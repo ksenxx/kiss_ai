@@ -50,9 +50,6 @@ class TestUdsListener(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_persistence(self.tmpdir)
-        import kiss.server.web_server as ws
-        self._orig_grace = ws._TAB_CLOSE_GRACE
-        ws._TAB_CLOSE_GRACE = 0.05
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
@@ -71,8 +68,6 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         await self.server.start_async()
 
     async def asyncTearDown(self) -> None:
-        import kiss.server.web_server as ws
-        ws._TAB_CLOSE_GRACE = self._orig_grace
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
@@ -135,35 +130,6 @@ class TestUdsListener(IsolatedAsyncioTestCase):
                 await writer.wait_closed()
             except Exception:
                 pass
-
-    async def test_disconnect_arms_deferred_close(self) -> None:
-        """Dropping the UDS arms a deferred ``closeTab`` for every tab seen."""
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path),
-            limit=16 * 1024 * 1024,
-        )
-        writer.write(
-            json.dumps(
-                {"type": "ready", "tabId": "tab-uds-2",
-                 "restoredTabs": []},
-            ).encode("utf-8") + b"\n",
-        )
-        await writer.drain()
-        await self._drain_events(reader, "focusInput", timeout=2.0)
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
-        for _ in range(50):
-            with self.server._pending_tab_closes_lock:
-                if "tab-uds-2" in self.server._pending_tab_closes:
-                    break
-            await asyncio.sleep(0.01)
-        with self.server._pending_tab_closes_lock:
-            self.assertIn(
-                "tab-uds-2", self.server._pending_tab_closes,
-            )
 
     async def test_broadcast_fans_out_to_uds_client(self) -> None:
         """Backend broadcasts reach UDS clients via the WebPrinter fan-out."""
@@ -284,28 +250,23 @@ class TestUdsListener(IsolatedAsyncioTestCase):
     async def test_active_tasks_query_reports_running_tab(self) -> None:
         """When a tab claims to be running a task, the query reports it.
 
-        Reproduces the SIGTERM regression by injecting a fake active
-        ``_RunningAgentState`` into the registry and verifying the UDS
+        Reproduces the SIGTERM regression by registering an active
+        ``AgentState`` in the registry and verifying the UDS
         query returns ``count=1`` plus a ``"<tab_id>(task=<id>)"``
         descriptor — the same shape the SIGTERM log line prints.  This
         is the signal the extension uses to defer the restart.
         """
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-
-        class _FakeTab:
-            def __init__(self, tid: str) -> None:
-                self.is_task_active = True
-                self.task_history_id = tid
-                self.last_task_id = tid
+        from kiss.server import agent_state
+        from kiss.server.agent_state import AgentState
 
         fake_tab_id = "ad4ecb65-2878-4c2c-9736-3bb9be18814a"
-        fake = _FakeTab("74")
-        from typing import cast
-
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states[fake_tab_id] = cast(
-                _RunningAgentState, fake,
-            )
+        state = AgentState(
+            "74",
+            tab_id=fake_tab_id,
+            server_owned=True,
+            is_task_active=True,
+        )
+        agent_state.register(state)
         try:
             reader, writer = await asyncio.open_unix_connection(
                 str(self.uds_path),
@@ -333,8 +294,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
                 except Exception:
                     pass
         finally:
-            with _RunningAgentState._registry_lock:
-                _RunningAgentState.running_agent_states.pop(fake_tab_id, None)
+            agent_state.unregister("74", state)
 
     async def test_stop_async_removes_socket(self) -> None:
         """``stop_async`` unlinks the socket file on shutdown."""

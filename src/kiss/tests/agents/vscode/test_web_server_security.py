@@ -54,6 +54,7 @@ from kiss.server.web_server import (
     _parse_quick_tunnel_url,
     _read_url_from_stderr,
 )
+from kiss.tests.agents.vscode._ntfy_emulator import unroutable_base_url
 
 
 def _find_free_port() -> int:
@@ -105,6 +106,7 @@ class TestH1NoTunnelWithoutPassword(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=True,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
@@ -156,6 +158,7 @@ class TestH1TunnelStartsWhenPasswordSet(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=True,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 

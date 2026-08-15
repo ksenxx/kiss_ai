@@ -17,9 +17,6 @@ Covers findings #1, #4, #5, #6, #9, #11 of ``tmp/findings-4.md``:
   non-persistent contexts too.
 * #6 — pages adopted via ``go_to_url("tab:N")`` get the crash handler,
   so a renderer crash on such a page is recovered from.
-* #9 — ``_OAuthCallbackServer.close()`` unblocks a pending ``wait()``,
-  so the ``sorcar mcp auth`` event-loop teardown is not stalled by an
-  executor thread sitting out ``AUTH_TIMEOUT``.
 * #11 — the skill name is XML-escaped in ``load_skill_content`` output
   (consistent with the catalog).
 
@@ -30,7 +27,6 @@ and real skill directories are used throughout.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import pty
 import sys
@@ -48,7 +44,6 @@ from kiss.agents.sorcar.mcp_servers import (
 )
 from kiss.agents.sorcar.skills import discover_skills, load_skill_content
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.ui.cli.mcp_cli import _OAuthCallbackServer
 
 _SERVER_SCRIPT = '''
 from mcp.server.fastmcp import FastMCP
@@ -236,58 +231,6 @@ def test_renderer_crash_on_tab_switched_page_recovers() -> None:
         assert recovered, f"tool never recovered from adopted-tab crash: {out}"
     finally:
         tool.close()
-
-
-
-def test_oauth_callback_close_unblocks_pending_wait() -> None:
-    """``close()`` wakes a thread blocked in ``wait()`` promptly."""
-    callback = _OAuthCallbackServer()
-    errors: list[BaseException] = []
-
-    def waiter() -> None:
-        try:
-            callback.wait(300)
-        except BaseException as exc:  # noqa: BLE001 - recorded for assertion
-            errors.append(exc)
-
-    thread = threading.Thread(target=waiter, daemon=True)
-    thread.start()
-    time.sleep(0.2)
-    callback.close()
-    thread.join(timeout=10)
-    assert not thread.is_alive(), "wait() still blocked after close()"
-    assert len(errors) == 1
-    assert isinstance(errors[0], RuntimeError)
-    assert "no code returned" in str(errors[0])
-
-
-def test_auth_style_event_loop_teardown_not_stalled() -> None:
-    """A failed connect does not stall ``asyncio.run`` on the executor.
-
-    Reproduces the exact ``_cmd_auth`` structure: the callback wait
-    blocks on the default executor while the connect coroutine fails.
-    ``asyncio.run``'s teardown joins the executor; pre-fix nothing set
-    the callback's event, so the CLI hung for up to ``AUTH_TIMEOUT``
-    (300 s).  With the fix (close() inside the coroutine's ``finally``
-    setting ``_done``), teardown completes in seconds.
-    """
-    callback = _OAuthCallbackServer()
-
-    async def failing_flow() -> None:
-        loop = asyncio.get_running_loop()
-        pending = loop.run_in_executor(None, callback.wait, 300.0)
-        await asyncio.sleep(0.2)
-        try:
-            raise RuntimeError("connection failed before the redirect")
-        finally:
-            callback.close()
-            del pending
-
-    start = time.monotonic()
-    with pytest.raises(RuntimeError, match="connection failed"):
-        asyncio.run(failing_flow())
-    elapsed = time.monotonic() - start
-    assert elapsed < 30, f"event-loop teardown stalled {elapsed:.1f}s"
 
 
 

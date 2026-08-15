@@ -79,6 +79,23 @@ class TestValidateCommand(unittest.TestCase):
     def test_empty_string_satisfies_required_field(self) -> None:
         self.assertIsNone(validate_command({"type": "auth", "password": ""}))
 
+    def test_out_of_band_commands_are_in_the_catalog(self) -> None:
+        self.assertIsNone(validate_command({"type": "getDefaultModel"}))
+        self.assertIsNone(validate_command({"type": "readKissConfig"}))
+        self.assertIsNone(
+            validate_command({"type": "writeKissConfig", "config": {}})
+        )
+        self.assertIsNone(
+            validate_command({"type": "voiceWakeStart", "sensitivity": 50})
+        )
+        self.assertIsNone(validate_command({"type": "voiceWakeStop"}))
+
+    def test_write_kiss_config_requires_config(self) -> None:
+        self.assertEqual(
+            validate_command({"type": "writeKissConfig"}),
+            "Invalid writeKissConfig command: missing config",
+        )
+
     def test_catalog_covers_every_backend_handler(self) -> None:
         from kiss.server.server import VSCodeServer
 
@@ -307,6 +324,110 @@ class TestServerApiOverUds(unittest.TestCase):
         self.assertEqual(event_a.get("text"), "Unknown command: bogusCommand")
         self.assertEqual(event_b.get("type"), "activeTasksResponse")
 
+    def test_get_default_model_round_trip(self) -> None:
+        event = self._roundtrip({"type": "getDefaultModel"}, "defaultModel")
+        self.assertIsInstance(event.get("model"), str)
+        self.assertTrue(event["model"])
+
+    def test_read_kiss_config_round_trip(self) -> None:
+        from kiss.core.vscode_config import save_config
+
+        save_config({"test_read_sentinel": "sentinel-value"})
+        event = self._roundtrip({"type": "readKissConfig"}, "kissConfig")
+        config = event.get("config")
+        self.assertIsInstance(config, dict)
+        assert isinstance(config, dict)
+        self.assertEqual(config["test_read_sentinel"], "sentinel-value")
+        # The reply carries the daemon's defaults-merged view.
+        self.assertIn("max_budget", config)
+
+    def test_write_kiss_config_round_trip(self) -> None:
+        from kiss.core.vscode_config import load_config
+
+        event = self._roundtrip(
+            {
+                "type": "writeKissConfig",
+                "config": {"test_write_sentinel": "written-value"},
+            },
+            "kissConfigSaved",
+        )
+        self.assertTrue(event.get("ok"))
+        self.assertNotIn("error", event)
+        self.assertEqual(
+            load_config().get("test_write_sentinel"), "written-value"
+        )
+
+    def test_write_kiss_config_rejects_non_object_payload(self) -> None:
+        event = self._roundtrip(
+            {"type": "writeKissConfig", "config": "junk"},
+            "kissConfigSaved",
+        )
+        self.assertFalse(event.get("ok"))
+        self.assertEqual(event.get("error"), "config must be a JSON object")
+
+    def test_voice_wake_stop_without_listener_is_a_noop(self) -> None:
+        async def _talk() -> dict[str, Any]:
+            reader, writer = await asyncio.open_unix_connection(
+                self.sock_path
+            )
+            try:
+                writer.write(
+                    json.dumps({"type": "voiceWakeStop"}).encode() + b"\n"
+                )
+                writer.write(
+                    json.dumps({"type": "activeTasksQuery"}).encode() + b"\n"
+                )
+                await writer.drain()
+                line = await asyncio.wait_for(reader.readline(), timeout=10)
+                event: dict[str, Any] = json.loads(line)
+                return event
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        event = asyncio.run_coroutine_threadsafe(_talk(), self.loop).result(
+            timeout=15
+        )
+        # No error and no voiceWakeState reply: the very next event is
+        # the follow-up command's response.
+        self.assertEqual(event.get("type"), "activeTasksResponse")
+
+    def test_local_only_commands_are_dropped_for_remote_clients(self) -> None:
+        """The UDS-gated handlers must ignore WSS-delivered commands.
+
+        Each handler is invoked through the live server's API with a
+        non-UDS context and NO endpoint: were the gate missing, the
+        handler's direct reply would dereference the ``None`` endpoint
+        and the future would raise.
+        """
+        from kiss.server.sorcar import ApiContext
+
+        api = self.server._server_api
+        ctx = ApiContext(
+            endpoint=None,
+            conn_state={"work_dir": "", "conn_id": "remote-conn"},
+            is_uds=False,
+        )
+        calls = [
+            api.read_kiss_config({"type": "readKissConfig"}, ctx),
+            api.write_kiss_config(
+                {"type": "writeKissConfig", "config": {"k": "v"}}, ctx
+            ),
+            api.voice_wake_start({"type": "voiceWakeStart"}, ctx),
+            api.voice_wake_stop({"type": "voiceWakeStop"}, ctx),
+        ]
+        for coro in calls:
+            asyncio.run_coroutine_threadsafe(coro, self.loop).result(
+                timeout=10
+            )
+        leaked = self.server._voice_wake.running("remote-conn")
+        # Reap a listener BEFORE asserting so a broken gate cannot
+        # leak a live mic process past the failing test.
+        asyncio.run_coroutine_threadsafe(
+            self.server._voice_wake.stop("remote-conn"), self.loop
+        ).result(timeout=10)
+        self.assertFalse(leaked)
+
 
 class TestCatalogSync(unittest.TestCase):
     """The handwritten client catalogs must not drift from the API."""
@@ -391,25 +512,6 @@ class TestServerApiCodeBindings(unittest.TestCase):
                 ServerApi(object())  # type: ignore[arg-type]
         finally:
             del sorcar.API["bogusCmd"]
-
-    def test_cli_commands_bypass_work_dir_stamping(self) -> None:
-        from kiss.server.sorcar import ApiContext
-
-        with tempfile.TemporaryDirectory() as tmp:
-            server = RemoteAccessServer(
-                uds_path=os.path.join(tmp, "s.sock"),
-                url_file=os.path.join(tmp, "remote-url.json"),
-            )
-            ctx = ApiContext(
-                endpoint=None,
-                tabs_seen=set(),
-                conn_state={"conn_id": "conn-1"},
-                is_uds=False,
-            )
-            cmd: dict[str, Any] = {"type": "cliTabHello", "tabId": "cli-1"}
-            asyncio.run(server._server_api.dispatch(cmd, ctx))
-            self.assertNotIn("workDir", cmd)
-            self.assertEqual(cmd["connId"], "conn-1")
 
     def test_translate_webview_command(self) -> None:
         from kiss.server.sorcar import translate_webview_command

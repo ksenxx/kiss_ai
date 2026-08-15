@@ -7,9 +7,13 @@
 and update MODEL_INFO.json.
 
 The script writes the source-of-truth ``src/kiss/core/models/MODEL_INFO.json``
-in the repo. When the user-local copy at ``~/.kiss/MODEL_INFO.json`` exists,
-it is also refreshed so a running KISS install picks up the changes on its
-next ``model_info`` reload without waiting for a reinstall.
+in the repo, and nothing else: there is deliberately no user-local
+``~/.kiss/MODEL_INFO.json`` copy to keep in sync, and
+``src/kiss/tests/test_install_no_model_info_copy.py`` forbids re-introducing
+one. A running KISS install picks the catalog up from the package on its
+next start. The write is atomic (temp file + ``os.replace``) because
+``model_info`` loads the catalog at import time, so a truncating rewrite
+would break every process that starts while the script is running.
 
 Usage:
     uv run python scripts/update_models.py [OPTIONS]
@@ -31,6 +35,7 @@ import os
 import re
 import ssl
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -656,6 +661,8 @@ def detect_thinking_level(model_name: str) -> str | None:
 
     * ``codex/*`` — routed through the Codex CLI, which controls reasoning
       via its own ``model_reasoning_effort`` config rather than per-call.
+    * ``cc/*`` — routed through the Claude Code CLI, which has no
+      ``reasoning_effort`` surface at all.
     * ``claude-*``, ``gemini-*`` — non-OpenAI providers that don't accept
       ``reasoning_effort``.
     * Variants known to reject ``reasoning_effort`` entirely (``-pro``,
@@ -677,7 +684,7 @@ def detect_thinking_level(model_name: str) -> str | None:
     """
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
-    if model_name.startswith(("codex/", "claude-", "gemini-")):
+    if model_name.startswith(("codex/", "cc/", "claude-", "gemini-")):
         return None
     if any(marker in model_name for marker in ("-pro", "chat-latest", "-image")):
         return None
@@ -797,6 +804,10 @@ def find_deprecated_models(
     A model is considered deprecated if:
     - It's a codex/ model whose slug is not in the Codex CLI's official
       models.json (except ``codex/default`` which is always kept).
+    - It's a cc/ (Claude Code CLI) model whose ``claude-*`` slug is gone from
+      the Anthropic models API, using the same dated-snapshot/alias rules as
+      direct ``claude-*`` entries. The short aliases (``cc/haiku``,
+      ``cc/opus``, ``cc/sonnet``) are always kept.
     - It's an openrouter/ model not present in the fetched OpenRouter list
       (which already filters out expired models).
     - It's a claude- model not returned by the Anthropic models API and not an
@@ -820,6 +831,18 @@ def find_deprecated_models(
                 slug = name.removeprefix("codex/")
                 if slug not in codex_slugs:
                     deprecated.append({"name": name, "reason": "not in Codex CLI models.json"})
+            continue
+        if name.startswith("cc/"):
+            slug = name.removeprefix("cc/")
+            if anthropic and slug.startswith("claude-") and slug not in anthropic:
+                if re.search(r"\d{8}$", slug):
+                    deprecated.append({"name": name, "reason": "not in Anthropic API"})
+                else:
+                    alias_re = re.compile(rf"^{re.escape(slug)}-\d{{8}}$")
+                    if not any(alias_re.match(n) for n in anthropic):
+                        deprecated.append(
+                            {"name": name, "reason": "alias with no snapshot in Anthropic API"}
+                        )
             continue
         if name.startswith("openrouter/"):  # pragma: no branch
             if openrouter and name not in openrouter:  # pragma: no branch
@@ -988,6 +1011,59 @@ def _add_codex_candidates(
                 "input_price_per_1M": 0.0,
                 "output_price_per_1M": 0.0,
                 "source": "codex",
+                "needs_pricing": False,
+                "gen": True,
+                "fc": True,
+                "emb": False,
+            }
+        )
+
+
+_CLAUDE_CODE_ALIASES: tuple[str, ...] = ("haiku", "opus", "sonnet")
+"""Short model aliases the Claude Code CLI resolves itself (``--model opus``
+picks the newest Opus tier available to the subscription). They never appear
+in the Anthropic ``/v1/models`` list, so they are seeded here and — like
+``codex/default`` — never marked deprecated."""
+
+
+def _add_claude_code_candidates(
+    anthropic: dict[str, dict],
+    current: dict[str, dict],
+    openrouter: dict[str, dict],
+    new_models: list[dict],
+) -> None:
+    """Add ``cc/<model>`` entries for models the Claude Code CLI supports.
+
+    The Claude Code backend passes the part after ``cc/`` verbatim as the
+    ``claude`` CLI's ``--model`` flag, which accepts any Anthropic model ID
+    plus the short aliases in :data:`_CLAUDE_CODE_ALIASES`. Every
+    ``claude-*`` model returned by the Anthropic models API therefore
+    becomes a ``cc/claude-*`` candidate, alongside the always-present
+    alias entries.
+
+    Context length is taken from the matching OpenRouter entry when
+    available, then from the direct ``claude-*`` catalog entry, falling
+    back to 200000 (the Anthropic default). All entries get $0/0 pricing
+    since Claude Code is billed via the user's Claude subscription.
+    """
+    for slug in list(_CLAUDE_CODE_ALIASES) + sorted(anthropic):
+        cc_name = f"cc/{slug}"
+        if cc_name in current:
+            continue
+        or_info = _lookup_openrouter_pricing(slug, "anthropic", openrouter)
+        if or_info and or_info.get("context_length"):
+            ctx = or_info["context_length"]
+        elif current.get(slug, {}).get("context_length"):
+            ctx = current[slug]["context_length"]
+        else:
+            ctx = 200000
+        new_models.append(
+            {
+                "name": cc_name,
+                "context_length": _cap_context_length(ctx),
+                "input_price_per_1M": 0.0,
+                "output_price_per_1M": 0.0,
+                "source": "claude-code",
                 "needs_pricing": False,
                 "gen": True,
                 "fc": True,
@@ -1179,6 +1255,9 @@ def compute_changes(
 
     if codex_slugs:  # pragma: no branch
         _add_codex_candidates(codex_slugs, current, openrouter, new_models)
+
+    if anthropic:
+        _add_claude_code_candidates(anthropic, current, openrouter, new_models)
 
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
@@ -1502,11 +1581,30 @@ def _write_model_info_json(path: Path, data: dict[str, dict]) -> None:
 
     Context lengths of 1000000 or above are capped at 500000 before
     writing so the on-disk catalog never advertises a >=1M context window.
+
+    The publish is **atomic**: the ~200 KB catalog is written to a
+    sibling temp file and then ``os.replace``d over the target.  A plain
+    ``write_text`` truncates first, and ``model_info`` reads this file at
+    **import time** — so any kiss process starting during the write (a
+    ``run_parallel`` fan-out can start dozens per second) used to read a
+    truncated prefix and die with a ``JSONDecodeError`` out of the import
+    itself.
+
+    Args:
+        path: The catalog file to publish.
+        data: The catalog contents, mutated in place by the context cap.
     """
     _normalize_context_caps(data)
     sorted_data = dict(sorted(data.items()))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(sorted_data, indent=2) + "\n", encoding="utf-8")
+    fd, staged = tempfile.mkstemp(prefix=f".{path.name}-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(sorted_data, indent=2) + "\n")
+        os.replace(staged, path)
+    except BaseException:
+        Path(staged).unlink(missing_ok=True)
+        raise
 
 
 def apply_updates_to_file(
@@ -1518,10 +1616,9 @@ def apply_updates_to_file(
 ) -> None:
     """Apply MODEL_INFO updates/additions/removals to the JSON source of truth.
 
-    Mutates ``MODEL_INFO_PATH`` (the in-repo ``MODEL_INFO.json``) and, when
-    it already exists, also syncs the user-local copy at
-    ``~/.kiss/MODEL_INFO.json`` so that a running KISS install picks up the
-    changes on next ``model_info`` reload without waiting for a reinstall.
+    Mutates ``MODEL_INFO_PATH`` (the in-repo ``MODEL_INFO.json``) and
+    nothing else — no user-local copy is written (see the module
+    docstring).
 
     Args:
         updates: ``[{"name": str, "changes": {field: value, ...}}]``.
@@ -1847,7 +1944,7 @@ def main() -> None:
     if new_models and not args.skip_test:  # pragma: no branch
         print(f"\n[5/6] Testing {len(new_models)} new models...")
         for nm in new_models:  # pragma: no branch
-            if nm["name"].startswith("codex/"):  # pragma: no branch
+            if nm["name"].startswith(("codex/", "cc/")):  # pragma: no branch
                 continue
             caps = test_model_capabilities(nm["name"], verbose=args.verbose)
             nm["gen"] = caps["gen"]

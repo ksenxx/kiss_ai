@@ -27,6 +27,7 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _load_chat_events_by_task_id,
 )
+from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 
 
@@ -52,6 +53,7 @@ class TestEventPersistenceNoDuplicate:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
@@ -60,12 +62,12 @@ class TestEventPersistenceNoDuplicate:
 
     def test_broadcast_persists_each_event_exactly_once(self) -> None:
         printer = JsonPrinter()
-        printer._thread_local.task_id = "tab-1"
 
         agent = ChatSorcarAgent("agent")
         task_id, _ = _add_task("hello task")
         agent._last_task_id = task_id
-        printer._persist_agents["tab-1"] = agent
+        printer._thread_local.task_id = str(task_id)
+        printer.agent_task_allocated(agent, task_id)
 
         broadcast_events: list[dict[str, Any]] = [
             {"type": "text_delta", "text": "alpha"},

@@ -22,7 +22,7 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -39,7 +39,7 @@ class TestDispatchMalformed(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_unhashable_type_field_does_not_raise(self) -> None:
         self.server._handle_command({"type": []})

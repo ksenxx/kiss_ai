@@ -72,15 +72,17 @@ function pickerText(win) {
 }
 
 function testRestoredTabInheritsTemplateModelOnLaunch() {
-  const seeded = {
-    tabs: [
-      {title: 'first', chatId: 'persisted-tab-a', backendChatId: ''},
-      {title: 'second', chatId: 'persisted-tab-b', backendChatId: ''},
-    ],
-    activeTabIndex: 0,
-    chatId: 'persisted-tab-a',
-  };
+  // Tabs are server-canonical now: only the selection is persisted,
+  // and the daemon's `tabs_state` snapshot supplies the tab set.
+  const seeded = {chatId: 'persisted-tab-a'};
   const {win} = makeWebview('claude-opus-4-7', seeded);
+  send(win, {
+    type: 'tabs_state',
+    tabs: [
+      {tabId: 'persisted-tab-a', chatId: '', title: 'first', workDir: ''},
+      {tabId: 'persisted-tab-b', chatId: '', title: 'second', workDir: ''},
+    ],
+  });
 
   assert.strictEqual(
     pickerText(win),
@@ -105,15 +107,17 @@ function testRestoredTabInheritsTemplateModelOnLaunch() {
 }
 
 function testModelsEventPropagatesIntoTabState() {
-  const seeded = {
-    tabs: [
-      {title: 'first', chatId: 'persisted-tab-a', backendChatId: ''},
-      {title: 'second', chatId: 'persisted-tab-b', backendChatId: ''},
-    ],
-    activeTabIndex: 0,
-    chatId: 'persisted-tab-a',
-  };
+  // Tabs are server-canonical now: only the selection is persisted,
+  // and the daemon's `tabs_state` snapshot supplies the tab set.
+  const seeded = {chatId: 'persisted-tab-a'};
   const {win} = makeWebview('No model', seeded);
+  send(win, {
+    type: 'tabs_state',
+    tabs: [
+      {tabId: 'persisted-tab-a', chatId: '', title: 'first', workDir: ''},
+      {tabId: 'persisted-tab-b', chatId: '', title: 'second', workDir: ''},
+    ],
+  });
 
   assert.strictEqual(pickerText(win), 'No model');
 
@@ -146,15 +150,17 @@ function testModelsEventPropagatesIntoTabState() {
 }
 
 function testModelsEventPreservesUserPickedTabs() {
-  const seeded = {
-    tabs: [
-      {title: 'first', chatId: 'persisted-tab-a', backendChatId: ''},
-      {title: 'second', chatId: 'persisted-tab-b', backendChatId: ''},
-    ],
-    activeTabIndex: 0,
-    chatId: 'persisted-tab-a',
-  };
+  // Tabs are server-canonical now: only the selection is persisted,
+  // and the daemon's `tabs_state` snapshot supplies the tab set.
+  const seeded = {chatId: 'persisted-tab-a'};
   const {win, posted} = makeWebview('claude-opus-4-7', seeded);
+  send(win, {
+    type: 'tabs_state',
+    tabs: [
+      {tabId: 'persisted-tab-a', chatId: '', title: 'first', workDir: ''},
+      {tabId: 'persisted-tab-b', chatId: '', title: 'second', workDir: ''},
+    ],
+  });
 
   const modelList = [
     {name: 'claude-opus-4-7', inp: 15, out: 75, uses: 0, vendor: 'Anthropic'},

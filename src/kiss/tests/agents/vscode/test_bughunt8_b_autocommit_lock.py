@@ -4,7 +4,8 @@
 # add your name here
 """Bug-hunt 8 (group B): autocommit misreports a failed ``git add``.
 
-``_MergeFlowMixin._handle_autocommit_action`` ignored the exit status
+``_MergeFlowMixin._autocommit_changes`` (né ``_handle_autocommit_action``)
+ignored the exit status
 of ``git add -A``.  When staging fails — e.g. ``.git/index.lock`` is
 held by another git process (editor, GUI client, crashed git) — the
 subsequent ``git diff --cached`` is empty, so the handler broadcast
@@ -25,7 +26,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -59,7 +60,7 @@ class TestAutocommitStagingFailure(unittest.TestCase):
         self.tab_id = "t-ac-lock"
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.pop(self.tab_id, None)
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_index_lock_reports_failure_not_nothing_to_commit(self) -> None:
@@ -68,8 +69,8 @@ class TestAutocommitStagingFailure(unittest.TestCase):
         (self.repo / "f.txt").write_text("one\ntwo\n")
         (self.repo / ".git" / "index.lock").write_text("")
         try:
-            self.server._handle_autocommit_action(
-                "commit", self.tab_id, work_dir=str(self.repo),
+            self.server._autocommit_changes(
+                self.tab_id, work_dir=str(self.repo),
             )
         finally:
             (self.repo / ".git" / "index.lock").unlink()

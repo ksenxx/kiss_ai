@@ -72,13 +72,41 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
     repo_lock,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry():
+    """Keep the process-global agent-state registry clean per test."""
+    agent_state.agent_states.clear()
+    yield
+    agent_state.agent_states.clear()
+
+
+def _register_wt_state(
+    tab_id: str, *, is_task_active: bool = False,
+) -> AgentState:
+    """Register a server-owned worktree AgentState for *tab_id*."""
+    state = AgentState(
+        f"task-{tab_id}",
+        agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        tab_id=tab_id,
+        server_owned=True,
+        is_task_active=is_task_active,
+    )
+    state.use_worktree = True
+    agent_state.register(state)
+    return state
 
 
 def _make_repo(path: Path) -> Path:
@@ -140,20 +168,9 @@ class _RecordingPrinter:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
         self._thread_local = threading.local()
-        self._persist_agents: dict[str, Any] = {}
 
     def broadcast(self, event: dict[str, Any]) -> None:
         self.events.append(event)
-
-    def broadcast_tab_ui(self, event: dict[str, Any]) -> None:
-        """Record a tab-scoped UI event.
-
-        The production ``JsonPrinter.broadcast_tab_ui`` fans the event
-        out to mirroring tabs; with no mirrors registered it reduces to
-        a single ``broadcast``, which is what merge/discard progress
-        events go through here.
-        """
-        self.broadcast(event)
 
 
 def _server(repo: Path) -> VSCodeServer:
@@ -190,11 +207,8 @@ class TestRaceMergeGuardTOCTOU:
         repo = _make_repo(tmp_path / "repo")
         server = _server(repo)
 
-        tab_a = server._get_tab("a")
-        tab_a.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab_a.use_worktree = True
-        tab_a.is_task_active = False
-        agent_a = cast(WorktreeSorcarAgent, tab_a.agent)
+        state_a = _register_wt_state("a")
+        agent_a = cast(WorktreeSorcarAgent, state_a.agent)
         wt = _make_wt_with_commit(repo, "kiss/wt-race1-1", agent_a)
 
         lock = repo_lock(repo)
@@ -270,10 +284,8 @@ class TestRaceMergeGuardTOCTOU:
         repo = _make_repo(tmp_path / "repo")
         server = _server(repo)
 
-        tab = server._get_tab("a")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        agent = cast(WorktreeSorcarAgent, tab.agent)
+        state = _register_wt_state("a")
+        agent = cast(WorktreeSorcarAgent, state.agent)
         _make_wt_with_commit(repo, "kiss/wt-race1-2", agent)
 
         lock = repo_lock(repo)
@@ -303,11 +315,11 @@ class TestRaceMergeGuardTOCTOU:
         deadline = time.time() + 3.0
         while time.time() < deadline:
             with server._state_lock:
-                if tab.is_merging:
+                if state.is_merging:
                     break
             time.sleep(0.02)
-        assert tab.is_merging, (
-            "RACE-1: merge handler did not set ``tab.is_merging`` "
+        assert state.is_merging, (
+            "RACE-1: merge handler did not set ``state.is_merging`` "
             "before blocking on repo_lock.  The flag is the signal "
             "for non-wt task-start to refuse."
         )
@@ -315,7 +327,7 @@ class TestRaceMergeGuardTOCTOU:
         holder_release.set()
         holder_t.join(timeout=5)
         merge_thread.join(timeout=15)
-        assert not tab.is_merging, "is_merging must be cleared post-merge"
+        assert not state.is_merging, "is_merging must be cleared post-merge"
         assert result_holder and result_holder[0].get("success") is True
 
 
@@ -326,36 +338,6 @@ class TestRacePostTaskVsUserAction:
     is refused (with ``success: False``) while the task thread is
     still touching ``tab.agent._wt``.
     """
-
-    def test_is_task_active_cleared_after_present_pending_worktree(
-        self,
-    ) -> None:
-        """Structural confirmation that the buggy ordering is fixed.
-
-        ``is_task_active = False`` must now follow the
-        ``_present_pending_worktree`` call in the worktree-mode
-        post-task block.  This is the static guarantee that the
-        runtime guard (``_check_worktree_busy``) keeps refusing
-        concurrent clicks until the task thread is done.
-        """
-        src = (
-            Path(__file__).resolve().parents[3]
-            / "server" / "task_runner.py"
-        ).read_text()
-
-        start = src.index("def _run_task_inner")
-        rest = src[start:]
-        present_idx = rest.index("_present_pending_worktree")
-        post_present = rest[present_idx:]
-        clear_idx_rel = post_present.index("tab.is_task_active = False")
-        clear_idx = present_idx + clear_idx_rel
-
-        assert present_idx < clear_idx, (
-            "RACE-3 regression: ``tab.is_task_active = False`` must "
-            "appear AFTER ``_present_pending_worktree`` in the "
-            "_run_task_inner finally block.  Found clear at "
-            f"{clear_idx} and present at {present_idx}."
-        )
 
     def test_handle_worktree_action_refuses_while_task_active(
         self, tmp_path: Path,
@@ -372,11 +354,8 @@ class TestRacePostTaskVsUserAction:
         repo = _make_repo(tmp_path / "repo")
         server = _server(repo)
 
-        tab = server._get_tab("a")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.is_task_active = True
-        agent = cast(WorktreeSorcarAgent, tab.agent)
+        state = _register_wt_state("a", is_task_active=True)
+        agent = cast(WorktreeSorcarAgent, state.agent)
         wt = _make_wt_with_commit(repo, "kiss/wt-race3-active", agent)
 
         result = server._handle_worktree_action("discard", "a")
@@ -468,34 +447,30 @@ class TestRaceNonWtStartBlockedByOngoingMerge:
         ``_state_lock``.  When the merge handler sets the flag, a
         concurrent non-wt task-start must observe it and refuse.
         """
-        from kiss.agents.sorcar.running_agent_state import (
-            _RunningAgentState,
-        )
-
         repo = _make_repo(tmp_path / "repo")
         server = _server(repo)
 
-        tab_a = server._get_tab("a")
-        tab_a.use_worktree = True
-        tab_a.is_merging = True
+        state_a = _register_wt_state("a")
+        state_a.is_merging = True
 
-        tab_b = server._get_tab("b")
-        tab_b.use_worktree = False
+        state_b = AgentState("task-b", tab_id="b", server_owned=True)
+        state_b.use_worktree = False
+        agent_state.register(state_b)
 
         with server._state_lock:
             should_refuse = any(
                 t.is_merging and t.use_worktree
-                for t in _RunningAgentState.running_agent_states.values()
+                for t in agent_state.agent_states.values()
             )
         assert should_refuse, (
             "RACE-1: non-wt task-start guard must observe the merge "
             "handler's ``is_merging = True`` flag."
         )
 
-        tab_a.is_merging = False
+        state_a.is_merging = False
         with server._state_lock:
             should_refuse = any(
                 t.is_merging and t.use_worktree
-                for t in _RunningAgentState.running_agent_states.values()
+                for t in agent_state.agent_states.values()
             )
         assert not should_refuse

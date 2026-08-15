@@ -6,11 +6,13 @@
 
 Invariant
 =========
-In the sorcar CLI *interactive* terminal the output of the ``Read``
-tool MUST be rendered with syntax highlighting derived from the file
-extension — exactly the same colouring the ``_format_tool_call`` panel
-uses for the ``Write`` / ``Edit`` tools.  Concretely, when a model
-issues ``Read(file_path="/tmp/x.py")`` the body that lands between the
+In a :class:`ConsolePrinter` terminal — the default rendering of
+every agent run without an explicit printer, e.g. a programmatic
+Python-API run — the output of the ``Read`` tool MUST be rendered
+with syntax highlighting derived from the file extension — exactly
+the same colouring the ``_format_tool_call`` panel uses for the
+``Write`` / ``Edit`` tools.  Concretely, when a model issues
+``Read(file_path="/tmp/x.py")`` the body that lands between the
 opening and closing ``RESULT`` rules in the terminal must be produced
 by :class:`rich.syntax.Syntax`, NOT by a plain ``file.write``.
 

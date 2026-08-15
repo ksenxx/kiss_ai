@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end regression tests for wave-2 findings A4, A10, B1, C2.
+"""End-to-end regression tests for wave-2 findings A4, A10, B1.
 
 A4  ``_get_db()`` read the global ``_db_generation`` twice — once for
     the staleness check and again (after connection creation) when
@@ -24,11 +24,6 @@ B1  The baseline commit SHA persisted to git config
     reader was later removed as production-dead API; the test reads
     the git config value directly.)
 
-C2  ``_RunningAgentState.register()`` silently overwrote an existing
-    live state registered under the same ``tab_id``, orphaning the old
-    state's ``stop_event``/``task_thread``.  It must emit a WARNING on
-    overwrite (semantics unchanged: last registration wins).
-
 WAL ``_get_db()`` executed ``PRAGMA journal_mode=WAL`` on a fresh
     connection before arming ``busy_timeout`` and outside
     ``_init_tables_lock``.  The rollback→WAL transition needs an
@@ -48,7 +43,6 @@ repositories and real threads — no mocks, patches, or fakes.
 from __future__ import annotations
 
 import json
-import logging
 import random
 import shutil
 import sqlite3
@@ -63,7 +57,6 @@ import pytest
 import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
 _GIT_ID = (
     "-c",
@@ -234,50 +227,6 @@ class TestB1BaselineCommitRoundtrip:
         )
         assert result.returncode != 0
         assert result.stdout.strip() == ""
-
-
-class TestC2RegisterOverwriteWarning:
-    """C2: silent overwrite of a live registry entry must emit a WARNING."""
-
-    _TAB = "w2c2-tab"
-
-    def teardown_method(self) -> None:
-        _RunningAgentState.unregister(self._TAB)
-
-    @staticmethod
-    def _warnings(caplog: object) -> list[logging.LogRecord]:
-        records: list[logging.LogRecord] = caplog.records  # type: ignore[attr-defined]
-        return [
-            r for r in records
-            if r.levelno >= logging.WARNING
-            and r.name == "kiss.agents.sorcar.running_agent_state"
-        ]
-
-    def test_overwrite_of_different_state_logs_warning(self, caplog) -> None:
-        """Registering a second state under the same tab_id warns and wins."""
-        s1 = _RunningAgentState(self._TAB, "test-model")
-        s2 = _RunningAgentState(self._TAB, "test-model")
-        with caplog.at_level(
-            logging.WARNING, logger="kiss.agents.sorcar.running_agent_state",
-        ):
-            _RunningAgentState.register(self._TAB, s1)
-            assert self._warnings(caplog) == []
-            _RunningAgentState.register(self._TAB, s2)
-        assert _RunningAgentState.running_agent_states[self._TAB] is s2
-        warnings = self._warnings(caplog)
-        assert warnings, "overwriting register() emitted no WARNING"
-        assert any(self._TAB in r.getMessage() for r in warnings)
-
-    def test_reregister_same_state_is_silent(self, caplog) -> None:
-        """Re-registering the identical state object must not warn."""
-        s1 = _RunningAgentState(self._TAB, "test-model")
-        with caplog.at_level(
-            logging.WARNING, logger="kiss.agents.sorcar.running_agent_state",
-        ):
-            _RunningAgentState.register(self._TAB, s1)
-            _RunningAgentState.register(self._TAB, s1)
-        assert self._warnings(caplog) == []
-        assert _RunningAgentState.running_agent_states[self._TAB] is s1
 
 
 class TestWalSwitchLockRace(_DBSandbox):

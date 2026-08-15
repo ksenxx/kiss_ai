@@ -60,18 +60,17 @@ from typing import Any
 from unittest import TestCase
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 
 
 def _make_remote_server() -> Any:
     """Build a :class:`RemoteAccessServer` with no tunnel / sockets bound.
 
     Constructing the remote server also constructs its owned
-    :class:`VSCodeServer`, whose ``__init__`` clears the process-global
-    ``_RunningAgentState.running_agent_states`` registry.  Tests must
-    therefore build the remote server FIRST and then mutate the
-    registry — so the shutdown helper scans the same registry the test
-    populated.
+    :class:`VSCodeServer`, whose ``__init__`` sweeps the process-global
+    ``agent_state.agent_states`` registry.  Tests must therefore build
+    the remote server FIRST and then mutate the registry — so the
+    shutdown helper scans the same registry the test populated.
     """
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
     from kiss.server.web_server import RemoteAccessServer
@@ -131,7 +130,6 @@ class TestShutdownPersistsUninterruptibleWorker(TestCase):
         of whether the worker ever unwinds.
         """
         remote = _make_remote_server()
-        vscode = remote._vscode_server
 
         tab_id = "shutdown-uninterruptible-1"
         chat_id = "shutdown-uninterruptible-chat-1"
@@ -149,14 +147,18 @@ class TestShutdownPersistsUninterruptibleWorker(TestCase):
                 except KeyboardInterrupt:
                     pass
 
-        tab = vscode._get_tab(tab_id)
-        tab.chat_id = chat_id
-        tab.task_history_id = task_id
-        tab.stop_event = threading.Event()
-        tab.user_answer_queue = queue.Queue()
+        state = agent_state.AgentState(
+            str(task_id),
+            chat_id=chat_id,
+            tab_id=tab_id,
+            server_owned=True,
+            stop_event=threading.Event(),
+            is_task_active=True,
+        )
+        state.user_answer_queue = queue.Queue()
         worker = threading.Thread(target=_uninterruptible_worker, daemon=True)
-        tab.task_thread = worker
-        tab.is_task_active = True
+        state.task_thread = worker
+        agent_state.register(state)
         worker.start()
         try:
             for _ in range(100):
@@ -181,13 +183,14 @@ class TestShutdownPersistsUninterruptibleWorker(TestCase):
                 f"would perceive the agent as killed; got {result!r}"
             )
 
-            assert tab.interrupted_by_shutdown is True, (
+            assert state.interrupted_by_shutdown is True, (
                 "shutdown helper must set interrupted_by_shutdown on "
-                "in-flight tabs"
+                "in-flight states"
             )
         finally:
             cleanup.set()
             worker.join(timeout=2)
+            agent_state.unregister(str(task_id), state)
 
     def test_pre_emptive_rewrite_only_touches_active_ids(self) -> None:
         """The safety net must be tightly scoped: an unrelated row
@@ -239,63 +242,3 @@ class TestShutdownPersistsUninterruptibleWorker(TestCase):
         """Calling the helper with no ids must be a safe no-op."""
         affected = _persistence._shutdown_persist_in_flight_results(set())
         assert affected == 0
-
-    def test_stop_helper_falls_back_to_agent_last_task_id(self) -> None:
-        """If ``tab.task_history_id`` is still ``None`` (the
-        task_runner only sets it in the post-``run()`` inner finally),
-        the shutdown helper must fall back to ``tab.agent._last_task_id``
-        — which the agent itself sets early in ``run()`` — to find the
-        in-flight row.  Without this fallback, a worker wedged
-        mid-``agent.run()`` would have no recoverable task id and the
-        sentinel would survive into the next-startup orphan sweep.
-        """
-        remote = _make_remote_server()
-        vscode = remote._vscode_server
-
-        tab_id = "shutdown-uninterruptible-4"
-        chat_id = "shutdown-uninterruptible-chat-4"
-        task_id = _insert_sentinel_row(chat_id)
-
-        class _MiniAgent:
-            _last_task_id = task_id
-
-        cleanup = threading.Event()
-
-        def _worker() -> None:
-            while not cleanup.is_set():
-                try:
-                    time.sleep(0.02)
-                except KeyboardInterrupt:
-                    pass
-
-        tab = vscode._get_tab(tab_id)
-        tab.chat_id = chat_id
-        tab.agent = _MiniAgent()  # type: ignore[assignment]
-        tab.task_history_id = None
-        tab.stop_event = threading.Event()
-        tab.user_answer_queue = queue.Queue()
-        worker = threading.Thread(target=_worker, daemon=True)
-        tab.task_thread = worker
-        tab.is_task_active = True
-        worker.start()
-        try:
-            for _ in range(100):
-                if worker.is_alive():
-                    break
-                time.sleep(0.01)
-
-            remote._stop_active_agent_tasks(timeout=0.5)
-
-            assert _row_result(task_id) == (
-                "Task interrupted by server restart/shutdown"
-            ), (
-                "shutdown helper failed to recover task_history_id from "
-                "tab.agent._last_task_id; row was left at the sentinel "
-                "and would be misreported as 'process killed' on the "
-                "next startup"
-            )
-        finally:
-            cleanup.set()
-            worker.join(timeout=2)
-            with _RunningAgentState._registry_lock:
-                tab.is_task_active = False

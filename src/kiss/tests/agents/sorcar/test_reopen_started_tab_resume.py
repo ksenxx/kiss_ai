@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -44,10 +44,10 @@ class TestStartedTabResumeOwnRunningChat:
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect(self.tmpdir)
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
@@ -72,11 +72,14 @@ class TestStartedTabResumeOwnRunningChat:
             lambda task_id, tab_id: subs.append((task_id, tab_id))
         )
 
-        state = _RunningAgentState(tab_id, "test-model")
-        state.chat_id = chat_id
-        state.task_history_id = task_id
-        state.is_task_active = True
-        _RunningAgentState.running_agent_states[tab_id] = state
+        state = agent_state.AgentState(
+            task_id,
+            chat_id=chat_id,
+            tab_id=tab_id,
+            server_owned=True,
+            is_task_active=True,
+        )
+        agent_state.register(state)
 
         server._replay_session(chat_id=chat_id, tab_id=tab_id, task_id=task_id)
 
@@ -123,11 +126,15 @@ class TestStartedTabResumeOwnRunningChat:
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
 
-        state = _RunningAgentState(tab_id, "test-model")
-        state.chat_id = chat_id
-        state.is_task_active = True
-        state.task_thread = worker
-        _RunningAgentState.running_agent_states[tab_id] = state
+        state = agent_state.AgentState(
+            "task-busy",
+            chat_id=chat_id,
+            tab_id=tab_id,
+            server_owned=True,
+            is_task_active=True,
+            task_thread=worker,
+        )
+        agent_state.register(state)
 
         try:
             server._cmd_run(

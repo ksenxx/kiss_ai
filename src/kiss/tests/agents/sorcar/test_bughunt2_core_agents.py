@@ -74,8 +74,8 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 
 
 def _finish_body() -> bytes:
@@ -186,7 +186,7 @@ class TestIsWorktreeExtraFlag:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt2-core-")
         self.saved = _redirect(self.tmpdir)
         self.srv, self.url = _start_server()
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
         self.srv.shutdown()
@@ -195,7 +195,7 @@ class TestIsWorktreeExtraFlag:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def _run(self, agent: ChatSorcarAgent, **kwargs: Any) -> str:
         cfg = {"base_url": self.url, "api_key": "test-key"}
@@ -230,17 +230,18 @@ class TestIsWorktreeExtraFlag:
         assert task_id is not None
         assert _load_is_worktree(task_id) is False
 
-    def test_plain_chat_agent_explicit_true_kept_by_final_save(self) -> None:
-        """An explicit ``use_worktree=True`` on a plain ``ChatSorcarAgent``
-        must survive the end-of-run extra save (early save recorded True;
-        the final save used to flip it back to False)."""
+    def test_plain_chat_agent_explicit_true_records_false(self) -> None:
+        """A plain ``ChatSorcarAgent`` creates no worktree, whatever it
+        is asked for, so both the early and the final extra save must
+        record ``is_worktree = False``.  Believing the caller's request
+        instead of the filesystem made the history badge lie."""
         work = Path(self.tmpdir) / "chat"
         work.mkdir()
         agent = ChatSorcarAgent("explicit-true")
         self._run(agent, work_dir=str(work), use_worktree=True)
         task_id = agent._last_task_id
         assert task_id is not None
-        assert _load_is_worktree(task_id) is True
+        assert _load_is_worktree(task_id) is False
 
     def test_worktree_agent_real_worktree_records_true(self) -> None:
         """Regression guard: a real worktree run still records True."""
@@ -341,7 +342,7 @@ class TestSetModelSwapsLiveModel:
         self.srv.state_lock = threading.Lock()  # type: ignore[attr-defined]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.srv.server_port}/v1"
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
         self.srv.shutdown()
@@ -350,7 +351,7 @@ class TestSetModelSwapsLiveModel:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_next_llm_call_uses_swapped_model(self) -> None:
         """After the agent calls ``set_model('swapped-model')`` mid-run, the

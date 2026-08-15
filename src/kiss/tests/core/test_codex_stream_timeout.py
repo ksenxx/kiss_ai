@@ -28,7 +28,6 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.kiss_error import KISSError
 from kiss.core.models import codex_model as codex_module
 from kiss.core.models.codex_model import CodexModel
 
@@ -43,7 +42,10 @@ class TestCodexStreamTimeout:
         We create a fake ``codex`` script that writes JSONL events to
         stdout in an infinite loop (simulating a codex agent that keeps
         thinking/running commands forever).  ``generate()`` must raise
-        ``KISSError`` within a few seconds, not hang indefinitely.
+        ``TimeoutError`` within a few seconds, not hang indefinitely.
+        A stall is the retryable class — ``KISSAgent._run_agentic_loop``
+        re-raises every ``KISSError`` but retries anything else — so the
+        agent re-asks the model instead of aborting the whole task.
         """
         fake_codex = tmp_path / "codex"
         fake_codex.write_text(textwrap.dedent("""\
@@ -68,7 +70,7 @@ class TestCodexStreamTimeout:
             m = CodexModel("codex/gpt-5.5", model_config={"timeout": 3})
             m.initialize("hi")
 
-            with pytest.raises(KISSError, match="timed out"):
+            with pytest.raises(TimeoutError, match="timed out"):
                 m.generate()
         finally:
             os.environ["PATH"] = saved_path

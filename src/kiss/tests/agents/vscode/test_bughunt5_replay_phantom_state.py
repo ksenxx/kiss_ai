@@ -2,25 +2,15 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bug-hunt 5: ``_replay_session`` mints a phantom registry entry (BUG-5E-2).
+"""Bug-hunt 5: ``_replay_session`` must not mint a phantom registry entry.
 
 Pure-viewer tabs (opened from the history sidebar) deliberately have NO
-``_RunningAgentState`` registry entry — ``_replay_session`` documents
-this invariant (the C2/C3 fix) and explicitly avoids creating one.  But
-its final ``_emit_pending_worktree(tab_id)`` call delegates to
-``_present_pending_worktree``, whose first line is
-``tab = self._get_tab(tab_id)`` — which CREATES a registry entry (and
-eagerly allocates a ``WorktreeSorcarAgent``) for every viewer tab,
-silently regressing the invariant: every history click leaks one
-registry entry + agent per viewer tab until the tab is closed, and the
-entry participates in every registry scan (busy checks, chat-id
-matching in ``_resolve_parent_tab_id_for_sub`` and
-``_reattach_running_chat``).
-
-``_present_pending_worktree`` only needs to *look up* the tab: when no
-entry exists there cannot be a pending worktree to present (the agent
-holding worktree state lives on the entry), so a non-creating ``get``
-is behaviourally identical except it does not mint the phantom.
+agent-state registry entry — ``_replay_session`` documents this
+invariant (the C2/C3 fix) and only *looks up* existing states.  The
+same must hold for ``_present_pending_worktree``: when no entry exists
+there cannot be a pending worktree to present (the agent holding
+worktree state lives on the entry), so neither call may register a new
+state for a viewer tab.
 """
 
 from __future__ import annotations
@@ -33,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -65,7 +55,7 @@ class TestReplayPhantomState(unittest.TestCase):
             th._db_conn.close()
             th._db_conn = None
         th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved  # type: ignore[assignment]
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_history_click_creates_no_registry_entry(self) -> None:
@@ -81,19 +71,14 @@ class TestReplayPhantomState(unittest.TestCase):
         replays = [e for e in self.events if e.get("type") == "task_events"]
         assert len(replays) == 1 and replays[0]["tabId"] == viewer_tab
 
-        assert viewer_tab not in _RunningAgentState.running_agent_states, (
-            "BUG: _replay_session minted a phantom _RunningAgentState "
-            "(via _emit_pending_worktree -> _present_pending_worktree "
-            "-> _get_tab) for a pure-viewer tab"
+        assert agent_state.find_by_tab(viewer_tab) is None, (
+            "BUG: _replay_session minted a phantom agent state for a "
+            "pure-viewer tab"
         )
 
     def test_present_pending_worktree_unknown_tab_is_noop(self) -> None:
-        self.server._present_pending_worktree(
-            "never-seen-tab", try_merge_review=True,
-        )
-        assert (
-            "never-seen-tab" not in _RunningAgentState.running_agent_states
-        ), (
+        self.server._present_pending_worktree("never-seen-tab")
+        assert agent_state.find_by_tab("never-seen-tab") is None, (
             "BUG: _present_pending_worktree minted a registry entry for "
             "an unknown tab id"
         )

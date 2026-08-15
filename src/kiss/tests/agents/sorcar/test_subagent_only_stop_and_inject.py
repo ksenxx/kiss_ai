@@ -12,19 +12,17 @@ be able to
 
 Wiring under test (all production code, no mocks of it):
 
-* ``ChatSorcarAgent._run_tasks_parallel`` registers each sub-agent
-  under its deterministic tab id with its OWN per-sub-agent
-  ``stop_event`` (chained to the parent's) and stamps
-  ``agent._tab_id`` so the pre-step drain hook targets the sub-agent's
-  ``pending_user_messages`` queue.
+* ``ChatSorcarAgent._run_tasks_parallel`` gives each sub-agent worker
+  its OWN per-sub-agent ``_SubagentStopEvent`` (chained to the
+  parent's) bound to the printer's thread-local, and stamps
+  ``agent._tab_id`` with the deterministic sub-tab id.
 * A ``KeyboardInterrupt`` raised inside one worker by the cooperative
   stop is absorbed by ``_run_single`` (reported as that one task's
   failure) unless the PARENT is being stopped.
-* ``VSCodeServer._find_source_tab_for_viewer`` resolves a frontend
-  viewer tab (subscribed to the sub-agent's task stream) to the
-  sub-agent's registry entry, which makes both
-  ``_stop_task(viewer_tab)`` and ``_cmd_append_user_message`` reach
-  ONLY that sub-agent.
+* The server resolves a frontend viewer tab (subscribed to the
+  sub-agent's task stream) to the sub-agent's task-keyed
+  ``agent_state`` entry, which makes both ``_stop_task(viewer_tab)``
+  and ``_cmd_append_user_message`` reach ONLY that sub-agent.
 """
 
 from __future__ import annotations
@@ -33,18 +31,16 @@ import threading
 import time
 from typing import Any
 
-from kiss.agents.sorcar.chat_sorcar_agent import (
-    ChatSorcarAgent,
-    _SubagentStopEvent,
-)
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _SubagentStopEvent
+from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 
 
 def _clear_registry() -> None:
-    _RunningAgentState.running_agent_states.clear()
+    with agent_state.STATE_LOCK:
+        agent_state.agent_states.clear()
 
 
 class _RecordingPrinter(JsonPrinter):
@@ -93,11 +89,12 @@ class TestSubagentOnlyStop:
     def test_stop_one_subagent_leaves_sibling_and_parent_alive(
         self, monkeypatch: Any,
     ) -> None:
-        """Set the registry-published per-sub-agent stop event of ONE
-        worker; that worker aborts via the cooperative
-        ``KeyboardInterrupt`` path while its sibling completes and the
-        parent's stop event stays unset."""
+        """Set the per-sub-agent stop event of ONE worker; that worker
+        aborts via the cooperative ``KeyboardInterrupt`` path while its
+        sibling completes and the parent's stop event stays unset."""
         release_sibling = threading.Event()
+        sub_stop_events: dict[str, threading.Event] = {}
+        events_lock = threading.Lock()
 
         def _stub_run(self: ChatSorcarAgent, **kwargs: Any) -> str:
             printer = kwargs.get("printer")
@@ -106,6 +103,8 @@ class TestSubagentOnlyStop:
             task_key = kwargs.get("prompt_template", "")
             stop = getattr(printer._thread_local, "stop_event", None)
             assert stop is not None
+            with events_lock:
+                sub_stop_events[task_key] = stop
             if task_key == "victim":
                 assert _wait_until(stop.is_set), (
                     "the victim sub-agent never observed its own "
@@ -138,29 +137,20 @@ class TestSubagentOnlyStop:
         runner = threading.Thread(target=_run_parent, daemon=True)
         runner.start()
 
-        def _victim_state() -> _RunningAgentState | None:
-            with _RunningAgentState._registry_lock:
-                for tid, st in (
-                    _RunningAgentState.running_agent_states.items()
-                ):
-                    if tid.endswith("__sub_0"):
-                        return st
-            return None
+        def _victim_event() -> threading.Event | None:
+            with events_lock:
+                return sub_stop_events.get("victim")
 
-        def _victim_ready() -> bool:
-            st = _victim_state()
-            return st is not None and st.stop_event is not None
-
-        assert _wait_until(_victim_ready), (
-            "the victim sub-agent never registered its state"
+        assert _wait_until(lambda: _victim_event() is not None), (
+            "the victim sub-agent worker never started"
         )
-        victim_state = _victim_state()
-        assert victim_state is not None
-        assert isinstance(victim_state.stop_event, _SubagentStopEvent), (
-            "each sub-agent must publish its own per-sub-agent stop "
-            "event in the registry"
+        victim_stop = _victim_event()
+        assert victim_stop is not None
+        assert isinstance(victim_stop, _SubagentStopEvent), (
+            "each sub-agent worker must get its own per-sub-agent "
+            "_SubagentStopEvent chained to the parent's"
         )
-        victim_state.stop_event.set()
+        victim_stop.set()
 
         release_sibling.set()
         runner.join(timeout=15)
@@ -226,6 +216,7 @@ class TestSubagentPromptInjectionWiring:
         self, monkeypatch: Any,
     ) -> None:
         captured: dict[str, Any] = {}
+        started = threading.Event()
         queued = threading.Event()
 
         def _stub_run(self: ChatSorcarAgent, **kwargs: Any) -> str:
@@ -233,10 +224,21 @@ class TestSubagentPromptInjectionWiring:
             assert printer is not None
             self.printer = printer
             captured["tab_id"] = getattr(self, "_tab_id", "")
+            captured["agent"] = self
+            # Bind a task id on the worker thread (as the real run
+            # does) and register the sub-agent's task-keyed state so
+            # the server bridge (the only steering channel) can queue
+            # into it.
+            printer._thread_local.task_id = "sub-task-0"
+            state = agent_state.AgentState("sub-task-0")
+            agent_state.register(state)
+            captured["state"] = state
+            started.set()
             assert queued.wait(10)
             model = _RecordingModel()
             SorcarAgent._drain_pending_user_messages(self, model)
             captured["model_calls"] = list(model.calls)
+            captured["leftover"] = list(state.pending_user_messages)
             return "success: true\nsummary: drained\n"
 
         monkeypatch.setattr(ChatSorcarAgent, "run", _stub_run)
@@ -256,36 +258,24 @@ class TestSubagentPromptInjectionWiring:
         )
         runner.start()
 
-        def _sub_entry() -> tuple[str, _RunningAgentState] | None:
-            with _RunningAgentState._registry_lock:
-                for tid, st in (
-                    _RunningAgentState.running_agent_states.items()
-                ):
-                    if tid.endswith("__sub_0"):
-                        return tid, st
-            return None
-
-        assert _wait_until(lambda: _sub_entry() is not None)
-        entry = _sub_entry()
-        assert entry is not None
-        sub_tab_id, sub_state = entry
-        with _RunningAgentState._registry_lock:
-            sub_state.pending_user_messages.append("focus on tests")
+        assert started.wait(10), "the sub-agent worker never started"
+        sub_state = captured["state"]
+        sub_state.pending_user_messages.append("focus on tests")
         queued.set()
         runner.join(timeout=15)
         assert not runner.is_alive()
 
-        assert captured["tab_id"] == sub_tab_id, (
-            "the sub-agent's _tab_id must be its registry tab id so "
-            "the pre-step drain hook targets the sub-agent's own "
-            "pending_user_messages queue"
+        assert str(captured["tab_id"]).endswith("__sub_0"), (
+            "the sub-agent's _tab_id must be the deterministic "
+            "'task-<parent>__sub_<idx>' id so per-sub-agent UI "
+            f"routing works; got {captured['tab_id']!r}"
         )
         calls = captured["model_calls"]
         assert len(calls) == 1, calls
         role, content = calls[0]
         assert role == "user"
         assert "focus on tests" in content
-        assert sub_state.pending_user_messages == [], (
+        assert captured["leftover"] == [], (
             "the drain must empty the queue so the same message is "
             "never injected twice"
         )
@@ -293,8 +283,8 @@ class TestSubagentPromptInjectionWiring:
 
 class TestViewerTabResolvesToSubagent:
     """A frontend viewer tab subscribed to a sub-agent's task stream
-    must resolve to the sub-agent's registry entry for both Stop and
-    prompt injection."""
+    must resolve to the sub-agent's task-keyed agent state for both
+    Stop and prompt injection."""
 
     def setup_method(self) -> None:
         _clear_registry()
@@ -316,42 +306,31 @@ class TestViewerTabResolvesToSubagent:
 
     def _register_subagent(
         self, server: VSCodeServer, *, task_id: str, viewer_tab: str,
-    ) -> _RunningAgentState:
-        """Register a live sub-agent state (as ``_run_tasks_parallel``
-        does) and subscribe *viewer_tab* to its task stream (as
-        ``_reattach_running_chat`` does for the frontend tab)."""
+    ) -> agent_state.AgentState:
+        """Register a live sub-agent state under its task id and
+        subscribe *viewer_tab* to its task stream (as the server does
+        when a frontend tab opens the sub-agent's transcript)."""
         agent = ChatSorcarAgent("sub")
         agent._last_task_id = task_id
-        sub_tab_id = "task-parent__sub_0"
-        state = _RunningAgentState(
-            sub_tab_id,
-            "",
+        state = agent_state.AgentState(
+            task_id,
             agent=agent,  # type: ignore[arg-type]
             chat_id="chat-1",
-            is_subagent=True,
             parent_task_id="parent",
             is_task_active=True,
             stop_event=_SubagentStopEvent(threading.Event()),
         )
-        _RunningAgentState.register(sub_tab_id, state)
+        agent_state.register(state)
         server.printer.subscribe_tab(task_id, viewer_tab)
         return state
-
-    def test_find_source_tab_resolves_viewer_to_subagent(self) -> None:
-        server, _events = self._make_server()
-        self._register_subagent(
-            server, task_id="77", viewer_tab="viewer-tab",
-        )
-        resolved = server._find_source_tab_for_viewer("viewer-tab")
-        assert resolved == "task-parent__sub_0", (
-            "the viewer tab must resolve to the sub-agent's registry "
-            f"entry; got {resolved!r}"
-        )
 
     def test_stop_on_viewer_tab_sets_only_subagent_event(self) -> None:
         server, _events = self._make_server()
         state = self._register_subagent(
             server, task_id="77", viewer_tab="viewer-tab",
+        )
+        assert state.is_subagent, (
+            "a state with parent_task_id set must report is_subagent"
         )
         assert state.stop_event is not None
         server._stop_task("viewer-tab")

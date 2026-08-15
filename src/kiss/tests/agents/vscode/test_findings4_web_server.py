@@ -7,18 +7,12 @@
 End-to-end tests against a real :class:`RemoteAccessServer` with real
 UDS connections (no mocks):
 
-- F4-01: a stale connection's disconnect must not arm a deferred
-  ``closeTab`` for a tab a live replacement connection has claimed.
 - F4-02: ``stop_async()`` must close established UDS client streams,
   and (residual) JOIN the in-flight handler coroutines so none touch
   server state after shutdown returns.
 - F4-06: ``_handle_submit`` must refuse new tasks once shutdown began.
-- F4-07: the deferred tab close must not detach an in-flight merge
-  review's state while the per-tab action lock is held.
 - F4-10: concurrent self-signed TLS generation publishes a matched
   cert/key pair.
-- F4-12: overlapping connections announcing one CLI task keep the
-  running state alive until the LAST owner ends it.
 - F4-13: concurrent ``runUpdate`` requests launch a single installer.
 - F4-14: SIGHUP triggers the shutdown path instead of being ignored.
 """
@@ -58,9 +52,6 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_persistence(self.tmpdir)
-        import kiss.server.web_server as ws
-        self._orig_grace = ws._TAB_CLOSE_GRACE
-        ws._TAB_CLOSE_GRACE = 0.05
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
@@ -78,8 +69,6 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
         await self.server.start_async()
 
     async def asyncTearDown(self) -> None:
-        import kiss.server.web_server as ws
-        ws._TAB_CLOSE_GRACE = self._orig_grace
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
@@ -95,46 +84,6 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
     async def _send(writer: asyncio.StreamWriter, cmd: dict) -> None:
         writer.write((json.dumps(cmd) + "\n").encode("utf-8"))
         await writer.drain()
-
-    async def test_f401_stale_disconnect_spares_reclaimed_tab(self) -> None:
-        """A replacement connection's tab survives the old conn's drop."""
-        tab_id = "f401-tab"
-        reader_a, writer_a = await self._connect()
-        await self._send(writer_a, {"type": "openFile", "tabId": tab_id,
-                                    "path": "does-not-matter"})
-        await asyncio.sleep(0.15)
-
-        # Replacement connection B claims the same tab.
-        reader_b, writer_b = await self._connect()
-        await self._send(writer_b, {"type": "openFile", "tabId": tab_id,
-                                    "path": "does-not-matter"})
-        await asyncio.sleep(0.15)
-
-        # Stale connection A drops AFTER B claimed the tab.
-        writer_a.close()
-        await asyncio.sleep(0.3)
-        with self.server._pending_tab_closes_lock:
-            pending_after_a = dict(self.server._pending_tab_closes)
-        self.assertNotIn(
-            tab_id, pending_after_a,
-            "the stale connection's disconnect armed a closeTab timer "
-            "for a tab that a live replacement connection owns",
-        )
-        # Survival assertion: well past the grace window, the live
-        # owner's claim must still be intact — a fired stale timer
-        # would have popped the ownership entry and closed the tab.
-        with self.server._pending_tab_closes_lock:
-            owner = self.server._tab_conn_owners.get(tab_id)
-        self.assertIsNotNone(
-            owner,
-            "the reclaimed tab was closed by the stale connection's "
-            "deferred closeTab after the grace window elapsed",
-        )
-
-        # When the OWNER drops, the timer must be armed as before.
-        writer_b.close()
-        await asyncio.sleep(0.3)
-        writer_b.close()
 
     async def test_f402_stop_async_closes_established_uds_clients(
         self,
@@ -178,59 +127,26 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
                 "stop_async returned",
             )
         self.assertFalse(self.server._uds_handler_tasks)
-        self.assertFalse(self.server._pending_close_tasks)
         writer.close()
 
     async def test_f406_submit_refused_after_shutdown_started(self) -> None:
         """_handle_submit must not start tasks once shutdown began."""
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+        from kiss.server import agent_state
 
         self.server._shutdown_initiated = True
         try:
             await self.server._handle_submit(
                 {"tabId": "f406-tab", "prompt": "do work"},
             )
-            tab = _RunningAgentState.running_agent_states.get("f406-tab")
+            state = agent_state.find_by_tab("f406-tab")
             self.assertTrue(
-                tab is None or not tab.is_task_active,
+                state is None or not state.is_task_active,
                 "a task was started after shutdown was initiated; the "
                 "worker sweep already ran and this task would be "
                 "killed abruptly at process exit",
             )
         finally:
             self.server._shutdown_initiated = False
-
-    async def test_f407_deferred_close_waits_for_action_lock(self) -> None:
-        """The deferred close must not detach a locked merge review."""
-        tab_id = "f407-tab"
-        self.server._register_merge_state(
-            tab_id,
-            {"files": [{"name": "a.txt", "hunks": [
-                {"bs": 0, "bc": 0, "cs": 0, "cc": 1},
-            ]}], "work_dir": self.tmpdir},
-        )
-        lock = await self.server._acquire_merge_action_lock(tab_id)
-        self.assertIsNotNone(lock)
-        try:
-            self.server._fire_pending_tab_close(tab_id)
-            await asyncio.sleep(0.2)
-            with self.server._merge_states_lock:
-                still_there = tab_id in self.server._merge_states
-            self.assertTrue(
-                still_there,
-                "the deferred close removed the merge state while an "
-                "in-flight merge action still held the per-tab lock",
-            )
-        finally:
-            assert lock is not None
-            lock.release()
-        for _ in range(50):
-            with self.server._merge_states_lock:
-                if tab_id not in self.server._merge_states:
-                    break
-            await asyncio.sleep(0.05)
-        with self.server._merge_states_lock:
-            self.assertNotIn(tab_id, self.server._merge_states)
 
     async def test_f410_concurrent_tls_generation_is_serialised(
         self,
@@ -297,38 +213,6 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
         probe.load_cert_chain(
             str(tls_dir / "cert.pem"), str(tls_dir / "key.pem"),
         )
-
-    async def test_f412_reconnect_overlap_keeps_cli_task_running(
-        self,
-    ) -> None:
-        """The last live owner's claim keeps the task running."""
-        task_id = "f412-task"
-        reader_a, writer_a = await self._connect()
-        reader_b, writer_b = await self._connect()
-        await self._send(writer_a, {"type": "cliTaskStart",
-                                    "taskId": task_id})
-        await self._send(writer_b, {"type": "cliTaskStart",
-                                    "taskId": task_id})
-        await asyncio.sleep(0.2)
-        self.assertTrue(self.server._is_cli_task_running(task_id))
-
-        # Old connection ends its claim (or drops) — the replacement
-        # still owns the task.
-        await self._send(writer_a, {"type": "cliTaskEnd",
-                                    "taskId": task_id})
-        await asyncio.sleep(0.2)
-        self.assertTrue(
-            self.server._is_cli_task_running(task_id),
-            "ending the STALE connection's claim cleared the global "
-            "running state while the live replacement still owns it",
-        )
-
-        await self._send(writer_b, {"type": "cliTaskEnd",
-                                    "taskId": task_id})
-        await asyncio.sleep(0.2)
-        self.assertFalse(self.server._is_cli_task_running(task_id))
-        writer_a.close()
-        writer_b.close()
 
     async def test_f413_concurrent_run_update_single_flight(self) -> None:
         """Two concurrent runUpdate requests spawn ONE installer."""

@@ -6,10 +6,8 @@
 ``kiss.server`` — audit round 5.
 
 B1 fix: ``_await_user_response`` now acquires ``_state_lock`` before
-    reading ``_running_agent_states``, consistent with the locking discipline.
-
-B2 fix: ``_handle_autocommit_action`` now acquires ``_state_lock``
-    before reading ``_running_agent_states`` when persisting the autocommit event.
+    reading the task-keyed ``agent_state`` registry, consistent with
+    the locking discipline.
 
 I1 fix: ``_cmd_user_answer`` now uses ``cmd.get("tabId", "")`` (empty
     string default), consistent with every other command handler.
@@ -21,6 +19,7 @@ import queue
 import threading
 import unittest
 
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -41,24 +40,32 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 
 
 class TestAwaitUserResponseLockingFix(unittest.TestCase):
-    """B1 FIX: ``_await_user_response`` now acquires ``_state_lock``
-    before reading ``_running_agent_states``, consistent with the locking
-    discipline used everywhere else.
+    """B1 FIX: ``_await_user_response`` resolves the answer queue
+    through the registry under ``_state_lock`` (the registry's
+    ``STATE_LOCK``), consistent with the locking discipline used
+    everywhere else.
     """
 
+    def tearDown(self) -> None:
+        agent_state.agent_states.clear()
 
     def test_behavioral_read_with_lock(self) -> None:
-        """Behavioral: ``_await_user_response`` now acquires
-        ``_state_lock``, so calling it while another thread holds
-        the lock will block until the lock is released.
+        """Behavioral: ``_await_user_response`` acquires the state
+        lock while resolving the queue, so calling it while another
+        thread holds the lock will block until the lock is released.
         """
         server, _ = _make_server()
-        tab = server._get_tab("test-tab")
-        tab.stop_event = threading.Event()
-        tab.user_answer_queue = queue.Queue(maxsize=1)
-        tab.user_answer_queue.put("hello")
+        state = agent_state.AgentState(
+            "test-tab",
+            tab_id="test-tab",
+            server_owned=True,
+            stop_event=threading.Event(),
+        )
+        state.user_answer_queue = queue.Queue(maxsize=1)
+        state.user_answer_queue.put("hello")
+        agent_state.register(state)
 
-        server.printer._thread_local.stop_event = tab.stop_event
+        server.printer._thread_local.stop_event = state.stop_event
         server.printer._thread_local.task_id = "test-tab"
 
         lock_held = threading.Event()
@@ -78,7 +85,7 @@ class TestAwaitUserResponseLockingFix(unittest.TestCase):
         def call_await() -> None:
             lock_held.wait(timeout=5)
             await_started.set()
-            server.printer._thread_local.stop_event = tab.stop_event
+            server.printer._thread_local.stop_event = state.stop_event
             server.printer._thread_local.task_id = "test-tab"
             result_box.append(server._await_user_response())
             done.set()

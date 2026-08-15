@@ -46,7 +46,6 @@ import pytest
 
 _CHILD_SCRIPT = r"""
 import os
-import queue
 import sys
 import threading
 import time
@@ -90,12 +89,19 @@ server = RemoteAccessServer(
     uds_path=tmp / "sorcar.sock",
 )
 
+from kiss.server import agent_state
+
 vscode = server._vscode_server
 tab_id = "reset-e2e-tab"
-tab = vscode._get_tab(tab_id)
 agent = WorktreeSorcarAgent("Sorcar VS Code")
-tab.agent = agent
-tab.chat_id = ""
+agent_state.register(
+    agent_state.AgentState(
+        "reset-e2e-prekey",
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+    )
+)
 
 heartbeat = tmp / "heartbeat.txt"
 marker = tmp / "agent_exit.txt"
@@ -122,6 +128,11 @@ def fake_run(**kwargs):
         },
     )
     agent._last_task_id = task_id
+    # Mirror printer.agent_task_allocated: re-key the registry entry to
+    # the persisted task id so shutdown persistence finds the DB row.
+    st = agent_state.find_by_agent(agent)
+    if st is not None:
+        agent_state.rekey(st, str(task_id))
     task_id_file.write_text(str(task_id), encoding="utf-8")
     try:
         deadline = time.monotonic() + 120.0
@@ -136,8 +147,8 @@ def fake_run(**kwargs):
 
 agent.run = fake_run
 
-tab.stop_event = threading.Event()
-tab.user_answer_queue = queue.Queue()
+# _resolve_run_state finds the pre-registered state via find_by_tab and
+# installs stop_event / user_answer_queue / task_thread itself.
 worker = threading.Thread(
     target=vscode._run_task,
     args=({
@@ -151,7 +162,6 @@ worker = threading.Thread(
     },),
     daemon=True,
 )
-tab.task_thread = worker
 worker.start()
 
 if BUSY_LOOP:

@@ -1,96 +1,77 @@
-# KISS Sorcar CLI Reference
+# KISS Sorcar Client Interfaces
 
-> The `sorcar` CLI runs in interactive (Claude-Code-style REPL) and non-interactive (one-shot task) modes, and includes a `sorcar mcp` subcommand for managing Model-Context-Protocol servers.
+> KISS Sorcar is used through three client interfaces, all served by one local daemon (`kiss-web`): the VS Code extension, the remote web/mobile app, and the Python client API `kiss.server.sorcar.run`.
 
-## Modes
+## The `kiss-web` Daemon
 
-`sorcar` runs in two modes:
-
-- **Interactive** (no `-t/--task` or `-f/--file`) — a Claude-Code-style REPL that connects as a thin terminal client to the local `sorcar web` daemon. Chat-session control (new chat, resume by id, list history) and worktree merge/discard prompts are driven from slash commands. Each task is isolated in a git worktree by default.
-- **Non-interactive** (`-t` or `-f` supplied) — runs a plain `SorcarAgent` once on the supplied task and exits. Worktree isolation and chat-session control are unavailable in this mode; display events are still streamed into the chat DB so the run is replayable in the chat webview.
-
-## Examples
+The `kiss-web` daemon hosts all agents, chat sessions, and the web app. The VS Code extension starts it automatically; you can also manage it yourself:
 
 ```bash
-# Launch the interactive Sorcar CLI, similar to Claude Code.
-sorcar
+# Start the daemon (serves the web app and the extension).
+kiss-web
 
-# Run a one-shot task (non-interactive).
-sorcar -t "What is 2435*234?"
+# Pin the daemon's working directory.
+kiss-web --workdir "$HOME/projects/my-repo"
 
-# Use a specific model.
-sorcar -m "claude-sonnet-4-6" -t "What is 2435*234?"
-
-# Custom endpoint and headers for a local or self-hosted model.
-sorcar -e "http://localhost:8000/v1" --header "Authorization:Bearer xxx" \
-       -t "Summarize this codebase."
-
-# Cap spend at $2 and pin the working directory.
-sorcar -b 2.0 -w "$HOME/projects/my-repo" -t "Refactor utils.py for clarity."
-
-# Use the contents of a file as the task.
-echo "Can you find the cheapest non-stop flight from SFO to JFK on June 15?" > prompt
-sorcar -f prompt
-
-# Disable browser/web tools (terminal-only mode).
-sorcar --no-web -t "Lint and fix every Python file under src/."
-
-# Disable parallel sub-agents for a deterministic single-thread run.
-sorcar --no-parallel -t 'Run pytest and report which tests fail and why.'
-
-# Ask Sorcar to use desktop/browser/messaging tools.
-sorcar -t 'Can you send the message "Hello from Sorcar!" to ksen via the desktop Slack app?'
-
-# Ask Sorcar to explain code.
-sorcar -t 'Can you show me the detailed step-by-step workflow of gepa.py?'
-
-# Manage MCP servers.
-sorcar mcp list --ping
-
-# Print the installed sorcar version and exit.
-sorcar --version
+# Print the active remote (cloudflared) URL and exit.
+kiss-web --url
 ```
-
-## CLI Options
 
 | Flag | Description |
 |------|-------------|
-| `-V`, `--version` | Print `sorcar <version>` (from `kiss.__version__`) and exit |
-| `-t`, `--task` | Task description; switches to non-interactive mode |
-| `-f`, `--file` | Path to a file whose contents are used as the task; switches to non-interactive mode |
-| `-m`, `--model_name` | LLM model name; defaults to the best available model for the configured API keys |
-| `-e`, `--endpoint` | Custom base URL for a local or self-hosted model |
-| `--header` | Custom HTTP header in `Key:Value` form; may be repeated |
-| `-b`, `--max_budget` | Maximum spend in USD for the run |
-| `-w`, `--work_dir` | Working directory; defaults to the directory where `sorcar` is launched |
-| `-v`, `--verbose` | Print Rich panels to the console (`true` by default; pass `false` for quiet mode) |
-| `-p`, `--parallel` / `--no-parallel` | Enable/disable parallel sub-agents (enabled by default) |
-| `--worktree` / `--no-worktree` | Interactive only. Isolate each task in a git worktree branch (enabled by default); use `--no-worktree` to run directly in the working tree |
-| `--auto-commit` / `--no-auto-commit` | Interactive only. Auto-commit worktree changes when a task finishes (enabled by default); use `--no-auto-commit` to preserve the worktree for manual review |
-| `--no-web` | Disable browser/web tools (terminal-only mode) |
+| `--workdir` | Working directory for the daemon |
+| `--url` | Print the active remote URL and exit |
 
-`--worktree` / `--no-worktree` / `--auto-commit` / `--no-auto-commit` are rejected with `exit 2` when combined with `-t`/`-f`, since the non-interactive path runs a bare `SorcarAgent` that does not implement them. Argparse prefix abbreviations are disabled, so each flag must be spelled out in full.
+## VS Code Extension and Web/Mobile App
 
-## Interactive CLI Features
+Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and type or speak your task. The chat interface provides:
 
 - `@` file/folder mentions with ranked project-file completion.
-- Slash commands: `/help`, `/clear` (alias `/new`), `/resume`, `/model`, `/model list`, `/cost` (aliases `/usage`, `/context`), `/commands`, `/skills`, `/mcp`, `/autocommit`, `/voice` (toggle wake-word voice chat), and `/exit` (alias `/quit`).
-- Custom Markdown slash commands loaded from `~/.kiss/commands`, `<project>/.kiss/commands`, `~/.claude/commands`, and `<project>/.claude/commands`.
+- Per-task **git worktree isolation** with auto-commit and merge on success, or an interactive merge/discard prompt — toggle both in the Settings panel.
+- A model picker, per-task budget caps, chat history with resume, and an agent dashboard (burger menu, bottom-left).
+- Wake-word voice chat ("sorcar, …") via the mic button, including steering a running agent by voice.
+- Live steering: inject a message into a running agent, or switch its model mid-run.
+- Tab mirroring — every VS Code window and web client shows the same tabs with the same contents.
+- API keys, a custom model endpoint, custom HTTP headers, budget limits, and the remote-access password, all set in the Settings panel.
+
+The remote web app is the same interface served over a cloudflared tunnel: copy the URL and password from the Settings panel and open it on any device.
+
+## Python Client API
+
+Any Python process can run a task on the daemon with `kiss.server.sorcar.run` and block until it finishes:
+
+```python
+from kiss.server import sorcar
+
+result = sorcar.run("Summarize README.md", work_dir="/path/to/repo")
+print(result.text, result.success, result.cost, result.tokens, result.steps)
+
+# Continue the same chat (the agent sees the prior task as context):
+follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
+```
+
+Keyword options:
+
+| Option | Description |
+|--------|-------------|
+| `work_dir` | Working directory for the task; the daemon's default when empty |
+| `model` | Model name; the daemon's selected default when empty |
+| `chat_id` | Existing chat session id to continue; a new chat when empty |
+| `tools` | Path to a Python file whose `get_tools()` function returns the functions the daemon registers as extra agent tools |
+| `use_worktree` | Run the task in an isolated git worktree (default `True`) |
+| `auto_commit` | Auto-commit the task's changes on success (default `True`) |
+| `max_budget` | Per-task budget override in USD |
+| `model_config` | Per-task model configuration override (custom endpoint / headers) |
+| `web_tools` | Per-task browser-tool enablement override |
+| `is_parallel` | Whether the agent may spawn parallel sub-agents (default `True`) |
+| `timeout` | Maximum seconds to wait for the task to finish (default `3600`) |
+| `sock_path` | Daemon Unix-domain-socket path override |
+
+The returned `TaskResult` carries `text`, `success`, `cost`, `tokens`, `steps`, `chat_id`, and `task_id`.
+
+## Skills, MCP Servers, and Customization
+
 - Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
-- MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`.
-- VS Code "Tricks" button entries are the concatenation of `~/.kiss/MY_INJECTION.md` (personal tricks, auto-seeded on first read) and the bundled `src/kiss/INJECTIONS.md` (read directly from the package so every upgrade delivers the latest defaults).
-- VS Code welcome-screen sample-task chips are the concatenation of `~/.kiss/MY_TASK_TEMPLATES.md` (your personal tasks) and the bundled `src/kiss/SAMPLE_TASKS.md`.
-
-## `sorcar mcp` Subcommand
-
-Manage Model-Context-Protocol servers used by Sorcar:
-
-| Subcommand | Purpose |
-|---|---|
-| `sorcar mcp add [options] <name> <cmd…>` | Register a stdio (default) or `--transport http`/`sse` server in `--scope user` (`~/.kiss/mcp.json`) or `--scope project` (`<work_dir>/.kiss/mcp.json`); supports `--env KEY=VALUE` and `--header 'Key: Value'` (repeatable). **All options must precede `<name>`** because the target command uses `argparse.REMAINDER`; options placed after `<name>` are consumed as target arguments |
-| `sorcar mcp list [--ping]` | List configured servers; `--ping` also connects and reports live status and tool counts |
-| `sorcar mcp get <name>` | Print one server's configuration as JSON |
-| `sorcar mcp remove <name>` | Delete a server from every writable config file |
-| `sorcar mcp auth <name> [--no-browser]` | Run the OAuth 2.1 browser flow (dynamic client registration + PKCE) and persist tokens under `~/.kiss/mcp_auth/` |
-| `sorcar mcp logout <name>` | Delete a server's stored OAuth tokens |
-| `sorcar mcp debug <name>` | Connect and dump capabilities, tools (with input schemas and permission status), resources, and prompts |
+- MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`; OAuth tokens are persisted under `~/.kiss/mcp_auth/`.
+- "Tricks" button entries read from `~/.kiss/INJECTIONS.md` (one per `## Trick` section), seeded on install from the bundled `src/kiss/INJECTIONS.md`.
+- Welcome-screen sample-task chips are the concatenation of `~/.kiss/MY_TASK_TEMPLATES.md` (your personal tasks) and the bundled `src/kiss/SAMPLE_TASKS.md`.

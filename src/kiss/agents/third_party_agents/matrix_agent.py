@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Matrix Agent — SorcarAgent extension with Matrix protocol tools.
+"""Matrix Agent — channel agent with Matrix protocol tools.
 
 Provides authenticated access to Matrix via matrix-nio. Stores credentials
 in ``~/.kiss/third_party_agents/matrix/config.json``.
@@ -23,8 +23,6 @@ from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -188,22 +186,6 @@ class MatrixChannelBackend(ToolMethodBackend):
             )
 
         self._run(_send())
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        return wait_for_matching_message(
-            poll=lambda: self.poll_messages(channel_id, "")[0],
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=3.0,
-        )
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if message is from the bot."""
@@ -459,8 +441,8 @@ class MatrixChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class MatrixAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Matrix protocol tools."""
+class MatrixAgent(BaseChannelAgent):
+    """Channel agent with Matrix protocol tools."""
 
     def __init__(self) -> None:
         super().__init__("Matrix Agent")
@@ -596,6 +578,17 @@ def main() -> None:
         channel_name="Matrix",
         make_backend=_make_backend,
     )
+
+
+def get_tools() -> list:
+    """Return the Matrix channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return MatrixAgent()._get_tools()
 
 
 if __name__ == "__main__":

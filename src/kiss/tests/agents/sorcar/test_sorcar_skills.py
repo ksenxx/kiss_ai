@@ -7,9 +7,8 @@
 These exercise the real behaviour end to end: skill directories are
 written to real user (``KISS_HOME``/``CLAUDE_CONFIG_DIR``/``HOME``) and
 project directories, discovery and permission filtering run against the
-real filesystem and the real ``~/.kiss/config.json``, the ``skill``
-tool is built and invoked for real, and the REPL is driven through a
-real subprocess reading piped stdin.  No model calls are made.
+real filesystem and the real ``~/.kiss/config.json``, and the ``skill``
+tool is built and invoked for real.  No model calls are made.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ from kiss.agents.sorcar.skills import (
     Skill,
     bundled_skills_dir,
     discover_skills,
-    format_skill_listing,
     load_skill_content,
     load_skill_permissions,
     make_skill_tool,
@@ -374,29 +372,6 @@ def test_skill_tool_picks_up_new_skill_after_creation(
     assert tool is not None
     _write_skill(project / ".kiss" / "skills", "second", "S", "Second body.")
     assert "Second body." in tool("second")
-
-
-
-def test_format_skill_listing_empty_hint(isolated_homes: Path) -> None:
-    """The empty listing explains where to create skills."""
-    text = format_skill_listing({})
-    assert "No skills found" in text
-    assert ".claude/skills" in text
-    assert ".agents/skills" in text
-
-
-def test_format_skill_listing_alignment(isolated_homes: Path) -> None:
-    """The listing shows name, source, and description."""
-    project = isolated_homes / "project"
-    _write_skill(project / ".kiss" / "skills", "deploy", "Deploy the app")
-    _write_skill(
-        isolated_homes / ".claudehome" / "skills", "review", "Review code"
-    )
-    text = format_skill_listing(discover_skills(str(project)))
-    assert "deploy" in text
-    assert "(project)" in text
-    assert "(claude-user)" in text
-    assert "Deploy the app" in text
 
 
 

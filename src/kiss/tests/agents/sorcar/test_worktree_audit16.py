@@ -4,12 +4,12 @@
 # add your name here
 """Audit 16: Integration tests for bugs/inconsistencies found in audit 16.
 
-BUG-68: ``_finish_merge`` and ``_run_task_inner``'s post-task cleanup
-    silently leave a pending empty-change worktree when
-    ``_any_non_wt_running()`` is True — the user sees no buttons and
-    has no indication that a worktree exists.  This is inconsistent
-    with ``_emit_pending_worktree`` (which broadcasts
-    ``worktree_done`` as a fallback — BUG-66 fix).
+BUG-68: post-task pending-worktree cleanup silently left a pending
+    empty-change worktree when ``_any_non_wt_running()`` was True —
+    the user saw no buttons and had no indication that a worktree
+    existed.  (Historically observed through the since-removed
+    ``_finish_merge``; the shared logic now lives in
+    ``_present_pending_worktree``.)
 
     Resolved by removing the cause rather than reporting it: an
     empty worktree is now discarded even while a non-wt task runs,
@@ -35,16 +35,17 @@ BUG-70: ``_check_merge_conflict`` only checks the unstaged and staged
     The user had no warning.  ``_check_merge_conflict`` should report
     the overlap so the user can resolve before merging.
 
-RED-10: The three post-task pending-worktree handling blocks in
-    ``_run_task_inner``, ``_finish_merge``, and
-    ``_emit_pending_worktree`` duplicate the same "auto-discard or
-    emit worktree_done" logic with subtle divergences.  A single
-    helper would eliminate redundancy and prevent future drift.
+RED-10: The post-task pending-worktree handling blocks in
+    ``_run_task_inner`` and ``_emit_pending_worktree`` duplicated the
+    same "auto-discard or emit worktree_done" logic with subtle
+    divergences.  A single helper (``_present_pending_worktree``)
+    eliminates the redundancy and prevents future drift.
 """
 
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -52,13 +53,25 @@ import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry() -> Iterator[None]:
+    agent_state.agent_states.clear()
+    yield
+    agent_state.agent_states.clear()
 
 
 def _make_repo(path: Path) -> Path:
     """Create a minimal git repo with one initial commit."""
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main", str(path)],
+        capture_output=True, check=True,
+    )
     subprocess.run(
         ["git", "-C", str(path), "config", "user.email", "t@t.com"],
         capture_output=True,
@@ -78,6 +91,19 @@ def _make_repo(path: Path) -> Path:
         capture_output=True, check=True,
     )
     return path
+
+
+def _register_wt_tab(task_id: str, tab_id: str) -> AgentState:
+    """Register a server-owned worktree-mode state with a real agent."""
+    state = AgentState(
+        task_id,
+        agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        tab_id=tab_id,
+        server_owned=True,
+    )
+    state.use_worktree = True
+    agent_state.register(state)
+    return state
 
 
 def _create_wt(
@@ -107,11 +133,14 @@ class _RecordingPrinter:
     def broadcast(self, event: dict[str, Any]) -> None:
         self.events.append(event)
 
+    def print(self, *args: Any, **kwargs: Any) -> None:
+        pass
 
-class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
-    """``_finish_merge`` with no worktree changes and a concurrent
-    non-wt task must discard the empty worktree WITHOUT broadcasting
-    the meaningless ``worktree_done`` prompt.
+
+class TestBug68PresentPendingNoBroadcastOnEmptyNonWtBusy:
+    """``_present_pending_worktree`` with no worktree changes and a
+    concurrent non-wt task must discard the empty worktree WITHOUT
+    broadcasting the meaningless ``worktree_done`` prompt.
 
     The frontend renders ``worktree_done`` as "Auto-commit and merge
     or Discard?", which makes no sense when there are zero changed
@@ -121,7 +150,9 @@ class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
     tree is busy — it touches neither its files nor its HEAD.
     """
 
-    def test_finish_merge_empty_wt_non_wt_busy(self, tmp_path: Path) -> None:
+    def test_present_pending_empty_wt_non_wt_busy(
+        self, tmp_path: Path,
+    ) -> None:
         repo = _make_repo(tmp_path / "repo")
 
         server = VSCodeServer()
@@ -130,18 +161,17 @@ class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug68a"
-        tab = server._get_tab(tab_id)
-        tab.use_worktree = True
-        tab.is_merging = True
+        state = _register_wt_tab("task-bug68a", tab_id)
 
-        agent = cast(WorktreeSorcarAgent, tab.agent)
+        agent = cast(WorktreeSorcarAgent, state.agent)
         branch = "kiss/wt-bug68a-1"
         wt = _create_wt(repo, branch, agent)
 
-        other = server._get_tab("other-bug68a")
+        other = AgentState("task-other-68a", tab_id="other-bug68a")
         other.is_running_non_wt = True
+        agent_state.register(other)
 
-        server._finish_merge(tab_id)
+        server._present_pending_worktree(tab_id)
 
         wt_done = [e for e in printer.events if e.get("type") == "worktree_done"]
         assert not wt_done, (
@@ -162,7 +192,7 @@ class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
 
         other.is_running_non_wt = False
 
-    def test_finish_merge_empty_wt_non_wt_idle_discards(
+    def test_present_pending_empty_wt_non_wt_idle_discards(
         self, tmp_path: Path,
     ) -> None:
         """Regression: when no non-wt task is running, the empty
@@ -174,14 +204,12 @@ class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug68b"
-        tab = server._get_tab(tab_id)
-        tab.use_worktree = True
-        tab.is_merging = True
+        state = _register_wt_tab("task-bug68b", tab_id)
 
-        agent = cast(WorktreeSorcarAgent, tab.agent)
+        agent = cast(WorktreeSorcarAgent, state.agent)
         _create_wt(repo, "kiss/wt-bug68b-1", agent)
 
-        server._finish_merge(tab_id)
+        server._present_pending_worktree(tab_id)
 
         assert agent._wt is None, (
             "Regression: empty worktree was not auto-discarded when "
@@ -213,10 +241,9 @@ class TestBug70UntrackedFileConflict:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug70"
-        tab = server._get_tab(tab_id)
-        tab.use_worktree = True
+        state = _register_wt_tab("task-bug70", tab_id)
 
-        agent = cast(WorktreeSorcarAgent, tab.agent)
+        agent = cast(WorktreeSorcarAgent, state.agent)
         branch = "kiss/wt-bug70-1"
         wt = _create_wt(repo, branch, agent)
 
@@ -259,10 +286,9 @@ class TestBug70UntrackedFileConflict:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug70b"
-        tab = server._get_tab(tab_id)
-        tab.use_worktree = True
+        state = _register_wt_tab("task-bug70b", tab_id)
 
-        agent = cast(WorktreeSorcarAgent, tab.agent)
+        agent = cast(WorktreeSorcarAgent, state.agent)
         wt = _create_wt(repo, "kiss/wt-bug70-2", agent)
 
         (wt.wt_dir / "foo.py").write_text("agent content\n")
@@ -293,7 +319,7 @@ class TestRed10PostTaskPendingWtDuplication:
         changes don't drift between the three sites."""
         assert hasattr(VSCodeServer, "_present_pending_worktree"), (
             "RED-10: the post-task pending-worktree logic is still "
-            "duplicated across _run_task_inner, _finish_merge, and "
+            "duplicated across _run_task_inner and "
             "_emit_pending_worktree.  Expected a single helper "
             "`_present_pending_worktree`."
         )

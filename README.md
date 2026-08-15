@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.8.7-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.8.8-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -16,7 +16,7 @@
 
 ### Open-source general-purpose AI agent for long-horizon tasks and AI discovery
 
-**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a VS Code extension, a Claude-Code-style CLI, and a browser/mobile web app. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. All agents run as daemons. Complex AI systems/techniques can be replaced with a paragraph of prompt in KISS Sorcar.
+**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon, and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. All agents run as daemons. Complex AI systems/techniques can be replaced with a paragraph of prompt in KISS Sorcar.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
@@ -28,17 +28,18 @@ ______________________________________________________________________
 <summary><strong>Table of Contents</strong></summary>
 
 - [KISS Sorcar vs Claude Code vs Cursor](#-kiss-sorcar-vs-claude-code-vs-cursor)
-- [What is in the Name](#what-is-in-the-name)
+- [Architecture](#-architecture)
 - [See It in Action](#-see-it-in-action)
 - [Installation](#installation)
   - [Full install from source](#full-install-from-source)
-  - [Python package / CLI install](#python-package--cli-install)
+  - [Python package install](#python-package-install)
   - [Configure model access](#configure-model-access)
   - [VS Code Extension Installation](#vs-code-extension-installation)
-- [CLI Interface](#cli-interface)
-  - [CLI options](#cli-options)
-  - [Interactive CLI features](#interactive-cli-features)
-  - [`sorcar mcp` subcommand](#sorcar-mcp-subcommand)
+- [Using KISS Sorcar](#using-kiss-sorcar)
+  - [VS Code extension and web/mobile app](#vs-code-extension-and-webmobile-app)
+  - [The `kiss-web` daemon](#the-kiss-web-daemon)
+  - [Python client API](#python-client-api)
+  - [Skills, MCP servers, and customization](#skills-mcp-servers-and-customization)
 - [Messaging & Third-Party Agents](#-messaging--third-party-agents)
 - [Models Supported](#-models-supported)
 - [Contributing](#-contributing)
@@ -55,13 +56,13 @@ ______________________________________________________________________
 
 | Capability | **KISS Sorcar** | **Claude Code** | **Cursor** |
 |---|---|---|---|
-| **Interfaces** | CLI + VS Code extension + web/mobile app | CLI + mobile app | Custom VS Code |
+| **Interfaces** | VS Code extension + web/mobile app + Python API | CLI + mobile app | Custom VS Code |
 | **AI Discovery** | ✅ simply via prompt | ❌ | ❌ |
 | **GEPA Prompt Optimization** | ✅ simply via prompt | ❌ | ❌ |
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~2850** | Unknown | Unknown |
-| **Models in bundled catalog** | 603 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 619 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -85,9 +86,9 @@ curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install
 
 The installer targets macOS and Linux on `x86_64`, `aarch64`, and `arm64`. It installs or checks the tools needed to run KISS Sorcar and build/install the VS Code extension.
 
-### Python package / CLI install
+### Python package install
 
-If you only want the Python package and CLI entry points:
+If you only want the Python package (the `kiss-web` daemon, the Python client API, and the messaging-agent entry points):
 
 ```bash
 pipx install kiss-agent-framework
@@ -111,104 +112,66 @@ export OPENROUTER_API_KEY=...
 export GEMINI_API_KEY=...
 ```
 
-You can also configure a custom endpoint with `--endpoint` / `-e` and optional repeated `--header Key:Value` CLI flags.
+You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the VS Code extension or web app.
 
 ### VS Code Extension Installation
 
 To install only the KISS Sorcar extension, open Visual Studio Code, search for **KISS Sorcar** in the extension marketplace, install it, and relaunch VS Code. Press ESC if you do not have a specific API key ready, but configure at least one model backend before running tasks.
 
-## CLI Interface
+## Using KISS Sorcar
 
-`sorcar` runs in two modes:
+KISS Sorcar has three client interfaces, all served by one local daemon: the **VS Code extension**, the **remote web/mobile app**, and the **Python client API**.
 
-- **Interactive** (no `-t/--task` or `-f/--file`) — a Claude-Code-style REPL that connects as a thin terminal client to the local `sorcar web` daemon. Chat-session control (new chat, resume by id, list history) and worktree merge/discard prompts are driven from slash commands. Each task is isolated in a git worktree by default.
-- **Non-interactive** (`-t` or `-f` supplied) — runs a plain `SorcarAgent` once on the supplied task and exits. Worktree isolation and chat-session control are unavailable in this mode; display events are still streamed into the chat DB so the run is replayable in the chat webview.
+### VS Code extension and web/mobile app
 
-```bash
-# Launch the interactive Sorcar CLI, similar to Claude Code.
-sorcar
-
-# Run a one-shot task (non-interactive).
-sorcar -t "What is 2435*234?"
-
-# Use a specific model.
-sorcar -m "claude-sonnet-4-6" -t "What is 2435*234?"
-
-# Custom endpoint and headers for a local or self-hosted model.
-sorcar -e "http://localhost:8000/v1" --header "Authorization:Bearer xxx" \
-       -t "Summarize this codebase."
-
-# Cap spend at $2 and pin the working directory.
-sorcar -b 2.0 -w "$HOME/projects/my-repo" -t "Refactor utils.py for clarity."
-
-# Use the contents of a file as the task.
-echo "Can you find the cheapest non-stop flight from SFO to JFK on June 15?" > prompt
-sorcar -f prompt
-
-# Disable browser/web tools (terminal-only mode).
-sorcar --no-web -t "Lint and fix every Python file under src/."
-
-# Disable parallel sub-agents for a deterministic single-thread run.
-sorcar --no-parallel -t 'Run pytest and report which tests fail and why.'
-
-# Ask Sorcar to use desktop/browser/messaging tools.
-sorcar -t 'Can you send the message "Hello from Sorcar!" to ksen via the desktop Slack app?'
-
-# Ask Sorcar to explain code.
-sorcar -t 'Can you show me the detailed step-by-step workflow of gepa.py?'
-
-# Manage MCP servers (see "sorcar mcp" subcommand below).
-sorcar mcp list --ping
-
-# Print the installed sorcar version and exit.
-sorcar --version
-```
-
-### CLI options
-
-| Flag | Description |
-|------|-------------|
-| `-V`, `--version` | Print `sorcar <version>` (from `kiss.__version__`) and exit |
-| `-t`, `--task` | Task description; switches to non-interactive mode |
-| `-f`, `--file` | Path to a file whose contents are used as the task; switches to non-interactive mode |
-| `-m`, `--model_name` | LLM model name; defaults to the best available model for the configured API keys |
-| `-e`, `--endpoint` | Custom base URL for a local or self-hosted model |
-| `--header` | Custom HTTP header in `Key:Value` form; may be repeated |
-| `-b`, `--max_budget` | Maximum spend in USD for the run |
-| `-w`, `--work_dir` | Working directory; defaults to the directory where `sorcar` is launched |
-| `-v`, `--verbose` | Print Rich panels to the console (`true` by default; pass `false` for quiet mode) |
-| `-p`, `--parallel` / `--no-parallel` | Enable/disable parallel sub-agents (enabled by default) |
-| `--worktree` / `--no-worktree` | **Interactive only.** Isolate each task in a git worktree branch (enabled by default); use `--no-worktree` to run directly in the working tree |
-| `--auto-commit` / `--no-auto-commit` | **Interactive only.** Auto-commit worktree changes when a task finishes (enabled by default); use `--no-auto-commit` to preserve the worktree for manual review |
-| `--no-web` | Disable browser/web tools (terminal-only mode) |
-
-`--worktree` / `--no-worktree` / `--auto-commit` / `--no-auto-commit` are rejected with `exit 2` when combined with `-t`/`-f`, since the non-interactive path runs a bare `SorcarAgent` that does not implement them. Argparse prefix abbreviations are disabled, so each flag must be spelled out in full.
-
-### Interactive CLI features
-
-The interactive CLI includes:
+Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and type or speak your task. The chat interface provides:
 
 - `@` file/folder mentions with ranked project-file completion.
-- Slash commands: `/help`, `/clear` (alias `/new`), `/resume`, `/model`, `/model list`, `/cost` (aliases `/usage`, `/context`), `/commands`, `/skills`, `/mcp`, `/autocommit`, `/voice` (toggle wake-word voice chat), and `/exit` (alias `/quit`).
-- Custom Markdown slash commands loaded from `~/.kiss/commands`, `<project>/.kiss/commands`, `~/.claude/commands`, and `<project>/.claude/commands`.
+- Per-task **git worktree isolation** with auto-commit and merge on success, or an interactive merge/discard prompt — toggle both in the Settings panel.
+- A model picker, per-task budget caps, chat history with resume, and an agent dashboard (burger menu, bottom-left).
+- Wake-word voice chat ("sorcar, …") via the mic button, including steering a running agent by voice.
+- Live steering: inject a message into a running agent, or switch its model mid-run.
+- Tab mirroring — every VS Code window and web client shows the same tabs with the same contents.
+
+The remote web app is the same interface served over a cloudflared tunnel: copy the URL and password from the Settings panel and open it on any device.
+
+### The `kiss-web` daemon
+
+The `kiss-web` daemon hosts all agents, chat sessions, and the web app, and services every client command — including config reads/writes, default-model lookup, and the wake-word listener — over its socket. The VS Code extension starts it automatically; you can also manage it yourself:
+
+```bash
+# Start the daemon (serves the web app and the extension).
+kiss-web
+
+# Pin the daemon's working directory.
+kiss-web --workdir "$HOME/projects/my-repo"
+
+# Print the active remote (cloudflared) URL and exit.
+kiss-web --url
+```
+
+### Python client API
+
+Any Python process can run a task on the daemon with `kiss.server.sorcar.run` and block until it finishes:
+
+```python
+from kiss.server import sorcar
+
+result = sorcar.run("Summarize README.md", work_dir="/path/to/repo")
+print(result.text, result.success, result.cost, result.tokens, result.steps)
+
+# Continue the same chat (the agent sees the prior task as context):
+follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
+```
+
+`run()` accepts keyword options mirroring the chat interface — `model`, `work_dir`, `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config` (custom endpoint/headers), `web_tools`, `is_parallel`, `timeout`, `sock_path` (daemon socket override) — plus `tools="/path/to/my_tools.py"`, a Python file whose `get_tools()` function returns the functions the daemon registers as extra agent tools. The functions are never serialized: only the path travels over the socket, and the daemon imports the file, calls `get_tools()`, and runs the tools in its own process.
+
+### Skills, MCP servers, and customization
+
 - Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
-- MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`.
-- VS Code "Tricks" button entries are the concatenation of two `## Trick`-sectioned Markdown files: (1) `~/.kiss/MY_INJECTION.md` — your personal tricks, auto-seeded on first read with a starter trick and never overwritten thereafter; (2) the bundled `src/kiss/INJECTIONS.md` — tricks shipped with the extension, read directly from the package so every upgrade delivers the latest defaults. To customise your dropdown edit `~/.kiss/MY_INJECTION.md`; to reset it remove the file.
-- VS Code welcome-screen sample-task chips are the concatenation of two `## Task`-sectioned Markdown files: (1) `~/.kiss/MY_TASK_TEMPLATES.md` — your personal tasks, auto-created on first launch with the seed `## Task\n\nHi!\n` and never overwritten thereafter; (2) the bundled `src/kiss/SAMPLE_TASKS.md` — sample tasks shipped with the extension, read directly from the package so every upgrade delivers the latest chips. To customise your chips edit `~/.kiss/MY_TASK_TEMPLATES.md`; to reset it remove the file.
-
-### `sorcar mcp` subcommand
-
-Manage Model-Context-Protocol servers used by Sorcar:
-
-| Subcommand | Purpose |
-|---|---|
-| `sorcar mcp add [options] <name> <cmd…>` | Register a stdio (default) or `--transport http`/`sse` server in `--scope user` (`~/.kiss/mcp.json`) or `--scope project` (`<work_dir>/.kiss/mcp.json`); supports `--env KEY=VALUE` and `--header 'Key: Value'` (repeatable). **All options must precede `<name>`** because the target command uses `argparse.REMAINDER`; options placed after `<name>` are consumed as target arguments. |
-| `sorcar mcp list [--ping]` | List configured servers; `--ping` also connects and reports live status and tool counts. |
-| `sorcar mcp get <name>` | Print one server's configuration as JSON. |
-| `sorcar mcp remove <name>` | Delete a server from every writable config file. |
-| `sorcar mcp auth <name> [--no-browser]` | Run the OAuth 2.1 browser flow (dynamic client registration + PKCE) and persist tokens under `~/.kiss/mcp_auth/`. |
-| `sorcar mcp logout <name>` | Delete a server's stored OAuth tokens. |
-| `sorcar mcp debug <name>` | Connect and dump capabilities, tools (with input schemas and permission status), resources, and prompts. |
+- MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`; OAuth tokens are persisted under `~/.kiss/mcp_auth/`.
+- "Tricks" button entries read from `~/.kiss/INJECTIONS.md` (one per `## Trick` section), seeded on install from the bundled `src/kiss/INJECTIONS.md`. Edit the file to customise the dropdown; remove it to regenerate from the bundled defaults.
+- Welcome-screen sample-task chips are the concatenation of two `## Task`-sectioned Markdown files: (1) `~/.kiss/MY_TASK_TEMPLATES.md` — your personal tasks, auto-created on first launch with the seed `## Task\n\nHi!\n` and never overwritten thereafter; (2) the bundled `src/kiss/SAMPLE_TASKS.md` — sample tasks shipped with the extension, read directly from the package so every upgrade delivers the latest chips. To customise your chips edit `~/.kiss/MY_TASK_TEMPLATES.md`; to reset it remove the file.
 
 ## 💬 Messaging & Third-Party Agents
 
@@ -222,25 +185,25 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-KISS Sorcar ships a catalog of **603 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **619 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
 | OpenAI | 105 |
 | Anthropic | 13 |
-| Gemini / Google | 27 |
-| Together AI | 86 |
+| Gemini / Google | 24 |
+| Together AI | 87 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 342 |
-| Claude Code CLI (`cc/*`) | 3 |
+| OpenRouter | 350 |
+| Claude Code CLI (`cc/*`) | 13 |
 | Codex CLI (`codex/*`) | 9 |
 
 Current catalog capability totals:
 
-- **586** generation-capable models
-- **428** function-calling-capable models
-- **8** embedding models
+- **602** generation-capable models
+- **443** function-calling-capable models
+- **9** embedding models
 
 Full model list:
 
@@ -375,7 +338,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Gemini / Google (27)</strong></summary>
+<summary><strong>Gemini / Google (24)</strong></summary>
 
 - `gemini-2.0-flash`
 - `gemini-2.0-flash-001`
@@ -408,7 +371,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Together AI (86)</strong></summary>
+<summary><strong>Together AI (87)</strong></summary>
 
 - `BAAI/bge-base-en-v1.5`
 - `Qwen/QwQ-32B`
@@ -530,7 +493,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (342)</strong></summary>
+<summary><strong>OpenRouter (350)</strong></summary>
 
 - `openrouter/ai21/jamba-large-1.7`
 - `openrouter/aion-labs/aion-2.0`
@@ -878,8 +841,18 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Claude Code CLI (cc/*) (3)</strong></summary>
+<summary><strong>Claude Code CLI (cc/*) (13)</strong></summary>
 
+- `cc/claude-fable-5`
+- `cc/claude-haiku-4-5-20251001`
+- `cc/claude-opus-4-5-20251101`
+- `cc/claude-opus-4-6`
+- `cc/claude-opus-4-7`
+- `cc/claude-opus-4-8`
+- `cc/claude-opus-5`
+- `cc/claude-sonnet-4-5-20250929`
+- `cc/claude-sonnet-4-6`
+- `cc/claude-sonnet-5`
 - `cc/haiku`
 - `cc/opus`
 - `cc/sonnet`

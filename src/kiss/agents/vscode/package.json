@@ -2,7 +2,7 @@
   "name": "kiss-sorcar",
   "displayName": "KISS Sorcar",
   "description": "The open-source AI coding agent that beats Cursor and Claude Code on Terminal Bench. Free, local, bring your own API key.",
-  "version": "2026.8.7",
+  "version": "2026.8.8",
   "publisher": "ksenxx",
   "repository": {
     "type": "git",
@@ -88,38 +88,6 @@
         "title": "KISS: Stop Current Task"
       },
       {
-        "command": "kissSorcar.acceptChange",
-        "title": "KISS: Accept Change"
-      },
-      {
-        "command": "kissSorcar.rejectChange",
-        "title": "KISS: Reject Change"
-      },
-      {
-        "command": "kissSorcar.prevChange",
-        "title": "KISS: Previous Change"
-      },
-      {
-        "command": "kissSorcar.nextChange",
-        "title": "KISS: Next Change"
-      },
-      {
-        "command": "kissSorcar.acceptAll",
-        "title": "KISS: Accept All Changes"
-      },
-      {
-        "command": "kissSorcar.rejectAll",
-        "title": "KISS: Reject All Changes"
-      },
-      {
-        "command": "kissSorcar.acceptFile",
-        "title": "KISS: Accept File Changes"
-      },
-      {
-        "command": "kissSorcar.rejectFile",
-        "title": "KISS: Reject File Changes"
-      },
-      {
         "command": "kissSorcar.generateCommitMessage",
         "title": "KISS: Generate Commit Message",
         "icon": "$(sparkle)"
@@ -159,40 +127,6 @@
         {
           "command": "kissSorcar.generateCommitMessage",
           "when": "scmProvider == git"
-        }
-      ],
-      "commandPalette": [
-        {
-          "command": "kissSorcar.acceptChange",
-          "when": "false"
-        },
-        {
-          "command": "kissSorcar.rejectChange",
-          "when": "false"
-        },
-        {
-          "command": "kissSorcar.prevChange",
-          "when": "false"
-        },
-        {
-          "command": "kissSorcar.nextChange",
-          "when": "false"
-        },
-        {
-          "command": "kissSorcar.acceptAll",
-          "when": "false"
-        },
-        {
-          "command": "kissSorcar.rejectAll",
-          "when": "false"
-        },
-        {
-          "command": "kissSorcar.acceptFile",
-          "when": "false"
-        },
-        {
-          "command": "kissSorcar.rejectFile",
-          "when": "false"
         }
       ]
     },

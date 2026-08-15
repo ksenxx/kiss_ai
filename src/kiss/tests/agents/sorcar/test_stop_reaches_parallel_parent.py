@@ -29,7 +29,7 @@ daemon cannot route used to disappear behind a disabled ``logger.debug``,
 so the UI could not tell a pending stop from a discarded one.
 
 No mocks or fakes: real threads, a real ``ThreadPoolExecutor``, the real
-``_RunningAgentState`` registry, and the production
+agent-state registry, and the production
 ``VSCodeServer._force_stop_thread`` / ``_stop_task``.
 """
 
@@ -43,9 +43,8 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import sorcar_agent
-from kiss.agents.sorcar.chat_sorcar_agent import _SubagentStopEvent
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.sorcar.sorcar_agent import _await_subagents
+from kiss.agents.sorcar.sorcar_agent import _await_subagents, _SubagentStopEvent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -194,12 +193,18 @@ class TestStopIsAlwaysAcknowledged:
         server, events = self._server_with_capture()
         tab_id = "stop-ack-running"
         stop_event = threading.Event()
-        state = _RunningAgentState(tab_id, "claude-opus-5", stop_event=stop_event)
-        _RunningAgentState.register(tab_id, state)
+        state = agent_state.AgentState(
+            "task-stop-ack",
+            tab_id=tab_id,
+            server_owned=True,
+            stop_event=stop_event,
+            is_task_active=True,
+        )
+        agent_state.register(state)
         try:
             server._stop_task(tab_id)
         finally:
-            _RunningAgentState.unregister(tab_id, state)
+            agent_state.unregister(state.task_id, state)
         acks = [e for e in events if e.get("type") == "stop_ack"]
         assert acks == [
             {"type": "stop_ack", "accepted": True, "tabId": tab_id},

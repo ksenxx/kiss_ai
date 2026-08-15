@@ -45,85 +45,6 @@ def test_save_task_extra_raises_on_is_favorite_payload(temp_db: Path) -> None:  
         )
 
 
-def test_cli_printer_forwards_only_listed_global_types(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """In-process diagnostics with empty taskId must NOT flood the
-    daemon UDS; only the explicit ``new_tab`` / ``tasks_updated``
-    global system events should be forwarded.
-    """
-    from kiss.ui.cli import cli_daemon_bridge, cli_printer
-
-    captured: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        cli_daemon_bridge,
-        "send_event",
-        lambda env: captured.append(env),
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_start", lambda _tid: None,
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_end", lambda _tid: None,
-    )
-
-    printer = cli_printer.RecordingConsolePrinter()
-    printer.broadcast({
-        "type": "new_tab",
-        "task_id": "a" * 32,
-        "parent_tab_id": "",
-        "taskId": "",
-    })
-    printer.broadcast({"type": "tasks_updated", "taskId": ""})
-    printer.broadcast({"type": "debug_diagnostic", "taskId": ""})
-    printer.broadcast({"type": "random_internal_event"})
-
-    types_forwarded = [e.get("type") for e in captured]
-    assert "new_tab" in types_forwarded
-    assert "tasks_updated" in types_forwarded
-    assert "debug_diagnostic" not in types_forwarded
-    assert "random_internal_event" not in types_forwarded
-
-
-def test_register_running_state_does_not_clobber_preexisting(temp_db: Path) -> None:  # noqa: ARG001
-    """Documented contract: a pre-allocated ``_RunningAgentState``
-    entry for this chat_id with ``state.agent=None`` belongs to its
-    creator (server frame or parent worktree agent).  A standalone
-    child agent that observes the entry must SKIP re-registration
-    (return False) WITHOUT hijacking the entry.  See
-    ``test_run_does_not_clobber_preexisting_state`` for the
-    end-to-end contract.
-    """
-    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-    from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-
-    agent = ChatSorcarAgent(name="t")
-    agent._chat_id = "test-chat-456"
-
-    pre = _RunningAgentState(
-        "test-chat-456",
-        "model",
-        agent=None,
-    )
-    pre.chat_id = "test-chat-456"
-    pre.is_task_active = False
-
-    try:
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states["test-chat-456"] = pre
-
-        result = agent._register_running_state()
-        assert result is False, "must skip re-register for pre-existing entry"
-        assert pre.agent is None, (
-            "must NOT clobber pre-allocated entry's None agent"
-        )
-    finally:
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.pop(
-                "test-chat-456", None,
-            )
-
-
 def test_bx_handles_falsy_string_literals_during_migration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -197,16 +118,3 @@ def test_migration_toggles_foreign_keys_off_during_rename() -> None:
     src = Path("src/kiss/agents/sorcar/persistence.py").read_text()
     assert "PRAGMA foreign_keys=OFF" in src
     assert src.count("PRAGMA foreign_keys=ON") >= 2
-
-
-def test_live_task_id_returns_str_or_none() -> None:
-    """Source-level assertion: the ``_live_task_id`` helper must be
-    annotated as returning ``str | None``.  The r5-vscode review
-    flagged that an int slipping through breaks
-    ``set[str]`` membership comparisons downstream.
-    """
-    src = Path("src/kiss/server/server.py").read_text()
-    assert "_live_task_id" in src
-    assert "-> str | None" in src or "-> str|None" in src, (
-        "_live_task_id should return str | None"
-    )

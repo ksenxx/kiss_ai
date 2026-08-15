@@ -4,37 +4,32 @@
 # add your name here
 """Bug-hunt 8 (group C): a stale worker's cleanup clobbers a new task.
 
-BUG-TR8-5 — ``_run_task``'s outer ``finally`` re-resolves the tab state
-BY ID from the global registry
-(``_RunningAgentState.running_agent_states.get(tab_id)``) at cleanup
-time and unconditionally nulls its ``task_thread`` / ``stop_event`` /
-``user_answer_queue`` / ``agent`` and clears ``pending_user_messages``.
+BUG-TR8-5 — ``_run_task``'s outer ``finally`` used to re-resolve the
+tab state BY TAB ID from the global registry at cleanup time and
+unconditionally null its ``task_thread`` / ``stop_event`` /
+``user_answer_queue`` / ``agent`` and clear ``pending_user_messages``.
 The worker can spend a long time between the agent returning and that
 ``finally`` (autocommit git scans, merge-view preparation, persistence
 — all real I/O), during which the tab's backend state can be disposed
-(``closeTab`` while the task is wedged in cleanup) and RE-CREATED under
-the SAME tab id by a reopened frontend tab that immediately starts a
-NEW task.  The stale worker's ``finally`` then looks up the FRESH state
-object and destroys the new task's plumbing mid-flight: its agent slot
-is nulled (the new worker crashes with ``'NoneType' object has no
-attribute 'run'``), its answer queue and stop event are dropped (the
-new task becomes unanswerable and unstoppable), and its queued
-follow-up messages are silently discarded.
+(``closeTab`` while the task is wedged in cleanup) and a NEW state can
+be registered for the SAME tab id by a reopened frontend tab that
+immediately starts a NEW task.  A tab-id lookup in the stale worker's
+``finally`` would then find the FRESH state object and destroy the new
+task's plumbing mid-flight: its agent slot nulled (the new worker
+crashes with ``'NoneType' object has no attribute 'run'``), its answer
+queue and stop event dropped (the new task becomes unanswerable and
+unstoppable), and its queued follow-up messages silently discarded.
 
-Observed in the wild as the flaky
-``test_resume_running_followup_input`` failure where a lingering
-worker from a previous task nulled the next task's agent between
-``_run_task_inner``'s ``assert tab.agent is not None`` and
-``tab.agent.run(...)``.
-
-The test makes the race deterministic with real threads and the real
-``VSCodeServer`` task pipeline: the first worker is paused inside its
-post-run cleanup by holding ``_state_lock``, the tab state is swapped
-(dispose + re-register, as closeTab + reopen would do) and re-armed
-for a new task, then the stale worker is allowed to finish.  No mocks
-or patched methods — the agent is a real ``WorktreeSorcarAgent``
-subclass whose ``run`` blocks on a real event (the established
-pattern of the earlier bug-hunt tests).
+The refactored ``_run_task`` resolves its cleanup target by the run's
+own registry key (``cmd["_state_key"]``), so a state registered later
+for the same tab must come through completely untouched.  This test
+drives that scenario with real threads and the real ``VSCodeServer``
+task pipeline: the first worker blocks inside its agent ``run``, a
+fresh state for the same tab id is registered and armed for a new
+task, then the stale worker is allowed to finish.  No mocks or patched
+methods — the agent is a real ``WorktreeSorcarAgent`` subclass whose
+``run`` blocks on a real event (the established pattern of the earlier
+bug-hunt tests).
 """
 
 from __future__ import annotations
@@ -49,9 +44,10 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
 
 
@@ -110,7 +106,7 @@ class TestStaleWorkerFinallyClobbersNewTask(unittest.TestCase):
         if not models:
             self.skipTest("no model API key configured")
         self.model = models[0]
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bh8c-stale-")
         self.saved = _redirect_db(self.tmpdir)
         _init_git_repo(self.tmpdir)
@@ -125,18 +121,23 @@ class TestStaleWorkerFinallyClobbersNewTask(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_stale_finally_leaves_fresh_tab_state_intact(self) -> None:
         tab_id = "bh8c-stale-tab"
 
-        state1 = self.server._get_tab(tab_id)
         agent1 = _BlockingAgent()
-        state1.agent = agent1
-        state1.stop_event = threading.Event()
+        state1 = AgentState(
+            "bh8c-stale-task-1",
+            agent=agent1,
+            tab_id=tab_id,
+            server_owned=True,
+            stop_event=threading.Event(),
+        )
         state1.user_answer_queue = queue.Queue(maxsize=1)
+        agent_state.register(state1)
         worker1 = threading.Thread(
             target=self.server._run_task,
             args=({
@@ -145,6 +146,7 @@ class TestStaleWorkerFinallyClobbersNewTask(unittest.TestCase):
                 "model": self.model,
                 "workDir": self.tmpdir,
                 "tabId": tab_id,
+                "_state_key": state1.task_id,
             },),
             daemon=True,
         )
@@ -152,29 +154,32 @@ class TestStaleWorkerFinallyClobbersNewTask(unittest.TestCase):
         worker1.start()
         assert agent1.entered.wait(timeout=30), "task 1 never started"
 
-        self.server._state_lock.acquire()
-        try:
-            agent1.release.set()
-
-            _RunningAgentState.running_agent_states.pop(tab_id, None)
-            state2 = _RunningAgentState(tab_id, self.model)
-            _RunningAgentState.register(tab_id, state2)
-            agent2 = WorktreeSorcarAgent("Bughunt8 fresh agent")
-            queue2: queue.Queue[str] = queue.Queue(maxsize=1)
-            stop2 = threading.Event()
-            thread2 = threading.Thread(
-                target=stop2.wait, args=(15,), daemon=True,
+        # While worker1 is still inside its run (and therefore has its
+        # whole cleanup ahead of it), the frontend closes and reopens
+        # the tab: a FRESH state for the SAME tab id is registered and
+        # armed for a new task.
+        agent2 = WorktreeSorcarAgent("Bughunt8 fresh agent")
+        queue2: queue.Queue[str] = queue.Queue(maxsize=1)
+        stop2 = threading.Event()
+        thread2 = threading.Thread(
+            target=stop2.wait, args=(15,), daemon=True,
+        )
+        thread2.start()
+        with self.server._state_lock:
+            state2 = AgentState(
+                "bh8c-fresh-task-2",
+                agent=agent2,
+                tab_id=tab_id,
+                server_owned=True,
+                stop_event=stop2,
+                task_thread=thread2,
             )
-            thread2.start()
-            state2.agent = agent2
             state2.user_answer_queue = queue2
-            state2.stop_event = stop2
-            state2.task_thread = thread2
             state2.is_task_active = True
             state2.pending_user_messages.append("queued follow-up")
-        finally:
-            self.server._state_lock.release()
+            agent_state.register(state2)
 
+        agent1.release.set()
         worker1.join(timeout=60)
         self.assertFalse(worker1.is_alive(), "stale worker never finished")
 
@@ -215,6 +220,12 @@ class TestStaleWorkerFinallyClobbersNewTask(unittest.TestCase):
                 state2.is_task_active,
                 "BUG-TR8-5: the stale worker's finally flipped the NEW "
                 "task's is_task_active flag while it is still running",
+            )
+            self.assertIs(
+                agent_state.get("bh8c-fresh-task-2"),
+                state2,
+                "BUG-TR8-5: the stale worker's finally unregistered "
+                "the NEW task's state",
             )
         finally:
             stop2.set()

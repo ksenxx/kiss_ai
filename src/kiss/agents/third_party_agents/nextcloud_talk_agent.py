@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Nextcloud Talk Agent — SorcarAgent extension with Nextcloud Talk API tools.
+"""Nextcloud Talk Agent — channel agent with Nextcloud Talk API tools.
 
 Provides authenticated access to Nextcloud Talk via username/password.
 Stores config in ``~/.kiss/third_party_agents/nextcloud/config.json``.
@@ -23,8 +23,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -167,22 +165,6 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
         statuscode = result.get("ocs", {}).get("meta", {}).get("statuscode", 0)
         if statuscode not in (200, 201):
             raise RuntimeError(f"Nextcloud Talk send failed: {result}")
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        return wait_for_matching_message(
-            poll=lambda: self.poll_messages(channel_id, "")[0],
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=3.0,
-        )
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if message is from the bot."""
@@ -363,8 +345,8 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class NextcloudTalkAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Nextcloud Talk API tools."""
+class NextcloudTalkAgent(BaseChannelAgent):
+    """Channel agent with Nextcloud Talk API tools."""
 
     def __init__(self) -> None:
         super().__init__("Nextcloud Talk Agent")
@@ -471,6 +453,17 @@ def main() -> None:
         channel_name="Nextcloud Talk",
         make_backend=_make_backend,
     )
+
+
+def get_tools() -> list:
+    """Return the Nextcloud Talk channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return NextcloudTalkAgent()._get_tools()
 
 
 if __name__ == "__main__":

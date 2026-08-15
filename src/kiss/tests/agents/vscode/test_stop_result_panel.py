@@ -20,10 +20,12 @@ import os
 import queue
 import threading
 import unittest
+import uuid
 from typing import Any
 from unittest import TestCase
 
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 
 
 def _make_server() -> Any:
@@ -33,9 +35,33 @@ def _make_server() -> Any:
     return VSCodeServer()
 
 
+def _register_state(
+    agent: WorktreeSorcarAgent, tab_id: str,
+) -> agent_state.AgentState:
+    """Pre-register a server-owned AgentState the way ``_cmd_run`` does.
+
+    ``task_runner._resolve_run_state`` finds it via
+    ``agent_state.find_by_tab`` and reuses its agent, stop event, and
+    answer queue for the run.
+    """
+    st = agent_state.AgentState(
+        uuid.uuid4().hex,
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+        stop_event=threading.Event(),
+    )
+    st.user_answer_queue = queue.Queue(maxsize=1)
+    agent_state.register(st)
+    return st
+
+
 class TestStoppedTaskEmitsResultEvent(TestCase):
     """When a task is stopped via KeyboardInterrupt, a ``result`` event
     with ``success=False`` must appear in the broadcast stream."""
+
+    def tearDown(self) -> None:
+        agent_state.agent_states.clear()
 
     def test_keyboard_interrupt_produces_result_event(self) -> None:
         """Simulate a task that raises KeyboardInterrupt and verify a
@@ -54,27 +80,22 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         server.printer.broadcast = capture  # type: ignore[assignment]
 
         tab_id = "stop-test-1"
-        tab = server._get_tab(tab_id)
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        _register_state(agent, tab_id)
 
         def fake_run(**kwargs: Any) -> None:
-            tab.agent.total_tokens_used = 1234
-            tab.agent.budget_used = 0.05
-            tab.agent.step_count = 7
+            agent.total_tokens_used = 1234
+            agent.budget_used = 0.05
+            agent.step_count = 7
             raise KeyboardInterrupt("Stopped by user")
 
-        tab.agent.run = fake_run  # type: ignore[assignment]
-
-        stop_event = threading.Event()
-        tab.stop_event = stop_event
-        tab.user_answer_queue = queue.Queue()
+        agent.run = fake_run  # type: ignore[assignment]
 
         task_thread = threading.Thread(
             target=server._run_task,
             args=({"type": "run", "prompt": "test task", "tabId": tab_id},),
             daemon=True,
         )
-        tab.task_thread = task_thread
         task_thread.start()
         task_thread.join(timeout=10)
 
@@ -124,27 +145,22 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         server.printer.broadcast = capture  # type: ignore[assignment]
 
         tab_id = "error-test-1"
-        tab = server._get_tab(tab_id)
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        _register_state(agent, tab_id)
 
         def fake_run(**kwargs: Any) -> None:
-            tab.agent.total_tokens_used = 500
-            tab.agent.budget_used = 0.02
-            tab.agent.step_count = 3
+            agent.total_tokens_used = 500
+            agent.budget_used = 0.02
+            agent.step_count = 3
             raise RuntimeError("Model API connection failed")
 
-        tab.agent.run = fake_run  # type: ignore[assignment]
-
-        stop_event = threading.Event()
-        tab.stop_event = stop_event
-        tab.user_answer_queue = queue.Queue()
+        agent.run = fake_run  # type: ignore[assignment]
 
         task_thread = threading.Thread(
             target=server._run_task,
             args=({"type": "run", "prompt": "test task", "tabId": tab_id},),
             daemon=True,
         )
-        tab.task_thread = task_thread
         task_thread.start()
         task_thread.join(timeout=10)
 
@@ -183,14 +199,14 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         server.printer.broadcast = capture  # type: ignore[assignment]
 
         tab_id = "success-test-1"
-        tab = server._get_tab(tab_id)
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        _register_state(agent, tab_id)
 
         def fake_run(**kwargs: Any) -> None:
             printer = kwargs.get("printer", server.printer)
-            tab.agent.total_tokens_used = 2000
-            tab.agent.budget_used = 0.10
-            tab.agent.step_count = 15
+            agent.total_tokens_used = 2000
+            agent.budget_used = 0.10
+            agent.step_count = 15
             printer.print(
                 "success: true\nsummary: Task completed successfully",
                 type="result",
@@ -199,18 +215,13 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
                 step_count=15,
             )
 
-        tab.agent.run = fake_run  # type: ignore[assignment]
-
-        stop_event = threading.Event()
-        tab.stop_event = stop_event
-        tab.user_answer_queue = queue.Queue()
+        agent.run = fake_run  # type: ignore[assignment]
 
         task_thread = threading.Thread(
             target=server._run_task,
             args=({"type": "run", "prompt": "test task", "tabId": tab_id},),
             daemon=True,
         )
-        tab.task_thread = task_thread
         task_thread.start()
         task_thread.join(timeout=10)
 
@@ -229,6 +240,9 @@ class TestBudgetExceededResultPanel(TestCase):
     the task must stop and a ``result`` event with ``success=False``
     containing 'budget exceeded' must appear in the broadcast stream
     so the frontend displays it in the result panel."""
+
+    def tearDown(self) -> None:
+        agent_state.agent_states.clear()
 
     def test_budget_exceeded_produces_result_event(self) -> None:
         """Simulate an agent that raises KISSError for budget exceeded
@@ -250,27 +264,22 @@ class TestBudgetExceededResultPanel(TestCase):
         server.printer.broadcast = capture  # type: ignore[assignment]
 
         tab_id = "budget-test-1"
-        tab = server._get_tab(tab_id)
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        _register_state(agent, tab_id)
 
         def fake_run(**kwargs: Any) -> None:
-            tab.agent.total_tokens_used = 50000
-            tab.agent.budget_used = 1.05
-            tab.agent.step_count = 42
+            agent.total_tokens_used = 50000
+            agent.budget_used = 1.05
+            agent.step_count = 42
             raise KISSError("Agent budget-test budget exceeded.")
 
-        tab.agent.run = fake_run  # type: ignore[assignment]
-
-        stop_event = threading.Event()
-        tab.stop_event = stop_event
-        tab.user_answer_queue = queue.Queue()
+        agent.run = fake_run  # type: ignore[assignment]
 
         task_thread = threading.Thread(
             target=server._run_task,
             args=({"type": "run", "prompt": "test task", "tabId": tab_id},),
             daemon=True,
         )
-        tab.task_thread = task_thread
         task_thread.start()
         task_thread.join(timeout=10)
 

@@ -332,9 +332,9 @@ class TestModelPickerLastModelPersistence:
             "on-disk value; got "
             f"{server._default_model!r}"
         )
-        tab_b = server._get_tab("tabB")
-        assert tab_b.selected_model == "claude-opus-4-8", (
-            "_new_chat set the new tab's selected_model to the stale "
+        tab_b_model = server._tab_models.get("tabB")
+        assert tab_b_model == "claude-opus-4-8", (
+            "_new_chat set the new tab's selected model to the stale "
             "on-disk value; got "
-            f"{tab_b.selected_model!r}"
+            f"{tab_b_model!r}"
         )

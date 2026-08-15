@@ -38,8 +38,8 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.server.task_runner import _RunningAgentState
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Any, Any, Any]:
@@ -67,7 +67,7 @@ class TestGhostSuffixQuotesSurvive(unittest.TestCase):
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment,method-assign]
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
         _restore_persistence(self.saved)

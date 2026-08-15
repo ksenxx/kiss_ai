@@ -28,7 +28,7 @@ import threading
 import unittest
 from typing import Any
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -49,16 +49,21 @@ class TestStaleUserAnswer(unittest.TestCase):
         self.task_key = "4242"
         self.owner_tab = "owner-tab"
         self.viewer_tab = "viewer-tab"
-        tab = self.server._get_tab(self.owner_tab)
-        tab.stop_event = threading.Event()
-        tab.user_answer_queue = queue.Queue(maxsize=1)
-        tab.is_task_active = True
+        state = agent_state.AgentState(
+            self.task_key,
+            tab_id=self.owner_tab,
+            server_owned=True,
+            stop_event=threading.Event(),
+            is_task_active=True,
+        )
+        state.user_answer_queue = queue.Queue(maxsize=1)
+        agent_state.register(state)
         self.server.printer.subscribe_tab(self.task_key, self.owner_tab)
         self.server.printer.subscribe_tab(self.task_key, self.viewer_tab)
-        self.tab = tab
+        self.state = state
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def _ask_on_worker(self, question: str) -> tuple[
         threading.Thread, list[str], threading.Event,
@@ -66,7 +71,7 @@ class TestStaleUserAnswer(unittest.TestCase):
         """Run ``_ask_user_question`` on a fake agent thread."""
         answers: list[str] = []
         done = threading.Event()
-        stop_event = self.tab.stop_event
+        stop_event = self.state.stop_event
 
         def worker() -> None:
             tl = self.server.printer._thread_local

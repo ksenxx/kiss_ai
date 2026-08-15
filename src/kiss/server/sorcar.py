@@ -5,11 +5,11 @@
 """The Sorcar server API and a minimal synchronous client for it.
 
 This module is the single source of truth for the wire API of the
-``sorcar web`` daemon and hosts both of its Python ends:
+``kiss-web`` daemon and hosts both of its Python ends:
 
 **The server API** — :data:`API`, :func:`validate_command`, and
 :class:`ServerApi` define every command a user interface (a VS Code
-window, the remote webapp, or a CLI/Python client) may send to the
+window, the remote webapp, or a Python client) may send to the
 daemon.  Both transports speak the same JSON commands, dispatched on
 the ``"type"`` field — framed as newline-delimited lines on the
 Unix-domain socket (UDS) and as one object per WebSocket frame on
@@ -42,12 +42,12 @@ already-running daemon and block until it finishes::
 
 Caller-supplied tools become agent tools: pass the path of a Python
 file via ``tools="/path/to/my_tools.py"`` and the daemon imports the
-file and registers every top-level public function that is suitable as
-a tool (plain synchronous functions with keyword-bindable,
-type-annotated parameters and Google-style docstrings).  The client
-never serializes Python functions — the daemon loads the file itself,
-so the tools execute **in the daemon process** like native agent
-tools::
+file and calls its top-level ``get_tools()`` function, which returns
+the functions in the file the agent may call (plain synchronous
+functions with keyword-bindable, type-annotated parameters and
+Google-style docstrings).  The client never serializes Python
+functions — the daemon loads the file itself, so the tools execute
+**in the daemon process** like native agent tools::
 
     # my_tools.py
     def get_temperature(city: str) -> str:
@@ -58,13 +58,17 @@ tools::
         \"\"\"
         return lookup_sensor(city)
 
+    def get_tools():
+        \"\"\"Return the tools the agent may call.\"\"\"
+        return [get_temperature]
+
     result = sorcar.run("What's the temperature in Paris?",
                         tools="my_tools.py")
 
 The function speaks the daemon's newline-delimited JSON protocol over
 its Unix-domain socket (``$KISS_SORCAR_SOCK``, defaulting to
 ``$KISS_HOME/sorcar.sock``) — the same transport the VS Code extension
-and the CLI client use — so no HTTP server, password, or extra
+uses — so no HTTP server, password, or extra
 dependency is involved.  POSIX file permissions (mode 0o600) on the
 socket restrict access to the owning user.
 """
@@ -319,7 +323,8 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("stop"),
     ApiCommand("userAnswer", required=("answer",)),
     ApiCommand("newChat"),
-    ApiCommand("closeTab", required=("tabId",), handler="close_tab"),
+    ApiCommand("openTab", required=("tabId",)),
+    ApiCommand("closeTab", required=("tabId",)),
     ApiCommand("resumeSession", handler="resume_session"),
     ApiCommand("ready", handler="ready"),
     ApiCommand("getHistory"),
@@ -336,16 +341,22 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("selectModel", required=("model",)),
     ApiCommand("getConfig"),
     ApiCommand("saveConfig", required=("config",)),
+    ApiCommand("getDefaultModel", handler="get_default_model"),
+    ApiCommand("readKissConfig", handler="read_kiss_config"),
+    ApiCommand(
+        "writeKissConfig", required=("config",), handler="write_kiss_config"
+    ),
+    ApiCommand("voiceWakeStart", handler="voice_wake_start"),
+    ApiCommand("voiceWakeStop", handler="voice_wake_stop"),
     ApiCommand("setWorkDir", required=("workDir",)),
     ApiCommand("getFiles", required=("prefix",)),
     ApiCommand("recordFileUsage", required=("path",)),
     ApiCommand("openFile", required=("path",), handler="open_file"),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
     ApiCommand("complete", required=("query",)),
-    ApiCommand("mergeAction", required=("action",), handler="merge_action"),
     ApiCommand("worktreeAction", required=("action",)),
-    ApiCommand("autocommitAction", required=("action",)),
     ApiCommand("generateCommitMessage"),
+    ApiCommand("autocommitAction"),
     ApiCommand("auth", required=("password",), handler="drop"),
     ApiCommand("runUpdate", handler="run_update"),
     ApiCommand("serverReset", handler="server_reset"),
@@ -356,11 +367,6 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("voiceSensitivity", required=("value",), handler="drop"),
     ApiCommand("voiceAck", handler="drop"),
     ApiCommand("voiceDropped", required=("text",), handler="drop"),
-    ApiCommand("cliEvent", required=("event",), handler="cli_event"),
-    ApiCommand("cliTabHello", required=("tabId",), handler="cli_tab_hello"),
-    ApiCommand("cliTaskStart", required=("taskId",), handler="cli_task_start"),
-    ApiCommand("cliTaskEnd", required=("taskId",), handler="cli_task_end"),
-    ApiCommand("cliInfo"),
     ApiCommand("focusEditor", handler="drop"),
     ApiCommand("webviewFocusChanged", handler="drop"),
     ApiCommand("activeTabChanged", required=("tabId",), handler="drop"),
@@ -393,18 +399,6 @@ it (e.g. a ``notificationAction`` missing its ``id``) would surface a
 spurious error banner for a message the daemon was never meant to
 handle.
 """
-
-_CLI_HANDLERS: frozenset[str] = frozenset(
-    {"cli_event", "cli_tab_hello", "cli_task_start", "cli_task_end"}
-)
-"""Handlers of the CLI → daemon bridge commands.
-
-Commands routed to these handlers describe tasks the sorcar CLI runs
-itself; :meth:`ServerApi.dispatch` exempts them from the per-window
-``workDir`` stamping because they never read ``workDir`` and must not
-be mutated on their way to the relay.
-"""
-
 
 def validate_command(cmd: Any) -> str | None:
     """Validate one client command against the server API catalog.
@@ -488,19 +482,15 @@ class ApiContext:
             ``websockets`` ``ServerConnection`` (remote browser) or an
             :class:`asyncio.StreamWriter` (local VS Code extension).
             Used for direct replies.
-        tabs_seen: Per-connection set of frontend tab ids, mutated in
-            place; the transport's disconnect cleanup arms a deferred
-            ``closeTab`` for every id recorded here.
         conn_state: Per-connection mutable state holding at least the
             connection's ``work_dir`` (announced via ``setWorkDir``)
             and unique ``conn_id``.
         is_uds: ``True`` when the command arrived over the local
-            Unix-domain socket (a VS Code window or the sorcar CLI),
-            ``False`` for a remote WSS browser client.
+            Unix-domain socket (a VS Code window or a local Python
+            client), ``False`` for a remote WSS browser client.
     """
 
     endpoint: Any
-    tabs_seen: set[str]
     conn_state: dict[str, Any]
     is_uds: bool
 
@@ -510,30 +500,19 @@ class ServerBackend(Protocol):
 
     Structural type of the object backing :class:`ServerApi` — in
     production the ``RemoteAccessServer`` of
-    :mod:`kiss.server.web_server`, which owns the transports, the
-    merge/CLI bookkeeping, and the backend agent server.  Only the
+    :mod:`kiss.server.web_server`, which owns the transports and the
+    backend agent server.  Only the
     members the API layer actually calls are declared; see the
     implementing methods in ``web_server.py`` for full behaviour
     documentation.
     """
 
     _printer: Any
+    _vscode_server: Any
 
     async def _endpoint_send(self, endpoint: Any, data: str) -> None: ...
 
     async def _run_cmd(self, cmd: dict[str, Any]) -> None: ...
-
-    def _relay_cli_event(self, ev: dict[str, Any]) -> None: ...
-
-    def _validated_cli_task_id(self, cmd: dict[str, Any]) -> str: ...
-
-    def _handle_cli_task_start(
-        self, task_id: str, conn_state: dict[str, Any],
-    ) -> None: ...
-
-    def _handle_cli_task_end(
-        self, task_id: str, conn_state: dict[str, Any],
-    ) -> None: ...
 
     async def _handle_open_file(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -547,6 +526,24 @@ class ServerBackend(Protocol):
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
+    async def _handle_get_default_model(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_read_kiss_config(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_write_kiss_config(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_voice_wake_start(
+        self, cmd: dict[str, Any], endpoint: Any, conn_id: str,
+    ) -> None: ...
+
+    async def _handle_voice_wake_stop(self, conn_id: str) -> None: ...
+
     async def _handle_active_tasks_query(self, endpoint: Any) -> None: ...
 
     def _sanitized_restored_tabs(
@@ -554,7 +551,7 @@ class ServerBackend(Protocol):
     ) -> list[dict[str, str]]: ...
 
     async def _handle_ready(
-        self, cmd: dict[str, Any], websocket: Any, *, is_uds: bool = False,
+        self, cmd: dict[str, Any], websocket: Any,
     ) -> None: ...
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None: ...
@@ -564,14 +561,6 @@ class ServerBackend(Protocol):
     async def _handle_run_update(self, conn_id: str = "") -> None: ...
 
     async def _handle_server_reset(self, conn_id: str = "") -> None: ...
-
-    async def _handle_web_merge_action(self, cmd: dict[str, Any]) -> None: ...
-
-    def _pop_merge_state(self, tab_id: str) -> Any: ...
-
-    async def _finish_merge_and_close_tab(
-        self, tab_id: str, merge_state: Any,
-    ) -> None: ...
 
     def _client_ip(self, websocket: Any) -> str: ...
 
@@ -587,7 +576,7 @@ class ServerApi:
     entry in :data:`API` names (via ``ApiCommand.handler``) the method
     of this class that services it, so the clients — the VS Code
     extension (``src/SorcarApi.ts`` over UDS), the chat webview /
-    remote webapp (``media/api.js`` over WSS), and the CLI / Python
+    remote webapp (``media/api.js`` over WSS), and the Python
     clients — call these methods remotely by sending the catalog's
     JSON commands.  The transport layer
     (``RemoteAccessServer._dispatch_client_command``) parses the JSON
@@ -642,8 +631,8 @@ class ServerApi:
         2. Validates *cmd* against the catalog
            (:func:`validate_command`) and answers an invalid command
            with a direct ``error`` event to the sender only.
-        3. Records the command's ``tabId`` for the transport's
-           deferred-close bookkeeping (:meth:`_record_tab`).
+        3. Records the command's ``tabId`` in the connection's
+           bookkeeping (:meth:`_record_tab`).
         4. Stamps the connection's ``conn_id`` as ``connId`` —
            overwriting any client-supplied value so it cannot be
            spoofed — which keys the backend's per-connection
@@ -653,10 +642,7 @@ class ServerApi:
            other command lacking an explicit ``workDir`` is stamped
            with it, so two VS Code windows sharing the daemon can
            never observe each other's folder through the daemon-global
-           fallback.  The CLI-bridge commands (:data:`_CLI_HANDLERS`)
-           are exempt: they describe tasks the CLI runs itself, never
-           read ``workDir``, and must not be mutated on their way to
-           the relay.
+           fallback.
         6. Invokes the :class:`ServerApi` method named by the
            command's catalog entry.
 
@@ -685,33 +671,29 @@ class ServerApi:
             new_wd = cmd.get("workDir", "")
             if isinstance(new_wd, str) and new_wd:
                 ctx.conn_state["work_dir"] = new_wd
-        elif (
-            handler not in _CLI_HANDLERS
-            and ctx.conn_state["work_dir"]
-            and not cmd.get("workDir")
-        ):
+        elif ctx.conn_state["work_dir"] and not cmd.get("workDir"):
             cmd["workDir"] = ctx.conn_state["work_dir"]
         await getattr(self, handler)(cmd, ctx)
 
     def _record_tab(self, tab_id: str, ctx: ApiContext) -> None:
         """Record *tab_id* as touched by this connection.
 
-        Adds the id to ``ctx.tabs_seen`` (arming the transport's
-        deferred ``closeTab`` on disconnect) and, for local UDS peers,
-        registers it with the printer's local-tab set exactly once per
-        connection (talk-playback arbitration).
+        For local UDS peers, registers the id with the printer's
+        local-tab bookkeeping (talk-playback arbitration).  The
+        connection's ``local_tabs`` set is mutated only inside the
+        printer, under the same lock that guards the shared
+        local-UDS tab counts and the canonical-close prune.
 
         Args:
             tab_id: The non-empty frontend tab identifier.
             ctx: The transport context of the current call.
         """
-        if tab_id not in ctx.tabs_seen:
-            ctx.tabs_seen.add(tab_id)
         if ctx.is_uds:
-            local_tabs = ctx.conn_state.setdefault("local_tabs", set())
-            if tab_id not in local_tabs:
-                local_tabs.add(tab_id)
-                self._backend._printer.register_local_uds_tab(tab_id)
+            self._backend._printer.register_local_uds_tab(
+                ctx.conn_state["conn_id"],
+                tab_id,
+                ctx.conn_state.setdefault("local_tabs", set()),
+            )
 
     async def authenticate(self, websocket: Any) -> bool:
         """Authenticate a remote WSS client with the ``auth`` handshake.
@@ -721,8 +703,9 @@ class ServerApi:
         frames must complete this handshake (the ``_WS_SHIM_JS`` shim
         served with the webapp sends ``{"type": "auth", "password":
         ...}`` as soon as the socket opens).  Local UDS clients (the
-        VS Code extension, the CLI) skip it — POSIX file permissions
-        on the socket already gate access to the owning user.
+        VS Code extension, Python clients) skip it — POSIX file
+        permissions on the socket already gate access to the owning
+        user.
 
         Protocol serviced here, in order:
 
@@ -872,28 +855,41 @@ class ServerApi:
         Sanitizes the command's ``restoredTabs`` ONCE (warnings
         included) and writes the cleaned list back so the backend's
         own sanitize pass finds nothing left to reject or truncate,
-        then records every restored tab id in the connection's
-        bookkeeping: the deferred-close contract is "schedule a
-        closeTab for every tab id this connection touched", and
-        ``_handle_ready`` re-claims (cancels the pending close of, and
-        resumes) every ``restoredTabs`` entry — without recording them
-        a later disconnect would never re-arm their deferred close,
-        leaking the restored backend state forever.  Finally fans the
-        command out through the backend's ready handler (models /
-        input history / config / session replay).
+        then RECONCILES a UDS connection's local-tab bookkeeping
+        (local-UDS talk muting) to exactly the tabs the client shows
+        after this ready: its own announced tab, the restored tabs,
+        and every canonical tab-registry tab (after a webview reload
+        ``ready`` announces only the fresh placeholder tab, yet the
+        client adopts every registry tab from the ``tabs_state``
+        snapshot — without the sync a talk event for an adopted
+        background tab would skip daemon-native playback and stay
+        silent, since webviews cannot autoplay).  Reconciling —
+        rather than only adding — also drops stale ids, so a repeated
+        ``ready`` self-heals bookkeeping left over from canonical
+        tabs closed while the connection was attached.  The sync
+        updates the connection's ``local_tabs`` set in place, so
+        disconnect cleanup is unchanged.  Finally fans the command
+        out through the backend's ready handler (models / input
+        history / config / session replay).
 
         Args:
             cmd: The ``ready`` command.
             ctx: The transport context of the current call.
         """
         cmd["restoredTabs"] = self._backend._sanitized_restored_tabs(cmd)
-        for rt in cmd["restoredTabs"]:
-            rt_id = rt["tabId"]
-            if rt_id:
-                self._record_tab(rt_id, ctx)
-        await self._backend._handle_ready(
-            cmd, ctx.endpoint, is_uds=ctx.is_uds,
-        )
+        if ctx.is_uds:
+            shown = {rt["tabId"] for rt in cmd["restoredTabs"] if rt["tabId"]}
+            own_tab = cmd.get("tabId")
+            if isinstance(own_tab, str) and own_tab:
+                shown.add(own_tab)
+            registry = self._backend._vscode_server.tab_registry
+            shown.update(entry["tabId"] for entry in registry.snapshot())
+            self._backend._printer.sync_local_uds_tabs(
+                ctx.conn_state["conn_id"],
+                shown,
+                ctx.conn_state.setdefault("local_tabs", set()),
+            )
+        await self._backend._handle_ready(cmd, ctx.endpoint)
 
     async def submit(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Start a task from a webview ``submit``.
@@ -907,66 +903,6 @@ class ServerApi:
             ctx: The transport context of the current call (unused).
         """
         await self._backend._handle_submit(cmd)
-
-    async def close_tab(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Dispose the backend state of a closed frontend tab.
-
-        A WEB (WSS) client closing its chat tab destroys the only UI
-        that could ever finish an in-flight (server-tracked) merge
-        review for that tab, so the review is ended first (close =
-        accept the remaining hunks; no disk writes) and the tab is
-        disposed instead of leaking in ``is_merging`` limbo.  UDS (VS
-        Code) clients are exempt: their TypeScript MergeManager owns
-        the review in real editor tabs that survive the chat tab's
-        closure and will still send ``all-done`` — their ``closeTab``
-        forwards to the backend unchanged.
-
-        Args:
-            cmd: The ``closeTab`` command.
-            ctx: The transport context of the current call.
-        """
-        tab_id = cmd.get("tabId", "")
-        if isinstance(tab_id, str) and tab_id and not ctx.is_uds:
-            merge_state = self._backend._pop_merge_state(tab_id)
-            await self._backend._finish_merge_and_close_tab(
-                tab_id, merge_state,
-            )
-            return
-        await self.forward(cmd, ctx)
-
-    async def merge_action(
-        self, cmd: dict[str, Any], ctx: ApiContext,
-    ) -> None:
-        """Advance a merge review (accept / reject / navigate / finish).
-
-        Non-``all-done`` actions are processed by the daemon's
-        server-side merge engine (the web twin of the VS Code
-        TypeScript ``MergeManager``).  An ``all-done`` arriving FROM a
-        client is the extension's MergeManager finishing its
-        editor-managed review (its per-hunk actions never reach the
-        backend): the server-side shadow merge state registered when
-        the ``merge_data`` event was broadcast is dropped — leaving it
-        would replay a ZOMBIE review on the next webview reload, fire
-        a spurious second all-done from the deferred-close path, and
-        leak one state (with full file payloads) per finished review —
-        and the command still falls through to the backend
-        (``_cmd_merge_action`` → ``_finish_merge``).
-
-        Args:
-            cmd: The ``mergeAction`` command.
-            ctx: The transport context of the current call.
-        """
-        if cmd.get("action", "") != "all-done":
-            await self._backend._handle_web_merge_action(cmd)
-            return
-        tab_id = cmd.get("tabId", "")
-        if isinstance(tab_id, str) and tab_id:
-            # The finishing client may be one of the other windows
-            # mirroring the review; the shadow state is the owner's.
-            self._backend._pop_merge_state(
-                self._backend._printer.ui_mirror_owner(tab_id, "merge_data"),
-            )
-        await self.forward(cmd, ctx)
 
     async def open_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Serve a file's content to a remote-web client.
@@ -1026,6 +962,121 @@ class ServerApi:
         """
         await self._backend._handle_voice_transcribe(cmd, ctx.endpoint)
 
+    async def get_default_model(
+        self, cmd: dict[str, Any], ctx: ApiContext,
+    ) -> None:
+        """Reply with the daemon's key-derived default model name.
+
+        Services ``getDefaultModel`` so the VS Code extension host can
+        obtain :func:`kiss.core.models.model_info.get_default_model`
+        over the socket instead of spawning a throwaway ``uv run
+        python -c ...`` interpreter (its historical out-of-band
+        channel, still used as a fallback while the daemon is down).
+        The reply is a direct ``defaultModel`` event to the requester.
+
+        Args:
+            cmd: The ``getDefaultModel`` command.
+            ctx: The transport context of the current call.
+        """
+        await self._backend._handle_get_default_model(cmd, ctx.endpoint)
+
+    async def read_kiss_config(
+        self, cmd: dict[str, Any], ctx: ApiContext,
+    ) -> None:
+        """Serve the raw merged ``~/.kiss/config.json`` to a local client.
+
+        Services ``readKissConfig`` so the extension host can read the
+        daemon-owned config file through the socket instead of parsing
+        the file itself.  The reply is a direct ``kissConfig`` event.
+
+        LOCAL (UDS) CLIENTS ONLY: unlike ``getConfig`` (whose reply is
+        shaped for the settings panel), this returns the config
+        verbatim — including ``remote_password`` — so a remote WSS
+        browser must never receive it.  A WSS-delivered command is
+        dropped as a defensive no-op.
+
+        Args:
+            cmd: The ``readKissConfig`` command.
+            ctx: The transport context of the current call.
+        """
+        if not ctx.is_uds:
+            return
+        await self._backend._handle_read_kiss_config(cmd, ctx.endpoint)
+
+    async def write_kiss_config(
+        self, cmd: dict[str, Any], ctx: ApiContext,
+    ) -> None:
+        """Merge a local client's keys into ``~/.kiss/config.json``.
+
+        Services ``writeKissConfig`` so the extension host can update
+        daemon-owned config keys (e.g. ``remote_password``) through
+        the socket — sharing the daemon's atomic, lock-guarded
+        :func:`kiss.core.vscode_config.save_config` write path —
+        instead of rewriting the file itself.  The reply is a direct
+        ``kissConfigSaved`` acknowledgement event.
+
+        LOCAL (UDS) CLIENTS ONLY: a remote WSS browser must not be
+        able to change ``remote_password`` or any other daemon
+        setting through this raw channel; a WSS-delivered command is
+        dropped as a defensive no-op.
+
+        Args:
+            cmd: The ``writeKissConfig`` command carrying ``config``.
+            ctx: The transport context of the current call.
+        """
+        if not ctx.is_uds:
+            return
+        await self._backend._handle_write_kiss_config(cmd, ctx.endpoint)
+
+    async def voice_wake_start(
+        self, cmd: dict[str, Any], ctx: ApiContext,
+    ) -> None:
+        """Start the daemon-hosted wake-word listener for this client.
+
+        Services ``voiceWakeStart`` so the extension host can run
+        :mod:`kiss.server.voice_wake` as a daemon child over the
+        socket — receiving its protocol as ``voiceWakeEvent`` /
+        ``voiceWakeState`` events — instead of spawning the listener
+        process itself and parsing its stdout (its historical
+        out-of-band channel).  The optional ``sensitivity`` field
+        (0..100) tunes wake-word eagerness.  The listener is bound to
+        this connection and stopped on disconnect.
+
+        LOCAL (UDS) CLIENTS ONLY: the listener captures this
+        machine's microphone, so a remote WSS browser must not
+        control it (browser-mode voice capture stays in-page via
+        ``voiceTranscribe``); a WSS-delivered command is dropped as a
+        defensive no-op.
+
+        Args:
+            cmd: The ``voiceWakeStart`` command.
+            ctx: The transport context of the current call.
+        """
+        if not ctx.is_uds:
+            return
+        await self._backend._handle_voice_wake_start(
+            cmd, ctx.endpoint, ctx.conn_state["conn_id"],
+        )
+
+    async def voice_wake_stop(
+        self, cmd: dict[str, Any], ctx: ApiContext,
+    ) -> None:
+        """Stop this client's daemon-hosted wake-word listener.
+
+        Services ``voiceWakeStop``; a no-op when the connection has no
+        running listener.  LOCAL (UDS) CLIENTS ONLY, matching
+        ``voiceWakeStart``.
+
+        Args:
+            cmd: The ``voiceWakeStop`` command (unused).
+            ctx: The transport context of the current call.
+        """
+        if not ctx.is_uds:
+            return
+        await self._backend._handle_voice_wake_stop(
+            ctx.conn_state["conn_id"],
+        )
+
     async def active_tasks_query(
         self, cmd: dict[str, Any], ctx: ApiContext,
     ) -> None:
@@ -1071,77 +1122,6 @@ class ServerApi:
                 notifications reach only the requesting window.
         """
         await self._backend._handle_server_reset(ctx.conn_state["conn_id"])
-
-    async def cli_event(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Relay one CLI display event to subscribed webview tabs.
-
-        CLI → daemon live-stream bridge: the sorcar CLI forwards every
-        display event here so any chat webview subscribed to the
-        task's chat id sees the event immediately instead of having to
-        reload to replay it from the events DB.
-
-        Args:
-            cmd: The ``cliEvent`` envelope carrying the event.
-            ctx: The transport context of the current call (unused).
-        """
-        ev = cmd.get("event")
-        if isinstance(ev, dict):
-            self._backend._relay_cli_event(ev)
-
-    async def cli_tab_hello(
-        self, cmd: dict[str, Any], ctx: ApiContext,
-    ) -> None:
-        """Register a sorcar CLI REPL's tab id for talk arbitration.
-
-        A CLI REPL announces its tab id so talk-playback arbitration
-        can tell CLI terminal players apart from webview tabs.  Only
-        local UDS peers are terminal players; a WSS/browser peer
-        cannot suppress playback on the daemon machine.
-
-        Args:
-            cmd: The ``cliTabHello`` command.
-            ctx: The transport context of the current call.
-        """
-        raw_tab = cmd.get("tabId")
-        if ctx.is_uds and isinstance(raw_tab, str) and raw_tab:
-            cli_tabs = ctx.conn_state.setdefault("cli_tabs", set())
-            if raw_tab not in cli_tabs:
-                cli_tabs.add(raw_tab)
-                self._backend._printer.register_cli_tab(raw_tab)
-
-    async def cli_task_start(
-        self, cmd: dict[str, Any], ctx: ApiContext,
-    ) -> None:
-        """Record a CLI-launched task as running.
-
-        The CLI announces a fresh running task so a webview tab that
-        later resumes it from the history sidebar is subscribed to the
-        live stream and shows the blinking-green-circle "running"
-        indicator.
-
-        Args:
-            cmd: The ``cliTaskStart`` command.
-            ctx: The transport context of the current call.
-        """
-        task_id = self._backend._validated_cli_task_id(cmd)
-        if task_id:
-            self._backend._handle_cli_task_start(task_id, ctx.conn_state)
-
-    async def cli_task_end(
-        self, cmd: dict[str, Any], ctx: ApiContext,
-    ) -> None:
-        """Mark a CLI-launched task as finished.
-
-        The CLI announces the task finished; the daemon stops the
-        running indicator on every subscribed webview tab.
-
-        Args:
-            cmd: The ``cliTaskEnd`` command.
-            ctx: The transport context of the current call.
-        """
-        task_id = self._backend._validated_cli_task_id(cmd)
-        if task_id:
-            self._backend._handle_cli_task_end(task_id, ctx.conn_state)
 
     @staticmethod
     def trajectory_jobs() -> tuple[int, str, bytes]:
@@ -1226,19 +1206,20 @@ def run(
     work_dir: str = "",
     model: str = "",
     chat_id: str = "",
+    system_prompt: str = "",
     tools: str | Path | None = None,
-    use_worktree: bool = False,
-    auto_commit: bool = False,
+    use_worktree: bool = True,
+    auto_commit: bool = True,
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
     web_tools: bool | None = None,
-    is_parallel: bool = False,
+    is_parallel: bool = True,
     timeout: float = 3600.0,
     sock_path: str | Path | None = None,
 ) -> TaskResult:
     """Run *prompt* as a task on the local Sorcar daemon and block until done.
 
-    Connects to the ``sorcar web`` daemon's Unix-domain socket, sends
+    Connects to the ``kiss-web`` daemon's Unix-domain socket, sends
     the same ``run`` command a chat webview would, streams the task's
     events, and returns once the daemon reports the task finished.
 
@@ -1252,20 +1233,36 @@ def run(
             this task in the same chat — the agent then sees the prior
             tasks and results of that chat as context.  A new chat is
             started when empty.
+        system_prompt: Optional custom system prompt for the run.
+            When non-empty it is used as the system prompt of the
+            agent AND of every sub-agent it spawns (``run_parallel``),
+            replacing the default system prompt shipped in
+            ``src/kiss/SYSTEM.md``.  The daemon still appends its
+            per-run operational instructions (work directory, process
+            id, ``~/.kiss/SORCAR.md``) so the agent's tool contract
+            keeps working.  Empty (default) runs with the default
+            system prompt as usual.
         tools: Optional path to a Python file supplying extra tools
-            for the agent.  The daemon imports the file and registers
-            every top-level public function that is suitable as a tool
-            (plain synchronous functions whose parameters are all
-            keyword-bindable; ``*args``/``**kwargs``/positional-only
-            parameters and coroutine/generator functions are skipped).
-            Each function's name, docstring (Google-style ``Args:``
-            section for parameter descriptions), and annotated
-            parameters define the tool schema the agent sees, exactly
-            like a native tool.  The functions are never serialized by
-            the client — they run **in the daemon process**.  The path
-            is resolved against this process's working directory.
+            for the agent.  The file must define a top-level
+            ``get_tools()`` function returning the functions in the
+            file the agent may call; the daemon imports the file,
+            calls ``get_tools()``, and registers the returned
+            callables as agent tools.  Each function's name, docstring
+            (Google-style ``Args:`` section for parameter
+            descriptions), and annotated keyword-bindable parameters
+            define the tool schema the agent sees, exactly like a
+            native tool.  The functions are never serialized by the
+            client — they run **in the daemon process**.  The path is
+            resolved against this process's working directory.  A
+            broken tools file (deleted before the daemon reads it,
+            raising at import time, or missing/misbehaving
+            ``get_tools()``) stops the task: the daemon fails the run
+            and the returned :class:`TaskResult` carries the
+            diagnostic error in its ``text`` with ``success=False``.
         use_worktree: Run the task in an isolated git worktree.
+            Defaults to True.
         auto_commit: Auto-commit the task's changes on success.
+            Defaults to True.
         max_budget: Per-task budget override in USD; ``None`` uses the
             daemon's configured default.
         model_config: Per-task model configuration override (custom
@@ -1274,6 +1271,7 @@ def run(
         web_tools: Per-task browser-tool enablement override; ``None``
             uses the daemon's configured default.
         is_parallel: Whether the agent may spawn parallel sub-agents.
+            Defaults to True.
         timeout: Maximum seconds to wait for the task to finish.
         sock_path: Daemon UDS path override (defaults to
             ``$KISS_SORCAR_SOCK`` or ``$KISS_HOME/sorcar.sock``).
@@ -1293,8 +1291,9 @@ def run(
         ConnectionError: When no daemon is listening on the socket, or
             the daemon drops the connection before the task finishes.
         TimeoutError: When the task does not finish within *timeout*
-            seconds.  The client then disconnects, which asks the
-            daemon to close the task's tab.
+            seconds.  The client then sends the daemon an explicit
+            ``closeTab`` for the task's tab and disconnects; the task
+            keeps running and its state is disposed when it ends.
     """
     if not prompt or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
@@ -1311,7 +1310,7 @@ def run(
         except OSError as exc:
             raise ConnectionError(
                 f"Cannot connect to the sorcar daemon at {path}: {exc} "
-                f"— start it with `sorcar web`."
+                f"— start it with `kiss-web`."
             ) from exc
         cmd = {
             "type": "run",
@@ -1321,6 +1320,7 @@ def run(
             "chatId": chat_id,
             "workDir": work_dir,
             "model": model,
+            "systemPrompt": system_prompt,
             "toolsFile": tools_file,
             "useWorktree": use_worktree,
             "autoCommit": auto_commit,
@@ -1382,6 +1382,22 @@ def run(
                 elif started:
                     return _to_task_result(result_event, chat_id, task_id)
     finally:
+        # The synthetic tab is this client's alone, and a disconnect no
+        # longer tears tabs down (tabs are global state shared by every
+        # client), so explicitly ask the daemon to close it on every
+        # exit path.  For a still-running task (timeout) this merely
+        # flips ``frontend_closed`` and the state is disposed when the
+        # task ends; for a finished task it is disposed immediately.
+        # Best-effort: the daemon may be gone or the connect may have
+        # failed.
+        try:
+            sock.settimeout(5.0)
+            sock.sendall(
+                json.dumps({"type": "closeTab", "tabId": tab_id})
+                .encode("utf-8") + b"\n",
+            )
+        except OSError:
+            pass
         # ``sock.makefile()`` holds an independent reference to the
         # socket descriptor, so closing only the socket object leaves
         # the buffered reader (and its multi-MiB buffer) alive whenever

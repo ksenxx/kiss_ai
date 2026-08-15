@@ -65,9 +65,10 @@ def _isolate_config(
 
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG", config_module.DEFAULT_CONFIG)
     saved = config_module.DEFAULT_CONFIG
-    snapshot = saved.model_copy(deep=True).__dict__
+    snapshot = dict(saved.model_copy(deep=True).__dict__)
     yield
-    saved.__dict__.update(snapshot)
+    for _k, _v in snapshot.items():
+        setattr(saved, _k, _v)
 
 
 class TestLoadSaveConfig:
@@ -92,11 +93,26 @@ class TestLoadSaveConfig:
         assert loaded["use_web_browser"] is False
         assert loaded["remote_password"] == "secret"
 
-    def test_save_excludes_unknown_keys(self) -> None:
-        save_config({"max_budget": 75, "secret_api_key": "should_not_save"})
+    def test_save_excludes_api_keys_but_keeps_extension_keys(self) -> None:
+        """API keys never reach the file; other keys passed in are written.
+
+        This used to assert that *every* key outside ``DEFAULTS`` was
+        dropped, which was the bug: ``tunnel_token``,
+        ``skill_permissions``, ``mcp_permissions`` and ``email`` are all
+        read at runtime, so accepting and discarding them lost the value
+        silently until the next daemon restart.  Only real API keys are
+        excluded — they belong in the shell RC.
+        """
+        save_config({
+            "max_budget": 75,
+            "ANTHROPIC_API_KEY": "should_not_save",
+            "tunnel_token": "tok-xyz",
+        })
         cfg_path = Path.home() / ".kiss" / "config.json"
         raw = json.loads(cfg_path.read_text())
-        assert "secret_api_key" not in raw
+        assert "ANTHROPIC_API_KEY" not in raw
+        assert "should_not_save" not in cfg_path.read_text()
+        assert raw["tunnel_token"] == "tok-xyz"
         assert raw["max_budget"] == 75
 
     def test_load_survives_corrupt_json(self) -> None:
@@ -225,13 +241,26 @@ class TestApiKeyShell:
     def test_save_key_refreshes_default_config(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Saving a key calls _refresh_config to rebuild DEFAULT_CONFIG."""
+        """Saving a key refreshes DEFAULT_CONFIG without losing other settings.
+
+        This used to assert that ``DEFAULT_CONFIG`` was replaced by a
+        brand-new instance, which was the bug: rebuilding re-reads only
+        the environment-backed fields, so it reset ``max_budget`` (which
+        is not environment-backed) and discarded whatever
+        ``apply_config_to_env`` had just applied.  The singleton is now
+        updated in place; what matters is that the new key is visible.
+        """
         from kiss.core import config as config_module
 
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        old_cfg = config_module.DEFAULT_CONFIG
-        save_api_key_to_shell("ZAI_API_KEY", "z-key")
-        assert config_module.DEFAULT_CONFIG is not old_cfg
+        previous_budget = config_module.DEFAULT_CONFIG.max_budget
+        config_module.DEFAULT_CONFIG.max_budget = 5.0
+        try:
+            save_api_key_to_shell("ZAI_API_KEY", "z-key")
+            assert config_module.DEFAULT_CONFIG.ZAI_API_KEY == "z-key"
+            assert config_module.DEFAULT_CONFIG.max_budget == 5.0
+        finally:
+            config_module.DEFAULT_CONFIG.max_budget = previous_budget
 
     def test_multiple_keys_sequential(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Multiple keys saved sequentially all appear in RC file."""
@@ -376,13 +405,29 @@ class TestShellRcPath:
         assert _shell_rc_path("fish") == Path.home() / ".config" / "fish" / "config.fish"
 
 
+def _installed_posix_shell() -> str:
+    """Return the first POSIX shell installed on this machine.
+
+    Prefers ``zsh`` to keep exercising the historical default, but
+    falls back to ``bash`` (present on every Linux/macOS CI box) so the
+    end-to-end sourcing tests still run for real — instead of failing —
+    on machines without zsh.  ``source_shell_env`` treats both shells
+    identically (same ``source rc; env`` pipeline).
+    """
+    for shell in ("zsh", "bash"):
+        if _resolve_shell_path(shell) is not None:
+            return shell
+    pytest.skip("no zsh or bash binary available on this system")
+
+
 class TestSourceShellEnv:
     """Test sourcing shell env vars."""
 
     def test_source_picks_up_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        rc = Path.home() / ".zshrc"
+        shell = _installed_posix_shell()
+        rc = _shell_rc_path(shell)
         rc.write_text('export GEMINI_API_KEY="sourced-key"\n')
-        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         source_shell_env()
         assert os.environ.get("GEMINI_API_KEY") == "sourced-key"
@@ -400,12 +445,13 @@ class TestSourceShellEnv:
         This covers the branch where ``"=" not in line`` and where
         ``k not in API_KEY_ENV_VARS``.
         """
-        rc = Path.home() / ".zshrc"
+        shell = _installed_posix_shell()
+        rc = _shell_rc_path(shell)
         rc.write_text(
             'echo "no-equals-line"\n'
             'export GEMINI_API_KEY="from-source"\n'
         )
-        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         source_shell_env()
         assert os.environ.get("GEMINI_API_KEY") == "from-source"
@@ -421,13 +467,12 @@ class TestSourceShellEnv:
         path via :func:`_resolve_shell_path` and augments the inner
         ``PATH`` with standard system locations.
         """
-        rc = Path.home() / ".zshrc"
+        shell = _installed_posix_shell()
+        rc = _shell_rc_path(shell)
         rc.write_text('export GEMINI_API_KEY="empty-path-key"\n')
-        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
         monkeypatch.setenv("PATH", "")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        if _resolve_shell_path("zsh") is None:
-            pytest.skip("zsh binary not available on this system")
         source_shell_env()
         assert os.environ.get("GEMINI_API_KEY") == "empty-path-key"
 
@@ -617,7 +662,7 @@ class TestEndToEndFlows:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Save API key → clear env → source env → key is back."""
-        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("SHELL", f"/bin/{_installed_posix_shell()}")
         save_api_key_to_shell("GEMINI_API_KEY", "flow-key")
         assert os.environ["GEMINI_API_KEY"] == "flow-key"
 

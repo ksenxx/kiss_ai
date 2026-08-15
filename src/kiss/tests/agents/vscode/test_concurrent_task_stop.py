@@ -36,7 +36,7 @@ import threading
 import unittest
 from typing import Any
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 
 
@@ -790,8 +790,11 @@ class TestCleanupTab(unittest.TestCase):
 
 
 class TestCloseTabServer(unittest.TestCase):
-    """_close_tab on VSCodeServer cleans up _running_agent_states, printer state,
-    and _persist_agents."""
+    """_close_tab on VSCodeServer cleans up the tab's registered
+    AgentState and printer subscriptions."""
+
+    def tearDown(self) -> None:
+        agent_state.agent_states.clear()
 
     @staticmethod
     def _make_server() -> Any:
@@ -801,18 +804,26 @@ class TestCloseTabServer(unittest.TestCase):
         from kiss.server.server import VSCodeServer
         return VSCodeServer()
 
+    @staticmethod
+    def _register_idle_state(task_id: str, tab_id: str) -> agent_state.AgentState:
+        state = agent_state.AgentState(
+            task_id, tab_id=tab_id, server_owned=True,
+        )
+        agent_state.register(state)
+        return state
+
     def test_close_tab_removes_tab_state(self) -> None:
-        """_close_tab removes the tab from _running_agent_states."""
+        """_close_tab unregisters an idle tab's AgentState."""
         server = self._make_server()
-        server._get_tab("tab1")
-        assert "tab1" in _RunningAgentState.running_agent_states
+        self._register_idle_state("close-1", "tab1")
+        assert agent_state.find_by_tab("tab1") is not None
         server._close_tab("tab1")
-        assert "tab1" not in _RunningAgentState.running_agent_states
+        assert agent_state.find_by_tab("tab1") is None
+        assert agent_state.get("close-1") is None
 
     def test_close_tab_clears_subscribers(self) -> None:
         """_close_tab removes the tab from every task's subscriber set."""
         server = self._make_server()
-        server._get_tab("tab1")
         server.printer.subscribe_tab("task-A", "tab1")
         server.printer.subscribe_tab("task-B", "tab1")
         assert "tab1" in server.printer._subscribers["task-A"]
@@ -822,20 +833,22 @@ class TestCloseTabServer(unittest.TestCase):
         assert "task-B" not in server.printer._subscribers
 
     def test_close_tab_skips_active_task(self) -> None:
-        """_close_tab does not remove a tab that has an active task."""
+        """_close_tab does not remove a state that has an active task."""
         server = self._make_server()
-        tab = server._get_tab("tab1")
-        tab.is_task_active = True
+        state = self._register_idle_state("close-2", "tab1")
+        state.is_task_active = True
         server._close_tab("tab1")
-        assert "tab1" in _RunningAgentState.running_agent_states
+        assert agent_state.get("close-2") is state
+        assert state.frontend_closed is True
 
     def test_close_tab_skips_merging_tab(self) -> None:
-        """_close_tab does not remove a tab that is in a merge review."""
+        """_close_tab does not remove a state that is in a merge review."""
         server = self._make_server()
-        tab = server._get_tab("tab1")
-        tab.is_merging = True
+        state = self._register_idle_state("close-3", "tab1")
+        state.is_merging = True
         server._close_tab("tab1")
-        assert "tab1" in _RunningAgentState.running_agent_states
+        assert agent_state.get("close-3") is state
+        assert state.frontend_closed is True
 
     def test_close_tab_nonexistent_is_noop(self) -> None:
         """_close_tab for an unknown tab_id does not raise."""
@@ -845,10 +858,10 @@ class TestCloseTabServer(unittest.TestCase):
     def test_cmd_close_tab_dispatches(self) -> None:
         """The closeTab command dispatches to _close_tab."""
         server = self._make_server()
-        server._get_tab("tab1")
-        assert "tab1" in _RunningAgentState.running_agent_states
+        self._register_idle_state("close-4", "tab1")
+        assert agent_state.find_by_tab("tab1") is not None
         server._handle_command({"type": "closeTab", "tabId": "tab1"})
-        assert "tab1" not in _RunningAgentState.running_agent_states
+        assert agent_state.find_by_tab("tab1") is None
 
 
 if __name__ == "__main__":

@@ -4,14 +4,11 @@
 # add your name here
 """Integration test: the settings action buttons sit on one line.
 
-Regression: in the remote webapp's DESKTOP mode the settings drawer was
-pinned to ``--settings-panel-w: 420px``.  Minus the panel's 2 x 16px
-padding that left 388px for the ``.config-update-row`` flex row, but the
-four buttons it holds — "Tips", "Git Commit", "Update" and
-"Reset Server" — need ~417px.  Because the buttons had no
-``white-space: nowrap`` they shrank instead and the labels of
-"Git Commit" and "Reset Server" wrapped onto a second line, making the
-row 46px tall with ragged, half-height neighbours.
+Regression: the settings action buttons once lacked
+``white-space: nowrap`` and could shrink until multi-word labels wrapped
+onto a second line, making the row 46px tall with ragged, half-height
+neighbours.  The current row contains "Tips", "Git Commit", "Update",
+and "Reset Server".
 
 The fix has two halves, both exercised here:
 
@@ -55,8 +52,7 @@ _BUTTON_IDS = (
 #: Desktop mode only applies at >= 900px wide (see remote-codex.css).
 _DESKTOP_VIEWPORT = ViewportSize(width=1440, height=900)
 
-#: A phone, where the drawer falls back to the 90vw mobile sheet that is
-#: too narrow to hold all four buttons on one line.
+#: A phone, where the drawer falls back to the responsive 90vw mobile sheet.
 _PHONE_VIEWPORT = ViewportSize(width=390, height=844)
 
 
@@ -299,24 +295,17 @@ def test_action_row_is_a_single_button_tall(_measurements) -> None:
     )
 
 
-def test_narrow_sheet_wraps_between_buttons_not_inside_labels(
+def test_narrow_sheet_keeps_buttons_inside_and_labels_unwrapped(
     _phone_measurements,
 ) -> None:
-    """On a phone the row must break between buttons, never mid-label.
+    """On a phone, labels stay intact and every button remains contained.
 
     ``main.css`` is shared with the 90vw mobile sheet and the VS Code
-    sidebar, which are narrower than the four buttons need.  There
-    ``flex-wrap`` has to move whole buttons onto a second line while
-    every label stays on a single line and no button spills outside the
-    panel's content box.
+    sidebar.  Depending on available font metrics, ``flex-wrap`` may
+    keep the three buttons on one row or move whole buttons to another;
+    it must never wrap inside a label or overflow the panel.
     """
     buttons = _phone_measurements["buttons"]
-    tops = {b["top"] for b in buttons}
-    assert len(tops) > 1, (
-        f"The {_PHONE_VIEWPORT['width']}px sheet is expected to be too "
-        "narrow for one line, so this test no longer exercises wrapping. "
-        f"Panel width is {_phone_measurements['panelWidth']}px."
-    )
     for button in buttons:
         assert button["labelScrollWidth"] <= button["labelClientWidth"], (
             f"{button['text']!r} is squeezed on a narrow sheet: label "

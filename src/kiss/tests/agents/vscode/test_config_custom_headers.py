@@ -136,7 +136,7 @@ class TestCLIHeadersFlow(unittest.TestCase):
     def test_build_run_kwargs_with_headers(self) -> None:
         import argparse
 
-        from kiss.agents.sorcar.cli_helpers import _build_run_kwargs
+        from kiss.agents.third_party_agents._channel_cli import _build_run_kwargs
 
         args = argparse.Namespace(
             model_name="gpt-4o",
@@ -160,7 +160,7 @@ class TestCLIHeadersFlow(unittest.TestCase):
     def test_build_run_kwargs_without_headers(self) -> None:
         import argparse
 
-        from kiss.agents.sorcar.cli_helpers import _build_run_kwargs
+        from kiss.agents.third_party_agents._channel_cli import _build_run_kwargs
 
         args = argparse.Namespace(
             model_name="gpt-4o",
@@ -220,7 +220,6 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
                 self.printer = FakePrinter()  # type: ignore[assignment]
                 self.work_dir = "/tmp"
                 self._state_lock = threading.RLock()
-                self._running_agent_states: dict[str, Any] = {}
                 self._default_model = ""
 
             def _get_models(self, conn_id: str = "") -> None:

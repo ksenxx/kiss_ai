@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Agent Skills support for the ``sorcar`` CLI and agent.
+"""Agent Skills support for the Sorcar agent.
 
 Implements the `Agent Skills <https://agentskills.io>`_ open standard
 with Claude Code compatibility: a *skill* is a directory containing a
@@ -113,8 +113,9 @@ def parse_frontmatter(path: Path) -> tuple[dict[str, Any], str] | None:
 def collapse_whitespace(value: object) -> str:
     """Collapse all whitespace in *value* into single spaces.
 
-    A YAML block scalar may span lines; the one-line listings (skills
-    catalog, ``/commands``, ``/help``) require single-line strings.
+    A YAML block scalar may span lines; the one-line
+    ``<available_skills>`` catalog embedded in the ``skill`` tool's
+    description requires single-line strings.
 
     Args:
         value: Any value; ``None``/falsy becomes ``""``.
@@ -491,52 +492,3 @@ def make_skill_tool(work_dir: str) -> Callable[[str], str] | None:
         "listing of its bundled resource files."
     )
     return skill
-
-
-def truncate_listing_description(desc: str) -> str:
-    """Cap *desc* at 100 characters for aligned catalog listings.
-
-    Shared by :func:`format_skill_listing` and
-    :func:`~kiss.agents.sorcar.custom_commands.format_command_listing`
-    so the two listings can never drift.
-
-    Args:
-        desc: The raw one-line description.
-
-    Returns:
-        *desc* unchanged when at most 100 characters, otherwise its
-        first 97 characters followed by ``"..."``.
-    """
-    if len(desc) > 100:
-        return desc[:97] + "..."
-    return desc
-
-
-def format_skill_listing(skills: dict[str, Skill]) -> str:
-    """Format *skills* as the aligned listing printed by ``/skills``.
-
-    Args:
-        skills: Mapping of skill name → skill (from
-            :func:`discover_skills`).
-
-    Returns:
-        A printable multi-line listing, or a hint about where to create
-        skill directories when *skills* is empty.
-    """
-    if not skills:
-        return (
-            "No skills found.\n"
-            f"Create <name>/SKILL.md directories in {user_skills_dir()} "
-            "(user) or <project>/.kiss/skills (project) to define them.\n"
-            "Claude Code skills in ~/.claude/skills and "
-            "<project>/.claude/skills, and cross-client skills in "
-            "~/.agents/skills and <project>/.agents/skills, are picked "
-            "up too."
-        )
-    entries = sorted(skills.values(), key=lambda s: s.name)
-    width = max(len(s.name) for s in entries)
-    lines = []
-    for skill in entries:
-        desc = truncate_listing_description(skill.description)
-        lines.append(f"  {skill.name:<{width}}  ({skill.source}) {desc}")
-    return "\n".join(lines)

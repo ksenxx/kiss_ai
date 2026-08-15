@@ -8,15 +8,15 @@
 //
 // Opening a chat window while agents are still working should put the newest
 // of those tasks on screen -- that is the one the user just walked away from.
-// The remote web app learns about them from the `openRunningTasks` snapshot
-// the server pushes after `ready`; the extension host replays a `status` for
-// every tab it restored.
+// Both clients learn about them the same way now: the daemon answers `ready`
+// with the shared-registry `tabs_state` snapshot and then replays every
+// chat-bound tab, broadcasting a `status {running:true, startTs}` for each
+// task that is still going.
 //
 // The permission to move the user lasts only until the first real gesture, so
-// a WebSocket that drops and reconnects mid-session (it says `ready` again,
-// and gets the same snapshot back) cannot yank anybody off the transcript
-// they are reading. See openRunningTasksNoTabSwitch.test.js for that half of
-// the contract.
+// a daemon that replays mid-session (a reconnect says `ready` again, and the
+// replay statuses come back) cannot yank anybody off the transcript they are
+// reading. See tabsStateNoTabSwitch.test.js for that half of the contract.
 
 'use strict';
 
@@ -102,105 +102,120 @@ function clickTab(win, tabId) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
-function tabIdForChat(win, posted, chatId) {
-  const call = posted.find(m => m.type === 'resumeSession' && m.id === chatId);
-  assert.ok(call, `chat ${chatId} must have been resumed`);
-  return call.tabId;
+// The registry snapshot the daemon broadcasts after `ready` (and after every
+// registry mutation): the canonical tab set every client reconciles against.
+function tabsState(win, entries) {
+  send(win, {
+    type: 'tabs_state',
+    tabs: entries.map(e => ({
+      tabId: e.tabId,
+      chatId: e.chatId || '',
+      title: e.title || 'new chat',
+      workDir: e.workDir || '',
+    })),
+  });
 }
 
-function openRunningTasks(win, tasks) {
-  send(win, {type: 'openRunningTasks', tasks: tasks});
-}
-
+// The replay's running-task news: the daemon broadcasts one of these for
+// every registry tab whose task is still going.
 function statusRunning(win, tabId, startTs) {
   send(win, {type: 'status', running: true, tabId: tabId, startTs: startTs});
 }
 
-// The remote web app: the snapshot names one running task, so that is where
+// The remote web app: the replay names one running task, so that is where
 // the window opens.
 function testRemoteSingleRunningTaskTakesTheScreen() {
-  const {win, posted} = makeWebview({remote: true});
+  const {win} = makeWebview({remote: true});
   const boot = activeTabId(win);
 
-  openRunningTasks(win, [
-    {chatId: 'chat-1', taskId: 'task-1', title: 'ship the parser', startTs: 7},
+  tabsState(win, [
+    {tabId: 'tab-1', chatId: 'chat-1', title: 'ship the parser'},
   ]);
+  statusRunning(win, 'tab-1', 7);
 
-  const restored = tabIdForChat(win, posted, 'chat-1');
-  assert.notStrictEqual(restored, boot, 'the task must get its own tab');
+  assert.ok(
+    !tabIds(win).includes(boot),
+    'the boot placeholder is replaced by the canonical snapshot',
+  );
   assert.strictEqual(
     activeTabId(win),
-    restored,
+    'tab-1',
     'launching with a running task must put that task on screen',
   );
   win.close();
   console.log('  ok - a single running task is on screen at launch');
 }
 
-// Several running tasks: the newest wins, whatever order the rows arrive in.
+// Several running tasks: the newest wins, whatever order the replays land in.
 function testRemoteNewestRunningTaskWins() {
   for (const order of ['ascending', 'shuffled']) {
     const rows = [
-      {chatId: 'chat-old', taskId: 't-old', title: 'old', startTs: 100},
-      {chatId: 'chat-new', taskId: 't-new', title: 'new', startTs: 300},
-      {chatId: 'chat-mid', taskId: 't-mid', title: 'mid', startTs: 200},
+      {tabId: 'tab-old', startTs: 100},
+      {tabId: 'tab-new', startTs: 300},
+      {tabId: 'tab-mid', startTs: 200},
     ];
     rows.sort((a, b) =>
       order === 'ascending' ? a.startTs - b.startTs : b.startTs - a.startTs,
     );
-    const {win, posted} = makeWebview({remote: true});
-    openRunningTasks(win, rows);
+    const {win} = makeWebview({remote: true});
+    tabsState(win, [
+      {tabId: 'tab-old', chatId: 'chat-old', title: 'old'},
+      {tabId: 'tab-new', chatId: 'chat-new', title: 'new'},
+      {tabId: 'tab-mid', chatId: 'chat-mid', title: 'mid'},
+    ]);
+    for (const row of rows) statusRunning(win, row.tabId, row.startTs);
     assert.strictEqual(
       activeTabId(win),
-      tabIdForChat(win, posted, 'chat-new'),
-      `the newest task must win (rows ${order})`,
+      'tab-new',
+      `the newest task must win (replays ${order})`,
     );
-    assert.strictEqual(
-      posted.filter(m => m.type === 'resumeSession').length,
-      3,
-      'every running task must still be resumed into its own tab',
+    assert.deepStrictEqual(
+      tabIds(win),
+      ['tab-old', 'tab-new', 'tab-mid'],
+      'every running task must still get its own tab, in registry order',
     );
     win.close();
   }
-  console.log('  ok - the newest running task wins, in any row order');
+  console.log('  ok - the newest running task wins, in any replay order');
 }
 
 // Timestamps go missing when a task predates the history row. The backend
-// lists its running tasks oldest first, so the last row is still the newest.
+// replays its registry oldest first, so the last tab is still the newest.
 function testRemoteMissingTimestampsFallBackToOrder() {
-  const {win, posted} = makeWebview({remote: true});
-  openRunningTasks(win, [
-    {chatId: 'chat-first', taskId: 't1', title: 'first'},
-    {chatId: 'chat-last', taskId: 't2', title: 'last'},
+  const {win} = makeWebview({remote: true});
+  tabsState(win, [
+    {tabId: 'tab-first', chatId: 'chat-first', title: 'first'},
+    {tabId: 'tab-last', chatId: 'chat-last', title: 'last'},
   ]);
+  statusRunning(win, 'tab-first');
+  statusRunning(win, 'tab-last');
   assert.strictEqual(
     activeTabId(win),
-    tabIdForChat(win, posted, 'chat-last'),
-    'with no timestamps the last row is the newest task',
+    'tab-last',
+    'with no timestamps the last registry tab is the newest task',
   );
   win.close();
-  console.log('  ok - rows without timestamps fall back to snapshot order');
+  console.log('  ok - replays without timestamps fall back to registry order');
 }
 
-// A chat the window already had a tab for is switched to, not duplicated.
+// A chat the window already had a tab for is switched to, not duplicated:
+// a second snapshot listing the same tabs must not grow the tab bar, and the
+// replayed status lands on the tab that was already there.
 function testRemoteAlreadyOpenRunningChatIsSwitchedTo() {
   const {win, posted} = makeWebview({
     remote: true,
-    state: {
-      tabs: [
-        {title: 'reading', chatId: 'tab-read', backendChatId: 'chat-read'},
-        {title: 'working', chatId: 'tab-work', backendChatId: 'chat-work'},
-      ],
-      activeTabIndex: 0,
-      chatId: 'tab-read',
-    },
+    state: {chatId: 'tab-read'},
   });
-  assert.strictEqual(activeTabId(win), 'tab-read', 'restored on the first tab');
+  const entries = [
+    {tabId: 'tab-read', chatId: 'chat-read', title: 'reading'},
+    {tabId: 'tab-work', chatId: 'chat-work', title: 'working'},
+  ];
+  tabsState(win, entries);
+  assert.strictEqual(activeTabId(win), 'tab-read', 'restored the selection');
   const before = tabIds(win);
 
-  openRunningTasks(win, [
-    {chatId: 'chat-work', taskId: 't-work', title: 'working', startTs: 42},
-  ]);
+  tabsState(win, entries);
+  statusRunning(win, 'tab-work', 42);
 
   assert.deepStrictEqual(
     tabIds(win),
@@ -208,10 +223,9 @@ function testRemoteAlreadyOpenRunningChatIsSwitchedTo() {
     'a chat that already has a tab must not get a second one',
   );
   assert.strictEqual(
-    posted.filter(m => m.type === 'resumeSession' && m.id === 'chat-work')
-      .length,
+    posted.filter(m => m.type === 'resumeSession').length,
     0,
-    'an already-open chat must not be resumed again by the snapshot',
+    'the daemon replays registry tabs itself; the client resumes nothing',
   );
   assert.strictEqual(
     activeTabId(win),
@@ -226,34 +240,32 @@ function testRemoteAlreadyOpenRunningChatIsSwitchedTo() {
 function testNoRunningTaskKeepsTheRestoredTab() {
   const {win} = makeWebview({
     remote: true,
-    state: {
-      tabs: [
-        {title: 'one', chatId: 'tab-1', backendChatId: 'chat-1'},
-        {title: 'two', chatId: 'tab-2', backendChatId: 'chat-2'},
-      ],
-      activeTabIndex: 1,
-      chatId: 'tab-2',
-    },
+    state: {chatId: 'tab-2'},
   });
-  openRunningTasks(win, []);
+  tabsState(win, [
+    {tabId: 'tab-1', chatId: 'chat-1', title: 'one'},
+    {tabId: 'tab-2', chatId: 'chat-2', title: 'two'},
+  ]);
   send(win, {type: 'status', running: false, tabId: 'tab-1'});
   assert.strictEqual(
     activeTabId(win),
     'tab-2',
-    'with nothing running the restored tab stays on screen',
+    'with nothing running the restored selection stays on screen',
   );
   win.close();
   console.log('  ok - an idle launch keeps the restored tab');
 }
 
-// Junk in the snapshot must not move anybody.
+// Junk in the snapshot must not move anybody or tear tabs down.
 function testMalformedSnapshotDoesNotSwitch() {
   const {win, posted} = makeWebview({remote: true});
   const boot = activeTabId(win);
-  openRunningTasks(win, [null, {}, {taskId: 'no-chat-id'}]);
-  openRunningTasks(win, 'not-an-array');
-  send(win, {type: 'openRunningTasks'});
+  send(win, {type: 'tabs_state', tabs: [null, {}, {taskId: 'no-tab-id'}]});
+  send(win, {type: 'tabs_state', tabs: 'not-an-array'});
+  send(win, {type: 'tabs_state'});
+  statusRunning(win, 'tab-nowhere', 5);
   assert.strictEqual(activeTabId(win), boot, 'the active tab is kept');
+  assert.deepStrictEqual(tabIds(win), [boot], 'no tab may appear or vanish');
   assert.strictEqual(
     posted.filter(m => m.type === 'resumeSession').length,
     0,
@@ -263,20 +275,15 @@ function testMalformedSnapshotDoesNotSwitch() {
   console.log('  ok - a malformed snapshot switches nothing');
 }
 
-// The extension host replays a `status` per restored tab; the newest of them
-// takes the screen.
+// The extension webview takes the same path: the daemon replays a `status`
+// per registry tab; the newest of them takes the screen.
 function testExtensionNewestRestoredStatusWins() {
-  const {win} = makeWebview({
-    state: {
-      tabs: [
-        {title: 'alpha', chatId: 'tab-a', backendChatId: 'chat-a'},
-        {title: 'beta', chatId: 'tab-b', backendChatId: 'chat-b'},
-        {title: 'gamma', chatId: 'tab-c', backendChatId: 'chat-c'},
-      ],
-      activeTabIndex: 0,
-      chatId: 'tab-a',
-    },
-  });
+  const {win} = makeWebview({state: {chatId: 'tab-a'}});
+  tabsState(win, [
+    {tabId: 'tab-a', chatId: 'chat-a', title: 'alpha'},
+    {tabId: 'tab-b', chatId: 'chat-b', title: 'beta'},
+    {tabId: 'tab-c', chatId: 'chat-c', title: 'gamma'},
+  ]);
   assert.strictEqual(activeTabId(win), 'tab-a', 'restored on the first tab');
 
   statusRunning(win, 'tab-b', 500);
@@ -308,7 +315,7 @@ function testExtensionNewestRestoredStatusWins() {
 // keystrokes lands before the backend is live -- and the chat is behind the
 // "server is starting" overlay the whole time.
 function testGestureBeforeTheBackendIsLiveKeepsTheLaunch() {
-  const {win, posted} = makeWebview({remote: true, connect: false});
+  const {win} = makeWebview({remote: true, connect: false});
 
   win.document.dispatchEvent(
     new win.MouseEvent('pointerdown', {bubbles: true}),
@@ -318,13 +325,14 @@ function testGestureBeforeTheBackendIsLiveKeepsTheLaunch() {
   );
 
   send(win, {type: 'daemonStatus', connected: true});
-  openRunningTasks(win, [
-    {chatId: 'chat-1', taskId: 'task-1', title: 'still going', startTs: 5},
+  tabsState(win, [
+    {tabId: 'tab-1', chatId: 'chat-1', title: 'still going'},
   ]);
+  statusRunning(win, 'tab-1', 5);
 
   assert.strictEqual(
     activeTabId(win),
-    tabIdForChat(win, posted, 'chat-1'),
+    'tab-1',
     'a password keystroke must not spend the launch it precedes',
   );
   win.close();
@@ -337,7 +345,7 @@ function testGestureBeforeTheBackendIsLiveKeepsTheLaunch() {
 // one lets `ready` through. Every keystroke of the password lands between the
 // two, so the launch has to survive them.
 function testPasswordPromptDoesNotSpendTheLaunch() {
-  const {win, posted} = makeWebview({remote: true, connect: false});
+  const {win} = makeWebview({remote: true, connect: false});
 
   // auth_required: the app is revealed so the modal can be seen.
   send(win, {type: 'daemonStatus', connected: true});
@@ -351,15 +359,16 @@ function testPasswordPromptDoesNotSpendTheLaunch() {
   }
 
   // auth_ok: the password was accepted, so the queued `ready` goes out and
-  // the snapshot comes back.
+  // the snapshot and replays come back.
   send(win, {type: 'daemonStatus', connected: true});
-  openRunningTasks(win, [
-    {chatId: 'chat-1', taskId: 'task-1', title: 'still going', startTs: 5},
+  tabsState(win, [
+    {tabId: 'tab-1', chatId: 'chat-1', title: 'still going'},
   ]);
+  statusRunning(win, 'tab-1', 5);
 
   assert.strictEqual(
     activeTabId(win),
-    tabIdForChat(win, posted, 'chat-1'),
+    'tab-1',
     'typing the remote password must not spend the launch it precedes',
   );
   win.close();
@@ -369,23 +378,21 @@ function testPasswordPromptDoesNotSpendTheLaunch() {
 // Landing on a task means staying there when it finishes: the result is what
 // the user was brought to see.
 function testTaskFinishingDoesNotMoveTheUser() {
-  const {win, posted} = makeWebview({remote: true});
-  openRunningTasks(win, [
-    {chatId: 'chat-slow', taskId: 't-slow', title: 'slow', startTs: 100},
-    {chatId: 'chat-quick', taskId: 't-quick', title: 'quick', startTs: 900},
+  const {win} = makeWebview({remote: true});
+  tabsState(win, [
+    {tabId: 'tab-slow', chatId: 'chat-slow', title: 'slow'},
+    {tabId: 'tab-quick', chatId: 'chat-quick', title: 'quick'},
   ]);
-  const slowTab = tabIdForChat(win, posted, 'chat-slow');
-  const quickTab = tabIdForChat(win, posted, 'chat-quick');
 
   // Both replays report themselves running, so the launch is fully resolved.
-  send(win, {type: 'status', running: true, tabId: slowTab, startTs: 100});
-  send(win, {type: 'status', running: true, tabId: quickTab, startTs: 900});
-  assert.strictEqual(activeTabId(win), quickTab, 'the newest task won');
+  statusRunning(win, 'tab-slow', 100);
+  statusRunning(win, 'tab-quick', 900);
+  assert.strictEqual(activeTabId(win), 'tab-quick', 'the newest task won');
 
-  send(win, {type: 'status', running: false, tabId: quickTab});
+  send(win, {type: 'status', running: false, tabId: 'tab-quick'});
   assert.strictEqual(
     activeTabId(win),
-    quickTab,
+    'tab-quick',
     'a task finishing must leave the user on its result, not move them to ' +
       'an older task that happens to still be running',
   );
@@ -393,52 +400,54 @@ function testTaskFinishingDoesNotMoveTheUser() {
   console.log('  ok - a task finishing never moves the user');
 }
 
-// A task that had already finished by the time its replay landed never won the
-// launch in the first place, so the still-running one takes the screen.
+// A task that had already finished by the time its replay landed never won
+// the launch in the first place, so the still-running one takes the screen.
 function testFinishedTaskIsNoLongerACandidate() {
-  const {win, posted} = makeWebview({remote: true});
-  openRunningTasks(win, [
-    {chatId: 'chat-slow', taskId: 't-slow', title: 'slow', startTs: 100},
-    {chatId: 'chat-quick', taskId: 't-quick', title: 'quick', startTs: 900},
+  const {win} = makeWebview({remote: true});
+  tabsState(win, [
+    {tabId: 'tab-slow', chatId: 'chat-slow', title: 'slow'},
+    {tabId: 'tab-quick', chatId: 'chat-quick', title: 'quick'},
   ]);
-  const slowTab = tabIdForChat(win, posted, 'chat-slow');
-  const quickTab = tabIdForChat(win, posted, 'chat-quick');
-  assert.strictEqual(activeTabId(win), quickTab, 'the newest task won');
+  statusRunning(win, 'tab-quick', 900);
+  assert.strictEqual(activeTabId(win), 'tab-quick', 'the newest task won');
 
   // The quick task finishes: its replay lands the closing status, and the
-  // chat drops out of the launch snapshot.
-  send(win, {type: 'status', running: false, tabId: quickTab});
-  send(win, {type: 'status', running: true, tabId: slowTab, startTs: 100});
+  // slow one's replay still says it is running.
+  send(win, {type: 'status', running: false, tabId: 'tab-quick'});
+  statusRunning(win, 'tab-slow', 100);
   assert.strictEqual(
     activeTabId(win),
-    slowTab,
+    'tab-slow',
     'once the newest task is done the launch falls through to the one ' +
       'still running',
   );
   win.close();
-  console.log('  ok - a finished task drops out of the launch snapshot');
+  console.log('  ok - a finished task drops out of the launch candidates');
 }
 
-// The first tap ends the launch: a reconnect after it must not move the user.
+// The first tap ends the launch: replays after it must not move the user.
 function testPointerDownEndsTheLaunch() {
-  const {win, posted} = makeWebview({remote: true});
-  const boot = activeTabId(win);
+  const {win} = makeWebview({remote: true, state: {chatId: 'tab-here'}});
+  tabsState(win, [
+    {tabId: 'tab-here', chatId: 'chat-here', title: 'reading'},
+  ]);
 
   win.document.dispatchEvent(
     new win.MouseEvent('pointerdown', {bubbles: true}),
   );
-  openRunningTasks(win, [
-    {chatId: 'chat-1', taskId: 'task-1', title: 'background', startTs: 9},
+  tabsState(win, [
+    {tabId: 'tab-here', chatId: 'chat-here', title: 'reading'},
+    {tabId: 'tab-bg', chatId: 'chat-bg', title: 'background'},
   ]);
+  statusRunning(win, 'tab-bg', 9);
 
   assert.strictEqual(
     activeTabId(win),
-    boot,
-    'a tap ends the launch, so a reconnect snapshot must not switch tabs',
+    'tab-here',
+    'a tap ends the launch, so a reconnect replay must not switch tabs',
   );
-  assert.strictEqual(
-    posted.filter(m => m.type === 'resumeSession').length,
-    1,
+  assert.ok(
+    tabIds(win).includes('tab-bg'),
     'the task must still get a reachable background tab',
   );
   win.close();
@@ -447,16 +456,11 @@ function testPointerDownEndsTheLaunch() {
 
 // So does the first keystroke.
 function testKeyDownEndsTheLaunch() {
-  const {win} = makeWebview({
-    state: {
-      tabs: [
-        {title: 'alpha', chatId: 'tab-a', backendChatId: 'chat-a'},
-        {title: 'beta', chatId: 'tab-b', backendChatId: 'chat-b'},
-      ],
-      activeTabIndex: 0,
-      chatId: 'tab-a',
-    },
-  });
+  const {win} = makeWebview({state: {chatId: 'tab-a'}});
+  tabsState(win, [
+    {tabId: 'tab-a', chatId: 'chat-a', title: 'alpha'},
+    {tabId: 'tab-b', chatId: 'chat-b', title: 'beta'},
+  ]);
   win.document.dispatchEvent(
     new win.KeyboardEvent('keydown', {key: 'a', bubbles: true}),
   );
@@ -474,16 +478,11 @@ function testKeyDownEndsTheLaunch() {
 // loading overlay and replays everything when it returns. That must not hand
 // the launch a second chance at a user who has already picked their tab.
 function testBackendHiccupDoesNotRelaunch() {
-  const {win} = makeWebview({
-    state: {
-      tabs: [
-        {title: 'alpha', chatId: 'tab-a', backendChatId: 'chat-a'},
-        {title: 'beta', chatId: 'tab-b', backendChatId: 'chat-b'},
-      ],
-      activeTabIndex: 0,
-      chatId: 'tab-a',
-    },
-  });
+  const {win} = makeWebview({state: {chatId: 'tab-a'}});
+  tabsState(win, [
+    {tabId: 'tab-a', chatId: 'chat-a', title: 'alpha'},
+    {tabId: 'tab-b', chatId: 'chat-b', title: 'beta'},
+  ]);
   // The launch runs its course and lands on the running task.
   statusRunning(win, 'tab-b', 500);
   assert.strictEqual(activeTabId(win), 'tab-b', 'the launch had its chance');
@@ -492,9 +491,14 @@ function testBackendHiccupDoesNotRelaunch() {
   clickTab(win, 'tab-a');
   assert.strictEqual(activeTabId(win), 'tab-a', 'the user chose this tab');
 
-  // The daemon drops and returns, replaying every running task.
+  // The daemon drops and returns, resyncing the registry and replaying
+  // every running task.
   send(win, {type: 'daemonStatus', connected: false});
   send(win, {type: 'daemonStatus', connected: true});
+  tabsState(win, [
+    {tabId: 'tab-a', chatId: 'chat-a', title: 'alpha'},
+    {tabId: 'tab-b', chatId: 'chat-b', title: 'beta'},
+  ]);
   statusRunning(win, 'tab-b', 500);
   assert.strictEqual(
     activeTabId(win),
@@ -508,16 +512,11 @@ function testBackendHiccupDoesNotRelaunch() {
 // A window left untouched is not launching forever: a task that starts much
 // later must not steal a tab from a screen somebody may be watching.
 function testLaunchWindowExpires() {
-  const {win} = makeWebview({
-    state: {
-      tabs: [
-        {title: 'alpha', chatId: 'tab-a', backendChatId: 'chat-a'},
-        {title: 'beta', chatId: 'tab-b', backendChatId: 'chat-b'},
-      ],
-      activeTabIndex: 0,
-      chatId: 'tab-a',
-    },
-  });
+  const {win} = makeWebview({state: {chatId: 'tab-a'}});
+  tabsState(win, [
+    {tabId: 'tab-a', chatId: 'chat-a', title: 'alpha'},
+    {tabId: 'tab-b', chatId: 'chat-b', title: 'beta'},
+  ]);
   const realNow = win.Date.now();
   win.Date.now = function () {
     return realNow + 60000;
@@ -535,13 +534,8 @@ function testLaunchWindowExpires() {
 // A sub-agent tab is an implementation detail of the task that spawned it, so
 // it is never a launch target: the parent chat is.
 function testSubagentTabIsNotALaunchTarget() {
-  const {win} = makeWebview({
-    state: {
-      tabs: [{title: 'alpha', chatId: 'tab-a', backendChatId: 'chat-a'}],
-      activeTabIndex: 0,
-      chatId: 'tab-a',
-    },
-  });
+  const {win} = makeWebview({state: {chatId: 'tab-a'}});
+  tabsState(win, [{tabId: 'tab-a', chatId: 'chat-a', title: 'alpha'}]);
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'tab-sub',
