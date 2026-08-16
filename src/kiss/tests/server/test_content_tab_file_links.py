@@ -42,6 +42,9 @@ _HTML_SOURCE = (
 )
 
 
+_MD_SOURCE = "# KISS-MD-TITLE\n\nSome **bold** words.\n"
+
+
 def _find_free_port() -> int:
     """Return an available TCP port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -78,6 +81,7 @@ class _ServerHarness:
         self.work_dir.mkdir()
         (self.work_dir / "sample.py").write_text(_PY_SOURCE)
         (self.work_dir / "page.html").write_text(_HTML_SOURCE)
+        (self.work_dir / "notes.md").write_text(_MD_SOURCE)
         (self.work_dir / "binary.bin").write_bytes(b"\x00\x01\x02\x03")
 
         certfile = tmp / "cert.pem"
