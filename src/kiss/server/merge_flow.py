@@ -1022,6 +1022,7 @@ class _MergeFlowMixin:
             "type": "worktree_done",
             "branch": wt_agent._wt_branch,
             "worktreeDir": str(wt_agent._wt_dir),
+            "worktreeWorkDir": str(wt_agent._wt_work_dir),
             "originalBranch": wt_agent._original_branch,
             "changedFiles": changed,
             "hasConflict": self._check_merge_conflict(tab_id),

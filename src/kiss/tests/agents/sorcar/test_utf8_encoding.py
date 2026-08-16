@@ -4,6 +4,10 @@
 # add your name here
 """End-to-end regression tests for issue #43: explicit UTF-8 file I/O.
 
+The core-only system-prompt check moved to
+``kiss.tests.core.test_utf8_encoding``, which also owns the
+:func:`_run_in_c_locale` helper imported below.
+
 Every test runs a child Python interpreter with a forced C locale
 (``LC_ALL=C``, ``LANG=C``) and Python's UTF-8 mode disabled
 (``PYTHONUTF8=0``) so the platform default text encoding is ASCII.
@@ -14,42 +18,12 @@ round-trips must succeed byte-for-byte.
 """
 
 import json
-import subprocess
-import sys
 from pathlib import Path
+
+from kiss.tests.core.test_utf8_encoding import _run_in_c_locale
 
 NON_ASCII = "café ☕ — ünïcode"
 NON_ASCII_JSON = json.dumps(NON_ASCII)
-
-
-def _run_in_c_locale(script: str, cwd: Path) -> subprocess.CompletedProcess[str]:
-    """Run ``script`` in a child interpreter pinned to the C locale.
-
-    Args:
-        script: Python source passed to ``python -c``.
-        cwd: Working directory for the child process.
-
-    Returns:
-        The completed process with captured stdout/stderr.
-    """
-    src_dir = str(Path(__file__).resolve().parents[4])
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "LC_ALL": "C",
-        "LANG": "C",
-        "PYTHONUTF8": "0",
-        "PYTHONPATH": src_dir,
-        "HOME": str(cwd),
-    }
-    return subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=str(cwd),
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=120,
-    )
 
 
 class TestUtf8Encoding:
@@ -90,18 +64,6 @@ args = argparse.Namespace(file={str(task_file)!r}, task=None)
 loaded = _resolve_task(args)
 expected = json.loads({NON_ASCII_JSON!r})
 assert loaded == expected, repr(loaded)
-print("OK")
-"""
-        proc = _run_in_c_locale(script, tmp_path)
-        assert proc.returncode == 0, proc.stderr
-        assert "OK" in proc.stdout
-
-    def test_system_prompt_loads_in_c_locale(self, tmp_path: Path) -> None:
-        script = """
-from kiss.core import base
-
-assert isinstance(base.SYSTEM_PROMPT, str)
-assert len(base.SYSTEM_PROMPT) > 0
 print("OK")
 """
         proc = _run_in_c_locale(script, tmp_path)

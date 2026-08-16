@@ -66,6 +66,11 @@ _DISPLAY_EVENT_TYPES = frozenset(
         "followup_suggestion",
         "autocommit_done",
         "warning",
+        # Persisted so replays repopulate the chat header's tokens/cost
+        # metrics: without it a transcript reloaded mid-run (or after a
+        # stop/error, when no ``result`` event exists) shows only the
+        # step count in the status row.
+        "usage_info",
     }
 )
 

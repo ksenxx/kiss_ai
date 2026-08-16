@@ -7,10 +7,11 @@
 The behaviour tests live in ``test_parallel_engine_shared.py``
 and ``test_abandoned_subagent_worktree.py``; this module drives
 the engine's remaining paths — no printer at all, a printer whose
-viewer registry already lists the child's tab, a printer whose
-broadcast raises, and an abandon with no parent agent to hand the
-children to — with real agents, real threads and the local stand-in
-model.
+viewer registry already lists the child's tab, and a printer whose
+broadcast raises — with real agents, real threads and the local
+stand-in model.  The parentless-abandon branch, which depends only
+on ``kiss.core`` and ``kiss.agents.sorcar``, lives in
+``kiss.tests.agents.sorcar.test_parallel_engine_branches``.
 """
 
 from __future__ import annotations
@@ -23,10 +24,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.sorcar_agent import (
-    _register_abandoned,
-    run_tasks_parallel,
-)
+from kiss.agents.sorcar.sorcar_agent import run_tasks_parallel
 from kiss.core.print_to_console import ConsolePrinter
 from kiss.tests.sorcar.parallel_agent_harness import (
     STANDIN_MODEL,
@@ -148,11 +146,6 @@ def test_engine_runs_with_a_printer_that_has_no_viewer_registry(
         server.stop()
 
     assert "plain" in results[0]
-
-
-def test_register_abandoned_ignores_a_parentless_fanout() -> None:
-    """A bare functional fan-out has no agent to hand children to."""
-    _register_abandoned(None, [], [], [])
 
 
 @pytest.mark.parametrize("printer_factory", [

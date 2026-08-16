@@ -5,7 +5,6 @@
 """Generate API.md from kiss package source code using AST introspection."""
 
 import ast
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -493,7 +492,6 @@ def main() -> int:
     modules = discover_modules()
     markdown = generate_markdown(modules)
     OUTPUT.write_text(markdown, encoding="utf-8")
-    subprocess.run(["uv", "run", "mdformat", str(OUTPUT)], check=True)
     print(f"Generated {OUTPUT.relative_to(PROJECT_ROOT)} ({len(modules)} modules)")
     return 0
 

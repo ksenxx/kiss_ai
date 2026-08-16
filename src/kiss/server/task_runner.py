@@ -47,6 +47,7 @@ from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import get_available_models
 from kiss.core.printer import parse_result_yaml
 from kiss.server import agent_state
+from kiss.server.agent_file import AgentFileError, apply_agent_overrides
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.tools_file import load_tools_file
@@ -376,6 +377,16 @@ class _TaskRunnerMixin:
         _tab_models: dict[str, str]
 
         def _tab_model(self, tab_id: str) -> str: ...
+        def _registry_update_tab(
+            self,
+            tab_id: str,
+            *,
+            chat_id: str | None = None,
+            title: str | None = None,
+            work_dir: str | None = None,
+            task_id: str | None = None,
+            create: bool = False,
+        ) -> None: ...
         def _any_non_wt_running(
             self, repo_root: Path | None = None,
         ) -> bool: ...
@@ -430,11 +441,78 @@ class _TaskRunnerMixin:
         tab_id = cmd.get("tabId", "")
         start_ms = int(time.time() * 1000)
         cmd["_start_ms"] = start_ms
+        # Agent-script overrides (wire field ``agentPath``) rewrite the
+        # run command's parameter fields, so they run FIRST — before
+        # any field is read, including the ``chatId`` that
+        # ``_resolve_run_state`` below consumes.  The script is
+        # untrusted user code, so it executes here on the task's worker
+        # thread (like a tools file), never on the dispatch loop.  A
+        # broken script must still fail the task with the
+        # status-running → result → status-end guarantees of the try
+        # below, so the raise is deferred until after the start status.
+        agent_file_error: AgentFileError | None = None
+        overridden_fields: set[str] = set()
+        try:
+            overridden_fields = apply_agent_overrides(cmd)
+        except AgentFileError as exc:
+            agent_file_error = exc
         client_task_id = _client_task_id_of(cmd)
         # Capture the state OBJECT up front: the printer bridge re-keys
         # it to the persisted task id mid-run, so a key lookup in the
         # finally below would miss and skip the end-of-run cleanup.
         state = self._resolve_run_state(cmd)
+        # The dispatch handler fixed ``state.chat_id`` from the
+        # client-sent ``chatId`` before this thread started, so a
+        # ``get_chat_id()`` override must be re-applied to the state —
+        # ``_run_task_inner`` binds the agent's chat from it.  Gated on
+        # the OVERRIDDEN set: without a ``get_chat_id()`` getter the
+        # state's chat id (possibly carried over from the tab's
+        # previous run) must stay untouched.
+        if overridden_fields & {"chatId", "prompt", "workDir"}:
+            override_chat_id: str | None = None
+            if "chatId" in overridden_fields:
+                # An empty override means "fresh chat" — mint the id
+                # here, exactly like the dispatch handler does for an
+                # empty client-sent ``chatId``, so the announced and
+                # the persisted chat agree.
+                override_chat_id = (
+                    str(cmd["chatId"] or "") or uuid.uuid4().hex
+                )
+                state.chat_id = override_chat_id
+                with self._state_lock:
+                    self._tab_chat_views[tab_id] = override_chat_id
+            # The dispatch handler already PINNED the tab's registry
+            # entry (chat, title, work dir) from the client-sent
+            # command, so re-pin whatever the script changed.
+            self._registry_update_tab(
+                tab_id,
+                chat_id=override_chat_id,
+                title=(
+                    cmd["prompt"] if "prompt" in overridden_fields
+                    else None
+                ),
+                work_dir=(
+                    # ``TabRegistry.update_tab`` keeps the current
+                    # value for an empty work dir, so an empty override
+                    # (meaning "the daemon's default") must be pinned
+                    # as the EFFECTIVE directory the run uses.
+                    (cmd["workDir"] or self.work_dir)
+                    if "workDir" in overridden_fields
+                    else None
+                ),
+            )
+            if override_chat_id is not None:
+                # The dispatch handler also already ANNOUNCED the tab's
+                # chat — a ``clear`` event carrying the pre-override
+                # chat id — so every client tracking the run's chat
+                # from that event (e.g. ``kiss.server.sorcar.run``)
+                # would report a chat this run never touches.
+                # Re-announce the overridden one.
+                self.printer.broadcast({
+                    "type": "clear",
+                    "chat_id": override_chat_id,
+                    "tabId": tab_id,
+                })
         try:
             status_start: dict[str, Any] = {
                 "type": "status",
@@ -445,6 +523,8 @@ class _TaskRunnerMixin:
             if client_task_id:
                 status_start["taskId"] = client_task_id
             self.printer.broadcast(status_start)
+            if agent_file_error is not None:
+                raise agent_file_error
             self._run_task_inner(cmd)
         except BaseException as exc:
             logger.warning(
