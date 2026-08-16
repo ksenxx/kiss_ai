@@ -5,8 +5,9 @@
 """Enforce the core-layer packaging invariant.
 
 Core-only test (it scans nothing but ``src/kiss/core``) moved here from
-``kiss.tests.test_layering_invariants``, which keeps the sorcar-layer
-check and imports the shared scanner helpers back from this module.
+the original root-level module; the sorcar-layer check lives in
+``kiss.tests.agents.sorcar.test_layering_invariants`` and imports the
+shared scanner helpers back from this module.
 
 The invariant (user-specified) MUST always hold: code in
 ``src/kiss/core/`` MUST NOT depend on any code outside
