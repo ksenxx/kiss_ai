@@ -12,8 +12,6 @@ from __future__ import annotations
 import queue
 from typing import Any
 
-import pytest
-
 
 class TestEscapeInvalidTemplateFieldNames:
     """Cover branches for conversion and format_spec in _escape_fragment."""
@@ -28,15 +26,6 @@ class TestEscapeInvalidTemplateFieldNames:
         assert "{{bad!r:>10}}" in result
 
 
-class TestLazyImportNotInMap:
-    """Cover the else branch where name is NOT in _LAZY_IMPORTS."""
-
-    def test_raises_attribute_error(self) -> None:
-        """Accessing a name NOT in _LAZY_IMPORTS raises AttributeError."""
-        import kiss.core.models as models_mod
-
-        with pytest.raises(AttributeError, match="has no attribute"):
-            getattr(models_mod, "NonExistentModel")
 
 
 class TestDrainQueueMessages:

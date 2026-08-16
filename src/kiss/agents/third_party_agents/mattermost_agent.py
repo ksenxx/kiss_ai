@@ -16,10 +16,13 @@ Usage::
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+import requests
 
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -27,6 +30,8 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+
+logger = logging.getLogger(__name__)
 
 _MATTERMOST_DIR = Path.home() / ".kiss" / "third_party_agents" / "mattermost"
 _config = ChannelConfig(
@@ -41,10 +46,20 @@ _config = ChannelConfig(
 class MattermostChannelBackend(ToolMethodBackend):
     """Channel backend for Mattermost REST API."""
 
-    def __init__(self) -> None:
+    def __init__(self, base_url: str = "", token: str = "") -> None:
+        """Initialize the backend.
+
+        Args:
+            base_url: Optional server base URL (e.g. ``https://mm.example.com:443``)
+                used for direct REST calls such as the typing indicator.  When
+                empty, it is derived from the stored config on :meth:`connect`.
+            token: Optional personal access token for direct REST calls.
+        """
         self._driver: Any = None
         self._last_post_time: int = 0
         self._connection_info: str = ""
+        self._base_url: str = base_url.rstrip("/")
+        self._token: str = token
 
     def connect(self) -> bool:
         """Authenticate with Mattermost using stored config."""
@@ -53,14 +68,18 @@ class MattermostChannelBackend(ToolMethodBackend):
             self._connection_info = "No Mattermost config found."
             return False
         try:
+            scheme = cfg.get("scheme", "https")
+            port = int(cfg.get("port", 443))
+            self._base_url = f"{scheme}://{cfg['url']}:{port}"
+            self._token = cfg["token"]
             from mattermostdriver import Driver
 
             self._driver = Driver(
                 {
                     "url": cfg["url"],
                     "token": cfg["token"],
-                    "port": int(cfg.get("port", 443)),
-                    "scheme": cfg.get("scheme", "https"),
+                    "port": port,
+                    "scheme": scheme,
                 }
             )
             self._driver.login()
@@ -114,6 +133,34 @@ class MattermostChannelBackend(ToolMethodBackend):
         if thread_ts:  # pragma: no branch
             post["root_id"] = thread_ts
         self._driver.posts.create_post(options=post)
+
+    def send_typing(self, channel_id: str, thread_ts: str = "") -> None:
+        """Show a best-effort typing indicator in a Mattermost channel.
+
+        POSTs ``/api/v4/users/me/typing`` with a bearer token so channel
+        members see the bot "typing" while a task is being worked on.
+        Failures (HTTP errors, unreachable server, missing configuration)
+        are logged and swallowed; this method never raises.
+
+        Args:
+            channel_id: Channel in which to show the typing indicator.
+            thread_ts: Root post ID when typing inside a thread; sent as
+                ``parent_id`` when non-empty.
+        """
+        if not self._base_url or not channel_id:
+            return
+        body: dict[str, Any] = {"channel_id": channel_id}
+        if thread_ts:
+            body["parent_id"] = thread_ts
+        try:
+            requests.post(
+                f"{self._base_url}/api/v4/users/me/typing",
+                json=body,
+                headers={"Authorization": f"Bearer {self._token}"},
+                timeout=10,
+            )
+        except Exception:
+            logger.debug("Mattermost typing indicator failed", exc_info=True)
 
     def list_teams(self) -> str:
         """List Mattermost teams.

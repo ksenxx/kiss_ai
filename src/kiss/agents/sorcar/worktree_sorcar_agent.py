@@ -198,6 +198,19 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         return self._wt.wt_dir if self._wt else None
 
     @property
+    def _wt_work_dir(self) -> Path | None:
+        """The task's working directory inside the worktree.
+
+        ``wt_dir`` plus the original work dir's offset from the repo
+        root; differs from ``wt_dir`` when the task was launched from a
+        subdirectory of the repo.  Falls back to ``wt_dir`` for legacy
+        snapshots without the field.
+        """
+        if self._wt is None:
+            return None
+        return self._wt.work_dir or self._wt.wt_dir
+
+    @property
     def _baseline_commit(self) -> str | None:
         """SHA of the baseline commit (user's dirty state), or ``None``."""
         return self._wt.baseline_commit if self._wt else None
@@ -1079,15 +1092,16 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                     GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
                     return None
 
+            wt_work_dir = wt_dir / offset
             self._wt = GitWorktree(
                 repo_root=repo,
                 branch=branch,
                 original_branch=original_branch,
                 wt_dir=wt_dir,
                 baseline_commit=baseline_commit,
+                work_dir=wt_work_dir,
             )
 
-            wt_work_dir = wt_dir / offset
             wt_work_dir.mkdir(parents=True, exist_ok=True)
             return wt_work_dir
 
@@ -1275,6 +1289,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 {
                     "type": "worktree_created",
                     "worktreeDir": str(self._wt_dir),
+                    "worktreeWorkDir": str(wt_work_dir),
                     "branch": self._wt_branch,
                 }
             )

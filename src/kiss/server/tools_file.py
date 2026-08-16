@@ -68,6 +68,82 @@ class ToolsFileError(Exception):
     """
 
 
+def execute_python_file(
+    raw_path: Any,
+    error_cls: type[Exception],
+    label: str,
+) -> dict[str, Any]:
+    """Import a caller-supplied Python file and return its namespace.
+
+    Shared daemon-side loader for the ``run`` command's caller-supplied
+    Python files (the ``toolsFile`` tools file and the ``agentPath``
+    agent script).  The source is compiled and executed directly (no
+    ``__pycache__`` read or write), so every run observes the file's
+    CURRENT contents and the caller's directory is never littered with
+    bytecode.
+
+    Args:
+        raw_path: The wire field naming the file — expected to be an
+            absolute path string, but treated as untrusted.
+        error_cls: The exception class to raise on any failure (e.g.
+            :exc:`ToolsFileError`), so each caller keeps its own
+            diagnostic type.
+        label: Human-readable name of the file kind (e.g. ``"tools
+            file"``), used in diagnostic messages.
+
+    Returns:
+        The executed module's namespace dict.
+
+    Raises:
+        Exception: An *error_cls* instance when *raw_path* is not a
+            string, is not the path of an existing ``.py`` file, or
+            names a module that raises at import time.
+    """
+    # Type-check FIRST: comparing or repr-ing an untrusted non-string
+    # object could run arbitrary code (raising ``__eq__``/``__repr__``),
+    # so nothing touches *raw_path* beyond isinstance until it is known
+    # to be a plain string.
+    if not isinstance(raw_path, str):
+        raise error_cls(
+            f"{label} field must be a path string, got "
+            f"{type(raw_path).__name__}"
+        )
+    path = Path(raw_path)
+    try:
+        is_py_file = path.suffix == ".py" and path.is_file()
+    except (OSError, ValueError):
+        # e.g. an embedded NUL byte makes ``is_file`` raise ValueError.
+        is_py_file = False
+    if not is_py_file:
+        raise error_cls(
+            f"{label} {raw_path!r} is not an existing Python (.py) file"
+        )
+    module_name = f"_kiss_client_file_{uuid.uuid4().hex}"
+    module = types.ModuleType(module_name)
+    module.__file__ = str(path)
+    sys.modules[module_name] = module
+    try:
+        source = path.read_text(encoding="utf-8")
+        code = compile(source, str(path), "exec", dont_inherit=True)
+        exec(code, module.__dict__)  # noqa: S102
+    except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
+        # BaseException (not just Exception/SystemExit): a file raising
+        # e.g. KeyboardInterrupt or SystemExit at import time is
+        # converted into *error_cls* like any other bad module — the
+        # task runner treats an escaping KeyboardInterrupt as a task
+        # CANCELLATION, so letting it propagate unwrapped would report
+        # a broken file as "task cancelled" instead of a task error
+        # with a diagnostic.
+        logger.warning("Failed to import %s %r", label, raw_path, exc_info=True)
+        raise error_cls(
+            f"{label} {raw_path!r} failed to import: "
+            f"{_safe_message(exc)}"
+        ) from exc
+    finally:
+        sys.modules.pop(module_name, None)
+    return module.__dict__
+
+
 def resolve_tools_file(tools: str | Path | None) -> str:
     """Validate a client-supplied tools path and resolve it absolutely.
 
@@ -138,53 +214,15 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
             ``get_tools()`` is missing, raises, or returns anything
             but a list/tuple of callables.
     """
-    # Type-check FIRST: comparing or repr-ing an untrusted non-string
-    # object could run arbitrary code (raising ``__eq__``/``__repr__``),
-    # so nothing touches *raw_path* beyond isinstance until it is known
-    # to be a plain string.
+    # ``None``/empty mean "no extra tools"; isinstance is checked FIRST
+    # (before the == comparison) because comparing an untrusted
+    # non-string object could run arbitrary code.
     if raw_path is None:
         return []
-    if not isinstance(raw_path, str):
-        raise ToolsFileError(
-            f"tools file field must be a path string, got "
-            f"{type(raw_path).__name__}"
-        )
-    if raw_path == "":
+    if isinstance(raw_path, str) and raw_path == "":
         return []
-    path = Path(raw_path)
-    try:
-        is_py_file = path.suffix == ".py" and path.is_file()
-    except (OSError, ValueError):
-        # e.g. an embedded NUL byte makes ``is_file`` raise ValueError.
-        is_py_file = False
-    if not is_py_file:
-        raise ToolsFileError(
-            f"tools file {raw_path!r} is not an existing Python (.py) file"
-        )
-    module_name = f"_kiss_tools_file_{uuid.uuid4().hex}"
-    module = types.ModuleType(module_name)
-    module.__file__ = str(path)
-    sys.modules[module_name] = module
-    try:
-        source = path.read_text(encoding="utf-8")
-        code = compile(source, str(path), "exec", dont_inherit=True)
-        exec(code, module.__dict__)  # noqa: S102
-    except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
-        # BaseException (not just Exception/SystemExit): a tools file
-        # raising e.g. KeyboardInterrupt or SystemExit at import time
-        # is converted into ToolsFileError like any other bad module —
-        # the task runner treats an escaping KeyboardInterrupt as a
-        # task CANCELLATION, so letting it propagate unwrapped would
-        # report a broken tools file as "task cancelled" instead of a
-        # task error with a diagnostic.
-        logger.warning("Failed to import toolsFile %r", raw_path, exc_info=True)
-        raise ToolsFileError(
-            f"tools file {raw_path!r} failed to import: "
-            f"{_safe_message(exc)}"
-        ) from exc
-    finally:
-        sys.modules.pop(module_name, None)
-    get_tools = module.__dict__.get("get_tools")
+    namespace = execute_python_file(raw_path, ToolsFileError, "tools file")
+    get_tools = namespace.get("get_tools")
     if not callable(get_tools):
         raise ToolsFileError(
             f"tools file {raw_path!r} must define a top-level "

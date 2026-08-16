@@ -69,23 +69,13 @@ def _dir_inside_worktree(work_dir: str, wt_dir: object) -> bool:
         return False
 
 
-_SUMMARY_GATE_REJECTION = (
-    "Error: tool call rejected — this step is a multiple of 5, so your "
-    "next tool call MUST be summary(description=\"natural language "
-    "summary in 5-10 sentences of what you did in the last 6 steps\"). "
-    "Call summary first, then retry this tool call."
-)
-
-
 def summary(description: str) -> str:
     """MANDATORY every 5 steps: summarize your last 6 steps of work.
 
     Your tool call on every step that is a multiple of 5 (step 5, 10,
     15, ...) MUST be this tool, BEFORE any other tool call (including
-    finish).  Any other tool call made on such a step is rejected
-    until summary has been called.  This requirement applies to every
-    task, no matter how simple, and is never overridden by the task
-    prompt.
+    finish).  This requirement applies to every task, no matter how
+    simple, and is never overridden by the task prompt.
 
     The tool itself performs no action: the chat webview groups the
     preceding six event panels under this call's panel and collapses
@@ -195,154 +185,14 @@ class ChatSorcarAgent(SorcarAgent):
         The ``summary`` tool lets the model periodically condense its
         recent activity; the chat webview reacts to the persisted
         ``tool_call`` event by nesting and collapsing the preceding
-        event panels (see ``media/main.js``).  Enforcement — on steps
-        divisible by 5 the ONLY accepted tool call is ``summary`` — is
-        implemented by :meth:`_summary_tool_guard`, the executor-level
-        :attr:`tool_call_guard` that also covers ``finish`` and any
-        caller-supplied extra tools.
+        event panels (see ``media/main.js``).  The every-5-steps
+        cadence is requested by the SYSTEM.md instructions and this
+        tool's docstring only — there is no mechanical enforcement.
 
         Returns:
             The base tools plus :func:`summary`.
         """
         return [*super()._get_tools(), summary]
-
-    @property
-    def tool_call_guard(self) -> Any:
-        """The per-tool-call guard copied onto each session executor.
-
-        Always returns :meth:`_summary_tool_guard`, which delegates to
-        any guard installed by parent classes (stored by the setter
-        below) and then enforces the every-5-steps ``summary`` gate.
-        A property for the same reason as :attr:`pre_step_hook`:
-        ``RelentlessAgent`` reads this attribute when wiring each
-        per-session executor, after ``_reset`` has assigned ``None``
-        through the setter.
-        """
-        return self._summary_tool_guard
-
-    @tool_call_guard.setter
-    def tool_call_guard(  # pyright: ignore[reportIncompatibleVariableOverride]
-        self, guard: Any
-    ) -> None:
-        """Store the parent-installed guard to delegate to.
-
-        Args:
-            guard: The guard installed by parent classes (or ``None``).
-        """
-        self._inner_tool_call_guard = guard
-
-    def _summary_tool_guard(self, name: str, args: dict[str, Any]) -> str | None:
-        """Reject every tool call except ``summary`` while one is due.
-
-        Consulted by ``KISSAgent._execute_step`` before EVERY tool
-        call — including ``finish`` (a blocked ``finish`` is not
-        terminal) and caller-supplied extra tools.  While the current
-        executor's ``_summary_due`` flag is set (armed by
-        :meth:`_summary_reminder_hook` at the top of every step
-        divisible by 5), any tool call other than ``summary`` is
-        blocked with an instructive error until the model calls
-        ``summary``; the executor prints blocked calls with
-        ``is_error=True``.  There is deliberately no escape hatch —
-        an ignored gate keeps rejecting (bounded by the task's
-        ``max_steps``/budget), so the summary reliably lands on the
-        boundary step.
-
-        Args:
-            name: The tool name the model is calling.
-            args: The tool call arguments (forwarded to the delegated
-                parent guard).
-
-        Returns:
-            ``None`` to allow the call, or the rejection message to
-            block it.
-        """
-        inner = getattr(self, "_inner_tool_call_guard", None)
-        if inner is not None:
-            blocked = inner(name, args)
-            if blocked is not None:
-                return str(blocked)
-        executor = getattr(self, "_current_executor", None)
-        if executor is None or not getattr(executor, "_summary_due", False):
-            return None
-        if name == "summary":
-            executor._summary_due = False
-            return None
-        return _SUMMARY_GATE_REJECTION
-
-    @property
-    def pre_step_hook(self) -> Any:
-        """The per-step hook copied onto each session executor.
-
-        Always returns :meth:`_summary_reminder_hook`, which first
-        delegates to whatever hook the parent classes installed (the
-        pending-user-messages drain from ``SorcarAgent.perform_task``,
-        stored by the setter below) and then enforces the
-        every-5-steps ``summary`` tool reminder.  Exposed as a
-        property because ``SorcarAgent.perform_task`` assigns
-        ``self.pre_step_hook`` immediately before
-        ``RelentlessAgent.perform_task`` copies it onto the inner
-        executor — wrapping at read time is the only seam that
-        composes with that assignment.
-        """
-        return self._summary_reminder_hook
-
-    @pre_step_hook.setter
-    def pre_step_hook(self, hook: Any) -> None:
-        """Store the parent-installed hook to delegate to.
-
-        Args:
-            hook: The hook installed by parent classes (or ``None``).
-        """
-        self._inner_pre_step_hook = hook
-
-    def _summary_reminder_hook(self, model: Any) -> None:
-        """Arm the summary gate on every step divisible by 5.
-
-        Runs at the top of every executor step.  Delegates to the
-        parent-installed hook first, then — whenever the step ABOUT to
-        run is a multiple of 5 — sets the executor's ``_summary_due``
-        flag (armed exactly once per boundary) and appends a user
-        message instructing the model to call
-        ``summary(description=...)`` recapping its last 6 steps.  The
-        SYSTEM.md instruction and reminder messages alone are not
-        reliably followed by every model (verified live: summaries
-        landed on steps 6/11/16 or were skipped entirely), so the
-        armed flag makes :meth:`_summary_tool_guard` reject every
-        other tool call (including ``finish``) until ``summary`` runs
-        — the summary tool call lands exactly on step 5, 10, 15, ....
-        An armed flag survives into later steps until the model
-        complies, so an ignored reminder can no longer skip a whole
-        5-step window.  The step number is GLOBAL (prior sub-sessions'
-        steps included), matching the step counter the UI displays.
-
-        Args:
-            model: The live model whose conversation receives the
-                reminder message.
-        """
-        inner = getattr(self, "_inner_pre_step_hook", None)
-        if inner is not None:
-            inner(model)
-        executor = getattr(self, "_current_executor", None)
-        if executor is None:
-            return
-        step = int(getattr(executor, "step_count", 0) or 0) + int(
-            getattr(self, "total_steps", 0) or 0
-        )
-        if step < 5 or step % 5:
-            return
-        if getattr(executor, "_summary_reminder_step", 0) == step:
-            return
-        executor._summary_reminder_step = step
-        executor._summary_due = True
-        model.add_message_to_conversation(
-            "user",
-            f"You are now on step {step}, a multiple of 5. Call the "
-            'summary tool NOW — summary(description="natural language '
-            'summary in 5-10 sentences of what you did in the last 6 '
-            'steps") — before any other tool call. Every other tool '
-            "call (including finish) will be rejected until you do. "
-            "After the summary, continue the task.",
-        )
 
     def new_chat(self) -> None:
         """Reset to a new chat session (equivalent to VS Code 'Clear').

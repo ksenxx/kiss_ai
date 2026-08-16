@@ -64,10 +64,28 @@ class DiscordChannelBackend(ToolMethodBackend):
         )
         return resp.json()
 
-    def _post(self, path: str, json_body: dict | None = None) -> Any:  # type: ignore[type-arg]
+    def _post(  # type: ignore[type-arg]
+        self, path: str, json_body: dict | None = None, raise_on_error: bool = False
+    ) -> Any:
+        """POST *json_body* to the Discord API and return the parsed JSON.
+
+        Args:
+            path: API path appended to the api base (e.g. ``/channels/1/messages``).
+            json_body: Optional JSON payload for the request body.
+            raise_on_error: When True, raise ``requests.HTTPError`` on any
+                non-2xx response instead of returning the error body. Transport
+                failures (e.g. unreachable server) always raise. Default False
+                preserves the tool-facing callers' return-the-error-body
+                contract.
+
+        Returns:
+            The decoded JSON response body.
+        """
         resp = requests.post(
             f"{self._api_base}{path}", headers=self._headers(), json=json_body, timeout=30
         )
+        if raise_on_error:
+            resp.raise_for_status()
         return resp.json()
 
     def _delete(self, path: str) -> Any:  # type: ignore[type-arg]
@@ -168,11 +186,52 @@ class DiscordChannelBackend(ToolMethodBackend):
             return [], oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Send a Discord message, optionally as a reply to *thread_ts*."""
+        """Send a Discord message, optionally as a reply to *thread_ts*.
+
+        Raises on transport failure and on non-2xx API responses so the
+        ChannelRunner's delivery ledger sees failed sends and can retry
+        them instead of silently marking them delivered.
+
+        Args:
+            channel_id: Channel snowflake ID to post into.
+            text: Message content.
+            thread_ts: Optional message ID to reply to.
+
+        Raises:
+            requests.HTTPError: On a non-2xx Discord API response.
+            requests.RequestException: On transport failure (e.g. the
+                server is unreachable).
+        """
         body: dict[str, Any] = {"content": text}
         if thread_ts:
             body["message_reference"] = {"message_id": thread_ts}
-        self._post(f"/channels/{channel_id}/messages", body)
+        self._post(f"/channels/{channel_id}/messages", body, raise_on_error=True)
+
+    def send_typing(self, channel_id: str, thread_ts: str = "") -> None:
+        """Show a typing indicator in a Discord channel (best-effort).
+
+        POSTs the Discord ``/channels/{channel_id}/typing`` REST endpoint,
+        which displays "bot is typing…" for a few seconds. Any network or
+        API error (including non-2xx responses and unreachable servers) is
+        swallowed so a failed indicator can never break message handling.
+
+        Args:
+            channel_id: Channel snowflake ID to show the indicator in.
+            thread_ts: Reply-target message ID, accepted for interface
+                parity with :meth:`send_message`. Ignored here because
+                ``send_message`` treats thread ids as message references
+                inside *channel_id* (not as separate channels), so the
+                typing indicator belongs to *channel_id* as well.
+        """
+        del thread_ts
+        try:
+            requests.post(
+                f"{self._api_base}/channels/{channel_id}/typing",
+                headers=self._headers(),
+                timeout=30,
+            )
+        except Exception:
+            pass
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Return True if *msg* was sent by this bot's own user.

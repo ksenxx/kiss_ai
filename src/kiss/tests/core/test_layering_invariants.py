@@ -2,22 +2,21 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Enforce the package layering invariants.
+"""Enforce the core-layer packaging invariant.
 
-Two invariants (user-specified) MUST always hold:
+Core-only test (it scans nothing but ``src/kiss/core``) moved here from
+the original root-level module; the sorcar-layer check lives in
+``kiss.tests.agents.sorcar.test_layering_invariants`` and imports the
+shared scanner helpers back from this module.
 
-1. Code in ``src/kiss/core/`` MUST NOT depend on any code outside
-   ``src/kiss/core/``.
-2. Code in ``src/kiss/agents/sorcar/`` MUST NOT depend on any code
-   outside ``src/kiss/agents/sorcar/`` except code in
-   ``src/kiss/core/``.
-
-"Depend on" means *any* import of a first-party ``kiss`` module —
-top-level, lazy (inside a function), or conditional — so this test
-walks the full AST of every Python file in the two layers and resolves
-every ``import`` / ``from ... import`` statement (including relative
-imports) to an absolute ``kiss.*`` module path.  Third-party and
-standard-library imports are unconstrained.
+The invariant (user-specified) MUST always hold: code in
+``src/kiss/core/`` MUST NOT depend on any code outside
+``src/kiss/core/``.  "Depend on" means *any* import of a first-party
+``kiss`` module — top-level, lazy (inside a function), or conditional —
+so the scanner walks the full AST of every Python file in the layer and
+resolves every ``import`` / ``from ... import`` statement (including
+relative imports) to an absolute ``kiss.*`` module path.  Third-party
+and standard-library imports are unconstrained.
 """
 
 from __future__ import annotations
@@ -25,7 +24,11 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-SRC_ROOT = Path(__file__).resolve().parents[2]
+import kiss
+
+# Located via the installed ``kiss`` package rather than ``__file__`` so
+# the paths stay correct no matter where this test module lives.
+SRC_ROOT = Path(kiss.__file__).resolve().parents[1]
 KISS_ROOT = SRC_ROOT / "kiss"
 
 
@@ -202,18 +205,5 @@ def test_core_depends_only_on_core() -> None:
     violations = _violations(KISS_ROOT / "core", ("kiss.core",))
     assert not violations, (
         "kiss.core must not depend on code outside src/kiss/core/:\n"
-        + "\n".join(violations)
-    )
-
-
-def test_sorcar_depends_only_on_sorcar_and_core() -> None:
-    """Sorcar code must import only ``kiss.core`` and ``kiss.agents.sorcar``."""
-    violations = _violations(
-        KISS_ROOT / "agents" / "sorcar",
-        ("kiss.core", "kiss.agents.sorcar"),
-    )
-    assert not violations, (
-        "kiss.agents.sorcar must not depend on code outside "
-        "src/kiss/agents/sorcar/ and src/kiss/core/:\n"
         + "\n".join(violations)
     )

@@ -8,10 +8,11 @@
 // webapp (same main.js, remote-chat body class).  Every scrollable
 // subpanel of an event panel (thinking, bash output, thoughts/llm
 // panel, tool bodies) must also scroll to its own end as streamed text
-// appears inside it.  While a task is running, a user scrolling the
-// chat up by at least 1/8th of its visible height DISABLES the outer
-// auto-scroll; it RESUMES once the user scrolls back to the bottom.
-// Background-tab events must never touch the visible chat's scroll.
+// appears inside it.  ANY user scroll away from the bottom of the chat
+// DISABLES the outer auto-scroll — the chat must never scroll to the
+// end unless the user is at the end — and auto-scroll RESUMES once the
+// user scrolls back to the bottom.  Background-tab events must never
+// touch the visible chat's scroll.
 
 'use strict';
 
@@ -143,9 +144,9 @@ const label = remote => (remote ? 'remote webapp' : 'extension webview');
 
 // --------------------------------------------------------------------
 // Outer chat: streamed events pin the chat to the end of the latest
-// event panel while the user stays near the bottom.  Scrolling up by
-// at least 1/8th of the visible height disables auto-scroll; it
-// resumes once the user scrolls back to the bottom.
+// event panel while the user stays at the bottom.  Any scroll away
+// from the bottom disables auto-scroll; it resumes once the user
+// scrolls back to the bottom.
 // --------------------------------------------------------------------
 
 async function testOuterChatFollowsLocksAndResumes(remote) {
@@ -168,24 +169,23 @@ async function testOuterChatFollowsLocksAndResumes(remote) {
       '): streamed bash output did not auto-scroll the chat to the end',
   );
 
-  // A small user scroll up (less than 1/8th of the visible height)
-  // must NOT disable auto-scroll.
-  userScroll(win, O, bottom(geo) - 40);
+  // Even a SMALL user scroll up must DISABLE auto-scroll: the chat
+  // must never scroll to the end unless the user is at the end.
+  const smallTop = bottom(geo) - 40;
+  userScroll(win, O, smallTop);
   send(win, {type: 'thinking_start'});
   geo.sh += 300;
   send(win, {type: 'thinking_delta', text: 'b'.repeat(200)});
   await nextFrames(win);
   assert.strictEqual(
     O.scrollTop,
-    bottom(geo),
+    smallTop,
     'BUG (' +
       label(remote) +
-      '): a user scroll-up smaller than 1/8th of the viewport ' +
-      'disabled auto-scroll',
+      '): a small user scroll-up did not disable auto-scroll',
   );
 
-  // Scrolling up by at least 1/8th of the visible height must DISABLE
-  // auto-scroll while the task is running.
+  // A larger scroll up keeps auto-scroll disabled too.
   const lockedTop = bottom(geo) - 120;
   userScroll(win, O, lockedTop);
   geo.sh += 400;
@@ -196,8 +196,8 @@ async function testOuterChatFollowsLocksAndResumes(remote) {
     lockedTop,
     'BUG (' +
       label(remote) +
-      '): streaming auto-scrolled the chat although the user scrolled ' +
-      'up at least 1/8th of the viewport',
+      '): streaming auto-scrolled the chat although the user had ' +
+      'scrolled up',
   );
 
   // Non-streamed events must not move the locked chat either.
@@ -462,8 +462,8 @@ async function testThoughtsPanelAutoScrolls(remote) {
   );
 
   // Finalizing the text (markdown re-render) must keep the thoughts
-  // subpanel at its end; the outer chat, which the user scrolled up by
-  // at least 1/8th of its height, must stay where the user left it.
+  // subpanel at its end; the outer chat, which the user scrolled up,
+  // must stay where the user left it.
   userScroll(win, lp, 70);
   userScroll(win, O, 90);
   send(win, {type: 'text_end'});
@@ -554,11 +554,13 @@ async function testBackgroundTabDoesNotScrollActiveChat(remote) {
     task_id: 9,
     events: [],
   });
-  // Stay within 1/8th of the bottom so the visible chat's auto-scroll
-  // remains ENABLED: background-tab streaming must still never move
-  // the visible chat.
-  const pos = bottom(geoO) - 30;
+  // Stay AT the bottom so the visible chat's auto-scroll remains
+  // ENABLED, then grow the chat: background-tab streaming must still
+  // never move the visible chat, because its events target a detached
+  // fragment, not the on-screen transcript.
+  const pos = bottom(geoO);
   userScroll(win, O, pos);
+  geoO.sh += 400;
 
   // Streamed events for the background tab (thinking, bash output,
   // text) must not scroll the visible chat.
@@ -733,9 +735,8 @@ async function testBannersActionResultsAndFollowupsRespectLock(remote) {
       'to the bottom',
   );
 
-  // A small scroll up (<1/8th) keeps auto-scroll enabled for action
-  // result panels.
-  userScroll(win, O, bottom(geoO) - 20);
+  // At the bottom, auto-scroll is enabled for action result panels.
+  userScroll(win, O, bottom(geoO));
   geoO.sh += 100;
   send(win, {type: 'worktree_result', success: true, message: 'Merged ok.'});
   assert.ok(
@@ -849,14 +850,15 @@ async function testTabRestoreLandsAtEnd(remote) {
 }
 
 // --------------------------------------------------------------------
-// The scroll-lock threshold is exactly 1/8th of the chat's visible
-// height, and the lock only releases at the very bottom.
+// The scroll lock engages on ANY scroll away from the bottom (a 1px
+// tolerance absorbs fractional scroll positions), and it only releases
+// at the very bottom.
 // --------------------------------------------------------------------
 
 async function testScrollLockThresholdAndResume(remote) {
   const {win, posted} = makeWebview({remote});
   const O = win.document.getElementById('output');
-  const geo = {sh: 2000, ch: 400}; // 1/8th of the viewport = 50px
+  const geo = {sh: 2000, ch: 400};
   fakeGeometry(O, geo);
   startRunningTask(win, posted);
 
@@ -869,8 +871,9 @@ async function testScrollLockThresholdAndResume(remote) {
     'streaming must pin the chat to the bottom first (' + label(remote) + ')',
   );
 
-  // 49px above the bottom (just below 1/8th): auto-scroll stays on.
-  userScroll(win, O, bottom(geo) - 49);
+  // 1px above the bottom is within the fractional-scroll tolerance:
+  // auto-scroll stays on.
+  userScroll(win, O, bottom(geo) - 1);
   geo.sh += 100;
   send(win, {type: 'system_output', text: 'line 2\n'});
   await nextFrames(win);
@@ -879,12 +882,12 @@ async function testScrollLockThresholdAndResume(remote) {
     bottom(geo),
     'BUG (' +
       label(remote) +
-      '): a scroll-up just below the 1/8th threshold disabled ' +
+      '): a 1px scroll offset (fractional-scroll tolerance) disabled ' +
       'auto-scroll',
   );
 
-  // Exactly 1/8th above the bottom: auto-scroll must be disabled.
-  const lockedTop = bottom(geo) - 50;
+  // 2px above the bottom: auto-scroll must be disabled.
+  const lockedTop = bottom(geo) - 2;
   userScroll(win, O, lockedTop);
   geo.sh += 100;
   send(win, {type: 'system_output', text: 'line 3\n'});
@@ -894,20 +897,18 @@ async function testScrollLockThresholdAndResume(remote) {
     lockedTop,
     'BUG (' +
       label(remote) +
-      '): scrolling up by exactly 1/8th of the viewport did not ' +
-      'disable auto-scroll',
+      '): scrolling up away from the bottom did not disable auto-scroll',
   );
 
-  // Coming within 2px of the bottom is still not "at the bottom":
-  // the lock stays engaged.
-  const almost = bottom(geo) - 2;
-  userScroll(win, O, almost);
+  // Scrolling further up keeps the lock engaged.
+  const higher = bottom(geo) - 300;
+  userScroll(win, O, higher);
   geo.sh += 100;
   send(win, {type: 'system_output', text: 'line 4\n'});
   await nextFrames(win);
   assert.strictEqual(
     O.scrollTop,
-    almost,
+    higher,
     'BUG (' +
       label(remote) +
       '): auto-scroll resumed before the user reached the bottom',
@@ -928,7 +929,7 @@ async function testScrollLockThresholdAndResume(remote) {
   );
   win.close();
   console.log(
-    '  ok - lock engages at exactly 1/8th of the viewport and ' +
+    '  ok - lock engages on any scroll away from the bottom and ' +
       'releases at the bottom (' +
       label(remote) +
       ')',
@@ -956,7 +957,9 @@ async function testSendMessageKeepsLock(remote) {
   assert.strictEqual(
     O.scrollTop,
     30,
-    'precondition (' + label(remote) + '): the user scroll lock must be engaged',
+    'precondition (' +
+      label(remote) +
+      '): the user scroll lock must be engaged',
   );
 
   // The user submits a follow-up message while the task is running and
@@ -1003,11 +1006,13 @@ async function testSendMessageKeepsLock(remote) {
 }
 
 // --------------------------------------------------------------------
-// Scrolling up while NO task is running must not engage the lock: a
-// task started afterwards streams with auto-scroll enabled.
+// Scrolling up while NO task is running engages the lock too: a task
+// started afterwards (without this tab's own `clear`, e.g. a viewer
+// task synchronized from another window) must not yank the reading
+// user to the end; auto-scroll starts once the user is at the bottom.
 // --------------------------------------------------------------------
 
-async function testIdleScrollDoesNotLock(remote) {
+async function testIdleScrollAlsoLocks(remote) {
   const {win, posted} = makeWebview({remote});
   const O = win.document.getElementById('output');
   const geo = {sh: 3000, ch: 500};
@@ -1019,7 +1024,7 @@ async function testIdleScrollDoesNotLock(remote) {
   userScroll(win, O, 30);
 
   // A task then starts (e.g. synchronized from another window): the
-  // idle scroll must not have engaged the lock, so streaming follows.
+  // chat must not scroll to the end while the user is reading above.
   send(win, {
     type: 'status',
     running: true,
@@ -1031,15 +1036,30 @@ async function testIdleScrollDoesNotLock(remote) {
   await nextFrames(win);
   assert.strictEqual(
     O.scrollTop,
+    30,
+    'BUG (' +
+      label(remote) +
+      '): a task started while the user was scrolled up yanked the ' +
+      'chat to the end',
+  );
+
+  // Scrolling to the bottom enables auto-scroll for the new task.
+  userScroll(win, O, bottom(geo));
+  geo.sh += 100;
+  send(win, {type: 'text_delta', text: 'more '});
+  await nextFrames(win);
+  assert.strictEqual(
+    O.scrollTop,
     bottom(geo),
     'BUG (' +
       label(remote) +
-      '): a scroll-up while no task was running engaged a stale lock ' +
-      'that suppressed auto-scroll of the next task',
+      '): auto-scroll did not start after the user scrolled to the ' +
+      'bottom',
   );
   win.close();
   console.log(
-    '  ok - an idle scroll-up does not engage the scroll lock (' +
+    '  ok - an idle scroll-up keeps the chat where the user is when a ' +
+      'task starts (' +
       label(remote) +
       ')',
   );
@@ -1090,6 +1110,157 @@ async function testClearEventResetsLock(remote) {
   );
 }
 
+// --------------------------------------------------------------------
+// Reading a PREVIOUS task spliced into the same chat: event panels
+// generated by the running task must never scroll the chat to the end
+// while the user is reading above; auto-scroll resumes only once the
+// user scrolls to the end of the chat.
+// --------------------------------------------------------------------
+
+async function testReadingPreviousTaskNeverYanked(remote) {
+  const {win, posted} = makeWebview({remote});
+  const O = win.document.getElementById('output');
+  const geo = {sh: 2000, ch: 400};
+  fakeGeometry(O, geo);
+  const tabId = startRunningTask(win, posted);
+
+  // The running task streams; the chat follows its end.
+  send(win, {type: 'setTaskText', text: 'current task', tabId: tabId});
+  send(win, {type: 'tool_call', name: 'Bash', command: 'make -j'});
+  send(win, {type: 'system_output', text: 'building…\n'});
+  await nextFrames(win);
+  assert.strictEqual(
+    O.scrollTop,
+    bottom(geo),
+    'precondition (' + label(remote) + '): streaming must follow the end',
+  );
+
+  // The user scrolls to the top and the previous task of the same chat
+  // is spliced in above the running task's transcript.
+  userScroll(win, O, 0);
+  send(win, {
+    type: 'adjacent_task_events',
+    tabId: tabId,
+    direction: 'prev',
+    task: 'previous task',
+    task_id: 3,
+    events: [
+      {type: 'prompt', text: 'earlier request'},
+      {type: 'text_delta', text: 'earlier answer'},
+      {type: 'text_end'},
+      {type: 'result', summary: 'earlier done', success: true},
+    ],
+  });
+  assert.ok(
+    O.querySelector('.adjacent-task'),
+    'the previous task must be spliced into the chat',
+  );
+  geo.sh += 800;
+
+  // The user reads the previous task while the running task keeps
+  // generating event panels of every kind: the chat must not move.
+  userScroll(win, O, 120);
+  geo.sh += 100;
+  send(win, {type: 'tool_call', name: 'Read', path: '/tmp/f'});
+  geo.sh += 100;
+  send(win, {type: 'tool_result', content: 'file body', is_error: false});
+  geo.sh += 100;
+  send(win, {type: 'thinking_start'});
+  send(win, {type: 'thinking_delta', text: 'pondering'});
+  send(win, {type: 'thinking_end'});
+  geo.sh += 100;
+  send(win, {type: 'text_delta', text: 'answer '});
+  send(win, {type: 'text_end'});
+  geo.sh += 100;
+  send(win, {type: 'warning', message: 'heads up'});
+  geo.sh += 100;
+  send(win, {type: 'system_output', text: 'tail\n'});
+  await nextFrames(win);
+  assert.strictEqual(
+    O.scrollTop,
+    120,
+    'BUG (' +
+      label(remote) +
+      "): the running task's event panels scrolled the chat to the " +
+      'end while the user was reading a previous task',
+  );
+
+  // Only scrolling to the end of the chat resumes auto-scroll.
+  userScroll(win, O, bottom(geo));
+  geo.sh += 100;
+  send(win, {type: 'system_output', text: 'more tail\n'});
+  await nextFrames(win);
+  assert.strictEqual(
+    O.scrollTop,
+    bottom(geo),
+    'BUG (' +
+      label(remote) +
+      '): auto-scroll did not resume after the user scrolled to the ' +
+      'end of the chat',
+  );
+  win.close();
+  console.log(
+    '  ok - reading a previous task is never yanked to the end (' +
+      label(remote) +
+      ')',
+  );
+}
+
+// --------------------------------------------------------------------
+// A content shrink (e.g. older panels collapsing) can land the chat at
+// its bottom WITHOUT the browser firing any scroll event (the scroll
+// position itself does not change).  A lock cached before the shrink
+// is stale: the next event must release it and resume auto-scroll.
+// --------------------------------------------------------------------
+
+async function testCollapseShrinkReleasesStaleLock(remote) {
+  const {win, posted} = makeWebview({remote});
+  const O = win.document.getElementById('output');
+  const geo = {sh: 3000, ch: 500};
+  fakeGeometry(O, geo);
+  startRunningTask(win, posted);
+
+  send(win, {type: 'text_delta', text: 'tall content '});
+  await nextFrames(win);
+
+  // The user scrolls to the very top: the lock engages.
+  userScroll(win, O, 0);
+  geo.sh += 100;
+  send(win, {type: 'text_delta', text: 'more '});
+  await nextFrames(win);
+  assert.strictEqual(
+    O.scrollTop,
+    0,
+    'precondition (' + label(remote) + '): the lock must be engaged',
+  );
+
+  // Panels collapse: the chat shrinks until it is not scrollable at
+  // all.  scrollTop is already 0, so the browser fires NO scroll event
+  // — the cached lock is now stale.
+  geo.sh = 400;
+
+  // The next event panel must release the stale lock (the chat is at
+  // its bottom) instead of suppressing auto-scroll forever.
+  send(win, {type: 'tool_call', name: 'Bash', command: 'true'});
+  geo.sh = 1200;
+  send(win, {type: 'system_output', text: 'growing again\n'});
+  await nextFrames(win);
+  assert.strictEqual(
+    O.scrollTop,
+    bottom(geo),
+    'BUG (' +
+      label(remote) +
+      '): a stale lock left behind by a content shrink (no scroll ' +
+      'event) kept suppressing auto-scroll',
+  );
+  win.close();
+  console.log(
+    '  ok - a content shrink to the bottom releases a stale lock (' +
+      label(remote) +
+      ')',
+  );
+}
+
 async function main() {
   for (const remote of [false, true]) {
     await testOuterChatFollowsLocksAndResumes(remote);
@@ -1104,8 +1275,10 @@ async function main() {
     await testTabRestoreLandsAtEnd(remote);
     await testScrollLockThresholdAndResume(remote);
     await testSendMessageKeepsLock(remote);
-    await testIdleScrollDoesNotLock(remote);
+    await testIdleScrollAlsoLocks(remote);
     await testClearEventResetsLock(remote);
+    await testReadingPreviousTaskNeverYanked(remote);
+    await testCollapseShrinkReleasesStaleLock(remote);
   }
   console.log('chatAutoScroll.test.js: all tests passed');
 }
