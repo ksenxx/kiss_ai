@@ -1119,6 +1119,354 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertEqual(reply["workDir"], "")
             self.assertEqual(reply["tabId"], "")
 
+    async def test_ws_check_paths_pending_worktree_fallback(self) -> None:
+        """A path existing only in the tab's pending worktree resolves.
+
+        A finished worktree task keeps its committed artifacts on the
+        un-merged branch: the file lives under
+        ``<repo>/.kiss-worktrees/<branch>/`` but not under the tab's
+        workDir until the merge.  ``checkPaths`` must report such a
+        path as existing for THAT tab only, ``openFile`` must serve the
+        worktree copy, and a successful ``worktree_result`` (merge or
+        discard finished) must drop the fallback so the workDir verdict
+        wins again.
+        """
+        work_dir = self.server.work_dir
+        wt_dir = Path(work_dir) / ".kiss-worktrees" / "kiss_wt-1"
+        (wt_dir / "reports").mkdir(parents=True)
+        report = wt_dir / "reports" / "analysis.html"
+        report.write_text("<h1>report</h1>\n")
+
+        # The daemon announces the finished task's pending worktree
+        # with the tab already stamped (merge_flow's worktree_done).
+        self.server._printer.broadcast(
+            {
+                "type": "worktree_done",
+                "branch": "kiss/wt-1",
+                "worktreeDir": str(wt_dir),
+                "tabId": "wt-tab",
+            }
+        )
+
+        async def recv_type(ws: Any, wanted: str) -> dict[str, Any]:
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev: dict[str, Any] = json.loads(raw)
+                if ev.get("type") == wanted:
+                    return ev
+            raise AssertionError(f"no {wanted} reply received")
+
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            query = {
+                "type": "checkPaths",
+                "paths": ["reports/analysis.html"],
+                "workDir": work_dir,
+                "tabId": "wt-tab",
+            }
+            await ws.send(json.dumps(query))
+            reply = await recv_type(ws, "pathsExist")
+            self.assertEqual(
+                reply["results"],
+                {"reports/analysis.html": True},
+                "path in the tab's pending worktree must resolve",
+            )
+
+            await ws.send(json.dumps({**query, "tabId": "other-tab"}))
+            reply = await recv_type(ws, "pathsExist")
+            self.assertEqual(
+                reply["results"],
+                {"reports/analysis.html": False},
+                "another tab must not see this tab's worktree",
+            )
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "openFile",
+                        "path": "reports/analysis.html",
+                        "workDir": work_dir,
+                        "tabId": "wt-tab",
+                    }
+                )
+            )
+            content = await recv_type(ws, "fileContent")
+            self.assertEqual(content["content"], "<h1>report</h1>\n")
+            self.assertEqual(content["path"], str(report.resolve()))
+
+            # Merge finished: the fallback is dropped, and the file is
+            # still absent from the workDir, so the path is dead again.
+            self.server._printer.broadcast(
+                {
+                    "type": "worktree_result",
+                    "success": True,
+                    "message": "Merged branch 'kiss/wt-1'.",
+                    "tabId": "wt-tab",
+                }
+            )
+            await ws.send(json.dumps(query))
+            reply = await recv_type(ws, "pathsExist")
+            self.assertEqual(
+                reply["results"],
+                {"reports/analysis.html": False},
+                "a finished worktree_result must drop the fallback",
+            )
+
+    async def test_ws_check_paths_nested_workdir_worktree_fallback(self) -> None:
+        """A nested-workDir tab resolves via the worktree's nested cwd.
+
+        A task launched from a subdirectory of the repo runs in
+        ``<wt-root>/<offset>`` inside its worktree, so its relative
+        artifact paths live there — not directly under the worktree
+        root.  ``worktree_created``/``worktree_done`` publish that cwd
+        as ``worktreeWorkDir`` and the fallback must prefer it,
+        otherwise ``checkPaths``/``openFile`` miss the artifact.
+        """
+        repo_root = self.server.work_dir
+        work_dir = Path(repo_root) / "packages" / "app"
+        work_dir.mkdir(parents=True)
+        wt_root = Path(repo_root) / ".kiss-worktrees" / "kiss_wt-nested"
+        wt_work_dir = wt_root / "packages" / "app"
+        report = wt_work_dir / "reports" / "analysis.html"
+        report.parent.mkdir(parents=True)
+        report.write_text("<h1>nested report</h1>\n")
+
+        self.server._printer.broadcast(
+            {
+                "type": "worktree_done",
+                "branch": "kiss/wt-nested",
+                "worktreeDir": str(wt_root),
+                "worktreeWorkDir": str(wt_work_dir),
+                "tabId": "nested-tab",
+            }
+        )
+        self.assertEqual(
+            self.server._printer.worktree_dir_for_tab("nested-tab"),
+            str(wt_work_dir),
+            "worktreeWorkDir must win over the worktree root",
+        )
+
+        async def recv_type(ws: Any, wanted: str) -> dict[str, Any]:
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev: dict[str, Any] = json.loads(raw)
+                if ev.get("type") == wanted:
+                    return ev
+            raise AssertionError(f"no {wanted} reply received")
+
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "checkPaths",
+                        "paths": ["reports/analysis.html"],
+                        "workDir": str(work_dir),
+                        "tabId": "nested-tab",
+                    }
+                )
+            )
+            reply = await recv_type(ws, "pathsExist")
+            self.assertEqual(
+                reply["results"],
+                {"reports/analysis.html": True},
+                "a nested-workDir artifact must resolve via worktreeWorkDir",
+            )
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "openFile",
+                        "path": "reports/analysis.html",
+                        "workDir": str(work_dir),
+                        "tabId": "nested-tab",
+                    }
+                )
+            )
+            content = await recv_type(ws, "fileContent")
+            self.assertEqual(content["content"], "<h1>nested report</h1>\n")
+            self.assertEqual(content["path"], str(report.resolve()))
+
+    async def test_ws_replay_task_events_restores_worktree_fallback(self) -> None:
+        """A ``task_events`` replay restores the worktree fallback.
+
+        Session replay for a live tab first drops the tab's printer
+        state (``cleanup_tab``), and while the task is still running
+        nothing re-emits ``worktree_done`` — the historical
+        ``worktree_created`` nested in the replayed transcript is the
+        only copy of the pending worktree dir.  Tracking must scan the
+        nested events (in order, so a replayed successful
+        ``worktree_result`` still retires the entry).
+        """
+        work_dir = self.server.work_dir
+        wt_dir = Path(work_dir) / ".kiss-worktrees" / "kiss_wt-replay"
+        (wt_dir / "reports").mkdir(parents=True)
+        (wt_dir / "reports" / "live.html").write_text("<h1>live</h1>\n")
+
+        printer = self.server._printer
+        printer.broadcast(
+            {
+                "type": "worktree_created",
+                "worktreeDir": str(wt_dir),
+                "branch": "kiss/wt-replay",
+                "tabId": "replay-tab",
+            }
+        )
+        printer.cleanup_tab("replay-tab")
+        self.assertEqual(printer.worktree_dir_for_tab("replay-tab"), "")
+
+        # The replay envelope of a still-running task restores it.
+        printer.broadcast(
+            {
+                "type": "task_events",
+                "events": [
+                    {"type": "prompt", "text": "do work"},
+                    {
+                        "type": "worktree_created",
+                        "worktreeDir": str(wt_dir),
+                        "branch": "kiss/wt-replay",
+                    },
+                ],
+                "task": "do work",
+                "tabId": "replay-tab",
+            }
+        )
+        self.assertEqual(
+            printer.worktree_dir_for_tab("replay-tab"),
+            str(wt_dir),
+            "a replayed worktree_created must restore the fallback",
+        )
+
+        async def recv_type(ws: Any, wanted: str) -> dict[str, Any]:
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev: dict[str, Any] = json.loads(raw)
+                if ev.get("type") == wanted:
+                    return ev
+            raise AssertionError(f"no {wanted} reply received")
+
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "checkPaths",
+                        "paths": ["reports/live.html"],
+                        "workDir": work_dir,
+                        "tabId": "replay-tab",
+                    }
+                )
+            )
+            reply = await recv_type(ws, "pathsExist")
+            self.assertEqual(
+                reply["results"],
+                {"reports/live.html": True},
+                "the restored fallback must resolve the live artifact",
+            )
+
+        # A replay of an already-merged task nets out to no fallback.
+        printer.broadcast(
+            {
+                "type": "task_events",
+                "events": [
+                    {
+                        "type": "worktree_created",
+                        "worktreeDir": str(wt_dir),
+                        "branch": "kiss/wt-replay",
+                    },
+                    {
+                        "type": "worktree_result",
+                        "success": True,
+                        "message": "Merged branch 'kiss/wt-replay'.",
+                    },
+                ],
+                "task": "do work",
+                "tabId": "replay-tab",
+            }
+        )
+        self.assertEqual(
+            printer.worktree_dir_for_tab("replay-tab"),
+            "",
+            "a replayed successful worktree_result must retire the entry",
+        )
+
+    async def test_ws_close_tab_drops_worktree_fallback(self) -> None:
+        """Closing a tab releases its pending-worktree fallback entry.
+
+        A tab closed without merging never receives a successful
+        ``worktree_result``, so ``WebPrinter.cleanup_tab`` must drop the
+        recorded worktree dir instead of leaking it for the daemon
+        lifetime — and instead of serving it as a stale fallback to a
+        later client that reuses the tab id.
+        """
+        work_dir = self.server.work_dir
+        wt_dir = Path(work_dir) / ".kiss-worktrees" / "kiss_wt-close"
+        (wt_dir / "reports").mkdir(parents=True)
+        (wt_dir / "reports" / "closed.html").write_text("<h1>x</h1>\n")
+
+        self.server._printer.broadcast(
+            {
+                "type": "worktree_done",
+                "branch": "kiss/wt-close",
+                "worktreeDir": str(wt_dir),
+                "tabId": "close-tab",
+            }
+        )
+        self.assertEqual(
+            self.server._printer.worktree_dir_for_tab("close-tab"),
+            str(wt_dir),
+        )
+
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({"type": "closeTab", "tabId": "close-tab"}))
+            deadline = asyncio.get_event_loop().time() + 5
+            while (
+                self.server._printer.worktree_dir_for_tab("close-tab")
+                and asyncio.get_event_loop().time() < deadline
+            ):
+                await asyncio.sleep(0.05)
+            self.assertEqual(
+                self.server._printer.worktree_dir_for_tab("close-tab"),
+                "",
+                "closing the tab must drop its worktree fallback entry",
+            )
+
+            # A later tab reusing the id must not inherit the fallback.
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "checkPaths",
+                        "paths": ["reports/closed.html"],
+                        "workDir": work_dir,
+                        "tabId": "close-tab",
+                    }
+                )
+            )
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev: dict[str, Any] = json.loads(raw)
+                if ev.get("type") == "pathsExist":
+                    break
+            else:
+                raise AssertionError("no pathsExist reply received")
+            self.assertEqual(
+                ev["results"],
+                {"reports/closed.html": False},
+                "a reused tab id must not see the closed tab's worktree",
+            )
+
     async def test_ws_generate_commit_message(self) -> None:
         """generateCommitMessage command does not produce Unknown command error."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:

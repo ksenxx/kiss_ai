@@ -21,6 +21,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import requests
+
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -31,18 +33,36 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
 _TELEGRAM_DIR = Path.home() / ".kiss" / "third_party_agents" / "telegram"
 _config = ChannelConfig(_TELEGRAM_DIR, ("bot_token",))
 
+_DEFAULT_API_BASE = "https://api.telegram.org"
+
 
 class TelegramChannelBackend(ToolMethodBackend):
     """Channel backend for Telegram Bot API.
 
-    Uses python-telegram-bot sync Bot for API calls and long-polling
-    getUpdates for message polling.
+    Uses python-telegram-bot sync Bot for most API calls; message
+    polling (``poll_messages``) and typing indicators speak the Bot API
+    directly over HTTP against ``_api_base`` so they honor persisted
+    cursors and remain testable against a local server.
     """
 
     def __init__(self) -> None:
         self._bot: Any = None
         self._last_update_id: int = -1
         self._connection_info: str = ""
+        self._api_base: str = _DEFAULT_API_BASE
+
+    def _bot_token(self) -> str:
+        """Return the bot token from the live Bot or the stored config.
+
+        Returns:
+            The bot token string, or ``""`` when neither the connected
+            ``Bot`` instance nor the persisted config provides one.
+        """
+        token = str(getattr(self._bot, "token", "") or "")
+        if token:
+            return token
+        cfg = _config.load()
+        return cfg["bot_token"] if cfg else ""
 
     def connect(self) -> bool:
         """Authenticate with Telegram using the stored bot token."""
@@ -64,30 +84,79 @@ class TelegramChannelBackend(ToolMethodBackend):
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
-        """Poll for new Telegram updates via getUpdates."""
-        assert self._bot is not None
+        """Poll for new Telegram updates via the Bot API ``getUpdates`` method.
+
+        Cursor contract (Telegram offset-confirmation convention):
+
+        - ``oldest`` is the persisted cursor from the previous poll.  When it
+          is a digit-string greater than ``0`` it is sent as the
+          ``getUpdates`` ``offset``, telling Telegram to confirm (drop) every
+          update with ``update_id < offset`` and return only newer ones.
+          When ``oldest`` is ``"0"``, empty, or non-numeric, the legacy
+          process-local behavior applies: the offset is derived from
+          ``_last_update_id + 1`` when a previous in-process poll saw
+          updates, or omitted entirely on a fresh backend.
+        - The process-local ``_last_update_id`` keeps working for the
+          interactive tools path; when both a numeric ``oldest`` and a
+          process-local offset are available, the **maximum** of the two is
+          used so polling is monotonic and never re-fetches updates either
+          source has already confirmed.
+        - The returned ``new_cursor`` is ``str(highest update_id processed
+          + 1)`` — suitable for persisting verbatim and passing back as
+          ``oldest`` on the next poll — or the passed-in ``oldest``
+          unchanged when no updates arrived.
+
+        Never raises: any transport, HTTP, or parse failure returns
+        ``([], oldest)`` so a failed poll can never break a channel tick.
+
+        Args:
+            channel_id: Chat ID to filter messages to; empty for all chats.
+            oldest: Cursor from the previous poll (see contract above).
+            limit: Maximum number of updates to fetch (Telegram cap: 100).
+
+        Returns:
+            Tuple of (list of normalized message dicts with ``ts``,
+            ``date``, ``user``, ``text``, ``message_id``, and ``chat_id``
+            keys, new cursor string).
+        """
         try:
-            offset = self._last_update_id + 1 if self._last_update_id >= 0 else None
-            updates = self._bot.get_updates(offset=offset, limit=limit, timeout=0)
+            legacy = self._last_update_id + 1 if self._last_update_id >= 0 else None
+            requested = int(oldest) if oldest.isdigit() and int(oldest) > 0 else None
+            candidates = [c for c in (legacy, requested) if c is not None]
+            payload: dict[str, Any] = {"timeout": 0, "limit": min(limit, 100)}
+            if candidates:
+                payload["offset"] = max(candidates)
+            response = requests.post(
+                f"{self._api_base}/bot{self._bot_token()}/getUpdates",
+                json=payload,
+                timeout=30,
+            )
+            data = response.json()
+            if not data.get("ok"):
+                return [], oldest
             messages: list[dict[str, Any]] = []
-            for update in updates:  # pragma: no branch
-                if update.update_id > self._last_update_id:  # pragma: no branch
-                    self._last_update_id = update.update_id
-                msg = update.message or update.channel_post
-                if msg and msg.text:  # pragma: no branch
-                    chat_id = str(msg.chat.id)
-                    if not channel_id or chat_id == channel_id:  # pragma: no branch
+            highest = -1
+            for update in data.get("result", []):
+                update_id = int(update["update_id"])
+                highest = max(highest, update_id)
+                if update_id > self._last_update_id:
+                    self._last_update_id = update_id
+                msg = update.get("message") or update.get("channel_post")
+                if msg and msg.get("text"):
+                    chat_id = str(msg["chat"]["id"])
+                    if not channel_id or chat_id == channel_id:
                         messages.append(
                             {
-                                "ts": str(msg.message_id),
-                                "date": str(msg.date.timestamp()) if msg.date else "",
-                                "user": str(msg.from_user.id) if msg.from_user else "",
-                                "text": msg.text,
-                                "message_id": str(msg.message_id),
+                                "ts": str(msg["message_id"]),
+                                "date": str(float(msg["date"])) if msg.get("date") else "",
+                                "user": str(msg["from"]["id"]) if msg.get("from") else "",
+                                "text": msg["text"],
+                                "message_id": str(msg["message_id"]),
                                 "chat_id": chat_id,
                             }
                         )
-            return messages, oldest
+            new_cursor = str(highest + 1) if highest >= 0 else oldest
+            return messages, new_cursor
         except Exception:
             return [], oldest
 
@@ -98,6 +167,39 @@ class TelegramChannelBackend(ToolMethodBackend):
         if thread_ts:  # pragma: no branch
             kwargs["reply_to_message_id"] = int(thread_ts)
         self._bot.send_message(**kwargs)
+
+    def send_typing(self, channel_id: str, thread_ts: str = "") -> None:
+        """Show a "typing…" indicator in a Telegram chat (best-effort).
+
+        POSTs the Bot API ``sendChatAction`` method with
+        ``action="typing"``, which displays "bot is typing…" for a few
+        seconds or until the next message is sent.  Any failure — a
+        missing token, a non-2xx response, or an unreachable server —
+        is swallowed so a failed indicator can never break message
+        handling.
+
+        Args:
+            channel_id: Chat ID (integer as string) or @username.
+            thread_ts: Reply-target message ID, accepted for interface
+                parity with :meth:`send_message`.  Ignored here because
+                :meth:`send_message` threads via ``reply_to_message_id``
+                (a plain reply inside *channel_id*, not a forum topic),
+                and ``sendChatAction`` has no reply-target parameter,
+                so the indicator belongs to the whole chat.
+        """
+        del thread_ts
+        try:
+            token = self._bot_token()
+            if not token:
+                return
+            cid: Any = int(channel_id) if channel_id.lstrip("-").isdigit() else channel_id
+            requests.post(
+                f"{self._api_base}/bot{token}/sendChatAction",
+                json={"chat_id": cid, "action": "typing"},
+                timeout=30,
+            )
+        except Exception:
+            pass
 
     def send_text(self, chat_id: str, text: str, reply_to_message_id: str = "") -> str:
         """Send a text message to a Telegram chat.

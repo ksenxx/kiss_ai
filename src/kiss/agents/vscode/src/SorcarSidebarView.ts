@@ -109,6 +109,60 @@ function isTextLikeExtension(filePath: string): boolean {
   if (!ext) return true;
   return !NATIVE_VIEWER_EXTENSIONS.has(ext);
 }
+
+/**
+ * Whether clicking a link to *filePath* should render the file in a
+ * webview tab instead of opening its source in a text editor — the VS
+ * Code counterpart of the remote web app, which renders .html/.htm
+ * files in an in-app tab (see renderContentView in media/main.js).
+ */
+function isRenderableHtmlExtension(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return ext === '.html' || ext === '.htm';
+}
+
+function escapeHtmlAttr(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+/**
+ * Return *html* with a `<base>` tag pointing at *dirUri* injected, so
+ * relative asset references in the document resolve through the
+ * webview's resource scheme instead of the unreachable file scheme.
+ *
+ * Insertion point, in order of preference: right after the opening
+ * `<head>` tag (located on a copy with comments blanked to the same
+ * length, so a `<head>` inside a comment is never chosen, and scanned
+ * to its closing `>` with quote awareness so a `>` inside an attribute
+ * value does not end the tag early); otherwise right after the doctype,
+ * so the injection never demotes the document to quirks mode; otherwise
+ * at the very start.
+ */
+function injectHtmlBase(html: string, dirUri: string): string {
+  const base = `<base href="${escapeHtmlAttr(dirUri)}/">`;
+  const search = html.replace(/<!--[\s\S]*?-->/g, m => ' '.repeat(m.length));
+  const head = /<head(?=[\s/>])/i.exec(search);
+  if (head) {
+    let i = head.index + head[0].length;
+    let quote = '';
+    for (; i < search.length; i++) {
+      const ch = search[i];
+      if (quote) {
+        if (ch === quote) quote = '';
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === '>') {
+        return html.slice(0, i + 1) + base + html.slice(i + 1);
+      }
+    }
+  }
+  const doctype = /<!doctype[^>]*>/i.exec(search);
+  if (doctype) {
+    const at = doctype.index + doctype[0].length;
+    return html.slice(0, at) + base + html.slice(at);
+  }
+  return base + html;
+}
 import {AgentClient, DroppedCommandReason} from './AgentClient';
 import {SorcarApi} from './SorcarApi';
 import {getGitApi} from './gitApi';
@@ -176,6 +230,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   public readonly onCommitMessage = this._onCommitMessage.event;
   private _commitPendingTabs: Set<string> = new Set();
   private _worktreeDirs: Map<string, string> = new Map();
+  // Tab ids listed by the daemon's last canonical `tabs_state`
+  // snapshot. A tab that drops out of the snapshot was closed by
+  // another client — that close never echoes back through this
+  // webview as a `closeTab` message, so it is detected here and the
+  // host releases the tab's resources (worktree fallback dir,
+  // running/commit flags) instead of holding them forever.
+  private _registryTabs: Set<string> = new Set();
   private _worktreeActionResolves: Map<string, () => void> = new Map();
   private _worktreeProgresses: Map<
     string,
@@ -198,6 +259,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _sizeReportResolver:
     ((s: {inner: number; screen: number}) => void) | undefined;
   private _workspaceFoldersSub: vscode.Disposable | undefined;
+  // One rendered-HTML tab per file path, mirroring the remote web app's
+  // content tabs: a second click on the same link reveals (and
+  // refreshes) the existing tab instead of stacking duplicates.
+  private _htmlPreviewPanels: Map<string, vscode.WebviewPanel> = new Map();
 
   private _showActionProgress(
     title: string,
@@ -394,12 +459,56 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
         const dir = msg.worktreeDir;
         const wtTabId = msg.tabId;
+        if (dir && wtTabId !== undefined) {
+          // Not gated on _isOwnTab: a canonical tab created by another
+          // client is adopted by this webview from `tabs_state` without
+          // ever sending a message that would register it in _ownTabs,
+          // yet its transcript (mirrored here) still needs the
+          // pending-worktree fallback for _resolveTabFile(). Recording
+          // a directory is side-effect free; only the SCM view below
+          // stays scoped to tabs this window interacted with.
+          // worktreeWorkDir (the task's cwd inside the worktree) wins
+          // over the worktree root so relative paths from tasks
+          // launched in a repo subdirectory resolve correctly.
+          this._worktreeDirs.set(wtTabId, msg.worktreeWorkDir || dir);
+        }
         if (dir && this._isOwnTab(wtTabId)) {
-          if (wtTabId !== undefined) {
-            this._worktreeDirs.set(wtTabId, dir);
-          }
           void this._openWorktreeInScm(dir);
         }
+      }
+      if (msg.type === 'task_events' && Array.isArray(msg.events)) {
+        // A session replay (reconnect, adopted canonical tab) reaches a
+        // host that may have no _worktreeDirs entry for the tab: the
+        // daemon dropped its own tracking in cleanup_tab() before the
+        // replay, and while the task is still running nothing re-emits
+        // worktree_done. The historical worktree events nested in the
+        // replayed transcript are the only copy of the directory, so
+        // scan them in order (a later successful worktree_result nets
+        // out an earlier worktree_created).
+        this._trackReplayedWorktreeEvents(msg.tabId, msg.events);
+      }
+      if (msg.type === 'tabs_state' && Array.isArray(msg.tabs)) {
+        // The snapshot is canonical and complete: a tab it no longer
+        // lists was closed — possibly by another client, whose close
+        // never reaches this host as a `closeTab` webview message. The
+        // webview drops such tabs in reconcileTabs(); the host must
+        // release its per-tab resources too, or a dead tab's worktree
+        // fallback dir / running flags would linger for the session
+        // (and could leak onto a later tab reusing the same id).
+        // Sub-agent and other client-local tabs never appear in
+        // snapshots, so only ids seen in a previous snapshot are
+        // eligible for pruning.
+        const listed = new Set<string>();
+        for (const t of msg.tabs) {
+          if (t && t.tabId) listed.add(t.tabId);
+        }
+        for (const staleId of this._registryTabs) {
+          if (!listed.has(staleId)) {
+            this._ownTabs.delete(staleId);
+            this._cleanupTabResources(staleId);
+          }
+        }
+        this._registryTabs = listed;
       }
       if (msg.type === 'worktree_progress') {
         const wpTabId = msg.tabId;
@@ -409,6 +518,21 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             : this._worktreeProgresses.values().next().value;
         if (progress) {
           progress.report({message: msg.message});
+        }
+      }
+      if (msg.type === 'worktree_result' && msg.success) {
+        // Mirrors the unconditional recording above: a merge/discard
+        // finished by any client retires the worktree directory, so the
+        // fallback entry must go even when this window never claimed
+        // the tab. git.close on a repository that was never opened is
+        // a harmless no-op.
+        const doneTabId = msg.tabId;
+        if (doneTabId !== undefined) {
+          const doneDir = this._worktreeDirs.get(doneTabId);
+          if (doneDir) {
+            void this._closeWorktreeInScm(doneDir);
+            this._worktreeDirs.delete(doneTabId);
+          }
         }
       }
       if (msg.type === 'worktree_result' && this._isOwnTab(msg.tabId)) {
@@ -431,13 +555,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           }
         } else {
           showErrorNotification(msg.message || 'Worktree action failed.');
-        }
-        if (msg.success && wrTabId !== undefined) {
-          const wtDir = this._worktreeDirs.get(wrTabId);
-          if (wtDir) {
-            void this._closeWorktreeInScm(wtDir);
-            this._worktreeDirs.delete(wrTabId);
-          }
         }
       }
       if (
@@ -574,6 +691,64 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       return folders[0].uri.fsPath;
     }
     return process.cwd();
+  }
+
+  /**
+   * Resolve *p* for a tab: against *wd* first, then against the tab's
+   * pending worktree directory.
+   *
+   * A worktree task's committed artifacts live only on its un-merged
+   * `kiss/wt-*` branch until the user merges (or the next run
+   * auto-retires it), so a path printed in its result panel does not
+   * exist under the workspace root yet and a plain
+   * `resolveWorkspaceFile(p, wd)` reports it missing — leaving the
+   * link permanently grey.  Falling back to the worktree dir recorded
+   * for the tab (`worktree_created` / `worktree_done`) makes the path
+   * resolvable the moment the result renders; after a merge or discard
+   * the `worktree_result` handler drops the entry and the workspace
+   * copy (or genuine absence) wins again.
+   */
+  /**
+   * Restore the pending-worktree fallback from a replayed transcript.
+   *
+   * Applies the same net effect as receiving the nested worktree
+   * events live: `worktree_created` / `worktree_done` record the
+   * directory (preferring the task's cwd inside the worktree), a
+   * successful `worktree_result` retires it.
+   */
+  private _trackReplayedWorktreeEvents(
+    tabId: string | undefined,
+    events: unknown[],
+  ): void {
+    if (tabId === undefined) return;
+    for (const raw of events) {
+      if (!raw || typeof raw !== 'object') continue;
+      const ev = raw as {
+        type?: string;
+        worktreeDir?: string;
+        worktreeWorkDir?: string;
+        success?: boolean;
+      };
+      if (ev.type === 'worktree_created' || ev.type === 'worktree_done') {
+        const dir = ev.worktreeWorkDir || ev.worktreeDir;
+        if (dir) this._worktreeDirs.set(tabId, dir);
+      } else if (ev.type === 'worktree_result' && ev.success) {
+        this._worktreeDirs.delete(tabId);
+      }
+    }
+  }
+
+  private _resolveTabFile(
+    p: string,
+    wd: string,
+    tabId: string | undefined,
+  ): string | null {
+    const resolved = resolveWorkspaceFile(p, wd);
+    if (resolved) return resolved;
+    const wtDir =
+      tabId !== undefined ? this._worktreeDirs.get(tabId) : undefined;
+    if (wtDir && wtDir !== wd) return resolveWorkspaceFile(p, wtDir);
+    return null;
   }
 
   private _sendToWebview(message: ToWebviewMessage): void {
@@ -793,14 +968,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
         const trimmed = message.prompt.trim();
         if (trimmed && !trimmed.includes('\n')) {
-          const resolved = resolveWorkspaceFile(trimmed, effectiveWorkDir);
+          // _resolveTabFile (not plain resolveWorkspaceFile): a report
+          // that lives only in the tab's pending worktree must open
+          // like any other file link — falling through to _startTask
+          // would launch an unintended agent run on a path-only prompt.
+          const resolved = this._resolveTabFile(
+            trimmed,
+            effectiveWorkDir,
+            tabId,
+          );
           if (resolved) {
-            const uri = vscode.Uri.file(resolved);
-            const doc = await vscode.workspace.openTextDocument(uri);
-            await vscode.window.showTextDocument(doc, {
-              preview: false,
-              viewColumn: vscode.ViewColumn.One,
-            });
+            await this._openResolvedFile(resolved);
             return;
           }
         }
@@ -856,7 +1034,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'openFile':
         if (message.path) {
           const wd = message.workDir || this._getWorkDir();
-          const filePath = resolveWorkspaceFile(message.path, wd);
+          const filePath = this._resolveTabFile(
+            message.path,
+            wd,
+            message.tabId,
+          );
           if (!filePath) {
             console.warn(
               '[SorcarSidebarView] refusing to open file outside workspace:',
@@ -864,24 +1046,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             );
             break;
           }
-          const uri = vscode.Uri.file(filePath);
-          if (isTextLikeExtension(filePath)) {
-            const doc = await vscode.workspace.openTextDocument(uri);
-            const editor = await vscode.window.showTextDocument(doc, {
-              preview: false,
-              viewColumn: vscode.ViewColumn.One,
-            });
-            if (message.line !== undefined && message.line > 0) {
-              const pos = new vscode.Position(message.line - 1, 0);
-              editor.selection = new vscode.Selection(pos, pos);
-              editor.revealRange(
-                new vscode.Range(pos, pos),
-                vscode.TextEditorRevealType.InCenter,
-              );
-            }
-          } else {
-            await vscode.commands.executeCommand('vscode.open', uri);
-          }
+          await this._openResolvedFile(filePath, message.line);
         }
         break;
 
@@ -895,7 +1060,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const paths = Array.isArray(message.paths) ? message.paths : [];
         for (const p of paths) {
           if (typeof p !== 'string' || !p) continue;
-          results[p] = resolveWorkspaceFile(p, wd) !== null;
+          results[p] = this._resolveTabFile(p, wd, message.tabId) !== null;
         }
         this._sendToWebview({
           type: 'pathsExist',
@@ -1288,6 +1453,88 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
   }
 
+  /**
+   * Open an already-resolved, existing file the way a clicked file link
+   * opens it: .html/.htm rendered in a webview tab, text-like files in
+   * the text editor (optionally revealing 1-indexed *line*), and
+   * everything else (images, pdf, ...) in VS Code's native viewer.
+   * Both the 'openFile' message (a clicked link) and the path-only
+   * 'submit' shortcut route through here so the two behave identically.
+   */
+  private async _openResolvedFile(
+    filePath: string,
+    line?: number,
+  ): Promise<void> {
+    if (isRenderableHtmlExtension(filePath)) {
+      // Render the page in a webview tab — like the remote web app
+      // does — instead of showing its source in the editor.
+      this._openHtmlPreviewTab(filePath);
+      return;
+    }
+    const uri = vscode.Uri.file(filePath);
+    if (!isTextLikeExtension(filePath)) {
+      await vscode.commands.executeCommand('vscode.open', uri);
+      return;
+    }
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const editor = await vscode.window.showTextDocument(doc, {
+      preview: false,
+      viewColumn: vscode.ViewColumn.One,
+    });
+    if (line !== undefined && line > 0) {
+      const pos = new vscode.Position(line - 1, 0);
+      editor.selection = new vscode.Selection(pos, pos);
+      editor.revealRange(
+        new vscode.Range(pos, pos),
+        vscode.TextEditorRevealType.InCenter,
+      );
+    }
+  }
+
+  /**
+   * Open *filePath* (a resolved, existing .html/.htm file) rendered in a
+   * webview editor tab, the way the remote web app renders HTML files in
+   * an in-app tab. One tab is kept per path: clicking the same link
+   * again reveals the existing tab and re-reads the file so edits made
+   * since the last click show up. Relative asset references work via an
+   * injected <base> pointing at the file's directory (see
+   * injectHtmlBase), with the file's directory and the workspace
+   * folders allowed as local resource roots.
+   */
+  private _openHtmlPreviewTab(filePath: string): void {
+    let html: string;
+    try {
+      html = fs.readFileSync(filePath, 'utf8');
+    } catch (err) {
+      showErrorNotification(`Failed to read ${filePath}: ${String(err)}`);
+      return;
+    }
+    const dir = path.dirname(filePath);
+    let panel = this._htmlPreviewPanels.get(filePath);
+    if (!panel) {
+      panel = vscode.window.createWebviewPanel(
+        'kissSorcarHtmlPreview',
+        path.basename(filePath),
+        vscode.ViewColumn.One,
+        {
+          enableScripts: true,
+          localResourceRoots: [
+            vscode.Uri.file(dir),
+            ...(vscode.workspace.workspaceFolders ?? []).map(f => f.uri),
+          ],
+        },
+      );
+      this._htmlPreviewPanels.set(filePath, panel);
+      panel.onDidDispose(() => {
+        this._htmlPreviewPanels.delete(filePath);
+      });
+    } else {
+      panel.reveal(vscode.ViewColumn.One);
+    }
+    const dirUri = panel.webview.asWebviewUri(vscode.Uri.file(dir));
+    panel.webview.html = injectHtmlBase(html, dirUri.toString());
+  }
+
   public dispose(): void {
     // Terminal: set first so any concurrently queued webview message or
     // late _getClient()/_getApi() call becomes a no-op and cannot
@@ -1323,5 +1570,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     // were ever used again, while a fresh _getClient() built a new one.
     this._api = null;
     this._onCommitMessage.dispose();
+    // Each panel's onDidDispose deletes its own map entry, so iterate a
+    // snapshot and clear at the end.
+    for (const panel of [...this._htmlPreviewPanels.values()]) {
+      panel.dispose();
+    }
+    this._htmlPreviewPanels.clear();
   }
 }

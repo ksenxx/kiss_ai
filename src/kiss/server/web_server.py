@@ -1762,6 +1762,95 @@ class WebPrinter(JsonPrinter):
         self.work_dir: str = ""
         self._pending_sends: dict[Any, set[ConcurrentFuture[None]]] = {}
         self._send_locks: dict[Any, asyncio.Lock] = {}
+        # tabId -> pending worktree dir of that tab's finished (or
+        # running) worktree task; see _track_worktree_event().
+        self._tab_worktree_dirs: dict[str, str] = {}
+
+    def _track_worktree_event(
+        self, event: dict[str, Any], tab_id: Any,
+    ) -> None:
+        """Track *tab_id*'s pending worktree directory from *event*.
+
+        A worktree task's committed artifacts live only in its worktree
+        until the branch is merged, so ``checkPaths``/``openFile``
+        requests from remote clients need the tab's worktree dir as a
+        resolution fallback (:meth:`RemoteAccessServer._resolve_tab_file`).
+        ``worktree_created`` / ``worktree_done`` record the directory
+        (preferring ``worktreeWorkDir`` — the task's cwd inside the
+        worktree — over the worktree root, so relative paths from tasks
+        launched in a repo subdirectory resolve correctly); a
+        successful ``worktree_result`` (merge or discard finished)
+        drops it, so the main checkout wins again.
+
+        A ``task_events`` replay envelope is scanned too, in event
+        order: session replay first runs :meth:`cleanup_tab` (dropping
+        the entry) and, while the task is still running, nothing else
+        re-presents the worktree — the historical ``worktree_created``
+        nested in the replayed transcript is the only copy of the
+        directory, so it must restore the tracking.
+
+        Args:
+            event: The event being broadcast.
+            tab_id: The tab the event copy is addressed to.
+        """
+        if not isinstance(tab_id, str) or not tab_id:
+            return
+        etype = event.get("type")
+        if etype == "task_events":
+            nested = event.get("events")
+            if isinstance(nested, list):
+                for sub in nested:
+                    if isinstance(sub, dict):
+                        self._track_worktree_event(sub, tab_id)
+            return
+        if etype in ("worktree_created", "worktree_done"):
+            wt_work_dir = event.get("worktreeWorkDir")
+            wt_dir = (
+                wt_work_dir
+                if isinstance(wt_work_dir, str) and wt_work_dir
+                else event.get("worktreeDir")
+            )
+            if isinstance(wt_dir, str) and wt_dir:
+                self._tab_worktree_dirs[tab_id] = wt_dir
+        elif etype == "worktree_result" and event.get("success"):
+            self._tab_worktree_dirs.pop(tab_id, None)
+
+    def worktree_dir_for_tab(self, tab_id: str) -> str:
+        """Return the pending worktree dir recorded for *tab_id*.
+
+        Args:
+            tab_id: The requesting client's tab id.
+
+        Returns:
+            The worktree directory path, or ``""`` when the tab has no
+            pending worktree.
+        """
+        return self._tab_worktree_dirs.get(tab_id, "")
+
+    def cleanup_tab(self, tab_id: str) -> None:
+        """Drop *tab_id*'s per-tab state, including its worktree dir.
+
+        A tab closed without merging (no successful ``worktree_result``
+        ever arrives for it) would otherwise leave its
+        ``_tab_worktree_dirs`` entry behind for the daemon lifetime —
+        one dead key per closed pending-worktree tab, and a stale
+        resolution fallback should a later client reuse the tab id.
+
+        Also runs when a live tab merely re-subscribes (session
+        replay, new chat).  That is safe: after rebinding a chat the
+        server re-presents a finished pending worktree
+        (``_emit_pending_worktree`` broadcasts ``worktree_done``),
+        and for a still-running task the replayed ``task_events``
+        transcript carries the historical ``worktree_created`` — either
+        way :meth:`_track_worktree_event` re-records the entry before
+        any file link is checked.
+
+        Args:
+            tab_id: The frontend tab identifier to drop.
+        """
+        if tab_id:
+            self._tab_worktree_dirs.pop(tab_id, None)
+        super().cleanup_tab(tab_id)
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send *event* to every connected WebSocket client.
@@ -1819,6 +1908,7 @@ class WebPrinter(JsonPrinter):
             return
 
         if "tabId" in event:
+            self._track_worktree_event(event, event.get("tabId"))
             if event.get("type") in ("prompt", "result") and event.get("taskId"):
                 record = {k: v for k, v in event.items() if k != "tabId"}
                 with self._lock:
@@ -1881,6 +1971,7 @@ class WebPrinter(JsonPrinter):
             return
         base = json.dumps(event)[:-1]
         for tab_id in targets:
+            self._track_worktree_event(event, tab_id)
             self._send_to_ws_clients(
                 f'{base}, "tabId": {json.dumps(tab_id)}}}'
             )
@@ -3217,6 +3308,7 @@ class RemoteAccessServer:
         url_file: str | Path | None = None,
         uds_path: str | Path | None = None,
         ntfy_base_url: str = _NTFY_BASE_URL,
+        uds_owner_wait_s: float = 30.0,
     ) -> None:
         source_shell_env()
         # ``saveConfig`` was the only caller of apply_config_to_env, so
@@ -3270,6 +3362,7 @@ class RemoteAccessServer:
         self._uds_path: Path = (
             Path(uds_path) if uds_path else _default_uds_path()
         )
+        self._uds_owner_wait_s = uds_owner_wait_s
         self._uds_server: asyncio.Server | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._latest_version: str | None = None
@@ -4122,6 +4215,50 @@ class RemoteAccessServer:
         """
         await self._voice_wake.stop(conn_id)
 
+    def _resolve_tab_file(
+        self, raw_path: str, work_dir: str, tab_id: str,
+    ) -> Path | None:
+        """Resolve *raw_path* for a tab, trying its pending worktree too.
+
+        Mirrors the VS Code extension host's resolution
+        (``SorcarSidebarView._resolveTabFile``): the path is resolved
+        against *work_dir* first; when that names no file and the tab
+        has a pending worktree (a finished worktree task whose branch is
+        not merged yet), the same relative path is tried inside the
+        worktree directory — that is where the task's committed
+        artifacts live until the merge.
+
+        Args:
+            raw_path: The path as printed in the transcript (may be
+                relative, absolute, or ``~``-prefixed).
+            work_dir: The tab's working directory.
+            tab_id: The requesting client's tab id (may be ``""``).
+
+        Returns:
+            The resolved path when it names an existing regular file,
+            otherwise ``None``.
+        """
+        try:
+            path = Path(os.path.expanduser(raw_path))
+            if path.is_absolute() or not work_dir:
+                candidates = [path]
+            else:
+                candidates = [Path(work_dir) / path]
+                wt_dir = (
+                    self._printer.worktree_dir_for_tab(tab_id)
+                    if tab_id
+                    else ""
+                )
+                if wt_dir and wt_dir != work_dir:
+                    candidates.append(Path(wt_dir) / path)
+            for candidate in candidates:
+                resolved = candidate.resolve()
+                if resolved.is_file():
+                    return resolved
+        except OSError:
+            return None
+        return None
+
     async def _handle_open_file(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None:
@@ -4171,11 +4308,8 @@ class RemoteAccessServer:
                 "tabId": tab_id,
             }
             try:
-                path = Path(os.path.expanduser(raw_path))
-                if not path.is_absolute() and work_dir:
-                    path = Path(work_dir) / path
-                path = path.resolve()
-                if not path.is_file():
+                path = self._resolve_tab_file(raw_path, work_dir, tab_id)
+                if path is None:
                     reply["error"] = f"File not found: {raw_path}"
                     return reply
                 if path.stat().st_size > _OPEN_FILE_MAX_BYTES:
@@ -4241,13 +4375,10 @@ class RemoteAccessServer:
             for raw_path in raw_paths:
                 if not isinstance(raw_path, str) or not raw_path:
                     continue
-                try:
-                    path = Path(os.path.expanduser(raw_path))
-                    if not path.is_absolute() and work_dir:
-                        path = Path(work_dir) / path
-                    results[raw_path] = path.resolve().is_file()
-                except OSError:
-                    results[raw_path] = False
+                results[raw_path] = (
+                    self._resolve_tab_file(raw_path, work_dir, tab_id)
+                    is not None
+                )
             return results
 
         results = await asyncio.to_thread(_check_paths)
@@ -5385,15 +5516,7 @@ class RemoteAccessServer:
         try:
             self._uds_path.parent.mkdir(parents=True, exist_ok=True)
             if self._uds_path.exists() or self._uds_path.is_symlink():
-                if await self._uds_socket_is_live():
-                    # Another live daemon owns this pathname (F4-03).
-                    # Unlinking it would strand that daemon's clients
-                    # on an unreachable inode; leave it alone and let
-                    # local clients fall back to WSS.
-                    raise OSError(
-                        f"UDS socket {self._uds_path} is owned by "
-                        "another live daemon; refusing to steal it",
-                    )
+                await self._wait_for_uds_release()
                 try:
                     self._uds_path.unlink()
                 except OSError:
@@ -5427,6 +5550,47 @@ class RemoteAccessServer:
             # embedder that catches the exception.
             self._close_partial_setup()
             raise
+
+    async def _wait_for_uds_release(self) -> None:
+        """Wait for a live predecessor daemon to release the UDS pathname.
+
+        During a daemon restart the outgoing instance can take tens of
+        seconds to shut down (tunnel cleanup; the SIGTERM failsafe only
+        forces exit after 30s), and its UDS listener stays live for
+        that whole window.  Raising immediately here left the new
+        daemon without a UDS for its entire lifetime; the VS Code
+        extension's health probe reads that as ``sock-missing`` and
+        answers with yet another daemon restart on the next window
+        activation — an endless restart churn the user sees as a
+        recurring "KISS Sorcar Server is starting ..." screen.
+
+        Polls the pathname for up to ``self._uds_owner_wait_s``
+        seconds.  Only an owner that stays live past the deadline — a
+        genuine concurrent daemon (F4-03), whose clients unlinking
+        would strand on an unreachable inode — makes this raise.
+
+        Raises:
+            OSError: When another live daemon still owns the pathname
+                after the deadline.
+        """
+        deadline = time.monotonic() + self._uds_owner_wait_s
+        logged = False
+        while await self._uds_socket_is_live():
+            if time.monotonic() >= deadline:
+                raise OSError(
+                    f"UDS socket {self._uds_path} is owned by "
+                    "another live daemon; refusing to steal it",
+                )
+            if not logged:
+                logged = True
+                logger.info(
+                    "UDS socket %s is owned by another live daemon "
+                    "(likely a predecessor still shutting down); "
+                    "waiting up to %.0fs for it to release the "
+                    "pathname…",
+                    self._uds_path, self._uds_owner_wait_s,
+                )
+            await asyncio.sleep(0.5)
 
     async def _uds_socket_is_live(self) -> bool:
         """Return True when a live peer accepts connections on the UDS path.
