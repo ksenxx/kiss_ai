@@ -5,7 +5,7 @@
 """Security fixes: RC-file permissions and shell-quoting (H3).
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.agents.vscode.test_vscode_security_h_m``; the non-core tests remain there.
+``kiss.tests.server.test_vscode_security_h_m``; the non-core tests remain there.
 """
 
 from __future__ import annotations
