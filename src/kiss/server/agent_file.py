@@ -146,10 +146,21 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
         ok = isinstance(value, str)
         expected = "a string"
     elif param == "tools":
+        if isinstance(value, list):
+            # The agent script doubles as its own tools file: a
+            # ``get_tools()`` returning the tool callables themselves
+            # (the tools-file contract — e.g. every channel agent
+            # module) normalizes to the script's own path, which the
+            # task runner later imports as the ``toolsFile`` and whose
+            # ``get_tools()`` it calls for the actual list.
+            value = raw_path
         if isinstance(value, os.PathLike):
             value = os.fspath(value)
         ok = value is None or isinstance(value, str)
-        expected = "a tools-file path (string or pathlib.Path) or None"
+        expected = (
+            "a tools-file path (string or pathlib.Path), a list of "
+            "tool callables, or None"
+        )
     elif param in ("use_worktree", "auto_commit", "is_parallel"):
         ok = isinstance(value, bool)
         expected = "a bool"
@@ -198,7 +209,10 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
     without a getter keep the field value the client sent.  A ``get_tools()``
     return value is a tools-file *path* written to the ``toolsFile``
     field — the task runner later imports that file and calls its
-    ``get_tools()`` exactly as for a client-passed ``tools`` path.
+    ``get_tools()`` exactly as for a client-passed ``tools`` path.  A
+    ``get_tools()`` returning a *list* of tool callables instead (the
+    tools-file contract) makes the agent script its own tools file:
+    the script's path is written to ``toolsFile``.
 
     The getters run in the daemon process on the task's worker thread,
     like a tools file's ``get_tools()``, and the file is re-imported

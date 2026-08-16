@@ -1288,7 +1288,7 @@ def run(
                 def get_model() -> str: ...
                 def get_chat_id() -> str: ...
                 def get_system_prompt() -> str: ...
-                def get_tools() -> str | Path | None: ...  # tools-file path
+                def get_tools() -> str | Path | list | None: ...  # tools-file path or tool list
                 def get_use_worktree() -> bool: ...
                 def get_auto_commit() -> bool: ...
                 def get_max_budget() -> float | None: ...   # finite
@@ -1303,7 +1303,10 @@ def run(
             daemon does not resolve it against this process's working
             directory), which the daemon then imports and whose
             ``get_tools()`` it calls as if the path had been passed as
-            *tools*.  ``timeout`` and *sock_path* have no getters by
+            *tools*; a ``get_tools()`` that instead returns a *list*
+            of tool callables (the tools-file contract, as in the
+            channel agent modules) makes the script its own tools
+            file.  ``timeout`` and *sock_path* have no getters by
             design: they are client-transport parameters — the script
             only runs on the daemon that *sock_path* selects, and
             *timeout* bounds this client's local wait.  The
