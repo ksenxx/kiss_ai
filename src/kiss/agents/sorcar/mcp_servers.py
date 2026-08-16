@@ -1253,11 +1253,13 @@ def make_mcp_tool_wrapper(
     return wrapper
 
 
-# Names of the agent's built-in tools.  A synthesized MCP tool name
-# colliding with any of these (e.g. server "run" + tool "parallel" →
-# "run_parallel") would make KISSAgent._add_functions() raise and abort
-# the whole tool loop, so such names are pre-reserved and the MCP tool
-# gets a numeric suffix instead.
+# Names of the agent's built-in tools ("cron_job" is built in only to
+# cron sessions dispatched via run_agent("cron", ...), whose tools file
+# supplies it).  A synthesized MCP tool name colliding with any of
+# these (e.g. server "run" + tool "parallel" → "run_parallel") would
+# make KISSAgent._add_functions() raise and abort the whole tool loop,
+# so such names are pre-reserved and the MCP tool gets a numeric suffix
+# instead.
 _RESERVED_TOOL_NAMES = frozenset({
     "Bash", "Read", "Edit", "Write", "finish",
     "go_to_url", "click", "type_text", "press_key", "scroll",

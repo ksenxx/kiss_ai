@@ -1340,9 +1340,10 @@ class SorcarAgent(RelentlessAgent):
         except Exception:
             logger.warning("MCP tool setup failed", exc_info=True)
         from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
-        from kiss.agents.sorcar.cron_agent import cron_job
 
-        tools.append(cron_job)
+        # Scheduled automations (cron) are not a built-in tool: the
+        # agent dispatches them via run_agent("cron", ...), which runs
+        # kiss.agents.sorcar.cron_agent as an agent script.
         tools.append(make_run_agent_tool(self.work_dir or ""))
         tools.append(ask_user_question)
         tools.append(talk)

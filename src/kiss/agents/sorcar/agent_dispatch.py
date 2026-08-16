@@ -6,12 +6,15 @@
 
 Gives the Sorcar agent a single tool, ``run_agent`` (built per task by
 :func:`make_run_agent_tool`), that runs any agent on a task right away
-— either an installed third-party channel agent named by channel
-(Slack, Telegram, Discord, email, WhatsApp, Home Assistant, ...) or an
-arbitrary *agent script* named by its ``.py`` file path — so a request
-like "Send 'hello' to the #sorcar Slack channel" or "run my_agent.py
-on this task" is executed in one tool call instead of the agent first
-rediscovering what those agents are and how they work.
+— an installed third-party channel agent named by channel (Slack,
+Telegram, Discord, email, WhatsApp, Home Assistant, ...), the built-in
+``cron`` agent (the scheduled-automations agent script
+``kiss.agents.sorcar.cron_agent``, which supplies the ``cron_job``
+tool), or an arbitrary *agent script* named by its ``.py`` file path —
+so a request like "Send 'hello' to the #sorcar Slack channel", "every
+morning at 9 summarize my inbox", or "run my_agent.py on this task" is
+executed in one tool call instead of the agent first rediscovering
+what those agents are and how they work.
 
 The channel agents are looked up dynamically, the same soft-plugin
 style the cron deliverer uses: any module named
@@ -293,16 +296,31 @@ def _run_agent(
         work_dir = parent_work_dir or str(kiss_home() / "agent_work")
         return _dispatch(Path(agent_path).stem, task, agent_path,
                          work_dir, model_name, budget)
-    channels = available_channels()
     # Forgiving lookup: "Home Assistant", "phone control", and
     # "nextcloud-talk" all resolve — spelling variants differ only in
     # case, spaces, hyphens, and underscores.
     squashed = _squash(requested)
+    if squashed == "cron":
+        # The scheduled-automations agent: an agent script in the
+        # sorcar package (not a third-party channel), dispatched the
+        # same way — its get_tools() supplies the cron_job tool and
+        # its get_work_dir()/get_use_worktree()/get_auto_commit()
+        # getters keep the session in ~/.kiss/cron/work, out of the
+        # calling project's git lifecycle.
+        from kiss.agents.sorcar import cron_agent
+
+        return _dispatch(
+            "cron", cron_agent.CRON_DISPATCH_PREAMBLE + task,
+            str(cron_agent.__file__), cron_agent.get_work_dir(),
+            model_name, budget,
+        )
+    channels = available_channels()
     matches = [name for name in channels if _squash(name) == squashed]
     if not matches:
         return (
-            f"Error: unknown agent {agent!r} — not an installed channel "
-            f"and not a path to a .py agent script. Available channels: "
+            f"Error: unknown agent {agent!r} — not the built-in cron "
+            f"agent, not an installed channel, and not a path to a .py "
+            f"agent script. Available channels: "
             f"{', '.join(channels) or 'none installed'}."
         )
     channel = matches[0]
@@ -381,11 +399,16 @@ def make_run_agent_tool(work_dir: str) -> Callable[..., str]:
         channel, managing chats, and so on.  Pass the user's request
         through as the task; the channel agent has its own
         authenticated API tools and resolves channel or user names
-        itself.  Also use it whenever the user names an agent file (an
-        *agent script*) to run a task with: pass the file's path as
-        the agent.
+        itself.  Use it the same way for scheduled automations (cron
+        jobs) — creating, listing, removing, pausing, resuming, or
+        immediately running a scheduled job: pass ``"cron"`` as the
+        agent and the scheduling request as the task (the cron agent
+        translates natural-language schedules itself).  Also use it
+        whenever the user names an agent file (an *agent script*) to
+        run a task with: pass the file's path as the agent.
 
-        Available channels: {channels}.
+        Available channels: {channels}.  The built-in ``"cron"``
+        agent (scheduled automations) is always available.
 
         The task runs as a fresh session on the kiss-web daemon — the
         agent file's path is passed as the ``agent_path`` of
@@ -401,11 +424,12 @@ def make_run_agent_tool(work_dir: str) -> Callable[..., str]:
         This call blocks until the task finishes (up to 15 minutes).
 
         Args:
-            agent: WHICH agent to run — either an installed channel
-                name, e.g. ``"slack"``, ``"telegram"``, ``"discord"``,
+            agent: WHICH agent to run — an installed channel name,
+                e.g. ``"slack"``, ``"telegram"``, ``"discord"``,
                 ``"email"``, ``"whatsapp"`` (case, spaces, hyphens,
                 and underscores are ignored: "Home Assistant" resolves
-                to ``homeassistant``), or the path of a Python
+                to ``homeassistant``); or ``"cron"`` for the
+                scheduled-automations agent; or the path of a Python
                 agent-script file, e.g. ``"agents/researcher.py"``
                 (recognized by its ``.py`` suffix or a path separator;
                 must exist; a relative path is resolved against this

@@ -13,6 +13,14 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   tool accepts only four normalized schedule forms (interval, 5-field
   cron expression, one-shot duration, one-shot ISO timestamp) and the
   agent translates phrases like "every weekday at 9am" into them.
+- The Sorcar agent does not carry the :func:`cron_job` tool itself:
+  this module is an *agent script* (``kiss.server.sorcar.run``'s
+  ``agent_path`` contract), and a scheduling request is dispatched to
+  it with the ``run_agent`` tool as ``run_agent("cron", task)`` — the
+  dispatched session gets the :func:`cron_job` tool from
+  :func:`get_tools` and runs in ``~/.kiss/cron/work`` without a
+  worktree (:func:`get_work_dir`, :func:`get_use_worktree`,
+  :func:`get_auto_commit`).
 - The kiss-web daemon runs the scheduler automatically in a
   background thread (:func:`start_scheduler_thread`): every ~60
   seconds a tick finds due jobs, reschedules them *before* running
@@ -73,7 +81,11 @@ _daemon_sock_path: str | None = None
 
 Set by :func:`start_scheduler_thread` so tool calls executed inside the
 daemon (e.g. ``cron_job("run_now", ...)``) submit prompt jobs back to
-the same daemon even when it serves a non-default socket.
+the same daemon even when it serves a non-default socket.  Always read
+through :func:`_recorded_daemon_sock_path`, which resolves the
+CANONICAL module's value: dispatched cron sessions get their
+``cron_job`` tool from a fresh synthetic copy of this module whose own
+global is never set.
 """
 CRON_SCAN_DAYS = 4 * 366 + 1  # covers the largest gap between leap days
 DEFAULT_TICK_INTERVAL_SECONDS = 60.0
@@ -376,6 +388,27 @@ def compute_next_run(schedule: str, now: float) -> float | None:
     return ts if ts > now else None
 
 
+def _recorded_daemon_sock_path() -> str | None:
+    """Return the daemon UDS recorded for this process, if any.
+
+    :func:`start_scheduler_thread` records the hosting daemon's socket
+    in the canonical ``kiss.agents.sorcar.cron_agent`` module.  The
+    kiss-web daemon, however, re-executes this file as a fresh
+    synthetic tools-file module for every dispatched cron session
+    (``run_agent("cron", ...)``), whose own :data:`_daemon_sock_path`
+    global is never set — so the lookup goes through
+    :data:`sys.modules` to the canonical module, falling back to this
+    module's own global for canonical and standalone callers.
+
+    Returns:
+        The recorded daemon socket path, or ``None`` when this process
+        hosts no scheduler.
+    """
+    canonical = sys.modules.get("kiss.agents.sorcar.cron_agent")
+    recorded = getattr(canonical, "_daemon_sock_path", None)
+    return recorded or _daemon_sock_path
+
+
 def _deliver_to_channel(channel: str, chat: str, text: str) -> str:
     """Send *text* to one channel agent's backend.
 
@@ -564,7 +597,9 @@ def _execute_job(job: dict[str, Any], sock_path: str | None = None) -> None:
         if str(job.get("command", "")).strip():
             status, text = _run_command_job(job)
         else:
-            status, text = _run_prompt_job(job, sock_path or _daemon_sock_path)
+            status, text = _run_prompt_job(
+                job, sock_path or _recorded_daemon_sock_path(),
+            )
     except Exception as e:
         logger.error("Cron job %s failed: %s", job["id"], e, exc_info=True)
         status, text = "error", f"{type(e).__name__}: {e}"
@@ -889,16 +924,74 @@ def cron_job(
     })
 
 
+CRON_DISPATCH_PREAMBLE = (
+    "You are the cron scheduling agent: this session already has the "
+    "cron_job tool for managing scheduled automations — use it directly "
+    "and immediately, without exploring any source code.  Translate the "
+    "user's natural-language schedule into one of the tool's four "
+    "supported schedule forms yourself.  Never call run_agent here: it "
+    "would just recurse into another session like this one.\n\n"
+)
+"""Preamble prepended to every task dispatched to this agent script.
+
+Used by ``kiss.agents.sorcar.agent_dispatch`` when the ``run_agent``
+tool is called with ``"cron"`` as the agent, mirroring the channel
+agents' dispatch preamble.
+"""
+
+
 def get_tools() -> list:
     """Return the cron tools (``kiss.server.sorcar.run`` tools-file contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument.
+    the API's ``tools=`` argument — including when the module is passed
+    as the ``agent_path``, which makes it its own tools file.
 
     Returns:
         The list containing the :func:`cron_job` tool.
     """
     return [cron_job]
+
+
+def get_work_dir() -> str:
+    """Return the work directory for dispatched cron-management sessions.
+
+    Agent-script getter (``kiss.server.sorcar.run``'s ``agent_path``
+    contract): a ``run_agent("cron", ...)`` session manages the job
+    store under ``~/.kiss/cron`` and never touches the calling
+    project, so it runs in the cron state directory — the same
+    directory :func:`_run_prompt_job` uses for scheduled runs.
+
+    Returns:
+        The cron work directory path (created when absent).
+    """
+    work_dir = _cron_dir() / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    return str(work_dir)
+
+
+def get_use_worktree() -> bool:
+    """Return whether dispatched cron sessions use a git worktree.
+
+    Agent-script getter: managing the JSON job store needs no git
+    lifecycle.
+
+    Returns:
+        ``False``.
+    """
+    return False
+
+
+def get_auto_commit() -> bool:
+    """Return whether dispatched cron sessions auto-commit.
+
+    Agent-script getter: managing the JSON job store needs no git
+    lifecycle.
+
+    Returns:
+        ``False``.
+    """
+    return False
 
 
 def main() -> None:
