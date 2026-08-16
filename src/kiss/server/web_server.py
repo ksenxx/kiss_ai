@@ -77,6 +77,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
+from kiss.agents.sorcar import cron_agent
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.models.model_info import get_default_model
@@ -5835,6 +5836,16 @@ class RemoteAccessServer:
             print(f"Cloudflare tunnel:         {self._active_url}", file=sys.stderr)
         elif self.use_tunnel:
             print("Warning: cloudflared tunnel failed to start", file=sys.stderr)
+        # Scheduled automations (cron) run in a background daemon
+        # thread for the daemon's whole lifetime; prompt jobs are
+        # submitted back to this daemon through its own UDS socket.
+        # Only this blocking lifecycle (the real `kiss-web` daemon)
+        # owns the scheduler: `start_async()` embedders — in-process
+        # helper daemons and tests — must not fire the user's
+        # scheduled jobs.
+        cron_stop = cron_agent.start_scheduler_thread(
+            sock_path=str(self._uds_path),
+        )
         loop = asyncio.get_running_loop()
         self._shutdown_future = loop.create_future()
         serve_task: asyncio.Task[None] = asyncio.ensure_future(
@@ -5846,6 +5857,7 @@ class RemoteAccessServer:
                 return_when=asyncio.FIRST_COMPLETED,
             )
         finally:
+            cron_stop.set()
             if not serve_task.done():
                 serve_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

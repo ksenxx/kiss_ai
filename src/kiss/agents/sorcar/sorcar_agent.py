@@ -1339,7 +1339,7 @@ class SorcarAgent(RelentlessAgent):
             tools.extend(make_mcp_tools(self.work_dir or "."))
         except Exception:
             logger.warning("MCP tool setup failed", exc_info=True)
-        from kiss.agents.third_party_agents.cron_agent import cron_job
+        from kiss.agents.sorcar.cron_agent import cron_job
 
         tools.append(cron_job)
         tools.append(ask_user_question)
