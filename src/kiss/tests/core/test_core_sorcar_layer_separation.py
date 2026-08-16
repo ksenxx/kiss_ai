@@ -5,10 +5,10 @@
 """End-to-end proof that ``kiss.core`` does not depend on ``kiss.agents.sorcar``.
 
 Core-only tests (they scan, import, and exercise nothing but
-``src/kiss/core``) moved here from
-``kiss.tests.test_core_sorcar_layer_separation``; the sorcar-side tests
-of the same invariant remain there and import the shared helpers back
-from this module.
+``src/kiss/core``) moved here from the original root-level module; the
+sorcar-side tests of the same invariant live in
+``kiss.tests.agents.sorcar.test_core_sorcar_layer_separation`` and
+import the shared helpers back from this module.
 
 The regression these tests guard against is the reverse dependency: if
 any ``kiss.core`` module reaches back into ``kiss.agents.sorcar`` (or
