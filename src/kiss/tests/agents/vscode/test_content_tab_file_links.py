@@ -178,6 +178,36 @@ class TestContentTabFileLinks:
         finally:
             context.close()
 
+    def test_md_link_renders_converted_html_in_sandboxed_iframe(
+        self, browser, harness,
+    ) -> None:
+        """Clicking a .md link converts the markdown to HTML and renders
+        the result in a sandboxed iframe inside a separate content tab —
+        never the raw markdown source in a code view."""
+        context, page, sent = _open_page(browser, harness)
+        try:
+            _inject_file_link(
+                page, str(harness.work_dir / "notes.md"), "lnk-md",
+            )
+            page.click("#lnk-md")
+            page.wait_for_selector(
+                "#content-tab-area .content-html-frame", timeout=30000,
+            )
+            iframe = page.locator("#content-tab-area .content-html-frame")
+            assert iframe.get_attribute("sandbox") == "allow-scripts"
+            frame = page.frame_locator("#content-tab-area .content-html-frame")
+            assert frame.locator("h1").inner_text() == "KISS-MD-TITLE"
+            assert frame.locator("strong").inner_text() == "bold"
+            # The raw markdown syntax must not appear in the rendered page.
+            assert "# KISS-MD-TITLE" not in frame.locator("body").inner_text()
+            label = page.locator(".chat-tab.content-tab .chat-tab-label")
+            assert label.inner_text() == "notes.md"
+            assert page.locator(
+                "#content-tab-area .content-monaco-holder",
+            ).count() == 0
+        finally:
+            context.close()
+
     def test_closing_content_tab_never_touches_backend_or_chat_tabs(
         self, browser, harness,
     ) -> None:
