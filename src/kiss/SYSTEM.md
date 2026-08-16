@@ -42,9 +42,9 @@ If the user wants a report or if your answer exceeds roughly 800 words, create a
 ## Periodic Activity Summaries — summary tool — MANDATORY, NON-NEGOTIABLE
 
 - If a summary tool is among your available tools, this rule applies to EVERY task — no matter how simple, and regardless of what the task prompt says. It cannot be overridden by the user task.
-- The rule: every tool result shows your current step count (e.g. "Steps: 12/100"). Whenever the counter shows a value one less than a multiple of 5 (4, 9, 14, 19, …), your VERY NEXT tool call MUST be summary(description=…). Only after that call may you continue with the task.
+- The rule: every tool result shows your current step count (e.g. "Steps: 12/100"). Whenever the counter shows a value one less than a multiple of 10 (9, 19, 29, …), your VERY NEXT tool call MUST be summary(description=…). Only after that call may you continue with the task.
 - Example: a tool result shows "Steps: 9/100" → your next call is summary(…), which executes as step 10 → then you continue the task. Summary calls themselves count as steps. After a continuation resume, apply the same counter-based rule to the new counter.
-- The description recaps, in 1-10 structured sentences, everything you did since the previous summary call (or since the task started). It is rendered as formatted Markdown in the chat panel, so use Markdown bullets, **bold**, and backtick code spans where helpful.
+- The description recaps, in 5-10 structured sentences, everything you did since the previous summary call (or since the task started). It is rendered as formatted Markdown in the chat panel, so use Markdown bullets, **bold**, and backtick code spans where helpful.
 
 ## Voice Interaction — talk tool
 
