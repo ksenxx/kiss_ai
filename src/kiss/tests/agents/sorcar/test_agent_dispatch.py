@@ -2,16 +2,16 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for the immediate channel-agent dispatch tool.
+"""End-to-end tests for the immediate agent dispatch tool.
 
 Everything runs against the real installed channel modules and the
 real agent-script loader — no mocks or test doubles (``monkeypatch``
-is used only to isolate environment variables and the cron module's
-daemon-socket default between tests).  Branches not exercised here,
-and why they need no doubles-based tests:
+is used only to isolate environment variables, the working directory,
+and the cron module's daemon-socket default between tests).  Branches
+not exercised here, and why they need no doubles-based tests:
 
-- ``run_channel_agent``'s successful and timed-out dispatch paths
-  submit a task to the kiss-web daemon and need a live LLM endpoint
+- ``run_agent``'s successful and timed-out dispatch paths submit a
+  task to the kiss-web daemon and need a live LLM endpoint
   (unavailable and non-deterministic in unit tests); the dispatch
   plumbing up to the daemon socket is covered via the
   unreachable-daemon path, and the agent-script contract the daemon
@@ -19,7 +19,7 @@ and why they need no doubles-based tests:
 - ``_package_dir``'s package-absent branches would require
   uninstalling ``kiss.agents.third_party_agents`` from the test
   environment.
-- ``run_channel_agent``'s no-agent-class guard is unreachable for any
+- ``_run_agent``'s no-agent-class guard is unreachable for any
   installed channel (``test_every_channel_module_is_dispatchable``
   proves the contract holds for all of them).
 """
@@ -31,15 +31,21 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar import channel_agents, cron_agent
-from kiss.agents.sorcar.channel_agents import (
+from kiss.agents.sorcar import agent_dispatch, cron_agent
+from kiss.agents.sorcar.agent_dispatch import (
     _agent_class,
     _daemon_sock_path,
     available_channels,
     get_tools,
-    run_channel_agent,
+    make_run_agent_tool,
 )
 from kiss.server.agent_file import AgentFileError, apply_agent_overrides
+
+# The standalone tool (no calling-task work directory): relative agent
+# paths resolve against the process working directory and path-mode
+# sub-tasks run in ``$KISS_HOME/agent_work``.  The closure captures
+# only the work-dir string, so one instance is safe across tests.
+run_agent = make_run_agent_tool("")
 
 
 @pytest.fixture(autouse=True)
@@ -69,36 +75,37 @@ def test_available_channels_discovery() -> None:
 
 
 def test_docstring_lists_channels() -> None:
-    doc = run_channel_agent.__doc__ or ""
+    doc = run_agent.__doc__ or ""
     assert "{channels}" not in doc
     assert "slack" in doc and "telegram" in doc
 
 
-def test_unknown_channel_error() -> None:
-    out = run_channel_agent("no_such_channel", "say hi")
-    assert out.startswith("Error: unknown channel")
+def test_unknown_agent_error() -> None:
+    out = run_agent("no_such_channel", "say hi")
+    assert out.startswith("Error: unknown agent")
+    assert "not a path to a .py agent script" in out
     assert "slack" in out
 
 
 def test_channel_name_is_normalized() -> None:
     # Case/whitespace variants still resolve; the unreachable daemon
-    # then fails the dispatch cleanly instead of "unknown channel".
-    out = run_channel_agent("  NTFY ", "say hi")
-    assert "unknown channel" not in out
+    # then fails the dispatch cleanly instead of "unknown agent".
+    out = run_agent("  NTFY ", "say hi")
+    assert "unknown agent" not in out
     assert out.startswith("Error: the ntfy agent task could not run:")
 
 
 def test_empty_task_error() -> None:
-    assert run_channel_agent("slack", "   ") == (
+    assert run_agent("slack", "   ") == (
         "Error: task must be a non-empty string."
     )
 
 
 def test_bad_budget_error() -> None:
-    out = run_channel_agent("slack", "say hi", max_budget="cheap")
+    out = run_agent("slack", "say hi", max_budget="cheap")
     assert out == "Error: max_budget must be a number, got 'cheap'."
     for bad in ("nan", "inf", "0", "-2"):
-        out = run_channel_agent("slack", "say hi", max_budget=bad)
+        out = run_agent("slack", "say hi", max_budget=bad)
         assert out == (
             f"Error: max_budget must be a positive finite number, "
             f"got {bad!r}."
@@ -111,26 +118,140 @@ def test_channel_alias_normalization() -> None:
     for alias, canonical in (
         ("Home Assistant", "homeassistant"),
         ("phone control", "phone_control"),
-        ("nextcloud-talk", "nextcloud_talk"),
         ("SLACK", "slack"),
     ):
-        out = run_channel_agent(alias, "say hi")
-        assert "unknown channel" not in out
+        out = run_agent(alias, "say hi")
+        assert "unknown agent" not in out
         assert out.startswith(
             f"Error: the {canonical} agent task could not run:"
         )
 
 
-def test_dispatch_unreachable_daemon_is_a_clean_error(tmp_path: Path) -> None:
-    out = run_channel_agent("ntfy", "say hi", max_budget="1.5")
+def test_hyphenated_alias_is_a_channel_not_a_path() -> None:
+    # A hyphen is a channel-name separator, not a path marker: the
+    # alias resolves to the channel even though "-" appears in it.
+    out = run_agent("nextcloud-talk", "say hi")
+    assert "unknown agent" not in out
+    assert out.startswith(
+        "Error: the nextcloud_talk agent task could not run:"
+    )
+
+
+def test_channel_dispatch_unreachable_daemon_is_a_clean_error(
+    tmp_path: Path,
+) -> None:
+    out = run_agent("ntfy", "say hi", max_budget="1.5")
     assert out.startswith("Error: the ntfy agent task could not run:")
     assert "no-daemon.sock" in out
     # The workspace env var (unset before the call) is unset again.
     import os
 
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
-    # The dispatch work dir is prepared under KISS_HOME.
+    # Channel dispatches run in the channel agents' shared work
+    # directory (the same default their poll-mode runner uses).
     assert (tmp_path / "channel_work").is_dir()
+    assert not (tmp_path / "agent_work").exists()
+
+
+def test_path_mode_missing_file_error(tmp_path: Path) -> None:
+    missing = tmp_path / "no_such_agent.py"
+    out = run_agent(str(missing), "say hi")
+    assert out.startswith("Error: agent script")
+    assert "does not exist" in out
+
+
+def test_path_mode_non_python_file_error(tmp_path: Path) -> None:
+    not_py = tmp_path / "agent.txt"
+    not_py.write_text("hello")
+    out = run_agent(str(not_py), "say hi")
+    assert out.startswith("Error: agent script")
+    assert "is not a Python (.py) file" in out
+
+
+def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
+    tmp_path: Path,
+) -> None:
+    # A valid agent-script path takes the path branch (no channel
+    # lookup, no workspace handling) and fails cleanly on the
+    # unreachable daemon, named by the script's file stem.
+    import os
+
+    script = tmp_path / "my_researcher.py"
+    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    out = run_agent(str(script), "say hi", workspace="ignored-ws")
+    assert out.startswith(
+        "Error: the my_researcher agent task could not run:"
+    )
+    assert "no-daemon.sock" in out
+    # Path mode never touches the channel workspace env var.
+    assert "KISS_CHANNEL_WORKSPACE" not in os.environ
+    # The standalone tool runs path-mode sub-tasks in agent_work.
+    assert (tmp_path / "agent_work").is_dir()
+    assert not (tmp_path / "channel_work").exists()
+
+
+def test_path_mode_detected_by_py_suffix_and_separator(
+    tmp_path: Path,
+) -> None:
+    # ".py" suffix without a separator is path mode, not a channel.
+    out = run_agent("slack_agent.py", "say hi")
+    assert out.startswith("Error: agent script")
+    # A separator without a ".py" suffix is path mode too — rejected
+    # with the loader's .py diagnostic rather than "unknown agent".
+    out = run_agent(str(tmp_path / "somedir" / "agent"), "say hi")
+    assert out.startswith("Error: agent script")
+    assert "is not a Python (.py) file" in out
+
+
+def test_relative_path_resolves_against_captured_work_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The tool runs in the daemon process, whose CWD is unrelated to
+    # the user's project: a relative agent path must resolve against
+    # the CALLING task's work directory captured by the factory.
+    project = tmp_path / "project"
+    (project / "agents").mkdir(parents=True)
+    script = project / "agents" / "reviewer.py"
+    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    elsewhere = tmp_path / "daemon_cwd"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    tool = make_run_agent_tool(str(project))
+    out = tool("agents/reviewer.py", "say hi")
+    # The script was found (under the project, not under the CWD) and
+    # the dispatch failed only on the unreachable daemon.
+    assert out.startswith("Error: the reviewer agent task could not run:")
+    assert "no-daemon.sock" in out
+    # A missing relative path names the project-anchored resolution.
+    out = tool("agents/nope.py", "say hi")
+    assert out.startswith("Error: agent script")
+    assert str(project / "agents" / "nope.py") in out
+    assert "does not exist" in out
+
+
+def test_path_mode_runs_in_captured_work_dir(tmp_path: Path) -> None:
+    # A path-named agent's sub-task runs in the calling task's work
+    # directory — no agent_work/channel_work scratch dir is created.
+    project = tmp_path / "project"
+    project.mkdir()
+    script = project / "helper.py"
+    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    out = make_run_agent_tool(str(project))(str(script), "say hi")
+    assert out.startswith("Error: the helper agent task could not run:")
+    assert not (tmp_path / "agent_work").exists()
+    assert not (tmp_path / "channel_work").exists()
+
+
+def test_standalone_relative_path_resolves_against_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Without a captured work directory (standalone tool), a relative
+    # path resolves against the process working directory.
+    script = tmp_path / "local_agent.py"
+    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    monkeypatch.chdir(tmp_path)
+    out = run_agent("local_agent.py", "say hi")
+    assert out.startswith("Error: the local_agent agent task could not run:")
 
 
 def test_dispatch_uses_launcher_workspace_registry(
@@ -151,7 +272,7 @@ def test_dispatch_uses_launcher_workspace_registry(
     monkeypatch.setenv("KISS_CHANNEL_WORKSPACE", "stale-ws")
     _enter_workspace("other-ws")  # a concurrent dispatch is active
     try:
-        out = run_channel_agent("ntfy", "say hi", workspace="my-ws")
+        out = run_agent("ntfy", "say hi", workspace="my-ws")
         assert out.startswith("Error: the ntfy agent task could not run:")
         # After this dispatch exits, the concurrent one is still
         # active, so the env var points at its workspace.
@@ -161,10 +282,10 @@ def test_dispatch_uses_launcher_workspace_registry(
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
 
 
-def test_channel_tools_reserved_against_mcp_collisions() -> None:
+def test_dispatch_tools_reserved_against_mcp_collisions() -> None:
     from kiss.agents.sorcar.mcp_servers import _RESERVED_TOOL_NAMES
 
-    assert {"run_channel_agent", "cron_job"} <= _RESERVED_TOOL_NAMES
+    assert {"run_agent", "cron_job"} <= _RESERVED_TOOL_NAMES
 
 
 def test_dispatch_uses_recorded_daemon_socket(
@@ -172,11 +293,15 @@ def test_dispatch_uses_recorded_daemon_socket(
 ) -> None:
     # Inside the kiss-web daemon the cron scheduler records the
     # daemon's own UDS at boot; the dispatch must target it even when
-    # KISS_SORCAR_SOCK points elsewhere.
+    # KISS_SORCAR_SOCK points elsewhere — in path mode too.
     recorded = tmp_path / "recorded-daemon.sock"
     monkeypatch.setattr(cron_agent, "_daemon_sock_path", str(recorded))
     assert _daemon_sock_path() == str(recorded)
-    out = run_channel_agent("ntfy", "say hi")
+    out = run_agent("ntfy", "say hi")
+    assert "recorded-daemon.sock" in out
+    script = tmp_path / "probe_agent.py"
+    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    out = run_agent(str(script), "say hi")
     assert "recorded-daemon.sock" in out
 
 
@@ -187,7 +312,7 @@ def test_agent_class_resolution() -> None:
     assert cls is not None and cls.__name__ == "SlackAgent"
     # A module defining no BaseChannelAgent subclass of its own
     # (imported classes do not count) resolves to None.
-    assert _agent_class(channel_agents) is None
+    assert _agent_class(agent_dispatch) is None
 
 
 def test_every_channel_module_is_dispatchable() -> None:
@@ -250,19 +375,24 @@ def test_agent_script_get_tools_wrong_type_still_rejected(
 
 
 def test_get_tools_and_sorcar_wiring() -> None:
-    assert get_tools() == [run_channel_agent]
+    tools = get_tools()
+    assert len(tools) == 1
+    assert tools[0].__name__ == "run_agent"
+    assert "slack" in (tools[0].__doc__ or "")
     # The module lives in the sorcar package and never imports from
     # kiss.agents.third_party_agents at module scope (soft plugin).
-    source_text = Path(channel_agents.__file__).read_text(encoding="utf-8")
-    assert "/agents/sorcar/" in channel_agents.__file__
+    source_text = Path(agent_dispatch.__file__).read_text(encoding="utf-8")
+    assert "/agents/sorcar/" in agent_dispatch.__file__
     for line in source_text.splitlines():
         assert not line.startswith("from kiss.agents.third_party_agents")
         assert not line.startswith("import kiss.agents.third_party_agents")
-    # The default Sorcar toolset registers the tool.
-    agent_source = Path(channel_agents.__file__).parent / "sorcar_agent.py"
-    assert "tools.append(run_channel_agent)" in agent_source.read_text(
-        encoding="utf-8"
+    # The default Sorcar toolset registers the tool, bound to the
+    # calling task's work directory.
+    agent_source = Path(agent_dispatch.__file__).parent / "sorcar_agent.py"
+    assert (
+        'tools.append(make_run_agent_tool(self.work_dir or ""))'
+        in agent_source.read_text(encoding="utf-8")
     )
     # The system prompt directs the agent to dispatch immediately.
-    system_md = Path(channel_agents.__file__).parents[2] / "SYSTEM.md"
-    assert "run_channel_agent" in system_md.read_text(encoding="utf-8")
+    system_md = Path(agent_dispatch.__file__).parents[2] / "SYSTEM.md"
+    assert "run_agent" in system_md.read_text(encoding="utf-8")
