@@ -5,7 +5,7 @@
 """Tests for vscode agent audit round 8: redundancies, inconsistencies, bugs.
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.agents.vscode.test_vscode_audit_8``; the non-core tests remain there.
+``kiss.tests.server.test_vscode_audit_8``; the non-core tests remain there.
 """
 
 from __future__ import annotations

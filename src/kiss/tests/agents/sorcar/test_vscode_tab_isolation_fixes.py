@@ -125,7 +125,7 @@ class TestB5CommitMessageCarriesTabId(unittest.TestCase):
     """B5: commitMessage events must carry tabId so only the requester sees them."""
 
     def test_cmd_generate_commit_message_tags_events_with_tab_id(self) -> None:
-        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
+        from kiss.tests.server._memory_printer import MemoryPrinter
 
         printer = MemoryPrinter()
         server = VSCodeServer(printer=printer)
