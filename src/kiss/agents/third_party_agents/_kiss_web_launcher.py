@@ -150,8 +150,8 @@ class KissWebChatAgent(BaseChannelAgent):
 
     A plain :class:`BaseChannelAgent` (no auth tools, no backend) that
     additionally carries the daemon chat id across launches: the
-    pollers call :meth:`resume_chat_by_id` before launching and read
-    :attr:`chat_id` after, so each conversation thread maps to a
+    channel runner calls :meth:`resume_chat_by_id` before launching and
+    reads :attr:`chat_id` after, so each conversation thread maps to a
     persistent daemon chat.  Like every channel agent it never runs
     anything itself — the inherited ``run()`` submits the task through
     :func:`kiss.server.sorcar.run` via :func:`run_agent_via_kiss_web`,
@@ -218,7 +218,8 @@ def run_agent_via_kiss_web(
     The passed *agent* instance is never executed — the daemon builds
     its own chat agent.  The instance serves as the carrier of channel
     identity: the launcher propagates the daemon chat id onto it (so
-    pollers can resume the conversation), records the YAML result in
+    the channel runner can resume the conversation), records the YAML
+    result in
     ``agent.last_run_result``, and copies the task's cost / token /
     step totals onto the instance for CLI run stats.
 

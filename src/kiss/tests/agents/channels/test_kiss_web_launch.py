@@ -876,16 +876,16 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         assert yaml.safe_load(result)["summary"] == "auth tools bridged"
 
 
-class TestKissWebPollerAgents(_ApiLaunchBase):
-    """The chat-id carrier agents used by the Slack pollers."""
+class TestKissWebChatCarrierAgents(_ApiLaunchBase):
+    """The chat-id carrier agents used by the channel runner."""
 
     def test_chat_agent_gets_daemon_chat_id(self) -> None:
         self._install_stub()
-        agent = KissWebChatAgent("Test Poller")
+        agent = KissWebChatAgent("Test Carrier")
         agent.new_chat()
         result = run_agent_via_kiss_web(
             agent,
-            "poller task",
+            "carrier task",
             work_dir=self.repo,
             sock_path=self.sock_path,
         )
@@ -893,12 +893,12 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
         assert agent.last_run_result == result
         assert agent.chat_id, (
             "the daemon-minted chat id must be propagated onto the "
-            "carrier agent so the poller can resume the thread later"
+            "carrier agent so the channel runner can resume the thread later"
         )
 
     def test_chat_agent_resume_chat_by_id(self) -> None:
         self._install_stub()
-        agent = KissWebChatAgent("Test Poller")
+        agent = KissWebChatAgent("Test Carrier")
         agent.new_chat()
         run_agent_via_kiss_web(
             agent,
@@ -916,7 +916,7 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
             return "resumed fine"
 
         self._install_stub(on_run=on_run)
-        resumed = KissWebChatAgent("Test Poller")
+        resumed = KissWebChatAgent("Test Carrier")
         resumed.resume_chat_by_id(first_chat)
         run_agent_via_kiss_web(
             resumed,
@@ -931,7 +931,7 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
 
     def test_carrier_records_result_with_new_chat(self) -> None:
         self._install_stub()
-        agent = KissWebChatAgent("Test Poller 2")
+        agent = KissWebChatAgent("Test Carrier 2")
         agent.new_chat()
         result = run_agent_via_kiss_web(
             agent,
@@ -941,38 +941,6 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
         )
         assert yaml.safe_load(result)["summary"] == STUB_SUMMARY
         assert agent.last_run_result == result
-
-    def test_slack_sorcar_poller_run_sorcar(self) -> None:
-        from kiss.agents.third_party_agents import slack_sorcar_poller
-
-        self._install_stub(summary="poller done")
-        text, chat_id = slack_sorcar_poller._run_sorcar("do stuff", "")
-        assert "poller done" in text
-        assert chat_id, "a fresh chat id must be returned"
-        assert isinstance(self.stub_calls[0]["agent"], ChatSorcarAgent)
-        assert self.stub_calls[0]["agent"] is not None
-
-    def test_slack_sorcar_poller_resumes_chat(self) -> None:
-        from kiss.agents.third_party_agents import slack_sorcar_poller
-
-        self._install_stub(summary="first")
-        _text, chat_id = slack_sorcar_poller._run_sorcar("start", "")
-        assert chat_id
-        self._install_stub(summary="second")
-        _text2, chat_id2 = slack_sorcar_poller._run_sorcar(
-            "continue", chat_id,
-        )
-        assert chat_id2 == chat_id, "existing chat id must be reused"
-
-    def test_slack_channel_poller_run_sorcar(self) -> None:
-        from kiss.agents.third_party_agents import slack_channel_sorcar_poller
-
-        self._install_stub(summary="wt poller done")
-        text, chat_id = slack_channel_sorcar_poller._run_sorcar(
-            "wt stuff", "",
-        )
-        assert "wt poller done" in text
-        assert chat_id
 
 
 class TestChannelRunnerViaApi(_ApiLaunchBase):
