@@ -13,18 +13,24 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   tool accepts only four normalized schedule forms (interval, 5-field
   cron expression, one-shot duration, one-shot ISO timestamp) and the
   agent translates phrases like "every weekday at 9am" into them.
-- A scheduler tick (``kiss-cron --tick`` one-shot, or ``kiss-cron
-  --daemon`` looping every 60 seconds) finds due jobs, reschedules
-  them *before* running (so the same occurrence never double-fires;
-  a job that outlasts its interval may still overlap its next run),
-  runs each in a fresh kiss-web daemon session, and delivers the
-  result.
-- Delivery targets reuse the existing channel agents: any module in
-  ``kiss.agents.third_party_agents`` with a ``_make_backend()``
-  factory can receive results (``telegram:123``, ``slack:eng``,
-  ``ntfy``, ...).  Every run is also appended to a local log under
-  ``~/.kiss/cron/output/``.  A ``[SILENT]`` summary (or empty command
-  output) suppresses delivery, exactly like Hermes.
+- The kiss-web daemon runs the scheduler automatically in a
+  background thread (:func:`start_scheduler_thread`): every ~60
+  seconds a tick finds due jobs, reschedules them *before* running
+  (so the same occurrence never double-fires; a job that outlasts
+  its interval may still overlap its next run), runs each in a fresh
+  daemon session, and delivers the result.  ``kiss-cron --tick`` and
+  ``kiss-cron --daemon`` remain available for running the scheduler
+  outside the daemon; in that mode command jobs work standalone while
+  prompt jobs still need a reachable kiss-web daemon (they are
+  submitted through its socket).
+- Delivery targets are looked up dynamically: any module named
+  ``kiss.agents.third_party_agents.<channel>_agent`` with a
+  ``_make_backend()`` factory can receive results (``telegram:123``,
+  ``slack:eng``, ``ntfy``, ...).  This module works without those
+  optional channel modules — an unknown channel just yields a
+  delivery-error note.  Every run is also appended to a local log
+  under ``~/.kiss/cron/output/``.  A ``[SILENT]`` summary (or empty
+  command output) suppresses delivery, exactly like Hermes.
 - ``command`` jobs (Hermes "no_agent" mode) run a shell command with
   no LLM involved; non-empty stdout is delivered verbatim.
 
@@ -32,7 +38,7 @@ Usage::
 
     kiss-cron --create "morning brief" --schedule "0 9 * * *" \\
         --prompt "Summarize today's HN front page" --deliver telegram:123
-    kiss-cron --daemon
+    kiss-web   # the daemon ticks the scheduler automatically
 """
 
 import argparse
@@ -45,23 +51,30 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from kiss.agents.third_party_agents._channel_agent_utils import (
-    channel_state_lock,
-    summary_for_reply,
-)
 from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
 COMMAND_TIMEOUT_SECONDS = 600.0
+PROMPT_TIMEOUT_SECONDS = 3600.0
+
+_daemon_sock_path: str | None = None
+"""UDS path of the kiss-web daemon hosting this process's scheduler.
+
+Set by :func:`start_scheduler_thread` so tool calls executed inside the
+daemon (e.g. ``cron_job("run_now", ...)``) submit prompt jobs back to
+the same daemon even when it serves a non-default socket.
+"""
 CRON_SCAN_DAYS = 4 * 366 + 1  # covers the largest gap between leap days
 DEFAULT_TICK_INTERVAL_SECONDS = 60.0
 MAX_STORED_SUMMARY_CHARS = 4000
@@ -86,6 +99,64 @@ def _jobs_path() -> Path:
 def _output_dir() -> Path:
     """Return the directory holding per-job local output logs."""
     return _cron_dir() / "output"
+
+
+_SILENCE_TOKENS = frozenset({"[SILENT]", "NO_REPLY"})
+
+
+def _is_silent(summary: str) -> bool:
+    """Return whether *summary* is a Hermes-style silence token.
+
+    A summary that is exactly ``[SILENT]`` or ``NO_REPLY`` (optionally
+    wrapped in HTML tags by the daemon's HTML conversion) suppresses
+    delivery.
+
+    Args:
+        summary: The job's deliverable summary text.
+
+    Returns:
+        ``True`` when delivery should be suppressed.
+    """
+    return re.sub(r"<[^>]+>", "", summary).strip() in _SILENCE_TOKENS
+
+
+@contextlib.contextmanager
+def _jobs_lock(blocking: bool) -> Iterator[Any | None]:
+    """Acquire the ``flock`` guarding the job store.
+
+    The same lock serializes the scheduler's tick (non-blocking: an
+    overlapping tick skips) and the tool's read-modify-write
+    (blocking: the tool waits for a running tick to finish), so a job
+    edit can never be overwritten by a stale in-memory save.  On
+    platforms without ``fcntl`` the lock file is opened but not
+    locked.
+
+    Args:
+        blocking: Whether to wait for the lock (tool path) or give up
+            immediately when it is held (tick path).
+
+    Yields:
+        The open lock file object while the lock is held, or ``None``
+        when *blocking* is ``False`` and another process holds it.
+    """
+    lock_path = _jobs_path().with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fp = lock_path.open("a+", encoding="utf-8")
+    try:
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - non-Unix platforms
+            yield fp
+            return
+        flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+        try:
+            fcntl.flock(fp.fileno(), flags)
+        except BlockingIOError:
+            yield None
+            return
+        yield fp
+    finally:
+        fp.close()
 
 
 def load_jobs() -> list[dict[str, Any]]:
@@ -383,26 +454,30 @@ def _deliver(job: dict[str, Any], text: str) -> list[str]:
     return notes
 
 
-def _run_prompt_job(job: dict[str, Any]) -> tuple[str, str | None]:
+def _run_prompt_job(
+    job: dict[str, Any], sock_path: str | None = None,
+) -> tuple[str, str | None]:
     """Run an LLM cron job in a fresh kiss-web daemon session.
 
-    Mirrors Hermes: every run gets a brand-new session (no history),
-    with a preamble marking the run as unattended and forbidding
-    further scheduling; a ``[SILENT]`` summary suppresses delivery.
+    Submits the prompt to the running kiss-web daemon through the
+    public client API :func:`kiss.server.sorcar.run`.  Mirrors Hermes:
+    every run gets a brand-new session (no history), with a preamble
+    marking the run as unattended and forbidding further scheduling; a
+    ``[SILENT]`` (or empty) summary suppresses delivery.
 
     Args:
         job: The job dict (uses ``prompt``, ``model_name``,
             ``max_budget``).
+        sock_path: Daemon UDS path override; ``None`` uses the
+            standard resolution (``KISS_SORCAR_SOCK`` environment
+            variable, then ``$KISS_HOME/sorcar.sock``).
 
     Returns:
         ``(status, text)`` where status is ``"ok"``, ``"error"``, or
         ``"silent"``; text is the deliverable summary (``None`` when
         silent).
     """
-    from kiss.agents.third_party_agents._kiss_web_launcher import (
-        KissWebChatAgent,
-        run_agent_via_kiss_web,
-    )
+    from kiss.server import sorcar
 
     preamble = (
         "You are running as an unattended scheduled automation (cron job). "
@@ -413,20 +488,35 @@ def _run_prompt_job(job: dict[str, Any]) -> tuple[str, str | None]:
     )
     work_dir = _cron_dir() / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
-    agent = KissWebChatAgent(f"Cron: {job.get('name', job['id'])}")
-    result = run_agent_via_kiss_web(
-        agent,
-        preamble + str(job.get("prompt", "")),
-        model_name=str(job.get("model_name", "")),
-        max_budget=float(job["max_budget"]) if job.get("max_budget") else None,
-        work_dir=str(work_dir),
-    )
-    summary = summary_for_reply(result)
-    if summary is None:
+    try:
+        result = sorcar.run(
+            preamble + str(job.get("prompt", "")),
+            work_dir=str(work_dir),
+            model=str(job.get("model_name", "")),
+            max_budget=float(job["max_budget"]) if job.get("max_budget") else None,
+            timeout=PROMPT_TIMEOUT_SECONDS,
+            sock_path=sock_path,
+        )
+    except TimeoutError:
+        return "error", (
+            f"prompt job timed out after {PROMPT_TIMEOUT_SECONDS:.0f}s "
+            "(the task keeps running in the daemon)"
+        )
+    except OSError as e:
+        sock = (
+            sock_path
+            or os.environ.get("KISS_SORCAR_SOCK")
+            or str(kiss_home() / "sorcar.sock")
+        )
+        return "error", (
+            f"cannot reach the kiss-web daemon at {sock}: {e} "
+            "(prompt jobs need a running kiss-web daemon; "
+            "command jobs work without one)"
+        )
+    summary = result.text or ("" if result.success else "Task failed")
+    if not summary or _is_silent(summary):
         return "silent", None
-    parsed = yaml.safe_load(result) if result else None
-    success = bool(parsed.get("success")) if isinstance(parsed, dict) else False
-    return ("ok" if success else "error"), summary
+    return ("ok" if result.success else "error"), summary
 
 
 def _run_command_job(job: dict[str, Any]) -> tuple[str, str | None]:
@@ -459,7 +549,7 @@ def _run_command_job(job: dict[str, Any]) -> tuple[str, str | None]:
     return "ok", output
 
 
-def _execute_job(job: dict[str, Any]) -> None:
+def _execute_job(job: dict[str, Any], sock_path: str | None = None) -> None:
     """Execute one job, deliver its result, and record the outcome.
 
     Never raises: failures are recorded in the job's ``last_status`` /
@@ -468,12 +558,13 @@ def _execute_job(job: dict[str, Any]) -> None:
 
     Args:
         job: The job dict to execute.
+        sock_path: Daemon UDS path override for prompt jobs.
     """
     try:
         if str(job.get("command", "")).strip():
             status, text = _run_command_job(job)
         else:
-            status, text = _run_prompt_job(job)
+            status, text = _run_prompt_job(job, sock_path or _daemon_sock_path)
     except Exception as e:
         logger.error("Cron job %s failed: %s", job["id"], e, exc_info=True)
         status, text = "error", f"{type(e).__name__}: {e}"
@@ -484,7 +575,7 @@ def _execute_job(job: dict[str, Any]) -> None:
         except Exception as e:
             logger.error("Cron delivery for %s failed: %s", job["id"], e, exc_info=True)
             notes = [f"error: delivery failed: {e}"]
-    with channel_state_lock(_jobs_path(), blocking=True):
+    with _jobs_lock(blocking=True):
         jobs = load_jobs()
         for stored in jobs:
             if stored["id"] == job["id"]:
@@ -494,7 +585,7 @@ def _execute_job(job: dict[str, Any]) -> None:
         save_jobs(jobs)
 
 
-def tick(now: float | None = None) -> int:
+def tick(now: float | None = None, sock_path: str | None = None) -> int:
     """Run one scheduler pass: execute every due job.
 
     Takes a non-blocking ``flock`` on the job store (an overlapping
@@ -512,13 +603,14 @@ def tick(now: float | None = None) -> int:
 
     Args:
         now: Current time in epoch seconds; ``None`` uses the clock.
+        sock_path: Daemon UDS path override for prompt jobs.
 
     Returns:
         The number of jobs executed (``0`` when another tick holds the
         lock).
     """
     now = time.time() if now is None else now
-    with channel_state_lock(_jobs_path(), blocking=False) as lock_fp:
+    with _jobs_lock(blocking=False) as lock_fp:
         if lock_fp is None:
             return 0
         jobs = load_jobs()
@@ -553,8 +645,68 @@ def tick(now: float | None = None) -> int:
         if not due:
             return 0
     for job in due:
-        _execute_job(job)
+        _execute_job(job, sock_path)
     return len(due)
+
+
+def run_scheduler(
+    stop_event: threading.Event,
+    interval: float = DEFAULT_TICK_INTERVAL_SECONDS,
+    sock_path: str | None = None,
+) -> None:
+    """Run the scheduler loop until *stop_event* is set.
+
+    Ticks immediately, then every *interval* seconds.  A failing tick
+    is logged and never stops the loop.
+
+    Args:
+        stop_event: Setting this event stops the loop (the wait
+            between ticks returns early; a tick already executing a
+            job finishes it first).
+        interval: Seconds between scheduler passes.
+        sock_path: Daemon UDS path override for prompt jobs.
+    """
+    while not stop_event.is_set():
+        try:
+            ran = tick(sock_path=sock_path)
+            if ran:
+                logger.info("kiss-cron: ran %d job(s)", ran)
+        except Exception as e:
+            logger.error("Scheduler tick failed: %s", e, exc_info=True)
+        stop_event.wait(interval)
+
+
+def start_scheduler_thread(
+    interval: float = DEFAULT_TICK_INTERVAL_SECONDS,
+    sock_path: str | None = None,
+) -> threading.Event:
+    """Start the scheduler loop in a daemon thread.
+
+    Called by the kiss-web daemon on startup so scheduled automations
+    fire without any external cron process.  Prompt jobs are submitted
+    back to the daemon through *sock_path*.
+
+    Args:
+        interval: Seconds between scheduler passes.
+        sock_path: Daemon UDS path override for prompt jobs (the
+            daemon passes its own socket); also becomes the module
+            default so ``run_now`` tool calls in this process target
+            the same daemon.
+
+    Returns:
+        The stop event: set it to stop the loop.
+    """
+    global _daemon_sock_path
+    if sock_path:
+        _daemon_sock_path = sock_path
+    stop_event = threading.Event()
+    threading.Thread(
+        target=run_scheduler,
+        args=(stop_event, interval, sock_path),
+        name="kiss-cron-scheduler",
+        daemon=True,
+    ).start()
+    return stop_event
 
 
 def _job_view(job: dict[str, Any]) -> dict[str, Any]:
@@ -628,8 +780,10 @@ def cron_job(
     exactly ``[SILENT]`` (or a command with empty output) delivers
     nothing.
 
-    Jobs only fire while the scheduler is running: ``kiss-cron --daemon``
-    (or ``kiss-cron --tick`` from the system crontab).
+    The kiss-web daemon runs the scheduler automatically; jobs fire
+    while the daemon is up.  ``kiss-cron --daemon`` / ``--tick`` also
+    run the scheduler standalone, where command jobs work on their own
+    but prompt jobs still need a reachable kiss-web daemon.
 
     Args:
         action: One of ``create``, ``list``, ``remove``, ``pause``,
@@ -686,7 +840,7 @@ def cron_job(
             "last_summary": "",
             "last_delivery": [],
         }
-        with channel_state_lock(_jobs_path(), blocking=True):
+        with _jobs_lock(blocking=True):
             jobs = load_jobs()
             jobs.append(job)
             save_jobs(jobs)
@@ -698,7 +852,7 @@ def cron_job(
     if action in ("remove", "pause", "resume"):
         if not job_id:
             return _dump({"error": f"{action} requires job_id"})
-        with channel_state_lock(_jobs_path(), blocking=True):
+        with _jobs_lock(blocking=True):
             jobs = load_jobs()
             match = [job for job in jobs if job["id"] == job_id]
             if not match:
@@ -783,14 +937,7 @@ def main() -> None:
     if args.daemon:
         logging.basicConfig(level=logging.INFO)
         print(f"kiss-cron scheduler running (every {args.interval:.0f}s); Ctrl-C to stop")
-        while True:
-            try:
-                ran = tick()
-                if ran:
-                    print(f"[{datetime.now().isoformat(timespec='seconds')}] ran {ran} job(s)")
-            except Exception as e:
-                logger.error("Scheduler tick failed: %s", e, exc_info=True)
-            time.sleep(args.interval)
+        run_scheduler(threading.Event(), args.interval)
     elif args.tick:
         print(f"ran {tick()} job(s)")
     elif args.list:
