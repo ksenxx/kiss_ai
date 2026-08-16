@@ -1264,6 +1264,7 @@ _RESERVED_TOOL_NAMES = frozenset({
     "screenshot", "get_page_content", "show_browser", "close_browser",
     "skill", "ask_user_question", "talk", "set_model",
     "run_parallel", "number_of_cores", "summary",
+    "cron_job", "run_channel_agent",
 })
 
 
