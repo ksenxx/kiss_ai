@@ -1819,8 +1819,59 @@
     if (e.key === 'Escape') closeTabContextMenu();
   });
 
-  function createBackgroundSubagentTab(parentId) {
+  /**
+   * The deterministic tab id every client mints for sub-agent task
+   * *taskId* spawned under parent tab *parentTabId*.
+   *
+   * Tab ids are global across clients (the shared tab registry mirrors
+   * one tab to every window), so all clients MUST agree on the id of a
+   * sub-agent's tab.  When each client minted its own random id for
+   * the same sub-agent, the daemon ended up with one viewer
+   * subscription per client and each client then "deduped" the other
+   * clients' announcements via retagSubagentTab -> api.closeTab, which
+   * unsubscribed EVERY tab id from the sub-agent's event stream — the
+   * tabs froze on the head of the transcript.  One shared,
+   * deterministic id means no retag, no closeTab, one subscription.
+   *
+   * The format matches the daemon's own convention for replayed
+   * sub-agent tabs (``f"{parent_tab_id}__sub_{sub_task_id}"`` in
+   * ``_open_persisted_subagent_tabs``), which
+   * ``_resolve_parent_tab_id_for_sub`` parses with
+   * ``rsplit("__sub_", 1)`` — nesting is safe.
+   *
+   * @param {string} parentTabId The parent's tab id ('' when unknown).
+   * @param {*} taskId The sub-agent's task id.
+   * @returns {string} The deterministic sub-agent tab id.
+   */
+  function subagentTabIdFor(parentTabId, taskId) {
+    return (parentTabId || 'task') + '__sub_' + String(taskId);
+  }
+
+  /**
+   * Open a background (non-activated) tab for a freshly spawned
+   * sub-agent.
+   *
+   * @param {string} parentId The parent's tab id ('' for none).
+   * @param {string} tabId Deterministic id for the new tab; '' keeps
+   *     the random id makeTab minted (legacy callers/tests).
+   * @returns {object} The new tab object.
+   */
+  function createBackgroundSubagentTab(parentId, tabId) {
+    if (tabId) {
+      // One id, one tab: the deterministic id may already be open
+      // (e.g. the daemon's openSubagentTab announcement landed before
+      // this spawn was processed).  Reuse it instead of stacking a
+      // second tab under the same id.
+      const existing = getTab(tabId);
+      if (existing) {
+        existing.isSubagentTab = true;
+        if (parentId && parentId !== existing.id)
+          existing.parentTabId = parentId;
+        return existing;
+      }
+    }
     const subTab = makeTab('new chat');
+    if (tabId) subTab.id = tabId;
     if (parentId) subTab.parentTabId = parentId;
     subTab.isSubagentTab = true;
     placeSubagentTabAfterParent(subTab, parentId);
@@ -2947,11 +2998,28 @@
     return m ? m[1] : p;
   }
 
+  // A verdict is not terminal: a resolved span keeps its
+  // data-path-wd / data-path-tab stamps and stores its path in the
+  // state attribute it lands on (data-path when the file exists,
+  // data-path-missing when it does not), so recheckFileLinksForTab()
+  // can find it in the transcript and ask for a fresh verdict after
+  // the tab's worktree branch is merged or discarded.  The registry
+  // still drains: promote/demote drop the span, and only an explicit
+  // recheck re-registers it.
+
+  function _fileLinkPath(span) {
+    return (
+      span.getAttribute('data-path-candidate') ||
+      span.getAttribute('data-path') ||
+      span.getAttribute('data-path-missing') ||
+      ''
+    );
+  }
+
   function promoteFileLink(span) {
-    const raw = span.getAttribute('data-path-candidate');
+    const raw = _fileLinkPath(span);
     span.removeAttribute('data-path-candidate');
-    span.removeAttribute('data-path-wd');
-    span.removeAttribute('data-path-tab');
+    span.removeAttribute('data-path-missing');
     span.setAttribute('data-path', raw);
     span.classList.add('kiss-filelink');
     span.title = 'Open ' + raw;
@@ -2959,10 +3027,11 @@
   }
 
   function demoteFileLink(span) {
+    const raw = _fileLinkPath(span);
     span.removeAttribute('data-path-candidate');
-    span.removeAttribute('data-path-wd');
-    span.removeAttribute('data-path-tab');
-    span.setAttribute('data-path-missing', '1');
+    span.removeAttribute('data-path');
+    span.removeAttribute('title');
+    span.setAttribute('data-path-missing', raw);
     span.classList.remove('kiss-filelink');
     _pendingFileLinkSpans.delete(span);
   }
@@ -3023,9 +3092,10 @@
       }
       // tableak-coverage:end
       if ((span.getAttribute('data-path-wd') || '') !== workDir) continue;
-      const p = _stripLineSuffix(
-        span.getAttribute('data-path-candidate') || '',
-      );
+      // A span re-registered by recheckFileLinksForTab() carries
+      // data-path or data-path-missing instead of data-path-candidate;
+      // _fileLinkPath() reads whichever state attribute holds the path.
+      const p = _stripLineSuffix(_fileLinkPath(span));
       if (Object.prototype.hasOwnProperty.call(results, p)) {
         if (results[p]) promoteFileLink(span);
         else demoteFileLink(span);
@@ -3086,11 +3156,19 @@
    * are skipped, and a reconnect with nothing outstanding sends
    * nothing: every open window reconnects at once after a daemon
    * restart.
+   *
+   * A pending span is not always a fresh candidate: a resolved span
+   * re-registered by recheckFileLinksForTab() carries data-path or
+   * data-path-missing instead of data-path-candidate, and losing its
+   * post-worktree verdict to the outage would strand it in its
+   * pre-merge (or pre-discard) state forever. _fileLinkPath() reads
+   * whichever state attribute holds the path, so those spans are
+   * reissued too.
    */
   function reissueFileLinkChecks() {
     const groups = new Map();
     for (const span of _pendingFileLinkSpans) {
-      const raw = span.getAttribute('data-path-candidate');
+      const raw = _fileLinkPath(span);
       if (!raw) continue;
       const owner = span.getAttribute('data-path-tab') || '';
       const wd = span.getAttribute('data-path-wd') || '';
@@ -3105,6 +3183,54 @@
         groups.set(groupKey, group);
       }
       group.paths.push(p);
+    }
+    for (const group of groups.values()) api.send(group);
+  }
+
+  /**
+   * Re-ask the host about every file-link span in *tabId*'s transcript.
+   *
+   * Called when the tab's worktree branch is merged or discarded
+   * (worktree_result): a merge copies the task's committed files into
+   * the original checkout — paths demoted as missing while they lived
+   * only on the branch now exist — and a discard deletes the worktree
+   * copy that the host's pending-worktree fallback resolved, so
+   * promoted links may now point at nothing.  Resolved spans are no
+   * longer in the registry, so they are collected from the transcript
+   * DOM instead (#output for the visible tab, the saved fragment for a
+   * background one), re-registered so the reply can flip them, and
+   * re-checked under the workDir stamped on each span.
+   *
+   * @param {string|undefined} tabId The tab whose worktree changed.
+   */
+  function recheckFileLinksForTab(tabId) {
+    const id = tabId === undefined ? activeTabId : tabId;
+    const owner = String(id);
+    const roots = [];
+    if (id === activeTabId) roots.push(O);
+    const tab = getTab(id);
+    if (tab && tab.outputFragment) roots.push(tab.outputFragment);
+    const groups = new Map();
+    for (const root of roots) {
+      if (!root || !root.querySelectorAll) continue;
+      const spans = root.querySelectorAll(
+        '[data-path], [data-path-candidate], [data-path-missing]',
+      );
+      for (const span of spans) {
+        if ((span.getAttribute('data-path-tab') || '') !== owner) continue;
+        const raw = _fileLinkPath(span);
+        if (!raw) continue;
+        const wd = span.getAttribute('data-path-wd') || '';
+        const p = _stripLineSuffix(raw);
+        _pendingFileLinkSpans.add(span);
+        _pendingPathChecks.add(_fileLinkCacheKey(owner, wd, p));
+        let group = groups.get(wd);
+        if (!group) {
+          group = {type: 'checkPaths', paths: [], workDir: wd, tabId: id};
+          groups.set(wd, group);
+        }
+        if (group.paths.indexOf(p) < 0) group.paths.push(p);
+      }
     }
     for (const group of groups.values()) api.send(group);
   }
@@ -3628,7 +3754,10 @@
             _rpTabPanel.set(existing.id, panelEl);
             continue;
           }
-          const subTab = createBackgroundSubagentTab(panelEl._rpParentTabId);
+          const subTab = createBackgroundSubagentTab(
+            panelEl._rpParentTabId,
+            subagentTabIdFor(panelEl._rpParentTabId, en.taskId),
+          );
           subTab.currentTaskId = en.taskId;
           en.tabId = subTab.id;
           _rpTabPanel.set(subTab.id, panelEl);
@@ -3967,10 +4096,11 @@
     if (el.scrollTop !== top) el.scrollTop = top;
   }
 
-  // User scroll lock: when a task is running and the user scrolls the
-  // chat up by at least 1/8th of its visible height, outer auto-scroll
-  // is disabled; it resumes once the user scrolls back to the bottom
-  // of the chat.
+  // User scroll lock: whenever the chat is scrolled away from its
+  // bottom — e.g. the user scrolled up to read a previous task — outer
+  // auto-scroll is disabled; it resumes only once the user scrolls
+  // back to the bottom of the chat.  Programmatic auto-scrolls always
+  // land at the bottom, so they never engage the lock.
   let userScrollLock = false;
 
   function chatDistanceFromBottom() {
@@ -3978,12 +4108,7 @@
   }
 
   function updateUserScrollLock() {
-    const dist = chatDistanceFromBottom();
-    if (dist >= O.clientHeight / 8) {
-      if (isRunning) userScrollLock = true;
-    } else if (dist <= 1) {
-      userScrollLock = false;
-    }
+    userScrollLock = chatDistanceFromBottom() > 1;
   }
 
   function resetUserScrollLock() {
@@ -3993,6 +4118,14 @@
   function autoScrollChat() {
     // The outer chat follows the tail only while the user has not
     // scrolled up (the lock re-arms when they return to the bottom).
+    // A collapse (e.g. older panels folding) can shrink the chat until
+    // it rests at its bottom without the browser firing any scroll
+    // event; a lock cached before the shrink would then suppress
+    // following forever, so a lock observed at the bottom is stale and
+    // is re-derived here.  An engaged lock is never created here: an
+    // append grows the distance from the bottom, so recomputing an
+    // UNLOCKED state right after one would wrongly engage the lock.
+    if (userScrollLock) updateUserScrollLock();
     if (!userScrollLock) scrollPanelToEnd(O);
   }
 
@@ -5973,10 +6106,39 @@
           const teVisibleTab = activeTabId;
           currentTaskMetrics = {tokens: '', budget: '', steps: ''};
           // visibletask-coverage:end
+          // The borrowed row starts empty, exactly like the active
+          // tab's replayTaskEvents() starts with clearUsageMetrics():
+          // this replay REPLACES the tab's transcript, so a transcript
+          // that carries no usage event must leave the tab with no
+          // numbers — not with the visible tab's (or the hidden tab's
+          // own stale) ones.
+          if (statusTokens) statusTokens.textContent = '';
+          if (statusBudget) statusBudget.textContent = '';
+          if (statusSteps) statusSteps.textContent = '';
           let bgSteps = 0;
           try {
             bgSteps = replayEventsInto(frag, ev.events || [], {
               ownerTabId: teTabId,
+              // The replayed usage_info / result events painted this
+              // hidden tab's tokens and cost onto the borrowed status
+              // row; keep them on the tab (exactly like the live
+              // processOutputEventForBgTab does) — otherwise a switch
+              // to this tab shows only "Steps: N". A transcript that
+              // painted nothing keeps the tab's previous numbers (the
+              // row was cleared above, so what it holds here is the
+              // replay's own, never another tab's). The capture runs
+              // through this callback, BEFORE the replay's collapse
+              // pass: collapsing a finished run_parallel panel can
+              // close the tab on screen, and the tab-switch that
+              // follows repaints the row before the replay returns.
+              onEventsRendered: function () {
+                if (statusTokens && statusTokens.textContent)
+                  teTab.statusTokensText = statusTokens.textContent;
+                if (statusBudget && statusBudget.textContent)
+                  teTab.statusBudgetText = statusBudget.textContent;
+                if (statusSteps && statusSteps.textContent)
+                  teTab.statusStepsText = statusSteps.textContent;
+              },
               onFollowupClick: function (text) {
                 inp.value = text;
                 syncClearBtn();
@@ -6178,7 +6340,15 @@
           inp.focus();
         }
         break;
+      case 'worktree_created':
       case 'worktree_done':
+        // The host/server just recorded the tab's pending-worktree
+        // fallback dir. Links checked before that (e.g. a result
+        // rendered after a reconnect replay dropped the tracking, or
+        // before worktree_done re-presented it) were demoted as
+        // missing, so re-verify them now that they can resolve.
+        recheckFileLinksForTab(ev.tabId);
+        if (ev.type === 'worktree_created') break;
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgWtTab = getTab(ev.tabId);
           if (bgWtTab) {
@@ -6189,6 +6359,11 @@
         showWorktreeActions(ev);
         break;
       case 'worktree_result':
+        // A merge just copied the task's committed files into the
+        // original checkout; a discard just deleted the worktree copy.
+        // Either way the tab's file links may have flipped existence,
+        // so re-verify them (foreground and background tabs alike).
+        if (ev.success) recheckFileLinksForTab(ev.tabId);
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgWrTab = getTab(ev.tabId);
           if (bgWrTab) {
@@ -6324,7 +6499,10 @@
             rpRegisterSubagent(rpPanel, parentTabBeforeNew, ev.task_id, '');
             break;
           }
-          const subTab = createBackgroundSubagentTab(parentTabBeforeNew);
+          const subTab = createBackgroundSubagentTab(
+            parentTabBeforeNew,
+            subagentTabIdFor(parentTabBeforeNew, ev.task_id),
+          );
           subTab.currentTaskId = ev.task_id;
           subAgentTabId = subTab.id;
           if (rpPanel) {
@@ -6336,7 +6514,10 @@
             );
           }
         } else {
-          subAgentTabId = createBackgroundSubagentTab('').id;
+          subAgentTabId = createBackgroundSubagentTab(
+            '',
+            subagentTabIdFor('', ev.task_id),
+          ).id;
         }
         api.resumeSession({taskId: ev.task_id, tabId: subAgentTabId});
         break;
@@ -6929,6 +7110,12 @@
     } finally {
       _deferHighlight = prevDefer;
     }
+    // Runs after every event has rendered but BEFORE the collapse pass
+    // below: collapsing a finished run_parallel panel closes its
+    // sub-agent tabs, and if one of those is the tab on screen the
+    // switch that follows repaints the shared status row — a caller
+    // that wants the numbers this replay painted must read them now.
+    if (opts && opts.onEventsRendered) opts.onEventsRendered();
     collapseAllExceptResult(container, ownerTabId);
     if (typeof hljs !== 'undefined') {
       container.querySelectorAll('code.needs-hl').forEach(bl => {

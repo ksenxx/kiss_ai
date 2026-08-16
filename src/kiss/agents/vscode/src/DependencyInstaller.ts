@@ -1057,7 +1057,16 @@ WantedBy=default.target
         stdio: 'ignore',
         timeout: 10000,
       });
-      execSync('systemctl --user restart kiss-web', {
+      // --no-block queues the restart job and returns immediately.  A
+      // blocking restart waits for the old daemon to finish shutting
+      // down, which can take longer than the 10s timeout (tunnel
+      // cleanup; the daemon's SIGTERM failsafe allows 30s).  The
+      // ETIMEDOUT that execSync then threw was misread as "systemd
+      // failed" and triggered the direct-spawn fallback below — while
+      // systemd's restart job was still in flight — leaving TWO
+      // daemons racing for port 8787 and systemd crash-looping every
+      // RestartSec against the rogue's listener.
+      execSync('systemctl --user restart --no-block kiss-web', {
         stdio: 'ignore',
         timeout: 10000,
       });
@@ -1071,7 +1080,7 @@ WantedBy=default.target
       log(`kiss-web systemd user service restarted: ${serviceFile}`);
       systemdOk = true;
       reissueRestart = () => {
-        execSync('systemctl --user restart kiss-web', {
+        execSync('systemctl --user restart --no-block kiss-web', {
           stdio: 'ignore',
           timeout: 10000,
         });

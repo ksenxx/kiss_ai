@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import threading
+import urllib.parse
+import urllib.request
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
@@ -38,6 +41,52 @@ _config = ChannelConfig(
         "access_token",
     ),
 )
+
+
+def _raise_on_send_error(resp: Any, room_id: str) -> Any:
+    """Raise ``RuntimeError`` when *resp* is a matrix-nio error response.
+
+    The shared ``ChannelRunner`` treats a ``send_message`` that returns
+    without raising as a successful delivery and deletes the reply from its
+    at-least-once ledger, but nio's ``room_send`` reports failures (rate
+    limits, auth failures) by *returning* an error response rather than
+    raising — so those responses must be converted into exceptions here or
+    the reply is silently lost.
+
+    When matrix-nio is importable, the check is
+    ``isinstance(resp, nio.ErrorResponse)``, which covers
+    ``nio.responses.RoomSendError`` and every other error subclass.  nio is
+    an optional dependency (imported lazily throughout this module), so when
+    it is missing the check falls back to the same structural contract: nio
+    error responses carry both ``message`` and ``status_code`` attributes,
+    while success responses such as ``RoomSendResponse`` carry neither.
+
+    Args:
+        resp: Response object returned by ``AsyncClient.room_send``.
+        room_id: Target room, included in the error message for context.
+
+    Returns:
+        *resp* unchanged when it is not an error response.
+
+    Raises:
+        RuntimeError: If *resp* is an error response; the message includes
+            the response's ``status_code`` and ``message`` details.
+    """
+    try:
+        from nio import ErrorResponse
+    except ImportError:
+        error_type: type | None = None
+    else:  # pragma: no cover - nio is not installed in the test environment
+        error_type = ErrorResponse
+    if error_type is not None:  # pragma: no cover - nio-installed path
+        is_error = isinstance(resp, error_type)
+    else:
+        is_error = hasattr(resp, "message") and hasattr(resp, "status_code")
+    if is_error:
+        status = getattr(resp, "status_code", None) or "unknown"
+        message = getattr(resp, "message", "")
+        raise RuntimeError(f"Matrix send to {room_id} failed: {status} {message}".rstrip())
+    return resp
 
 
 class MatrixChannelBackend(ToolMethodBackend):
@@ -174,18 +223,69 @@ class MatrixChannelBackend(ToolMethodBackend):
             return [], oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Send a Matrix text message."""
+        """Send a Matrix text message.
+
+        Raises:
+            RuntimeError: If the homeserver rejects the send (nio returns an
+                error response such as ``RoomSendError`` instead of raising),
+                so the channel runner's at-least-once delivery ledger does
+                not count the reply as delivered and can redeliver it.
+        """
         if not self._client:  # pragma: no branch
             return
 
-        async def _send() -> None:
-            await self._client.room_send(
+        async def _send() -> Any:
+            return await self._client.room_send(
                 channel_id,
                 message_type="m.room.message",
                 content={"msgtype": "m.text", "body": text},
             )
 
-        self._run(_send())
+        _raise_on_send_error(self._run(_send()), channel_id)
+
+    def send_typing(self, channel_id: str, thread_ts: str = "") -> None:
+        """Send a Hermes-style typing indicator to a Matrix room.
+
+        Issues ``PUT /_matrix/client/v3/rooms/{roomId}/typing/{userId}``
+        with body ``{"typing": true, "timeout": 15000}`` against the
+        backend's configured homeserver, authenticating with the stored
+        access token. Best-effort: any transport or server error is
+        logged and swallowed, never raised. If the backend has no client
+        or no stored user id, this returns without doing anything.
+
+        Args:
+            channel_id: Matrix room ID (!room:server) to show typing in.
+            thread_ts: Unused; present for channel-backend signature parity.
+        """
+        del thread_ts
+        client = self._client
+        if client is None:
+            return
+        user_id = str(getattr(client, "user_id", "") or "")
+        if not user_id:
+            return
+        try:
+            homeserver = str(getattr(client, "homeserver", "") or "").rstrip("/")
+            access_token = str(getattr(client, "access_token", "") or "")
+            url = (
+                f"{homeserver}/_matrix/client/v3/rooms/"
+                f"{urllib.parse.quote(channel_id, safe='')}/typing/"
+                f"{urllib.parse.quote(user_id, safe='')}"
+            )
+            body = json.dumps({"typing": True, "timeout": 15000}).encode("utf-8")
+            request = urllib.request.Request(
+                url,
+                data=body,
+                method="PUT",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=10):
+                pass
+        except Exception as e:
+            logging.getLogger(__name__).debug("Matrix typing indicator failed: %s", e)
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if message is from the bot."""

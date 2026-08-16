@@ -927,18 +927,43 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
     return True
 
 
-def _db_file_identity(path: str) -> tuple[int, int] | None:
-    """Return the ``(st_dev, st_ino)`` identity of *path*, or ``None``.
+#: Sentinel returned by :func:`_db_file_identity` when ``os.stat``
+#: failed for a reason OTHER than the file being absent (EACCES, EIO,
+#: EMFILE, ...).  Impossible as a real ``(st_dev, st_ino)`` pair.
+_FILE_ID_UNKNOWN: tuple[int, int] = (-1, -1)
 
-    ``None`` means the file does not currently exist (or cannot be
-    stat'ed).  The identity distinguishes a file that was deleted and
-    recreated at the same pathname from the original file — a plain
-    existence check cannot.
+
+def _db_file_identity(path: str) -> tuple[int, int] | None:
+    """Return the ``(st_dev, st_ino)`` identity of *path*.
+
+    ``None`` means the file is CONFIRMED absent — ``os.stat`` raised
+    ``FileNotFoundError`` (ENOENT/ENOTDIR).  Any other ``OSError`` is a
+    transient or environmental failure that says nothing about whether
+    the file exists, so the distinct sentinel :data:`_FILE_ID_UNKNOWN`
+    is returned instead; callers must treat it as "identity unknown,
+    assume unchanged" — never as "file deleted or replaced".
+
+    Conflating the two was catastrophic: one transient stat failure
+    under heavy load made every thread treat its healthy connection as
+    stale, and the reconnect path then deleted the LIVE ``-wal``/
+    ``-shm`` sidecars out from under the remaining connections,
+    corrupting the database and losing every commit still in the WAL.
+
+    The identity distinguishes a file that was deleted and recreated
+    at the same pathname from the original file — a plain existence
+    check cannot.
     """
     try:
         st = os.stat(path)
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError:
+        logger.warning(
+            "transient stat failure on %s; assuming file unchanged",
+            path,
+            exc_info=True,
+        )
+        return _FILE_ID_UNKNOWN
     return (st.st_dev, st.st_ino)
 
 
@@ -969,14 +994,24 @@ def _get_db() -> sqlite3.Connection:
     gen_snapshot = _db_generation
     current_path = str(_DB_PATH)
     current_id = _db_file_identity(current_path)
-    _maybe_reset_caches(current_path, current_id)
+    if current_id is not _FILE_ID_UNKNOWN:
+        _maybe_reset_caches(current_path, current_id)
 
     if (
         tl_conn is not None
         and tl_gen == gen_snapshot
         and tl_path == current_path
-        and current_id is not None
-        and getattr(tl, "file_id", None) == current_id
+        and (
+            # A transient stat failure proves nothing about the file;
+            # keep using the healthy cached connection rather than
+            # tearing it down and reconnecting to a database that is
+            # momentarily unreadable.
+            current_id is _FILE_ID_UNKNOWN
+            or (
+                current_id is not None
+                and getattr(tl, "file_id", None) == current_id
+            )
+        )
     ):
         return tl_conn
 
@@ -993,12 +1028,16 @@ def _get_db() -> sqlite3.Connection:
             pass
 
     _ensure_kiss_dir()
-    if not os.path.exists(current_path):
-        for suffix in ("-wal", "-shm"):
-            try:
-                os.unlink(current_path + suffix)
-            except OSError:
-                pass
+    # Deliberately NO manual cleanup of stale ``-wal``/``-shm``
+    # sidecars here.  Application-level unlink of SQLite's sidecar
+    # files is impossible to make safe: any check-then-unlink is racy
+    # against other threads and OTHER PROCESSES concurrently opening
+    # or holding the same database, and unlinking a live WAL destroys
+    # committed-but-uncheckpointed pages (the root cause of the
+    # 2026-08-15 sorcar.db corruption).  SQLite itself handles a
+    # leftover sidecar of a deleted-and-recreated database safely: a
+    # WAL whose salt/checksums do not match is ignored and reset on
+    # the first write, so no cleanup is needed for correctness.
     conn = sqlite3.connect(
         current_path,
         check_same_thread=False,

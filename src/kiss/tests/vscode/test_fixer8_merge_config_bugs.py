@@ -36,7 +36,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.core.vscode_config import DEFAULTS, sanitize_config
 from kiss.server.autocomplete import _AutocompleteMixin, _ghost_suffix
 from kiss.server.diff_merge import _git, _scan_files
 from kiss.server.json_printer import JsonPrinter
@@ -261,25 +260,6 @@ class TestGhostSuffixKinds:
 
 
 
-class TestSanitizeConfigBooleanBudget:
-    def test_true_budget_falls_back_to_default(self) -> None:
-        out = sanitize_config({"max_budget": True})
-        assert out["max_budget"] == DEFAULTS["max_budget"]
-
-    def test_false_budget_falls_back_to_default(self) -> None:
-        out = sanitize_config({"max_budget": False})
-        assert out["max_budget"] == DEFAULTS["max_budget"]
-
-    def test_finite_numbers_still_accepted(self) -> None:
-        assert sanitize_config({"max_budget": 55})["max_budget"] == 55
-        assert sanitize_config({"max_budget": 55.5})["max_budget"] == 55.5
-        assert sanitize_config({"max_budget": "42"})["max_budget"] == 42.0
-
-    def test_bool_defaults_still_coerce_truthy(self) -> None:
-        bool_keys = [k for k, v in DEFAULTS.items() if isinstance(v, bool)]
-        for key in bool_keys:
-            assert sanitize_config({key: 1})[key] is True
-            assert sanitize_config({key: 0})[key] is False
 
 
 

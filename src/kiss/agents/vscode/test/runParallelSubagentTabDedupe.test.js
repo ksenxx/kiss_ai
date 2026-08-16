@@ -304,14 +304,22 @@ function assertOneTabPerSubagent(win, taskIds, where) {
 
 // The parent tab is replayed (history click / reconnect) while the
 // fan-out's tabs are open.  _open_persisted_subagent_tabs addresses
-// each sub-agent by its deterministic replay id, which differs from
-// the live id the tabs already carry.
+// each sub-agent by its deterministic replay id — which, since the
+// deterministic-id fix (subagentTabIdFor), is the SAME id the client
+// minted live: the announcement must land on the existing tab with no
+// retag and no closeTab.
 function testPersistedReplayIdsDoNotDuplicate(makeClient, label) {
-  const {win, parentId, taskIds, liveTabIds} = bootFanOut(makeClient, 2);
+  const client = bootFanOut(makeClient, 2);
+  const {win, parentId, taskIds, liveTabIds} = client;
+  const closesBefore = client.all().filter(m => m.type === 'closeTab').length;
 
   taskIds.forEach((taskId, i) => {
     const replayId = parentId + '__sub_' + taskId;
-    assert.notStrictEqual(replayId, liveTabIds[i], 'ids must differ');
+    assert.strictEqual(
+      replayId,
+      liveTabIds[i],
+      'live and replay ids must converge on the deterministic id',
+    );
     send(win, {
       type: 'openSubagentTab',
       tab_id: replayId,
@@ -332,13 +340,20 @@ function testPersistedReplayIdsDoNotDuplicate(makeClient, label) {
   });
 
   assertOneTabPerSubagent(win, taskIds, label + ': persisted replay ids');
+  const closesAfter = client.all().filter(m => m.type === 'closeTab').length;
+  assert.strictEqual(
+    closesAfter,
+    closesBefore,
+    'a converged replay announcement must not close any tab id — a ' +
+      'closeTab here unsubscribes the shared id for every client',
+  );
   win.close();
   console.log('  ok - [' + label + '] persisted replay ids reuse one tab');
 }
 
-// Collapse (tabs close) then expand (the webview mints fresh tab ids
-// and resumes) and only then does the daemon's replay burst arrive
-// under the deterministic ids.
+// Collapse (tabs close) then expand (the webview re-mints the
+// deterministic tab ids and resumes) and only then does the daemon's
+// replay burst arrive under those same deterministic ids.
 function testReplayAfterExpandDoesNotDuplicate(makeClient, label) {
   const scenario = bootFanOut(makeClient, 2);
   const {win, panel, parentId, taskIds} = scenario;
@@ -352,8 +367,9 @@ function testReplayAfterExpandDoesNotDuplicate(makeClient, label) {
   taskIds.forEach((taskId, i) => {
     const replayId = parentId + '__sub_' + taskId;
     assert.ok(
-      !reopenedIds.includes(replayId),
-      'sanity: the reopened tab uses a client-minted id',
+      reopenedIds.includes(replayId),
+      'the reopened tab must reuse the deterministic id, so the ' +
+        'replay burst below lands on it instead of forcing a retag',
     );
     send(win, {
       type: 'openSubagentTab',
@@ -690,7 +706,14 @@ function testRetagReleasesTheOldTabId(makeClient, label) {
   const all = scenario.all;
 
   const before = all().length;
-  const replayId = parentId + '__sub_' + taskIds[0];
+  // A daemon id that DIFFERS from the tab's current id.  Since the
+  // deterministic-id fix (subagentTabIdFor) the client already sits on
+  // "<parentId>__sub_<taskId>", so the rename is exercised with the
+  // other id form the daemon still uses: the agent-minted synthetic
+  // live-fan-out id ("task-<parentTaskId>__sub_<idx>", see
+  // ChatSorcarAgent._run_tasks_parallel).
+  const replayId = 'task-parent-task__sub_0';
+  assert.notStrictEqual(replayId, liveTabIds[0], 'sanity: ids must differ');
   send(win, {
     type: 'openSubagentTab',
     tab_id: replayId,
@@ -756,7 +779,14 @@ function testRetagReReportsTheChatTabBehindAContentTab(makeClient, label) {
   assert.ok(contentTab, 'sanity: fileContent must open a content tab');
 
   const before = all().length;
-  const replayId = parentId + '__sub_' + taskIds[0];
+  // A daemon id that DIFFERS from the tab's current id.  Since the
+  // deterministic-id fix (subagentTabIdFor) the client already sits on
+  // "<parentId>__sub_<taskId>", so the rename is exercised with the
+  // other id form the daemon still uses: the agent-minted synthetic
+  // live-fan-out id ("task-<parentTaskId>__sub_<idx>", see
+  // ChatSorcarAgent._run_tasks_parallel).
+  const replayId = 'task-parent-task__sub_0';
+  assert.notStrictEqual(replayId, liveTabIds[0], 'sanity: ids must differ');
   send(win, {
     type: 'openSubagentTab',
     tab_id: replayId,

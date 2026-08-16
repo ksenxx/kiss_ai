@@ -283,6 +283,11 @@ class GitWorktree:
             dirty state (staged, unstaged, untracked files) at worktree
             creation time.  ``None`` when the main worktree was clean or
             for legacy worktrees created before baseline support.
+        work_dir: The task's working directory inside the worktree
+            (``wt_dir`` plus the original work dir's offset from the
+            repo root).  Equals ``wt_dir`` when the task started at the
+            repo root.  ``None`` for legacy snapshots created before
+            this field existed.
     """
 
     repo_root: Path
@@ -290,6 +295,7 @@ class GitWorktree:
     original_branch: str | None
     wt_dir: Path
     baseline_commit: str | None = None
+    work_dir: Path | None = None
 
 
 class MergeResult(enum.Enum):

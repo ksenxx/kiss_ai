@@ -155,7 +155,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Show the version and exit",
     )
     parser.add_argument(
-        "-m", "--model_name", type=str, default=get_default_model(),
+        "-m", "--model_name", type=str, default=None,
         help="LLM model name (defaults to the best model for the configured API keys)",
     )
     parser.add_argument(
@@ -167,8 +167,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-b", "--max_budget", type=_parse_budget_value,
-        default=config_module.DEFAULT_CONFIG.max_budget,
-        help="Maximum budget in USD",
+        default=None,
+        help="Maximum budget in USD (defaults to the configured default budget)",
     )
     parser.add_argument(
         "-w", "--work_dir", type=str, default=_launch_work_dir(),
@@ -199,6 +199,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     """Build ``agent.run()`` keyword arguments from parsed CLI args.
 
+    ``-m`` / ``-b`` parse to ``None`` when omitted (so poll mode can
+    distinguish a genuine omission from an explicit value equal to the
+    default); here — the interactive path — ``None`` resolves to the
+    real defaults.
+
     Args:
         args: Parsed CLI arguments from :func:`_build_arg_parser`.
 
@@ -206,6 +211,12 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         Keyword arguments for ``agent.run()``.
     """
     task_description = _resolve_task(args)
+    model_name = args.model_name if args.model_name is not None else get_default_model()
+    max_budget = (
+        args.max_budget
+        if args.max_budget is not None
+        else config_module.DEFAULT_CONFIG.max_budget
+    )
     work_dir = args.work_dir or _launch_work_dir()
     Path(work_dir).mkdir(parents=True, exist_ok=True)
 
@@ -222,8 +233,8 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
 
     run_kwargs: dict[str, Any] = {
         "prompt_template": task_description,
-        "model_name": args.model_name,
-        "max_budget": args.max_budget,
+        "model_name": model_name,
+        "max_budget": max_budget,
         "model_config": model_config,
         "work_dir": work_dir,
         "web_tools": not args.no_web,
