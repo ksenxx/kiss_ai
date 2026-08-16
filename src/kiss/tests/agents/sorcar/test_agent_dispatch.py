@@ -153,6 +153,47 @@ def test_channel_dispatch_unreachable_daemon_is_a_clean_error(
     assert not (tmp_path / "agent_work").exists()
 
 
+def test_cron_dispatch_unreachable_daemon_is_a_clean_error(
+    tmp_path: Path,
+) -> None:
+    # "cron" (any case/spacing) routes to the built-in cron agent
+    # script, not to channel lookup: the dispatch fails only on the
+    # unreachable daemon and runs in the cron work directory.
+    out = run_agent("  Cron ", "run 'echo hi' every 5 minutes")
+    assert "unknown agent" not in out
+    assert out.startswith("Error: the cron agent task could not run:")
+    assert "no-daemon.sock" in out
+    # The cron dispatch runs in the cron agent's own work directory.
+    assert (tmp_path / "cron" / "work").is_dir()
+    assert not (tmp_path / "channel_work").exists()
+    assert not (tmp_path / "agent_work").exists()
+
+
+def test_cron_agent_module_is_a_valid_agent_script() -> None:
+    # The contract the cron dispatch relies on: passing the cron
+    # module as ``agent_path`` makes it its own tools file (its
+    # ``get_tools()`` returns the cron_job tool) and moves the session
+    # to ~/.kiss/cron/work with no git lifecycle.
+    cmd = {"agentPath": cron_agent.__file__, "toolsFile": ""}
+    overridden = apply_agent_overrides(cmd)
+    assert overridden == {"toolsFile", "workDir", "useWorktree", "autoCommit"}
+    assert cmd["toolsFile"] == cron_agent.__file__
+    assert cmd["workDir"] == cron_agent.get_work_dir()
+    assert cmd["useWorktree"] is False
+    assert cmd["autoCommit"] is False
+
+
+def test_docstring_and_error_mention_cron() -> None:
+    assert "cron" in (run_agent.__doc__ or "")
+    # "cron" is not a third-party channel — it must never appear in
+    # the channel list, only via its dedicated dispatch branch.
+    assert "cron" not in available_channels()
+    # A mistyped agent name gets a hint about the built-in cron agent.
+    out = run_agent("no_such_channel", "say hi")
+    assert out.startswith("Error: unknown agent")
+    assert "cron" in out
+
+
 def test_path_mode_missing_file_error(tmp_path: Path) -> None:
     missing = tmp_path / "no_such_agent.py"
     out = run_agent(str(missing), "say hi")

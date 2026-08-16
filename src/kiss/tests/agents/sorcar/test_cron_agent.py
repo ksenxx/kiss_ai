@@ -443,15 +443,39 @@ def test_get_tools_and_sorcar_wiring() -> None:
     assert "/agents/sorcar/" in cron_agent.__file__
     assert "from kiss.agents.third_party_agents" not in source_text
     assert "import kiss.agents.third_party_agents" not in source_text
-    # The default Sorcar toolset registers the tool.
+    # cron_job is NOT a built-in tool of the default Sorcar toolset:
+    # scheduling requests go through run_agent("cron", ...), which
+    # dispatches this module as an agent script.
     agent_source = Path(cron_agent.__file__).parent / "sorcar_agent.py"
-    assert "tools.append(cron_job)" in agent_source.read_text(encoding="utf-8")
+    agent_text = agent_source.read_text(encoding="utf-8")
+    assert "tools.append(cron_job)" not in agent_text
+    assert "from kiss.agents.sorcar.cron_agent import cron_job" not in agent_text
+    dispatch_source = Path(cron_agent.__file__).parent / "agent_dispatch.py"
+    assert (
+        "cron_agent.CRON_DISPATCH_PREAMBLE + task"
+        in dispatch_source.read_text(encoding="utf-8")
+    )
+    # The system prompt directs scheduling requests to run_agent("cron").
+    system_md = Path(cron_agent.__file__).parents[2] / "SYSTEM.md"
+    assert 'run_agent tool with "cron"' in system_md.read_text(encoding="utf-8")
     # The kiss-cron CLI entry point is wired in pyproject.toml.
     pyproject = Path(cron_agent.__file__).parents[4] / "pyproject.toml"
     assert (
         'kiss-cron = "kiss.agents.sorcar.cron_agent:main"'
         in pyproject.read_text(encoding="utf-8")
     )
+
+
+def test_agent_script_getters(tmp_path: Path) -> None:
+    # The agent-script contract used by run_agent("cron", ...): the
+    # dispatched session runs in ~/.kiss/cron/work with no git
+    # lifecycle.
+    work_dir = cron_agent.get_work_dir()
+    assert work_dir == str(tmp_path / "cron" / "work")
+    assert Path(work_dir).is_dir()
+    assert cron_agent.get_use_worktree() is False
+    assert cron_agent.get_auto_commit() is False
+    assert "cron_job" in cron_agent.CRON_DISPATCH_PREAMBLE
 
 
 def test_store_is_plain_json_list(tmp_path: Path) -> None:
@@ -505,6 +529,38 @@ def test_run_now_uses_daemon_sock_path(tmp_path: Path) -> None:
             deliver="none",
         ))
         reply = yaml.safe_load(cron_job("run_now", job_id=job["id"]))
+        assert reply["ran"]["last_status"] == "error"
+        assert "custom-daemon.sock" in load_jobs()[0]["last_summary"]
+    finally:
+        _stop_scheduler(stop_event)
+
+
+def test_tools_file_loaded_run_now_uses_daemon_sock_path(
+    tmp_path: Path,
+) -> None:
+    # A run_agent("cron", ...) session gets its cron_job tool from a
+    # FRESH synthetic module (the daemon's tools-file loader re-executes
+    # this file), whose own _daemon_sock_path global is never set:
+    # run_now must still target the socket recorded in the canonical
+    # module by the daemon's scheduler thread.
+    from kiss.server.tools_file import ToolsFileError, execute_python_file
+
+    custom_sock = tmp_path / "custom-daemon.sock"
+    stop_event = start_scheduler_thread(interval=999.0, sock_path=str(custom_sock))
+    try:
+        namespace = execute_python_file(
+            cron_agent.__file__, ToolsFileError, "tools file",
+        )
+        loaded_cron_job = namespace["get_tools"]()[0]
+        # A distinct module copy — the very situation the canonical
+        # lookup exists for.
+        assert loaded_cron_job is not cron_job
+        assert namespace["_daemon_sock_path"] is None
+        job = _create(loaded_cron_job(
+            "create", name="llm", prompt="say hi", schedule="every 1h",
+            deliver="none",
+        ))
+        reply = yaml.safe_load(loaded_cron_job("run_now", job_id=job["id"]))
         assert reply["ran"]["last_status"] == "error"
         assert "custom-daemon.sock" in load_jobs()[0]["last_summary"]
     finally:
