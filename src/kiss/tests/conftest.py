@@ -28,6 +28,18 @@ hookwrapper's ``finally``: for unittest-style tests pytest runs
 ``finally`` would only fire long after ``tearDown`` already closed the
 connection.  The ``finally`` is still used as a backstop for sweeps
 started by non-unittest tests.
+
+``IsolatedAsyncioTestCase`` needs the same guard on ``asyncTearDown``:
+CPython's ``_callTearDown`` awaits ``asyncTearDown`` **before** it runs
+the sync ``tearDown``, and the ~60 async server test files close
+``persistence._db_conn`` inside ``asyncTearDown`` — so wrapping only
+the sync ``tearDown`` joins the sweep *after* the connection is already
+closed, leaving the exact SIGSEGV this guard exists to prevent (seen as
+the order-dependent crash in large ``tests/agents/vscode`` runs, e.g.
+``test_per_window_reply_isolation.py`` closing the connection while an
+``orphan-task-sweep`` thread was inside ``_recover_orphaned_tasks``).
+``asyncTearDown`` is therefore wrapped too, joining sweeps before its
+body runs.
 """
 
 import functools
@@ -35,13 +47,13 @@ import os
 import tempfile
 import threading
 import unittest
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 
 import pytest
 
 from kiss.agents.sorcar import persistence as _th
-from kiss.core import stop_signal
+from kiss.core import stop_signal, vscode_config
 from kiss.core.kiss_error import KISSError
 
 # Generous: a sweep only walks the sentinel rows of one temporary
@@ -103,6 +115,27 @@ def _tear_down_after_orphan_sweeps(tear_down: Callable[[], None]) -> None:
     tear_down()
 
 
+async def _async_tear_down_after_orphan_sweeps(
+    tear_down: Callable[[], Awaitable[None]],
+) -> None:
+    """Join lingering orphan sweeps, then run the async teardown body.
+
+    ``IsolatedAsyncioTestCase._callTearDown`` awaits ``asyncTearDown``
+    BEFORE the sync ``tearDown``, so this is the last moment at which
+    ``persistence._db_conn`` — which many async server fixtures close
+    inside ``asyncTearDown`` — is still guaranteed valid for a sweep.
+
+    Args:
+        tear_down: The ``asyncTearDown`` bound coroutine method this
+            call replaces.
+
+    Returns:
+        None.
+    """
+    join_orphan_sweeps()
+    await tear_down()
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
     """Guard every test's teardown against the orphan-sweep race.
@@ -117,8 +150,9 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
 
     Args:
         item: The test about to run. For ``unittest.TestCase`` items its
-            ``tearDown`` is wrapped so sweeps are joined before the
-            teardown body closes the database.
+            ``tearDown`` — and for ``IsolatedAsyncioTestCase`` items its
+            ``asyncTearDown``, which runs first — is wrapped so sweeps
+            are joined before the teardown body closes the database.
 
     Returns:
         Generator required by the pytest hookwrapper protocol.
@@ -127,6 +161,12 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
     if isinstance(instance, unittest.TestCase):
         instance.tearDown = functools.partial(  # type: ignore[method-assign]
             _tear_down_after_orphan_sweeps, instance.tearDown,
+        )
+    if isinstance(instance, unittest.IsolatedAsyncioTestCase):
+        # functools.partial of a coroutine function still satisfies
+        # the inspect.iscoroutinefunction assert in _callAsync.
+        instance.asyncTearDown = functools.partial(  # type: ignore[method-assign]
+            _async_tear_down_after_orphan_sweeps, instance.asyncTearDown,
         )
     try:
         yield
@@ -277,6 +317,101 @@ def _isolated_default_workdir(
     default_dir = tmp_path_factory.mktemp("kiss-default-workdir")
     monkeypatch.setenv("KISS_WORKDIR", str(default_dir))
     yield
+
+
+def _drop_redundant_config_overrides() -> None:
+    """Delete ``CONFIG_DIR``/``CONFIG_PATH`` overrides equal to the lazy value.
+
+    ``vscode_config.CONFIG_DIR``/``CONFIG_PATH`` are lazy module
+    attributes that follow ``$KISS_HOME``; a materialized override with
+    the very same value resolves identically *now* but silently stops
+    following later ``KISS_HOME`` swaps — the mechanism behind the
+    ``remote_password`` shared-config leak.  Overrides pointing anywhere
+    else belong to a live test or module-scoped harness redirection and
+    are kept.
+
+    Returns:
+        None.
+    """
+    from kiss.core.config import kiss_home
+
+    module_dict = vars(vscode_config)
+    lazy_dir = kiss_home()
+    for name, lazy_value in (
+        ("CONFIG_DIR", lazy_dir),
+        ("CONFIG_PATH", lazy_dir / "config.json"),
+    ):
+        if module_dict.get(name) == lazy_value:
+            delattr(vscode_config, name)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_shared_config() -> Iterator[None]:
+    """Undo per-test damage to the session-shared ``config.json``.
+
+    The session-wide ``KISS_HOME`` above means ``config.json`` is shared
+    by every test in the run, and a leaked non-empty ``remote_password``
+    turns every later websocket handshake into ``auth_required`` (the
+    Playwright tests then hang behind ``#auth-modal``).  Two leak paths
+    existed, both order-dependent:
+
+    * **Pinned path overrides.**  ``vscode_config.CONFIG_DIR`` /
+      ``CONFIG_PATH`` are *lazy* module attributes (``__getattr__``)
+      that follow ``$KISS_HOME`` on every access.  The common test
+      pattern ``self._orig = vc.CONFIG_DIR`` … ``vc.CONFIG_DIR =
+      self._orig`` restores the right *value* but materializes it as a
+      permanent module global — so a later test that swaps
+      ``KISS_HOME`` and calls ``save_config`` (expecting the write to
+      land in its isolated home, e.g.
+      ``test_ntfy_topic_isolation.py``) silently writes into the
+      session-shared file instead.  Overrides that did not exist before
+      a test are therefore deleted after it, restoring laziness.
+
+    * **Direct writes.**  Any test that writes the shared file without
+      restoring it.  The file's byte content is snapshotted before each
+      test and written back (or unlinked) afterwards.
+
+    Tests that point ``CONFIG_DIR``/``CONFIG_PATH`` or ``KISS_HOME`` at
+    their own temporary directory are unaffected: their writes never
+    touch the session-shared path, and their overrides are cleaned up
+    for them.  Overrides installed by a *module*- or *class*-scoped
+    harness (e.g. ``test_content_tab_file_links.py``) exist before this
+    fixture's setup and are preserved for the harness's remaining
+    tests; only *redundant* overrides — ones equal to the lazy
+    ``$KISS_HOME`` resolution, which such a harness leaves behind when
+    it restores the values it read at setup — are dropped, because they
+    resolve identically but silently stop following ``KISS_HOME``.
+
+    Yields:
+        None.
+    """
+    _drop_redundant_config_overrides()
+    override_names = ("CONFIG_DIR", "CONFIG_PATH")
+    module_dict = vars(vscode_config)
+    saved_overrides = {
+        name: module_dict[name]
+        for name in override_names
+        if name in module_dict
+    }
+    shared_config = Path(_test_kiss_home) / "config.json"
+    try:
+        saved_content = shared_config.read_bytes()
+    except OSError:
+        saved_content = None
+    yield
+    for name in override_names:
+        if name in saved_overrides:
+            setattr(vscode_config, name, saved_overrides[name])
+        elif name in module_dict:
+            delattr(vscode_config, name)
+    _drop_redundant_config_overrides()
+    try:
+        if saved_content is None:
+            shared_config.unlink(missing_ok=True)
+        else:
+            shared_config.write_bytes(saved_content)
+    except OSError:
+        pass
 
 
 @pytest.fixture(autouse=True)

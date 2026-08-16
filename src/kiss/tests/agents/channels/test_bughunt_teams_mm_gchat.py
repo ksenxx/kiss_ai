@@ -19,6 +19,8 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.third_party_agents.mattermost_agent import MattermostChannelBackend
+from kiss.agents.third_party_agents.mattermost_agent import _config as _mm_config
 from kiss.agents.third_party_agents.msteams_agent import MSTeamsChannelBackend
 
 _GRAPH_MESSAGE = {
@@ -150,6 +152,26 @@ def test_msteams_poll_channel_runner_contract(graph_server) -> None:
     reply_path = _paths(graph_server)[-1]
     assert "/messages/MSG1/replies" in reply_path
     assert "2024-05-01" not in reply_path
+
+
+def test_mattermost_connect_returns_false_on_malformed_port() -> None:
+    """Regression: a malformed persisted port must not raise out of connect().
+
+    The scheme/port/base-URL/token derivation in ``connect()`` used to run
+    before the ``try`` block, so a config.json with ``port='not-a-number'``
+    raised ``ValueError`` instead of returning ``False``.  ``connect()``
+    must swallow the error and record a helpful ``_connection_info``.
+    """
+    _mm_config.save(
+        {"url": "127.0.0.1", "token": "tok", "port": "not-a-number", "scheme": "http"}
+    )
+    try:
+        backend = MattermostChannelBackend()
+        assert backend.connect() is False
+        assert "Mattermost connection failed" in backend._connection_info
+        assert backend._driver is None
+    finally:
+        _mm_config.clear()
 
 
 @pytest.mark.skipif(
