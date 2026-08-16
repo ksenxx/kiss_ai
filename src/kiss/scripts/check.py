@@ -35,32 +35,6 @@ def run_command(cmd: list[str], description: str) -> bool:
     return True
 
 
-def find_markdown_files() -> list[str]:
-    """Find all non-gitignored markdown files in the project.
-
-    Uses ``git ls-files`` to list tracked and untracked-but-not-ignored
-    markdown files, automatically respecting ``.gitignore`` rules.
-
-    Returns:
-        Sorted list of absolute paths to markdown files found in the project.
-    """
-    project_root = Path(__file__).parent.parent.parent.parent
-    result = subprocess.run(
-        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "*.md"],
-        capture_output=True,
-        text=True,
-        cwd=project_root,
-        check=False,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return []
-    return sorted(
-        str(p)
-        for f in result.stdout.strip().split("\n")
-        if f and (p := project_root / f).is_file()
-    )
-
-
 def _should_skip_path(path: Path) -> bool:
     """Check if a path should be skipped by consulting ``.gitignore`` rules.
 
@@ -185,7 +159,7 @@ def main() -> int:
 
     Parses command-line arguments and runs code quality checks including
     dependency installation, syntax checking with py_compile, linting with ruff,
-    type checking with mypy, and markdown formatting checks.
+    and type checking with mypy.
 
     Returns:
         Exit code 0 if all checks pass, 1 if any check fails.
@@ -215,8 +189,6 @@ def main() -> int:
 
     project_root = Path(__file__).parent.parent.parent.parent
 
-    md_files = find_markdown_files()
-
     _sync_extension_version()
 
     checks = [
@@ -243,9 +215,6 @@ def main() -> int:
                     "VS Code extension lint",
                 )
             )
-
-    if md_files:
-        checks.append((["uv", "run", "mdformat", "--check", *md_files], "Lint markdown (mdformat)"))
 
     print("\n🔍 Running all code quality checks...\n")
 

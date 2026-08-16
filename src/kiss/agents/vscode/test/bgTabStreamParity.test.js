@@ -27,12 +27,13 @@
 //
 // The live stream and the replayed transcript are NOT the same list of
 // events, and the difference is the daemon's, not this test's: only
-// display events are recorded and persisted, and `usage_info` is not
-// one of them. Rather than restate that rule here -- or read it out of
-// the daemon's source, which would fail for a harmless refactor and
-// pass for a real change of behaviour -- `persistedTranscript()` below
-// runs the run through the daemon's OWN recorder and replays whatever
-// comes back.
+// display events are recorded and persisted (`usage_info` among them,
+// so a reload can repopulate the tokens/cost header of a task that has
+// no `result` event yet). Rather than restate that rule here -- or read
+// it out of the daemon's source, which would fail for a harmless
+// refactor and pass for a real change of behaviour --
+// `persistedTranscript()` below runs the run through the daemon's OWN
+// recorder and replays whatever comes back.
 
 'use strict';
 
@@ -181,10 +182,10 @@ function persistedTranscript() {
     'the daemon must keep the result event, or there is nothing to replay',
   );
   assert.ok(
-    !events.some(ev => ev.type === 'usage_info'),
-    'the daemon drops usage_info before storing a run, so a replayed ' +
-      'transcript must not contain one -- the step count has to survive ' +
-      'on what is left',
+    events.some(ev => ev.type === 'usage_info'),
+    'the daemon keeps usage_info when storing a run: it is the only ' +
+      'carrier of the tokens/cost header for a task that stopped, ' +
+      'errored, or is still running (no result event yet)',
   );
   return events;
 }
@@ -318,9 +319,9 @@ function testBothUsageFormsAreReadTheSameWayByBothTranscripts() {
 }
 
 // The counters shown for a replayed transcript must match the counters
-// the live stream produced for the very same run -- even though the
-// daemon threw the usage_info away before storing it, so the replay has
-// only the result's step_count to go on.
+// the live stream produced for the very same run -- the stored
+// usage_info and the result's step_count both survive recording, and
+// either alone must be enough to rebuild the header.
 function testReplayAgreesWithTheLiveStream() {
   const {win} = makeWebview();
   const tabA = win._testApi.getActiveTabId();
@@ -442,11 +443,211 @@ function testTheStepCounterNeverRunsBackwards() {
   console.log('  ok - the step counter never runs backwards');
 }
 
+// The remote web app's reconnect path: the daemon replays every open
+// tab's transcript as a `task_events` envelope, and only one of those
+// tabs is on screen. A hidden tab's replay borrows the visible status
+// row while it renders and gives it back afterwards -- but the numbers
+// the replayed usage_info / result painted belong to the hidden tab and
+// must come back with it. This used to keep only the step count, so a
+// reloaded web app showed "· Steps: 22" with no tokens and no cost
+// until the task's next live step.
+function testBackgroundReplayKeepsTokensAndCost() {
+  const {win} = makeWebview();
+  const tabA = win._testApi.getActiveTabId();
+  win._testApi.createNewTab();
+  const tabB = win._testApi.getActiveTabId();
+  clickTab(win, tabA);
+
+  const before = snapshot(win);
+  send(win, {
+    type: 'task_events',
+    tabId: tabB,
+    task: 'benchmark research',
+    events: persistedTranscript(),
+  });
+  const after = snapshot(win);
+  assert.strictEqual(
+    after.tokens,
+    before.tokens,
+    'a hidden tab\u2019s replay must not leave its numbers on the ' +
+      'visible tab\u2019s status row',
+  );
+  assert.strictEqual(after.budget, before.budget, 'nor its cost');
+  assert.strictEqual(after.steps, before.steps, 'nor its step count');
+
+  clickTab(win, tabB);
+  const replayed = snapshot(win);
+  assert.strictEqual(
+    replayed.tokens,
+    'Tokens: 12,345',
+    'switching to a tab whose transcript was replayed while hidden ' +
+      'must show the tokens the replay carried',
+  );
+  assert.strictEqual(
+    replayed.budget,
+    'Cost: $0.42',
+    'and the cost -- not a bare "· Steps: N" header',
+  );
+  assert.strictEqual(replayed.steps, 'Steps: 7', 'and the step count');
+  win.close();
+  console.log('  ok - a background replay keeps its tokens and cost');
+}
+
+// A hidden tab's replay borrows the visible status row while it
+// renders. A replayed transcript that carries no usage event (a run
+// recorded before usage_info was persisted, or a task that has not
+// spent anything yet) must NOT walk off with the numbers the visible
+// tab left on that row -- the hidden tab keeps its own previous
+// numbers, exactly as staticTaskPanelVisibleTask.test.js pins for a
+// same-task replay.
+function testMetricFreeReplayDoesNotStealTheVisibleTabsNumbers() {
+  const {win} = makeWebview();
+  const tabA = win._testApi.getActiveTabId();
+  win._testApi.createNewTab();
+  const tabB = win._testApi.getActiveTabId();
+  clickTab(win, tabA);
+
+  // A runs live with numbers of its own, distinct from B's.
+  const aRun = recordedRun().map(ev => {
+    if (ev.type === 'usage_info')
+      return {...ev, text: '', total_tokens: 999, cost: '$9.99', total_steps: 9};
+    if (ev.type === 'result')
+      return {...ev, total_tokens: 999, cost: '$9.99', step_count: 9};
+    return ev;
+  });
+  runInto(win, tabA, aRun);
+  const visibleBefore = snapshot(win);
+  assert.strictEqual(visibleBefore.tokens, 'Tokens: 999');
+
+  // B replays a transcript WITH numbers, then a metric-free one.
+  send(win, {type: 'task_events', tabId: tabB, events: persistedTranscript()});
+  send(win, {
+    type: 'task_events',
+    tabId: tabB,
+    events: [{type: 'prompt', text: 'brand new task', ts: TS}],
+  });
+
+  const visibleAfter = snapshot(win);
+  assert.strictEqual(
+    visibleAfter.tokens,
+    visibleBefore.tokens,
+    'the hidden replays must leave the visible tab\u2019s numbers alone',
+  );
+  assert.strictEqual(visibleAfter.budget, visibleBefore.budget);
+  assert.strictEqual(visibleAfter.steps, visibleBefore.steps);
+
+  clickTab(win, tabB);
+  const hidden = snapshot(win);
+  assert.strictEqual(
+    hidden.tokens,
+    'Tokens: 12,345',
+    'a metric-free replay must not inherit the visible tab\u2019s ' +
+      'token count -- the tab keeps its own',
+  );
+  assert.strictEqual(hidden.budget, 'Cost: $0.42', 'nor its cost');
+  assert.strictEqual(hidden.steps, 'Steps: 7', 'nor its step count');
+  win.close();
+  console.log(
+    '  ok - a metric-free replay does not steal the visible numbers',
+  );
+}
+
+// The replay's collapse pass can take the screen away mid-flight: a
+// finished run_parallel panel closes its sub-agent tabs, and if the tab
+// on screen is one of them, the switch that follows repaints the shared
+// status row. The numbers the replay painted must already be on the
+// parent tab by then -- captured after rendering, before collapsing.
+function testHiddenReplayThatClosesTheVisibleTabKeepsItsNumbers() {
+  const {win, posted} = makeWebview();
+  const tabA = win._testApi.getActiveTabId();
+
+  send(win, {type: 'status', running: true, tabId: tabA, startTs: TS});
+  send(win, {
+    type: 'tool_call',
+    name: 'run_parallel',
+    tabId: tabA,
+    extras: {tasks: JSON.stringify(['sub 1'])},
+  });
+  const before = posted.length;
+  send(win, {
+    type: 'new_tab',
+    task_id: 'sub-task-1',
+    parent_tab_id: tabA,
+    taskId: '',
+  });
+  const resume = posted
+    .slice(before)
+    .find(m => m.type === 'resumeSession' && m.taskId === 'sub-task-1');
+  assert.ok(resume, 'new_tab must make the webview post resumeSession');
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: resume.tabId,
+    parent_tab_id: tabA,
+    description: 'sub 1',
+    task_id: 'sub-task-1',
+    taskIndex: 0,
+  });
+  clickTab(win, resume.tabId);
+  assert.strictEqual(win._testApi.getActiveTabId(), resume.tabId);
+
+  // The parent's finished transcript replays while the sub-agent tab
+  // is on screen; its collapse pass closes that tab.
+  const parentRun = recordAsDaemon([
+    {type: 'thinking_start', ts: TS},
+    {type: 'thinking_delta', text: 'fanning out', ts: TS},
+    {type: 'thinking_end', ts: TS},
+    {
+      type: 'tool_call',
+      name: 'run_parallel',
+      extras: {tasks: JSON.stringify(['sub 1'])},
+      ts: TS,
+    },
+    {type: 'tool_result', content: 'sub done', ts: TS},
+    {
+      type: 'usage_info',
+      text: 'Steps: 7/100, Context: 12,345/500,000 tokens, Budget: $0.42/$10.00',
+      total_tokens: 12345,
+      cost: '$0.42',
+      total_steps: 7,
+      ts: TS,
+    },
+    {
+      type: 'result',
+      text: 'summary: Done.\nsuccess: true\n',
+      summary: 'Done.',
+      success: true,
+      total_tokens: 12345,
+      cost: '$0.42',
+      step_count: 7,
+      ts: TS,
+    },
+  ]);
+  send(win, {type: 'task_events', tabId: tabA, events: parentRun});
+
+  if (win._testApi.getActiveTabId() !== tabA) clickTab(win, tabA);
+  const shown = snapshot(win);
+  assert.strictEqual(
+    shown.tokens,
+    'Tokens: 12,345',
+    'a hidden replay that closed the tab on screen must still hand ' +
+      'its tokens to the parent tab',
+  );
+  assert.strictEqual(shown.budget, 'Cost: $0.42', 'and its cost');
+  assert.strictEqual(shown.steps, 'Steps: 7', 'and its step count');
+  win.close();
+  console.log(
+    '  ok - a hidden replay that closes the visible tab keeps its numbers',
+  );
+}
+
 function main() {
   testHiddenTabRendersLikeAVisibleOne();
   testBothUsageFormsAreReadTheSameWayByBothTranscripts();
   testReplayAgreesWithTheLiveStream();
   testTheStepCounterNeverRunsBackwards();
+  testBackgroundReplayKeepsTokensAndCost();
+  testMetricFreeReplayDoesNotStealTheVisibleTabsNumbers();
+  testHiddenReplayThatClosesTheVisibleTabKeepsItsNumbers();
   console.log('bgTabStreamParity.test.js: all tests passed');
 }
 
