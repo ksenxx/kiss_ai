@@ -6,10 +6,13 @@
 
 Two real bugs in ``_try_adopt_existing_cloudflared``:
 
-1. A cloudflared whose adoption is declined (confirmed-unhealthy or no
+1. A cloudflared whose adoption is declined (unreachable metrics or no
    discoverable URL) was left running forever — an orphan process leak,
    since the caller then spawns a fresh cloudflared (rotating the
-   public URL) while the old one keeps a metrics port bound.
+   public URL) while the old one keeps a metrics port bound.  (A live
+   cloudflared with reachable metrics reporting zero ready connections
+   and a known URL is no longer declined at all: it is adopted
+   tentatively so a mid-reconnect tunnel keeps its public URL.)
 2. ``_probe_tunnel_ready`` is 3-valued (``None`` = "no information",
    e.g. metrics endpoint slow to bind after wake) but the adoption path
    treated ``None`` like ``False`` and declined immediately, needlessly
@@ -117,14 +120,46 @@ class TestAdoptDecline(unittest.TestCase):
             "url": "https://saved.trycloudflare.com",
         }))
 
-    def test_declined_unhealthy_cloudflared_is_terminated(self) -> None:
-        """Confirmed-unhealthy (readyConnections=0) -> decline AND terminate."""
+    def test_zero_ready_with_known_url_adopts_tentatively(self) -> None:
+        """readyConnections=0 with a discoverable URL -> tentative adoption.
+
+        Zero ready connections on a reachable metrics endpoint is the
+        mid-reconnect signature; the watchdog tolerates it for minutes
+        before rotating the URL, so the adoption path adopts the
+        process tentatively (URL discovered via ``/quicktunnel`` here)
+        instead of killing a recoverable tunnel.
+        """
         httpd, port = _start_metrics_server(
             [(200, json.dumps({"readyConnections": 0}))],
         )
         self._httpds.append(httpd)
         proc = self._spawn_fake_cloudflared()
         self._write_pidfile(proc.pid, port)
+
+        result = ws._try_adopt_existing_cloudflared()
+
+        self.assertEqual(
+            result,
+            (proc.pid, port, "https://adopted.trycloudflare.com"),
+            "0-ready cloudflared with a known URL must be adopted "
+            "tentatively so the public URL is preserved",
+        )
+        self.assertIsNone(
+            proc.poll(),
+            "mid-reconnect cloudflared was killed by the adoption path",
+        )
+
+    def test_unreachable_metrics_cloudflared_is_terminated(self) -> None:
+        """Persistently unreachable metrics -> decline AND terminate.
+
+        When every probe returns ``None`` (endpoint unreachable) the
+        watchdog could never monitor the adopted tunnel (it skips
+        ``None`` ticks), so the decline path must still reap the
+        process — no orphan leak — and unlink its pidfile.
+        """
+        proc = self._spawn_fake_cloudflared()
+        # A port with no listener: connection refused -> probe None.
+        self._write_pidfile(proc.pid, 1)
 
         result = ws._try_adopt_existing_cloudflared()
 

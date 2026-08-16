@@ -294,9 +294,13 @@ class TestAdoptionWithRealCloudflaredWireFormat(unittest.TestCase):
 
     Two behaviours are pinned:
 
-    1. A *persistently* deregistered tunnel (503 on every probe) is
-       declined after the bounded re-probe ladder and the dead
-       process is terminated so a fresh quick-tunnel replaces it.
+    1. A tunnel still reporting 503 after the bounded re-probe ladder
+       is adopted TENTATIVELY when its public URL is known: 503 +
+       ``readyConnections: 0`` is also what a mid-reconnect tunnel
+       reports (network switch, wake from sleep), and the watchdog
+       already owns the recover-vs-replace decision with a far larger
+       tick budget.  Killing it here rotated the public URL on every
+       kiss-web restart that landed mid-reconnect.
     2. A *briefly* not-ready tunnel (503 while reconnecting after
        wake / WiFi recovery, then healthy) is NOT killed — it is
        adopted and keeps its public URL.  Terminating on the first
@@ -351,26 +355,41 @@ class TestAdoptionWithRealCloudflaredWireFormat(unittest.TestCase):
                 self._proc.wait(timeout=5)
         self._tmp.cleanup()
 
-    def test_persistent_503_declines_after_bounded_reprobes(self) -> None:
-        """Constant 503 -> re-probe ladder, decline, terminate."""
+    def test_persistent_503_adopts_tentatively_after_reprobes(self) -> None:
+        """Constant 503 with a known URL -> re-probe ladder, adopt.
+
+        503 + ``readyConnections: 0`` cannot distinguish "deregistered
+        for good" from "mid-reconnect after a network switch", and the
+        watchdog already tolerates this state for minutes before
+        rotating the URL.  The adoption path therefore adopts the
+        process tentatively (preserving the public URL) and leaves the
+        recover-vs-replace decision to the watchdog's tick budget.
+        """
         dead_reply = (503, json.dumps({
             "status": 503, "readyConnections": 0,
         }))
         self._start(ready_replies=[dead_reply])
         result = _try_adopt_existing_cloudflared()
-        self.assertIsNone(result)
         self.assertEqual(
             self._metrics.ready_requests, 5,
-            "A confirmed-503 tunnel must be re-probed through the "
-            "full bounded ladder (1 initial + 4 retries) before the "
-            "decline — a single 503 only proves 'not ready NOW'.",
+            "A 503 tunnel must still be re-probed through the full "
+            "bounded ladder (1 initial + 4 retries) — a recovery "
+            "during the window upgrades the tentative adoption to a "
+            "confirmed one.",
         )
-        deadline = time.monotonic() + 5
-        while self._proc.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.05)
-        self.assertIsNotNone(
+        self.assertEqual(
+            result,
+            (
+                self._proc.pid,
+                self._metrics.port,
+                "https://e2e-adopted.trycloudflare.com",
+            ),
+            "A persistently-503 cloudflared with a known URL must be "
+            "adopted tentatively so the public URL is preserved.",
+        )
+        self.assertIsNone(
             self._proc.poll(),
-            "A declined (deregistered) cloudflared must be terminated.",
+            "The tentatively adopted cloudflared must stay alive.",
         )
 
     def test_transient_503_recovers_and_is_adopted(self) -> None:
