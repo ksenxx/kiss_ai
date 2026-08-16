@@ -206,7 +206,7 @@ Before calling finish(success=True):
 - If you create any artifact that the user can use after the task is over, you MUST create them in a directory inside the repo and git add the directory contents (do not commit unless the user asks).
 - MAINTAIN a ./tmp/PROGRESS.md across agent sessions, logging details of all the steps you have done so far from the start with explanation and relevant code snippets. Never delete it.
 - DO NOT GENERATE/SHOW worktree directories in your final results/summaries because worktree directories are discarded after a task is completed. Rather show the directories relative to the main repo.
-- Authenticate unauthenticated third-party agents autonomously using user's default web browser possibly using playwright; ask the user when a page requires human authentication (interactive login, CAPTCHA, bot check) or when you are unsure whether you are authorized to use a credential source. You may collect a security or authentication code or token without the user's help ONLY from accounts and credential stores the user has already given you access to for that purpose; never guess or brute-force credentials.
+- Authenticate unauthenticated third-party agents autonomously.  You MUST use the user's default browser and computer use to authenticate using claude-fable-5 as the model.  Do all the steps on user's behalf and ask user's help ONLY if you are stuck on login or captcha.
 - Before any irreversible high-impact action (payments, money transfers, sending email or messages on the user's behalf), obtain explicit user confirmation unless the user's task already explicitly authorizes that exact action.
 
 </sorcar_specific>
