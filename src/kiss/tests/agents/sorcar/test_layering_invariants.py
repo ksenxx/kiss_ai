@@ -4,13 +4,15 @@
 # add your name here
 """Enforce the sorcar-layer packaging invariant.
 
+Moved from the root-level ``kiss.tests.test_layering_invariants``
+because this test depends only on ``kiss.core`` and
+``kiss.agents.sorcar`` (plus the core-only shared AST import scanner
+imported below from ``kiss.tests.core.test_layering_invariants``,
+which also owns the core-layer half of the invariant).
+
 The invariant (user-specified) MUST always hold: code in
 ``src/kiss/agents/sorcar/`` MUST NOT depend on any code outside
 ``src/kiss/agents/sorcar/`` except code in ``src/kiss/core/``.
-
-The core-layer half of the invariant, together with the shared AST
-import scanner imported below, lives in
-``kiss.tests.core.test_layering_invariants``.
 """
 
 from __future__ import annotations
