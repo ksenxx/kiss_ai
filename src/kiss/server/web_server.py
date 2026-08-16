@@ -3308,6 +3308,7 @@ class RemoteAccessServer:
         url_file: str | Path | None = None,
         uds_path: str | Path | None = None,
         ntfy_base_url: str = _NTFY_BASE_URL,
+        uds_owner_wait_s: float = 30.0,
     ) -> None:
         source_shell_env()
         # ``saveConfig`` was the only caller of apply_config_to_env, so
@@ -3361,6 +3362,7 @@ class RemoteAccessServer:
         self._uds_path: Path = (
             Path(uds_path) if uds_path else _default_uds_path()
         )
+        self._uds_owner_wait_s = uds_owner_wait_s
         self._uds_server: asyncio.Server | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._latest_version: str | None = None
@@ -5514,15 +5516,7 @@ class RemoteAccessServer:
         try:
             self._uds_path.parent.mkdir(parents=True, exist_ok=True)
             if self._uds_path.exists() or self._uds_path.is_symlink():
-                if await self._uds_socket_is_live():
-                    # Another live daemon owns this pathname (F4-03).
-                    # Unlinking it would strand that daemon's clients
-                    # on an unreachable inode; leave it alone and let
-                    # local clients fall back to WSS.
-                    raise OSError(
-                        f"UDS socket {self._uds_path} is owned by "
-                        "another live daemon; refusing to steal it",
-                    )
+                await self._wait_for_uds_release()
                 try:
                     self._uds_path.unlink()
                 except OSError:
@@ -5556,6 +5550,47 @@ class RemoteAccessServer:
             # embedder that catches the exception.
             self._close_partial_setup()
             raise
+
+    async def _wait_for_uds_release(self) -> None:
+        """Wait for a live predecessor daemon to release the UDS pathname.
+
+        During a daemon restart the outgoing instance can take tens of
+        seconds to shut down (tunnel cleanup; the SIGTERM failsafe only
+        forces exit after 30s), and its UDS listener stays live for
+        that whole window.  Raising immediately here left the new
+        daemon without a UDS for its entire lifetime; the VS Code
+        extension's health probe reads that as ``sock-missing`` and
+        answers with yet another daemon restart on the next window
+        activation — an endless restart churn the user sees as a
+        recurring "KISS Sorcar Server is starting ..." screen.
+
+        Polls the pathname for up to ``self._uds_owner_wait_s``
+        seconds.  Only an owner that stays live past the deadline — a
+        genuine concurrent daemon (F4-03), whose clients unlinking
+        would strand on an unreachable inode — makes this raise.
+
+        Raises:
+            OSError: When another live daemon still owns the pathname
+                after the deadline.
+        """
+        deadline = time.monotonic() + self._uds_owner_wait_s
+        logged = False
+        while await self._uds_socket_is_live():
+            if time.monotonic() >= deadline:
+                raise OSError(
+                    f"UDS socket {self._uds_path} is owned by "
+                    "another live daemon; refusing to steal it",
+                )
+            if not logged:
+                logged = True
+                logger.info(
+                    "UDS socket %s is owned by another live daemon "
+                    "(likely a predecessor still shutting down); "
+                    "waiting up to %.0fs for it to release the "
+                    "pathname…",
+                    self._uds_path, self._uds_owner_wait_s,
+                )
+            await asyncio.sleep(0.5)
 
     async def _uds_socket_is_live(self) -> bool:
         """Return True when a live peer accepts connections on the UDS path.
