@@ -16,6 +16,16 @@ The fix verifies the process behind the PID still looks like a
 cloudflared binary (``ps -o comm=`` basename) before sending any
 signal; a mismatch only unlinks the stale pidfile.
 
+A later change made the adoption path symmetric with the watchdog: a
+live cloudflared whose reachable metrics endpoint reports zero ready
+connections (the mid-reconnect signature) is now adopted tentatively
+when its public URL is known, instead of being terminated — killing it
+rotated the public URL on every kiss-web restart (e.g. one triggered
+by ``./install.sh``) that landed mid-reconnect.  Termination on the
+decline path is reserved for processes whose URL cannot be discovered
+at all or whose metrics endpoint is persistently unreachable (the
+watchdog could never monitor such a tunnel).
+
 These tests use a real subprocess, a real HTTP metrics server, and a
 real pidfile.  No mocks.
 """
@@ -141,8 +151,20 @@ class TestAdoptDeclineStalePid(unittest.TestCase):
             )
             time.sleep(0.05)
 
-    def test_real_cloudflared_lookalike_is_terminated(self) -> None:
-        """A genuine cloudflared process on the decline path IS terminated."""
+    def test_real_cloudflared_mid_reconnect_is_adopted_tentatively(
+        self,
+    ) -> None:
+        """A live cloudflared with 0 ready connections and a known URL
+        is ADOPTED, not killed.
+
+        ``readyConnections == 0`` on a reachable metrics endpoint is
+        the mid-reconnect signature (network switch, wake from sleep).
+        The watchdog tolerates that state for minutes before rotating
+        the URL; the adoption path must not be stricter, or every
+        kiss-web restart landing mid-reconnect (e.g. one triggered by
+        ``./install.sh``) kills a recoverable tunnel and resets the
+        public URL.
+        """
         port = self._start_unhealthy_metrics_server()
         link = Path(self._tmp.name) / "cloudflared"
         os.symlink(sys.executable, link)
@@ -153,6 +175,44 @@ class TestAdoptDeclineStalePid(unittest.TestCase):
         )
         self._procs.append(proc)
         self._write_pidfile(proc.pid, port)
+
+        result = ws._try_adopt_existing_cloudflared()
+
+        self.assertEqual(
+            result,
+            (proc.pid, port, "https://saved.trycloudflare.com"),
+            "mid-reconnect cloudflared with a known URL must be "
+            "adopted tentatively so the public URL is preserved",
+        )
+        self.assertIsNone(
+            proc.poll(),
+            "mid-reconnect cloudflared was killed by the adoption path",
+        )
+        self.assertTrue(
+            ws._cloudflared_pidfile().exists(),
+            "pidfile of a tentatively adopted cloudflared must remain",
+        )
+
+    def test_real_cloudflared_without_known_url_is_terminated(self) -> None:
+        """A 0-ready cloudflared whose URL is unknown IS terminated.
+
+        Without a public URL the tunnel cannot be advertised, so the
+        decline path must still reap the process (no orphan leak) and
+        unlink its pidfile.
+        """
+        port = self._start_unhealthy_metrics_server()
+        link = Path(self._tmp.name) / "cloudflared"
+        os.symlink(sys.executable, link)
+        proc = subprocess.Popen(
+            [str(link), "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self._procs.append(proc)
+        ws._cloudflared_pidfile().write_text(json.dumps({
+            "pid": proc.pid,
+            "metrics_port": port,
+        }))
 
         result = ws._try_adopt_existing_cloudflared()
 
