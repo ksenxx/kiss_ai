@@ -560,6 +560,39 @@ class GitWorktreeOps:
         return True
 
     @staticmethod
+    def reset_worktree_to(wt_dir: Path, ref: str) -> bool:
+        """Hard-reset *wt_dir*'s checked-out branch onto *ref*.
+
+        Used when a pre-created spare worktree (see
+        :mod:`kiss.agents.sorcar.worktree_pool`) is consumed for a new
+        task: the spare's branch was created from whatever HEAD the
+        repository had at refill time, so it must be moved to the tip
+        of the task's original branch.  ``git reset --hard`` updates
+        the branch ref, the index, and only the working-tree files
+        that differ — a near-instant operation compared to the full
+        checkout of ``git worktree add``.
+
+        Args:
+            wt_dir: Worktree directory whose branch to move.
+            ref: Commit-ish (normally the original branch name) to
+                reset onto.
+
+        Returns:
+            True on success, False when the reset failed (caller
+            should discard the spare and create a worktree inline).
+        """
+        result = _git("reset", "--hard", ref, cwd=wt_dir)
+        if result.returncode != 0:
+            logger.warning(
+                "Failed to reset spare worktree %s to %s: %s",
+                wt_dir,
+                ref,
+                result.stderr.strip(),
+            )
+            return False
+        return True
+
+    @staticmethod
     def remove(repo: Path, wt_dir: Path) -> None:
         """Remove a worktree directory (best-effort, force).
 
@@ -1275,6 +1308,96 @@ class GitWorktreeOps:
         ) == "1"
 
     @staticmethod
+    def save_spare_marker(repo: Path, branch: str) -> bool:
+        """Mark *branch* as a pool-owned spare worktree.
+
+        Written at spare creation time (see
+        :mod:`kiss.agents.sorcar.worktree_pool`) and cleared the moment
+        a task consumes the spare.  :meth:`reclaim_orphaned_worktrees`
+        treats a marked branch as contentless plumbing that is
+        discarded, never squash-merged: without the marker, a spare
+        orphaned by a daemon crash carries no ``kiss-original`` config
+        and the reclaim fallback would squash-merge the spare's branch
+        snapshot into whatever branch the user has since checked out.
+
+        Args:
+            repo: Git repo root path.
+            branch: The spare worktree's branch name.
+
+        Returns:
+            True if the marker was saved successfully.
+        """
+        return GitWorktreeOps._save_branch_config(
+            repo, branch, "kiss-spare", "1", "spare-worktree marker",
+        )
+
+    @staticmethod
+    def load_spare_marker(repo: Path, branch: str) -> bool:
+        """Return True when *branch* carries a spare-worktree marker."""
+        return GitWorktreeOps._load_branch_config(
+            repo, branch, "kiss-spare",
+        ) == "1"
+
+    @staticmethod
+    def clear_spare_marker(repo: Path, branch: str) -> bool:
+        """Remove *branch*'s spare-worktree marker.
+
+        Called when a task consumes a pooled spare: from that moment
+        the worktree carries real work, and a crash must route it
+        through the normal orphan reclaim (merge into its saved
+        original branch) rather than the spare-discard path.
+
+        Args:
+            repo: Git repo root path.
+            branch: The consumed spare's branch name.
+
+        Returns:
+            True when the marker is gone (removed now or already
+            absent — ``git config --unset`` exits 5 for a missing
+            key), False on any other git failure.
+        """
+        result = _git(
+            "config", "--unset", f"branch.{branch}.kiss-spare", cwd=repo,
+        )
+        if result.returncode in (0, 5):
+            return True
+        logger.warning(
+            "Failed to clear spare marker of '%s': %s",
+            branch,
+            result.stderr.strip(),
+        )
+        return False
+
+    @staticmethod
+    def clean_untracked(wt_dir: Path) -> bool:
+        """Remove untracked files and directories from *wt_dir*.
+
+        Used when a pooled spare worktree is consumed for a task: the
+        spare sat idle on disk for an unbounded time, so an external
+        writer (build hook, file watcher, stray command) may have
+        dropped untracked files into it that ``git reset --hard``
+        deliberately keeps — and the task's auto-commit would then
+        publish them as task output.  Ignored files are kept: they
+        never enter commits, and sweeping them (e.g. a ``.venv``)
+        would be pointlessly slow.
+
+        Args:
+            wt_dir: The agent-owned worktree directory to clean.
+
+        Returns:
+            True on success, False when ``git clean`` failed.
+        """
+        result = _git("clean", "-fdq", cwd=wt_dir)
+        if result.returncode != 0:
+            logger.warning(
+                "Failed to clean untracked files in %s: %s",
+                wt_dir,
+                result.stderr.strip(),
+            )
+            return False
+        return True
+
+    @staticmethod
     def _remove_path(path: Path) -> None:
         """Remove *path* whatever it is (symlink, dir, file, or absent).
 
@@ -1791,6 +1914,7 @@ class GitWorktreeOps:
 
         Returns:
             Number of worktrees successfully reclaimed (merged and
+            removed — or, for never-consumed pool spares, simply
             removed).
         """
         excluded = exclude_branches or set()
@@ -1833,6 +1957,31 @@ class GitWorktreeOps:
                     # dropped registrations whose directory is gone,
                     # so this branch is only reachable on an rm-vs-
                     # iteration race with an external process.
+                    continue
+                if GitWorktreeOps.load_spare_marker(repo, branch):
+                    # A pool spare (created by worktree_pool, never
+                    # yet given to a task) is contentless plumbing:
+                    # discard it, never merge.  Its branch snapshots
+                    # whatever branch was checked out at refill time,
+                    # so the no-config merge fallback below would
+                    # squash that snapshot into the CURRENT branch
+                    # even after the user switched branches.
+                    if GitWorktreeOps.has_uncommitted_changes(
+                        wt_dir,
+                    ) or not GitWorktreeOps._branch_is_expendable(
+                        repo, branch,
+                    ):
+                        # A spare is never written to, so content here
+                        # means something external happened; preserve
+                        # rather than destroy.
+                        logger.warning(
+                            "Orphan spare worktree %s (branch '%s') "
+                            "has unexpected content; preserving",
+                            wt_dir, branch,
+                        )
+                        continue
+                    GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                    reclaimed += 1
                     continue
                 if GitWorktreeOps.load_preserve_marker(repo, branch):
                     # The user (or the failed-task preserve path)
