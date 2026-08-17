@@ -127,13 +127,13 @@ class _MergingFlagRecordingAgent(WorktreeSorcarAgent):
         self._test_tab_id = tab_id
         self.observed_merging_during_discard: bool | None = None
 
-    def discard(self) -> str:
+    def discard(self, *, rescue_ignored: bool = False) -> str:
         """Record the owning state's ``is_merging`` flag, then really discard."""
         with agent_state.STATE_LOCK:
             state = agent_state.find_by_tab(self._test_tab_id)
             assert state is not None
             self.observed_merging_during_discard = state.is_merging
-        return super().discard()
+        return super().discard(rescue_ignored=rescue_ignored)
 
 
 class TestScanFilesCapCoversDirectories:

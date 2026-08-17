@@ -1000,14 +1000,26 @@ class _MergeFlowMixin:
         if not changed and discard_if_empty:
             # Discarding an EMPTY worktree removes its directory and
             # its unmerged branch without touching the main working
-            # tree, so a concurrent non-worktree task is no reason to
-            # skip it — skipping leaks the worktree forever because
-            # nothing ever retries.
+            # tree, so a concurrent non-worktree task on the MAIN
+            # tree is no reason to skip it — skipping leaks the
+            # worktree forever because nothing ever retries.  A task
+            # running INSIDE this worktree is different: the discard
+            # would delete the directory out from under it, so leave
+            # the worktree pending (a later resume retries).
+            wt_dir = wt_agent._wt_dir
+            with self._state_lock:
+                if wt_dir is not None and self._any_non_wt_running(
+                    wt_dir,
+                ):
+                    return
             with self._state_lock:
                 prev_merging = state.is_merging
                 state.is_merging = True
             try:
-                wt_agent.discard()
+                # Automatic path: rescue git-ignored task output the
+                # changed-files probe cannot see (see
+                # WorktreeSorcarAgent.discard).
+                wt_agent.discard(rescue_ignored=True)
             finally:
                 with self._state_lock:
                     state.is_merging = prev_merging
@@ -1362,21 +1374,38 @@ class _MergeFlowMixin:
                 busy = self._check_worktree_busy(state, verb, repo_root, wt._wt_dir)
                 if busy:
                     return busy
-            elif action == "merge" and (
-                self._any_non_wt_running(repo_root)
-                or (wt._wt_dir is not None and self._any_non_wt_running(wt._wt_dir))
+            elif wt._wt_dir is not None and self._any_non_wt_running(
+                wt._wt_dir,
             ):
+                # A task on ANOTHER tab is running INSIDE this pending
+                # worktree (its work_dir's toplevel is the linked
+                # worktree).  Both merge and discard delete the
+                # directory out from under it, so — unlike the
+                # main-tree guard below — the discard exemption does
+                # NOT apply here (gpt-5.6-sol review finding: the
+                # internal auto-discard used to remove an occupied
+                # worktree).
+                return {
+                    "success": False,
+                    "message": (
+                        "Another tab is running a task inside this "
+                        "task's worktree. Wait for it to finish "
+                        f"before {verb}."
+                    ),
+                }
+            elif action == "merge" and self._any_non_wt_running(repo_root):
                 # internal=True only bypasses this tab's OWN
                 # is_task_active/is_merging flags (the post-task
                 # auto-finalize runs on the task thread that owns
                 # them).  It must NOT bypass the main-tree guard
                 # (F4-19): merging stashes/checkouts/merges the
                 # main working tree while a direct task on another
-                # tab is still writing it.  A DISCARD is exempt: it
-                # only removes .kiss-worktrees/<slug> and deletes the
-                # unmerged branch, touching neither the main working
-                # tree's files nor its HEAD, so refusing it would
-                # leak the worktree forever (nothing ever retries).
+                # tab is still writing it.  A DISCARD is exempt from
+                # THIS guard: it only removes .kiss-worktrees/<slug>
+                # and deletes the unmerged branch, touching neither
+                # the main working tree's files nor its HEAD, so
+                # refusing it would leak the worktree forever
+                # (nothing ever retries).
                 return {
                     "success": False,
                     "message": (
@@ -1394,7 +1423,12 @@ class _MergeFlowMixin:
                 # thread lets shutdown WAIT for the repository to stop
                 # being rewritten instead of returning mid-merge.
                 state.merge_thread = threading.current_thread()
-        wt._pending_review = False
+        # ``_pending_review`` is NOT cleared here: the agent's own
+        # merge()/discard() clear it themselves, and only past their
+        # deferral checks.  Clearing it up front would let a tab close
+        # during a DEFERRED discard auto-release (merge!) work the
+        # user explicitly asked to throw away (gpt-5.6-sol review
+        # finding).
         try:
             with repo_lock(repo_root):
                 if action == "merge":
@@ -1408,14 +1442,32 @@ class _MergeFlowMixin:
                     msg = wt.merge()
                     success = "Successfully merged" in msg
                     return {"success": success, "message": msg}
-                msg = wt.discard()
-                # A partial discard (branch deletion failed) must not
-                # report success: the UI would close the workflow
-                # while an orphan branch remains (F4-24).
-                return {
-                    "success": "Partially discarded" not in msg,
+                # Only the AUTOMATIC discard (post-task finalize /
+                # session-resume, internal=True) rescues git-ignored
+                # task output: it runs because the changed-files probe
+                # saw nothing, and that probe cannot see ignored
+                # files.  A user-explicit Discard click throws the
+                # work away as asked.
+                msg = wt.discard(rescue_ignored=internal)
+                # A partial discard (branch deletion failed) or a
+                # deferred one (a sub-agent is still writing into the
+                # worktree, or its ignored output could not be
+                # rescued) must not report success: the UI would
+                # close the workflow while an orphan branch remains
+                # (F4-24) or while the worktree is still pending.  A
+                # deferred discard is additionally flagged retryable
+                # so the webview keeps the Merge / Discard buttons
+                # instead of stripping the only retry controls.
+                deferred = "Discard deferred" in msg
+                result: dict[str, Any] = {
+                    "success": (
+                        "Partially discarded" not in msg and not deferred
+                    ),
                     "message": msg,
                 }
+                if deferred:
+                    result["retryable"] = True
+                return result
         finally:
             if not already_claimed:
                 with self._state_lock:
