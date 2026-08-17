@@ -69,6 +69,8 @@ PARAM_FIELDS: tuple[tuple[str, str], ...] = (
     ("web_tools", "webTools"),
     ("is_parallel", "useParallel"),
     ("append_basic_tools", "appendBasicTools"),
+    ("append_to_system_prompt", "appendToSystemPrompt"),
+    ("append_to_prompt", "appendToPrompt"),
 )
 """The overridable ``run`` parameters, as ``(param, wire_field)`` pairs.
 
@@ -108,7 +110,10 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
     if param == "prompt":
         ok = isinstance(value, str) and bool(value.strip())
         expected = "a non-empty string"
-    elif param in ("work_dir", "model", "chat_id", "system_prompt"):
+    elif param in (
+        "work_dir", "model", "chat_id", "system_prompt",
+        "append_to_system_prompt", "append_to_prompt",
+    ):
         ok = isinstance(value, str)
         expected = "a string"
     elif param == "tools":

@@ -685,6 +685,8 @@ class _TaskRunnerMixin:
         active_file: str | None,
         tab_id: str,
         system_prompt_override: str = "",
+        append_to_system_prompt: str = "",
+        append_to_prompt: str = "",
     ) -> None:
         """Broadcast optimistic ``system_prompt``/``prompt`` panels at submit.
 
@@ -708,6 +710,13 @@ class _TaskRunnerMixin:
             system_prompt_override: The run's caller-supplied custom
                 base system prompt (the wire ``systemPrompt`` field);
                 shown instead of ``SYSTEM_PROMPT`` when non-blank.
+            append_to_system_prompt: The run's caller-supplied system
+                prompt suffix (the wire ``appendToSystemPrompt``
+                field); appended right after the base prompt, exactly
+                where ``SorcarAgent.run`` appends it.
+            append_to_prompt: The run's caller-supplied prompt suffix
+                (the wire ``appendToPrompt`` field); appended to the
+                shown prompt, mirroring the executed prompt.
         """
         from kiss.core.base import SYSTEM_PROMPT
 
@@ -715,12 +724,12 @@ class _TaskRunnerMixin:
             system_prompt_override
             if system_prompt_override.strip()
             else SYSTEM_PROMPT
-        )
+        ) + append_to_system_prompt
         if active_file:
             system_text += f"\n\n- The path of the file open in the editor is {active_file}"
         for etype, text in (
             ("system_prompt", system_text),
-            ("prompt", prompt),
+            ("prompt", prompt + append_to_prompt),
         ):
             self.printer.broadcast(
                 {
@@ -831,6 +840,18 @@ class _TaskRunnerMixin:
         system_prompt_override = (
             _raw_system_prompt if isinstance(_raw_system_prompt, str) else ""
         )
+        # Caller-supplied append-only suffixes (wire fields
+        # ``appendToSystemPrompt`` / ``appendToPrompt``).  Untrusted
+        # input: anything but a string (absent, None, wrong type)
+        # appends nothing.
+        _raw_append_sys = cmd.get("appendToSystemPrompt")
+        append_to_system_prompt = (
+            _raw_append_sys if isinstance(_raw_append_sys, str) else ""
+        )
+        _raw_append_prompt = cmd.get("appendToPrompt")
+        append_to_prompt = (
+            _raw_append_prompt if isinstance(_raw_append_prompt, str) else ""
+        )
         attachments = decode_attachments(cmd.get("attachments", []))
         start_ms = int(cmd.get("_start_ms") or 0)
 
@@ -885,6 +906,7 @@ class _TaskRunnerMixin:
 
         self._broadcast_early_prompts(
             prompt, active_file, tab_id, system_prompt_override,
+            append_to_system_prompt, append_to_prompt,
         )
 
         if not use_worktree:
@@ -975,6 +997,12 @@ class _TaskRunnerMixin:
         run_task_ids: list[str] = []
         try:
             subtasks = parse_task_tags(prompt)
+            if append_to_prompt:
+                # The suffix is part of the EXECUTED prompt: appending
+                # here (once per subtask, before the loop) keeps the
+                # agent run, ``state.last_user_prompt``, and the
+                # per-subtask persistence all consistent.
+                subtasks = [t + append_to_prompt for t in subtasks]
             from kiss.core.vscode_config import (
                 build_model_config,
                 load_config,
@@ -1069,6 +1097,11 @@ class _TaskRunnerMixin:
                         tools=client_tools,
                         append_basic_tools=_append_basic_tools,
                         base_system_prompt=system_prompt_override,
+                        # ``SorcarAgent.run``'s ``system_prompt`` is an
+                        # append-only suffix on the base system prompt
+                        # — exactly the ``appendToSystemPrompt``
+                        # contract.
+                        system_prompt=append_to_system_prompt,
                         _skip_persistence=True,
                         _on_task_id_allocated=on_task_id_allocated,
                     )
