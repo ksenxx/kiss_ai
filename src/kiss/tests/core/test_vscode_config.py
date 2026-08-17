@@ -5,7 +5,7 @@
 """Integration tests for VS Code configuration panel backend.
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.test_vscode_config``; the non-core tests remain there.
+``kiss.tests.server.test_vscode_config``; the non-core tests remain there.
 """
 
 from __future__ import annotations

@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import tempfile
 import threading
 from pathlib import Path
@@ -38,6 +37,12 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from kiss.agents.sorcar.channel_workspace import (
+    enter_workspace as _enter_workspace,
+)
+from kiss.agents.sorcar.channel_workspace import (
+    exit_workspace as _exit_workspace,
+)
 from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent
 
 if TYPE_CHECKING:
@@ -47,56 +52,10 @@ logger = logging.getLogger(__name__)
 
 _NO_TIMEOUT_SECONDS = 10 * 365 * 24 * 3600.0
 
-_WORKSPACE_ENV_VAR = "KISS_CHANNEL_WORKSPACE"
-_WORKSPACE_LOCK = threading.Lock()
-_ACTIVE_WORKSPACES: dict[str, int] = {}
-
-
-def _enter_workspace(workspace: str) -> None:
-    """Mark a launch's workspace active and publish it to the env var.
-
-    The env var is process-global, so it is managed by reference
-    counting rather than save/restore snapshots: snapshots taken by
-    overlapping launches restore each other's values out of order,
-    leaving a stale workspace exported after every task has finished.
-
-    Args:
-        workspace: The launching agent's workspace identifier.
-    """
-    with _WORKSPACE_LOCK:
-        _ACTIVE_WORKSPACES[workspace] = _ACTIVE_WORKSPACES.get(workspace, 0) + 1
-        os.environ[_WORKSPACE_ENV_VAR] = workspace
-        if len(_ACTIVE_WORKSPACES) > 1:
-            logger.warning(
-                "concurrent kiss-web launches use different workspaces %s "
-                "but share the single process-global %s environment "
-                "variable; their daemon-side get_tools() may see the "
-                "wrong workspace",
-                sorted(_ACTIVE_WORKSPACES),
-                _WORKSPACE_ENV_VAR,
-            )
-
-
-def _exit_workspace(workspace: str) -> None:
-    """Mark a launch's workspace inactive and clean up the env var.
-
-    When the last active launch finishes the env var is removed; while
-    other launches remain active the env var is kept pointing at one of
-    their workspaces.
-
-    Args:
-        workspace: The workspace passed to :func:`_enter_workspace`.
-    """
-    with _WORKSPACE_LOCK:
-        count = _ACTIVE_WORKSPACES.get(workspace, 0) - 1
-        if count > 0:
-            _ACTIVE_WORKSPACES[workspace] = count
-        else:
-            _ACTIVE_WORKSPACES.pop(workspace, None)
-        if not _ACTIVE_WORKSPACES:
-            os.environ.pop(_WORKSPACE_ENV_VAR, None)
-        elif os.environ.get(_WORKSPACE_ENV_VAR) not in _ACTIVE_WORKSPACES:
-            os.environ[_WORKSPACE_ENV_VAR] = next(iter(_ACTIVE_WORKSPACES))
+# The workspace publication registry (reference-counted, shared with
+# the sorcar ``run_agent`` dispatch tool) lives in
+# ``kiss.agents.sorcar.channel_workspace``; the private aliases above
+# keep this module's public surface unchanged.
 
 _API_SERVER: RemoteAccessServer | None = None
 _API_SERVER_SOCK: str = ""
@@ -150,8 +109,8 @@ class KissWebChatAgent(BaseChannelAgent):
 
     A plain :class:`BaseChannelAgent` (no auth tools, no backend) that
     additionally carries the daemon chat id across launches: the
-    pollers call :meth:`resume_chat_by_id` before launching and read
-    :attr:`chat_id` after, so each conversation thread maps to a
+    channel runner calls :meth:`resume_chat_by_id` before launching and
+    reads :attr:`chat_id` after, so each conversation thread maps to a
     persistent daemon chat.  Like every channel agent it never runs
     anything itself — the inherited ``run()`` submits the task through
     :func:`kiss.server.sorcar.run` via :func:`run_agent_via_kiss_web`,
@@ -218,7 +177,8 @@ def run_agent_via_kiss_web(
     The passed *agent* instance is never executed — the daemon builds
     its own chat agent.  The instance serves as the carrier of channel
     identity: the launcher propagates the daemon chat id onto it (so
-    pollers can resume the conversation), records the YAML result in
+    the channel runner can resume the conversation), records the YAML
+    result in
     ``agent.last_run_result``, and copies the task's cost / token /
     step totals onto the instance for CLI run stats.
 

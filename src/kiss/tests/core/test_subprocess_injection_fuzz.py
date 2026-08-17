@@ -5,7 +5,7 @@
 """Property-based / fuzzing tests for the shell-RC API-key code paths.
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.agents.vscode.test_subprocess_injection_fuzz``; the non-core tests remain there.
+``kiss.tests.server.test_subprocess_injection_fuzz``; the non-core tests remain there.
 """
 
 from __future__ import annotations

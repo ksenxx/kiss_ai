@@ -16,6 +16,10 @@ Can you check the following message for a merge conflict and help me fix it?
 
 ## Trick
 
+You MUST use the user's default browser and computer use to authenticate using claude-fable-5 as the model.  Do all the steps on user's behalf and ask user's help ONLY if you are stuck on login or captcha.
+
+## Trick
+
 Use 'openrouter/moonshotai/kimi-k3' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the model to not invent new problems. Use the model names literally without hallucinating new model names.
 
 ## Trick

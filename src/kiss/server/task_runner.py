@@ -289,7 +289,15 @@ def _release_worktree_without_merging(
     """
     branch = agent._wt_branch
     if not has_changes:
-        agent.discard()
+        # Automatic path: rescue git-ignored task output the
+        # changed-files probe cannot see (see
+        # WorktreeSorcarAgent.discard).
+        msg = agent.discard(rescue_ignored=True)
+        if "Discard deferred" in msg:
+            # A live sub-agent (or a failed ignored-file rescue) kept
+            # the worktree.  It stays pending on the agent, so a later
+            # retire retries; surface why nothing was released.
+            agent._set_warnings(merge=msg)
         return
     if not agent._preserve_pending_worktree_for_review():
         # No worktree was pending after all, so there is no branch to
@@ -912,7 +920,20 @@ class _TaskRunnerMixin:
                 main_tree_busy = self._any_non_wt_running(
                     getattr(agent, "_repo_root", None),
                 )
-            if main_tree_busy:
+                wt_occupied = self._any_non_wt_running(
+                    getattr(agent, "_wt_dir", None),
+                )
+            if main_tree_busy and wt_occupied:
+                # A task on another tab is running INSIDE the pending
+                # worktree itself.  Every disposal — discard and the
+                # commit-and-remove preserve alike — deletes that
+                # directory out from under the running task, so leave
+                # the worktree pending; a later retire retries.
+                agent._set_warnings(merge=(
+                    f"Worktree '{agent._wt_branch}' was left pending: "
+                    "another tab is running a task inside it."
+                ))
+            elif main_tree_busy:
                 # Retiring the previous worktree is an automatic path,
                 # so it obeys the toggle as it stands NOW — the value
                 # this run carried, not the one the run that created
