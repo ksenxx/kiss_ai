@@ -45,6 +45,7 @@ import requests
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
+    drain_request_body,
     stop_http_server,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -86,12 +87,15 @@ def _parse_content_length(value: str | None) -> int | None:
 
     Returns:
         The non-negative integer length, or None when the header is
-        missing, negative, or not a plain decimal integer.
+        missing, negative, not a plain decimal integer, or longer than
+        10 digits (an absurd length; unguarded ``int()`` would raise
+        past Python's integer-string conversion limit on a header of
+        thousands of digits).
     """
     if value is None:
         return None
     value = value.strip()
-    if not value.isascii() or not value.isdigit():
+    if not value.isascii() or not value.isdigit() or len(value) > 10:
         return None
     return int(value)
 
@@ -167,7 +171,15 @@ class WeixinChannelBackend(ToolMethodBackend):
                 self.wfile.write(body)
 
             def do_POST(self) -> None:
-                """Authenticate and queue an inbound plaintext WeChat XML message."""
+                """Authenticate and queue an inbound plaintext WeChat XML message.
+
+                A rejection path with a parseable ``Content-Length``
+                drains the (bounded) unread request body after sending
+                the response — see ``drain_request_body`` — so the
+                client reads the status code instead of a connection
+                reset.
+                """
+                length = _parse_content_length(self.headers.get("Content-Length"))
                 if backend._callback_token:
                     params = parse_qs(urlparse(self.path).query)
                     signature = params.get("signature", [""])[0]
@@ -177,8 +189,8 @@ class WeixinChannelBackend(ToolMethodBackend):
                     if not hmac.compare_digest(expected, signature):
                         self.send_response(401)
                         self.end_headers()
+                        drain_request_body(self, length)
                         return
-                length = _parse_content_length(self.headers.get("Content-Length"))
                 if length is None:
                     self.send_response(400)
                     self.end_headers()
@@ -186,6 +198,7 @@ class WeixinChannelBackend(ToolMethodBackend):
                 if length > _MAX_BODY_BYTES:
                     self.send_response(413)
                     self.end_headers()
+                    drain_request_body(self, length)
                     return
                 raw = self.rfile.read(length)
                 backend._queue_xml_message(raw)

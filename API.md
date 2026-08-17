@@ -10,6 +10,7 @@
       - [`kiss.agents.sorcar.chat_sorcar_agent`](#kissagentssorcarchat_sorcar_agent)
       - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
     - [`kiss.server.sorcar`](#kissserversorcar)
+      - [`kiss.agents.sorcar.daemon_client`](#kissagentssorcardaemon_client)
 
 </details>
 
@@ -190,8 +191,6 @@
 
 #### `kiss.server.sorcar` — *The Sorcar server API and a minimal synchronous client for it.*
 
-##### `class TaskResult` — Final outcome of one synchronous daemon task run.
-
 ##### `class ApiCommand` — One command of the Sorcar server API.
 
 ##### `class ApiContext` — Transport context of one in-flight server API call.
@@ -298,6 +297,22 @@
 - `a`: First password string.
 - `b`: Second password string.
 - **Returns:** ``True`` when the two strings are equal.
+
+---
+
+#### `kiss.agents.sorcar.daemon_client` — *Synchronous client for running tasks on the ``kiss-web`` daemon.*
+
+##### `class TaskResult` — Final outcome of one synchronous daemon task run.
+
+**`resolve_tools_file`** — Validate a client-supplied tools path and resolve it absolutely. Client-side counterpart of the daemon's ``kiss.server.tools_file.load_tools_file``.  The path is resolved against the CLIENT's working directory (the daemon may run with a different one) and validated eagerly so a bad value fails fast, before any daemon connection is made.<br/>`def resolve_tools_file(tools: str | Path | None) -> str`
+
+- `tools`: Path to a Python file whose ``get_tools()`` function supplies the agent tools, or ``None`` for no extra tools.
+- **Returns:** The absolute path as a string, or ``""`` when *tools* is ``None``.
+
+**`resolve_agent_path`** — Validate a client-supplied agent-script path and resolve it. Client-side counterpart of the daemon's ``kiss.server.agent_file.apply_agent_overrides``.  The path is resolved against the CLIENT's working directory (the daemon may run with a different one) and validated eagerly so a bad value fails fast, before any daemon connection is made.<br/>`def resolve_agent_path(agent_path: str | None) -> str`
+
+- `agent_path`: Path string of a Python file whose ``get_X()`` functions compute the run's parameters, or ``None``/empty for no agent script.
+- **Returns:** The absolute path as a string, or ``""`` when *agent_path* is ``None`` or empty.
 
 **`run`** — Run *prompt* as a task on the local Sorcar daemon and block until done. Connects to the ``kiss-web`` daemon's Unix-domain socket, sends the same ``run`` command a chat webview would, streams the task's events, and returns once the daemon reports the task finished.<br/>`def run(prompt: str, *, work_dir: str = '', model: str = '', chat_id: str = '', system_prompt: str = '', tools: str | Path | None = None, agent_path: str = '', use_worktree: bool = True, auto_commit: bool = True, max_budget: float | None = None, model_config: dict[str, Any] | None = None, web_tools: bool | None = None, is_parallel: bool = True, timeout: float = 3600.0, sock_path: str | Path | None = None) -> TaskResult`
 

@@ -803,7 +803,11 @@ function testRetaggedSubagentKeepsItsPendingReport() {
   assertNoReportTab(win, 'retagged subagent report before subagentDone');
 
   // The parent's history row is replayed: same sub-agent, new tab id.
-  const replayId = parentId + '__sub_sub-task-1';
+  // The id must genuinely differ from the open tab's (which already is
+  // the deterministic `<parent>__sub_<task>` id) or no re-addressing
+  // happens and retagSubagentTab's report transfer is never exercised.
+  const replayId = 'replay-' + resume.tabId;
+  assert.notStrictEqual(replayId, resume.tabId);
   send(win, Object.assign({}, announce, {tab_id: replayId}));
   assert.strictEqual(
     win.document.querySelectorAll('#tab-list .chat-tab.subagent-tab').length,
