@@ -990,6 +990,13 @@ class _TaskRunnerMixin:
             _agent_budget = coerce_budget_override(cmd.get("maxBudget"))
             _raw_web = cmd.get("webTools")
             _agent_web = _raw_web if isinstance(_raw_web, bool) else None
+            # Absent or malformed means the default (True): only a
+            # client that explicitly sent ``false`` strips the agent
+            # down to ``finish`` plus its own tools.
+            _raw_append = cmd.get("appendBasicTools")
+            _append_basic_tools = (
+                _raw_append if isinstance(_raw_append, bool) else True
+            )
             _raw_model_config = cmd.get("modelConfig")
             _agent_model_config = (
                 _raw_model_config
@@ -1060,6 +1067,7 @@ class _TaskRunnerMixin:
                             else _model_config
                         ),
                         tools=client_tools,
+                        append_basic_tools=_append_basic_tools,
                         base_system_prompt=system_prompt_override,
                         _skip_persistence=True,
                         _on_task_id_allocated=on_task_id_allocated,

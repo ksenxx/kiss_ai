@@ -30,7 +30,8 @@ are absent.
 Each dispatch is a plain call of the daemon client
 :func:`kiss.agents.sorcar.daemon_client.run` (re-exported as the
 public API ``kiss.server.sorcar.run``) passing the prompt and the agent file's
-path as ``agent_path``: the daemon imports the file as an agent script
+path as ``extension_agent_path``: the daemon imports the file as an
+agent script
 and applies its ``get_X()`` parameter overrides.  For a channel, the
 module's ``get_tools()`` returns the channel's tool callables, so the
 script serves as its own tools file — the daemon-built agent gets the
@@ -235,7 +236,8 @@ def _dispatch(
     """Submit an agent-script task to the kiss-web daemon and wait.
 
     The shared tail of :func:`_run_agent`'s channel and path modes:
-    calls :func:`kiss.server.sorcar.run` with *agent_path* and returns
+    calls :func:`kiss.server.sorcar.run` with *agent_path* as its
+    *extension_agent_path* and returns
     the result — or a clean error string — never raising.
 
     Args:
@@ -263,7 +265,7 @@ def _dispatch(
     try:
         result = daemon_client.run(
             prompt,
-            agent_path=agent_path,
+            extension_agent_path=agent_path,
             work_dir=work_dir,
             model=model_name,
             max_budget=budget,
@@ -475,7 +477,7 @@ def make_run_agent_tool(
         agent (scheduled automations) is always available.
 
         The task runs as a fresh session on the kiss-web daemon — the
-        agent file's path is passed as the ``agent_path`` of
+        agent file's path is passed as the ``extension_agent_path`` of
         :func:`kiss.server.sorcar.run`, so the session is configured
         by the file's ``get_X()`` getters (a channel module's
         ``get_tools()`` supplies that channel's authenticated tools,
