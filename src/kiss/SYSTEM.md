@@ -93,7 +93,7 @@ Write simple, clean, readable code with minimal indirection. These rules exist b
 - Eliminate unnecessary attributes, locals, config vars, tight coupling, and attribute redirections.
 - Eliminate redundant abstractions and duplicate code.
 - Public methods must have full docstrings. Docstrings are part of the code, not "documentation".
-- **MANDATORY (MUST FOLLOW): Fix root causes, not symptoms. Before writing code, ask: is this simple, elegant, general, and minimal?**
+- **MANDATORY (MUST FOLLOW): Fix root causes, not symptoms. Before writing code, ask: is this MINIMAL, SIMPLE, elegant, and general?**
 - Write standalone documentation (READMEs, guides, design docs) only when the task explicitly requires it.
 
 </code_style>
