@@ -174,6 +174,25 @@ def take_spare(repo: Path) -> tuple[str, Path] | None:
             branch,
         )
         return None
+    if (
+        GitWorktreeOps.has_uncommitted_changes(wt_dir)
+        or GitWorktreeOps.list_ignored_files(wt_dir)
+        or not GitWorktreeOps._branch_is_expendable(repo, branch)
+    ):
+        # A spare is never written to, so content in it means an
+        # external writer put something there.  Consuming it would
+        # destroy that content (`reset --hard` + `git clean -fdq`),
+        # which contradicts the preservation policy the reclaim pass
+        # applies to the very same situation.  Leave the directory
+        # for the reclaim pass to preserve; create inline instead.
+        logger.warning(
+            "Pooled spare worktree %s (branch '%s') has unexpected "
+            "content; preserving it and falling back to inline "
+            "creation",
+            wt_dir,
+            branch,
+        )
+        return None
     return spare
 
 
@@ -197,6 +216,24 @@ def discard_all() -> None:
     for key, (branch, wt_dir) in spares.items():
         repo = Path(key)
         try:
+            # Same guard the reclaim pass applies to orphaned spares:
+            # a spare is never written to, so content in it means an
+            # external writer put something there — preserve it for
+            # the reclaim pass to inspect rather than destroy it.  A
+            # spare whose directory is already gone is plumbing only
+            # and is always cleaned up.
+            if wt_dir.is_dir() and (
+                GitWorktreeOps.has_uncommitted_changes(wt_dir)
+                or GitWorktreeOps.list_ignored_files(wt_dir)
+                or not GitWorktreeOps._branch_is_expendable(repo, branch)
+            ):
+                logger.warning(
+                    "Pooled spare worktree %s (branch '%s') has "
+                    "unexpected content; preserving instead of "
+                    "discarding",
+                    wt_dir, branch,
+                )
+                continue
             GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
         except Exception:  # pragma: no cover — filesystem teardown race
             logger.warning(
