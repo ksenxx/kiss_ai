@@ -571,6 +571,33 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert getattr(call["agent"], "_use_web_tools", None) is False
         assert getattr(call["agent"], "_is_parallel", None) is True
 
+    def test_append_basic_tools_false_forwarded(self) -> None:
+        """``append_basic_tools=False`` reaches the daemon-built agent.
+
+        The launcher (and the ``LAUNCH_KWARG_NAMES`` filter the channel
+        agents' ``run()`` shims pass their kwargs through) must forward
+        the restriction to ``sorcar.run`` — a dropped kwarg would
+        silently hand the channel task the full basic toolset.
+        """
+        from kiss.agents.third_party_agents._channel_agent_utils import (
+            filter_launch_kwargs,
+        )
+        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+
+        assert filter_launch_kwargs(
+            {"append_basic_tools": False, "system_prompt": "dropped"}
+        ) == {"append_basic_tools": False}
+        self._install_stub()
+        run_agent_via_kiss_web(
+            SlackAgent(),
+            "task",
+            work_dir=self.repo,
+            sock_path=self.sock_path,
+            append_basic_tools=False,
+        )
+        agent = self.stub_calls[0]["agent"]
+        assert getattr(agent, "_append_basic_tools", None) is False
+
     def test_zero_budget_override_is_honored(self) -> None:
         from kiss.agents.third_party_agents.slack_agent import SlackAgent
 

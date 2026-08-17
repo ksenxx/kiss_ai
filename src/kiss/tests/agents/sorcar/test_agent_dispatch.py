@@ -171,7 +171,7 @@ def test_cron_dispatch_unreachable_daemon_is_a_clean_error(
 
 def test_cron_agent_module_is_a_valid_agent_script() -> None:
     # The contract the cron dispatch relies on: passing the cron
-    # module as ``agent_path`` makes it its own tools file (its
+    # module as ``extension_agent_path`` makes it its own tools file (its
     # ``get_tools()`` returns the cron_job tool) and moves the session
     # to ~/.kiss/cron/work with no git lifecycle.
     cmd = {"agentPath": cron_agent.__file__, "toolsFile": ""}
@@ -374,7 +374,7 @@ def test_every_channel_module_is_dispatchable() -> None:
 
 def test_channel_module_is_a_valid_agent_script() -> None:
     # The exact contract the dispatch relies on: passing a channel
-    # module as ``agent_path`` makes the daemon use the module as its
+    # module as ``extension_agent_path`` makes the daemon use the module as its
     # own tools file (its ``get_tools()`` returns the tool list).
     import kiss.agents.third_party_agents.ntfy_agent as ntfy_agent
 
