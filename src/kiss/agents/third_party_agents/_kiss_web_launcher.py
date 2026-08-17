@@ -153,6 +153,7 @@ def run_agent_via_kiss_web(
     model_config: dict[str, Any] | None = None,
     web_tools: bool | None = None,
     is_parallel: bool = True,
+    append_basic_tools: bool = True,
     timeout: float | None = None,
     sock_path: str | None = None,
 ) -> str:
@@ -203,6 +204,11 @@ def run_agent_via_kiss_web(
         web_tools: Per-task browser-tool enablement override. ``None``
             uses the kiss-web config default.
         is_parallel: Whether the agent may spawn parallel sub-agents.
+        append_basic_tools: Whether the daemon-built agent gets the
+            built-in basic toolset on top of the channel tools.  When
+            ``False`` the agent's only tools are ``finish`` and the
+            tools file's ``get_tools()`` tools (see
+            :func:`kiss.server.sorcar.run`).
         timeout: Max seconds to wait for the task; ``None`` waits
             indefinitely.  On timeout the task keeps running in the
             daemon and ``""`` is returned.
@@ -250,6 +256,7 @@ def run_agent_via_kiss_web(
                 model_config=model_config,
                 web_tools=web_tools,
                 is_parallel=is_parallel,
+                append_basic_tools=append_basic_tools,
                 timeout=timeout if timeout is not None else _NO_TIMEOUT_SECONDS,
                 sock_path=sock,
             )

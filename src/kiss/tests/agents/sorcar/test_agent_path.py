@@ -2,11 +2,11 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for ``kiss.server.sorcar.run``'s ``agent_path``.
+"""End-to-end tests for ``kiss.server.sorcar.run``'s ``extension_agent_path``.
 
 Spin up a real :class:`kiss.server.web_server.RemoteAccessServer` on a
 temporary Unix-domain socket and drive ``kiss.server.sorcar.run`` with
-an ``agent_path`` script against it.  The only replaced boundary is the
+an ``extension_agent_path`` script against it.  The only replaced boundary is the
 LLM itself: like the other task-runner suites in this directory,
 ``SorcarAgent``'s parent ``run`` is swapped for a stub so the daemon's
 full run pipeline (``run`` command dispatch → worker thread →
@@ -59,7 +59,7 @@ def _init_repo(repo: str) -> None:
 
 
 class AgentPathApiTest(unittest.TestCase):
-    """Drive ``sorcar.run(agent_path=...)`` against a real daemon over UDS."""
+    """Drive ``sorcar.run(extension_agent_path=...)`` against a real daemon over UDS."""
 
     def setUp(self) -> None:
         # Resolved: macOS mkdtemp returns a symlinked /var/... path while
@@ -328,7 +328,7 @@ class AgentPathApiTest(unittest.TestCase):
             model=available[0],
             system_prompt="client system prompt",
             tools=client_tools,
-            agent_path=agent_path,
+            extension_agent_path=agent_path,
             use_worktree=True,
             auto_commit=True,
             max_budget=9.5,
@@ -382,7 +382,7 @@ class AgentPathApiTest(unittest.TestCase):
             "original prompt",
             work_dir=self.repo,
             system_prompt="kept system prompt",
-            agent_path=agent_path,
+            extension_agent_path=agent_path,
             max_budget=3.5,
             sock_path=self.sock_path,
             timeout=60,
@@ -433,7 +433,7 @@ class AgentPathApiTest(unittest.TestCase):
             "run without tools",
             work_dir=self.repo,
             tools=client_tools,
-            agent_path=agent_path,
+            extension_agent_path=agent_path,
             sock_path=self.sock_path,
             timeout=60,
         )
@@ -488,7 +488,7 @@ class AgentPathApiTest(unittest.TestCase):
         second = sorcar.run(
             "what was the word?",
             work_dir=self.repo,
-            agent_path=agent_path,
+            extension_agent_path=agent_path,
             sock_path=self.sock_path,
             timeout=60,
         )
@@ -575,7 +575,7 @@ class AgentPathApiTest(unittest.TestCase):
                 result = sorcar.run(
                     "should not run the agent",
                     work_dir=self.repo,
-                    agent_path=agent_path,
+                    extension_agent_path=agent_path,
                     sock_path=self.sock_path,
                     timeout=60,
                 )
@@ -632,19 +632,19 @@ class AgentPathApiTest(unittest.TestCase):
         assert cmd == original
 
     def test_invalid_agent_path_raises_value_error(self) -> None:
-        """The client rejects a bad ``agent_path`` before connecting."""
+        """The client rejects a bad ``extension_agent_path`` before connecting."""
         with self.assertRaises(ValueError):
             sorcar.run(
-                "hi", agent_path=str(Path(self.tmpdir) / "missing.py"),
+                "hi", extension_agent_path=str(Path(self.tmpdir) / "missing.py"),
                 sock_path=self.sock_path,
             )
         not_py = Path(self.tmpdir) / "agent.txt"
         not_py.write_text("def get_model():\n    return 'x'\n")
         with self.assertRaises(ValueError):
-            sorcar.run("hi", agent_path=str(not_py), sock_path=self.sock_path)
+            sorcar.run("hi", extension_agent_path=str(not_py), sock_path=self.sock_path)
         with self.assertRaises(ValueError):
             sorcar.run(
-                "hi", agent_path=cast(Any, 123), sock_path=self.sock_path,
+                "hi", extension_agent_path=cast(Any, 123), sock_path=self.sock_path,
             )
 
 

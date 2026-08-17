@@ -634,6 +634,7 @@ LAUNCH_KWARG_NAMES = frozenset(
         "model_config",
         "web_tools",
         "is_parallel",
+        "append_basic_tools",
         "timeout",
         "sock_path",
     }
