@@ -545,7 +545,10 @@ class DiscordAgent(BaseChannelAgent):
         "If authentication is needed, call start_discord_browser_auth() to open "
         "the Discord Developer Portal, then use browser tools to create an app, "
         "add a bot, and copy the bot token. Complete these steps autonomously — "
-        "do NOT instruct the user to do them manually."
+        "do NOT instruct the user to do them manually. "
+        "You MUST use the user's default browser and computer use to authenticate "
+        "using claude-fable-5 as the model.  Do all the steps on user's behalf and "
+        "ask user's help ONLY if you are stuck on login or captcha."
     )
 
     def __init__(self) -> None:

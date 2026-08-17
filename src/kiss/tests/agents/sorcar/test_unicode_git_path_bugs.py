@@ -4,7 +4,7 @@
 # add your name here
 """Unicode git-path handling in the sorcar worktree helpers.
 
-Moved from ``kiss.tests.agents.vscode.test_unicode_git_path_bugs``
+Moved from ``kiss.tests.server.test_unicode_git_path_bugs``
 because these tests drive :class:`GitWorktreeOps` directly and depend
 only on ``kiss.core`` and ``kiss.agents.sorcar``.  The autocommit test
 that constructs a real ``VSCodeServer`` (and thus depends on

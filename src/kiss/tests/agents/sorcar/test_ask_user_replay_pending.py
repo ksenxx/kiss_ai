@@ -21,7 +21,7 @@ import unittest
 
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
+from kiss.tests.server._memory_printer import MemoryPrinter
 
 
 class _SlowAskPrinter(MemoryPrinter):

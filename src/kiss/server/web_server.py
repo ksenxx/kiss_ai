@@ -77,6 +77,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
+from kiss.agents.sorcar import cron_agent
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.models.model_info import get_default_model
@@ -877,6 +878,16 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
     (falling back to the URL recorded in the pidfile when the metrics
     endpoint doesn't expose one — e.g. named tunnels).
 
+    A live cloudflared whose reachable metrics endpoint reports zero
+    ready connections (mid-reconnect after a network switch or wake
+    from sleep) is still adopted — *tentatively* — as long as its
+    public URL is known: the watchdog's startup grace and
+    unhealthy-tick budget then decide between recovery and
+    replacement, exactly as they would have for the previous owner.
+    Declining (and killing) such a tunnel here would rotate a
+    recoverable public URL on every kiss-web restart that happens to
+    land mid-reconnect.
+
     This is how the daemon preserves a single quick-tunnel URL across
     its own restarts: ``cloudflared`` is spawned in its own process
     group (``start_new_session=True``) so it survives ``kiss-web``'s
@@ -913,19 +924,46 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
             ready = _probe_tunnel_ready(metrics_port)
             if ready is True:
                 break
-    if ready is not True:
-        logger.info(
-            "cloudflared pid %d alive but metrics port %d reports "
-            "no ready connections; not adopting",
-            pid, metrics_port,
-        )
-        _terminate_declined_cloudflared(pid)
-        return None
     url = _query_quicktunnel_hostname(metrics_port)
     if url is None:
         saved = data.get("url")
         if isinstance(saved, str) and saved.startswith("https://"):
             url = saved
+    if ready is not True:
+        if ready is False and url is not None and _looks_like_cloudflared(pid):
+            # The metrics endpoint is REACHABLE but reports zero ready
+            # edge connections — the canonical mid-reconnect signature
+            # (network switch, wake from sleep).  The watchdog tolerates
+            # exactly this state for ``_TUNNEL_STARTUP_GRACE`` plus a
+            # full unhealthy-tick budget (minutes) before rotating the
+            # URL, so the adoption path must not be stricter: killing a
+            # recovering cloudflared here is what rotated the public URL
+            # on every install-triggered kiss-web restart that landed
+            # mid-reconnect.  Adopt it tentatively — the caller marks it
+            # freshly started, and the watchdog's existing grace/tick
+            # machinery rotates it only if it never recovers.
+            logger.info(
+                "cloudflared pid=%d metrics_port=%d reports zero ready "
+                "connections (likely mid-reconnect); adopting "
+                "tentatively with url=%s — the watchdog will replace it "
+                "only if it never recovers",
+                pid, metrics_port, url,
+            )
+            return pid, metrics_port, url
+        if ready is None:
+            reason = f"metrics port {metrics_port} is unreachable"
+        elif url is None:
+            reason = (
+                f"metrics port {metrics_port} reports no ready "
+                "connections and no URL is known"
+            )
+        else:
+            reason = "the process no longer looks like cloudflared"
+        logger.info(
+            "cloudflared pid %d alive but %s; not adopting", pid, reason,
+        )
+        _terminate_declined_cloudflared(pid)
+        return None
     if url is None:
         _terminate_declined_cloudflared(pid)
         return None
@@ -4971,6 +5009,13 @@ class RemoteAccessServer:
         an exponentially-growing backoff via :attr:`_tunnel_next_retry`
         so the watchdog stops hammering Cloudflare when rate-limited.
         """
+        if self._shutdown_initiated:
+            # The daemon is going down.  The SIGTERM path has already
+            # detached the tunnel (bookkeeping says "no tunnel"), so a
+            # watchdog tick landing in the shutdown window would
+            # otherwise spawn a fresh cloudflared — orphaning it or
+            # rotating the public URL for nothing.
+            return
         now = time.monotonic()
         proc = self._tunnel_proc
         adopted_pid = self._tunnel_adopted_pid
@@ -5080,10 +5125,25 @@ class RemoteAccessServer:
         ``remote_url`` to connected clients.  On failure schedules an
         exponential backoff via :attr:`_tunnel_next_retry`.
         """
+        if self._shutdown_initiated:
+            # Closes the race where a watchdog tick already past its
+            # own shutdown guard reaches here after the SIGTERM path
+            # detached the tunnel: spawning a fresh cloudflared now
+            # would orphan it or needlessly rotate the public URL.
+            return
         assert self._loop is not None
         tunnel_url = await self._loop.run_in_executor(
             None, self._start_tunnel,
         )
+        if self._shutdown_initiated:
+            # SIGTERM landed while the tunnel start was in flight (the
+            # entry guard above ran before the flag was set).  The
+            # sigterm thread's early detach has already run, so detach
+            # this fresh cloudflared as well — its pid/URL were saved
+            # to the pidfile by the start path, so the NEXT daemon
+            # adopts it — and publish nothing from a dying process.
+            self._detach_tunnel()
+            return
         if tunnel_url:
             logger.info("Tunnel restarted: %s", tunnel_url)
             self._tunnel_failure_count = 0
@@ -5776,6 +5836,16 @@ class RemoteAccessServer:
             print(f"Cloudflare tunnel:         {self._active_url}", file=sys.stderr)
         elif self.use_tunnel:
             print("Warning: cloudflared tunnel failed to start", file=sys.stderr)
+        # Scheduled automations (cron) run in a background daemon
+        # thread for the daemon's whole lifetime; prompt jobs are
+        # submitted back to this daemon through its own UDS socket.
+        # Only this blocking lifecycle (the real `kiss-web` daemon)
+        # owns the scheduler: `start_async()` embedders — in-process
+        # helper daemons and tests — must not fire the user's
+        # scheduled jobs.
+        cron_stop = cron_agent.start_scheduler_thread(
+            sock_path=str(self._uds_path),
+        )
         loop = asyncio.get_running_loop()
         self._shutdown_future = loop.create_future()
         serve_task: asyncio.Task[None] = asyncio.ensure_future(
@@ -5787,6 +5857,7 @@ class RemoteAccessServer:
                 return_when=asyncio.FIRST_COMPLETED,
             )
         finally:
+            cron_stop.set()
             if not serve_task.done():
                 serve_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -5889,7 +5960,13 @@ class RemoteAccessServer:
         while the in-flight agent worker threads are cooperatively
         stopped and joined.  Ordering matters:
 
-        1. :meth:`_stop_active_agent_tasks` FIRST — the user-visible
+        0. :meth:`_detach_tunnel` FIRST — spawn the stderr drain shim
+           that keeps the detached ``cloudflared`` alive, before any
+           cleanup that can outlive an impatient supervisor's
+           SIGTERM→SIGKILL escalation.  Everything after this point
+           may be cut short by SIGKILL without costing the public
+           tunnel URL.
+        1. :meth:`_stop_active_agent_tasks` — the user-visible
            point of "Reset Server" is that running agents stop, and
            this must not depend on the event loop being able to unwind
            (a wedged loop previously left agents running forever).
@@ -5904,6 +5981,21 @@ class RemoteAccessServer:
            fresh daemon instead of leaving a zombie that ignores every
            further SIGTERM.
         """
+        # Detach the tunnel FIRST — before any slow cleanup (agent-task
+        # joins, merge waits, MCP disconnects).  This spawns the stderr
+        # drain shim that keeps the detached cloudflared alive after
+        # this process dies.  The VS Code extension escalates its
+        # SIGTERM to SIGKILL after only a few seconds; when that
+        # SIGKILL landed mid-cleanup the shim was never spawned (the
+        # detach used to run only in ``start()``'s ``finally``), the
+        # detached cloudflared died of SIGPIPE on its next stderr
+        # write, and the next kiss-web found "pidfile points to dead
+        # pid" and minted a fresh public URL.  A healthy tunnel must
+        # survive this daemon's death no matter how the daemon dies.
+        try:
+            self._detach_tunnel()
+        except Exception:  # noqa: BLE001 — shutdown must proceed regardless
+            logger.exception("SIGTERM shutdown: tunnel detach failed")
         try:
             self._stop_active_agent_tasks()
         except Exception:  # noqa: BLE001 — shutdown must proceed regardless
@@ -6158,6 +6250,16 @@ class RemoteAccessServer:
             logger.info("Server shutting down: pid=%d (KeyboardInterrupt)", pid)
         finally:
             self._shutdown_initiated = True
+            # Detach the tunnel FIRST (mirrors _shutdown_on_sigterm's
+            # step 0).  This ``finally`` also serves the
+            # KeyboardInterrupt / pre-loop-SIGTERM paths, which never
+            # ran the sigterm thread's early detach; running the slow
+            # cleanups below first would reopen the window where an
+            # impatient supervisor's SIGKILL leaves the spawned
+            # cloudflared without its stderr drain shim (SIGPIPE
+            # death -> rotated public URL).  A no-op when the sigterm
+            # thread already detached.
+            self._detach_tunnel()
             self._stop_active_agent_tasks()
             self._await_active_merges()
             self._disconnect_mcp_servers()
@@ -6166,7 +6268,6 @@ class RemoteAccessServer:
             # last save succeeded.
             self._vscode_server.tab_registry.flush()
             logger.info("Server stopped: pid=%d", pid)
-            self._detach_tunnel()
 
     async def start_async(self) -> None:
         """Start the server asynchronously (for use in existing event loops).

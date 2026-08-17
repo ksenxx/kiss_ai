@@ -27,9 +27,14 @@ from __future__ import annotations
 import logging
 import math
 import os
-from pathlib import Path
 from typing import Any
 
+# The client-side validator lives in the sorcar layer (the ``run_agent``
+# dispatch tool uses it under the layering invariant); re-exported here
+# unchanged as the public ``kiss.server.agent_file.resolve_agent_path``.
+from kiss.agents.sorcar.daemon_client import (
+    resolve_agent_path as resolve_agent_path,
+)
 from kiss.server.tools_file import _safe_message, execute_python_file
 
 logger = logging.getLogger("kiss-vscode")
@@ -76,46 +81,6 @@ take effect.
 """
 
 
-def resolve_agent_path(agent_path: str | None) -> str:
-    """Validate a client-supplied agent-script path and resolve it.
-
-    Client-side counterpart of :func:`apply_agent_overrides`.  The path
-    is resolved against the CLIENT's working directory (the daemon may
-    run with a different one) and validated eagerly so a bad value
-    fails fast, before any daemon connection is made.
-
-    Args:
-        agent_path: Path string of a Python file whose ``get_X()``
-            functions compute the run's parameters, or ``None``/empty
-            for no agent script.
-
-    Returns:
-        The absolute path as a string, or ``""`` when *agent_path* is
-        ``None`` or empty.
-
-    Raises:
-        ValueError: When *agent_path* is neither ``None`` nor a string,
-            is not a ``.py`` file, or does not exist.
-    """
-    if agent_path is None:
-        return ""
-    if not isinstance(agent_path, str):
-        raise ValueError(
-            f"agent_path must be a string path to a Python file, got "
-            f"{type(agent_path).__name__}: {agent_path!r}"
-        )
-    if agent_path == "":
-        return ""
-    path = Path(agent_path).expanduser().resolve()
-    if path.suffix != ".py":
-        raise ValueError(
-            f"agent script {str(path)!r} is not a Python (.py) file"
-        )
-    if not path.is_file():
-        raise ValueError(f"agent script {str(path)!r} does not exist")
-    return str(path)
-
-
 def _check_override(raw_path: str, param: str, value: Any) -> Any:
     """Type-check one ``get_X()`` return value against parameter ``X``.
 
@@ -146,10 +111,21 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
         ok = isinstance(value, str)
         expected = "a string"
     elif param == "tools":
+        if isinstance(value, list):
+            # The agent script doubles as its own tools file: a
+            # ``get_tools()`` returning the tool callables themselves
+            # (the tools-file contract — e.g. every channel agent
+            # module) normalizes to the script's own path, which the
+            # task runner later imports as the ``toolsFile`` and whose
+            # ``get_tools()`` it calls for the actual list.
+            value = raw_path
         if isinstance(value, os.PathLike):
             value = os.fspath(value)
         ok = value is None or isinstance(value, str)
-        expected = "a tools-file path (string or pathlib.Path) or None"
+        expected = (
+            "a tools-file path (string or pathlib.Path), a list of "
+            "tool callables, or None"
+        )
     elif param in ("use_worktree", "auto_commit", "is_parallel"):
         ok = isinstance(value, bool)
         expected = "a bool"
@@ -198,7 +174,10 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
     without a getter keep the field value the client sent.  A ``get_tools()``
     return value is a tools-file *path* written to the ``toolsFile``
     field — the task runner later imports that file and calls its
-    ``get_tools()`` exactly as for a client-passed ``tools`` path.
+    ``get_tools()`` exactly as for a client-passed ``tools`` path.  A
+    ``get_tools()`` returning a *list* of tool callables instead (the
+    tools-file contract) makes the agent script its own tools file:
+    the script's path is written to ``toolsFile``.
 
     The getters run in the daemon process on the task's worker thread,
     like a tools file's ``get_tools()``, and the file is re-imported

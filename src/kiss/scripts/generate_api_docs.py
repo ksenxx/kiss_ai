@@ -19,6 +19,9 @@ INCLUDE_FILES: set[Path] = {
     Path("agents/sorcar/sorcar_agent.py"),
     Path("agents/sorcar/chat_sorcar_agent.py"),
     Path("agents/sorcar/worktree_sorcar_agent.py"),
+    # The synchronous client API (``run`` / ``TaskResult``), defined in
+    # the sorcar layer and re-exported by ``kiss.server.sorcar``.
+    Path("agents/sorcar/daemon_client.py"),
     Path("server/sorcar.py"),
 }
 INCLUDE_DIRS: set[Path] = {Path("third_party_agents")}
@@ -397,6 +400,7 @@ def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
         "kiss.agents.sorcar.chat_sorcar_agent",
         "kiss.agents.sorcar.worktree_sorcar_agent",
         "kiss.server.sorcar",
+        "kiss.agents.sorcar.daemon_client",
     ]
     rank = {name: i for i, name in enumerate(order)}
 
