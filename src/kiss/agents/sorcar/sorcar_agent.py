@@ -791,6 +791,7 @@ class SorcarAgent(RelentlessAgent):
         self.docker_manager: Any = None
         self._use_web_tools: bool = True
         self._is_parallel: bool = True
+        self._append_basic_tools: bool = True
         # Sub-agent threads this agent stopped waiting for; see
         # :class:`_AbandonedSubagent` and :meth:`reclaim_abandoned_subagents`.
         # Touched by the agent thread and by server threads (worktree
@@ -1406,7 +1407,15 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        all_tools = self._get_tools() + tools
+        # ``run(append_basic_tools=False)`` strips the agent down to
+        # ``finish`` (added by ``RelentlessAgent.perform_task``) plus
+        # the caller's *tools*: the built-in toolset is never built, so
+        # no web profile, MCP server, or run_agent/run_parallel wiring
+        # is set up either.
+        if self._append_basic_tools:
+            all_tools = self._get_tools() + tools
+        else:
+            all_tools = list(tools)
         # Always install the steering hooks: they are self-guarding
         # no-ops when no follow-up channel exists (a printer without
         # the duck-typed ``drain_pending_user_messages`` bridge), and
@@ -1460,6 +1469,7 @@ class SorcarAgent(RelentlessAgent):
         attachments: list[Attachment] | None = None,
         ask_user_question_callback: Callable[[str], str] | None = None,
         base_system_prompt: str = "",
+        append_basic_tools: bool = True,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -1491,9 +1501,18 @@ class SorcarAgent(RelentlessAgent):
                 *system_prompt* suffix, the active-editor-file line, and the
                 per-run operational instructions (work dir, PID,
                 ``~/.kiss/SORCAR.md``) are still appended.  Blank (default)
-                keeps the default system prompt.  Keyword-last so every
-                historical positional argument of this public method keeps
-                its position.
+                keeps the default system prompt.  Appended after the
+                historical positional arguments so every one of them
+                keeps its position.
+            append_basic_tools: Whether :meth:`perform_task` prepends the
+                built-in basic toolset (:meth:`_get_tools`: Bash, Read,
+                Edit, Write, browser tools, run_agent,
+                ask_user_question, talk, set_model, run_parallel, ...)
+                to the caller's *tools*.  Defaults to True.  When False
+                the agent runs with ONLY the ``finish`` tool (added by
+                ``RelentlessAgent.perform_task``) and the caller's
+                *tools* — *web_tools* and *is_parallel* then have no
+                effect, since the tools they toggle are never built.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -1501,6 +1520,7 @@ class SorcarAgent(RelentlessAgent):
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
         self._is_parallel = is_parallel
+        self._append_basic_tools = append_basic_tools
         # Stored on self (not just a local) so the ``run_parallel``
         # fan-out — which executes DURING ``super().run`` below — can
         # forward the same base system prompt to every sub-agent.
