@@ -5,7 +5,7 @@
 """Bug-hunt round 9 — e2e repros for three real defects.
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.agents.vscode.test_bughunt9_config_helpers_assets``; the non-core tests remain there.
+``kiss.tests.server.test_bughunt9_config_helpers_assets``; the non-core tests remain there.
 """
 
 from __future__ import annotations

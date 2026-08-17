@@ -1228,3 +1228,88 @@ class SorcarRunApiTest(unittest.TestCase):
         """Blank prompts are rejected before any connection is made."""
         with self.assertRaises(ValueError):
             sorcar.run("   ", sock_path=self.sock_path, timeout=5)
+
+    def _stub_dispatch_run(self) -> None:
+        """Install a parent-run stub that spends a fixed, known amount."""
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            self_agent.total_tokens_used = 500
+            self_agent.budget_used = 0.25
+            self_agent.total_steps = 4
+            raw = (
+                "success: true\n"
+                "is_continue: false\n"
+                "summary: dispatched done\n"
+            )
+            printer = kwargs.get("printer") or getattr(
+                self_agent, "printer", None,
+            )
+            if printer is not None:
+                printer.print(
+                    raw,
+                    type="result",
+                    step_count=4,
+                    total_tokens=500,
+                    cost="$0.2500",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+
+    def _dispatch_through_daemon(self, parent: Any) -> str:
+        """Dispatch a path-mode ``run_agent`` sub-task through the daemon.
+
+        Args:
+            parent: The calling agent passed to ``make_run_agent_tool``
+                (``None`` exercises the no-attribution path).
+
+        Returns:
+            The tool's YAML result string.
+        """
+        from kiss.agents.sorcar import cron_agent
+        from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
+
+        # No get_model(): the daemon's default model applies (the run
+        # is stubbed, so no model API call ever happens, but the model
+        # name must pass the runner's availability guard).
+        script = Path(self.tmpdir) / "noop_dispatch_agent.py"
+        script.write_text("# intentionally empty agent script\n")
+        saved_sock = cron_agent._daemon_sock_path
+        cron_agent._daemon_sock_path = self.sock_path
+        try:
+            tool = make_run_agent_tool(self.repo, parent)
+            return tool(str(script), "do nothing")
+        finally:
+            cron_agent._daemon_sock_path = saved_sock
+
+    def test_run_agent_tool_attributes_subtask_cost_to_parent(self) -> None:
+        """A dispatched sub-task's spend folds into the calling agent.
+
+        Reproduces the cost-accounting bug where ``run_agent`` sub-task
+        cost/tokens/steps (returned by the daemon's terminal ``result``
+        event) were discarded, so the calling task's end-of-task cost
+        under-reported.  The parent's counters must grow by exactly the
+        sub-task's reported spend.
+        """
+        self._stub_dispatch_run()
+        parent = SorcarAgent("dispatch-parent")
+        parent.budget_used = 0.1
+        parent.total_tokens_used = 10
+        parent.total_steps = 1
+
+        out = self._dispatch_through_daemon(parent)
+
+        assert "dispatched done" in out
+        assert abs(parent.budget_used - 0.35) < 1e-9
+        assert parent.total_tokens_used == 510
+        assert parent.total_steps == 5
+
+    def test_run_agent_tool_without_parent_attributes_nothing(self) -> None:
+        """Standalone tools-file use (no calling agent) still works.
+
+        ``get_tools()`` builds the tool with no parent agent; the
+        dispatch must succeed without any attribution attempt.
+        """
+        self._stub_dispatch_run()
+        out = self._dispatch_through_daemon(None)
+        assert "dispatched done" in out
