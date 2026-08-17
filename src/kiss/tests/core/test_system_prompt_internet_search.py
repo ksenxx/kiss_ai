@@ -65,6 +65,17 @@ def _run_task(model_name: str, task: str) -> str:
     )
 
 
+def _internet_urls() -> list[str]:
+    """Return the visited URLs that are actual Internet fetches.
+
+    SYSTEM.md mandates reading ``./SORCAR.md`` as the very first
+    action; with ``go_to_url`` as the only tool some models comply via
+    a ``file://`` URL.  Such local reads are policy compliance, not
+    Internet searches, so only ``http(s)://`` visits count.
+    """
+    return [u for u in VISITED_URLS if u.startswith(("http://", "https://"))]
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("model_name", TEST_MODELS)
 def test_current_info_task_triggers_internet_search(model_name: str) -> None:
@@ -80,14 +91,14 @@ def test_current_info_task_triggers_internet_search(model_name: str) -> None:
         try:
             result = _run_task(model_name, task)
         except KISSError:
-            if VISITED_URLS:
+            if _internet_urls():
                 break
             if attempt == 1:
                 raise
             continue
-        if VISITED_URLS:
+        if _internet_urls():
             break
-    assert VISITED_URLS, (
+    assert _internet_urls(), (
         f"{model_name} finished without any Internet search; "
         f"SYSTEM.md search-by-default policy not followed. Result: {result}"
     )
@@ -102,8 +113,8 @@ def test_confident_trivial_task_skips_internet_search(model_name: str) -> None:
         model_name,
         "Compute 17 * 23 and finish immediately with just the numeric result.",
     )
-    assert not VISITED_URLS, (
-        f"{model_name} searched the Internet ({VISITED_URLS}) for trivial "
+    assert not _internet_urls(), (
+        f"{model_name} searched the Internet ({_internet_urls()}) for trivial "
         f"arithmetic; the confidence exception in SYSTEM.md was not honored."
     )
     assert "391" in result
