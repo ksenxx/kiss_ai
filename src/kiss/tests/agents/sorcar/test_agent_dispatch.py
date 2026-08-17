@@ -428,10 +428,12 @@ def test_get_tools_and_sorcar_wiring() -> None:
         assert not line.startswith("from kiss.agents.third_party_agents")
         assert not line.startswith("import kiss.agents.third_party_agents")
     # The default Sorcar toolset registers the tool, bound to the
-    # calling task's work directory.
+    # calling task's work directory AND the calling agent itself, so
+    # each dispatched sub-task's spend is folded into the calling
+    # task's cost accounting.
     agent_source = Path(agent_dispatch.__file__).parent / "sorcar_agent.py"
     assert (
-        'tools.append(make_run_agent_tool(self.work_dir or ""))'
+        'tools.append(make_run_agent_tool(self.work_dir or "", self))'
         in agent_source.read_text(encoding="utf-8")
     )
     # The system prompt directs the agent to dispatch immediately.
