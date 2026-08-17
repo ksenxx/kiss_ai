@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Agent-script loading for ``kiss.server.sorcar.run``'s ``agent_path``.
+"""Agent-script loading for ``kiss.server.sorcar.run``'s ``extension_agent_path``.
 
 The caller of :func:`kiss.server.sorcar.run` may supply an *agent
 script* — a Python file whose top-level ``get_X()`` functions compute
