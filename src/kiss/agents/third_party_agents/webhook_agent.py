@@ -58,6 +58,7 @@ from urllib.parse import urlsplit
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
+    drain_request_body,
     stop_http_server,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -206,9 +207,15 @@ class WebhookChannelBackend(ToolMethodBackend):
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
+                self.unread_body_length: int | None = None
                 status = backend._handle_request(self)
                 self.send_response(status)
                 self.end_headers()
+                # A rejected request's body was never read; drain it
+                # (bounded) AFTER the response so the client reads the
+                # status code instead of a connection reset — see
+                # ``drain_request_body``.
+                drain_request_body(self, self.unread_body_length)
 
             def log_message(self, *args: Any) -> None:  # type: ignore[override]
                 pass
@@ -232,8 +239,22 @@ class WebhookChannelBackend(ToolMethodBackend):
         return True
 
     def _handle_request(self, handler: BaseHTTPRequestHandler) -> int:
-        """Process one inbound POST request and return the HTTP status code."""
+        """Process one inbound POST request and return the HTTP status code.
+
+        A rejection leaves the request body unread; its parsed length is
+        recorded on ``handler.unread_body_length`` so ``do_POST`` can
+        drain it after sending the response (see
+        :func:`drain_request_body`) and the client reads the status code
+        instead of a connection reset.
+        """
         path = urlsplit(handler.path).path
+        raw_length = handler.headers.get("Content-Length")
+        length: int | None = None
+        if raw_length is not None:
+            raw_length = raw_length.strip()
+            if raw_length.isascii() and raw_length.isdecimal() and len(raw_length) <= 10:
+                length = int(raw_length)
+        handler.unread_body_length = length  # type: ignore[attr-defined]
         if not path.startswith("/hook/"):
             return 404
         name = path[len("/hook/") :]
@@ -241,16 +262,14 @@ class WebhookChannelBackend(ToolMethodBackend):
             route = self._routes.get(name)
         if route is None:
             return 404
-        raw_length = handler.headers.get("Content-Length")
         if raw_length is None:
             return 411
-        raw_length = raw_length.strip()
-        if not (raw_length.isascii() and raw_length.isdecimal()) or len(raw_length) > 10:
+        if length is None:
             return 400
-        length = int(raw_length)
         if length > _MAX_BODY_BYTES:
             return 413
         body = handler.rfile.read(length)
+        handler.unread_body_length = None  # type: ignore[attr-defined]
         return self._handle_event(name, route, handler.headers, body)
 
     def _handle_event(self, name: str, route: dict[str, Any], headers: Any, body: bytes) -> int:

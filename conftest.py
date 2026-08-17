@@ -29,9 +29,17 @@ invocation — CI, local, parallel splits, IDE — gets the higher cap without
 relying on anyone remembering to run ``ulimit -n 4096`` in their shell.
 """
 
+import os
 import sys
 
 import pytest
+
+# Background spare-worktree refills (kiss.agents.sorcar.worktree_pool)
+# must not run during the test suite: they would write worktrees into
+# temporary repositories that tests assert on and tear down.  Set
+# unconditionally — an inherited shell/CI value like "0" or "" must not
+# defeat the gate.  The pool's own tests re-enable it explicitly.
+os.environ["KISS_DISABLE_WORKTREE_POOL"] = "1"
 
 # Target soft limit for RLIMIT_NOFILE. 4096 comfortably covers the full test
 # suite (~4200 tests with sockets, subprocesses, tempfiles) while staying well

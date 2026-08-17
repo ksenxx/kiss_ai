@@ -5,7 +5,7 @@
 """End-to-end regression tests for Wave3-Fixer-4 findings (D1/D2/D3/D5).
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.vscode.test_wave3_voice_config_bugs``; the non-core tests remain there.
+``kiss.tests.server.test_wave3_voice_config_bugs``; the non-core tests remain there.
 """
 
 from __future__ import annotations

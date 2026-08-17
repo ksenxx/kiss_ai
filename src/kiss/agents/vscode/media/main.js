@@ -1512,6 +1512,19 @@
   }
   // ctxmenu-coverage:end
 
+  // Render *html* inside *view* in a sandboxed iframe (`allow-scripts`
+  // only, i.e. an opaque origin), with the Copy / Select All context
+  // menu shipped into the document (see withContentContextMenu).
+  function appendContentHtmlFrame(view, html) {
+    const iframe = document.createElement('iframe');
+    iframe.className = 'content-html-frame';
+    iframe.setAttribute('sandbox', 'allow-scripts');
+    // ctxmenu-coverage:start
+    iframe.srcdoc = withContentContextMenu(html);
+    // ctxmenu-coverage:end
+    view.appendChild(iframe);
+  }
+
   function renderContentView(tab, ev) {
     const area = ensureContentArea();
     disposeTabContentView(tab);
@@ -1521,16 +1534,23 @@
     area.appendChild(view);
     tab.contentViewEl = view;
     const lower = (ev.name || '').toLowerCase();
+    // mdlink-coverage:start
+    // A clicked .md/.markdown link arrives as raw markdown text — unlike
+    // a finished-task report, whose markdown openReadyReportTabs already
+    // converted to HTML and flagged isReport. Convert it here and render
+    // the result the same way an .html file renders.
+    if (
+      !ev.isReport &&
+      (lower.endsWith('.md') || lower.endsWith('.markdown'))
+    ) {
+      appendContentHtmlFrame(view, markdownReportToHtml(ev.content || ''));
+      return;
+    }
+    // mdlink-coverage:end
     // report-coverage:start
     if (ev.isReport || lower.endsWith('.html') || lower.endsWith('.htm')) {
       // report-coverage:end
-      const iframe = document.createElement('iframe');
-      iframe.className = 'content-html-frame';
-      iframe.setAttribute('sandbox', 'allow-scripts');
-      // ctxmenu-coverage:start
-      iframe.srcdoc = withContentContextMenu(ev.content || '');
-      // ctxmenu-coverage:end
-      view.appendChild(iframe);
+      appendContentHtmlFrame(view, ev.content || '');
       return;
     }
     const holder = document.createElement('div');
@@ -6367,7 +6387,9 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgWrTab = getTab(ev.tabId);
           if (bgWrTab) {
-            bgWrTab.worktreeBarEl = null;
+            // Keep the Merge / Discard bar on a retryable failure
+            // (deferred discard) — same rule as the foreground path.
+            if (!ev.retryable) bgWrTab.worktreeBarEl = null;
             clearActionProgress(bgWrTab.outputFragment);
             if (bgWrTab.outputFragment && !isSilentDiscardMessage(ev)) {
               const cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
@@ -7307,7 +7329,11 @@
   }
 
   function handleWorktreeResult(ev) {
-    clearWorktreeBar();
+    // A retryable failure (deferred discard: a sub-agent is still
+    // writing into the worktree, or its ignored output could not be
+    // rescued) keeps the Merge / Discard bar — clearing it would strip
+    // the only retry controls while the message says "retry".
+    if (!ev.retryable) clearWorktreeBar();
     clearActionProgress(O);
     if (isSilentDiscardMessage(ev)) {
       return;

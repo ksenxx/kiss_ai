@@ -62,7 +62,10 @@ class AgentPathApiTest(unittest.TestCase):
     """Drive ``sorcar.run(agent_path=...)`` against a real daemon over UDS."""
 
     def setUp(self) -> None:
-        self.tmpdir = tempfile.mkdtemp(prefix="sorcar_agent_path_")
+        # Resolved: macOS mkdtemp returns a symlinked /var/... path while
+        # the worktree machinery canonicalizes the repo (git_worktree
+        # resolves it), so un-resolved paths break startswith checks.
+        self.tmpdir = str(Path(tempfile.mkdtemp(prefix="sorcar_agent_path_")).resolve())
         self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)

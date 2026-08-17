@@ -121,6 +121,18 @@ function isRenderableHtmlExtension(filePath: string): boolean {
   return ext === '.html' || ext === '.htm';
 }
 
+/**
+ * Whether clicking a link to *filePath* should render the file as
+ * converted-to-HTML markdown in a tab (VS Code's built-in markdown
+ * preview) — the counterpart of the remote web app, which converts
+ * .md/.markdown content with marked and renders it in a content tab
+ * (see renderContentView in media/main.js).
+ */
+function isRenderableMarkdownExtension(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return ext === '.md' || ext === '.markdown';
+}
+
 function escapeHtmlAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
@@ -1455,9 +1467,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   /**
    * Open an already-resolved, existing file the way a clicked file link
-   * opens it: .html/.htm rendered in a webview tab, text-like files in
-   * the text editor (optionally revealing 1-indexed *line*), and
-   * everything else (images, pdf, ...) in VS Code's native viewer.
+   * opens it: .html/.htm rendered in a webview tab, .md/.markdown
+   * converted to HTML and rendered in a markdown-preview tab, text-like
+   * files in the text editor (optionally revealing 1-indexed *line*),
+   * and everything else (images, pdf, ...) in VS Code's native viewer.
    * Both the 'openFile' message (a clicked link) and the path-only
    * 'submit' shortcut route through here so the two behave identically.
    */
@@ -1470,6 +1483,26 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // does — instead of showing its source in the editor.
       this._openHtmlPreviewTab(filePath);
       return;
+    }
+    if (isRenderableMarkdownExtension(filePath)) {
+      // Render the markdown converted to HTML in a tab — VS Code's
+      // built-in markdown preview — like the remote web app does,
+      // instead of showing the raw markdown source in the editor.
+      // If the built-in markdown extension is unavailable the command
+      // fails; fall through to the text editor then.
+      try {
+        await vscode.commands.executeCommand(
+          'markdown.showPreview',
+          vscode.Uri.file(filePath),
+        );
+        return;
+      } catch (err) {
+        console.warn(
+          '[SorcarSidebarView] markdown preview unavailable, ' +
+            'opening source instead:',
+          err,
+        );
+      }
     }
     const uri = vscode.Uri.file(filePath);
     if (!isTextLikeExtension(filePath)) {

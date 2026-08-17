@@ -22,7 +22,7 @@ from typing import Any
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.speech_synthesis import audio_timeout_seconds
-from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
+from kiss.tests.server._memory_printer import MemoryPrinter
 
 
 def _find_tool(tools: list, name: str) -> Any:

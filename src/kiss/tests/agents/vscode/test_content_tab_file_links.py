@@ -2,6 +2,9 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
+# ruff: noqa: F811  (the `harness` module fixture is imported from
+#   kiss.tests.server.test_content_tab_file_links and is intentionally
+#   shadowed by test parameters of the same name)
 """End-to-end tests: clicking a file link in a remote-webapp chat tab.
 
 When the user clicks a file link (``span[data-path]``) in a chat
@@ -27,125 +30,14 @@ These tests drive a REAL browser (Playwright Chromium) against a REAL
 
 from __future__ import annotations
 
-import asyncio
 import json
-import shutil
-import socket
-import ssl
-import tempfile
-import threading
-from collections.abc import Coroutine
-from pathlib import Path
-from typing import Any
 
 import pytest
 from playwright.sync_api import sync_playwright
-from websockets.asyncio.client import connect
 
-import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
-from kiss.server.web_server import (
-    RemoteAccessServer,
-    _generate_self_signed_cert,
+from kiss.tests.server.test_content_tab_file_links import (
+    harness,  # noqa: F401  (module fixture used by param name)
 )
-
-_PY_SOURCE = 'def greet(name):\n    return "hello " + name\n'
-_HTML_SOURCE = (
-    "<!DOCTYPE html><html><body>"
-    "<h1 id='marker'>KISS-HTML-MARKER</h1>"
-    "</body></html>"
-)
-
-
-def _find_free_port() -> int:
-    """Return an available TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Return an SSL client context that skips certificate verification."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
-class _ServerHarness:
-    """A real RemoteAccessServer running on a background event loop."""
-
-    def __init__(self) -> None:
-        self.tmpdir = tempfile.mkdtemp(prefix="kiss-content-tab-")
-        tmp = Path(self.tmpdir)
-        self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-        kiss_dir = tmp / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "sorcar.db"
-        th._db_conn = None
-        self._saved_cfg = (vc.CONFIG_DIR, vc.CONFIG_PATH)
-        vc.CONFIG_DIR = tmp / "config"
-        vc.CONFIG_PATH = vc.CONFIG_DIR / "config.json"
-
-        self.work_dir = tmp / "repo"
-        self.work_dir.mkdir()
-        (self.work_dir / "sample.py").write_text(_PY_SOURCE)
-        (self.work_dir / "page.html").write_text(_HTML_SOURCE)
-        (self.work_dir / "binary.bin").write_bytes(b"\x00\x01\x02\x03")
-
-        certfile = tmp / "cert.pem"
-        keyfile = tmp / "key.pem"
-        _generate_self_signed_cert(certfile, keyfile)
-        self.port = _find_free_port()
-        self.base_url = f"https://127.0.0.1:{self.port}"
-        self.ws_url = f"wss://127.0.0.1:{self.port}/ws"
-        self.server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            certfile=str(certfile),
-            keyfile=str(keyfile),
-            url_file=tmp / "remote-url.json",
-            uds_path=tmp / "sorcar.sock",
-            work_dir=str(self.work_dir),
-        )
-        self.loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(
-            target=self.loop.run_forever, daemon=True,
-        )
-        self._thread.start()
-        asyncio.run_coroutine_threadsafe(
-            self.server.start_async(), self.loop,
-        ).result(60)
-
-    def run(self, coro: Coroutine[Any, Any, dict]) -> dict:
-        """Run *coro* on the server loop and return its result."""
-        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(60)
-
-    def stop(self) -> None:
-        """Stop the server, its loop, and restore redirected globals."""
-        try:
-            asyncio.run_coroutine_threadsafe(
-                self.server.stop_async(), self.loop,
-            ).result(60)
-        finally:
-            self.loop.call_soon_threadsafe(self.loop.stop)
-            self._thread.join(timeout=30)
-            self.loop.close()
-            if th._db_conn is not None:
-                th._db_conn.close()
-            th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
-            vc.CONFIG_DIR, vc.CONFIG_PATH = self._saved_cfg
-            shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-@pytest.fixture(scope="module")
-def harness():
-    """One shared real server for every browser test in this module."""
-    h = _ServerHarness()
-    yield h
-    h.stop()
 
 
 @pytest.fixture(scope="module")
@@ -286,6 +178,36 @@ class TestContentTabFileLinks:
         finally:
             context.close()
 
+    def test_md_link_renders_converted_html_in_sandboxed_iframe(
+        self, browser, harness,
+    ) -> None:
+        """Clicking a .md link converts the markdown to HTML and renders
+        the result in a sandboxed iframe inside a separate content tab —
+        never the raw markdown source in a code view."""
+        context, page, sent = _open_page(browser, harness)
+        try:
+            _inject_file_link(
+                page, str(harness.work_dir / "notes.md"), "lnk-md",
+            )
+            page.click("#lnk-md")
+            page.wait_for_selector(
+                "#content-tab-area .content-html-frame", timeout=30000,
+            )
+            iframe = page.locator("#content-tab-area .content-html-frame")
+            assert iframe.get_attribute("sandbox") == "allow-scripts"
+            frame = page.frame_locator("#content-tab-area .content-html-frame")
+            assert frame.locator("h1").inner_text() == "KISS-MD-TITLE"
+            assert frame.locator("strong").inner_text() == "bold"
+            # The raw markdown syntax must not appear in the rendered page.
+            assert "# KISS-MD-TITLE" not in frame.locator("body").inner_text()
+            label = page.locator(".chat-tab.content-tab .chat-tab-label")
+            assert label.inner_text() == "notes.md"
+            assert page.locator(
+                "#content-tab-area .content-monaco-holder",
+            ).count() == 0
+        finally:
+            context.close()
+
     def test_closing_content_tab_never_touches_backend_or_chat_tabs(
         self, browser, harness,
     ) -> None:
@@ -407,77 +329,3 @@ class TestContentTabFileLinks:
             assert page.locator(".chat-tab.content-tab").count() == 1
         finally:
             context.close()
-
-
-async def _ws_request(harness: _ServerHarness, payload: dict) -> dict:
-    """Authenticate over wss:// , send *payload*, return the
-    ``fileContent`` reply."""
-    async with connect(harness.ws_url, ssl=_no_verify_ssl()) as ws:
-        await ws.send(json.dumps({"type": "auth", "password": ""}))
-        while True:
-            msg = json.loads(await asyncio.wait_for(ws.recv(), 30))
-            if msg.get("type") == "auth_ok":
-                break
-        await ws.send(json.dumps(payload))
-        while True:
-            msg = json.loads(await asyncio.wait_for(ws.recv(), 30))
-            if msg.get("type") == "fileContent":
-                reply: dict = msg
-                return reply
-
-
-class TestOpenFileBackend:
-    """Protocol-level tests for the ``openFile`` → ``fileContent``
-    request/reply over a real ``wss://`` connection (no browser).
-
-    Each request coroutine runs on the harness's own background event
-    loop so these tests coexist with the sync-Playwright tests above
-    (which forbid a running event loop in the pytest thread).
-    """
-
-    def _request(self, harness: _ServerHarness, payload: dict) -> dict:
-        return harness.run(_ws_request(harness, payload))
-
-    def test_absolute_path_returns_content(self, harness) -> None:
-        path = str(harness.work_dir / "sample.py")
-        reply = self._request(
-            harness, {"type": "openFile", "path": path, "tabId": "t-1"},
-        )
-        assert reply["name"] == "sample.py"
-        assert reply["content"] == _PY_SOURCE
-        assert reply["tabId"] == "t-1"
-        assert "error" not in reply
-
-    def test_relative_path_uses_work_dir_field(self, harness) -> None:
-        reply = self._request(harness, {
-            "type": "openFile",
-            "path": "page.html",
-            "workDir": str(harness.work_dir),
-        })
-        assert reply["name"] == "page.html"
-        assert reply["content"] == _HTML_SOURCE
-
-    def test_missing_file_returns_error(self, harness) -> None:
-        reply = self._request(
-            harness, {"type": "openFile", "path": "/no/such/file.py"},
-        )
-        assert "File not found" in reply["error"]
-        assert "content" not in reply
-
-    def test_binary_file_returns_error(self, harness) -> None:
-        path = str(harness.work_dir / "binary.bin")
-        reply = self._request(harness, {"type": "openFile", "path": path})
-        assert "binary" in reply["error"].lower()
-        assert "content" not in reply
-
-    def test_oversized_file_returns_error(self, harness) -> None:
-        big = harness.work_dir / "big.txt"
-        big.write_text("x" * 2_500_000)
-        try:
-            reply = self._request(
-                harness, {"type": "openFile", "path": str(big)},
-            )
-            assert "too large" in reply["error"]
-            assert "content" not in reply
-        finally:
-            big.unlink()
