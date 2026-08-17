@@ -28,6 +28,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+# The client-side validator lives in the sorcar layer (the daemon
+# client ``kiss.agents.sorcar.daemon_client.run`` uses it under the
+# layering invariant); re-exported here unchanged as the public
+# ``kiss.server.tools_file.resolve_tools_file``.
+from kiss.agents.sorcar.daemon_client import (
+    resolve_tools_file as resolve_tools_file,
+)
+
 logger = logging.getLogger("kiss-vscode")
 
 
@@ -144,38 +152,7 @@ def execute_python_file(
     return module.__dict__
 
 
-def resolve_tools_file(tools: str | Path | None) -> str:
-    """Validate a client-supplied tools path and resolve it absolutely.
 
-    Client-side counterpart of :func:`load_tools_file`.  The path is
-    resolved against the CLIENT's working directory (the daemon may run
-    with a different one) and validated eagerly so a bad value fails
-    fast, before any daemon connection is made.
-
-    Args:
-        tools: Path to a Python file whose ``get_tools()`` function
-            supplies the agent tools, or ``None`` for no extra tools.
-
-    Returns:
-        The absolute path as a string, or ``""`` when *tools* is
-        ``None``.
-
-    Raises:
-        ValueError: When *tools* is neither ``None`` nor a path, is not
-            a ``.py`` file, or does not exist.
-    """
-    if tools is None:
-        return ""
-    if not isinstance(tools, (str, Path)):
-        raise ValueError(
-            f"tools must be a path to a Python file, got {type(tools).__name__}: {tools!r}"
-        )
-    path = Path(tools).expanduser().resolve()
-    if path.suffix != ".py":
-        raise ValueError(f"tools file {str(path)!r} is not a Python (.py) file")
-    if not path.is_file():
-        raise ValueError(f"tools file {str(path)!r} does not exist")
-    return str(path)
 
 
 def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:

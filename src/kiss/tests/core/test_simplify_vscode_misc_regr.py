@@ -5,7 +5,7 @@
 """End-to-end regression tests locking behavior of code paths being simplified.
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.vscode.test_simplify_vscode_misc_regr``; the non-core tests remain there.
+``kiss.tests.server.test_simplify_vscode_misc_regr``; the non-core tests remain there.
 """
 
 from __future__ import annotations

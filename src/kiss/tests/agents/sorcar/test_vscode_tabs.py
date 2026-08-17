@@ -181,7 +181,7 @@ class TestTabIdInjection(unittest.TestCase):
 
     def test_broadcast_injects_tabid_from_thread_local(self) -> None:
         """When thread-local task_id is set, broadcast adds tabId to events."""
-        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
+        from kiss.tests.server._memory_printer import MemoryPrinter
 
         printer = MemoryPrinter()
         printer._thread_local.task_id = "7"
@@ -195,7 +195,7 @@ class TestTabIdInjection(unittest.TestCase):
 
     def test_broadcast_does_not_overwrite_explicit_tabid(self) -> None:
         """If event already has tabId, broadcast does not overwrite it."""
-        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
+        from kiss.tests.server._memory_printer import MemoryPrinter
 
         printer = MemoryPrinter()
         printer._thread_local.task_id = "7"
@@ -452,7 +452,7 @@ class TestBashFlushTimerTabId(unittest.TestCase):
 
     def test_timer_flush_injects_tab_id(self) -> None:
         """Bash output flushed by the timer includes the correct tabId."""
-        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
+        from kiss.tests.server._memory_printer import MemoryPrinter
 
         printer = MemoryPrinter()
         printer._thread_local.task_id = "99"
@@ -475,7 +475,7 @@ class TestRecordingIsolation(unittest.TestCase):
 
     def test_recording_captures_own_tab_events(self) -> None:
         """Recording captures events for the current tab (per-tab isolation)."""
-        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
+        from kiss.tests.server._memory_printer import MemoryPrinter
 
         printer = MemoryPrinter()
         printer._thread_local.task_id = "1"

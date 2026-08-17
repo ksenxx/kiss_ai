@@ -5,7 +5,7 @@
 """Characterization (lockdown) tests for json_printer and vscode_config.
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.agents.vscode.test_simplification_lockdown_printer_config``;
+``kiss.tests.server.test_simplification_lockdown_printer_config``;
 the non-core tests remain there.
 """
 
