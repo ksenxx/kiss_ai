@@ -65,7 +65,7 @@ functions — the daemon loads the file itself, so the tools execute
     result = sorcar.run("What's the temperature in Paris?",
                         tools="my_tools.py")
 
-Similarly, ``agent_path="/path/to/my_agent.py"`` names an *agent
+Similarly, ``extension_agent_path="/path/to/my_agent.py"`` names an *agent
 script* whose top-level ``get_X()`` functions compute the run's
 parameters on the daemon — e.g. a ``get_model()`` overrides *model*, a
 ``get_prompt()`` overrides *prompt* — while parameters without a getter

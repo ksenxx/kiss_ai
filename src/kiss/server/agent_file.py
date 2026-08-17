@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Agent-script loading for ``kiss.server.sorcar.run``'s ``agent_path``.
+"""Agent-script loading for ``kiss.server.sorcar.run``'s ``extension_agent_path``.
 
 The caller of :func:`kiss.server.sorcar.run` may supply an *agent
 script* — a Python file whose top-level ``get_X()`` functions compute
@@ -68,6 +68,7 @@ PARAM_FIELDS: tuple[tuple[str, str], ...] = (
     ("model_config", "modelConfig"),
     ("web_tools", "webTools"),
     ("is_parallel", "useParallel"),
+    ("append_basic_tools", "appendBasicTools"),
 )
 """The overridable ``run`` parameters, as ``(param, wire_field)`` pairs.
 
@@ -126,7 +127,9 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
             "a tools-file path (string or pathlib.Path), a list of "
             "tool callables, or None"
         )
-    elif param in ("use_worktree", "auto_commit", "is_parallel"):
+    elif param in (
+        "use_worktree", "auto_commit", "is_parallel", "append_basic_tools",
+    ):
         ok = isinstance(value, bool)
         expected = "a bool"
     elif param == "max_budget":
