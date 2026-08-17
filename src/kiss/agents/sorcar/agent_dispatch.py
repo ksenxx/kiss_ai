@@ -189,6 +189,40 @@ def _daemon_sock_path() -> str | None:
     return cron_agent._daemon_sock_path
 
 
+def _attribute_dispatch_usage(parent_agent: Any, result: Any) -> None:
+    """Fold a dispatched sub-task's spend into the calling agent.
+
+    The daemon's terminal ``result`` event carries the sub-task's
+    cost, tokens, and steps (parsed into the
+    :class:`~kiss.agents.sorcar.daemon_client.TaskResult`).  Without
+    this fold, that spend would vanish from the calling task's
+    accounting — the parent's end-of-task cost, its live usage
+    header, and its persisted per-task cost would all lie low —
+    exactly the gap :func:`~kiss.agents.sorcar.sorcar_agent._attribute_sub_usage`
+    already closes for ``run_parallel`` sub-agents and ``talk`` TTS
+    calls.
+
+    Args:
+        parent_agent: The agent that called ``run_agent``; ``None``
+            (standalone tools-file use, where no calling agent
+            exists) attributes nothing.
+        result: The dispatched sub-task's ``TaskResult``.
+    """
+    if parent_agent is None:
+        return
+    try:
+        from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
+
+        _attribute_sub_usage(
+            parent_agent,
+            float(getattr(result, "cost", 0.0) or 0.0),
+            int(getattr(result, "tokens", 0) or 0),
+            int(getattr(result, "steps", 0) or 0),
+        )
+    except Exception:  # pragma: no cover — attribution must never break dispatch
+        logger.warning("dispatched sub-task usage attribution failed", exc_info=True)
+
+
 def _dispatch(
     name: str,
     prompt: str,
@@ -196,6 +230,7 @@ def _dispatch(
     work_dir: str,
     model_name: str,
     budget: float | None,
+    parent_agent: Any = None,
 ) -> str:
     """Submit an agent-script task to the kiss-web daemon and wait.
 
@@ -214,6 +249,9 @@ def _dispatch(
             default (an agent script's ``get_model()`` still wins).
         budget: Per-task USD budget override; ``None`` for the daemon
             default.
+        parent_agent: The agent calling ``run_agent``, when there is
+            one: the sub-task's cost/tokens/steps are folded into its
+            task accounting (see :func:`_attribute_dispatch_usage`).
 
     Returns:
         The sub-task's YAML result ("success" and "summary" keys), or
@@ -233,6 +271,8 @@ def _dispatch(
             sock_path=_daemon_sock_path(),
         )
     except TimeoutError:
+        # The sub-task keeps running (and spending) on the daemon; its
+        # spend is unknown here and stays on its own history row only.
         return (
             f"The {name} agent task did not finish within "
             f"{DISPATCH_TIMEOUT_SECONDS:.0f}s; it keeps running on the daemon."
@@ -240,6 +280,7 @@ def _dispatch(
     except Exception as e:
         logger.warning("agent dispatch failed", exc_info=True)
         return f"Error: the {name} agent task could not run: {e}"
+    _attribute_dispatch_usage(parent_agent, result)
     summary = result.text or ("" if result.success else "Task failed")
     return str(yaml.safe_dump(
         {"success": result.success, "summary": summary}, sort_keys=False,
@@ -253,6 +294,7 @@ def _run_agent(
     workspace: str,
     model_name: str,
     max_budget: str,
+    parent_agent: Any = None,
 ) -> str:
     """Run a channel agent or an agent script on a task immediately.
 
@@ -275,6 +317,9 @@ def _run_agent(
             default.
         max_budget: Per-task USD budget override as a number string;
             empty for the daemon default.
+        parent_agent: The agent calling ``run_agent``, when there is
+            one; the sub-task's spend is folded into its task
+            accounting (see :func:`_attribute_dispatch_usage`).
 
     Returns:
         The sub-task's YAML result ("success" and "summary" keys), or
@@ -307,7 +352,7 @@ def _run_agent(
             return f"Error: {e}"
         work_dir = parent_work_dir or str(kiss_home() / "agent_work")
         return _dispatch(Path(agent_path).stem, task, agent_path,
-                         work_dir, model_name, budget)
+                         work_dir, model_name, budget, parent_agent)
     # Forgiving lookup: "Home Assistant", "phone control", and
     # "nextcloud-talk" all resolve — spelling variants differ only in
     # case, spaces, hyphens, and underscores.
@@ -324,7 +369,7 @@ def _run_agent(
         return _dispatch(
             "cron", cron_agent.CRON_DISPATCH_PREAMBLE + task,
             str(cron_agent.__file__), cron_agent.get_work_dir(),
-            model_name, budget,
+            model_name, budget, parent_agent,
         )
     channels = available_channels()
     matches = [name for name in channels if _squash(name) == squashed]
@@ -373,12 +418,14 @@ def _run_agent(
     enter_workspace(workspace)
     try:
         return _dispatch(channel, prompt, str(module.__file__),
-                         work_dir, model_name, budget)
+                         work_dir, model_name, budget, parent_agent)
     finally:
         exit_workspace(workspace)
 
 
-def make_run_agent_tool(work_dir: str) -> Callable[..., str]:
+def make_run_agent_tool(
+    work_dir: str, parent_agent: Any = None,
+) -> Callable[..., str]:
     """Build the ``run_agent`` tool for the agent running in *work_dir*.
 
     The tool executes in the daemon process, whose own working
@@ -390,6 +437,11 @@ def make_run_agent_tool(work_dir: str) -> Callable[..., str]:
     Args:
         work_dir: The calling task's work directory.  Empty applies
             the standalone defaults (see :func:`_run_agent`).
+        parent_agent: The agent this tool is built for, when there is
+            one.  Each dispatched sub-task's cost/tokens/steps are
+            folded into its task accounting so the calling task's
+            end-of-task cost includes ``run_agent`` spend.  ``None``
+            (standalone tools-file use) disables attribution.
 
     Returns:
         The ``run_agent`` tool callable.
@@ -464,6 +516,7 @@ def make_run_agent_tool(work_dir: str) -> Callable[..., str]:
         """
         return _run_agent(
             work_dir, agent, task, workspace, model_name, max_budget,
+            parent_agent,
         )
 
     run_agent.__doc__ = (run_agent.__doc__ or "").replace(
