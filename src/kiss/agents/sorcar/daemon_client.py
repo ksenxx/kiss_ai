@@ -235,13 +235,14 @@ def run(
     chat_id: str = "",
     system_prompt: str = "",
     tools: str | Path | None = None,
-    agent_path: str = "",
+    extension_agent_path: str = "",
     use_worktree: bool = True,
     auto_commit: bool = True,
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
     web_tools: bool | None = None,
     is_parallel: bool = True,
+    append_basic_tools: bool = True,
     timeout: float = 3600.0,
     sock_path: str | Path | None = None,
 ) -> TaskResult:
@@ -287,11 +288,11 @@ def run(
             ``get_tools()``) stops the task: the daemon fails the run
             and the returned :class:`TaskResult` carries the
             diagnostic error in its ``text`` with ``success=False``.
-        agent_path: Optional path — a string — to a Python *agent
-            script* that computes this run's parameters **on the
+        extension_agent_path: Optional path — a string — to a Python
+            *agent script* that computes this run's parameters **on the
             daemon**.  When non-empty, the daemon imports the file and,
             for each parameter ``X`` of this function except
-            ``agent_path`` itself, calls the script's top-level
+            ``extension_agent_path`` itself, calls the script's top-level
             ``get_X()`` function — when the script defines one — and
             uses its return value for ``X``, replacing the value passed
             to this call.  A parameter whose ``get_X()`` the script
@@ -314,6 +315,7 @@ def run(
                 def get_model_config() -> dict | None: ...
                 def get_web_tools() -> bool | None: ...
                 def get_is_parallel() -> bool: ...
+                def get_append_basic_tools() -> bool: ...
 
             The ``get_X()`` functions are never serialized by the
             client — they run **in the daemon process**, exactly like a
@@ -329,7 +331,7 @@ def run(
             design: they are client-transport parameters — the script
             only runs on the daemon that *sock_path* selects, and
             *timeout* bounds this client's local wait.  The
-            *agent_path* itself is resolved against this process's
+            *extension_agent_path* itself is resolved against this process's
             working directory and validated eagerly, like *tools*.  A
             broken agent script (deleted before the daemon reads it,
             raising at import time, a non-callable ``get_X``, a raising
@@ -350,6 +352,19 @@ def run(
             uses the daemon's configured default.
         is_parallel: Whether the agent may spawn parallel sub-agents.
             Defaults to True.
+        append_basic_tools: Whether the agent gets the built-in basic
+            toolset (``Bash``, ``Read``, ``Edit``, ``Write``, browser
+            tools, ``run_agent``, ``ask_user_question``, ``talk``,
+            ``set_model``, ``summary``, ``run_parallel``, ...).
+            Defaults to True.  When False the agent's ONLY tools are
+            ``finish`` and the caller-supplied tools — the ones
+            returned by the *tools* file's ``get_tools()`` — so the
+            *web_tools* and *is_parallel* toggles have no tools left
+            to act on.  The default system prompt (``SYSTEM.md``)
+            assumes the basic toolset (e.g. it mandates a first
+            ``Read("./SORCAR.md")`` call), so a restricted run should
+            usually pass a *system_prompt* written for the tools it
+            actually has.
         timeout: Maximum seconds to wait for the task to finish.
         sock_path: Daemon UDS path override (defaults to
             ``$KISS_SORCAR_SOCK`` or ``$KISS_HOME/sorcar.sock``).
@@ -365,7 +380,7 @@ def run(
     Raises:
         ValueError: When *prompt* is empty or blank, when *tools*
             is not the path of an existing Python (``.py``) file (see
-            :func:`resolve_tools_file`), or when *agent_path* is
+            :func:`resolve_tools_file`), or when *extension_agent_path* is
             neither empty nor the path string of an existing Python
             (``.py``) file (see :func:`resolve_agent_path`).
         ConnectionError: When no daemon is listening on the socket, or
@@ -378,7 +393,7 @@ def run(
     if not prompt or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
     tools_file = resolve_tools_file(tools)
-    agent_file = resolve_agent_path(agent_path)
+    agent_file = resolve_agent_path(extension_agent_path)
     path = _resolve_sock_path(sock_path)
     tab_id = f"api-{uuid.uuid4().hex}"
     deadline = time.monotonic() + timeout
@@ -410,6 +425,7 @@ def run(
             "modelConfig": model_config,
             "webTools": web_tools,
             "useParallel": is_parallel,
+            "appendBasicTools": append_basic_tools,
         }
         sock.sendall(json.dumps(cmd).encode("utf-8") + b"\n")
         reader = sock.makefile("rb", buffering=_MAX_LINE_BYTES)

@@ -330,60 +330,20 @@ class RelentlessAgent(Base):
                             cost=f"${executor.budget_used:.4f}",
                         )
                     return error_result
-                trajectory_path: Path | None = None
-                try:
-                    tmp_dir = Path(self.work_dir) / "tmp"
-                    tmp_dir.mkdir(parents=True, exist_ok=True)
-                    trajectory_path = tmp_dir / f"trajectory_{session}.json"
-                    trajectory_path.write_text(executor.get_trajectory(), encoding="utf-8")
-                    # The stop event lives on the printer's THREAD-LOCAL
-                    # (``_PrinterThreadLocal.stop_event``), not on the
-                    # printer: reading it off the printer always yields
-                    # None, which leaves the summarizer's shell command
-                    # unkillable by Stop.
-                    _tl = getattr(self.printer, "_thread_local", None) if self.printer else None
-                    _stop_ev = getattr(_tl, "stop_event", None) if _tl else None
-                    from kiss.agents.sorcar.useful_tools import UsefulTools
-
-                    shell_tools = UsefulTools(stop_event=_stop_ev)
-                    summarizer_budget = max(
-                        0.01, self.max_budget - self.budget_used - executor.budget_used
+                if not getattr(self, "_append_basic_tools", True):
+                    # Restricted runs (``append_basic_tools=False``)
+                    # promise that NO LLM session of the task gets
+                    # tools beyond ``finish`` and the caller's own —
+                    # the trajectory summarizer's Read/Bash included —
+                    # so skip the summarizer and continue with the
+                    # plain failure text.
+                    result = finish(False, True, f"Agent failed: {exc}")
+                else:
+                    result = finish(
+                        False,
+                        True,
+                        self._summarize_failed_session(executor, session, exc),
                     )
-                    summarizer_agent = KISSAgent(f"{self.name} Summarizer")
-                    try:
-                        summarizer_result = summarizer_agent.run(
-                            model_name=self.model_name,
-                            prompt_template=SUMMARIZER_PROMPT,
-                            tools=[shell_tools.Read, shell_tools.Bash],
-                            arguments={
-                                "trajectory_path": str(trajectory_path),
-                            },
-                            max_steps=self.max_steps,
-                            max_budget=summarizer_budget,
-                            model_config=self.model_config,
-                            printer=self.printer,
-                            verbose=self.verbose,
-                            print_prompts=False,
-                        )
-                    finally:
-                        self._accumulate_usage(summarizer_agent)
-                    try:
-                        parsed = yaml.safe_load(summarizer_result)
-                        summary_text = (
-                            parsed.get("result", summarizer_result)
-                            if isinstance(parsed, dict)
-                            else summarizer_result
-                        )
-                    except Exception:  # pragma: no cover
-                        logger.debug("Exception caught", exc_info=True)
-                        summary_text = summarizer_result
-                except Exception:  # pragma: no cover – requires summarizer LLM failure
-                    logger.debug("Exception caught", exc_info=True)
-                    summary_text = f"Agent failed: {exc}"
-                finally:
-                    if trajectory_path and trajectory_path.exists():  # pragma: no branch
-                        trajectory_path.unlink()
-                result = finish(False, True, summary_text)
 
             self._current_executor = None
             self._accumulate_usage(executor)
@@ -436,6 +396,87 @@ class RelentlessAgent(Base):
         err = KISSError(banner)
         err.terminal_result_broadcast = True  # type: ignore[attr-defined]
         raise err
+
+    def _summarize_failed_session(
+        self,
+        executor: KISSAgent,
+        session: int,
+        exc: Exception,
+    ) -> str:
+        """Summarize a failed sub-session's trajectory with a helper LLM.
+
+        Dumps *executor*'s trajectory to a temp file and asks a
+        Read/Bash-equipped summarizer :class:`KISSAgent` to condense it
+        into the progress text the next sub-session continues from.
+        The summarizer's spend is folded into this agent's totals.
+        Never called for restricted runs (``append_basic_tools=False``)
+        — they must not hand ANY of the task's LLM sessions tools
+        beyond ``finish`` and the caller's own, so
+        :meth:`perform_task` uses the plain failure text instead.
+
+        Args:
+            executor: The failed sub-session's executor agent.
+            session: Index of the failed sub-session.
+            exc: The exception that ended the sub-session.
+
+        Returns:
+            The summary text, or the plain ``"Agent failed: ..."``
+            fallback when summarization itself fails.
+        """
+        trajectory_path: Path | None = None
+        try:
+            tmp_dir = Path(self.work_dir) / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            trajectory_path = tmp_dir / f"trajectory_{session}.json"
+            trajectory_path.write_text(executor.get_trajectory(), encoding="utf-8")
+            # The stop event lives on the printer's THREAD-LOCAL
+            # (``_PrinterThreadLocal.stop_event``), not on the
+            # printer: reading it off the printer always yields
+            # None, which leaves the summarizer's shell command
+            # unkillable by Stop.
+            _tl = getattr(self.printer, "_thread_local", None) if self.printer else None
+            _stop_ev = getattr(_tl, "stop_event", None) if _tl else None
+            from kiss.agents.sorcar.useful_tools import UsefulTools
+
+            shell_tools = UsefulTools(stop_event=_stop_ev)
+            summarizer_budget = max(
+                0.01, self.max_budget - self.budget_used - executor.budget_used
+            )
+            summarizer_agent = KISSAgent(f"{self.name} Summarizer")
+            try:
+                summarizer_result = summarizer_agent.run(
+                    model_name=self.model_name,
+                    prompt_template=SUMMARIZER_PROMPT,
+                    tools=[shell_tools.Read, shell_tools.Bash],
+                    arguments={
+                        "trajectory_path": str(trajectory_path),
+                    },
+                    max_steps=self.max_steps,
+                    max_budget=summarizer_budget,
+                    model_config=self.model_config,
+                    printer=self.printer,
+                    verbose=self.verbose,
+                    print_prompts=False,
+                )
+            finally:
+                self._accumulate_usage(summarizer_agent)
+            try:
+                parsed = yaml.safe_load(summarizer_result)
+                summary_text = (
+                    parsed.get("result", summarizer_result)
+                    if isinstance(parsed, dict)
+                    else summarizer_result
+                )
+            except Exception:  # pragma: no cover
+                logger.debug("Exception caught", exc_info=True)
+                summary_text = summarizer_result
+        except Exception:  # pragma: no cover – requires summarizer LLM failure
+            logger.debug("Exception caught", exc_info=True)
+            summary_text = f"Agent failed: {exc}"
+        finally:
+            if trajectory_path and trajectory_path.exists():  # pragma: no branch
+                trajectory_path.unlink()
+        return str(summary_text)
 
     def _emit_merged_result_event(self, payload: dict[str, Any]) -> None:
         """Emit a ``type="result"`` event with merged multi-session totals.
