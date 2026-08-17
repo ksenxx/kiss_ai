@@ -48,6 +48,7 @@ class _WorktreeCleanupOutcome(enum.Enum):
     PRESERVED_NO_AUTOCOMMIT = "preserved_no_autocommit"
     PRESERVED_COMMIT_FAILED = "preserved_commit_failed"
     PRESERVED_SUBAGENT_ACTIVE = "preserved_subagent_active"
+    PRESERVED_RESCUE_FAILED = "preserved_rescue_failed"
 
 
 _PRECOMMIT_FIX_LINES = (
@@ -437,6 +438,25 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
                 leftover = GitWorktreeOps.status_porcelain(wt.wt_dir)
                 return _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED, leftover
+            # Auto-commit cannot capture git-ignored task output
+            # (``git add -A`` skips it); without this rescue the
+            # removal below would silently destroy files the same
+            # task would have left on disk in non-worktree mode.  The
+            # rescue fails closed: when a file could not be landed in
+            # the main repo, the worktree is preserved — removing it
+            # would destroy the only copy.
+            try:
+                _, rescue_ok = GitWorktreeOps.rescue_ignored_files(
+                    wt.wt_dir, wt.repo_root,
+                )
+            except Exception:  # pragma: no cover — filesystem failure
+                logger.warning(
+                    "Ignored-file rescue failed for %s",
+                    wt.wt_dir, exc_info=True,
+                )
+                rescue_ok = False
+            if not rescue_ok:
+                return _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED, ""
         # No separate ``prune`` is issued: :meth:`GitWorktreeOps.remove`
         # prunes on every path that can leave a stale registration —
         # including the one this call covers when the directory has
@@ -497,6 +517,15 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 "git status --porcelain:\n%s",
                 wt.wt_dir,
                 leftover,
+            )
+            return False
+        if outcome is _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED:
+            logger.warning(
+                "Git-ignored task output in worktree '%s' could not "
+                "be rescued into the main repository; preserving %s "
+                "so the only copy is not destroyed",
+                wt.branch,
+                wt.wt_dir,
             )
             return False
         return True
@@ -817,6 +846,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT,
             _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED,
             _WorktreeCleanupOutcome.PRESERVED_SUBAGENT_ACTIVE,
+            _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED,
         ):
             # Persist the "preserve for manual review" decision so a
             # future :meth:`GitWorktreeOps.reclaim_orphaned_worktrees`
@@ -862,6 +892,19 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 f"commit was refused, most likely by a pre-commit hook. Its "
                 f"worktree directory {wt.wt_dir} was kept so the work is not "
                 f"lost; recover it there. git status --porcelain:\n{leftover}"
+            ))
+        elif outcome is _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED:
+            logger.warning(
+                "Git-ignored output of worktree '%s' could not be "
+                "rescued; preserving worktree directory %s",
+                wt.branch, wt.wt_dir,
+            )
+            self._set_warnings(merge=(
+                f"Git-ignored files created by the task in branch "
+                f"'{wt.branch}' could not be copied into the main "
+                f"repository, so its worktree directory {wt.wt_dir} was "
+                f"kept — it holds the only copy of those files. Recover "
+                f"them there."
             ))
         self._wt = None
         self._pending_review = False
@@ -1117,6 +1160,10 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 # pragma: no cover — git config failure
                 GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
                 return None
+            # Best-effort: a missing owner pid only means another
+            # process's reclaim treats this worktree as legacy (no
+            # cross-process liveness protection), never a task failure.
+            GitWorktreeOps.save_owner_pid(repo, branch)
 
             try:
                 dirty_copied = GitWorktreeOps.copy_dirty_state(repo, wt_dir)
@@ -1472,16 +1519,39 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             "    agent.discard()"
         )
 
-    def discard(self) -> str:
+    def discard(self, *, rescue_ignored: bool = False) -> str:
         """Throw away the task branch and worktree, checkout original.
 
         Every step is idempotent — safe to call multiple times.
         Acquires ``repo_lock`` to serialize against concurrent
         merge/release operations on the same repository.
 
+        Like the commit-and-remove path
+        (:meth:`_commit_and_clean_worktree`), the removal first waits
+        up to :data:`_ABANDONED_SUBAGENT_WAIT_SECONDS` for abandoned
+        sub-agent threads still writing into this worktree.  When one
+        is still running after the wait, nothing is discarded and a
+        "Discard deferred" message tells the caller to retry: deleting
+        a directory under a live writer loses whatever it produces
+        next and can leave a half-recreated zombie directory behind.
+
+        Args:
+            rescue_ignored: When True, git-ignored files the task
+                created in the worktree are copied into the main
+                repository (never overwriting existing files) before
+                the directory is removed.  The AUTOMATIC discard paths
+                pass True — they run because the changed-files probe
+                saw "no changes", but that probe cannot see ignored
+                files, so a task whose only output was e.g. a dataset
+                in an ignored ``data/`` directory would otherwise have
+                that output silently destroyed.  A user-explicit
+                discard keeps the default False: the user asked for
+                the work to be thrown away.
+
         Returns:
             Confirmation message (includes a warning if checkout
-            to the original branch failed).
+            to the original branch failed), or a "Discard deferred"
+            message when a live sub-agent prevented the removal.
 
         Raises:
             RuntimeError: If no worktree task is pending.
@@ -1490,10 +1560,57 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             raise RuntimeError("No pending worktree task to discard")
 
         wt = self._wt
-        self._pending_review = False
+        if wt.wt_dir.exists() and not self.reclaim_abandoned_subagents(
+            timeout=_ABANDONED_SUBAGENT_WAIT_SECONDS,
+        ):
+            logger.warning(
+                "A sub-agent thread is still running inside worktree "
+                "'%s'; deferring discard of %s",
+                wt.branch, wt.wt_dir,
+            )
+            return (
+                f"Discard deferred: a sub-agent of branch '{wt.branch}' "
+                f"is still running inside {wt.wt_dir}, so the worktree "
+                "was kept instead of being deleted underneath it. "
+                "Retry the discard once the sub-agent has stopped."
+            )
         checkout_warning = ""
         delete_warning = ""
         with repo_lock(wt.repo_root):
+            if rescue_ignored and wt.wt_dir.exists():
+                try:
+                    _, rescue_ok = GitWorktreeOps.rescue_ignored_files(
+                        wt.wt_dir, wt.repo_root,
+                    )
+                except Exception:  # pragma: no cover — filesystem failure
+                    logger.warning(
+                        "Ignored-file rescue failed for %s",
+                        wt.wt_dir, exc_info=True,
+                    )
+                    rescue_ok = False
+                if not rescue_ok:
+                    # Fail closed: this automatic discard runs because
+                    # the changed-files probe saw nothing, so the
+                    # ignored files are the worktree's ONLY content —
+                    # deleting the directory now would destroy their
+                    # only copy.
+                    logger.warning(
+                        "Deferring discard of worktree '%s': its "
+                        "git-ignored output could not be rescued",
+                        wt.branch,
+                    )
+                    return (
+                        f"Discard deferred: git-ignored files created "
+                        f"by the task in branch '{wt.branch}' could not "
+                        f"be copied into the main repository, so the "
+                        f"worktree at {wt.wt_dir} was kept — it holds "
+                        "the only copy of those files."
+                    )
+            # Cleared only past every deferral return above, so a
+            # deferred discard keeps the pending-review protection
+            # (a tab close must not auto-merge work the user asked
+            # to throw away).
+            self._pending_review = False
             GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
             GitWorktreeOps.prune(wt.repo_root)
             if wt.original_branch:

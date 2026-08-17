@@ -6387,7 +6387,9 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgWrTab = getTab(ev.tabId);
           if (bgWrTab) {
-            bgWrTab.worktreeBarEl = null;
+            // Keep the Merge / Discard bar on a retryable failure
+            // (deferred discard) — same rule as the foreground path.
+            if (!ev.retryable) bgWrTab.worktreeBarEl = null;
             clearActionProgress(bgWrTab.outputFragment);
             if (bgWrTab.outputFragment && !isSilentDiscardMessage(ev)) {
               const cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
@@ -7327,7 +7329,11 @@
   }
 
   function handleWorktreeResult(ev) {
-    clearWorktreeBar();
+    // A retryable failure (deferred discard: a sub-agent is still
+    // writing into the worktree, or its ignored output could not be
+    // rescued) keeps the Merge / Discard bar — clearing it would strip
+    // the only retry controls while the message says "retry".
+    if (!ev.retryable) clearWorktreeBar();
     clearActionProgress(O);
     if (isSilentDiscardMessage(ev)) {
       return;

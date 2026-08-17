@@ -406,19 +406,25 @@ class TestAcquireTaskWorktree:
         GitWorktreeOps.remove(self.repo, wt_dir)
         _run_git(self.repo, "branch", "-D", branch)
 
-    def test_consume_removes_idle_untracked_files(self) -> None:
+    def test_contaminated_spare_refused_not_destroyed(self) -> None:
         assert worktree_pool.prewarm(self.repo)
         with worktree_pool._pool_lock:
             (_, spare_dir), = worktree_pool._spares.values()
-        # An external writer drops a file into the idle spare;
-        # `git reset --hard` keeps untracked files, so without the
-        # consume-time clean the task would commit it as its output.
+        # An external writer drops a file into the idle spare.  The
+        # spare is never written to by the pool, so this content is
+        # not ours to destroy: consumption refuses it (preserving the
+        # file for the reclaim pass to inspect) and the task falls
+        # back to a fresh inline worktree.  The old behavior —
+        # consume + `git clean -fdq` — deleted the external file
+        # (gpt-5.6-sol review finding).
         (spare_dir / "generated.txt").write_text("stray build output\n")
         agent = WorktreeSorcarAgent("pool-test")
         wt_work = agent._try_setup_worktree(self.repo, str(self.repo))
         assert wt_work is not None
-        assert Path(wt_work) == spare_dir
-        assert not (spare_dir / "generated.txt").exists()
+        assert Path(wt_work) != spare_dir
+        assert (spare_dir / "generated.txt").read_text() == (
+            "stray build output\n"
+        )
         agent.discard()
 
     def test_consume_clears_spare_marker(self) -> None:
