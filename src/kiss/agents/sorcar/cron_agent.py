@@ -510,7 +510,7 @@ def _run_prompt_job(
         ``"silent"``; text is the deliverable summary (``None`` when
         silent).
     """
-    from kiss.server import sorcar
+    from kiss.agents.sorcar import daemon_client
 
     preamble = (
         "You are running as an unattended scheduled automation (cron job). "
@@ -522,7 +522,7 @@ def _run_prompt_job(
     work_dir = _cron_dir() / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
-        result = sorcar.run(
+        result = daemon_client.run(
             preamble + str(job.get("prompt", "")),
             work_dir=str(work_dir),
             model=str(job.get("model_name", "")),

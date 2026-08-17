@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import os
 import shutil
 import subprocess
 import sys
@@ -313,12 +314,26 @@ class TestLaunchViaApi(_ApiLaunchBase):
             return "module tools loaded ok"
 
         self._install_stub(on_run=on_run)
-        result = run_agent_via_kiss_web(
-            agent,
-            "use the tools",
-            work_dir=self.repo,
-            sock_path=self.sock_path,
-        )
+        # The channel agents persist credentials under ``~/.kiss`` (a
+        # ``Path.home()``-based path, re-evaluated when the daemon
+        # re-executes the module as the task's tools file), so point
+        # HOME at this test's empty tmpdir for the run: the tools must
+        # observe the deterministic "not authenticated" state, not the
+        # developer machine's real Slack credentials.
+        saved_home = os.environ.get("HOME")
+        os.environ["HOME"] = self.tmpdir
+        try:
+            result = run_agent_via_kiss_web(
+                agent,
+                "use the tools",
+                work_dir=self.repo,
+                sock_path=self.sock_path,
+            )
+        finally:
+            if saved_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = saved_home
         assert yaml.safe_load(result)["summary"] == "module tools loaded ok"
 
     def test_explicit_tools_file_overrides_agent_module(self) -> None:

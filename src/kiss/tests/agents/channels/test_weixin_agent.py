@@ -316,6 +316,10 @@ def test_callback_post_requires_signature_when_token_configured() -> None:
             timeout=10,
         )
         assert bad.status_code == 401
+        # An unsigned probe with a thousands-of-digits Content-Length
+        # must still get the 401 (not a raw connection close from an
+        # unguarded int() past the integer-string conversion limit).
+        assert _raw_post_status(port, f"Content-Length: {'9' * 5000}\r\n") == 401
         messages, _ = backend.poll_messages("", "0")
         assert messages == []
     finally:
@@ -353,6 +357,10 @@ def test_callback_post_bad_content_length() -> None:
         assert _raw_post_status(port, "") == 400
         assert _raw_post_status(port, "Content-Length: -5\r\n") == 400
         assert _raw_post_status(port, "Content-Length: 12abc\r\n") == 400
+        # Thousands of digits: unguarded int() would raise past
+        # Python's integer-string conversion limit (4300 digits) and
+        # kill the handler with no response instead of a 400.
+        assert _raw_post_status(port, f"Content-Length: {'9' * 5000}\r\n") == 400
         assert _raw_post_status(port, f"Content-Length: {2 * 1024 * 1024}\r\n") == 413
         messages, _ = backend.poll_messages("", "0")
         assert messages == []

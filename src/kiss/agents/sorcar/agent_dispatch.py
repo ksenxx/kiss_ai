@@ -20,12 +20,16 @@ The channel agents are looked up dynamically, the same soft-plugin
 style the cron deliverer uses: any module named
 ``kiss.agents.third_party_agents.<channel>_agent`` that defines a
 ``BaseChannelAgent`` subclass is dispatchable.  This module never
-imports from ``kiss.agents.third_party_agents`` at module scope, so it
-works (with an empty channel list) when those optional modules are
-absent.
+imports ``kiss.agents.third_party_agents`` statically — only the
+requested channel module is imported, dynamically, at dispatch time
+(the layering invariant in
+``kiss.tests.agents.sorcar.test_layering_invariants`` forbids more) —
+so it works (with an empty channel list) when those optional modules
+are absent.
 
-Each dispatch is a plain call of the public API
-:func:`kiss.server.sorcar.run` passing the prompt and the agent file's
+Each dispatch is a plain call of the daemon client
+:func:`kiss.agents.sorcar.daemon_client.run` (re-exported as the
+public API ``kiss.server.sorcar.run``) passing the prompt and the agent file's
 path as ``agent_path``: the daemon imports the file as an agent script
 and applies its ``get_X()`` parameter overrides.  For a channel, the
 module's ``get_tools()`` returns the channel's tool callables, so the
@@ -147,14 +151,22 @@ def _agent_class(module: Any) -> type | None:
     Returns:
         The agent class, or ``None`` when the module defines none.
     """
-    from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent
-
+    # Structural check (a base named ``BaseChannelAgent`` anywhere in
+    # the MRO) instead of an ``issubclass`` against the class imported
+    # from ``_channel_agent_utils``: the sorcar layer must not import
+    # ``kiss.agents.third_party_agents`` (see the layering invariant in
+    # ``kiss.tests.agents.sorcar.test_layering_invariants``), and the
+    # channel modules are soft plugins reached only through the dynamic
+    # per-channel import above — matching the contract by shape keeps
+    # the lookup import-free.
     for value in vars(module).values():
         if (
             inspect.isclass(value)
-            and issubclass(value, BaseChannelAgent)
-            and value is not BaseChannelAgent
             and value.__module__ == module.__name__
+            and any(
+                base.__name__ == "BaseChannelAgent"
+                for base in inspect.getmro(value)[1:]
+            )
         ):
             return value
     return None
@@ -207,11 +219,11 @@ def _dispatch(
         The sub-task's YAML result ("success" and "summary" keys), or
         an error message.
     """
-    from kiss.server import sorcar
+    from kiss.agents.sorcar import daemon_client
 
     Path(work_dir).mkdir(parents=True, exist_ok=True)
     try:
-        result = sorcar.run(
+        result = daemon_client.run(
             prompt,
             agent_path=agent_path,
             work_dir=work_dir,
@@ -284,7 +296,7 @@ def _run_agent(
         # Path mode: any agent-script file.  The task is passed through
         # unchanged — no channel preamble or workspace handling; the
         # script itself configures the session via its getters.
-        from kiss.server.agent_file import resolve_agent_path
+        from kiss.agents.sorcar.daemon_client import resolve_agent_path
 
         candidate = Path(requested).expanduser()
         if not candidate.is_absolute() and parent_work_dir:
@@ -334,9 +346,9 @@ def _run_agent(
     agent_cls = _agent_class(module)
     if agent_cls is None or not module.__file__:  # pragma: no cover — contract violation only
         return f"Error: {channel!r} defines no channel agent class."
-    from kiss.agents.third_party_agents._kiss_web_launcher import (
-        _enter_workspace,
-        _exit_workspace,
+    from kiss.agents.sorcar.channel_workspace import (
+        enter_workspace,
+        exit_workspace,
     )
 
     preamble = (
@@ -354,16 +366,16 @@ def _run_agent(
     # seeing the files of earlier channel sessions.
     work_dir = str(kiss_home() / "channel_work")
     # The workspace env var is process-global and managed by the
-    # launcher's reference-counting registry (shared with the channel
-    # CLIs), not by save/restore snapshots: snapshots taken by
+    # shared reference-counting registry (used by the channel CLIs'
+    # launcher too), not by save/restore snapshots: snapshots taken by
     # overlapping dispatches would restore each other's values out of
     # order and leave a stale workspace exported.
-    _enter_workspace(workspace)
+    enter_workspace(workspace)
     try:
         return _dispatch(channel, prompt, str(module.__file__),
                          work_dir, model_name, budget)
     finally:
-        _exit_workspace(workspace)
+        exit_workspace(workspace)
 
 
 def make_run_agent_tool(work_dir: str) -> Callable[..., str]:
