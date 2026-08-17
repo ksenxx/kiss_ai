@@ -50,6 +50,8 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.server.test_codex_mobile_layout import _build_html
+
 MEDIA_DIR = (
     Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media"
 )
@@ -166,16 +168,9 @@ CONTROL_IDS = [
 ]
 
 
-def _build_html() -> str:
-    from kiss.server.web_server import _build_html
-
-    return _build_html()
-
-
 def _read_codex_css() -> str:
     assert CODEX_CSS.is_file(), "media/remote-codex.css must exist"
     return CODEX_CSS.read_text(encoding="utf-8")
-
 
 
 def test_built_html_links_codex_stylesheet_cache_busted() -> None:
@@ -206,7 +201,6 @@ def test_no_unsubstituted_placeholders_remain() -> None:
     assert not re.search(r"\{\{[A-Z_]+\}\}", html)
 
 
-
 def test_all_control_ids_still_present() -> None:
     """Every existing control/template id survives unchanged.
 
@@ -221,13 +215,6 @@ def test_all_control_ids_still_present() -> None:
     expected = set(CONTROL_IDS) | template_ids
     missing = sorted(expected - built_ids)
     assert not missing, f"controls lost from remote page: {missing}"
-
-
-def test_body_keeps_remote_chat_class() -> None:
-    """The remote page body keeps the remote-chat scoping class."""
-    html = _build_html()
-    assert '<body class="remote-chat">' in html
-
 
 
 def test_chat_html_template_does_not_hardcode_codex_css() -> None:
@@ -300,7 +287,6 @@ def test_every_codex_rule_scoped_under_remote_chat() -> None:
         )
     ]
     assert not bad, f"unscoped selectors leak into VS Code webview: {bad}"
-
 
 
 def test_codex_page_palette() -> None:
@@ -396,7 +382,6 @@ def test_codex_rounded_panels() -> None:
     assert "body.remote-chat #sidebar" in css
     assert "body.remote-chat #settings-panel" in css
     assert "#171717" in css, "drawer surface #171717 missing"
-
 
 
 def test_desktop_media_query_docks_sidebar() -> None:
@@ -511,7 +496,6 @@ def test_main_js_remote_desktop_wiring() -> None:
     )
 
 
-
 def test_sidebar_resizer_in_chat_html() -> None:
     """chat.html ships an accessible resize handle inside #sidebar."""
     html = CHAT_HTML.read_text(encoding="utf-8")
@@ -566,7 +550,6 @@ def test_main_js_sidebar_resize_wiring() -> None:
     assert "--sidebar-w" in js
     assert "setPointerCapture" in js
     assert "pointercancel" in js
-
 
 
 def test_sidebar_default_width_fits_the_filter_toggles() -> None:
@@ -653,7 +636,6 @@ def test_main_js_reads_its_bounds_from_the_stylesheet() -> None:
         assert f"cssPxVar('{name}'" in js, (
             f"{name} must be read from the stylesheet, not duplicated"
         )
-
 
 
 @pytest.mark.timeout(120)

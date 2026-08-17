@@ -48,6 +48,8 @@ from typing import Any
 import pytest
 from playwright.sync_api import Page, ViewportSize, sync_playwright
 
+from kiss.tests.server.test_remote_panels_match_extension import VSCODE_VARS
+
 MEDIA_DIR = (
     Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media"
 )
@@ -61,28 +63,6 @@ WEB_SERVER_PY = (
 # remote page.  The extension-reference page below injects the same
 # block, so any computed-style difference between the two pages can
 # only come from CSS rule differences (i.e. remote-codex.css).
-VSCODE_VARS = {
-    "--vscode-font-size": "16px",
-    "--vscode-font-family": (
-        "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, "
-        "'Helvetica Neue', Arial, sans-serif"
-    ),
-    "--vscode-editor-font-size": "16px",
-    "--vscode-editor-font-family": (
-        "Menlo, Monaco, 'Courier New', monospace"
-    ),
-    "--vscode-editor-background": "#1e1e1e",
-    "--vscode-editor-foreground": "#cccccc",
-    "--vscode-descriptionForeground": "#8b8b8b",
-    "--vscode-panel-border": "#80808059",
-    "--vscode-sideBar-background": "#252526",
-    "--vscode-textLink-foreground": "#3794ff",
-    "--vscode-terminal-ansiRed": "#f44747",
-    "--vscode-terminal-ansiGreen": "#6a9955",
-    "--vscode-terminal-ansiYellow": "#d7ba7d",
-    "--vscode-terminal-ansiMagenta": "#c586c0",
-    "--vscode-terminal-ansiCyan": "#4ec9b0",
-}
 
 # Selector fragments that identify EVENT PANELS or the FIXED TASK
 # PANEL.  remote-codex.css must not target any of them.
@@ -144,22 +124,6 @@ def test_remote_codex_does_not_restyle_event_or_task_panels(
     assert not offenders, (
         f"remote-codex.css must not restyle event panels or the task "
         f"panel (pattern {pattern!r}); offending selectors: {offenders}"
-    )
-
-
-@pytest.mark.parametrize(("name", "value"), sorted(VSCODE_VARS.items()))
-def test_remote_page_defines_vscode_typography_vars(
-    name: str, value: str
-) -> None:
-    """The remote page built by web_server.py must inject the same
-    --vscode-* variables that the VS Code webview host provides (and
-    that this test's extension reference page uses), so fonts resolve
-    identically."""
-    from kiss.server.web_server import _build_html
-
-    html = _build_html()
-    assert f"{name}: {value};" in html, (
-        f"the remote page must define {name}: {value}"
     )
 
 

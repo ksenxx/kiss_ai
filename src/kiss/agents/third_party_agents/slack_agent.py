@@ -816,7 +816,10 @@ class SlackAgent(BaseChannelAgent):
         "If authentication is needed, call start_slack_browser_auth() to open "
         "the Slack API portal, then use browser tools to create an app, configure "
         "OAuth scopes, install it to a workspace, and copy the xoxb- bot token. "
-        "Complete these steps autonomously — do NOT instruct the user to do them manually."
+        "Complete these steps autonomously — do NOT instruct the user to do them manually. "
+        "You MUST use the user's default browser and computer use to authenticate "
+        "using claude-fable-5 as the model.  Do all the steps on user's behalf and "
+        "ask user's help ONLY if you are stuck on login or captcha."
     )
 
     def __init__(self, workspace: str = "default") -> None:

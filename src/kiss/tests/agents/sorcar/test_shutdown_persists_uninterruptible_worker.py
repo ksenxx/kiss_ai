@@ -5,7 +5,7 @@
 """Scoping rules of the pre-emptive shutdown persistence helper.
 
 Moved from
-``kiss.tests.agents.vscode.test_shutdown_persists_uninterruptible_worker``
+``kiss.tests.server.test_shutdown_persists_uninterruptible_worker``
 because these tests drive
 :func:`persistence._shutdown_persist_in_flight_results` directly and
 depend only on ``kiss.core`` and ``kiss.agents.sorcar``.  The

@@ -5,7 +5,7 @@
 """End-to-end regression tests for Wave2-Fixer-7 findings (real repos, no mocks).
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.vscode.test_wave2_merge_bugs``; the non-core tests remain there.
+``kiss.tests.server.test_wave2_merge_bugs``; the non-core tests remain there.
 """
 
 from __future__ import annotations

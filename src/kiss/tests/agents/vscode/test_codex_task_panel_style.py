@@ -50,7 +50,6 @@ MEDIA_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media"
 CODEX_CSS = MEDIA_DIR / "remote-codex.css"
 MAIN_CSS = MEDIA_DIR / "main.css"
 MAIN_JS = MEDIA_DIR / "main.js"
-WEB_SERVER_PY = Path(__file__).resolve().parents[3] / "server" / "web_server.py"
 
 
 def _dark_palette(css: str) -> dict[str, str]:
@@ -103,16 +102,6 @@ def _find_rule(css: str, selector: str) -> str:
     bodies = re.findall(pattern, css)
     assert bodies, f"body.remote-chat scoped rule for {selector!r} missing"
     return _resolve_palette_vars("\n".join(bodies), _dark_palette(css))
-
-
-def test_remote_page_font_size_vars_match_task_panel() -> None:
-    """The task panel sizes itself with --vscode-editor-font-size and
-    the chat panels with rem units derived from --vscode-font-size;
-    the remote page must inject the SAME 16px for both so panel
-    contents and the task panel share one size."""
-    src = WEB_SERVER_PY.read_text(encoding="utf-8")
-    assert "--vscode-font-size: 16px" in src
-    assert "--vscode-editor-font-size: 16px" in src
 
 
 def test_main_js_history_rows_use_task_color_var_not_inline() -> None:
