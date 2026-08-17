@@ -41,7 +41,7 @@ from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core import vscode_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.sorcar.parallel_agent_harness import OfflineFastModel
+from kiss.tests.server.parallel_agent_harness import OfflineFastModel
 
 _TAB = "merge-tab"
 _TASK_ID = "task-merge-shutdown"

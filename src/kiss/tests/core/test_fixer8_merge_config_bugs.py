@@ -5,7 +5,7 @@
 """End-to-end regression tests for Fixer-8 findings (real repos, no mocks).
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.vscode.test_fixer8_merge_config_bugs``; the non-core tests remain there.
+``kiss.tests.server.test_fixer8_merge_config_bugs``; the non-core tests remain there.
 """
 
 from __future__ import annotations

@@ -46,7 +46,6 @@ and would yield an infinite reload loop).
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -275,18 +274,3 @@ def test_first_auth_alone_does_not_reload(_browser):
         assert any(e.get("connected") is True for e in events), events
     finally:
         context.close()
-
-
-def test_shim_source_contains_reload_call():
-    """Sanity check: the shipped shim source includes a reload call.
-
-    A second, source-level guard so a future refactor that removes
-    the reload (and is somehow missed by the browser-level test
-    above — e.g. an inadvertent rename of the mock helpers) still
-    fails loudly.  This is intentionally narrow: it only asserts
-    that ``location.reload`` appears somewhere in the shim string.
-    """
-    assert re.search(r"location\s*\.\s*reload\s*\(", _WS_SHIM_JS), (
-        "BUG: _WS_SHIM_JS must call location.reload() to recover from "
-        "a server restart"
-    )

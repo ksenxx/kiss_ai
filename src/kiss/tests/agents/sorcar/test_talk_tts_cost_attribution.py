@@ -58,7 +58,7 @@ class TestTalkToolWiringE2E:
         reason="requires OPENAI_API_KEY for a live gpt-audio-1.5 call",
     )
     def test_talk_tool_folds_tts_spend_into_agent_budget(self) -> None:
-        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
+        from kiss.tests.server._memory_printer import MemoryPrinter
 
         printer = MemoryPrinter()
         printer.subscribe_tab("task-tts-cost", "tab-a")

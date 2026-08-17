@@ -24,6 +24,57 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
 
 
+MAX_DRAIN_BYTES = 8 * 1024 * 1024
+"""Upper bound on how much of a rejected request body is read and discarded.
+
+Bounds :func:`drain_request_body` so a client claiming an enormous
+``Content-Length`` cannot pin a handler thread; a genuinely oversized
+sender past this bound still gets the connection reset, which is the
+correct outcome for an abusive request.
+"""
+
+
+def drain_request_body(handler: Any, claimed_length: int | None) -> None:
+    """Read and discard a request body the handler is not going to use.
+
+    An HTTP handler that answers an error status (401/404/413/...)
+    without reading the request body closes the connection with unread
+    bytes in the socket's receive queue; the kernel then sends RST, the
+    still-sending client's write fails, and the already-written response
+    is discarded — the client sees ``ConnectionResetError`` instead of
+    the status code.  Draining the (bounded) body lets the client finish
+    sending and read the response.
+
+    Call this AFTER writing the response.  A probe that claimed a
+    ``Content-Length`` it never sends already has the status line by
+    then: a probe that closes after reading it ends the drain with an
+    immediate EOF, while one that instead reads until EOF stalls the
+    handler only for the bounded per-read timeout below.  For a client
+    mid-send of a large body the order is irrelevant: the small
+    response fits the socket buffer, the drain unblocks the client's
+    send, and the client then reads the response.
+
+    Args:
+        handler: The ``BaseHTTPRequestHandler`` serving the request.
+        claimed_length: The parsed ``Content-Length``, or ``None`` when
+            the header is missing or malformed (nothing can be safely
+            read then — without a length the connection would block
+            waiting for EOF the keep-alive client never sends).
+    """
+    if not claimed_length or claimed_length < 0:
+        return
+    try:
+        handler.connection.settimeout(10.0)
+        remaining = min(claimed_length, MAX_DRAIN_BYTES)
+        while remaining > 0:
+            chunk = handler.rfile.read(min(65536, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+    except OSError:  # pragma: no cover — client gone mid-drain
+        pass
+
+
 def drain_queue_messages(
     message_queue: queue.Queue[dict[str, Any]],
     *,

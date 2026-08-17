@@ -275,6 +275,41 @@ def _cleanup_legacy_merge_artifacts() -> None:
         logger.debug("Legacy merge_dir cleanup failed", exc_info=True)
 
 
+def _prewarm_task_dependencies() -> None:
+    """Warm the lazily imported modules a first task would pay for.
+
+    The first task after a daemon start used to spend several seconds
+    between its ``task_history`` row allocation and the agent's first
+    event: ``KISSAgent._reset`` imports the concrete model class (and
+    its provider SDK) on demand, and ``_run_task_inner`` loads the
+    VS Code config module lazily.  Importing them here — on a
+    background daemon thread started from ``VSCodeServer.__init__`` —
+    moves that cost to server startup, where nobody is waiting on it.
+
+    Best-effort: a missing optional SDK or an import error must never
+    affect server startup, so every import failure is only logged.
+    """
+    import importlib
+
+    for mod in (
+        "kiss.core.models.anthropic_model",
+        "kiss.core.models.openai_compatible_model",
+        "kiss.core.models.openai_compatible_model2",
+        "kiss.core.models.gemini_model",
+        "kiss.core.vscode_config",
+    ):
+        try:
+            importlib.import_module(mod)
+        except Exception:
+            logger.debug("Prewarm import of %s failed", mod, exc_info=True)
+    try:
+        from kiss.core.models.model_info import get_available_models
+
+        get_available_models()
+    except Exception:
+        logger.debug("Prewarm of the model registry failed", exc_info=True)
+
+
 class VSCodeServer(
     _CommandsMixin,
     _TaskRunnerMixin,
@@ -315,6 +350,11 @@ class VSCodeServer(
             daemon=True,
         )
         self._orphan_sweep_thread.start()
+        threading.Thread(
+            target=_prewarm_task_dependencies,
+            name="task-dependency-prewarm",
+            daemon=True,
+        ).start()
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
         # The canonical shared tab registry (mirrored by every client).
         # The path is resolved through the persistence module's

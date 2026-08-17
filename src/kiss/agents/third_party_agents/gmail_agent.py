@@ -974,7 +974,10 @@ class GmailAgent(BaseChannelAgent):
         "Google Cloud Console, then use browser tools to create OAuth credentials "
         "autonomously. If credentials.json exists, call authenticate_gmail() directly. "
         "Use ask_user_question() if you need user help with Google account login screens. "
-        "Do NOT instruct the user to do these steps manually."
+        "Do NOT instruct the user to do these steps manually. "
+        "You MUST use the user's default browser and computer use to authenticate "
+        "using claude-fable-5 as the model.  Do all the steps on user's behalf and "
+        "ask user's help ONLY if you are stuck on login or captcha."
     )
 
     def __init__(self) -> None:

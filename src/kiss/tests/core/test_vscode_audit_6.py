@@ -5,7 +5,7 @@
 """Audit round 6: config persistence (B1) and fast-model selection (B3) fixes.
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.agents.vscode.test_vscode_audit_6``; the non-core tests remain there.
+``kiss.tests.server.test_vscode_audit_6``; the non-core tests remain there.
 """
 
 from __future__ import annotations

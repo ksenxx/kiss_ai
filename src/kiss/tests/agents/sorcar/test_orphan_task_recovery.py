@@ -4,7 +4,7 @@
 # add your name here
 """Sweep-level recovery of orphan ``Agent Failed Abruptly`` rows.
 
-Moved from ``kiss.tests.agents.vscode.test_orphan_task_recovery``
+Moved from ``kiss.tests.server.test_orphan_task_recovery``
 because these tests drive :func:`persistence._recover_orphaned_tasks`
 directly and depend only on ``kiss.core`` and ``kiss.agents.sorcar``.
 The boot-time tests that construct a real ``VSCodeServer`` (and thus

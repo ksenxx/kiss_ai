@@ -35,7 +35,7 @@ from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
+from kiss.tests.server._memory_printer import MemoryPrinter
 
 TASK_ID = "task-77"
 OWNER_TAB = "owner-tab"
