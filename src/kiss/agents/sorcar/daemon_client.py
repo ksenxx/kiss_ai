@@ -243,6 +243,8 @@ def run(
     web_tools: bool | None = None,
     is_parallel: bool = True,
     append_basic_tools: bool = True,
+    append_to_system_prompt: str = "",
+    append_to_prompt: str = "",
     timeout: float = 3600.0,
     sock_path: str | Path | None = None,
 ) -> TaskResult:
@@ -316,6 +318,8 @@ def run(
                 def get_web_tools() -> bool | None: ...
                 def get_is_parallel() -> bool: ...
                 def get_append_basic_tools() -> bool: ...
+                def get_append_to_system_prompt() -> str: ...
+                def get_append_to_prompt() -> str: ...
 
             The ``get_X()`` functions are never serialized by the
             client — they run **in the daemon process**, exactly like a
@@ -365,6 +369,21 @@ def run(
             ``Read("./SORCAR.md")`` call), so a restricted run should
             usually pass a *system_prompt* written for the tools it
             actually has.
+        append_to_system_prompt: Extra text appended to the run's
+            system prompt when the agent is executed — after the
+            default ``SYSTEM.md`` prompt (or the *system_prompt*
+            replacement) and before the daemon's per-run operational
+            instructions.  ``run_parallel`` sub-agents inherit the
+            suffix on their own system prompts, like a *system_prompt*
+            replacement, so the extra instructions constrain the whole
+            task tree.  Empty (default) appends nothing.
+        append_to_prompt: Extra text appended to the executed task
+            prompt.  A multi-``<task>`` *prompt* runs the agent once
+            per subtask, and the text is appended to EACH subtask's
+            prompt.  The appended text is part of the prompt the agent
+            actually runs with, so it is also what the chat history
+            records and what follow-up tasks of the same chat see as
+            context.  Empty (default) appends nothing.
         timeout: Maximum seconds to wait for the task to finish.
         sock_path: Daemon UDS path override (defaults to
             ``$KISS_SORCAR_SOCK`` or ``$KISS_HOME/sorcar.sock``).
@@ -426,6 +445,8 @@ def run(
             "webTools": web_tools,
             "useParallel": is_parallel,
             "appendBasicTools": append_basic_tools,
+            "appendToSystemPrompt": append_to_system_prompt,
+            "appendToPrompt": append_to_prompt,
         }
         sock.sendall(json.dumps(cmd).encode("utf-8") + b"\n")
         reader = sock.makefile("rb", buffering=_MAX_LINE_BYTES)
