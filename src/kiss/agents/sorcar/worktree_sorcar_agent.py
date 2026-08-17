@@ -17,15 +17,14 @@ import logging
 import shlex
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar import worktree_pool
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
-    _WORKTREE_BRANCH_PREFIX,
     _WORKTREE_SUBDIR,
     GitWorktree,
     GitWorktreeOps,
@@ -917,6 +916,10 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         )
         if live is not None:
             branches.update(live())
+        # Pooled spare worktrees are owned by the process too: a
+        # reclaim pass that adopted one would merge-and-delete the
+        # worktree a concurrent task start is about to consume.
+        branches.update(worktree_pool.spare_branches())
         return branches
 
     def _retire_previous_worktree(self) -> str | None:
@@ -953,6 +956,88 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         released_branch = self._release_worktree()
         self._pending_review = False
         return released_branch
+
+    def _acquire_task_worktree(
+        self,
+        repo: Path,
+        original_branch: str,
+    ) -> tuple[str, Path] | None:
+        """Obtain a checked-out ``kiss/wt-*`` worktree for a new task.
+
+        Fast path: consume the spare worktree that
+        :mod:`kiss.agents.sorcar.worktree_pool` pre-created on a
+        background thread and hard-reset it onto *original_branch*'s
+        tip — skipping the full-checkout ``git worktree add`` that
+        dominates the delay between task submission and agent start.
+
+        Slow path (empty pool, or a spare that fails validation or the
+        reset): run the orphan-maintenance passes and create the
+        worktree inline, exactly as before the pool existed.  Reclaim
+        before sweep: reclaim may merge and delete orphan branches,
+        and sweep purges leftover config sections whose branches were
+        just removed.  Excluded from reclaim: every branch owned by a
+        *live* agent in this process — self and every other tab — and
+        every pooled spare, so neither a running sibling task's
+        worktree nor the pool's spare is ever adopted or destroyed.
+
+        Either way, a pool refill for the NEXT task is scheduled on a
+        background thread before returning.  Callers must hold
+        ``repo_lock(repo)``.
+
+        Args:
+            repo: Git repo root path.
+            original_branch: The branch the task will merge back into;
+                the acquired worktree's branch starts at its tip.
+
+        Returns:
+            ``(branch, wt_dir)`` on success, or ``None`` when no
+            worktree could be created (caller falls back to direct
+            execution).
+        """
+        acquired: tuple[str, Path] | None = None
+        spare = worktree_pool.take_spare(repo)
+        if spare is not None:
+            spare_branch, spare_dir = spare
+            # Three consume steps: move the spare's branch onto the
+            # task's base commit; drop untracked files an external
+            # writer may have left in the idle directory (reset keeps
+            # them and auto-commit would publish them); clear the
+            # spare marker so a crash mid-task routes this worktree
+            # through the normal orphan reclaim instead of the
+            # spare-discard path.
+            if (
+                GitWorktreeOps.reset_worktree_to(spare_dir, original_branch)
+                and GitWorktreeOps.clean_untracked(spare_dir)
+                and GitWorktreeOps.clear_spare_marker(repo, spare_branch)
+            ):
+                acquired = spare
+            else:
+                GitWorktreeOps.cleanup_partial(repo, spare_branch, spare_dir)
+        if acquired is None:
+            try:
+                GitWorktreeOps.reclaim_orphaned_worktrees(
+                    repo,
+                    exclude_branches=self._live_worktree_branches(),
+                )
+                GitWorktreeOps.sweep_orphaned_state(repo)
+            except Exception:  # pragma: no cover — unexpected git failure
+                logger.warning(
+                    "Orphan-worktree maintenance failed", exc_info=True,
+                )
+            branch = worktree_pool.new_task_branch(repo)
+            wt_dir = repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
+            if not GitWorktreeOps.create(repo, branch, wt_dir):
+                # pragma: no cover — git worktree add failure
+                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                return None
+            acquired = (branch, wt_dir)
+        # Refill the pool for the next task while this one runs.  The
+        # exclusion callable is evaluated by the refill thread right
+        # before its reclaim pass (under ``repo_lock``), so it sees the
+        # live-agent set as it stands THEN — including this task's own
+        # branch once ``self._wt`` is assigned.
+        worktree_pool.prewarm_async(repo, self._live_worktree_branches)
+        return acquired
 
     def _try_setup_worktree(
         self,
@@ -1020,38 +1105,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             try:
                 GitWorktreeOps.ensure_excluded(repo)
                 GitWorktreeOps.ensure_scratch_merge_driver(repo)
-                # Reclaim before sweep: reclaim may merge and delete
-                # orphan branches, and sweep purges leftover config
-                # sections whose branches were just removed.  Exclude
-                # every branch owned by a *live* agent in this
-                # process — self and every other tab — so a running
-                # sibling task's worktree is never adopted or
-                # destroyed by our reclaim pass.
-                GitWorktreeOps.reclaim_orphaned_worktrees(
-                    repo,
-                    exclude_branches=self._live_worktree_branches(),
-                )
-                GitWorktreeOps.sweep_orphaned_state(repo)
             except Exception:  # pragma: no cover — filesystem permission error
                 logger.warning("Failed to update git exclude", exc_info=True)
 
-            branch = (
-                f"{_WORKTREE_BRANCH_PREFIX}"
-                f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
-            )
-            base_branch = branch
-            suffix = 1
-            while GitWorktreeOps.branch_exists(repo, branch):  # pragma: no branch
-                branch = f"{base_branch}-{suffix}"
-                suffix += 1
-
-            slug = branch.replace("/", "_")
-            wt_dir = repo / _WORKTREE_SUBDIR / slug
-
-            if not GitWorktreeOps.create(repo, branch, wt_dir):
-                # pragma: no cover — git worktree add failure
-                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+            acquired = self._acquire_task_worktree(repo, original_branch)
+            if acquired is None:
                 return None
+            branch, wt_dir = acquired
 
             if not GitWorktreeOps.save_original_branch(repo, branch, original_branch):
                 # pragma: no cover — git config failure
