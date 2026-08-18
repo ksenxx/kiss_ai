@@ -517,6 +517,11 @@
       // that never arrived (see stop_button_delay_2026-08-05.html).
       isStopping: false,
       outputFragment: null,
+      // Transcripts of this chat's finished tasks, archived (as
+      // detached clones) when a new task's `clear` replaces them on
+      // screen, so the share button can export every task of the chat
+      // and not only the one whose panels are still in the DOM.
+      shareArchive: [],
       taskPanelHTML: '',
       taskPanelVisible: false,
       statusTextContent: 'Ready',
@@ -1891,6 +1896,7 @@
     '#upload-btn',
     '#tricks-btn',
     '#voice-btn',
+    '#share-btn',
     '#send-btn',
     '#stop-btn',
     '.chat-tab-add',
@@ -2471,6 +2477,7 @@
     'server-reset-confirm-cancel',
   );
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
+  const shareBtn = document.getElementById('share-btn');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
   const taskPanelCopy = document.getElementById('task-panel-copy');
@@ -5977,6 +5984,21 @@
       case 'pathsExist':
         handlePathsExist(ev);
         return;
+      case 'share_done': {
+        // share-coverage:start
+        flashShareBtn(!!ev.ok);
+        // The saved-page banner belongs to the conversation that was
+        // shared; a reply for a background tab must not write into the
+        // transcript on screen.
+        if (ev.tabId !== undefined && !isForActiveTab(ev)) break;
+        if (ev.ok) {
+          addNotice('Chat page saved to ' + (ev.path || 'reports/'));
+        } else {
+          addError('Share failed: ' + (ev.error || 'unknown error'));
+        }
+        // share-coverage:end
+        break;
+      }
       case 'status': {
         const evTab = findTabByEvt(ev);
         if (evTab) {
@@ -6180,11 +6202,17 @@
           // panels in it are about to stop existing, so they must hand
           // their sub-agent tabs in first.
           collapseNestedRunParallel(O);
+          // share-coverage:start
+          archiveTranscriptForShare(clearTab, O);
+          // share-coverage:end
           clearOutput();
           resetOutputState();
           showSpinner();
         } else if (clearTab) {
           collapseNestedRunParallel(clearTab.outputFragment);
+          // share-coverage:start
+          archiveTranscriptForShare(clearTab, clearTab.outputFragment);
+          // share-coverage:end
           forgetPendingFileLinks(clearTab.id);
           clearTab.outputFragment = null;
           clearTab.streamState = null;
@@ -6214,6 +6242,11 @@
         if (swTab) {
           if (ev.model) applyModelPick(swTabId, ev.model, 'restore');
 
+          // share-coverage:start
+          // The chat itself is being reset, so the archived task
+          // transcripts belong to a conversation that no longer exists.
+          swTab.shareArchive = [];
+          // share-coverage:end
           if (swTabId === activeTabId) {
             // Resetting the chat to the welcome screen discards its
             // transcript, fan-out panels and all; their sub-agent tabs
@@ -7131,6 +7164,91 @@
     addBanner('warn', 'Warning:', text);
   }
 
+  // share-coverage:start
+  // The UDS and WSS transports cap one frame at 64 MiB
+  // (_MAX_LINE_BYTES in web_server.py) and silently drop the
+  // connection on overflow, so an export that cannot fit — with
+  // headroom for JSON escaping and UTF-8 expansion — must be refused
+  // here, with an error the user can see, instead of being sent.
+  const SHARE_MAX_HTML_CHARS = 40 * 1024 * 1024;
+
+  /**
+   * Archive *container*'s transcript on *tab* before a new task's
+   * `clear` throws it away, so the share button can still export
+   * every task of the chat. The nodes are cloned — the caller's own
+   * teardown of the live transcript proceeds untouched — and a
+   * container with no event panel (welcome screen, spinner leftovers)
+   * archives nothing.
+   *
+   * @param {object|null} tab The chat tab owning the transcript.
+   * @param {Element|DocumentFragment|null} container The transcript
+   *     surface being replaced (#output or the tab's fragment).
+   */
+  function archiveTranscriptForShare(tab, container) {
+    if (!tab || !container || tab.isContentTab) return;
+    const holder = document.createElement('div');
+    for (let i = 0; i < container.childNodes.length; i++) {
+      const node = container.childNodes[i];
+      if (node.nodeType === 1 && node.id === 'welcome') continue;
+      holder.appendChild(node.cloneNode(true));
+    }
+    if (!holder.querySelector('.ev, .llm-panel')) return;
+    if (!tab.shareArchive) tab.shareArchive = [];
+    tab.shareArchive.push(holder);
+  }
+
+  /**
+   * Serialize the highlighted tab's chat surface — the static task
+   * panel, the archived transcripts of the chat's earlier tasks, and
+   * every event panel in #output — into the HTML body of a standalone
+   * shared page. Everything is cloned verbatim (same ids and
+   * classes), so the shared page's inlined main.css and share.js
+   * reproduce the exact panel styling and the collapse / expand
+   * behaviour; only the welcome screen (an input surface, not a
+   * panel) is dropped. Code blocks whose highlighting the webview
+   * deferred (collapsed panels, replayed history) are highlighted in
+   * the detached clone, because the shared page inlines only the
+   * highlight THEME, not highlight.js itself.
+   *
+   * @returns {string} The task panel's and transcript's outer HTML.
+   */
+  function buildShareableHtml() {
+    const holder = document.createElement('div');
+    if (taskPanel) holder.appendChild(taskPanel.cloneNode(true));
+    const out = document.createElement('div');
+    out.id = 'output';
+    const tab = getTab(activeTabId);
+    const archived = (tab && tab.shareArchive) || [];
+    for (let i = 0; i < archived.length; i++) {
+      const nodes = archived[i].childNodes;
+      for (let j = 0; j < nodes.length; j++) {
+        out.appendChild(nodes[j].cloneNode(true));
+      }
+    }
+    const live = O.cloneNode(true);
+    const w = live.querySelector('#welcome');
+    if (w) w.remove();
+    while (live.firstChild) out.appendChild(live.firstChild);
+    highlightPending(out);
+    holder.appendChild(out);
+    return holder.innerHTML;
+  }
+
+  /**
+   * Flash the share button green (saved) or red (failed) for a
+   * moment, so the click visibly landed even when the transcript's
+   * banner is off screen.
+   *
+   * @param {boolean} ok Whether the daemon saved the shared page.
+   */
+  function flashShareBtn(ok) {
+    if (!shareBtn) return;
+    const cls = ok ? 'share-ok' : 'share-err';
+    shareBtn.classList.add(cls);
+    setTimeout(() => shareBtn.classList.remove(cls), 2000);
+  }
+  // share-coverage:end
+
   function _buildRemoteUrlBar(displayUrl, isNtfy) {
     const wrapper = document.createElement('div');
     wrapper.className = 'remote-url-bar';
@@ -7781,6 +7899,29 @@
       markStopping(activeTabId, true);
       api.stop({tabId: activeTabId});
     });
+    // share-coverage:start
+    if (shareBtn) {
+      shareBtn.addEventListener('click', () => {
+        const tab = getTab(activeTabId);
+        const chatId = String((tab && tab.backendChatId) || activeTabId || '');
+        const htmlStr = buildShareableHtml();
+        if (htmlStr.length > SHARE_MAX_HTML_CHARS) {
+          addError(
+            'Share failed: this transcript is too large to export as one page',
+          );
+          flashShareBtn(false);
+          return;
+        }
+        api.shareChat({
+          tabId: activeTabId,
+          chatId: chatId,
+          title: (tab && tab.title) || 'KISS Sorcar chat',
+          html: htmlStr,
+          workDir: workDirForTab(activeTabId) || undefined,
+        });
+      });
+    }
+    // share-coverage:end
     uploadBtn.addEventListener('click', () => {
       const input = document.createElement('input');
       input.type = 'file';

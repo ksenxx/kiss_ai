@@ -238,6 +238,10 @@
   - `cmd`: The ``checkPaths`` command.
   - `ctx`: The transport context of the current call.
 
+- **share_chat** — Write a chat webview's transcript as a standalone HTML page. The chat webview serialized the highlighted tab's static task panel and event panels (its ``shareChat`` command carries the markup) and asks the daemon to save them as ``reports/chat-<chatId>.html`` under the tab's work dir.  Both transports take this path — the VS Code extension host forwards the webview's ``shareChat`` over UDS, the remote webapp sends it over WSS — so the page is built in exactly one place.  The reply is a direct ``share_done`` event to the requester.<br/>`async share_chat(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``shareChat`` command (``chatId``, ``html``, optional ``title``, ``workDir``, ``tabId``).
+  - `ctx`: The transport context of the current call.
+
 - **voice_transcribe** — Transcribe a remote-web client's post-wake utterance. A remote-web (browser mode) client heard the "Sorcar" wake word and captured the utterance that followed in the page (VS Code webviews never send this: their speech is captured and translated by the extension host's local listener).  The audio is translated with the same gpt-audio call the local listener uses and answered with the ``voiceSpeech`` message ``voice.js`` already handles.<br/>`async voice_transcribe(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``voiceTranscribe`` command carrying the audio.
   - `ctx`: The transport context of the current call.
