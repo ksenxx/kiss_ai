@@ -395,6 +395,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       () => {
         const wd = this._getWorkDir();
         this._getApi().setWorkDir(wd);
+        // The webview scopes its tab bar and history to the workspace
+        // directory; tell it directly, because the daemon answers
+        // `setWorkDir` with no `configData` the webview could learn
+        // the change from.
+        this._sendToWebview({type: 'workspaceWorkDir', workDir: wd});
       },
     );
     return client;
