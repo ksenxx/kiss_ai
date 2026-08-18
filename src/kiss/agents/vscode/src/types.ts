@@ -55,6 +55,7 @@ export type FromWebviewMessage =
       workDir?: string;
       tabId?: string;
     }
+  | {type: 'shareChatTasks'; chatId: string; tabId?: string}
   | {type: 'recordFileUsage'; path: string; workDir?: string}
   | {
       type: 'ready';
@@ -165,6 +166,13 @@ type ToWebviewMessageBody =
       workDir?: string;
     }
   | {type: 'share_done'; ok: boolean; path?: string; error?: string}
+  | {
+      type: 'share_tasks';
+      chatId: string;
+      tasks: Array<{task: string; task_id: string; events: unknown[]}>;
+      truncated?: boolean;
+      tabId?: string;
+    }
   | {
       type: 'result';
       text?: string;
@@ -375,7 +383,8 @@ export interface AgentCommand {
     | 'getConfig'
     | 'saveConfig'
     | 'serverReset'
-    | 'shareChat';
+    | 'shareChat'
+    | 'shareChatTasks';
   prompt?: string;
   model?: string;
   workDir?: string;

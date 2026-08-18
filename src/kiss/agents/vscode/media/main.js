@@ -517,11 +517,6 @@
       // that never arrived (see stop_button_delay_2026-08-05.html).
       isStopping: false,
       outputFragment: null,
-      // Transcripts of this chat's finished tasks, archived (as
-      // detached clones) when a new task's `clear` replaces them on
-      // screen, so the share button can export every task of the chat
-      // and not only the one whose panels are still in the DOM.
-      shareArchive: [],
       taskPanelHTML: '',
       taskPanelVisible: false,
       statusTextContent: 'Ready',
@@ -2860,37 +2855,41 @@
    * the replay so file links are cached and stamped against that tab rather
    * than against whichever tab happens to be on screen.
    */
-  function renderAdjacentTask(direction, task, events, taskId, ownerTabId) {
-    removeAdjacentLoader();
-    adjacentLoading = false;
-    // taskwheel-coverage:start
-    const wheelScrollPending = taskWheelPendingDir === direction;
-    taskWheelPendingDir = '';
-    // taskwheel-coverage:end
-
-    const hasTaskId = taskId !== undefined && taskId !== null && taskId !== '';
-    if (!hasTaskId && !task) {
-      if (direction === 'prev') noPrevTask = true;
-      else noNextTask = true;
-      return;
-    }
-
-    const taskLabel = task || '(untitled task)';
-
+  /**
+   * Replay *events* into a detached `.adjacent-task` container through
+   * the very renderers the live stream uses, and put the live view's
+   * numbers back afterwards. Shared by renderAdjacentTask (which
+   * splices the container into #output) and the share export (which
+   * serializes one container per persisted task of the chat).
+   *
+   * The container carries the `adjacent-task` class WHILE the replay
+   * runs: the collapse passes and the file-link stamping skip
+   * everything inside such a container, so the replay can never adopt
+   * or close a live sub-agent tab. The metrics the replay walked are
+   * left on the container's dataset (metricTokens / metricBudget /
+   * metricSteps) for renderAdjacentTask's region bookkeeping.
+   *
+   * @param {Array<object>} events The transcript to replay.
+   * @param {string|undefined} ownerTabId The tab the transcript
+   *     belongs to; file links are cached and stamped against it.
+   * @returns {Element} The detached container.
+   */
+  function replayDetachedTranscript(events, ownerTabId) {
     const container = mkEl('div', 'adjacent-task');
-    container.dataset.task = taskLabel;
-    if (hasTaskId) container.dataset.taskId = String(taskId);
-
     const savedTokens = statusTokens ? statusTokens.textContent : '';
     const savedBudget = statusBudget ? statusBudget.textContent : '';
     const savedSteps = statusSteps ? statusSteps.textContent : '';
     // visibletask-coverage:start
-    // The replay below renders a neighbour's transcript through the very
-    // renderers the live stream uses, so it walks the live task's step
-    // counter and metrics along with it. They are put back afterwards.
+    // The replay below renders another task's transcript through the
+    // very renderers the live stream uses, so it walks the live task's
+    // step counter and metrics along with it. They are put back
+    // afterwards — and so is the tab's failure flag, which a replayed
+    // task's OWN failed result would otherwise pin onto the tab.
     const savedMetrics = currentTaskMetrics;
     const savedStepCount = stepCount;
     const savedVisibleTab = activeTabId;
+    const savedTab = getTab(activeTabId);
+    const savedTaskFailed = savedTab ? savedTab.lastTaskFailed : false;
     currentTaskMetrics = {tokens: '', budget: '', steps: ''};
     // visibletask-coverage:end
     if (events && events.length > 0) {
@@ -2899,11 +2898,6 @@
         ownerTabId: ownerTabId || activeTabId,
       });
       // tableak-coverage:end
-    }
-    if (!container.firstChild) {
-      const ph = mkEl('div', 'adjacent-task-placeholder');
-      ph.textContent = taskLabel + ' — (no output recorded)';
-      container.appendChild(ph);
     }
     container.dataset.metricTokens = statusTokens
       ? statusTokens.textContent
@@ -2921,8 +2915,37 @@
     if (activeTabId === savedVisibleTab) {
       currentTaskMetrics = savedMetrics;
       stepCount = savedStepCount;
+      if (savedTab) savedTab.lastTaskFailed = savedTaskFailed;
     }
     // visibletask-coverage:end
+    return container;
+  }
+
+  function renderAdjacentTask(direction, task, events, taskId, ownerTabId) {
+    removeAdjacentLoader();
+    adjacentLoading = false;
+    // taskwheel-coverage:start
+    const wheelScrollPending = taskWheelPendingDir === direction;
+    taskWheelPendingDir = '';
+    // taskwheel-coverage:end
+
+    const hasTaskId = taskId !== undefined && taskId !== null && taskId !== '';
+    if (!hasTaskId && !task) {
+      if (direction === 'prev') noPrevTask = true;
+      else noNextTask = true;
+      return;
+    }
+
+    const taskLabel = task || '(untitled task)';
+
+    const container = replayDetachedTranscript(events, ownerTabId);
+    container.dataset.task = taskLabel;
+    if (hasTaskId) container.dataset.taskId = String(taskId);
+    if (!container.firstChild) {
+      const ph = mkEl('div', 'adjacent-task-placeholder');
+      ph.textContent = taskLabel + ' — (no output recorded)';
+      container.appendChild(ph);
+    }
 
     if (direction === 'prev') {
       const prevScrollHeight = O.scrollHeight;
@@ -3229,6 +3252,14 @@
   const _pendingPathChecks = new Set();
   const _pendingFileLinkSpans = new Set();
 
+  // share-coverage:start
+  // Raised while a share export replays persisted tasks into detached
+  // containers: their file-path spans can never be clicked, so
+  // registering them would leak detached nodes into
+  // _pendingFileLinkSpans and post needless checkPaths commands.
+  let _suppressFileLinkChecks = false;
+  // share-coverage:end
+
   // tableak-coverage:start
   // Keyed by tab as well as workDir: a check in flight for one tab must
   // not suppress the same check for another, or that tab's links stay
@@ -3282,6 +3313,9 @@
   }
 
   function verifyFileLinkCandidates(root, workDir, ownerTabId) {
+    // share-coverage:start
+    if (_suppressFileLinkChecks) return;
+    // share-coverage:end
     const spans = root.querySelectorAll('[data-path-candidate]');
     if (!spans.length) return;
     const wd =
@@ -5984,6 +6018,26 @@
       case 'pathsExist':
         handlePathsExist(ev);
         return;
+      case 'share_tasks': {
+        // share-coverage:start
+        // The export splices the transcript on screen into the chat's
+        // persisted tasks, so a reply for a tab that is no longer
+        // highlighted would serialize the WRONG screen: it is dropped,
+        // and that tab's share button can simply be clicked again.
+        if (ev.tabId !== undefined && !isForActiveTab(ev)) break;
+        if (ev.error) {
+          addError('Share failed: ' + ev.error);
+          flashShareBtn(false);
+          break;
+        }
+        const stTab = getTab(activeTabId);
+        const stChatId = String(
+          ev.chatId || (stTab && stTab.backendChatId) || activeTabId || '',
+        );
+        sendShareExport(stChatId, ev.tasks || [], !!ev.truncated);
+        // share-coverage:end
+        break;
+      }
       case 'share_done': {
         // share-coverage:start
         flashShareBtn(!!ev.ok);
@@ -6202,17 +6256,11 @@
           // panels in it are about to stop existing, so they must hand
           // their sub-agent tabs in first.
           collapseNestedRunParallel(O);
-          // share-coverage:start
-          archiveTranscriptForShare(clearTab, O);
-          // share-coverage:end
           clearOutput();
           resetOutputState();
           showSpinner();
         } else if (clearTab) {
           collapseNestedRunParallel(clearTab.outputFragment);
-          // share-coverage:start
-          archiveTranscriptForShare(clearTab, clearTab.outputFragment);
-          // share-coverage:end
           forgetPendingFileLinks(clearTab.id);
           clearTab.outputFragment = null;
           clearTab.streamState = null;
@@ -6241,12 +6289,6 @@
         const swTab = getTab(swTabId);
         if (swTab) {
           if (ev.model) applyModelPick(swTabId, ev.model, 'restore');
-
-          // share-coverage:start
-          // The chat itself is being reset, so the archived task
-          // transcripts belong to a conversation that no longer exists.
-          swTab.shareArchive = [];
-          // share-coverage:end
           if (swTabId === activeTabId) {
             // Resetting the chat to the welcome screen discards its
             // transcript, fan-out panels and all; their sub-agent tabs
@@ -7165,73 +7207,237 @@
   }
 
   // share-coverage:start
-  // The UDS and WSS transports cap one frame at 64 MiB
-  // (_MAX_LINE_BYTES in web_server.py) and silently drop the
-  // connection on overflow, so an export that cannot fit — with
-  // headroom for JSON escaping and UTF-8 expansion — must be refused
-  // here, with an error the user can see, instead of being sent.
-  const SHARE_MAX_HTML_CHARS = 40 * 1024 * 1024;
+  // The daemon reads one frame of at most 64 MiB (_MAX_LINE_BYTES in
+  // web_server.py) and silently drops the connection on overflow, so
+  // an export that cannot fit — measured as the REAL UTF-8 byte
+  // length of the JSON-escaped html, with headroom for the envelope —
+  // must be refused here, with an error the user can see.
+  const SHARE_MAX_HTML_JSON_BYTES = 56 * 1024 * 1024;
 
   /**
-   * Archive *container*'s transcript on *tab* before a new task's
-   * `clear` throws it away, so the share button can still export
-   * every task of the chat. The nodes are cloned — the caller's own
-   * teardown of the live transcript proceeds untouched — and a
-   * container with no event panel (welcome screen, spinner leftovers)
-   * archives nothing.
+   * The UTF-8 byte length of *str* — what the transport actually
+   * counts. `str.length` counts UTF-16 units: quotes and backslashes
+   * that JSON escaping doubles, and non-ASCII text that UTF-8 widens,
+   * would slip past a character-based cap and overflow the frame.
    *
-   * @param {object|null} tab The chat tab owning the transcript.
-   * @param {Element|DocumentFragment|null} container The transcript
-   *     surface being replaced (#output or the tab's fragment).
+   * @param {string} str The string to measure.
+   * @returns {number} Its UTF-8 encoding's byte length.
    */
-  function archiveTranscriptForShare(tab, container) {
-    if (!tab || !container || tab.isContentTab) return;
-    const holder = document.createElement('div');
-    for (let i = 0; i < container.childNodes.length; i++) {
-      const node = container.childNodes[i];
-      if (node.nodeType === 1 && node.id === 'welcome') continue;
-      holder.appendChild(node.cloneNode(true));
+  function utf8ByteLength(str) {
+    let bytes = 0;
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      if (c < 0x80) bytes += 1;
+      else if (c < 0x800) bytes += 2;
+      else if (c >= 0xd800 && c < 0xdc00) {
+        // A surrogate pair encodes as one 4-byte sequence; count it
+        // here and skip its low half.
+        bytes += 4;
+        i++;
+      } else bytes += 3;
     }
-    if (!holder.querySelector('.ev, .llm-panel')) return;
-    if (!tab.shareArchive) tab.shareArchive = [];
-    tab.shareArchive.push(holder);
+    return bytes;
   }
 
   /**
-   * Serialize the highlighted tab's chat surface — the static task
-   * panel, the archived transcripts of the chat's earlier tasks, and
-   * every event panel in #output — into the HTML body of a standalone
-   * shared page. Everything is cloned verbatim (same ids and
-   * classes), so the shared page's inlined main.css and share.js
-   * reproduce the exact panel styling and the collapse / expand
-   * behaviour; only the welcome screen (an input surface, not a
-   * panel) is dropped. Code blocks whose highlighting the webview
-   * deferred (collapsed panels, replayed history) are highlighted in
-   * the detached clone, because the shared page inlines only the
+   * Synthesize one static task panel for the shared page, showing
+   * *taskText*. The live #task-panel is cloned as the template (same
+   * id, classes and buttons, so the page's inlined main.css and
+   * share.js style and drive every copy alike) and reset to the
+   * expanded, visible state. The text element alone gets a per-task
+   * unique id so each drawer button's aria-controls names ITS text —
+   * assistive technology cannot resolve a duplicated id (the styling
+   * ids stay duplicated on purpose: main.css keys on them, and
+   * share.js scopes every interaction with closest()).
+   *
+   * @param {string} taskText The task's description text.
+   * @param {number} seq 1-based position of the task on the page.
+   * @returns {Element|null} The panel, or null without a template.
+   */
+  function shareTaskPanel(taskText, seq) {
+    if (!taskPanel) return null;
+    const panel = taskPanel.cloneNode(true);
+    panel.classList.add('visible');
+    panel.classList.remove('drawer-collapsed');
+    const textId = 'task-panel-text-' + seq;
+    const txt = panel.querySelector('#task-panel-text');
+    if (txt) {
+      txt.textContent = taskText;
+      txt.id = textId;
+      // The live panel's hover tooltip names the task on SCREEN; the
+      // static page has no tooltip machinery, so the leftover
+      // attribute would only mislead anyone reading the markup.
+      txt.removeAttribute('data-tooltip');
+    }
+    const btn = panel.querySelector('#task-panel-drawer-btn');
+    if (btn) {
+      btn.setAttribute('aria-expanded', 'true');
+      btn.setAttribute('aria-label', 'Collapse task panel');
+      if (txt) btn.setAttribute('aria-controls', textId);
+    }
+    return panel;
+  }
+
+  /**
+   * Clone the transcript on screen for the share export. The welcome
+   * screen (an input surface, not a panel) is dropped, and so are the
+   * spliced-in `.adjacent-task` neighbours and their loader — those
+   * tasks are exported from their own persisted transcripts, so
+   * keeping the splices would print them twice.
+   *
+   * @returns {Element} A detached holder of the cloned transcript.
+   */
+  function shareLiveTranscript() {
+    const live = O.cloneNode(true);
+    const drop = live.querySelectorAll(
+      '#welcome, #adjacent-loader, .adjacent-task',
+    );
+    for (let i = 0; i < drop.length; i++) drop[i].remove();
+    return live;
+  }
+
+  /**
+   * Wrap one task of the chat — its synthesized static task panel and
+   * the children of *body* — into a `.share-task` section of the
+   * shared page.
+   *
+   * @param {string} taskText The task's description text.
+   * @param {Element} body Holder whose children are the transcript.
+   * @param {number} seq 1-based position of the task on the page.
+   * @returns {Element} The assembled section.
+   */
+  function shareTaskSection(taskText, body, seq) {
+    const section = document.createElement('div');
+    section.className = 'share-task';
+    const panel = shareTaskPanel(taskText || '(untitled task)', seq);
+    if (panel) section.appendChild(panel);
+    while (body.firstChild) section.appendChild(body.firstChild);
+    return section;
+  }
+
+  /**
+   * Build the HTML body of the standalone shared page: one section
+   * per task of the chat, oldest first — every section a static task
+   * panel above the task's transcript. *tasks* is the chat's
+   * persisted task list from the daemon's `share_tasks` reply; the
+   * task on screen contributes the live DOM (a running task's newest
+   * panels are not in the database yet) and every other task replays
+   * its persisted events through the live renderers, so the shared
+   * page's inlined main.css and share.js reproduce the exact panel
+   * styling and collapse / expand behaviour. Code blocks whose
+   * highlighting was deferred (collapsed panels, replayed history)
+   * are highlighted here, because the shared page inlines only the
    * highlight THEME, not highlight.js itself.
    *
-   * @returns {string} The task panel's and transcript's outer HTML.
+   * @param {Array<object>} tasks The chat's persisted tasks, oldest
+   *     first, each {task, task_id, events}.
+   * @returns {string} The share page body's HTML, or '' when neither
+   *     the tasks nor the screen have anything to share.
    */
-  function buildShareableHtml() {
-    const holder = document.createElement('div');
-    if (taskPanel) holder.appendChild(taskPanel.cloneNode(true));
+  function buildShareableHtml(tasks) {
+    // The module-level id, deliberately WITHOUT a tab-state fallback:
+    // a new task's setTaskText nulls it but leaves the tab's field on
+    // the PREVIOUS task, and a stale match would hand that task's
+    // section the new task's live panels.
+    const liveId = currentTaskId ? String(currentTaskId) : '';
     const out = document.createElement('div');
     out.id = 'output';
-    const tab = getTab(activeTabId);
-    const archived = (tab && tab.shareArchive) || [];
-    for (let i = 0; i < archived.length; i++) {
-      const nodes = archived[i].childNodes;
-      for (let j = 0; j < nodes.length; j++) {
-        out.appendChild(nodes[j].cloneNode(true));
+    let liveUsed = false;
+    const list = tasks || [];
+    _suppressFileLinkChecks = true;
+    try {
+      for (let i = 0; i < list.length; i++) {
+        const t = list[i] || {};
+        const tid =
+          t.task_id === undefined || t.task_id === null
+            ? ''
+            : String(t.task_id);
+        let body;
+        if (liveId && tid === liveId) {
+          body = shareLiveTranscript();
+          liveUsed = true;
+        } else {
+          body = replayDetachedTranscript(t.events || [], activeTabId);
+          body.classList.remove('adjacent-task');
+        }
+        out.appendChild(shareTaskSection(t.task, body, i + 1));
+      }
+    } finally {
+      _suppressFileLinkChecks = false;
+    }
+    if (!liveUsed) {
+      const live = shareLiveTranscript();
+      if (live.querySelector('.ev, .llm-panel')) {
+        const last = out.lastElementChild;
+        if (last && !last.querySelector('.ev, .llm-panel')) {
+          // A task the daemon listed without events while the screen
+          // is streaming panels is that same task mid-write (its row
+          // lands in the database at start, its events follow): the
+          // live DOM completes the section instead of duplicating the
+          // task at the end of the page.
+          while (live.firstChild) last.appendChild(live.firstChild);
+        } else {
+          // The screen shows a task the database does not know at
+          // all (the chat was never persisted). It is the chat's
+          // newest surface, so it closes the page.
+          out.appendChild(
+            shareTaskSection(currentTaskName, live, list.length + 1),
+          );
+        }
       }
     }
-    const live = O.cloneNode(true);
-    const w = live.querySelector('#welcome');
-    if (w) w.remove();
-    while (live.firstChild) out.appendChild(live.firstChild);
+    // A task can legitimately have no recorded output; its section
+    // (the task text is content in itself) says so instead of being
+    // silently dropped.
+    const sections = out.children;
+    for (let i = 0; i < sections.length; i++) {
+      if (sections[i].querySelector('.ev, .llm-panel')) continue;
+      const ph = mkEl('div', 'adjacent-task-placeholder');
+      ph.textContent = '(no output recorded)';
+      sections[i].appendChild(ph);
+    }
+    if (!out.firstChild) return '';
     highlightPending(out);
-    holder.appendChild(out);
-    return holder.innerHTML;
+    return out.outerHTML;
+  }
+
+  /**
+   * Assemble the shared page's body from *tasks* plus the screen and
+   * hand it to the daemon as a `shareChat` command — the shared tail
+   * of the two export triggers (the `share_tasks` reply for a chat
+   * tab, the direct click path for a sub-agent tab). An empty or
+   * oversized export is refused with a visible error instead.
+   *
+   * @param {string} chatId The chat id naming the page's file.
+   * @param {Array<object>} tasks The chat's persisted tasks.
+   * @param {boolean} truncated Whether the daemon dropped old tasks.
+   */
+  function sendShareExport(chatId, tasks, truncated) {
+    const tab = getTab(activeTabId);
+    const htmlStr = buildShareableHtml(tasks);
+    if (!htmlStr) {
+      addError('Share failed: the chat is empty');
+      flashShareBtn(false);
+      return;
+    }
+    if (utf8ByteLength(JSON.stringify(htmlStr)) > SHARE_MAX_HTML_JSON_BYTES) {
+      addError('Share failed: this chat is too large to export as one page');
+      flashShareBtn(false);
+      return;
+    }
+    if (truncated) {
+      addWarning(
+        'The chat is too large to export whole: the shared page ' +
+          'holds only its most recent tasks.',
+      );
+    }
+    api.shareChat({
+      tabId: activeTabId,
+      chatId: chatId,
+      title: (tab && tab.title) || 'KISS Sorcar chat',
+      html: htmlStr,
+      workDir: workDirForTab(activeTabId) || undefined,
+    });
   }
 
   /**
@@ -7903,22 +8109,21 @@
     if (shareBtn) {
       shareBtn.addEventListener('click', () => {
         const tab = getTab(activeTabId);
-        const chatId = String((tab && tab.backendChatId) || activeTabId || '');
-        const htmlStr = buildShareableHtml();
-        if (htmlStr.length > SHARE_MAX_HTML_CHARS) {
-          addError(
-            'Share failed: this transcript is too large to export as one page',
-          );
-          flashShareBtn(false);
+        if (tab && tab.isSubagentTab) {
+          // A sub-agent tab shows one fan-out worker's transcript,
+          // not the chat: its rows are deliberately absent from the
+          // chat's task list, so it exports its own screen — under
+          // its own file name, never over the parent chat's page.
+          sendShareExport(String(tab.id), [], false);
           return;
         }
-        api.shareChat({
-          tabId: activeTabId,
-          chatId: chatId,
-          title: (tab && tab.title) || 'KISS Sorcar chat',
-          html: htmlStr,
-          workDir: workDirForTab(activeTabId) || undefined,
-        });
+        // The page must show ALL tasks of the chat, and after a
+        // reload the DOM holds only the one task the session replay
+        // repainted — so the daemon is asked for every persisted
+        // transcript of the chat first; the export is assembled in
+        // the `share_tasks` reply handler.
+        const chatId = String((tab && tab.backendChatId) || activeTabId || '');
+        api.shareChatTasks({tabId: activeTabId, chatId: chatId});
       });
     }
     // share-coverage:end
