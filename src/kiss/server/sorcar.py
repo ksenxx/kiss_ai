@@ -261,6 +261,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("recordFileUsage", required=("path",)),
     ApiCommand("openFile", required=("path",), handler="open_file"),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
+    ApiCommand("shareChat", required=("chatId", "html"), handler="share_chat"),
     ApiCommand("complete", required=("query",)),
     ApiCommand("worktreeAction", required=("action",)),
     ApiCommand("generateCommitMessage"),
@@ -423,6 +424,10 @@ class ServerBackend(Protocol):
     async def _run_cmd(self, cmd: dict[str, Any]) -> None: ...
 
     async def _handle_open_file(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_share_chat(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
@@ -850,6 +855,26 @@ class ServerApi:
         if ctx.is_uds:
             return
         await self._backend._handle_check_paths(cmd, ctx.endpoint)
+
+    async def share_chat(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Write a chat webview's transcript as a standalone HTML page.
+
+        The chat webview serialized the highlighted tab's static task
+        panel and event panels (its ``shareChat`` command carries the
+        markup) and asks the daemon to save them as
+        ``reports/chat-<chatId>.html`` under the tab's work dir.  Both
+        transports take this path — the VS Code extension host
+        forwards the webview's ``shareChat`` over UDS, the remote
+        webapp sends it over WSS — so the page is built in exactly one
+        place.  The reply is a direct ``share_done`` event to the
+        requester.
+
+        Args:
+            cmd: The ``shareChat`` command (``chatId``, ``html``,
+                optional ``title``, ``workDir``, ``tabId``).
+            ctx: The transport context of the current call.
+        """
+        await self._backend._handle_share_chat(cmd, ctx.endpoint)
 
     async def voice_transcribe(
         self, cmd: dict[str, Any], ctx: ApiContext,
