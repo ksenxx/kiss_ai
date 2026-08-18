@@ -635,6 +635,8 @@ LAUNCH_KWARG_NAMES = frozenset(
         "web_tools",
         "is_parallel",
         "append_basic_tools",
+        "append_to_system_prompt",
+        "append_to_prompt",
         "timeout",
         "sock_path",
     }
@@ -780,7 +782,9 @@ class BaseChannelAgent:
             **kwargs: Launcher keyword arguments (``model_name``,
                 ``work_dir``, ``max_budget``, ``tools``,
                 ``use_worktree``, ``model_config``, ``web_tools``,
-                ``is_parallel``, ``timeout``, ``sock_path``).
+                ``is_parallel``, ``append_basic_tools``,
+                ``append_to_system_prompt``, ``append_to_prompt``,
+                ``timeout``, ``sock_path``).
 
         Returns:
             YAML string with 'success' and 'summary' keys.

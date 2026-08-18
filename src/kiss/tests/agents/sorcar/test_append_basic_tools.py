@@ -44,8 +44,15 @@ from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.agents.sorcar.test_agent_path import _init_repo
 
 
-class AppendBasicToolsApiTest(unittest.TestCase):
-    """Drive ``sorcar.run(append_basic_tools=...)`` against a real daemon."""
+class DaemonRunApiHarness(unittest.TestCase):
+    """Shared real-daemon harness for ``sorcar.run`` end-to-end suites.
+
+    Owns the temporary repo + UDS daemon lifecycle, the recording
+    executor-LLM stub, and the raw-socket ``run`` driver.  Test suites
+    (this module's ``append_basic_tools`` tests, the
+    ``append_to_system_prompt``/``append_to_prompt`` tests in
+    ``test_append_to_prompts``) subclass it and add only test methods.
+    """
 
     def setUp(self) -> None:
         # Resolved: macOS mkdtemp returns a symlinked /var/... path while
@@ -187,10 +194,10 @@ class AppendBasicToolsApiTest(unittest.TestCase):
         Args:
             calls: List receiving, per agentic ``KISSAgent.run``
                 invocation, a dict with the ``tool_names`` handed to
-                the session and the call's ``arguments`` (the
+                the session, the call's ``arguments`` (the
                 task-executor calls carry ``task_description``, the
                 failure-path trajectory summarizer carries
-                ``trajectory_path``).
+                ``trajectory_path``), and the call's ``system_prompt``.
             fail_first_executor: When True, the FIRST task-executor
                 session raises a retryable :class:`KISSError` after
                 two steps, driving ``RelentlessAgent.perform_task``
@@ -218,6 +225,7 @@ class AppendBasicToolsApiTest(unittest.TestCase):
                     getattr(t, "__name__", "?") for t in tools
                 ],
                 "arguments": arguments,
+                "system_prompt": str(kwargs.get("system_prompt") or ""),
             })
             self_agent.total_tokens_used = 1
             self_agent.budget_used = 0.0001
@@ -288,16 +296,23 @@ class AppendBasicToolsApiTest(unittest.TestCase):
             ''',
         )
 
-    def _raw_daemon_run(self, extra_cmd: dict[str, Any]) -> None:
+    def _raw_daemon_run(
+        self,
+        extra_cmd: dict[str, Any],
+        events_out: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Drive one raw ``run`` command over the UDS and wait for the end.
 
         Bypasses :func:`kiss.server.sorcar.run` so an absent or
-        malformed ``appendBasicTools`` field can be sent exactly as an
-        arbitrary/buggy client would (the Python client always sends
-        the field).
+        malformed wire field (``appendBasicTools``,
+        ``appendToSystemPrompt``, ``appendToPrompt``) can be sent
+        exactly as an arbitrary/buggy client would (the Python client
+        always sends the fields).
 
         Args:
             extra_cmd: Raw fields merged into the ``run`` command.
+            events_out: Optional list receiving every event the daemon
+                emitted for this run's tab, in order.
         """
         tab_id = f"raw-{uuid.uuid4().hex}"
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -320,7 +335,11 @@ class AppendBasicToolsApiTest(unittest.TestCase):
             started = False
             while True:
                 event = json.loads(reader.readline())
-                if event.get("tabId") != tab_id or event.get("type") != "status":
+                if event.get("tabId") != tab_id:
+                    continue
+                if events_out is not None:
+                    events_out.append(event)
+                if event.get("type") != "status":
                     continue
                 if event.get("running"):
                     started = True
@@ -328,6 +347,10 @@ class AppendBasicToolsApiTest(unittest.TestCase):
                     return
         finally:
             sock.close()
+
+
+class AppendBasicToolsApiTest(DaemonRunApiHarness):
+    """Drive ``sorcar.run(append_basic_tools=...)`` against a real daemon."""
 
     def test_default_appends_basic_tools(self) -> None:
         """Without the parameter, the built-in basic toolset is added.

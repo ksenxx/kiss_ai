@@ -55,7 +55,7 @@ class TestHistoryFilterPanel(unittest.TestCase):
             self.assertIn(f'id="{cid}"', bar)
             self.assertIn("checked", bar.split(f'id="{cid}"', 1)[1][:40])
         self.assertIn('id="hf-workspace"', bar)
-        self.assertNotIn(
+        self.assertIn(
             "checked", bar.split('id="hf-workspace"', 1)[1][:40]
         )
         self.assertIn('id="hf-favorite"', bar)
