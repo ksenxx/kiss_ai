@@ -66,7 +66,7 @@ class TestCodexStreamTimeout:
         # The directory-level conftest stubs _find_codex_cli with a fake
         # /usr/bin path; point it at the stand-in above so the adapter
         # actually spawns it (same pattern as install_cli in
-        # kiss.tests.core.test_cli_subprocess_lifecycle).
+        # kiss.tests.core.models.test_cli_subprocess_lifecycle).
         saved_locator = codex_module._find_codex_cli
         try:
             os.environ["PATH"] = str(tmp_path) + ":" + saved_path
@@ -101,7 +101,7 @@ class TestCodexStreamTimeout:
         # The directory-level conftest stubs _find_codex_cli with a fake
         # /usr/bin path; point it at the stand-in above so the adapter
         # actually spawns it (same pattern as install_cli in
-        # kiss.tests.core.test_cli_subprocess_lifecycle).
+        # kiss.tests.core.models.test_cli_subprocess_lifecycle).
         saved_locator = codex_module._find_codex_cli
         try:
             os.environ["PATH"] = str(tmp_path) + ":" + saved_path

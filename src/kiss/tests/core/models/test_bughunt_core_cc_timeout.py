@@ -41,7 +41,7 @@ def _install_fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     # The directory-level conftest stubs _find_claude_cli with a fake
     # /usr/bin path; point it at the stand-in above so the adapter
     # actually spawns it (same pattern as install_cli in
-    # kiss.tests.core.test_cli_subprocess_lifecycle).
+    # kiss.tests.core.models.test_cli_subprocess_lifecycle).
     import kiss.core.models.claude_code_model as cc_mod
 
     monkeypatch.setattr(cc_mod, "_find_claude_cli", lambda: str(cli), raising=False)

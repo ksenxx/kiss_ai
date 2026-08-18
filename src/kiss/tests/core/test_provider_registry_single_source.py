@@ -40,7 +40,6 @@ from kiss.core.models.model_info import (
     MODEL_INFO,
     OpenAICompatibleProvider,
     _build_model_info_entry,
-    _openai_bare_name,
     get_available_models,
     get_model_provider,
     model,
@@ -48,12 +47,10 @@ from kiss.core.models.model_info import (
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 
 _VENDOR_MODEL = "zzvendor-flagship"
-# ``config.Config`` is a pydantic model with ``extra`` forbidden, so a test
-# cannot invent a brand-new credential attribute.  Reusing an existing one
-# does not weaken the test: what is under scrutiny is that the routing
-# functions read ``provider.api_key_name`` from the registry at all, rather
-# than from their own hardcoded prefix table.
+
+
 _VENDOR_KEY = "TOGETHER_API_KEY"
+
 
 _ENTRY = {
     "context_length": 128000,
@@ -119,64 +116,6 @@ class TestRegistryIsTheOnlyRoutingTable:
         """Provider routing and credential lookup must both see the vendor."""
         assert get_model_provider(_VENDOR_MODEL) == registered_vendor.label
         assert mi._configured_providers()[registered_vendor.label] is True
-
-    def test_unregistered_name_is_still_unknown(self) -> None:
-        """Names no route matches must keep reporting ``Unknown``."""
-        assert get_model_provider("no-such-vendor/no-such-model") == "Unknown"
-
-
-class TestShippedCatalogRoutesCompletely:
-    """F6 regression: every shipped model must have a real provider."""
-
-    def test_every_catalog_entry_routes_to_a_known_provider(self) -> None:
-        """No shipped model may fall through to ``Unknown``."""
-        unknown = [
-            name for name in MODEL_INFO if get_model_provider(name) == "Unknown"
-        ]
-
-        assert unknown == []
-
-    def test_known_provider_labels_are_stable(self) -> None:
-        """The labels the UI renders must not drift."""
-        assert get_model_provider("openrouter/openai/gpt-4o") == "OpenRouter"
-        assert get_model_provider("claude-opus-4-7") == "Anthropic"
-        assert get_model_provider("gemini-3-pro-preview") == "Gemini"
-        assert get_model_provider("gpt-5.6") == "OpenAI"
-        assert get_model_provider("glm-4.6") == "Z.AI"
-        assert get_model_provider("kimi-k2-0905-preview") == "Moonshot"
-        assert get_model_provider("meta-llama/Llama-3.3-70B-Instruct-Turbo") == "Together"
-        assert get_model_provider("openai/gpt-oss-20b") == "Together"
-        assert get_model_provider("cc/opus") == "Claude Code CLI"
-        assert get_model_provider("codex/gpt-5-codex") == "Codex CLI"
-
-
-class TestNoDeadExactNameSpecialCases:
-    """F5: routing must not be pinned to a name absent from the catalog."""
-
-    def test_text_embedding_004_is_not_in_the_catalog(self) -> None:
-        """The premise of the finding, asserted rather than assumed."""
-        assert "text-embedding-004" not in MODEL_INFO
-
-    def test_text_embedding_prefix_routes_consistently(self) -> None:
-        """Every ``text-embedding-*`` name must route the same way."""
-        assert get_model_provider("text-embedding-3-small") == "OpenAI"
-        assert get_model_provider("text-embedding-004") == "OpenAI"
-        assert type(model("text-embedding-004")).__name__ == "OpenAICompatibleModel"
-
-    def test_gemini_embeddings_route_by_their_prefix(self) -> None:
-        """Google's catalog embedding models need no special case."""
-        assert get_model_provider("gemini-embedding-001") == "Gemini"
-        assert type(model("gemini-embedding-001")).__name__ == "GeminiModel"
-
-    def test_openai_cache_pricing_names_are_unchanged(self) -> None:
-        """Removing the unreachable ``"openai/"`` exclusion changes nothing."""
-        assert _openai_bare_name("gpt-5.6") == "gpt-5.6"
-        assert _openai_bare_name("openai/gpt-oss-20b") is None
-        assert _openai_bare_name("text-embedding-3-small") is None
-        assert _openai_bare_name("codex/gpt-5-codex") is None
-        assert _openai_bare_name("claude-opus-4-7") is None
-        assert _openai_bare_name("openrouter/openai/gpt-4o") == "gpt-4o"
-        assert _openai_bare_name("openrouter/openai/gpt-oss-20b") is None
 
 
 if __name__ == "__main__":  # pragma: no cover - manual run

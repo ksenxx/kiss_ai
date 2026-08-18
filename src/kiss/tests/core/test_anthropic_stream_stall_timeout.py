@@ -2,6 +2,8 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
+# ruff: noqa: F811  (the `stall_server` module fixture is imported from
+# the core/models twin of this file and injected via test parameters)
 """End-to-end tests: a stalled Anthropic stream must not hang the agent.
 
 Bug reproduction ("task stuck in thinking", production failure at
@@ -61,284 +63,26 @@ code the tests FAIL fast instead of hanging CI.
 
 from __future__ import annotations
 
-import json
-import threading
-import time
-from collections.abc import Callable, Generator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
-
 import pytest
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.model_info import MODEL_INFO, ModelInfo
-
-_MODEL = "claude-stall-under-test"
-_STALL_TIMEOUT = 1.5
-_FAST_FAIL_BUDGET = 30.0
-
-_OPENAI_FINISH_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "finish",
-        "description": "Finish the task",
-        "parameters": {
-            "type": "object",
-            "properties": {"result": {"type": "string"}},
-            "required": ["result"],
-        },
-    },
-}
-
-
-def _sse(event_type: str, payload: dict[str, Any]) -> bytes:
-    return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n".encode()
-
-
-def _message_start(model_name: str) -> bytes:
-    return _sse(
-        "message_start",
-        {
-            "type": "message_start",
-            "message": {
-                "id": "msg_test",
-                "type": "message",
-                "role": "assistant",
-                "content": [],
-                "model": model_name,
-                "stop_reason": None,
-                "stop_sequence": None,
-                "usage": {"input_tokens": 10, "output_tokens": 1},
-            },
-        },
-    )
-
-
-def _thinking_block_prefix(model_name: str) -> list[bytes]:
-    """A turn that STARTS thinking (start + one delta) and never finishes."""
-    return [
-        _message_start(model_name),
-        _sse(
-            "content_block_start",
-            {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
-            },
-        ),
-        _sse(
-            "content_block_delta",
-            {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {"type": "thinking_delta", "thinking": "Let me think…"},
-            },
-        ),
-    ]
-
-
-def _finish_tool_stream(model_name: str) -> list[bytes]:
-    """A normal agentic turn: one ``finish`` tool_use block."""
-    return [
-        _message_start(model_name),
-        _sse(
-            "content_block_start",
-            {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {
-                    "type": "tool_use",
-                    "id": "toolu_finish",
-                    "name": "finish",
-                    "input": {},
-                },
-            },
-        ),
-        _sse(
-            "content_block_delta",
-            {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {
-                    "type": "input_json_delta",
-                    "partial_json": '{"result": "recovered"}',
-                },
-            },
-        ),
-        _sse("content_block_stop", {"type": "content_block_stop", "index": 0}),
-        _sse(
-            "message_delta",
-            {
-                "type": "message_delta",
-                "delta": {"stop_reason": "tool_use", "stop_sequence": None},
-                "usage": {"output_tokens": 20},
-            },
-        ),
-        _sse("message_stop", {"type": "message_stop"}),
-    ]
-
-
-class _StallState:
-    """Shared, thread-safe request log + per-test stall policy.
-
-    Attributes:
-        mode: The stall behavior for stalled requests — ``"silent"``
-            (200 + SSE headers, then zero bytes: the production
-            accepted-but-dead request), ``"no_headers"`` (request read,
-            response never starts), ``"ping_only"`` (SSE keep-alive
-            ``ping`` events forever, no message events), or
-            ``"think_then_ping"`` (a thinking block starts, then only
-            pings).
-        stall_first_n: Requests 1..N stall; later requests answer
-            normally.  Use a huge value to stall every request.
-        request_count: Number of POSTs received so far.
-    """
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.reset()
-
-    def reset(self) -> None:
-        """Restore the default policy (silent-stall everything)."""
-        self.mode = "silent"
-        self.stall_first_n = 10**9
-        self.request_count = 0
-        self.stop = threading.Event()
-
-    def next_request_stalls(self) -> bool:
-        with self.lock:
-            self.request_count += 1
-            return self.request_count <= self.stall_first_n
-
-
-_STATE = _StallState()
-
-
-class _StallHandler(BaseHTTPRequestHandler):
-    """Accepts /v1/messages and stalls per the shared ``_StallState``."""
-
-    def do_POST(self) -> None:  # noqa: N802
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length)) if length else {}
-        model_name = body.get("model", _MODEL)
-        if not _STATE.next_request_stalls():
-            self._send_sse_headers()
-            self._write_chunks(_finish_tool_stream(model_name))
-            return
-        if _STATE.mode == "no_headers":
-            _STATE.stop.wait(timeout=120.0)
-            return
-        self._send_sse_headers()
-        if _STATE.mode == "silent":
-            _STATE.stop.wait(timeout=120.0)
-            return
-        if _STATE.mode == "think_then_ping":
-            self._write_chunks(_thinking_block_prefix(model_name))
-        while not _STATE.stop.wait(timeout=0.2):
-            try:
-                self._write_chunks([_sse("ping", {"type": "ping"})])
-            except OSError:
-                return
-
-    def _send_sse_headers(self) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.end_headers()
-
-    def _write_chunks(self, chunks: list[bytes]) -> None:
-        for chunk in chunks:
-            self.wfile.write(chunk)
-            self.wfile.flush()
-
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        pass
-
-
-class _DaemonThreadingHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
-
-
-@pytest.fixture
-def stall_server() -> Generator[str]:
-    _STATE.reset()
-    server = _DaemonThreadingHTTPServer(("127.0.0.1", 0), _StallHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield f"http://127.0.0.1:{server.server_port}"
-    _STATE.stop.set()
-    server.shutdown()
-
-
-def _run_bounded(fn: Callable[[], Any], deadline: float = _FAST_FAIL_BUDGET) -> Any:
-    """Run *fn* on a daemon thread with a hard deadline.
-
-    Bounds the damage when the code under test regresses to the pre-fix
-    hang: the test FAILS after *deadline* seconds instead of blocking the
-    suite for the 600s SDK default (or forever).
-
-    Args:
-        fn: The zero-argument callable to execute.
-        deadline: Seconds to wait before declaring a hang.
-
-    Returns:
-        The exception *fn* raised, or ``("ok", result)`` when it returned.
-    """
-    outcome: dict[str, Any] = {}
-
-    def target() -> None:
-        try:
-            outcome["result"] = fn()
-        except BaseException as exc:  # noqa: BLE001 — reported to the test
-            outcome["error"] = exc
-
-    worker = threading.Thread(target=target, daemon=True)
-    start = time.monotonic()
-    worker.start()
-    worker.join(deadline)
-    if worker.is_alive():
-        pytest.fail(
-            f"call still running after {deadline}s — the stall timeout is "
-            f"not being enforced (pre-fix hang behavior)"
-        )
-    elapsed = time.monotonic() - start
-    assert elapsed < deadline
-    if "error" in outcome:
-        return outcome["error"]
-    return ("ok", outcome["result"])
-
-
-def _assert_stall_timeout_error(outcome: Any) -> None:
-    assert isinstance(outcome, TimeoutError), f"expected TimeoutError, got {outcome!r}"
-    msg = str(outcome)
-    assert "stalled" in msg
-    assert _MODEL in msg
-    assert "stream_stall_timeout" in msg
-
-
-def _make_model(
-    monkeypatch: pytest.MonkeyPatch,
-    server_url: str,
-    token_callback: Callable[[str], None] | None = None,
-    thinking_callback: Callable[[bool], None] | None = None,
-) -> AnthropicModel:
-    """Build an AnthropicModel through its REAL initialize() code path.
-
-    ``ANTHROPIC_BASE_URL`` is the SDK's own routing knob, so the fixed
-    client construction (timeout and retry bounds included) is exercised
-    verbatim.
-    """
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", server_url)
-    m = AnthropicModel(
-        _MODEL,
-        api_key="test-key",
-        model_config={"stream_stall_timeout": _STALL_TIMEOUT},
-        token_callback=token_callback,
-        thinking_callback=thinking_callback,
-    )
-    m.initialize("Update ./README.md based on the latest code in the project.")
-    return m
+from kiss.tests.core.models.test_anthropic_stream_stall_timeout import (  # noqa: F401
+    _FAST_FAIL_BUDGET,
+    _MODEL,
+    _STALL_TIMEOUT,
+    _STATE,
+    _DaemonThreadingHTTPServer,
+    _finish_tool_stream,
+    _message_start,
+    _run_bounded,
+    _sse,
+    _StallHandler,
+    _StallState,
+    _thinking_block_prefix,
+    stall_server,
+)
 
 
 def _register_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -372,104 +116,6 @@ def _ensure_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
             "test-key",
             raising=False,
         )
-
-
-class TestAdapterAbortsStalledStream:
-    """``AnthropicModel`` must abort a stalled stream, not hang."""
-
-    def test_tools_turn_times_out_fast_with_clear_error(
-        self, monkeypatch: pytest.MonkeyPatch, stall_server: str
-    ) -> None:
-        """The agentic (tools) path — the one that hung in production —
-        must raise an actionable ``TimeoutError`` within seconds."""
-        m = _make_model(monkeypatch, stall_server)
-        outcome = _run_bounded(
-            lambda: m.generate_and_process_with_tools(
-                {}, tools_schema=[_OPENAI_FINISH_TOOL]
-            )
-        )
-        _assert_stall_timeout_error(outcome)
-
-    def test_plain_generate_times_out_fast(
-        self, monkeypatch: pytest.MonkeyPatch, stall_server: str
-    ) -> None:
-        """The no-tools path goes through the same stream and must abort too."""
-        m = _make_model(monkeypatch, stall_server)
-        _assert_stall_timeout_error(_run_bounded(m.generate))
-
-    def test_headers_never_arrive_times_out_fast(
-        self, monkeypatch: pytest.MonkeyPatch, stall_server: str
-    ) -> None:
-        """A request the server accepts but never answers (no response
-        headers at all) surfaces as ``anthropic.APITimeoutError`` after the
-        SDK's now-bounded retries; it must also become the clear
-        ``TimeoutError`` — review finding: the first fix only caught
-        ``httpx.TimeoutException`` and left the SDK's 2 silent retries."""
-        _STATE.mode = "no_headers"
-        m = _make_model(monkeypatch, stall_server)
-        outcome = _run_bounded(
-            lambda: m.generate_and_process_with_tools(
-                {}, tools_schema=[_OPENAI_FINISH_TOOL]
-            )
-        )
-        _assert_stall_timeout_error(outcome)
-        assert _STATE.request_count == 2
-
-    def test_ping_only_stream_times_out_fast(
-        self, monkeypatch: pytest.MonkeyPatch, stall_server: str
-    ) -> None:
-        """Keep-alive pings keep bytes flowing (so the httpx read timeout
-        never fires) while the SDK filters the events out — the agent sees
-        nothing.  The event-level watchdog must abort — review finding:
-        byte-level timeout alone cannot catch this wedge."""
-        _STATE.mode = "ping_only"
-        m = _make_model(monkeypatch, stall_server)
-        outcome = _run_bounded(
-            lambda: m.generate_and_process_with_tools(
-                {}, tools_schema=[_OPENAI_FINISH_TOOL]
-            )
-        )
-        _assert_stall_timeout_error(outcome)
-
-    def test_stall_mid_thinking_closes_thinking_bracket(
-        self, monkeypatch: pytest.MonkeyPatch, stall_server: str
-    ) -> None:
-        """A stall after a thinking block started must emit the closing
-        ``thinking_callback(False)`` — review finding: otherwise the
-        printer/UI renders everything after the retry as "thinking"
-        forever (the visible symptom of the original bug)."""
-        _STATE.mode = "think_then_ping"
-        thinking_events: list[bool] = []
-        tokens: list[str] = []
-        m = _make_model(
-            monkeypatch,
-            stall_server,
-            token_callback=tokens.append,
-            thinking_callback=thinking_events.append,
-        )
-        outcome = _run_bounded(
-            lambda: m.generate_and_process_with_tools(
-                {}, tools_schema=[_OPENAI_FINISH_TOOL]
-            )
-        )
-        _assert_stall_timeout_error(outcome)
-        assert "Let me think…" in "".join(tokens)
-        assert thinking_events == [True, False]
-
-    def test_stalled_turn_is_not_appended_to_conversation(
-        self, monkeypatch: pytest.MonkeyPatch, stall_server: str
-    ) -> None:
-        """An aborted turn must leave the conversation unchanged so the
-        retry replays identical history."""
-        m = _make_model(monkeypatch, stall_server)
-        before = [dict(msg) for msg in m.conversation]
-        outcome = _run_bounded(
-            lambda: m.generate_and_process_with_tools(
-                {}, tools_schema=[_OPENAI_FINISH_TOOL]
-            )
-        )
-        _assert_stall_timeout_error(outcome)
-        assert m.conversation == before
 
 
 class TestAgentSurvivesStalledStream:

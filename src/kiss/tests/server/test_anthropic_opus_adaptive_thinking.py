@@ -2,6 +2,8 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
+# ruff: noqa: F811  (the `anthropic_server` module fixture is imported from
+# the core/models twin of this file and injected via test parameters)
 """Integration test: AnthropicModel must NOT emit thinking UI events when
 the streamed thinking block contains no thinking text (only signature deltas).
 
@@ -38,93 +40,18 @@ mocks, patches, or fakes.
 from __future__ import annotations
 
 import json
-import threading
-from collections.abc import Generator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import anthropic
-import pytest
 
+import kiss.tests.core.models.test_anthropic_opus_adaptive_thinking as _models_twin
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.server.json_printer import JsonPrinter
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
-
-
-def _signature_only_thinking_events() -> list[tuple[str, str]]:
-    """Build SSE event pairs where the thinking block has only signature deltas.
-
-    This is the streaming shape Anthropic returns from claude-opus-4-7 with
-    ``thinking={"type": "adaptive"}`` when the model decides not to think.
-    """
-    events: list[tuple[str, str]] = []
-    events.append((
-        "message_start",
-        json.dumps({
-            "type": "message_start",
-            "message": {
-                "id": "msg_test",
-                "type": "message",
-                "role": "assistant",
-                "content": [],
-                "model": "claude-opus-4-7",
-                "stop_reason": None,
-                "usage": {"input_tokens": 10, "output_tokens": 0},
-            },
-        }),
-    ))
-    events.append((
-        "content_block_start",
-        json.dumps({
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "thinking", "thinking": ""},
-        }),
-    ))
-    events.append((
-        "content_block_delta",
-        json.dumps({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "signature_delta", "signature": "sig_abc123"},
-        }),
-    ))
-    events.append((
-        "content_block_stop",
-        json.dumps({"type": "content_block_stop", "index": 0}),
-    ))
-    events.append((
-        "content_block_start",
-        json.dumps({
-            "type": "content_block_start",
-            "index": 1,
-            "content_block": {"type": "text", "text": ""},
-        }),
-    ))
-    events.append((
-        "content_block_delta",
-        json.dumps({
-            "type": "content_block_delta",
-            "index": 1,
-            "delta": {"type": "text_delta", "text": "The answer is 42."},
-        }),
-    ))
-    events.append((
-        "content_block_stop",
-        json.dumps({"type": "content_block_stop", "index": 1}),
-    ))
-    events.append((
-        "message_delta",
-        json.dumps({
-            "type": "message_delta",
-            "delta": {"stop_reason": "end_turn"},
-            "usage": {"output_tokens": 12},
-        }),
-    ))
-    events.append((
-        "message_stop",
-        json.dumps({"type": "message_stop"}),
-    ))
-    return events
+from kiss.tests.core.models.test_anthropic_opus_adaptive_thinking import (  # noqa: F401
+    _AnthropicAdaptiveHandler,
+    _signature_only_thinking_events,
+    anthropic_server,
+)
 
 
 def _real_thinking_events() -> list[tuple[str, str]]:
@@ -219,35 +146,6 @@ def _real_thinking_events() -> list[tuple[str, str]]:
     return events
 
 
-_RESPONSE_EVENTS: list[tuple[str, str]] = []
-
-
-class _AnthropicAdaptiveHandler(BaseHTTPRequestHandler):
-    """Serves whichever event list ``_RESPONSE_EVENTS`` currently holds."""
-
-    def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.end_headers()
-        for event_type, data in _RESPONSE_EVENTS:
-            self.wfile.write(f"event: {event_type}\ndata: {data}\n\n".encode())
-            self.wfile.flush()
-
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        pass
-
-
-@pytest.fixture(scope="module")
-def anthropic_server() -> Generator[str]:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _AnthropicAdaptiveHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield f"http://127.0.0.1:{server.server_port}"
-    server.shutdown()
-
-
 def _build_opus_4_7_model(server_url: str, printer: JsonPrinter) -> AnthropicModel:
     """Return an AnthropicModel for claude-opus-4-7 wired to the fake server."""
     m = AnthropicModel(
@@ -275,8 +173,7 @@ class TestOpus47AdaptiveThinking:
         immediately broadcast ``thinking_start`` even though no
         ``thinking_delta`` ever arrived.
         """
-        global _RESPONSE_EVENTS
-        _RESPONSE_EVENTS = _signature_only_thinking_events()
+        _models_twin._RESPONSE_EVENTS = _signature_only_thinking_events()
 
         printer = JsonPrinter()
         printer._thread_local.task_id = "test-sig-only"
@@ -312,8 +209,7 @@ class TestOpus47AdaptiveThinking:
         to confirm the deferred start fires on the first thinking_delta,
         not the earlier signature_delta.
         """
-        global _RESPONSE_EVENTS
-        _RESPONSE_EVENTS = _real_thinking_events()
+        _models_twin._RESPONSE_EVENTS = _real_thinking_events()
 
         printer = JsonPrinter()
         printer._thread_local.task_id = "test-real-thinking"
@@ -337,72 +233,3 @@ class TestOpus47AdaptiveThinking:
         text_deltas = [e for e in recorded if e["type"] == "text_delta"]
         text = "".join(d.get("text", "") for d in text_deltas)
         assert text == "Done.", text
-
-    def test_signature_only_block_skips_raw_thinking_callback(
-        self, anthropic_server: str
-    ) -> None:
-        """Raw callback variant: no thinking_callback fires for signature-only blocks."""
-        global _RESPONSE_EVENTS
-        _RESPONSE_EVENTS = _signature_only_thinking_events()
-
-        thinking_events: list[bool] = []
-        tokens: list[str] = []
-
-        m = AnthropicModel(
-            "claude-opus-4-7",
-            api_key="test-key",
-            token_callback=tokens.append,
-            thinking_callback=thinking_events.append,
-        )
-        m.client = anthropic.Anthropic(api_key="test-key", base_url=anthropic_server)
-        m.conversation = [{"role": "user", "content": "hi"}]
-        m._create_message(m._build_create_kwargs())
-
-        assert thinking_events == [], thinking_events
-        assert "The answer is 42." in "".join(tokens)
-
-    def test_opus_4_7_uses_adaptive_thinking_config(self) -> None:
-        """``_build_create_kwargs`` must request adaptive thinking for opus-4-7.
-
-        This documents the precondition that triggers the original bug:
-        adaptive thinking is what causes signature-only thinking blocks to
-        be returned by the API.
-        """
-        m = AnthropicModel("claude-opus-4-7", api_key="test-key")
-        m.conversation = [{"role": "user", "content": "hi"}]
-        kwargs = m._build_create_kwargs()
-        assert kwargs.get("thinking") == {
-            "type": "adaptive",
-            "display": "summarized",
-        }, kwargs.get("thinking")
-
-    def test_opus_4_8_uses_adaptive_thinking_config(self) -> None:
-        """``_build_create_kwargs`` must request adaptive thinking for opus-4-8.
-
-        The Anthropic API rejects ``thinking={"type": "enabled"}`` for
-        claude-opus-4-8 with:
-
-            "thinking.type.enabled is not supported for this model. Use
-             thinking.type.adaptive and output_config.effort to control
-             thinking behavior."
-
-        so opus-4-8 (and later) must use adaptive thinking.
-        """
-        m = AnthropicModel("claude-opus-4-8", api_key="test-key")
-        m.conversation = [{"role": "user", "content": "hi"}]
-        kwargs = m._build_create_kwargs()
-        assert kwargs.get("thinking") == {
-            "type": "adaptive",
-            "display": "summarized",
-        }, kwargs.get("thinking")
-
-    def test_opus_4_uses_enabled_thinking_config(self) -> None:
-        """Older opus-4 / opus-4-1 still use ``thinking.type=enabled``."""
-        for name in ("claude-opus-4", "claude-opus-4-1"):
-            m = AnthropicModel(name, api_key="test-key")
-            m.conversation = [{"role": "user", "content": "hi"}]
-            kwargs = m._build_create_kwargs()
-            assert kwargs.get("thinking") == {
-                "type": "enabled",
-                "budget_tokens": 10000,
-            }, (name, kwargs.get("thinking"))
