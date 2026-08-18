@@ -966,6 +966,9 @@ class TestPerTabT0(unittest.TestCase):
             function removeSpinner() {}
             function applyChevronState() {}
             function focusInputWithRetry() {}
+            // Both tabs belong to the current workspace, so neither is
+            // hidden (isTabHidden only hides other-workspace tabs).
+            function isTabHidden() { return false; }
             """
             + switch_src
             + r"""

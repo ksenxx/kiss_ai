@@ -93,6 +93,20 @@ function workDirOnMentionAfterSettingsChange(initialWd, newWd, bindKind) {
     throw new Error('unknown bindKind: ' + bindKind);
   }
 
+  // The daemon's registry lists the tab as UNPINNED (workDir "").
+  // Canonically unpinned tabs belong to every workspace, so the
+  // workspace-scoped tab bar keeps this tab visible and ACTIVE when
+  // the settings work_dir changes below — which is the situation this
+  // invariant guards: the new global work_dir must not leak into
+  // commands from a tab whose chat was bound under an older one.
+  // (A tab the registry pins to the old work_dir is hidden by the
+  // workspace switch instead; that behavior is covered by
+  // workspaceScopedTabs.test.js.)
+  send(win, {
+    type: 'tabs_state',
+    tabs: [{tabId: tabId, chatId: 'chat-real-task', title: 'b', workDir: ''}],
+  });
+
   send(win, {
     type: 'configData',
     config: {work_dir: newWd},
@@ -166,6 +180,13 @@ function testTaskEventsExtraWorkDirStillWinsOverConfig() {
     task: 'Real persisted task',
     events: [],
     extra: JSON.stringify({work_dir: '/path/task-recorded'}),
+  });
+
+  // Registry-unpinned, so the workspace switch below keeps the tab
+  // visible and active (see the same snapshot above).
+  send(win, {
+    type: 'tabs_state',
+    tabs: [{tabId: tabId, chatId: 'chat-real-task', title: 'b', workDir: ''}],
   });
 
   send(win, {

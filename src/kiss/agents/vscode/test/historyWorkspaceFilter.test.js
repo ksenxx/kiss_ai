@@ -157,8 +157,8 @@ function testCheckboxMarkupAndDefault() {
   assert.strictEqual(ws.type, 'checkbox');
   assert.strictEqual(
     ws.checked,
-    false,
-    'Workspace checkbox must be UNCHECKED by default',
+    true,
+    'Workspace checkbox must be CHECKED by default',
   );
 
   const bar = doc.querySelector('.history-filter-bar');
