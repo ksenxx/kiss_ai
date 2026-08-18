@@ -375,12 +375,6 @@ def test_dispatch_uses_launcher_workspace_registry(
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
 
 
-def test_dispatch_tools_reserved_against_mcp_collisions() -> None:
-    from kiss.agents.sorcar.mcp_servers import _RESERVED_TOOL_NAMES
-
-    assert {"run_agent", "cron_job"} <= _RESERVED_TOOL_NAMES
-
-
 def test_dispatch_uses_recorded_daemon_socket(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

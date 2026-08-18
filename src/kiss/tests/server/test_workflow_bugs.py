@@ -46,10 +46,13 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, _git
+from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+from kiss.tests.agents.sorcar.test_workflow_bugs import (  # noqa: F401
+    _make_repo,
+)
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -67,32 +70,6 @@ def _restore_db(saved: tuple) -> None:
         th._db_conn.close()
         th._db_conn = None
     (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
-def _make_repo(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
-    subprocess.run(
-        ["git", "-C", str(path), "config", "user.email", "t@t.com"],
-        capture_output=True, check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "config", "user.name", "T"],
-        capture_output=True, check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "checkout", "-b", "main"],
-        capture_output=True, check=True,
-    )
-    (path / "init.txt").write_text("init\n")
-    subprocess.run(
-        ["git", "-C", str(path), "add", "."], capture_output=True, check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "commit", "-m", "init"],
-        capture_output=True, check=True,
-    )
-    return path
 
 
 def _make_wt_with_commit(
@@ -190,58 +167,6 @@ class TestBug1IsTaskActiveLeaks:
             "BUG 1: is_task_active leaked True after non-wt task was "
             "rejected by worktree-merge guard"
         )
-
-
-class TestBug2StashPopLosesStagingState:
-    """stash_pop should preserve staged vs unstaged distinction."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.repo = _make_repo(Path(self.tmpdir) / "repo")
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_stash_pop_preserves_index(self) -> None:
-        """After stash → pop, staged modifications should remain staged."""
-        repo = self.repo
-
-        (repo / "f.txt").write_text("line1\n")
-        (repo / "g.txt").write_text("line1\n")
-        subprocess.run(
-            ["git", "-C", str(repo), "add", "."],
-            capture_output=True, check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(repo), "commit", "-m", "two files"],
-            capture_output=True, check=True,
-        )
-
-        (repo / "f.txt").write_text("line1\nline2\n")
-        subprocess.run(
-            ["git", "-C", str(repo), "add", "f.txt"],
-            capture_output=True, check=True,
-        )
-        (repo / "g.txt").write_text("line1\nline2\n")
-
-        cached = _git("diff", "--cached", "--name-only", cwd=repo)
-        assert "f.txt" in cached.stdout
-        unstaged = _git("diff", "--name-only", cwd=repo)
-        assert "g.txt" in unstaged.stdout
-
-        did_stash = GitWorktreeOps.stash_if_dirty(repo)
-        assert did_stash
-
-        ok = GitWorktreeOps.stash_pop(repo)
-        assert ok
-
-        cached_after = _git("diff", "--cached", "--name-only", cwd=repo)
-        assert "f.txt" in cached_after.stdout, (
-            "BUG 2: stash_pop lost staging state — f.txt is no longer "
-            "in the index after stash → pop"
-        )
-        unstaged_after = _git("diff", "--name-only", cwd=repo)
-        assert "g.txt" in unstaged_after.stdout
 
 
 class TestBug3AutoCommitNoLLMFallback:

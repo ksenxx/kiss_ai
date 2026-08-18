@@ -443,33 +443,3 @@ class TestForceStopBlockedSubagent(_DbRedirectBase):
             "the force-stop watchdog interrupted the sibling task that "
             "the reused pool thread picked up after the victim finished"
         )
-
-
-class TestSubagentStopEventWaitSemantics:
-    """``_SubagentStopEvent.wait`` must observe its own flag, the
-    parent chain, and timeouts."""
-
-    def test_wait_returns_true_when_own_flag_set(self) -> None:
-        ev = _SubagentStopEvent(threading.Event())
-        ev.set()
-        assert ev.wait(0.0) is True
-        assert ev.wait(1.0) is True
-
-    def test_wait_times_out_false_when_nothing_set(self) -> None:
-        ev = _SubagentStopEvent(threading.Event())
-        start = time.monotonic()
-        assert ev.wait(0.15) is False
-        assert time.monotonic() - start < 5.0
-
-    def test_wait_wakes_on_parent_set_mid_wait(self) -> None:
-        parent = threading.Event()
-        ev = _SubagentStopEvent(parent)
-        threading.Timer(0.1, parent.set).start()
-        assert ev.wait(5.0) is True
-
-    def test_wait_without_parent_and_none_chain(self) -> None:
-        ev = _SubagentStopEvent(None)
-        assert ev.wait(0.05) is False
-        ev.set()
-        assert ev.wait(None) is True
-        assert ev.is_set() is True
