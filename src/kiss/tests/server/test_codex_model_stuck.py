@@ -28,52 +28,11 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from kiss.core.models import codex_model as codex_module
 
 
 class TestCodexModelStuckBug:
     """Codex model failure must not spin forever in the RelentlessAgent loop."""
-
-    def test_codex_model_returns_quickly_when_cli_missing(self) -> None:
-        """When the codex CLI is not installed, the agent must fail promptly
-        instead of retrying 10000 times in the RelentlessAgent loop."""
-        from kiss.agents.sorcar.relentless_agent import RelentlessAgent
-
-        saved_path = os.environ.get("PATH", "")
-        saved_candidates = codex_module._UI_CANDIDATE_PATHS
-        try:
-            os.environ["PATH"] = ""
-            codex_module._UI_CANDIDATE_PATHS = ()
-
-            agent = RelentlessAgent("codex-stuck-test")
-            agent._reset(
-                model_name="codex/gpt-5.5",
-                max_sub_sessions=100,
-                max_steps=5,
-                max_budget=10.0,
-                work_dir=tempfile.mkdtemp(),
-                docker_image=None,
-            )
-            agent.system_prompt = "You are a helpful assistant."
-            agent.task_description = "Say hello"
-
-            def noop() -> str:
-                """A no-op tool."""
-                return "ok"
-
-            result = agent.perform_task([noop])
-            parsed = yaml.safe_load(result)
-            assert isinstance(parsed, dict)
-            assert parsed["success"] is False
-            assert parsed.get("is_continue", False) is False, (
-                "Agent should NOT set is_continue=True when the model fails "
-                "on the very first call — that causes infinite retries."
-            )
-        finally:
-            os.environ["PATH"] = saved_path
-            codex_module._UI_CANDIDATE_PATHS = saved_candidates
 
     def test_codex_model_does_not_loop_in_vscode_server(self) -> None:
         """End-to-end: submitting a task with codex/gpt-5.5 when the CLI is

@@ -37,102 +37,19 @@ from __future__ import annotations
 
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-import pytest
-
-from kiss.agents.sorcar import sorcar_agent
-from kiss.agents.sorcar.sorcar_agent import _await_subagents, _SubagentStopEvent
+from kiss.agents.sorcar.sorcar_agent import _await_subagents
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _submit(
-    pool: ThreadPoolExecutor,
-    bodies: list[Any],
-) -> list[Future[str]]:
-    """Submit one callable per sub-agent, preserving order."""
-    return [pool.submit(body) for body in bodies]
+from kiss.tests.agents.sorcar.test_stop_reaches_parallel_parent import (  # noqa: F401
+    _submit,
+)
 
 
 class TestFanOutIsInterruptible:
     """The parent must not be held hostage by a wedged child."""
-
-    def test_results_are_collected_in_task_order(self) -> None:
-        """The ordinary path is unchanged: every result, in order."""
-        def body(index: int) -> Any:
-            def run() -> str:
-                time.sleep(0.05 * (3 - index))
-                return f"result-{index}"
-            return run
-
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            futures = _submit(pool, [body(i) for i in range(3)])
-            results = _await_subagents(futures, threading.Event())
-        assert results == ["result-0", "result-1", "result-2"]
-
-    def test_a_stopped_child_that_unwinds_is_still_collected(self) -> None:
-        """A child that honours its stop event still reports back.
-
-        Its summary and its spend must survive the stop, so the grace
-        period is spent waiting rather than abandoning immediately.
-        """
-        stop_event = threading.Event()
-
-        def body() -> str:
-            stop_event.wait(5.0)
-            return "stopped cleanly"
-
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            futures = _submit(pool, [body])
-            threading.Timer(0.2, stop_event.set).start()
-            results = _await_subagents(futures, stop_event)
-        assert results == ["stopped cleanly"]
-
-    def test_a_wedged_child_is_abandoned_after_the_grace_period(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """One child ignoring Stop can no longer hold the task open."""
-        monkeypatch.setattr(
-            sorcar_agent, "_SUBAGENT_STOP_GRACE_SECONDS", 0.3,
-        )
-        release = threading.Event()
-        stop_event = threading.Event()
-
-        def wedged() -> str:
-            release.wait(30.0)
-            return "never seen"
-
-        pool = ThreadPoolExecutor(max_workers=1)
-        try:
-            futures = _submit(pool, [wedged])
-            stop_event.set()
-            start = time.monotonic()
-            with pytest.raises(KeyboardInterrupt):
-                _await_subagents(futures, stop_event)
-            assert time.monotonic() - start < 3.0
-        finally:
-            release.set()
-            pool.shutdown(wait=True)
-
-    def test_parent_stop_event_reaches_children_through_the_chain(self) -> None:
-        """Stopping the parent stops the fan-out, as before the fix."""
-        parent_stop = threading.Event()
-        child_stop = _SubagentStopEvent(parent_stop)
-        observed: list[bool] = []
-
-        def body() -> str:
-            child_stop.wait(5.0)
-            observed.append(child_stop.is_set())
-            return "child saw the parent stop"
-
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            futures = _submit(pool, [body])
-            threading.Timer(0.2, parent_stop.set).start()
-            results = _await_subagents(futures, parent_stop)
-        assert results == ["child saw the parent stop"]
-        assert observed == [True]
 
     def test_injected_interrupt_lands_while_children_run(self) -> None:
         """The production force-stop watchdog must reach the parent.

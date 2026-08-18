@@ -35,66 +35,19 @@ lingering subscriber tab via the agent's explicit ``_last_task_id``.
 
 from __future__ import annotations
 
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.sorcar_agent import run_tasks_parallel
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
-
-
-def _make_repo(path: Path) -> Path:
-    """Create a git repo with one initial commit at *path*."""
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-b", "main", str(path)], check=True)
-    subprocess.run(
-        ["git", "-C", str(path), "config", "user.email", "t@t.com"],
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "config", "user.name", "T"],
-        check=True,
-    )
-    (path / "README.md").write_text("# Test\n")
-    subprocess.run(["git", "-C", str(path), "add", "."], check=True)
-    subprocess.run(
-        ["git", "-C", str(path), "commit", "-m", "initial"],
-        check=True,
-    )
-    return path
-
-
-class _LLMUnavailable:
-    """Force the commit-message LLM helper through its fallback.
-
-    Patches :class:`kiss.core.kiss_agent.KISSAgent` to a class whose
-    ``run`` raises, so tests stay hermetic.  Reverts on exit.
-    """
-
-    def __enter__(self) -> _LLMUnavailable:
-        import kiss.core.kiss_agent as kiss_agent_mod
-
-        self._orig = kiss_agent_mod.KISSAgent
-
-        class _RaisingAgent:
-            def __init__(self, *_a: Any, **_kw: Any) -> None:
-                pass
-
-            def run(self, *_a: Any, **_kw: Any) -> str:
-                raise RuntimeError("no LLM in test")
-
-        kiss_agent_mod.KISSAgent = _RaisingAgent  # type: ignore[misc, assignment]
-        return self
-
-    def __exit__(self, *_exc: Any) -> None:
-        import kiss.core.kiss_agent as kiss_agent_mod
-
-        kiss_agent_mod.KISSAgent = self._orig  # type: ignore[misc]
+from kiss.tests.agents.sorcar.test_notification_all_tabs_fanout import (  # noqa: F401
+    _LLMUnavailable,
+    _make_repo,
+    _setup_worktree_agent,
+)
 
 
 class _CapturePrinter(JsonPrinter):
@@ -118,35 +71,20 @@ class _CapturePrinter(JsonPrinter):
         return [e for e in self.events if e.get("type") == event_type]
 
 
-def _setup_worktree_agent(
-    tmp: Path, branch_slug: str,
-) -> tuple[WorktreeSorcarAgent, Path]:
-    """Build a real on-disk worktree backed by a ``WorktreeSorcarAgent``.
+_SUB_TASK_ID = "313131"
 
-    Returns ``(agent, wt_dir)`` with ``agent._wt`` populated so
-    ``_auto_commit_worktree`` runs end-to-end.
-    """
-    repo = _make_repo(tmp / "repo")
-    branch = f"kiss/wt-fanout-{branch_slug}"
-    wt_dir = repo / ".kiss-worktrees" / branch.replace("/", "_")
-    assert GitWorktreeOps.create(repo, branch, wt_dir)
-    subprocess.run(
-        ["git", "-C", str(wt_dir), "config", "user.email", "t@t.com"],
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(wt_dir), "config", "user.name", "T"],
-        check=True,
-    )
-    agent = WorktreeSorcarAgent("test")
-    agent._wt = GitWorktree(
-        repo_root=repo,
-        branch=branch,
-        original_branch="main",
-        wt_dir=wt_dir,
-        baseline_commit=None,
-    )
-    return agent, wt_dir
+
+_VIEWER_TAB = "frontend-viewer-tab"
+
+
+def _patched_run(self: ChatSorcarAgent, **kwargs: Any) -> str:
+    """Simulate the sub-agent lifecycle: allocate ``_last_task_id``
+    and subscribe a frontend viewer tab to its event stream."""
+    self._last_task_id = _SUB_TASK_ID
+    printer: Any = kwargs.get("printer") or self.printer
+    if printer is not None and hasattr(printer, "subscribe_tab"):
+        printer.subscribe_tab(_SUB_TASK_ID, _VIEWER_TAB)
+    return "success: true\nsummary: done"
 
 
 class TestAutoCommitToastReachesAllTabs:
@@ -284,20 +222,6 @@ class TestModelPickReachesAllTabs:
 
         picks = printer.of_type("modelPick")
         assert {e["tabId"] for e in picks} == {"tab-launch", "tab-viewer"}
-
-
-_SUB_TASK_ID = "313131"
-_VIEWER_TAB = "frontend-viewer-tab"
-
-
-def _patched_run(self: ChatSorcarAgent, **kwargs: Any) -> str:
-    """Simulate the sub-agent lifecycle: allocate ``_last_task_id``
-    and subscribe a frontend viewer tab to its event stream."""
-    self._last_task_id = _SUB_TASK_ID
-    printer: Any = kwargs.get("printer") or self.printer
-    if printer is not None and hasattr(printer, "subscribe_tab"):
-        printer.subscribe_tab(_SUB_TASK_ID, _VIEWER_TAB)
-    return "success: true\nsummary: done"
 
 
 class TestNonUiSubagentDoneReachesAllTabs:
@@ -511,38 +435,3 @@ class TestTransientBroadcastNearTeardown:
         # Both tabs are remembered so restore_model_pick hands the
         # picker back when the task ends.
         assert {"tab-launch", "tab-viewer"} <= printer._model_override_tabs
-
-
-class _BroadcastOnlyPrinter:
-    """A printer stub with ONLY a ``broadcast`` method — the degraded
-    path for third-party printers without the transient primitive."""
-
-    def __init__(self) -> None:
-        self.events: list[dict[str, Any]] = []
-
-    def broadcast(self, event: dict[str, Any]) -> None:
-        self.events.append(dict(event))
-
-
-class TestPrimitiveLessPrinterDegradation:
-    """Printers exposing only ``broadcast`` still get one
-    ``tabId``-stamped toast copy (the pre-primitive behaviour)."""
-
-    def test_single_stamped_copy_on_broadcast_only_printer(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_str:
-            agent, wt_dir = _setup_worktree_agent(Path(tmp_str), "degraded")
-            (wt_dir / "new.txt").write_text("hello\n")
-
-            printer = _BroadcastOnlyPrinter()
-            agent.printer = printer  # type: ignore[assignment]
-            agent._tab_id = "tab-solo"
-            agent._last_task_id = "7171"
-
-            with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
-
-            notifs = [
-                e for e in printer.events if e.get("type") == "notification"
-            ]
-            assert len(notifs) == 2  # generating + committed, one tab each
-            assert all(e["tabId"] == "tab-solo" for e in notifs)

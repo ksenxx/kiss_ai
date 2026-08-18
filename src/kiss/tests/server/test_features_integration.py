@@ -29,40 +29,6 @@ from kiss.tests.core.test_features_integration import (  # noqa: F401
 )
 
 
-class TestWebBrowserToggle:
-    """web_tools parameter controls browser tool availability."""
-
-    def test_web_tools_false_no_browser_tools(self) -> None:
-        """When web_tools=False, SorcarAgent._setup_tools skips web tools."""
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
-        agent = SorcarAgent("no-web")
-        agent._use_web_tools = False
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        tool_names = [t.__name__ for t in tools]
-        browser_names = {
-            "go_to_url", "click", "type_text", "press_key",
-            "scroll", "screenshot", "get_page_content", "close_browser",
-        }
-        assert not browser_names.intersection(tool_names)
-        assert agent.web_use_tool is None
-
-    def test_web_tools_true_has_browser_tools(self) -> None:
-        """When web_tools=True, _setup_tools includes web tools."""
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
-        agent = SorcarAgent("with-web")
-        agent._use_web_tools = True
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        tool_names = [t.__name__ for t in tools]
-        assert "go_to_url" in tool_names
-        assert agent.web_use_tool is not None
-        agent.web_use_tool.close()
-        agent.web_use_tool = None
-
-
 class TestApiKeySetupAndDeletion:
     """Delete a key by saving it empty through the server's saveConfig."""
 

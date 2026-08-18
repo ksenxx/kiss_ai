@@ -15,32 +15,7 @@ import os
 
 import pytest
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _attribute_tts_usage
-
-
-class TestAttributeTtsUsage:
-    def test_spend_lands_on_agent_budget_and_tokens(self) -> None:
-        agent = SorcarAgent("tts-attribution-test")
-        agent.budget_used = 0.5
-        agent.total_tokens_used = 1_000
-        agent.total_steps = 7
-        _attribute_tts_usage(
-            agent,
-            {"budget_used": 0.0387, "total_tokens_used": 680, "total_steps": 1},
-        )
-        assert agent.budget_used == pytest.approx(0.5387)
-        assert agent.total_tokens_used == 1_680
-        assert agent.total_steps == 7
-
-    def test_empty_usage_is_a_noop(self) -> None:
-        agent = SorcarAgent("tts-attribution-noop")
-        agent.budget_used = 0.25
-        agent.total_tokens_used = 10
-        _attribute_tts_usage(agent, {})
-        assert agent.budget_used == 0.25
-        assert agent.total_tokens_used == 10
-
-
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
 class TestTalkToolWiringE2E:
