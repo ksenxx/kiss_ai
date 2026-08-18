@@ -35,7 +35,6 @@ from typing import Any
 
 import pytest
 
-from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import _read_model_info_json
 from kiss.scripts.update_models import _write_model_info_json
 
@@ -145,7 +144,13 @@ class TestWriterNeverPublishesATornFile:
 
 
 class TestReaderToleratesAConcurrentRewrite:
-    """F3, reader half: import must not die on a transient torn file."""
+    """F3, reader half: import must not die on a transient torn file.
+
+    The reader-only failure-mode tests (broken/missing/wrong-shape
+    catalog) moved to ``tests/core/test_model_info_json_atomicity.py``:
+    they depend only on ``kiss.core``.  This one stays because it needs
+    the real ``kiss.scripts`` writer on the other side of the file.
+    """
 
     def test_read_retries_through_a_truncation_window(
         self, tmp_path: Path,
@@ -172,44 +177,6 @@ class TestReaderToleratesAConcurrentRewrite:
             thread.join(timeout=10)
 
         assert set(raw) == set(data)
-
-    def test_permanently_broken_catalog_raises_a_clear_error(
-        self, tmp_path: Path,
-    ) -> None:
-        """A catalog that never becomes valid must fail with a named error."""
-        path = tmp_path / "MODEL_INFO.json"
-        path.write_text("{not json", encoding="utf-8")
-
-        with pytest.raises(KISSError) as excinfo:
-            _read_model_info_json(path)
-
-        assert str(path) in str(excinfo.value)
-
-    def test_missing_catalog_raises_a_clear_error(self, tmp_path: Path) -> None:
-        """An absent catalog must also surface as a KISSError."""
-        with pytest.raises(KISSError):
-            _read_model_info_json(tmp_path / "absent.json")
-
-    @pytest.mark.parametrize("payload", ["null", "[]", '"a catalog"', "42"])
-    def test_valid_json_of_the_wrong_shape_raises_a_clear_error(
-        self, tmp_path: Path, payload: str,
-    ) -> None:
-        """A catalog that parses but is not a table must still be classified.
-
-        An editor or an external catalog updater can atomically leave
-        behind syntactically valid JSON of the wrong top-level shape.
-        That is the same "the catalog is unusable" condition as a
-        truncated file, and it happens at **import time**, so it must
-        name the offending path instead of escaping as an unclassified
-        ``TypeError`` from ``dict(...)``.
-        """
-        path = tmp_path / "MODEL_INFO.json"
-        path.write_text(payload, encoding="utf-8")
-
-        with pytest.raises(KISSError) as excinfo:
-            _read_model_info_json(path)
-
-        assert str(path) in str(excinfo.value)
 
 
 class TestNoUserLocalCatalogCopy:
