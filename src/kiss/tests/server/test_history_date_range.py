@@ -28,25 +28,14 @@ from __future__ import annotations
 import shutil
 import tempfile
 import threading
-from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.server import VSCodeServer
-
-
-def _redirect(tmpdir: str) -> tuple:
-    """Redirect the persistence DB to a temp dir; return saved state."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore(saved: tuple) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+from kiss.tests.agents.sorcar.test_history_date_range import (  # noqa: F401
+    _redirect,
+    _restore,
+    _set_timestamp,
+)
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
@@ -66,15 +55,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-def _set_timestamp(task_id: str, ts: float) -> None:
-    """Force a task_history row's timestamp to a known value."""
-    db = th._get_db()
-    db.execute(
-        "UPDATE task_history SET timestamp = ? WHERE id = ?", (ts, task_id)
-    )
-    db.commit()
-
-
 class TestHistoryDateRange:
     """``_history_date_range`` and the ``history`` event's dateRange."""
 
@@ -88,34 +68,6 @@ class TestHistoryDateRange:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_empty_db_returns_none_pair(self) -> None:
-        assert th._history_date_range() == (None, None)
-
-    def test_min_max_over_regular_rows(self) -> None:
-        id1, _ = th._add_task("first task", chat_id="c1")
-        id2, _ = th._add_task("middle task", chat_id="c2")
-        id3, _ = th._add_task("last task", chat_id="c3")
-        _set_timestamp(id1, 1_000.0)
-        _set_timestamp(id2, 2_000.0)
-        _set_timestamp(id3, 3_000.0)
-        assert th._history_date_range() == (1_000.0, 3_000.0)
-
-    def test_subagent_rows_are_ignored(self) -> None:
-        parent_id, chat_id = th._add_task("parent task")
-        _set_timestamp(parent_id, 5_000.0)
-        sub_id, _ = th._add_task("sub task", chat_id=chat_id)
-        th._save_task_extra(
-            {
-                "model": "m",
-                "work_dir": "/tmp",
-                "version": "v",
-                "subagent": {"parent_task_id": parent_id},
-            },
-            task_id=sub_id,
-        )
-        _set_timestamp(sub_id, 10.0)
-        assert th._history_date_range() == (5_000.0, 5_000.0)
 
     def test_history_event_carries_date_range(self) -> None:
         id1, _ = th._add_task("first task", chat_id="c1")

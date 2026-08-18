@@ -20,28 +20,12 @@ import threading
 import unittest
 from typing import Any
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.speech_synthesis import audio_timeout_seconds
+from kiss.tests.agents.sorcar.test_talk_tool import (  # noqa: F401
+    _find_tool,
+    _make_agent,
+)
 from kiss.tests.server._memory_printer import MemoryPrinter
-
-
-def _find_tool(tools: list, name: str) -> Any:
-    """Return the tool function named *name* from *tools*."""
-    for t in tools:
-        if callable(t) and t.__name__ == name:
-            return t
-    raise AssertionError(
-        f"Tool {name!r} not found in "
-        f"{[getattr(t, '__name__', None) for t in tools if callable(t)]}"
-    )
-
-
-def _make_agent(printer: Any) -> SorcarAgent:
-    """Build a SorcarAgent with web tools disabled and *printer* attached."""
-    agent = SorcarAgent("test-talk-tool")
-    agent._use_web_tools = False
-    agent.printer = printer
-    return agent
 
 
 class TestTalkTool(unittest.TestCase):
@@ -254,22 +238,6 @@ class TestTalkTool(unittest.TestCase):
             [ev for ev in recorded["events"] if ev.get("type") == "talk"],
             [],
         )
-
-    def test_talk_without_printer_reports_unavailable(self) -> None:
-        """No printer (e.g. bare library use) → graceful message."""
-        agent = _make_agent(None)
-        talk = _find_tool(agent._get_tools(), "talk")
-        msg = talk("en", "hello")
-        self.assertIn("not available", msg)
-
-    def test_talk_with_printer_that_cannot_broadcast_reports_unavailable(
-        self,
-    ) -> None:
-        """A printer-like object without ``broadcast`` is a graceful no-op."""
-        agent = _make_agent(object())
-        talk = _find_tool(agent._get_tools(), "talk")
-        msg = talk("en", "hello")
-        self.assertIn("not available", msg)
 
 
 if __name__ == "__main__":

@@ -24,106 +24,13 @@ import json
 import shutil
 import tempfile
 import unittest
-from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.git_worktree import strip_worktree_suffix
 from kiss.agents.sorcar.persistence import _add_task, _save_task_extra
-
-
-def _redirect(tmpdir: str) -> tuple:
-    """Redirect the persistence DB to a temp dir. Mirrors test_persistence.py."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
-    th._db_conn = None
-    return old
-
-
-def _restore(saved: tuple) -> None:
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
-class TestStripWorktreeSuffix(unittest.TestCase):
-    """Unit-level tests for the helper used by callers before saving."""
-
-    def test_strips_worktree_root(self) -> None:
-        wt = "/Users/alice/proj/.kiss-worktrees/kiss_wt-1782617911-0960938a"
-        assert strip_worktree_suffix(wt) == "/Users/alice/proj"
-
-    def test_strips_worktree_subdir(self) -> None:
-        wt = "/Users/alice/proj/.kiss-worktrees/kiss_wt-abc-deadbeef/src/foo"
-        assert strip_worktree_suffix(wt) == "/Users/alice/proj"
-
-    def test_passthrough_when_not_in_worktree(self) -> None:
-        assert strip_worktree_suffix("/Users/alice/proj") == "/Users/alice/proj"
-
-    def test_passthrough_empty_string(self) -> None:
-        assert strip_worktree_suffix("") == ""
-
-    def test_strips_at_repo_root(self) -> None:
-        wt = "/repo/.kiss-worktrees/kiss_wt-x-12345678"
-        assert strip_worktree_suffix(wt) == "/repo"
-
-    def test_trailing_slash_not_kept_on_parent(self) -> None:
-        wt = "/Users/alice/proj/.kiss-worktrees/kiss_wt-1-2/"
-        assert strip_worktree_suffix(wt) == "/Users/alice/proj"
-
-    def test_only_strips_kiss_worktrees_segment(self) -> None:
-        p = "/Users/alice/some.kiss-worktrees-backup/data"
-        assert strip_worktree_suffix(p) == p
-
-    def test_requires_kiss_wt_prefix(self) -> None:
-        p = "/Users/alice/proj/.kiss-worktrees/something-else/file.txt"
-        assert strip_worktree_suffix(p) == p
-
-    def test_root_absolute_worktree(self) -> None:
-        """A worktree at the filesystem root must yield ``/``."""
-        assert strip_worktree_suffix("/.kiss-worktrees/kiss_wt-x") == "/"
-
-    def test_relative_worktree_path(self) -> None:
-        """A relative worktree path must yield ``.`` (current dir)."""
-        assert strip_worktree_suffix(".kiss-worktrees/kiss_wt-x") == "."
-
-    def test_windows_backslash_path(self) -> None:
-        """Windows-style backslashes must be folded so the suffix is
-        still recognised."""
-        p = r"C:\Users\alice\proj\.kiss-worktrees\kiss_wt-x-1234"
-        assert strip_worktree_suffix(p) == "C:/Users/alice/proj"
-
-
-class TestChatSorcarAgentBuildExtraStripsWorktree(unittest.TestCase):
-    """``ChatSorcarAgent._build_extra_payload`` must produce a payload
-    whose ``work_dir`` is the parent repo, not the worktree path."""
-
-    def test_build_extra_payload_strips_worktree(self) -> None:
-        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
-        agent = ChatSorcarAgent("Sorcar VS Code")
-        wt = "/Users/alice/proj/.kiss-worktrees/kiss_wt-abc-12345678"
-        payload = agent._build_extra_payload(
-            model="claude-opus-4-7",
-            work_dir=wt,
-            is_parallel=False,
-            is_worktree=True,
-        )
-        assert payload["work_dir"] == "/Users/alice/proj", (
-            f"_build_extra_payload kept worktree suffix: {payload['work_dir']!r}"
-        )
-
-    def test_build_extra_payload_passthrough_non_worktree(self) -> None:
-        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
-        agent = ChatSorcarAgent("Sorcar VS Code")
-        payload = agent._build_extra_payload(
-            model="claude-opus-4-7",
-            work_dir="/Users/alice/proj",
-            is_parallel=False,
-            is_worktree=False,
-        )
-        assert payload["work_dir"] == "/Users/alice/proj"
+from kiss.tests.agents.sorcar.test_task_history_strip_worktree import (  # noqa: F401
+    _redirect,
+    _restore,
+)
 
 
 class TestSaveTaskExtraEndToEnd(unittest.TestCase):
@@ -155,29 +62,6 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
         result: dict = json.loads(raw) if raw else {}
         return result
 
-    def test_chat_sorcar_agent_persists_stripped_work_dir(self) -> None:
-        """End-to-end check via the agent's own payload builder."""
-        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
-        agent = ChatSorcarAgent("Sorcar VS Code")
-        wt = "/Users/alice/proj/.kiss-worktrees/kiss_wt-abc-12345678"
-        payload = agent._build_extra_payload(
-            model="claude-opus-4-7",
-            work_dir=wt,
-            is_parallel=False,
-            is_worktree=True,
-        )
-        task_id, _chat_id = _add_task("repro task", "")
-        _save_task_extra(payload, task_id=task_id)
-
-        stored = self._read_extra(task_id)
-        assert stored["work_dir"] == "/Users/alice/proj", (
-            f"work_dir was stored verbatim with worktree suffix: "
-            f"{stored['work_dir']!r}"
-        )
-        assert stored["model"] == "claude-opus-4-7"
-        assert stored["is_worktree"] is True
-
     def test_task_runner_payload_persists_stripped_work_dir(self) -> None:
         """Mirror the literal payload built in
         ``kiss.server.task_runner._run_task_inner`` and assert
@@ -208,24 +92,6 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
         )
         assert stored["is_worktree"] is True
         assert stored["model"] == "claude-opus-4-7"
-
-    def test_plain_path_passthrough_end_to_end(self) -> None:
-        """A non-worktree ``work_dir`` must persist unchanged."""
-        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
-        agent = ChatSorcarAgent("Sorcar VS Code")
-        plain = "/Users/alice/proj"
-        payload = agent._build_extra_payload(
-            model="claude-opus-4-7",
-            work_dir=plain,
-            is_parallel=False,
-            is_worktree=False,
-        )
-        task_id, _chat_id = _add_task("plain task", "")
-        _save_task_extra(payload, task_id=task_id)
-
-        stored = self._read_extra(task_id)
-        assert stored["work_dir"] == plain
 
 
 if __name__ == "__main__":  # pragma: no cover

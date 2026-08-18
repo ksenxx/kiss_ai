@@ -50,13 +50,6 @@ MAIN_JS = (
     / "main.js"
 )
 
-CHAT_AGENT_PY = (
-    Path(__file__).resolve().parents[3]
-    / "agents"
-    / "sorcar"
-    / "chat_sorcar_agent.py"
-)
-
 
 def _case_block(case_label: str, next_case_label: str) -> str:
     js = MAIN_JS.read_text()
@@ -121,68 +114,4 @@ class TestNewTabHandlerGuardsOnParentTabId:
         assert 0 < guard_idx < create_idx, (
             "The parent_tab_id guard must appear BEFORE the tab is "
             "created (createBackgroundSubagentTab)."
-        )
-
-
-class TestSubagentNewTabBroadcastIncludesParentTabId:
-    """The sub-agent's ``new_tab`` broadcast (emitted in
-    ``ChatSorcarAgent.run`` when ``_subagent_info`` is set) must
-    include ``parent_tab_id`` so the frontend guard above can decide
-    whether this webview owns the parent."""
-
-    def test_broadcast_payload_includes_parent_tab_id_field(self) -> None:
-        src = CHAT_AGENT_PY.read_text()
-        idx = src.find('"type": "new_tab"')
-        assert idx > 0, "could not locate sub-agent new_tab broadcast"
-        block = src[idx : idx + 600]
-        assert '"parent_tab_id"' in block, (
-            "Sub-agent new_tab broadcast must include parent_tab_id so "
-            "the frontend can route the new tab + resumeSession to the "
-            "owning webview only.  Block was:\n" + block
-        )
-
-    def test_run_tasks_parallel_stores_parent_tab_id_in_subagent_info(
-        self,
-    ) -> None:
-        """The fan-out must thread the parent's tab id to each child.
-
-        ``ChatSorcarAgent.run`` stamps its ``new_tab`` broadcast with
-        ``_subagent_info["parent_tab_id"]``, so the child has to be
-        given the parent's real frontend tab id when it is spawned.
-        """
-        import threading
-        from typing import Any
-
-        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
-        class _Printer:
-            """Thread-local-only printer: the engine needs nothing else."""
-
-            def __init__(self) -> None:
-                self._thread_local = threading.local()
-
-        seen: list[Any] = []
-        original_run = ChatSorcarAgent.run
-
-        def _record(
-            self: ChatSorcarAgent,
-            prompt_template: str = "",
-            **kwargs: Any,
-        ) -> str:
-            seen.append(self._subagent_info)
-            return "success: true\nsummary: done"
-
-        parent = ChatSorcarAgent("cross-chat-parent")
-        parent._tab_id = "tab-owner-1"
-        parent.printer = _Printer()  # type: ignore[assignment]
-        try:
-            ChatSorcarAgent.run = _record  # type: ignore[method-assign]
-            parent._run_tasks_parallel(["a task"], max_workers=1)
-        finally:
-            ChatSorcarAgent.run = original_run  # type: ignore[method-assign]
-
-        assert seen and seen[0] is not None
-        assert seen[0].get("parent_tab_id") == "tab-owner-1", (
-            "the sub-agent was not told which tab spawned it, so its "
-            "new_tab broadcast cannot be routed to the owning webview"
         )

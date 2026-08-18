@@ -22,16 +22,12 @@ No mocks, patches, fakes, or test doubles.
 from __future__ import annotations
 
 import shutil
-import sqlite3
 import subprocess
 import tempfile
 from pathlib import Path
 
-import pytest
-
-from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent, _generate_commit_message
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.third_party_agents._channel_cli import (
     _build_arg_parser,
     _build_run_kwargs,
@@ -40,25 +36,45 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
-
-_SavedState = tuple[Path, "sqlite3.Connection | None", Path]
-
-
-def _redirect_db(tmpdir: str) -> _SavedState:
-    old: _SavedState = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
-    th._db_conn = None
-    return old
+from kiss.tests.agents.sorcar.test_100pct_branch_coverage import (  # noqa: F401
+    _redirect_db,
+    _restore_db,
+    _SavedState,
+)
 
 
-def _restore_db(saved: _SavedState) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+class TestPersistenceUncoveredBranches:
+    """Cover remaining persistence.py branches."""
+
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._saved = _redirect_db(self._tmpdir)
+
+    def teardown_method(self) -> None:
+        _restore_db(self._saved)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+
+class TestBrowserPrinterPrintBranches:
+    """Cover all print() type branches in json_printer.py."""
+
+    def _make_printer(self) -> JsonPrinter:
+        p = JsonPrinter()
+        p.start_recording()
+        return p
+
+
+def _register_worktree_state(tab_id: str) -> AgentState:
+    """Register a server-owned worktree state for *tab_id* and return it."""
+    state = AgentState(
+        f"task-{tab_id}",
+        agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        tab_id=tab_id,
+        server_owned=True,
+    )
+    state.use_worktree = True
+    agent_state.register(state)
+    return state
 
 
 class TestCliHelpers:
@@ -74,60 +90,6 @@ class TestCliHelpers:
             assert kwargs["work_dir"] == d
             assert kwargs["model_config"]["base_url"] == "http://localhost:1234"
             assert kwargs["web_tools"] is True
-
-
-class TestPersistenceUncoveredBranches:
-    """Cover remaining persistence.py branches."""
-
-    def setup_method(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-        self._saved = _redirect_db(self._tmpdir)
-
-    def teardown_method(self) -> None:
-        _restore_db(self._saved)
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-
-class TestWorktreeCommitMessageBranches:
-    """Cover commit message generation branches."""
-
-    @pytest.mark.slow
-    def test_generate_commit_message_with_staged_changes(self, tmp_path: Path) -> None:
-        """Commit message generation with staged changes exercises the LLM path.
-
-        Creates a real repo with staged changes; the method either succeeds
-        (returning an LLM-generated message) or catches an exception and
-        returns the fallback, covering one of the two code paths.
-        """
-        saved = _redirect_db(str(tmp_path))
-        try:
-            repo = tmp_path / "commitgen"
-            repo.mkdir()
-            subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=True)
-            subprocess.run(
-                ["git", "config", "user.email", "t@t.com"],
-                cwd=repo, capture_output=True,
-            )
-            subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
-            (repo / "f.txt").write_text("initial")
-            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
-            (repo / "f.txt").write_text("modified content")
-            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
-
-            msg = _generate_commit_message(repo)
-            assert isinstance(msg, str) and len(msg) > 0
-        finally:
-            _restore_db(saved)
-
-
-class TestBrowserPrinterPrintBranches:
-    """Cover all print() type branches in json_printer.py."""
-
-    def _make_printer(self) -> JsonPrinter:
-        p = JsonPrinter()
-        p.start_recording()
-        return p
 
 
 class TestFormatToolCallBranches:
@@ -158,19 +120,6 @@ class TestFormatToolCallBranches:
         assert ev["old_string"] == "old"
         assert ev["new_string"] == "new"
         assert "extras" in ev
-
-
-def _register_worktree_state(tab_id: str) -> AgentState:
-    """Register a server-owned worktree state for *tab_id* and return it."""
-    state = AgentState(
-        f"task-{tab_id}",
-        agent=WorktreeSorcarAgent("Sorcar VS Code"),
-        tab_id=tab_id,
-        server_owned=True,
-    )
-    state.use_worktree = True
-    agent_state.register(state)
-    return state
 
 
 class TestVSCodeServerUncoveredBranches:
@@ -252,7 +201,6 @@ class TestVSCodeServerUncoveredBranches:
                 agent_state.unregister(state.task_id, state)
         finally:
             _restore_db(saved)
-
 
 
 class TestVSCodeServerExtractResultSummary:

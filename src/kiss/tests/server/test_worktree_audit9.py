@@ -40,7 +40,6 @@ RED-5: The two consecutive `if not tab.use_worktree:` blocks in
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
@@ -48,167 +47,12 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
-    _manual_merge_cmd,
 )
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
-    """Create a bare-minimum git repo with one commit."""
-    repo = tmp_path / name
-    repo.mkdir()
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=repo, capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=repo, capture_output=True,
-    )
-    (repo / "init.txt").write_text("init")
-    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init"],
-        cwd=repo, capture_output=True,
-    )
-    return repo
-
-
-
-
-class TestBug40Inc4Fix:
-    """BUG-40/INC-4 FIX: _do_merge returns MergeResult.CHECKOUT_FAILED
-    instead of (None, err), and _release_worktree never misattributes
-    checkout errors to _stash_pop_warning."""
-
-
-
-
-    def test_checkout_error_not_stored_as_stash_warning(self, tmp_path):
-        """Checkout failure does NOT set _stash_pop_warning."""
-        repo = _make_repo(tmp_path)
-        agent = WorktreeSorcarAgent("test")
-        agent._chat_id = "bug40"
-
-        branch = "kiss/wt-bug40-test"
-        wt_dir = repo / ".kiss-worktrees" / "wt-bug40"
-        GitWorktreeOps.create(repo, branch, wt_dir)
-        GitWorktreeOps.save_original_branch(repo, branch, "main")
-
-        (wt_dir / "file.txt").write_text("agent work")
-        GitWorktreeOps.commit_all(wt_dir, "agent work")
-
-        agent._wt = GitWorktree(
-            repo_root=repo,
-            branch=branch,
-            original_branch="nonexistent-branch",
-            wt_dir=wt_dir,
-        )
-
-        agent._release_worktree()
-
-        assert agent._stash_pop_warning is None, (
-            "Checkout error must NOT be stored in _stash_pop_warning"
-        )
-        assert agent._merge_conflict_warning is not None
-        assert "checkout" in agent._merge_conflict_warning.lower()
-
-        GitWorktreeOps.remove(repo, wt_dir)
-        GitWorktreeOps.prune(repo)
-        if GitWorktreeOps.branch_exists(repo, branch):
-            GitWorktreeOps.delete_branch(repo, branch)
-
-
-class TestBug43Fix:
-    """BUG-43 FIX: Instructions use cherry-pick when baseline exists."""
-
-    def test_manual_merge_cmd_with_baseline(self):
-        """_manual_merge_cmd returns cherry-pick when baseline exists."""
-        wt = GitWorktree(
-            repo_root=Path("/repo"),
-            branch="kiss/wt-test",
-            original_branch="main",
-            wt_dir=Path("/repo/.kiss-worktrees/wt"),
-            baseline_commit="abc123",
-        )
-        cmd = _manual_merge_cmd(wt)
-        assert "cherry-pick" in cmd
-        assert "abc123..kiss/wt-test" in cmd
-        assert "merge --squash" not in cmd
-
-    def test_manual_merge_cmd_without_baseline(self):
-        """_manual_merge_cmd returns merge --squash when no baseline."""
-        wt = GitWorktree(
-            repo_root=Path("/repo"),
-            branch="kiss/wt-test",
-            original_branch="main",
-            wt_dir=Path("/repo/.kiss-worktrees/wt"),
-        )
-        cmd = _manual_merge_cmd(wt)
-        assert "merge --squash" in cmd
-        assert "cherry-pick" not in cmd
-
-
-
-
-    def test_functional_instructions_match_auto_merge(self, tmp_path):
-        """Instructions produce the same result as auto-merge when baseline exists."""
-        repo = _make_repo(tmp_path)
-
-        branch = "kiss/wt-bug43-test"
-        wt_dir = repo / ".kiss-worktrees" / "wt-bug43"
-        GitWorktreeOps.create(repo, branch, wt_dir)
-
-        (wt_dir / "dirty.txt").write_text("user dirty content")
-        subprocess.run(["git", "add", "-A"], cwd=wt_dir, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "baseline"],
-            cwd=wt_dir, capture_output=True,
-        )
-        baseline = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=wt_dir, capture_output=True, text=True,
-        ).stdout.strip()
-
-        (wt_dir / "agent.txt").write_text("agent work")
-        subprocess.run(["git", "add", "-A"], cwd=wt_dir, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "agent work"],
-            cwd=wt_dir, capture_output=True,
-        )
-
-        wt = GitWorktree(
-            repo_root=repo,
-            branch=branch,
-            original_branch="main",
-            wt_dir=wt_dir,
-            baseline_commit=baseline,
-        )
-        cmd = _manual_merge_cmd(wt)
-
-        assert "cherry-pick" in cmd
-
-        result = subprocess.run(
-            cmd.split(), cwd=repo, capture_output=True, text=True,
-        )
-        assert result.returncode == 0
-        status = subprocess.run(
-            ["git", "diff", "--cached", "--name-only"],
-            cwd=repo, capture_output=True, text=True,
-        )
-        files = set(status.stdout.strip().splitlines())
-        assert "agent.txt" in files
-        assert "dirty.txt" not in files, (
-            "Cherry-pick should NOT include baseline dirty state"
-        )
-
-        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=repo, capture_output=True)
-        GitWorktreeOps.remove(repo, wt_dir)
-        GitWorktreeOps.prune(repo)
-        if GitWorktreeOps.branch_exists(repo, branch):
-            GitWorktreeOps.delete_branch(repo, branch)
+from kiss.tests.agents.sorcar.test_worktree_audit9 import (  # noqa: F401
+    _make_repo,
+)
 
 
 class TestInc6Fix:
@@ -265,7 +109,3 @@ class TestInc6Fix:
         GitWorktreeOps.prune(repo)
         if GitWorktreeOps.branch_exists(repo, branch):
             GitWorktreeOps.delete_branch(repo, branch)
-
-
-
-
