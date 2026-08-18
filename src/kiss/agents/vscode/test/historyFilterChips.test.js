@@ -131,7 +131,7 @@ const CHIP_SPEC = [
   {
     id: 'hf-workspace',
     label: 'Workspace',
-    checked: false,
+    checked: true,
     lead: '.hf-chip-icon',
   },
   {

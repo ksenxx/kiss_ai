@@ -154,6 +154,8 @@ def run_agent_via_kiss_web(
     web_tools: bool | None = None,
     is_parallel: bool = True,
     append_basic_tools: bool = True,
+    append_to_system_prompt: str = "",
+    append_to_prompt: str = "",
     timeout: float | None = None,
     sock_path: str | None = None,
 ) -> str:
@@ -164,7 +166,8 @@ def run_agent_via_kiss_web(
     own module, whose top-level ``get_tools()`` the daemon calls to
     build a fresh agent from the credentials persisted under
     ``~/.kiss``), appends the agent's ``channel_system_prompt``
-    guidance to the prompt (the API carries no system prompt), and
+    guidance to the prompt (kept out of the system prompt so the
+    daemon's default system prompt stays intact), and
     submits the task to the in-process kiss-web daemon over its
     Unix-domain socket.  Blocks until the daemon reports the task
     finished (or *timeout* elapses) and returns the task's YAML result.
@@ -208,6 +211,13 @@ def run_agent_via_kiss_web(
             built-in basic toolset on top of the channel tools.  When
             ``False`` the agent's only tools are ``finish`` and the
             tools file's ``get_tools()`` tools (see
+            :func:`kiss.server.sorcar.run`).
+        append_to_system_prompt: Extra text appended to the run's
+            system prompt when the daemon executes the agent (see
+            :func:`kiss.server.sorcar.run`).
+        append_to_prompt: Extra text appended to the executed task
+            prompt, after the ``channel_system_prompt`` guidance this
+            launcher already appends (see
             :func:`kiss.server.sorcar.run`).
         timeout: Max seconds to wait for the task; ``None`` waits
             indefinitely.  On timeout the task keeps running in the
@@ -257,6 +267,8 @@ def run_agent_via_kiss_web(
                 web_tools=web_tools,
                 is_parallel=is_parallel,
                 append_basic_tools=append_basic_tools,
+                append_to_system_prompt=append_to_system_prompt,
+                append_to_prompt=append_to_prompt,
                 timeout=timeout if timeout is not None else _NO_TIMEOUT_SECONDS,
                 sock_path=sock,
             )

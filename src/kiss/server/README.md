@@ -145,6 +145,8 @@ extension agent may define.  The table below lists them all.
 | `get_web_tools()`            | `bool` or `None`                | `None` (daemon default)   | `webTools`          |
 | `get_is_parallel()`          | `bool`                          | `True`                    | `useParallel`       |
 | `get_append_basic_tools()`   | `bool`                          | `True`                    | `appendBasicTools`  |
+| `get_append_to_system_prompt()` | `str`                        | `""` (append nothing)     | `appendToSystemPrompt` |
+| `get_append_to_prompt()`     | `str`                           | `""` (append nothing)     | `appendToPrompt`    |
 
 When a getter is absent, the caller's value is used (which is the
 `run()` default when the caller did not pass one).
@@ -170,6 +172,14 @@ The three parameters without getters:
   `tools` argument.  Returning `None` clears any caller-supplied tools.
 - **`get_web_tools()`** — `None` uses the daemon's configured
   default; `True`/`False` forces browser tools on or off.
+- **`get_append_to_system_prompt()`** — extra text **appended** to
+  the run's system prompt (the default `SYSTEM.md` prompt or the
+  `get_system_prompt()` replacement) when the agent is executed.
+  Unlike `get_system_prompt()`, it does not replace anything.
+- **`get_append_to_prompt()`** — extra text **appended** to the
+  executed task prompt.  A multi-`<task>` prompt runs the agent once
+  per subtask and the text is appended to each subtask's prompt.  The
+  appended text becomes part of the recorded prompt in chat history.
 
 
 ## Tools: two contracts
@@ -546,6 +556,8 @@ def run(
     web_tools: bool | None = None,
     is_parallel: bool = True,
     append_basic_tools: bool = True,
+    append_to_system_prompt: str = "",
+    append_to_prompt: str = "",
     timeout: float = 3600.0,
     sock_path: str | Path | None = None,
 ) -> TaskResult
@@ -569,7 +581,7 @@ class TaskResult:
 | Aspect | Extension agent (`extension_agent_path`) | Tools file (`tools`) |
 |--------|------------------------------------------|----------------------|
 | **Purpose** | Override run parameters AND supply tools | Supply tools only |
-| **Getter functions** | `get_prompt()`, `get_model()`, `get_system_prompt()`, `get_tools()`, etc. (13 total) | `get_tools()` only |
+| **Getter functions** | `get_prompt()`, `get_model()`, `get_system_prompt()`, `get_tools()`, etc. (15 total) | `get_tools()` only |
 | **Required function** | None — define only the getters you need | Must define `get_tools()` |
 | **Can be combined** | Yes — `get_tools()` can point to a separate tools file | N/A |
 | **Can be self-contained** | Yes — return a list from `get_tools()` and the script becomes its own tools file | Always self-contained |

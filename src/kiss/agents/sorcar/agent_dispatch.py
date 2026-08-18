@@ -232,6 +232,7 @@ def _dispatch(
     model_name: str,
     budget: float | None,
     parent_agent: Any = None,
+    scope_work_dir: str = "",
 ) -> str:
     """Submit an agent-script task to the kiss-web daemon and wait.
 
@@ -254,6 +255,12 @@ def _dispatch(
         parent_agent: The agent calling ``run_agent``, when there is
             one: the sub-task's cost/tokens/steps are folded into its
             task accounting (see :func:`_attribute_dispatch_usage`).
+        scope_work_dir: The CALLING task's work directory, used as the
+            sub-task's tab workspace-scope so its tab shows in the
+            caller's tab bar even though the sub-task executes in
+            *work_dir* (a channel/cron scratch directory).  Empty
+            (standalone tools-file use) leaves the scope falling back
+            to *work_dir*.
 
     Returns:
         The sub-task's YAML result ("success" and "summary" keys), or
@@ -267,6 +274,7 @@ def _dispatch(
             prompt,
             extension_agent_path=agent_path,
             work_dir=work_dir,
+            scope_work_dir=scope_work_dir,
             model=model_name,
             max_budget=budget,
             timeout=DISPATCH_TIMEOUT_SECONDS,
@@ -354,7 +362,8 @@ def _run_agent(
             return f"Error: {e}"
         work_dir = parent_work_dir or str(kiss_home() / "agent_work")
         return _dispatch(Path(agent_path).stem, task, agent_path,
-                         work_dir, model_name, budget, parent_agent)
+                         work_dir, model_name, budget, parent_agent,
+                         scope_work_dir=parent_work_dir)
     # Forgiving lookup: "Home Assistant", "phone control", and
     # "nextcloud-talk" all resolve — spelling variants differ only in
     # case, spaces, hyphens, and underscores.
@@ -372,6 +381,7 @@ def _run_agent(
             "cron", cron_agent.CRON_DISPATCH_PREAMBLE + task,
             str(cron_agent.__file__), cron_agent.get_work_dir(),
             model_name, budget, parent_agent,
+            scope_work_dir=parent_work_dir,
         )
     channels = available_channels()
     matches = [name for name in channels if _squash(name) == squashed]
@@ -420,7 +430,8 @@ def _run_agent(
     enter_workspace(workspace)
     try:
         return _dispatch(channel, prompt, str(module.__file__),
-                         work_dir, model_name, budget, parent_agent)
+                         work_dir, model_name, budget, parent_agent,
+                         scope_work_dir=parent_work_dir)
     finally:
         exit_workspace(workspace)
 
