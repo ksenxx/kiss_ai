@@ -10,7 +10,10 @@ are touched by the simplification pass, using only real objects (no
 mocks/patches/fakes).  The relentless_agent-dependent methods (the
 result-panel printer tests and ``RelentlessRegression``) moved to
 ``tests/agents/sorcar/test_simplify_core_regr.py``, which imports the
-shared ``_make_printer`` helper from this module.
+shared ``_make_printer`` helper from this module.  The five
+``escape_invalid_template_field_names`` methods moved to
+``tests/agents/obsolete/gepa/test_simplify_core_regr.py`` because that
+helper lives in ``kiss.agents.obsolete.gepa``, outside ``kiss.core``.
 """
 
 import io
@@ -19,7 +22,6 @@ from typing import Any, cast
 
 import yaml
 
-from kiss.agents.obsolete.gepa.template_utils import escape_invalid_template_field_names
 from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent
@@ -60,26 +62,6 @@ class UtilsRegression(unittest.TestCase):
         assert parsed is not None
         self.assertEqual(parsed["summary"], "<p>structured summary</p>")
         self.assertTrue(parsed["success"])
-
-    def test_escape_keeps_valid_and_escapes_invalid(self) -> None:
-        out = escape_invalid_template_field_names("hi {bad} {good}", {"good"})
-        self.assertEqual(out.format(good="G"), "hi {bad} G")
-
-    def test_escape_nested_spec_invalid(self) -> None:
-        out = escape_invalid_template_field_names("{a:{b}}", {"a"})
-        self.assertEqual(out.format(), "{a:{b}}")
-
-    def test_escape_nested_spec_all_valid(self) -> None:
-        out = escape_invalid_template_field_names("{a:{b}}", {"a", "b"})
-        self.assertEqual(out.format(a=3, b=5), "    3")
-
-    def test_escape_conversion_preserved(self) -> None:
-        out = escape_invalid_template_field_names("{good!r}", {"good"})
-        self.assertEqual(out.format(good="x"), "'x'")
-
-    def test_escape_doubles_literal_braces(self) -> None:
-        out = escape_invalid_template_field_names("a {{lit}} {good}", {"good"})
-        self.assertEqual(out.format(good="G"), "a {lit} G")
 
     def test_config_to_dict_excludes_api_keys(self) -> None:
         d = config_to_dict()
