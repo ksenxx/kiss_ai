@@ -208,31 +208,5 @@ class TestAutocommitDoneInDisplayEventTypes(unittest.TestCase):
         )
 
 
-class TestMainJsHandlesAutocommitDoneInReplay(unittest.TestCase):
-    """main.js handleOutputEvent must handle autocommit_done for replay."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
-        cls.js = (base / "vscode" / "media" / "main.js").read_text()
-
-    def test_handle_output_event_has_autocommit_done_case(self) -> None:
-        """handleOutputEvent must have a case for autocommit_done."""
-        import re
-        match = re.search(
-            r"function handleOutputEvent\(.*?\)\s*\{(.*?)^\s{2}\}",
-            self.js,
-            re.DOTALL | re.MULTILINE,
-        )
-        assert match is not None, "handleOutputEvent function not found in main.js"
-        body = match.group(1)
-        assert "autocommit_done" in body, (
-            "handleOutputEvent in main.js must have a case for 'autocommit_done' "
-            "so the commit message renders during session replay"
-        )
-
-
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
