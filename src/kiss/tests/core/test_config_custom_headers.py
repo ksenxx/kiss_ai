@@ -5,7 +5,8 @@
 """Tests that custom HTTP headers can be configured via the settings panel.
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.agents.vscode.test_config_custom_headers``; the non-core tests remain there.
+``kiss.tests.agents.third_party_agents.test_config_custom_headers``;
+the non-core tests remain there.
 """
 
 from __future__ import annotations

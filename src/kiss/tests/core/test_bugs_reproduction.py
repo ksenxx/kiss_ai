@@ -5,7 +5,7 @@
 """Integration tests that reproduce bugs listed in bugs.md.
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.test_bugs_reproduction``; the non-core tests remain there.
+``kiss.tests.agents.third_party_agents.test_bugs_reproduction``; the non-core tests remain there.
 """
 
 
