@@ -9,8 +9,9 @@ Covers:
   call that the summarizer's actually-registered finish tool accepts
   (the summarizer registers ``KISSAgent.finish(result: str)`` because
   its tool list has no tool named "finish").
-- ``kiss.core.utils.finish`` emits the success/is_continue/summary
-  contract that ``kiss.core.printer.parse_result_yaml`` recognizes.
+- ``relentless_agent`` reuses the canonical ``kiss.core.utils.finish``
+  (whose ``parse_result_yaml`` contract is pinned in
+  ``kiss.tests.core.test_findings_wave_core``).
 """
 
 import inspect
@@ -27,7 +28,6 @@ from kiss.agents.sorcar.relentless_agent import SUMMARIZER_PROMPT
 from kiss.agents.sorcar.relentless_agent import finish as relentless_finish
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.printer import parse_result_yaml
 from kiss.core.utils import finish as utils_finish
 
 
@@ -94,16 +94,6 @@ class UtilsFinishContract(unittest.TestCase):
     def test_relentless_reuses_canonical_finish(self) -> None:
         """Core exposes one finish implementation, not two drifting copies."""
         self.assertIs(relentless_finish, utils_finish)
-
-    def test_utils_finish_recognized_by_parse_result_yaml(self) -> None:
-        raw = utils_finish(True, False, "the final code")
-        parsed = parse_result_yaml(raw)
-        self.assertIsNotNone(parsed)
-        assert parsed is not None
-        self.assertEqual(
-            parsed,
-            {"success": True, "is_continue": False, "summary": "<p>the final code</p>"},
-        )
 
 
 class FreshImportContract(unittest.TestCase):

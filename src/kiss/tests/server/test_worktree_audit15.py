@@ -343,21 +343,27 @@ class TestRed9RestorePendingMergeDeadCode:
     """``_restore_pending_merge`` is not called by any production module."""
 
     def test_no_production_callers(self) -> None:
-        """Verify no production code calls _restore_pending_merge."""
+        """Verify no production code calls _restore_pending_merge.
+
+        ``_restore_pending_merge`` was a ``VSCodeServer`` method, so
+        production callers could only live in ``src/kiss/server`` (its
+        home) or ``src/kiss/agents/sorcar`` (the agent layer it drives).
+        """
         import re
 
-        src_root = Path(__file__).resolve().parents[4] / "agents"
+        kiss_root = Path(__file__).resolve().parents[2]
         offenders: list[str] = []
-        for py in src_root.rglob("*.py"):
-            if "test" in py.name.lower():
-                continue
-            text = py.read_text()
-            for match in re.finditer(r"\b_restore_pending_merge\b", text):
-                line_start = text.rfind("\n", 0, match.start()) + 1
-                line = text[line_start : text.find("\n", match.end())]
-                if "def _restore_pending_merge" in line:
+        for src_root in (kiss_root / "server", kiss_root / "agents" / "sorcar"):
+            for py in src_root.rglob("*.py"):
+                if "test" in py.name.lower():
                     continue
-                offenders.append(f"{py}:{line.strip()}")
+                text = py.read_text()
+                for match in re.finditer(r"\b_restore_pending_merge\b", text):
+                    line_start = text.rfind("\n", 0, match.start()) + 1
+                    line = text[line_start : text.find("\n", match.end())]
+                    if "def _restore_pending_merge" in line:
+                        continue
+                    offenders.append(f"{py}:{line.strip()}")
 
         assert not offenders, (
             "RED-9 broken: found production callers of "
