@@ -296,6 +296,11 @@ type ToWebviewMessageBody =
         chatId: string;
         title: string;
         workDir: string;
+        // Workspace-visibility scope, distinct from workDir (the
+        // execution directory): a run_agent sub-task runs in a
+        // channel/cron scratch dir but is scoped to the calling
+        // workspace. Empty means "scope by workDir".
+        scopeWorkDir: string;
       }>;
     }
   | {

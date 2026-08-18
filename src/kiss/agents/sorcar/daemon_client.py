@@ -231,6 +231,7 @@ def run(
     prompt: str,
     *,
     work_dir: str = "",
+    scope_work_dir: str = "",
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -258,6 +259,16 @@ def run(
         prompt: The task instruction to run.
         work_dir: Working directory for the task; the daemon's current
             default is used when empty.
+        scope_work_dir: The workspace-scope directory of the task's
+            tab in the daemon's shared tab registry — the directory a
+            client's tab bar matches against to decide whether to show
+            the tab — kept separate from *work_dir* (the execution
+            directory) so a ``run_agent`` sub-task that runs in a
+            channel/cron scratch directory can still appear in the
+            CALLING workspace's tab bar.  Empty (the default) leaves
+            the tab's scope falling back to *work_dir*, unchanged from
+            ordinary runs.  Like *timeout* and *sock_path* it is a
+            client/UI-transport parameter with no agent-script getter.
         model: Model name; the daemon's selected default when empty.
         chat_id: Optional existing chat session id to continue.  Pass
             the ``chat_id`` of a previous :class:`TaskResult` to run
@@ -294,7 +305,8 @@ def run(
             *agent script* that computes this run's parameters **on the
             daemon**.  When non-empty, the daemon imports the file and,
             for each parameter ``X`` of this function except
-            ``extension_agent_path`` itself, calls the script's top-level
+            ``extension_agent_path`` itself (and the getter-less
+            parameters noted below), calls the script's top-level
             ``get_X()`` function — when the script defines one — and
             uses its return value for ``X``, replacing the value passed
             to this call.  A parameter whose ``get_X()`` the script
@@ -331,10 +343,13 @@ def run(
             *tools*; a ``get_tools()`` that instead returns a *list*
             of tool callables (the tools-file contract, as in the
             channel agent modules) makes the script its own tools
-            file.  ``timeout`` and *sock_path* have no getters by
-            design: they are client-transport parameters — the script
-            only runs on the daemon that *sock_path* selects, and
-            *timeout* bounds this client's local wait.  The
+            file.  ``timeout``, *sock_path*, and *scope_work_dir*
+            have no getters by design: the first two are
+            client-transport parameters — the script only runs on the
+            daemon that *sock_path* selects, and *timeout* bounds this
+            client's local wait — and *scope_work_dir* is the CALLING
+            client's tab-bar scope, which the dispatched script must
+            not be able to repoint at another workspace.  The
             *extension_agent_path* itself is resolved against this process's
             working directory and validated eagerly, like *tools*.  A
             broken agent script (deleted before the daemon reads it,
@@ -434,6 +449,7 @@ def run(
             "taskId": uuid.uuid4().hex,
             "chatId": chat_id,
             "workDir": work_dir,
+            "tabScopeWorkDir": scope_work_dir,
             "model": model,
             "systemPrompt": system_prompt,
             "toolsFile": tools_file,

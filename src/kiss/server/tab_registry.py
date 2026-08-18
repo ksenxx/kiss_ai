@@ -117,6 +117,7 @@ class TabRegistry:
                 "chatId": chat_id,
                 "title": _clean_str(entry.get("title"), _MAX_TITLE_CHARS),
                 "workDir": _clean_str(entry.get("workDir")),
+                "scopeWorkDir": _clean_str(entry.get("scopeWorkDir")),
                 "taskId": _clean_str(entry.get("taskId")),
             })
 
@@ -241,6 +242,7 @@ class TabRegistry:
                 "chatId": "",
                 "title": _clean_str(title, _MAX_TITLE_CHARS) or "new chat",
                 "workDir": _clean_str(work_dir),
+                "scopeWorkDir": "",
                 "taskId": "",
             })
             self._save_locked()
@@ -270,6 +272,7 @@ class TabRegistry:
         chat_id: str | None = None,
         title: str | None = None,
         work_dir: str | None = None,
+        scope_work_dir: str | None = None,
         task_id: str | None = None,
         create: bool = False,
     ) -> tuple[bool, list[str]]:
@@ -285,6 +288,15 @@ class TabRegistry:
             chat_id: New chat binding (``None`` keeps the current one).
             title: New title (``None``/empty keeps the current one).
             work_dir: New working directory (``None``/empty keeps it).
+            scope_work_dir: The directory that scopes the tab to a
+                client workspace, distinct from *work_dir* (the tab's
+                execution/display directory): a ``run_agent`` sub-task
+                executes in a channel/cron scratch directory but must
+                appear in the CALLING workspace's tab bar, so its scope
+                is pinned to that workspace while *work_dir* stays the
+                scratch directory.  ``None``/empty keeps the current
+                value; clients fall back to *work_dir* when it is
+                empty, preserving the pre-scope behaviour.
             task_id: The specific historical task the tab shows.
                 ``None`` keeps the current value; ``""`` clears it (the
                 tab tracks the chat's latest task again).
@@ -308,6 +320,7 @@ class TabRegistry:
                 entry = {
                     "tabId": tab_id, "chatId": "",
                     "title": "new chat", "workDir": "",
+                    "scopeWorkDir": "",
                     "taskId": "",
                 }
                 self._tabs.append(entry)
@@ -337,6 +350,10 @@ class TabRegistry:
             new_wd = _clean_str(work_dir)
             if new_wd and entry["workDir"] != new_wd:
                 entry["workDir"] = new_wd
+                changed = True
+            new_scope = _clean_str(scope_work_dir)
+            if new_scope and entry.get("scopeWorkDir", "") != new_scope:
+                entry["scopeWorkDir"] = new_scope
                 changed = True
             if changed:
                 self._save_locked()
@@ -383,6 +400,7 @@ class TabRegistry:
                         or "new chat"
                     ),
                     "workDir": _clean_str(entry.get("workDir")),
+                    "scopeWorkDir": _clean_str(entry.get("scopeWorkDir")),
                     "taskId": "",
                 })
             if not self._tabs:

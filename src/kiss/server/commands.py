@@ -286,6 +286,7 @@ class _CommandsMixin:
             chat_id: str | None = None,
             title: str | None = None,
             work_dir: str | None = None,
+            scope_work_dir: str | None = None,
             task_id: str | None = None,
             create: bool = False,
         ) -> None: ...
@@ -447,6 +448,14 @@ class _CommandsMixin:
                 chat_id=chat_id,
                 title=str(cmd.get("prompt", "") or ""),
                 work_dir=str(cmd.get("workDir", "") or ""),
+                # A ``run_agent`` sub-task (wire field
+                # ``tabScopeWorkDir``) executes in a channel/cron
+                # scratch directory but must appear in the CALLING
+                # workspace's tab bar, so its visibility scope is
+                # pinned to that workspace here while ``workDir`` stays
+                # the scratch directory.  Empty for ordinary runs,
+                # whose scope falls back to ``workDir`` unchanged.
+                scope_work_dir=str(cmd.get("tabScopeWorkDir", "") or ""),
                 task_id="",
                 create=True,
             )
