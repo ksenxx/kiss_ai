@@ -1,14 +1,17 @@
 # Messaging & Third-Party Agents
 
-> KISS Sorcar includes 23 third-party messaging agents that can send and receive messages on your behalf, plus a Govee smart-home CLI.
+> KISS Sorcar includes 32 third-party channel agents that act on messaging services, mailboxes, and devices on your behalf, plus infrastructure agents and a Govee smart-home CLI.
 
-## The 23 Messaging Agents
+## The 32 Channel Agents
 
 - BlueBubbles
+- DingTalk
 - Discord
+- Email (IMAP/SMTP)
 - Feishu
 - Gmail
 - Google Chat
+- Home Assistant
 - iMessage
 - IRC
 - LINE
@@ -17,16 +20,28 @@
 - Microsoft Teams
 - Nextcloud Talk
 - Nostr
+- ntfy
 - Phone Control
+- QQ
 - Signal
+- SimpleX
 - Slack
 - SMS
 - Synology Chat
 - Telegram
 - Tlon
 - Twitch
+- Webhook
+- WeCom
+- WeiXin
 - WhatsApp
 - Zalo
+
+In a chat task, just say what you want ("send 'running late' to Alice on WhatsApp") — Sorcar dispatches the matching channel agent through its `run_agent` tool. Each channel also has its own CLI entry point (`kiss-slack`, `kiss-gmail`, `kiss-whatsapp`, ...) for running channel tasks directly from the shell.
+
+## Infrastructure Agents
+
+Two infrastructure agents round out the set: an **A2A agent** (`kiss-a2a`) exposing Sorcar over the agent-to-agent protocol, and an **OpenAI-compatible server** (`kiss-oai`) that serves Sorcar behind an OpenAI-style HTTP API.
 
 These agents live in `src/kiss/agents/third_party_agents/` in the source repository.
 
@@ -46,7 +61,7 @@ browser to prompt the user to log in and obtain the authentication token.
 ```
 
 ```text
-Can you send "Hello from Sorcar!" to 1-510-289-3391?
+Can you send "Hello from Sorcar!" to 1-800-772-1213?
 ```
 
 ```text
