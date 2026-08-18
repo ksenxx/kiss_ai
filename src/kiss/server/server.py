@@ -475,6 +475,7 @@ class VSCodeServer(
         chat_id: str | None = None,
         title: str | None = None,
         work_dir: str | None = None,
+        scope_work_dir: str | None = None,
         task_id: str | None = None,
         create: bool = False,
     ) -> None:
@@ -490,13 +491,18 @@ class VSCodeServer(
             chat_id: New chat binding (``None`` keeps the current one).
             title: New title (``None``/empty keeps the current one).
             work_dir: New working directory (``None``/empty keeps it).
+            scope_work_dir: The workspace-scope directory that decides
+                which client tab bars show the tab, distinct from
+                *work_dir* (``None``/empty keeps the current value;
+                clients fall back to *work_dir* when it is empty).
             task_id: The specific historical task the tab shows
                 (``None`` keeps the current value, ``""`` clears it).
             create: Register the tab first when it is unknown.
         """
         changed, displaced = self.tab_registry.update_tab(
             tab_id, chat_id=chat_id, title=title,
-            work_dir=work_dir, task_id=task_id, create=create,
+            work_dir=work_dir, scope_work_dir=scope_work_dir,
+            task_id=task_id, create=create,
         )
         for old_tab_id in displaced:
             self._prune_local_uds_tab(old_tab_id)

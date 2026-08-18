@@ -2108,6 +2108,10 @@
       t = up;
     }
     if (!t) return '';
+    // A run_agent sub-task runs in a channel/cron scratch directory
+    // (its registryWorkDir) but pins a SEPARATE scope to the calling
+    // workspace so its tab shows there; that scope wins when set.
+    if (t.registryScopeWorkDir) return t.registryScopeWorkDir;
     if (typeof t.registryWorkDir === 'string') return t.registryWorkDir;
     return t.workDir || '';
   }
@@ -2223,6 +2227,14 @@
       // (see tabScopeWorkDir) without disturbing tab.workDir, which
       // client features (file links, commit, submit) keep using.
       if (typeof e.workDir === 'string') tab.registryWorkDir = e.workDir;
+      // A run_agent sub-task pins a distinct visibility scope (the
+      // calling workspace) so its tab shows there even though it runs
+      // in a channel/cron scratch directory (registryWorkDir). Empty
+      // means "no override — scope by registryWorkDir" (see
+      // tabScopeWorkDir).
+      if (typeof e.scopeWorkDir === 'string') {
+        tab.registryScopeWorkDir = e.scopeWorkDir;
+      }
       next.push(tab);
     });
 

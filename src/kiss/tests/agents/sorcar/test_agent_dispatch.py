@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -151,6 +152,57 @@ def test_channel_dispatch_unreachable_daemon_is_a_clean_error(
     # directory (the same default their poll-mode runner uses).
     assert (tmp_path / "channel_work").is_dir()
     assert not (tmp_path / "agent_work").exists()
+
+
+def test_dispatch_pins_tab_scope_to_calling_work_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every dispatch scopes the sub-task's tab to the CALLING work dir.
+
+    A ``run_agent`` sub-task runs in a channel/cron/agent scratch
+    directory (``work_dir``) but its tab must show in the calling
+    workspace's tab bar, so the dispatch forwards the calling task's
+    work directory as ``daemon_client.run``'s ``scope_work_dir``.  The
+    real dispatch path is exercised up to the daemon-client boundary;
+    only that boundary call is captured, to read the argument the
+    dispatch computed.
+    """
+    from kiss.agents.sorcar import daemon_client
+
+    captured: list[dict[str, Any]] = []
+
+    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        captured.append(kwargs)
+        return daemon_client.TaskResult(
+            text="ok", success=True, cost=0.0, tokens=0, steps=0,
+        )
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
+
+    caller = tmp_path / "caller_project"
+    caller.mkdir()
+    tool = make_run_agent_tool(str(caller))
+
+    # Channel mode: executes in the shared channel_work scratch dir,
+    # but the tab is scoped to the caller's project.
+    captured.clear()
+    tool("ntfy", "say hi")
+    assert captured[0]["work_dir"] == str(tmp_path / "channel_work")
+    assert captured[0]["scope_work_dir"] == str(caller)
+
+    # Cron mode: executes in the cron work dir, scoped to the caller.
+    captured.clear()
+    tool("cron", "run 'echo hi' every 5 minutes")
+    assert captured[0]["work_dir"] == cron_agent.get_work_dir()
+    assert captured[0]["scope_work_dir"] == str(caller)
+
+    # Path mode: executes in the caller's project (scope == work_dir).
+    script = caller / "helper.py"
+    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    captured.clear()
+    tool(str(script), "say hi")
+    assert captured[0]["work_dir"] == str(caller)
+    assert captured[0]["scope_work_dir"] == str(caller)
 
 
 def test_cron_dispatch_unreachable_daemon_is_a_clean_error(

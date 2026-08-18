@@ -235,6 +235,49 @@ function testCanonicalEmptyWorkDirWins() {
   );
 }
 
+function testScopeWorkDirPinsRunAgentTabToCaller() {
+  // A run_agent sub-task runs in a channel/cron scratch directory
+  // (workDir) OUTSIDE any workspace, but the daemon pins a separate
+  // scopeWorkDir to the calling workspace so its tab shows there.
+  const {win} = makeWebview();
+  setWorkspace(win, '/ws/a');
+  send(win, {
+    type: 'tabs_state',
+    tabs: [
+      // Scratch workDir is foreign; scopeWorkDir is the caller's ws.
+      {
+        tabId: 'api-1',
+        chatId: 'chat-1',
+        title: 'send hi',
+        workDir: '/home/u/.kiss/channel_work',
+        scopeWorkDir: '/ws/a',
+      },
+      // Same scratch workDir but scoped to ANOTHER workspace: hidden.
+      {
+        tabId: 'api-2',
+        chatId: 'chat-2',
+        title: 'send hi elsewhere',
+        workDir: '/home/u/.kiss/channel_work',
+        scopeWorkDir: '/ws/b',
+      },
+    ],
+  });
+  assert.deepStrictEqual(
+    tabBarIds(win),
+    ['api-1'],
+    'the run_agent tab is shown in the workspace that dispatched it, ' +
+      'and hidden in others, despite its foreign scratch workDir',
+  );
+  // Switching to /ws/b hides api-1 and shows api-2 — scope, not the
+  // shared scratch workDir, decides visibility.
+  setWorkspace(win, '/ws/b');
+  assert.deepStrictEqual(
+    tabBarIds(win),
+    ['api-2'],
+    'scopeWorkDir (not the scratch workDir) decides the tab bar',
+  );
+}
+
 function testPendingLocalTabSurvivesForeignSnapshot() {
   // A locally created tab whose `openTab` echo has not arrived yet is
   // shielded from reconciliation even when every snapshot entry is
@@ -758,6 +801,7 @@ const tests = [
   testWorkspaceSwitchPreservesHiddenTabState,
   testPathNormalization,
   testCanonicalEmptyWorkDirWins,
+  testScopeWorkDirPinsRunAgentTabToCaller,
   testPendingLocalTabSurvivesForeignSnapshot,
   testRemoteWorkDirSaveRescopesImmediately,
   testWorkspaceWorkDirMessageRescopes,
