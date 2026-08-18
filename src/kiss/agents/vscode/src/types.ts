@@ -284,6 +284,9 @@ type ToWebviewMessageBody =
   | {type: 'triggerStop'}
   | {type: 'measureSize'}
   | {type: 'daemonStatus'; connected: boolean}
+  // The window's workspace folder changed; the webview re-scopes its
+  // workspace-filtered surfaces (tab bar, history) to this directory.
+  | {type: 'workspaceWorkDir'; workDir: string}
   | {
       // Canonical shared-tab snapshot broadcast by the daemon after
       // every tab-registry mutation; clients reconcile against it.
@@ -293,6 +296,11 @@ type ToWebviewMessageBody =
         chatId: string;
         title: string;
         workDir: string;
+        // Workspace-visibility scope, distinct from workDir (the
+        // execution directory): a run_agent sub-task runs in a
+        // channel/cron scratch dir but is scoped to the calling
+        // workspace. Empty means "scope by workDir".
+        scopeWorkDir: string;
       }>;
     }
   | {

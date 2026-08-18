@@ -69,6 +69,8 @@ PARAM_FIELDS: tuple[tuple[str, str], ...] = (
     ("web_tools", "webTools"),
     ("is_parallel", "useParallel"),
     ("append_basic_tools", "appendBasicTools"),
+    ("append_to_system_prompt", "appendToSystemPrompt"),
+    ("append_to_prompt", "appendToPrompt"),
 )
 """The overridable ``run`` parameters, as ``(param, wire_field)`` pairs.
 
@@ -78,7 +80,12 @@ command wire field it overrides.  ``timeout`` and ``sock_path`` are
 absent by design: they are client-transport parameters — the script
 only runs on the daemon that ``sock_path`` selects, and ``timeout``
 bounds the client's local wait — so a daemon-side getter could never
-take effect.
+take effect.  ``scope_work_dir`` (wire field ``tabScopeWorkDir``) is
+absent by design too: it is the CALLING client's tab-bar visibility
+scope, which the dispatched script must not be able to repoint at
+another workspace — and its absence here is what lets the scope
+survive a ``get_work_dir()`` override (the ``workDir`` re-pin in
+``_run_task`` touches only the execution directory).
 """
 
 
@@ -108,7 +115,10 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
     if param == "prompt":
         ok = isinstance(value, str) and bool(value.strip())
         expected = "a non-empty string"
-    elif param in ("work_dir", "model", "chat_id", "system_prompt"):
+    elif param in (
+        "work_dir", "model", "chat_id", "system_prompt",
+        "append_to_system_prompt", "append_to_prompt",
+    ):
         ok = isinstance(value, str)
         expected = "a string"
     elif param == "tools":

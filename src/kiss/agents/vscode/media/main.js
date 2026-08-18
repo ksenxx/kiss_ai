@@ -764,8 +764,24 @@
   // content tab, point the host at whichever chat tab survives — and when
   // none survives, clear it, so the deleted chat stops owning the editor.
   function reportSurvivingChatTab() {
-    if (tabs.some(t => t.id === reportedChatTabId)) return;
-    const chat = tabs.find(t => !t.isContentTab);
+    // Only a VISIBLE chat may own the editor: pointing the host at a
+    // hidden (another workspace's) or dead tab would route its
+    // commit/merge actions to a chat this user cannot see.
+    const reported = getTab(reportedChatTabId);
+    if (reported && !isTabHidden(reported)) return;
+    const active = getTab(activeTabId);
+    let chat =
+      active && !active.isContentTab && !isTabHidden(active) ? active : null;
+    if (!chat && active && active.isContentTab && active.ownerTabId) {
+      // A content tab on screen keeps the editor with its owning chat.
+      const ownerTab = getTab(active.ownerTabId);
+      if (ownerTab && !ownerTab.isContentTab && !isTabHidden(ownerTab)) {
+        chat = ownerTab;
+      }
+    }
+    if (!chat) {
+      chat = tabs.find(t => !t.isContentTab && !isTabHidden(t)) || null;
+    }
     reportChatTab(chat ? chat.id : '');
   }
 
@@ -985,12 +1001,18 @@
     // tabs (see moveTabFocus) and Enter/Space activate.  If the active
     // tab is somehow not in the list, the first tab is the stop so the
     // tablist never becomes keyboard-unreachable.
-    const rovingStopId = tabs.some(t => t.id === activeTabId)
+    // Workspace scoping: tabs of other workspaces exist locally (all
+    // their state intact, still receiving events) but get no strip in
+    // the bar (see isTabHidden).
+    const shown = tabs.filter(t => {
+      return !isTabHidden(t);
+    });
+    const rovingStopId = shown.some(t => t.id === activeTabId)
       ? activeTabId
-      : tabs.length > 0
-        ? tabs[0].id
+      : shown.length > 0
+        ? shown[0].id
         : null;
-    tabs.forEach(tab => {
+    shown.forEach(tab => {
       const el = document.createElement('div');
       el.className =
         'chat-tab' +
@@ -1164,7 +1186,9 @@
   function switchToTab(tabId) {
     if (tabId === activeTabId) return;
     const tab = getTab(tabId);
-    if (!tab) return;
+    // A hidden tab (another workspace's, see isTabHidden) has no strip
+    // in the bar and may never come on screen here.
+    if (!tab || isTabHidden(tab)) return;
     saveCurrentTab();
     if (tab.isContentTab) {
       activeTabId = tabId;
@@ -1195,18 +1219,28 @@
   // break the "no tab switch unless finished" rule.  For those closes
   // prefer the closed tab's parent chat tab, then the nearest surviving
   // chat tab, falling back to adjacency only if no chat tab is left.
+  // Hidden tabs (other workspaces, see isTabHidden) are never
+  // successors: activating one would put an invisible tab on screen.
+  // Returns null when no visible tab is left (the caller opens a
+  // fresh chat tab then).
   function pickSuccessorTab(closed, origIdx, agentInitiated) {
-    const adjacent = tabs[Math.min(origIdx, tabs.length - 1)];
+    const eligible = (t, chatOnly) => {
+      return !!t && !isTabHidden(t) && !(chatOnly && t.isContentTab);
+    };
+    const nearest = chatOnly => {
+      for (let d = 0; d < tabs.length; d++) {
+        const after = tabs[origIdx + d];
+        if (eligible(after, chatOnly)) return after;
+        const before = tabs[origIdx - 1 - d];
+        if (eligible(before, chatOnly)) return before;
+      }
+      return null;
+    };
+    const adjacent = nearest(false);
     if (!agentInitiated) return adjacent;
     const parent = closed.parentTabId ? getTab(closed.parentTabId) : null;
-    if (parent && !parent.isContentTab) return parent;
-    for (let d = 0; d < tabs.length; d++) {
-      const after = tabs[origIdx + d];
-      if (after && !after.isContentTab) return after;
-      const before = tabs[origIdx - 1 - d];
-      if (before && !before.isContentTab) return before;
-    }
-    return adjacent;
+    if (eligible(parent, true)) return parent;
+    return nearest(true) || adjacent;
   }
 
   // agentInitiated marks a close the agent performed by itself rather
@@ -1247,11 +1281,17 @@
     }
     rpAfterTabsClosed(toClose);
     if (activeWasClosed) {
-      if (tabs.length === 0) {
+      const successor =
+        tabs.length > 0
+          ? pickSuccessorTab(closed, origIdx, agentInitiated)
+          : null;
+      if (!successor) {
+        // No tab of this workspace is left (hidden tabs of other
+        // workspaces may well remain): open a fresh chat here.
         createNewTab();
         return;
       }
-      activateAdjacentTab(pickSuccessorTab(closed, origIdx, agentInitiated));
+      activateAdjacentTab(successor);
     }
     reportSurvivingChatTab();
     renderTabBar();
@@ -1337,13 +1377,14 @@
     tabs.splice(idx, 1);
     disposeTabContentView(tab);
     if (activeTabId === tabId) {
-      if (tabs.length === 0) {
+      const successor =
+        tabs.length > 0 ? pickSuccessorTab(tab, idx, false) : null;
+      if (!successor) {
         hideContentArea();
         createNewTab();
         return;
       }
-      const newIdx = Math.min(idx, tabs.length - 1);
-      activateAdjacentTab(tabs[newIdx]);
+      activateAdjacentTab(successor);
     }
     renderTabBar();
     persistTabState();
@@ -1563,8 +1604,20 @@
   // active tab. It defaults to true because every caller but one acts on
   // a user request or a finished task; pass false to open the tab in the
   // background instead.
-  function handleFileContent(ev, mayFocus) {
+  //
+  // ownerTabId names the tab whose work produced the file, so the
+  // content tab inherits that owner's WORKSPACE SCOPE (tabScopeWorkDir):
+  // a report written by a hidden foreign tab opens hidden too instead
+  // of stealing focus in an unrelated workspace. It defaults to the
+  // active tab (user-driven opens belong to the conversation on screen).
+  function handleFileContent(ev, mayFocus, ownerTabId) {
     if (mayFocus === undefined) mayFocus = true;
+    const owner =
+      ownerTabId === undefined || ownerTabId === null || ownerTabId === ''
+        ? activeTabId
+        : String(ownerTabId);
+    const ownerTab = getTab(owner);
+    const ownerScope = ownerTab ? tabScopeWorkDir(ownerTab) : '';
     if (ev.error) {
       // tableak-coverage:start
       // A background task's failed file open is that task's problem. Toasting
@@ -1580,8 +1633,18 @@
       return;
     }
     const path = ev.path || '';
+    // Reuse by path WITHIN the same workspace scope only: one
+    // workspace's file must not overwrite (or focus) the content tab
+    // another workspace's conversation is showing for the same path —
+    // "currently hidden" is not enough, two different foreign
+    // workspaces are both hidden here.
+    const scopeKey = normalizeHistoryWorkDir(ownerScope);
     const existing = tabs.find(t => {
-      return t.isContentTab && t.contentPath === path;
+      return (
+        t.isContentTab &&
+        t.contentPath === path &&
+        normalizeHistoryWorkDir(tabScopeWorkDir(t)) === scopeKey
+      );
     });
     if (existing) {
       renderContentView(existing, ev);
@@ -1592,10 +1655,16 @@
     const tab = makeTab(ev.name || path || 'file');
     tab.isContentTab = true;
     tab.contentPath = path;
+    tab.ownerTabId = owner || '';
+    // Freeze the owner's scope so the content tab stays pinned to its
+    // workspace even after the owner closes (see tabScopeWorkDir).
+    tab.ownerScopeWorkDir = ownerScope;
     tabs.push(tab);
     renderContentView(tab, ev);
+    // switchToTab refuses hidden tabs, so a foreign-scoped file opens
+    // in the background and waits for its workspace.
     if (mayFocus) switchToTab(tab.id);
-    else renderTabBar();
+    renderTabBar();
   }
 
   // report-coverage:start
@@ -1711,6 +1780,10 @@
           isReport: true,
         },
         mayFocus,
+        // The report belongs to the task's tab: it inherits that
+        // tab's workspace scope, so a hidden tab's report opens
+        // hidden instead of surfacing in an unrelated workspace.
+        key,
       );
     });
   }
@@ -1733,12 +1806,15 @@
           closeTab(tabId);
         },
       },
+      // Bulk closes act on VISIBLE tabs only: a hidden tab belongs to
+      // another workspace, and closing it here would close it in the
+      // shared registry — destroying a tab this user cannot even see.
       {
         label: 'Close Others',
         action: function () {
           const ids = tabs
             .filter(t => {
-              return t.id !== tabId;
+              return t.id !== tabId && !isTabHidden(t);
             })
             .map(t => {
               return t.id;
@@ -1752,9 +1828,13 @@
       {
         label: 'Close All',
         action: function () {
-          const ids = tabs.map(t => {
-            return t.id;
-          });
+          const ids = tabs
+            .filter(t => {
+              return !isTabHidden(t);
+            })
+            .map(t => {
+              return t.id;
+            });
           ids.forEach(id => {
             closeTab(id);
           });
@@ -1765,7 +1845,7 @@
         action: function () {
           const ids = tabs
             .filter(t => {
-              return !t.isRunning;
+              return !t.isRunning && !isTabHidden(t);
             })
             .map(t => {
               return t.id;
@@ -1782,6 +1862,12 @@
       el.textContent = item.label;
       el.addEventListener('click', () => {
         closeTabContextMenu();
+        // The menu may have gone stale while open (the anchor tab was
+        // closed remotely, or a workspace change hid it): acting on a
+        // tab the user can no longer see would close or switch shared
+        // tabs behind their back.
+        const anchor = getTab(tabId);
+        if (!anchor || isTabHidden(anchor)) return;
         item.action();
       });
       tabCtxMenu.appendChild(el);
@@ -1981,6 +2067,107 @@
     return t.length > 30 ? t.substring(0, 30) + '\u2026' : t;
   }
 
+  // workspacescope-coverage:start
+  // Workspace-scoped tab bar: true when a tab pinned to *workDir*
+  // belongs on this client. Matching reuses the history filter's
+  // semantics (see applyHistoryFilterVisibility): an unpinned tab or
+  // a client without a workspace matches everything, and a tab whose
+  // work dir is a subdirectory of the workspace (e.g. a
+  // ".kiss-worktrees/kiss_wt-..." worktree) still belongs to it.
+  function tabMatchesWorkspace(workDir) {
+    const ws = normalizeHistoryWorkDir(configWorkDir || '');
+    if (ws === '') return true;
+    const wd = normalizeHistoryWorkDir(workDir || '');
+    if (wd === '') return true;
+    if (wd === ws) return true;
+    return wd.startsWith(ws.endsWith('/') ? ws : ws + '/');
+  }
+
+  // The work dir that scopes *tab* to a workspace. Sub-agent and
+  // content tabs are client-local details of a chat tab, so they take
+  // their parent chain's scope. For a registry tab the registry's
+  // canonical value wins — INCLUDING the canonical empty string,
+  // which means "unpinned, belongs everywhere" — and the local pin
+  // only covers tabs the registry has not described yet.
+  function tabScopeWorkDir(tab) {
+    let t = tab;
+    for (let i = 0; t && i < tabs.length; i++) {
+      const upId = t.parentTabId || t.ownerTabId;
+      if (!upId) break;
+      const up = getTab(upId);
+      if (!up) {
+        // The owner is gone (e.g. a finished sub-agent tab closed
+        // after parking its report): the scope frozen at creation
+        // keeps the orphan pinned to its workspace instead of letting
+        // it fall through as unpinned-everywhere.
+        if (typeof t.ownerScopeWorkDir === 'string') {
+          return t.ownerScopeWorkDir;
+        }
+        break;
+      }
+      t = up;
+    }
+    if (!t) return '';
+    // A run_agent sub-task runs in a channel/cron scratch directory
+    // (its registryWorkDir) but pins a SEPARATE scope to the calling
+    // workspace so its tab shows there; that scope wins when set.
+    if (t.registryScopeWorkDir) return t.registryScopeWorkDir;
+    if (typeof t.registryWorkDir === 'string') return t.registryWorkDir;
+    return t.workDir || '';
+  }
+
+  // True when *tab* is not shown on this client because it belongs to
+  // a different workspace. Hidden is a RENDERING property only: the
+  // tab object, its draft, transcript, sub-agent tabs and registry
+  // entry all stay intact, every broadcast keeps routing to it like
+  // to any background tab, and it is still offered back to the daemon
+  // for restart recovery — it just has no strip in the tab bar and
+  // can never become the active tab.
+  function isTabHidden(tab) {
+    return !!tab && !tabMatchesWorkspace(tabScopeWorkDir(tab));
+  }
+
+  function firstVisibleTab() {
+    return (
+      tabs.find(t => {
+        return !isTabHidden(t);
+      }) || null
+    );
+  }
+
+  // Park the user on a tab of THIS workspace: when every tab belongs
+  // to other workspaces, create the same local placeholder an empty
+  // registry gets, and when the active tab is hidden (or gone), save
+  // its draft and activate the first visible tab instead.
+  function ensureVisibleActiveTab() {
+    if (!firstVisibleTab()) tabs.push(makeTab('new chat'));
+    const active = getTab(activeTabId);
+    if (active && !isTabHidden(active)) return;
+    if (active) saveCurrentTab();
+    activateAdjacentTab(firstVisibleTab());
+  }
+
+  // Re-scope the workspace-derived UI after configWorkDir changes:
+  // the history filter and the workspace-scoped tab bar both depend
+  // on it. Purely client-local: no registry command is sent, and no
+  // tab state is discarded — visibility is recomputed, nothing else.
+  function applyWorkspaceScope() {
+    try {
+      applyHistoryFilterVisibility();
+    } catch (_e) {}
+    // A context menu opened before the switch anchors to a tab that
+    // may now be hidden; acting on it would mutate an invisible tab.
+    closeTabContextMenu();
+    ensureVisibleActiveTab();
+    // The active tab may have survived (e.g. an everywhere-visible
+    // content tab) while the chat reported to the host got hidden:
+    // re-point the host at a chat of THIS workspace.
+    reportSurvivingChatTab();
+    renderTabBar();
+    persistTabState();
+  }
+  // workspacescope-coverage:end
+
   // Reconcile the local tab bar against the canonical `tabs_state`
   // snapshot: adopt tabs other clients opened, drop tabs they closed,
   // and follow the registry's titles, order and chat bindings.
@@ -2035,6 +2222,19 @@
         tab.backendChatId = String(e.chatId);
       }
       if (e.workDir && !tab.workDir) tab.workDir = e.workDir;
+      // Mirror the registry's canonical work dir verbatim (empty
+      // means "unpinned"): it decides the tab's workspace visibility
+      // (see tabScopeWorkDir) without disturbing tab.workDir, which
+      // client features (file links, commit, submit) keep using.
+      if (typeof e.workDir === 'string') tab.registryWorkDir = e.workDir;
+      // A run_agent sub-task pins a distinct visibility scope (the
+      // calling workspace) so its tab shows there even though it runs
+      // in a channel/cron scratch directory (registryWorkDir). Empty
+      // means "no override — scope by registryWorkDir" (see
+      // tabScopeWorkDir).
+      if (typeof e.scopeWorkDir === 'string') {
+        tab.registryScopeWorkDir = e.scopeWorkDir;
+      }
       next.push(tab);
     });
 
@@ -2048,19 +2248,23 @@
     });
 
     // A removed registry tab takes its local sub-agent descendants
-    // with it, exactly like a local close would. An EMPTY snapshot
-    // spares tabs the registry never listed (the boot placeholder):
-    // there is nothing to mirror, so destroying and recreating the
-    // placeholder would only lose its identity and composer draft.
+    // with it, exactly like a local close would. A snapshot with
+    // nothing VISIBLE to mirror — an empty registry, or one whose
+    // every listed tab is hidden here (another workspace's) — spares
+    // tabs the registry never listed (the local placeholder):
+    // destroying and recreating the placeholder would only lose its
+    // identity and composer draft.
     const removedIds = new Set();
-    const snapshotEmpty = inSnapshot.size === 0;
+    const nothingVisibleListed = !next.some(t => {
+      return !isTabHidden(t);
+    });
     tabs.forEach(t => {
       if (
         !inSnapshot.has(t.id) &&
         !t.isSubagentTab &&
         !t.isContentTab &&
         !pendingOpenTabs.has(t.id) &&
-        !(snapshotEmpty && !t.inRegistry)
+        !(nothingVisibleListed && !t.inRegistry)
       ) {
         removedIds.add(t.id);
       }
@@ -2099,15 +2303,22 @@
       }
     });
 
-    if (tabs.length === 0) {
-      // Empty registry: keep one local, unregistered placeholder so
-      // the composer always exists. The daemon adopts it the moment
-      // it runs a task; until then it is a welcome screen only.
+    if (!firstVisibleTab()) {
+      // Empty registry — or one whose every tab belongs to another
+      // workspace: keep one local, unregistered placeholder so the
+      // composer always exists. The daemon adopts it the moment it
+      // runs a task; until then it is a welcome screen only.
       tabs.push(makeTab('new chat'));
     }
-    if (!getTab(activeTabId)) {
+    const activeAfter = getTab(activeTabId);
+    if (!activeAfter || isTabHidden(activeAfter)) {
+      // A hidden survivor keeps its draft; a removed tab has nothing
+      // left to save.
+      if (activeAfter) saveCurrentTab();
       const saved = savedActiveTabId ? getTab(savedActiveTabId) : null;
-      activateAdjacentTab(saved || tabs[0]);
+      activateAdjacentTab(
+        saved && !isTabHidden(saved) ? saved : firstVisibleTab(),
+      );
     }
     savedActiveTabId = '';
     reportSurvivingChatTab();
@@ -2474,7 +2685,14 @@
   // says it is running; sub-agent and content tabs are implementation
   // details of some chat tab, never launch targets themselves.
   function isLaunchRunning(tab) {
-    return !tab.isContentTab && !tab.isSubagentTab && !!tab.isRunning;
+    return (
+      !tab.isContentTab &&
+      !tab.isSubagentTab &&
+      !!tab.isRunning &&
+      // A task running in another workspace's tab is not news for
+      // this client: its tab is hidden here.
+      !isTabHidden(tab)
+    );
   }
 
   // Ties -- two tasks whose start timestamp is missing, so both read 0 --
@@ -5750,11 +5968,11 @@
         // file though, so open it in the background rather than throw it
         // away -- the tab is waiting for them when they switch over.
         if (ev.tabId !== undefined && !isForActiveTab(ev)) {
-          handleFileContent(ev, false);
+          handleFileContent(ev, false, ev.tabId);
           return;
         }
         // tableak-coverage:end
-        handleFileContent(ev, true);
+        handleFileContent(ev, true, ev.tabId);
         return;
       case 'pathsExist':
         handlePathsExist(ev);
@@ -6276,6 +6494,17 @@
         if (Array.isArray(ev.tabs)) reconcileTabs(ev.tabs);
         break;
 
+      case 'workspaceWorkDir':
+        // The extension host reports the window's workspace folder
+        // change directly (its daemon `setWorkDir` produces no
+        // `configData` reply), so the workspace-scoped tab bar and
+        // history re-scope immediately.
+        if (typeof ev.workDir === 'string' && ev.workDir !== configWorkDir) {
+          configWorkDir = ev.workDir;
+          applyWorkspaceScope();
+        }
+        break;
+
       case 'triggerStop':
         markStopping(activeTabId, true);
         api.stop({tabId: activeTabId});
@@ -6651,7 +6880,11 @@
         pendingOpenTabs.delete(ev.tabId);
         const rejTab = getTab(ev.tabId);
         if (rejTab && !rejTab.isSubagentTab && !rejTab.isContentTab) {
-          const chatTabs = tabs.filter(t => !t.isContentTab);
+          // Count VISIBLE chats only: hidden tabs of other workspaces
+          // must not make the sole visible chat here look expendable
+          // (closing it would spawn a registered replacement, get that
+          // rejected too, and loop).
+          const chatTabs = tabs.filter(t => !t.isContentTab && !isTabHidden(t));
           if (chatTabs.length > 1) closeTab(ev.tabId, true, true);
         }
         if (ev.text) {
@@ -6846,6 +7079,8 @@
     if (tabId === undefined || tabId === null) return;
     if (tabId === activeTabId) return;
     if (!getTab(tabId)) return;
+    // switchToTab refuses hidden tabs, so a task finishing in another
+    // workspace's tab never yanks this client onto it.
     switchToTab(tabId);
   }
 
@@ -7397,7 +7632,14 @@
           tabId: t.id,
           chatId: t.backendChatId,
           title: t.title || '',
-          workDir: t.workDir || '',
+          // The registry's canonical work dir (including the
+          // canonical '' = unpinned), so re-seeding an empty registry
+          // never re-pins a tab from the stale local value; the local
+          // pin only covers tabs the registry never described.
+          workDir:
+            typeof t.registryWorkDir === 'string'
+              ? t.registryWorkDir
+              : t.workDir || '',
         };
       });
     return current.length > 0 ? current : legacyRestoredTabs;
@@ -9196,8 +9438,14 @@
         // The task text goes to the read-only task panel only.  #task-input
         // holds the user's own draft for the NEXT prompt and is never written.
         const taskText = s.preview || s.title || '';
+        // A chat open in a HIDDEN tab (another workspace's) is treated
+        // like one with no tab at all: the user explicitly asked to
+        // open it in THIS workspace, so a fresh tab resumes it here
+        // and the daemon's one-tab-per-chat displacement (the newest
+        // bind wins — the same designed flow any cross-client history
+        // open uses) retires the old tab everywhere.
         const existingChatTab = getTabByBackendChatId(s.id);
-        if (existingChatTab) {
+        if (existingChatTab && !isTabHidden(existingChatTab)) {
           switchToTab(existingChatTab.id);
           // The tab may be parked on a different task of the same chat.
           // Scroll the clicked task's region into view so the static
@@ -9575,6 +9823,13 @@
       data.config.work_dir
     ) {
       api.setWorkDir({workDir: data.config.work_dir});
+      // The pin changed this web app instance's workspace right now;
+      // don't wait for a `configData` round-trip to re-scope the
+      // history rows and the workspace-scoped tab bar.
+      if (data.config.work_dir !== configWorkDir) {
+        configWorkDir = data.config.work_dir;
+        applyWorkspaceScope();
+      }
     }
   }
 
@@ -9801,11 +10056,6 @@
     };
     const prevConfigWorkDir = configWorkDir;
     configWorkDir = cfg.work_dir || '';
-    if (prevConfigWorkDir !== configWorkDir) {
-      try {
-        applyHistoryFilterVisibility();
-      } catch (_e) {}
-    }
     const wdInp = el('cfg-work-dir');
     if (wdInp) {
       setValue('cfg-work-dir', cfg.work_dir || '');
@@ -9826,6 +10076,10 @@
         }
       }
     }
+    // Compared AFTER the pinned override above so the web app's
+    // session pin — not the daemon-reported work_dir it supersedes —
+    // decides which history rows and shared tabs this client shows.
+    if (prevConfigWorkDir !== configWorkDir) applyWorkspaceScope();
     // The budget default belongs to Python (`config.DEFAULT_MAX_BUDGET`,
     // read by `vscode_config.DEFAULTS`), and `load_config()` seeds every
     // reply from it, so an effective value is always in `configData`.

@@ -598,6 +598,47 @@ class TestLaunchViaApi(_ApiLaunchBase):
         agent = self.stub_calls[0]["agent"]
         assert getattr(agent, "_append_basic_tools", None) is False
 
+    def test_append_to_prompts_forwarded(self) -> None:
+        """Both append suffixes reach the daemon-built agent's run.
+
+        The launcher (and the ``LAUNCH_KWARG_NAMES`` filter) must
+        forward ``append_to_system_prompt`` / ``append_to_prompt`` to
+        ``sorcar.run`` — a dropped kwarg would silently run the channel
+        task without the caller's extra instructions.  The stub sits on
+        ``RelentlessAgent.run``, so its ``system_prompt`` kwarg is the
+        fully assembled system instructions (base + suffix) and its
+        ``prompt_template`` the executed prompt (task + channel
+        guidance + suffix).
+        """
+        from kiss.agents.third_party_agents._channel_agent_utils import (
+            filter_launch_kwargs,
+        )
+        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+
+        assert filter_launch_kwargs(
+            {
+                "append_to_system_prompt": "S",
+                "append_to_prompt": "P",
+                "_skip_persistence": True,
+            }
+        ) == {"append_to_system_prompt": "S", "append_to_prompt": "P"}
+        self._install_stub()
+        run_agent_via_kiss_web(
+            SlackAgent(),
+            "task",
+            work_dir=self.repo,
+            sock_path=self.sock_path,
+            append_to_system_prompt="\nLAUNCHER-SYS-SUFFIX-2210",
+            append_to_prompt="\nLAUNCHER-PROMPT-SUFFIX-2210",
+        )
+        kwargs = self.stub_calls[0]["kwargs"]
+        assert "LAUNCHER-SYS-SUFFIX-2210" in str(
+            kwargs.get("system_prompt", "")
+        )
+        assert "LAUNCHER-PROMPT-SUFFIX-2210" in str(
+            kwargs.get("prompt_template", "")
+        )
+
     def test_zero_budget_override_is_honored(self) -> None:
         from kiss.agents.third_party_agents.slack_agent import SlackAgent
 
