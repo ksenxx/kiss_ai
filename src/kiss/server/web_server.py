@@ -79,6 +79,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
 from kiss.agents.sorcar import cron_agent
+from kiss.agents.sorcar.persistence import _load_all_chat_events_by_chat_id
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.models.model_info import get_default_model
@@ -338,6 +339,20 @@ def _truncate_utf8_bytes(text: str, max_bytes: int) -> tuple[str, int]:
 
 
 _MAX_LINE_BYTES = 64 * 1024 * 1024
+
+# Byte budget for the JSON tasks of one ``share_tasks`` reply.  The
+# reply's smallest receiver is NOT this server's own 64 MiB frame
+# (``_MAX_LINE_BYTES``) but the VS Code extension's UDS client, which
+# destroys the connection past MAX_LINE_BUFFER_BYTES = 32 MiB
+# (``src/AgentClient.ts``); the 8 MiB headroom under that covers the
+# reply envelope and the frame's UTF-8 / escaping overhead.  Older
+# tasks beyond the budget are dropped and the reply is flagged
+# ``truncated`` (see _handle_share_chat_tasks).
+_SHARE_TASKS_MAX_REPLY_BYTES = 24 * 1024 * 1024
+
+# Echoed identifiers ride in every ``share_tasks`` reply; a client
+# cannot make the reply overflow its frame by inflating them.
+_SHARE_TASKS_MAX_ID_CHARS = 256
 
 # ``websockets`` wraps the whole opening handshake - including a plain
 # HTTP reply produced by ``process_request`` - in ``open_timeout``.  Its
@@ -2495,6 +2510,25 @@ html, body { height: auto; overflow: auto; }
 #output { overflow: visible; }
 /* Chrome that only works inside the live chat webview. */
 .panel-copy-btn, #task-panel-copy { display: none !important; }
+/* One .share-task section per task of the chat, oldest first. */
+.share-task + .share-task {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+}
+/* Each task's panel text carries a per-task unique id (its drawer's
+   aria-controls target), so main.css's #task-panel-text rules are
+   replicated here by id prefix. */
+[id^='task-panel-text'] {
+  max-height: 60vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#task-panel.drawer-collapsed [id^='task-panel-text'] {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 """
 """Layout overrides appended after main.css on a shared chat page."""
 
@@ -2502,9 +2536,10 @@ html, body { height: auto; overflow: auto; }
 def _build_share_page(title: str, body_html: str) -> str:
     """Build one standalone, self-contained shared chat page.
 
-    Wraps *body_html* — the chat webview's serialized static task
-    panel and transcript (see ``buildShareableHtml`` in
-    ``media/main.js``) — in a complete HTML document that needs no
+    Wraps *body_html* — the chat webview's serialized chat, one
+    ``.share-task`` section (static task panel + transcript) per task
+    of the chat (see ``buildShareableHtml`` in ``media/main.js``) —
+    in a complete HTML document that needs no
     server: ``media/main.css`` (the exact stylesheet the webview
     uses), the highlight.js theme, the VS Code palette variables and
     ``media/share.js`` (collapse / expand behaviour for the event
@@ -2512,8 +2547,9 @@ def _build_share_page(title: str, body_html: str) -> str:
 
     Args:
         title: Page title; falls back to "KISS Sorcar chat".
-        body_html: The serialized ``#task-panel`` and ``#output``
-            markup, placed verbatim inside the page's ``#app``.
+        body_html: The serialized ``#output`` markup (one
+            ``.share-task`` section per task), placed verbatim inside
+            the page's ``#app``.
 
     Returns:
         The complete HTML document string.
@@ -4520,6 +4556,90 @@ class RemoteAccessServer:
             await self._endpoint_send(endpoint, json.dumps(reply))
         except Exception:
             logger.debug("shareChat: failed to write reply", exc_info=True)
+
+    async def _handle_share_chat_tasks(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Send a chat's every persisted task transcript for a share.
+
+        Handles the ``shareChatTasks`` command sent by
+        ``media/main.js`` when the user clicks the share button: the
+        webview needs the transcripts of ALL of the chat's tasks —
+        after a webview reload its DOM holds only the one task the
+        session replay repainted — so this returns every non-sub-agent
+        ``task_history`` row of the chat, oldest first, straight from
+        the history database
+        (:func:`~kiss.agents.sorcar.persistence._load_all_chat_events_by_chat_id`).
+        The reply is a single ``share_tasks`` JSON object sent
+        directly to the requesting *endpoint* — never broadcast —
+        with the shape::
+
+            {"type": "share_tasks", "tabId": <echo>, "chatId": <echo>,
+             "tasks": [{"task": <str>, "task_id": <str>,
+                        "events": [<event>, ...]}, ...],
+             "truncated": <bool>}
+
+        Every receiver caps one frame — this server at
+        ``_MAX_LINE_BYTES``, the VS Code extension's UDS client at a
+        smaller 32 MiB — and drops the connection on overflow, so when
+        the tasks do not fit ``_SHARE_TASKS_MAX_REPLY_BYTES`` the
+        OLDEST ones are left out and ``truncated`` is set — the newest
+        transcripts are the ones the export cannot redraw from its own
+        DOM.  An unknown or empty chat id yields an empty task list:
+        the webview then exports just what is on screen.  A history
+        database failure yields an ``error`` string in the reply, so
+        the share click never silently stalls.
+
+        Args:
+            cmd: The parsed ``shareChatTasks`` command (``chatId``,
+                optional ``tabId``).
+            endpoint: The requesting connection (WSS or UDS).
+        """
+        tab_id = cmd.get("tabId", "")
+        if not isinstance(tab_id, str):
+            tab_id = ""
+        chat_id = cmd.get("chatId", "")
+        if not isinstance(chat_id, str):
+            chat_id = ""
+        tab_id = tab_id[:_SHARE_TASKS_MAX_ID_CHARS]
+        chat_id = chat_id[:_SHARE_TASKS_MAX_ID_CHARS]
+
+        def _load_tasks() -> dict[str, Any]:
+            reply: dict[str, Any] = {
+                "type": "share_tasks",
+                "tabId": tab_id,
+                "chatId": chat_id,
+                "tasks": [],
+                "truncated": False,
+            }
+            if not chat_id.strip():
+                return reply
+            try:
+                rows, truncated = _load_all_chat_events_by_chat_id(
+                    chat_id, _SHARE_TASKS_MAX_REPLY_BYTES,
+                )
+            except Exception as exc:
+                logger.warning("shareChatTasks: load failed", exc_info=True)
+                reply["error"] = f"Failed to load the chat history: {exc}"
+                return reply
+            reply["tasks"] = [
+                {
+                    "task": row.get("task", ""),
+                    "task_id": row.get("task_id", ""),
+                    "events": row.get("events", []),
+                }
+                for row in rows
+            ]
+            reply["truncated"] = truncated
+            return reply
+
+        reply = await asyncio.to_thread(_load_tasks)
+        try:
+            await self._endpoint_send(endpoint, json.dumps(reply))
+        except Exception:
+            logger.debug(
+                "shareChatTasks: failed to write reply", exc_info=True,
+            )
 
     async def _handle_check_paths(
         self, cmd: dict[str, Any], endpoint: Any,

@@ -262,6 +262,9 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("openFile", required=("path",), handler="open_file"),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
     ApiCommand("shareChat", required=("chatId", "html"), handler="share_chat"),
+    ApiCommand(
+        "shareChatTasks", required=("chatId",), handler="share_chat_tasks"
+    ),
     ApiCommand("complete", required=("query",)),
     ApiCommand("worktreeAction", required=("action",)),
     ApiCommand("generateCommitMessage"),
@@ -428,6 +431,10 @@ class ServerBackend(Protocol):
     ) -> None: ...
 
     async def _handle_share_chat(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_share_chat_tasks(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
@@ -875,6 +882,27 @@ class ServerApi:
             ctx: The transport context of the current call.
         """
         await self._backend._handle_share_chat(cmd, ctx.endpoint)
+
+    async def share_chat_tasks(
+        self, cmd: dict[str, Any], ctx: ApiContext,
+    ) -> None:
+        """Send the requester every task of a chat for a share export.
+
+        The chat webview's share button exports the whole chat, but
+        after a reload its DOM holds only one task's transcript — the
+        daemon's session replay repaints a single task.  This command
+        returns the persisted transcripts of ALL of the chat's tasks
+        (oldest first) as a direct ``share_tasks`` reply; the webview
+        replays them into detached containers, splices in the live DOM
+        for the on-screen task, and sends the assembled page back via
+        ``shareChat``.
+
+        Args:
+            cmd: The ``shareChatTasks`` command (``chatId``, optional
+                ``tabId``).
+            ctx: The transport context of the current call.
+        """
+        await self._backend._handle_share_chat_tasks(cmd, ctx.endpoint)
 
     async def voice_transcribe(
         self, cmd: dict[str, Any], ctx: ApiContext,

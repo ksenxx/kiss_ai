@@ -242,6 +242,10 @@
   - `cmd`: The ``shareChat`` command (``chatId``, ``html``, optional ``title``, ``workDir``, ``tabId``).
   - `ctx`: The transport context of the current call.
 
+- **share_chat_tasks** — Send the requester every task of a chat for a share export. The chat webview's share button exports the whole chat, but after a reload its DOM holds only one task's transcript — the daemon's session replay repaints a single task.  This command returns the persisted transcripts of ALL of the chat's tasks (oldest first) as a direct ``share_tasks`` reply; the webview replays them into detached containers, splices in the live DOM for the on-screen task, and sends the assembled page back via ``shareChat``.<br/>`async share_chat_tasks(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``shareChatTasks`` command (``chatId``, optional ``tabId``).
+  - `ctx`: The transport context of the current call.
+
 - **voice_transcribe** — Transcribe a remote-web client's post-wake utterance. A remote-web (browser mode) client heard the "Sorcar" wake word and captured the utterance that followed in the page (VS Code webviews never send this: their speech is captured and translated by the extension host's local listener).  The audio is translated with the same gpt-audio call the local listener uses and answered with the ``voiceSpeech`` message ``voice.js`` already handles.<br/>`async voice_transcribe(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``voiceTranscribe`` command carrying the audio.
   - `ctx`: The transport context of the current call.
