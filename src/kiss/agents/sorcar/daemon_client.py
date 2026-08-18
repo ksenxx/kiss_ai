@@ -231,6 +231,7 @@ def run(
     prompt: str,
     *,
     work_dir: str = "",
+    scope_work_dir: str = "",
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -243,6 +244,8 @@ def run(
     web_tools: bool | None = None,
     is_parallel: bool = True,
     append_basic_tools: bool = True,
+    append_to_system_prompt: str = "",
+    append_to_prompt: str = "",
     timeout: float = 3600.0,
     sock_path: str | Path | None = None,
 ) -> TaskResult:
@@ -256,6 +259,16 @@ def run(
         prompt: The task instruction to run.
         work_dir: Working directory for the task; the daemon's current
             default is used when empty.
+        scope_work_dir: The workspace-scope directory of the task's
+            tab in the daemon's shared tab registry — the directory a
+            client's tab bar matches against to decide whether to show
+            the tab — kept separate from *work_dir* (the execution
+            directory) so a ``run_agent`` sub-task that runs in a
+            channel/cron scratch directory can still appear in the
+            CALLING workspace's tab bar.  Empty (the default) leaves
+            the tab's scope falling back to *work_dir*, unchanged from
+            ordinary runs.  Like *timeout* and *sock_path* it is a
+            client/UI-transport parameter with no agent-script getter.
         model: Model name; the daemon's selected default when empty.
         chat_id: Optional existing chat session id to continue.  Pass
             the ``chat_id`` of a previous :class:`TaskResult` to run
@@ -292,7 +305,8 @@ def run(
             *agent script* that computes this run's parameters **on the
             daemon**.  When non-empty, the daemon imports the file and,
             for each parameter ``X`` of this function except
-            ``extension_agent_path`` itself, calls the script's top-level
+            ``extension_agent_path`` itself (and the getter-less
+            parameters noted below), calls the script's top-level
             ``get_X()`` function — when the script defines one — and
             uses its return value for ``X``, replacing the value passed
             to this call.  A parameter whose ``get_X()`` the script
@@ -316,6 +330,8 @@ def run(
                 def get_web_tools() -> bool | None: ...
                 def get_is_parallel() -> bool: ...
                 def get_append_basic_tools() -> bool: ...
+                def get_append_to_system_prompt() -> str: ...
+                def get_append_to_prompt() -> str: ...
 
             The ``get_X()`` functions are never serialized by the
             client — they run **in the daemon process**, exactly like a
@@ -327,10 +343,13 @@ def run(
             *tools*; a ``get_tools()`` that instead returns a *list*
             of tool callables (the tools-file contract, as in the
             channel agent modules) makes the script its own tools
-            file.  ``timeout`` and *sock_path* have no getters by
-            design: they are client-transport parameters — the script
-            only runs on the daemon that *sock_path* selects, and
-            *timeout* bounds this client's local wait.  The
+            file.  ``timeout``, *sock_path*, and *scope_work_dir*
+            have no getters by design: the first two are
+            client-transport parameters — the script only runs on the
+            daemon that *sock_path* selects, and *timeout* bounds this
+            client's local wait — and *scope_work_dir* is the CALLING
+            client's tab-bar scope, which the dispatched script must
+            not be able to repoint at another workspace.  The
             *extension_agent_path* itself is resolved against this process's
             working directory and validated eagerly, like *tools*.  A
             broken agent script (deleted before the daemon reads it,
@@ -365,6 +384,21 @@ def run(
             ``Read("./SORCAR.md")`` call), so a restricted run should
             usually pass a *system_prompt* written for the tools it
             actually has.
+        append_to_system_prompt: Extra text appended to the run's
+            system prompt when the agent is executed — after the
+            default ``SYSTEM.md`` prompt (or the *system_prompt*
+            replacement) and before the daemon's per-run operational
+            instructions.  ``run_parallel`` sub-agents inherit the
+            suffix on their own system prompts, like a *system_prompt*
+            replacement, so the extra instructions constrain the whole
+            task tree.  Empty (default) appends nothing.
+        append_to_prompt: Extra text appended to the executed task
+            prompt.  A multi-``<task>`` *prompt* runs the agent once
+            per subtask, and the text is appended to EACH subtask's
+            prompt.  The appended text is part of the prompt the agent
+            actually runs with, so it is also what the chat history
+            records and what follow-up tasks of the same chat see as
+            context.  Empty (default) appends nothing.
         timeout: Maximum seconds to wait for the task to finish.
         sock_path: Daemon UDS path override (defaults to
             ``$KISS_SORCAR_SOCK`` or ``$KISS_HOME/sorcar.sock``).
@@ -415,6 +449,7 @@ def run(
             "taskId": uuid.uuid4().hex,
             "chatId": chat_id,
             "workDir": work_dir,
+            "tabScopeWorkDir": scope_work_dir,
             "model": model,
             "systemPrompt": system_prompt,
             "toolsFile": tools_file,
@@ -426,6 +461,8 @@ def run(
             "webTools": web_tools,
             "useParallel": is_parallel,
             "appendBasicTools": append_basic_tools,
+            "appendToSystemPrompt": append_to_system_prompt,
+            "appendToPrompt": append_to_prompt,
         }
         sock.sendall(json.dumps(cmd).encode("utf-8") + b"\n")
         reader = sock.makefile("rb", buffering=_MAX_LINE_BYTES)

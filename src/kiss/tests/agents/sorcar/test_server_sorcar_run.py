@@ -1218,6 +1218,117 @@ class SorcarRunApiTest(unittest.TestCase):
         )
         assert api_views == [], "api tab chat view leaked after run()"
 
+    def test_scope_work_dir_pins_tab_visibility_scope(self) -> None:
+        """``run(scope_work_dir=…)`` pins the tab's workspace scope.
+
+        A ``run_agent`` sub-task executes in a channel/cron scratch
+        directory (``work_dir``) but must appear in the CALLING
+        workspace's tab bar, so ``run()`` forwards ``scope_work_dir``
+        as the tab's ``scopeWorkDir`` registry field — distinct from
+        the execution ``workDir`` — and it is broadcast to every
+        client in the ``tabs_state`` snapshot.
+        """
+        captured: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            self_agent.total_tokens_used = 1
+            self_agent.budget_used = 0.0
+            self_agent.total_steps = 1
+            # Snapshot the registry WHILE the api- tab is still open
+            # (run() closes it on exit).
+            captured["tabs"] = [
+                dict(entry)
+                for entry in self.server._vscode_server.tab_registry.snapshot()
+                if entry["tabId"].startswith("api-")
+            ]
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer") or getattr(
+                self_agent, "printer", None,
+            )
+            if printer is not None:
+                printer.print(raw, type="result", step_count=1)
+            return raw
+
+        self._parent_class.run = stub_run
+        scratch = str(Path(self.tmpdir) / "channel_work")
+        workspace = str(Path(self.tmpdir) / "caller_workspace")
+        result = sorcar.run(
+            "say hi",
+            work_dir=scratch,
+            scope_work_dir=workspace,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        api_tabs = captured.get("tabs") or []
+        assert len(api_tabs) == 1, f"expected one api tab, got {api_tabs!r}"
+        entry = api_tabs[0]
+        # The execution dir stays the scratch dir; the visibility
+        # scope is pinned to the caller's workspace.
+        assert entry["workDir"] == scratch
+        assert entry["scopeWorkDir"] == workspace
+
+    def test_scope_survives_agent_script_work_dir_override(self) -> None:
+        """A ``get_work_dir()`` override re-pins ``workDir``, not the scope.
+
+        The cron agent script overrides the execution directory via
+        ``get_work_dir()``, and ``_run_task`` re-pins the registry
+        tab's ``workDir`` to the overridden value.  The tab's
+        ``scopeWorkDir`` must survive that re-pin — it is what keeps a
+        ``run_agent``-dispatched cron tab visible in the CALLING
+        workspace — which holds because ``scope_work_dir`` is
+        deliberately absent from ``PARAM_FIELDS``.
+        """
+        captured: dict[str, Any] = {}
+        override_dir = str(Path(self.tmpdir) / "script_work")
+        agent_script = Path(self.tmpdir) / "scoped_agent.py"
+        agent_script.write_text(
+            "def get_work_dir() -> str:\n"
+            f"    return {override_dir!r}\n"
+        )
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            self_agent.total_tokens_used = 1
+            self_agent.budget_used = 0.0
+            self_agent.total_steps = 1
+            # Snapshot AFTER apply_agent_overrides re-pinned workDir
+            # (both run on this worker thread before the agent runs).
+            captured["tabs"] = [
+                dict(entry)
+                for entry in self.server._vscode_server.tab_registry.snapshot()
+                if entry["tabId"].startswith("api-")
+            ]
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer") or getattr(
+                self_agent, "printer", None,
+            )
+            if printer is not None:
+                printer.print(raw, type="result", step_count=1)
+            return raw
+
+        self._parent_class.run = stub_run
+        workspace = str(Path(self.tmpdir) / "caller_workspace")
+        result = sorcar.run(
+            "say hi",
+            work_dir=str(Path(self.tmpdir) / "initial_work"),
+            scope_work_dir=workspace,
+            extension_agent_path=str(agent_script),
+            use_worktree=False,
+            auto_commit=False,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        api_tabs = captured.get("tabs") or []
+        assert len(api_tabs) == 1, f"expected one api tab, got {api_tabs!r}"
+        entry = api_tabs[0]
+        assert entry["workDir"] == override_dir, (
+            "get_work_dir() must re-pin the registry workDir"
+        )
+        assert entry["scopeWorkDir"] == workspace, (
+            "the workDir re-pin must not clobber the visibility scope"
+        )
+
     def test_no_daemon_raises_connection_error(self) -> None:
         """A missing daemon socket raises a helpful ConnectionError."""
         missing = str(Path(self.tmpdir) / "nowhere.sock")
