@@ -47,6 +47,14 @@ export type FromWebviewMessage =
       tabId?: string;
     }
   | {type: 'checkPaths'; paths: string[]; workDir?: string; tabId?: string}
+  | {
+      type: 'shareChat';
+      chatId: string;
+      html: string;
+      title?: string;
+      workDir?: string;
+      tabId?: string;
+    }
   | {type: 'recordFileUsage'; path: string; workDir?: string}
   | {
       type: 'ready';
@@ -156,6 +164,7 @@ type ToWebviewMessageBody =
       results: Record<string, boolean>;
       workDir?: string;
     }
+  | {type: 'share_done'; ok: boolean; path?: string; error?: string}
   | {
       type: 'result';
       text?: string;
@@ -365,7 +374,8 @@ export interface AgentCommand {
     | 'setWorkDir'
     | 'getConfig'
     | 'saveConfig'
-    | 'serverReset';
+    | 'serverReset'
+    | 'shareChat';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -378,6 +388,7 @@ export interface AgentCommand {
   prefix?: string;
   answer?: string;
   path?: string;
+  html?: string;
   chatId?: number | string;
   taskId?: string | number | null;
   activeFileContent?: string;

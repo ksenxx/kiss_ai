@@ -264,7 +264,8 @@ body.remote-chat #input-footer {
 body.remote-chat #menu-btn,
 body.remote-chat #upload-btn,
 body.remote-chat #tricks-btn,
-body.remote-chat #voice-btn {
+body.remote-chat #voice-btn,
+body.remote-chat #share-btn {
   width: 36px;
   height: 36px;
   min-width: 36px;
@@ -284,7 +285,8 @@ body.remote-chat #voice-btn {
 body.remote-chat #menu-btn:hover:not(:disabled),
 body.remote-chat #upload-btn:hover:not(:disabled),
 body.remote-chat #tricks-btn:hover:not(:disabled),
-body.remote-chat #voice-btn:hover:not(:disabled) {
+body.remote-chat #voice-btn:hover:not(:disabled),
+body.remote-chat #share-btn:hover:not(:disabled) {
   background: var(--hover-strong);
   color: var(--fg);
 }
@@ -297,7 +299,7 @@ body.remote-chat #voice-btn.active {
 
 body.remote-chat #menu-btn { margin-left: 0; }
 
-body.remote-chat #voice-btn { margin-right: 0; }
+body.remote-chat #share-btn { margin-right: 0; }
 
 body.remote-chat #model-btn {
   background: transparent;

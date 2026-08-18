@@ -45,6 +45,7 @@ import contextlib
 import datetime
 import errno
 import hashlib
+import html
 import ipaddress
 import json
 import logging
@@ -2454,6 +2455,96 @@ def _media_url(name: str) -> str:
     return f"/media/{name}?v={ver}"
 
 
+_VSCODE_THEME_VARS_CSS = (
+    ":root {\n"
+    "      --vscode-font-size: 16px;\n"
+    "      --vscode-font-family: -apple-system, BlinkMacSystemFont, "
+    "'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;\n"
+    "      --vscode-editor-font-size: 16px;\n"
+    "      --vscode-editor-font-family: Menlo, Monaco, "
+    "'Courier New', monospace;\n"
+    "      --vscode-editor-background: #1e1e1e;\n"
+    "      --vscode-editor-foreground: #cccccc;\n"
+    "      --vscode-input-background: #3c3c3c;\n"
+    "      --vscode-button-foreground: #ffffff;\n"
+    "      --vscode-sideBar-background: #252526;\n"
+    "      --vscode-textLink-foreground: #3794ff;\n"
+    "      --vscode-descriptionForeground: #8b8b8b;\n"
+    "      --vscode-panel-border: #80808059;\n"
+    "      --vscode-terminal-ansiRed: #f44747;\n"
+    "      --vscode-terminal-ansiGreen: #6a9955;\n"
+    "      --vscode-terminal-ansiYellow: #d7ba7d;\n"
+    "      --vscode-terminal-ansiMagenta: #c586c0;\n"
+    "      --vscode-terminal-ansiCyan: #4ec9b0;\n"
+    "    }\n"
+)
+"""The VS Code theme variables main.css derives its palette from.
+
+The webview gets them from VS Code itself; the remote webapp
+(:func:`_build_html`) and the shared chat pages
+(:func:`_build_share_page`) run in a plain browser, so both inline
+this block — one copy, so the two pages can never disagree on the
+palette.
+"""
+
+_SHARE_PAGE_CSS = """\
+/* A shared chat page is a normal scrolling document, not the
+   fixed-height webview app shell that main.css lays out. */
+html, body { height: auto; overflow: auto; }
+#app { height: auto; display: block; }
+#output { overflow: visible; }
+/* Chrome that only works inside the live chat webview. */
+.panel-copy-btn, #task-panel-copy { display: none !important; }
+"""
+"""Layout overrides appended after main.css on a shared chat page."""
+
+
+def _build_share_page(title: str, body_html: str) -> str:
+    """Build one standalone, self-contained shared chat page.
+
+    Wraps *body_html* — the chat webview's serialized static task
+    panel and transcript (see ``buildShareableHtml`` in
+    ``media/main.js``) — in a complete HTML document that needs no
+    server: ``media/main.css`` (the exact stylesheet the webview
+    uses), the highlight.js theme, the VS Code palette variables and
+    ``media/share.js`` (collapse / expand behaviour for the event
+    panels and the static task panel) are all inlined.
+
+    Args:
+        title: Page title; falls back to "KISS Sorcar chat".
+        body_html: The serialized ``#task-panel`` and ``#output``
+            markup, placed verbatim inside the page's ``#app``.
+
+    Returns:
+        The complete HTML document string.
+    """
+    main_css = (MEDIA_DIR / "main.css").read_text(encoding="utf-8")
+    hljs_css = (MEDIA_DIR / "highlight-github-dark.min.css").read_text(
+        encoding="utf-8",
+    )
+    share_js = (MEDIA_DIR / "share.js").read_text(encoding="utf-8")
+    page_title = html.escape(title.strip()) or "KISS Sorcar chat"
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '<meta charset="UTF-8">\n'
+        '<meta name="viewport" content="width=device-width, '
+        'initial-scale=1.0">\n'
+        f"<title>{page_title}</title>\n"
+        "<style>\n" + _VSCODE_THEME_VARS_CSS + "</style>\n"
+        "<style>\n" + hljs_css + "\n</style>\n"
+        "<style>\n" + main_css + "\n</style>\n"
+        "<style>\n" + _SHARE_PAGE_CSS + "</style>\n"
+        "</head>\n"
+        "<body>\n"
+        '<div id="app">\n' + body_html + "\n</div>\n"
+        "<script>\n" + share_js + "</script>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
 def _build_html() -> str:
     """Build the standalone HTML page for remote Sorcar access.
 
@@ -2482,28 +2573,7 @@ def _build_html() -> str:
         "    html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }\n"
         "    body { background: var(--vscode-editor-background, #1e1e1e);\n"
         "            color: var(--vscode-editor-foreground, #cccccc); }\n"
-        "    :root {\n"
-        "      --vscode-font-size: 16px;\n"
-        "      --vscode-font-family: -apple-system, BlinkMacSystemFont, "
-        "'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;\n"
-        "      --vscode-editor-font-size: 16px;\n"
-        "      --vscode-editor-font-family: Menlo, Monaco, "
-        "'Courier New', monospace;\n"
-        "      --vscode-editor-background: #1e1e1e;\n"
-        "      --vscode-editor-foreground: #cccccc;\n"
-        "      --vscode-input-background: #3c3c3c;\n"
-        "      --vscode-button-foreground: #ffffff;\n"
-        "      --vscode-sideBar-background: #252526;\n"
-        "      --vscode-textLink-foreground: #3794ff;\n"
-        "      --vscode-descriptionForeground: #8b8b8b;\n"
-        "      --vscode-panel-border: #80808059;\n"
-        "      --vscode-terminal-ansiRed: #f44747;\n"
-        "      --vscode-terminal-ansiGreen: #6a9955;\n"
-        "      --vscode-terminal-ansiYellow: #d7ba7d;\n"
-        "      --vscode-terminal-ansiMagenta: #c586c0;\n"
-        "      --vscode-terminal-ansiCyan: #4ec9b0;\n"
-        "    }\n"
-        "  </style>"
+        "    " + _VSCODE_THEME_VARS_CSS + "  </style>"
     )
     auth_modal = (
         '    <div id="auth-modal" style="display:none;">\n'
@@ -4369,6 +4439,87 @@ class RemoteAccessServer:
             await self._endpoint_send(endpoint, json.dumps(reply))
         except Exception:
             logger.debug("openFile: failed to write reply", exc_info=True)
+
+    async def _handle_share_chat(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Save a chat transcript as a standalone HTML page and reply.
+
+        Handles the ``shareChat`` command sent by ``media/main.js``
+        when the user clicks the share button next to the mic button:
+        the webview serialized the highlighted tab's static task panel
+        and every event panel of its transcript, and this handler
+        wraps them into a self-contained page
+        (:func:`_build_share_page`) written to
+        ``<workDir>/reports/chat-<chatId>.html``.  Both clients take
+        this path — the VS Code extension forwards the command over
+        UDS, the remote webapp sends it over WSS — so the page is
+        built in exactly one place.  The reply is a single
+        ``share_done`` JSON object sent directly to the requesting
+        *endpoint* — never broadcast — with the shape::
+
+            {"type": "share_done", "tabId": <echo>, "ok": true,
+             "path": <abs path of the written page>}   # on success
+            {"type": "share_done", "tabId": <echo>, "ok": false,
+             "error": <message>}                       # on failure
+
+        The chat id is sanitized to a filename-safe token; the target
+        directory is created when missing.  ``workDir`` falls back to
+        the daemon work dir exactly like :meth:`_handle_open_file`.
+
+        Args:
+            cmd: The parsed ``shareChat`` command (``chatId``,
+                ``html``, optional ``title``, ``workDir``, ``tabId``).
+            endpoint: The requesting connection (WSS or UDS).
+        """
+        tab_id = cmd.get("tabId", "")
+        if not isinstance(tab_id, str):
+            tab_id = ""
+        chat_id = cmd.get("chatId", "")
+        body_html = cmd.get("html", "")
+        title = cmd.get("title", "")
+        if not isinstance(title, str):
+            title = ""
+        work_dir = cmd.get("workDir", "")
+        if not isinstance(work_dir, str) or not work_dir:
+            work_dir = self._vscode_server.work_dir or self.work_dir
+
+        def _write_page() -> dict[str, Any]:
+            reply: dict[str, Any] = {
+                "type": "share_done",
+                "tabId": tab_id,
+                "ok": False,
+            }
+            if not isinstance(chat_id, str) or not chat_id.strip():
+                reply["error"] = "Missing chat id"
+                return reply
+            if not isinstance(body_html, str) or not body_html.strip():
+                reply["error"] = "Nothing to share: the chat is empty"
+                return reply
+            safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", chat_id)
+            safe_id = safe_id.strip("-.")[:80] or "chat"
+            try:
+                page = _build_share_page(title, body_html)
+                out_path = (
+                    Path(work_dir).expanduser()
+                    / "reports"
+                    / f"chat-{safe_id}.html"
+                )
+                # Atomic: a reader with the previous share of this chat
+                # open, or a concurrent share of the same chat from
+                # another client, must never observe a torn page.
+                _atomic_write_text(out_path, page)
+                reply["ok"] = True
+                reply["path"] = str(out_path)
+            except OSError as exc:
+                reply["error"] = f"Failed to write the chat page: {exc}"
+            return reply
+
+        reply = await asyncio.to_thread(_write_page)
+        try:
+            await self._endpoint_send(endpoint, json.dumps(reply))
+        except Exception:
+            logger.debug("shareChat: failed to write reply", exc_info=True)
 
     async def _handle_check_paths(
         self, cmd: dict[str, Any], endpoint: Any,

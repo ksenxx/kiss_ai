@@ -1209,6 +1209,8 @@ body.remote-chat #welcome-config { display: none !important; }
 
 #upload-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
+#share-btn.share-ok { color: var(--green); }
+#share-btn.share-err { color: var(--red); }
 #voice-btn.voice-loading, .ask-user-mic.voice-loading { opacity: 0.5; }
 #voice-btn.voice-listening, .ask-user-mic.voice-listening { animation: voice-pulse 1.6s ease-in-out infinite; }
 #voice-btn.voice-error, .ask-user-mic.voice-error { color: var(--error, #f48771); }
