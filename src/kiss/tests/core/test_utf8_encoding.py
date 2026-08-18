@@ -6,7 +6,7 @@
 
 Core-only test (its child process imports nothing but
 ``kiss.core.base``) moved here from
-``kiss.tests.agents.sorcar.test_utf8_encoding``, which keeps the
+``kiss.tests.agents.third_party_agents.test_utf8_encoding``, which keeps the
 sorcar-side round-trip tests and imports :func:`_run_in_c_locale` back
 from this module.
 
