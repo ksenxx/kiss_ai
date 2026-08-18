@@ -1,0 +1,252 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""Integration test: cc/* model must NOT emit thinking UI events when the
+thinking block contains no actual thinking text (only signature deltas).
+
+Reproduces the bug: Claude opus sends ``content_block_start`` with
+``type: "thinking"`` followed by ``signature_delta`` events (no
+``thinking_delta``).  The parser emits ``thinking_start`` /
+``thinking_end`` anyway, causing the browser UI to show an empty
+collapsible "Thinking" bar with no content.
+
+The fix: defer ``thinking_start`` until actual thinking content arrives.
+If the block ends with only signature deltas, suppress both boundaries.
+"""
+
+import json
+
+from kiss.core.models.claude_code_model import ClaudeCodeModel
+from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
+
+
+class TestEmptyThinkingBlockSuppressed:
+    """Thinking blocks with no text content (signature-only) must not produce UI events."""
+
+    def test_signature_only_thinking_block_raw_callbacks(self) -> None:
+        """Raw callback test: no thinking_callback fires for signature-only blocks."""
+        tokens: list[str] = []
+        thinking_events: list[bool] = []
+
+        model = ClaudeCodeModel(
+            "cc/opus",
+            token_callback=tokens.append,
+            thinking_callback=thinking_events.append,
+        )
+        model.initialize("test")
+
+        events = [
+            {"type": "content_block_start",
+             "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
+            {"type": "content_block_delta",
+             "delta": {"type": "signature_delta", "signature": "abc123"}},
+            {"type": "content_block_stop"},
+            {"type": "content_block_start", "content_block": {"type": "text"}},
+            {"type": "content_block_delta",
+             "delta": {"type": "text_delta", "text": "Hello"}},
+            {"type": "content_block_stop"},
+            {"type": "result", "result": "Hello", "usage": {}},
+        ]
+
+        content, _ = model._parse_stream_events(
+            iter(json.dumps(e) for e in events)
+        )
+
+        assert content == "Hello"
+        assert tokens == ["Hello"], f"Expected only text token, got {tokens}"
+        assert thinking_events == [], (
+            f"No thinking boundaries for empty block: {thinking_events}"
+        )
+
+    def test_assistant_event_empty_thinking_no_callbacks(self) -> None:
+        """Empty thinking in assistant events already works — verify it still does."""
+        thinking_events: list[bool] = []
+
+        model = ClaudeCodeModel(
+            "cc/opus",
+            token_callback=lambda t: None,
+            thinking_callback=thinking_events.append,
+        )
+        model.initialize("test")
+
+        events = [
+            {"type": "assistant", "message": {
+                "id": "msg_1",
+                "content": [
+                    {"type": "thinking", "thinking": ""},
+                    {"type": "text", "text": "Answer"},
+                ]}},
+            {"type": "result", "result": "Answer", "usage": {}},
+        ]
+
+        model._parse_stream_events(iter(json.dumps(e) for e in events))
+        assert thinking_events == [], thinking_events
+
+
+class TestRealThinkingBlockStillWorks:
+    """Blocks with actual thinking_delta content must still produce full UI events."""
+
+    def test_deferred_thinking_start_emitted_on_first_delta(self) -> None:
+        """thinking_start must be emitted just before the first thinking_delta."""
+        thinking_events: list[bool] = []
+        tokens: list[str] = []
+
+        model = ClaudeCodeModel(
+            "cc/sonnet",
+            token_callback=tokens.append,
+            thinking_callback=thinking_events.append,
+        )
+        model.initialize("test")
+
+        events = [
+            {"type": "content_block_start",
+             "content_block": {"type": "thinking"}},
+            {"type": "content_block_delta",
+             "delta": {"type": "thinking_delta", "thinking": "Step 1"}},
+            {"type": "content_block_delta",
+             "delta": {"type": "thinking_delta", "thinking": "Step 2"}},
+            {"type": "content_block_stop"},
+            {"type": "result", "result": "", "usage": {}},
+        ]
+
+        model._parse_stream_events(iter(json.dumps(e) for e in events))
+
+        assert thinking_events == [True, False]
+        assert tokens == ["Step 1", "Step 2"]
+
+    def test_signature_then_thinking_delta_still_works(self) -> None:
+        """A block with signature_delta followed by thinking_delta should still show."""
+        thinking_events: list[bool] = []
+        tokens: list[str] = []
+
+        model = ClaudeCodeModel(
+            "cc/sonnet",
+            token_callback=tokens.append,
+            thinking_callback=thinking_events.append,
+        )
+        model.initialize("test")
+
+        events = [
+            {"type": "content_block_start",
+             "content_block": {"type": "thinking"}},
+            {"type": "content_block_delta",
+             "delta": {"type": "signature_delta", "signature": "abc"}},
+            {"type": "content_block_delta",
+             "delta": {"type": "thinking_delta", "thinking": "Real thought"}},
+            {"type": "content_block_stop"},
+            {"type": "result", "result": "", "usage": {}},
+        ]
+
+        model._parse_stream_events(iter(json.dumps(e) for e in events))
+
+        assert thinking_events == [True, False]
+        assert tokens == ["Real thought"]
+
+
+class TestToolModeWithEmptyThinking:
+    """generate_and_process_with_tools must also suppress empty thinking blocks."""
+
+    def test_tool_mode_suppresses_empty_thinking(self) -> None:
+        """Tool mode with signature-only thinking should NOT emit thinking events."""
+        import subprocess
+        from typing import Any
+
+        thinking_events: list[bool] = []
+        text_tokens: list[str] = []
+        in_thinking = False
+
+        def token_cb(token: str) -> None:
+            if in_thinking:
+                pass
+            else:
+                text_tokens.append(token)
+
+        def thinking_cb(is_start: bool) -> None:
+            nonlocal in_thinking
+            in_thinking = is_start
+            thinking_events.append(is_start)
+
+        model = ClaudeCodeModel(
+            "cc/opus",
+            token_callback=token_cb,
+            thinking_callback=thinking_cb,
+        )
+        model.initialize("test")
+
+        events = [
+            {"type": "content_block_start",
+             "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
+            {"type": "content_block_delta",
+             "delta": {"type": "signature_delta", "signature": "sig123"}},
+            {"type": "content_block_stop"},
+            {"type": "content_block_start", "content_block": {"type": "text"}},
+            {"type": "content_block_delta",
+             "delta": {"type": "text_delta", "text": "result text"}},
+            {"type": "content_block_stop"},
+            {"type": "result", "result": "result text", "usage": {}},
+        ]
+
+        stream_data = "\n".join(json.dumps(e) for e in events) + "\n"
+
+        original_popen = subprocess.Popen
+
+        class FakePopen:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                self.returncode = 0
+                self.stdin = _FakeStdin()
+                self.stdout = _FakeStdout(stream_data)
+                self.stderr = _FakeStdout("")
+                self._terminated = False
+
+            def wait(self, timeout: float | None = None) -> int:
+                return 0
+
+            def poll(self) -> int | None:
+                return 0 if self._terminated else None
+
+            def terminate(self) -> None:
+                self._terminated = True
+
+            def kill(self) -> None:
+                self._terminated = True
+
+        class _FakeStdin:
+            def write(self, s: str) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        class _FakeStdout:
+            def __init__(self, data: str) -> None:
+                self._lines = data.splitlines(keepends=True)
+                self._pos = 0
+
+            def __iter__(self) -> "_FakeStdout":
+                return self
+
+            def __next__(self) -> str:
+                if self._pos >= len(self._lines):
+                    raise StopIteration
+                line = self._lines[self._pos]
+                self._pos += 1
+                return line
+
+            def read(self) -> str:
+                return "".join(self._lines[self._pos:])
+
+            def close(self) -> None:
+                pass
+
+        subprocess.Popen = FakePopen  # type: ignore[assignment,misc]
+        try:
+            function_calls, content, _ = model.generate_and_process_with_tools(
+                {"dummy_tool": lambda: "ok"}
+            )
+        finally:
+            subprocess.Popen = original_popen  # type: ignore[assignment,misc]
+
+        assert thinking_events == [], (
+            f"Expected no thinking events, got {thinking_events}"
+        )

@@ -1,0 +1,147 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""Integration test: GeminiModel must invoke thinking_callback.
+
+Gemini models with thinking enabled return parts where ``part.thought``
+is ``True`` for thinking content.  The ``thinking_callback`` must be
+invoked with ``True`` at the start of a thinking block and ``False`` at
+the end so that the browser UI routes thinking tokens to the thinking
+panel rather than the main text area.
+
+Bug reproduction: without the fix, ``_stream_parts()`` calls
+``_invoke_token_callback()`` for all parts without checking
+``part.thought``, so thinking tokens are broadcast as ``text_delta``
+events — thoughts appear outside the thinking panel.
+
+Uses real ``google.genai.types.Part`` objects — no mocks, patches, or
+fakes.
+"""
+
+from __future__ import annotations
+
+from google.genai import types
+
+from kiss.core.models.gemini_model import GeminiModel
+
+
+class TestGeminiStreamPartsThinkingCallback:
+    """Verify _stream_parts invokes thinking_callback for thought parts."""
+
+    def test_thinking_callback_fires_for_thought_parts(self) -> None:
+        """thinking_callback must receive True then False around thinking parts."""
+        tokens: list[str] = []
+        thinking_events: list[bool] = []
+
+        m = GeminiModel(
+            "gemini-2.5-flash",
+            api_key="test-key",
+            token_callback=lambda t: tokens.append(t),
+            thinking_callback=lambda s: thinking_events.append(s),
+        )
+
+        thinking_part = types.Part(text="Let me think about this.", thought=True)
+        text_part = types.Part(text="The answer is 42.")
+
+        m._stream_parts([thinking_part, text_part])
+
+        assert True in thinking_events, (
+            "thinking_callback(True) was never called — "
+            "thinking tokens leak as text_delta events"
+        )
+        assert False in thinking_events, (
+            "thinking_callback(False) was never called — "
+            "thinking panel will never close"
+        )
+        first_true = thinking_events.index(True)
+        last_false = len(thinking_events) - 1 - thinking_events[::-1].index(False)
+        assert first_true < last_false
+
+        combined = "".join(tokens)
+        assert "Let me think" in combined
+        assert "The answer is 42." in combined
+
+    def test_thinking_across_multiple_chunks(self) -> None:
+        """Thinking state must carry across multiple _stream_parts calls."""
+        tokens: list[str] = []
+        thinking_events: list[bool] = []
+
+        m = GeminiModel(
+            "gemini-2.5-flash",
+            api_key="test-key",
+            token_callback=lambda t: tokens.append(t),
+            thinking_callback=lambda s: thinking_events.append(s),
+        )
+
+        m._stream_parts([types.Part(text="Thinking chunk 1", thought=True)])
+        m._stream_parts([types.Part(text=" and chunk 2", thought=True)])
+        m._stream_parts([types.Part(text="Final answer.")])
+
+        assert thinking_events[0] is True
+        assert False in thinking_events
+
+        combined = "".join(tokens)
+        assert "Thinking chunk 1" in combined
+        assert "and chunk 2" in combined
+        assert "Final answer." in combined
+
+    def test_no_thinking_callback_when_no_thought_parts(self) -> None:
+        """thinking_callback must NOT fire when there are no thought parts."""
+        thinking_events: list[bool] = []
+
+        m = GeminiModel(
+            "gemini-2.5-flash",
+            api_key="test-key",
+            token_callback=lambda t: None,
+            thinking_callback=lambda s: thinking_events.append(s),
+        )
+
+        m._stream_parts([types.Part(text="Just regular text.")])
+
+        assert thinking_events == [], (
+            f"thinking_callback fired unexpectedly: {thinking_events}"
+        )
+
+    def test_close_thinking_if_open_closes_open_block(self) -> None:
+        """_close_thinking_if_open must close an open thinking block.
+
+        After a streaming loop ends, if the last chunk was a thinking part,
+        the thinking block must still be closed.  GeminiModel used to track
+        this on a private ``_in_thinking_stream`` duplicate of the base
+        ``_thinking_open`` flag; it now uses the base one, so the closing
+        helper is the base ``_close_thinking_if_open``.
+        """
+        thinking_events: list[bool] = []
+
+        m = GeminiModel(
+            "gemini-2.5-flash",
+            api_key="test-key",
+            token_callback=lambda t: None,
+            thinking_callback=lambda s: thinking_events.append(s),
+        )
+
+        m._stream_parts([types.Part(text="Only thinking.", thought=True)])
+        m._close_thinking_if_open()
+
+        assert thinking_events == [True, False], (
+            f"Expected [True, False] but got {thinking_events}"
+        )
+
+    def test_close_thinking_if_open_noop_when_not_thinking(self) -> None:
+        """_close_thinking_if_open must be a no-op when no block is open."""
+        thinking_events: list[bool] = []
+
+        m = GeminiModel(
+            "gemini-2.5-flash",
+            api_key="test-key",
+            token_callback=lambda t: None,
+            thinking_callback=lambda s: thinking_events.append(s),
+        )
+
+        m._stream_parts([types.Part(text="Regular text.")])
+        m._close_thinking_if_open()
+
+        assert thinking_events == [], (
+            f"thinking_callback fired unexpectedly: {thinking_events}"
+        )
