@@ -953,6 +953,9 @@ class SorcarAgent(RelentlessAgent):
                 base_system_prompt=str(
                     getattr(self, "_base_system_prompt", "") or ""
                 ),
+                system_prompt_suffix=str(
+                    getattr(self, "_system_prompt_suffix", "") or ""
+                ),
             )
         finally:
             # stop() joins the monitor BEFORE the offsets bump below so a
@@ -1477,7 +1480,11 @@ class SorcarAgent(RelentlessAgent):
             model_name: LLM model to use. Defaults to config value.
             prompt_template: Task prompt template with format placeholders.
             arguments: Dictionary of values to fill prompt_template placeholders.
-            system_prompt: system prompt to be appended to the actual system prompt
+            system_prompt: system prompt to be appended to the actual system
+                prompt.  Also forwarded to every sub-agent spawned via
+                ``run_parallel``, appended to each sub-agent's own base
+                system prompt — like *base_system_prompt*, so the extra
+                instructions constrain the whole task tree.
             tools: List of tools to be added in addition to bash and web tools.
             max_steps: Maximum steps per sub-session. Defaults to 10000.
             max_budget: Maximum budget in USD. Defaults to config value.
@@ -1527,6 +1534,11 @@ class SorcarAgent(RelentlessAgent):
         self._base_system_prompt = (
             base_system_prompt if base_system_prompt.strip() else ""
         )
+        # Stored on self for the same reason: the fan-out forwards the
+        # append-only *system_prompt* suffix to every sub-agent, so a
+        # run's extra system instructions constrain its whole task
+        # tree, exactly like a *base_system_prompt* replacement.
+        self._system_prompt_suffix = system_prompt if system_prompt else ""
         self.web_use_tool = None
         tl = getattr(printer, "_thread_local", None) if printer else None
         self._stop_event = getattr(tl, "stop_event", None) if tl else None
@@ -1708,6 +1720,7 @@ def run_tasks_parallel(
     chat_id: str = "",
     parent_tab_id: str = "",
     base_system_prompt: str = "",
+    system_prompt_suffix: str = "",
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -1789,6 +1802,13 @@ def run_tasks_parallel(
             system prompt (see :meth:`SorcarAgent.run`) spawns children
             that use the same prompt instead of the default ``SYSTEM.md``.
             ``""`` keeps the default.
+        system_prompt_suffix: Extra text appended to each sub-agent's
+            base system prompt, forwarded as the ``system_prompt``
+            argument of each sub-agent's ``run``.  A parent running
+            with an append-only system-prompt suffix (see
+            :meth:`SorcarAgent.run`'s *system_prompt*) passes it on so
+            the extra instructions constrain the whole task tree,
+            mirroring *base_system_prompt*.  ``""`` appends nothing.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -1867,6 +1887,7 @@ def run_tasks_parallel(
                 max_budget=max_budget,
                 model_config=model_config,
                 base_system_prompt=base_system_prompt,
+                system_prompt=system_prompt_suffix or None,
             )
             return result
         except KeyboardInterrupt:

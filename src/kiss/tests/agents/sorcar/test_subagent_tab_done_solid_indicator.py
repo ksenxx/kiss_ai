@@ -188,6 +188,9 @@ var tabs = __TABS__;
 var activeTabId = __ACTIVE__;
 function closeTab() {}
 function switchToTab() {}
+// All tabs in these tests belong to the current workspace, so none
+// is hidden (isTabHidden in main.js only hides other-workspace tabs).
+function isTabHidden() { return false; }
 
 __RENDER_TAB_BAR__
 
