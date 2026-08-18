@@ -25,9 +25,7 @@ from __future__ import annotations
 
 import json
 import tempfile
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from http.server import BaseHTTPRequestHandler
 
 import pytest
 import yaml
