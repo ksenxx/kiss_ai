@@ -35,15 +35,16 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.core.models.test_update_models_moonshot_thinking import MOONSHOT_LEVELS
 from kiss.tests.core.test_update_models_moonshot_thinking import (
-    MOONSHOT_LEVELS,
     _MoonshotHandler,
     moonshot_wire,
 )
 
-# The Moonshot wire harness moved to tests/core with the core-only alias
-# tests.  Re-exporting keeps the fixture visible to pytest in this module
-# and marks the imports as used for the linter.
+# The alias catalog constants live with the models-only tests in
+# tests/core/models; the Moonshot wire harness lives with the core wire
+# tests in tests/core.  Re-exporting keeps the fixture visible to pytest
+# in this module and marks the imports as used for the linter.
 __all__ = ["MOONSHOT_LEVELS", "_MoonshotHandler", "moonshot_wire"]
 
 OPENAI_LEVELS = ("low", "medium", "high", "xhigh")

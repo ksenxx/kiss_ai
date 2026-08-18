@@ -52,8 +52,8 @@ from kiss.tests.core.models.openai_sse_harness import (
     Request,
     ScriptedOpenAIServer,
 )
-from kiss.tests.core.test_cli_subprocess_lifecycle import install_cli
-from kiss.tests.server.test_heif_attachment import _write_gradient_png
+from kiss.tests.core.models.test_cli_subprocess_lifecycle import install_cli
+from kiss.tests.core.models.test_heif_attachment import _write_gradient_png
 
 
 def _payload_is_present(body: dict[str, Any], data: bytes) -> bool:

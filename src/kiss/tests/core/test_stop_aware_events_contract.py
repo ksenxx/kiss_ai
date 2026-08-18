@@ -25,27 +25,17 @@ the abort genuinely runs against the object it was given.
 from __future__ import annotations
 
 import threading
-import time
-from collections.abc import Generator, Iterator
+from collections.abc import Generator
 
 import pytest
 
 from kiss.core import stop_signal
 from kiss.core.models.stream_abort import stop_aware_events
-
-_EVENTS = ["alpha", "beta", "gamma"]
-
-
-class _Recorder:
-    """Records that the abort hook ran."""
-
-    def __init__(self) -> None:
-        """Start with no recorded calls."""
-        self.calls = 0
-
-    def __call__(self) -> None:
-        """Record one call."""
-        self.calls += 1
+from kiss.tests.core.models.test_stop_aware_events_contract import (  # noqa: F401
+    _EVENTS,
+    _failing_events,
+    _Recorder,
+)
 
 
 @pytest.fixture
@@ -82,16 +72,6 @@ class TestStopReportedAfterAQuietEnd:
                 bound_stop_event.set()
 
 
-def _failing_events() -> Iterator[str]:
-    """Yield one event and then fail the way a dropped socket does.
-
-    Yields:
-        A single event before the failure.
-    """
-    yield _EVENTS[0]
-    raise ConnectionResetError("peer went away")
-
-
 class TestFailingStreams:
     """A stream that raises must be classified, not blindly re-raised."""
 
@@ -102,50 +82,3 @@ class TestFailingStreams:
         with pytest.raises(KeyboardInterrupt):
             for _event in stop_aware_events(_failing_events()):
                 bound_stop_event.set()
-
-    def test_stall_wins_over_the_transport_error(self) -> None:
-        """A stalled stream that then fails is still a retryable stall."""
-        with pytest.raises(TimeoutError, match="stream_stall_timeout"):
-            for _event in stop_aware_events(
-                _failing_events(), stall_timeout=0.3
-            ):
-                time.sleep(1.0)
-
-    def test_an_unrelated_failure_propagates(self) -> None:
-        """Without a stop or a stall the original error must survive."""
-        with pytest.raises(ConnectionResetError, match="peer went away"):
-            for _event in stop_aware_events(_failing_events()):
-                pass
-
-
-class TestStallReportedAfterAQuietEnd:
-    """A stall must not be reported as a truncated success."""
-
-    def test_stall_detected_while_the_consumer_is_busy(self) -> None:
-        """A consumer slower than the stall window loses the stream."""
-        on_abort = _Recorder()
-        seen: list[str] = []
-        started = time.monotonic()
-        with pytest.raises(TimeoutError, match="stream_stall_timeout"):
-            for event in stop_aware_events(
-                iter(_EVENTS), stall_timeout=0.3, on_abort=on_abort
-            ):
-                seen.append(event)
-                if len(seen) == 1:
-                    time.sleep(1.0)
-        assert time.monotonic() - started < 10.0
-        assert on_abort.calls == 1
-
-    def test_stall_without_an_abort_hook(self) -> None:
-        """The hook is optional; the stall must still be reported."""
-        seen: list[str] = []
-        with pytest.raises(TimeoutError, match="stream_stall_timeout"):
-            for event in stop_aware_events(iter(_EVENTS), stall_timeout=0.3):
-                seen.append(event)
-                if len(seen) == 1:
-                    time.sleep(1.0)
-
-    def test_a_prompt_consumer_is_left_alone(self) -> None:
-        """Heartbeats from a keeping-up consumer prevent any stall."""
-        seen = list(stop_aware_events(iter(_EVENTS), stall_timeout=5.0))
-        assert seen == _EVENTS
