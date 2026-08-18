@@ -5,7 +5,7 @@
 """Prompt-construction contract tests for the Sorcar agent.
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.agents.sorcar.test_sorcar_agent``; the non-core tests remain there.
+``kiss.tests.agents.third_party_agents.test_sorcar_agent``; the non-core tests remain there.
 """
 
 from __future__ import annotations
