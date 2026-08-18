@@ -2664,6 +2664,70 @@ def _load_chat_events_by_task_id(
     return _load_events_session_row("WHERE id = ?", (task_id,))
 
 
+def _load_all_chat_events_by_chat_id(
+    chat_id: str,
+    max_json_bytes: int | None = None,
+) -> tuple[list[dict[str, object]], bool]:
+    """Load every task of a chat session and its events, oldest first.
+
+    Powers the daemon's ``shareChatTasks`` command: the chat webview
+    exports a chat as one standalone HTML page and needs the
+    transcripts of ALL of the chat's tasks, not just the latest one
+    (:func:`_load_latest_chat_events_by_chat_id`) — earlier tasks are
+    no longer in the webview's DOM after a reload, because a session
+    replay repaints only one task.  Sub-agent rows are skipped exactly
+    like the latest-task lookup skips them: they replay inside their
+    parent's transcript, not as chat tasks of their own.
+
+    The rows are walked newest first so a *max_json_bytes* budget can
+    stop BEFORE decoding an oversized chat's older transcripts — the
+    newest ones are the ones the webview cannot redraw from its own
+    DOM — instead of materializing every event and discarding the
+    surplus afterwards.
+
+    Args:
+        chat_id: The string chat session identifier.
+        max_json_bytes: Optional byte budget; each task is charged the
+            UTF-8 length of its JSON encoding, and loading stops at
+            the first task that does not fit.  ``None`` loads all.
+
+    Returns:
+        ``(tasks, truncated)``.  *tasks* is ordered by ``timestamp
+        ASC, rowid ASC`` (the order the tasks ran in), each dict with
+        ``task`` (str), ``task_id`` (str), ``events`` (list of event
+        dicts), ``chat_id`` (str), and ``extra`` (str, JSON metadata);
+        empty when *chat_id* is ``""`` or names no non-sub-agent
+        tasks.  *truncated* is True when the budget dropped at least
+        one (oldest) task.
+    """
+    if not chat_id:
+        return [], False
+    out: list[dict[str, object]] = []
+    truncated = False
+    budget = max_json_bytes
+    with _rw_lock.read_lock():
+        db = _get_db()
+        rows = db.execute(
+            _HISTORY_SELECT
+            + f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
+            "ORDER BY timestamp DESC, rowid DESC",
+            (chat_id,),
+        ).fetchall()
+        for row in rows:
+            entry = _events_session_dict(
+                db, str(row["id"]), row["task"], str(row["chat_id"] or ""),
+                _row_to_extra_json(row),
+            )
+            if budget is not None:
+                budget -= len(json.dumps(entry).encode("utf-8"))
+                if budget < 0:
+                    truncated = True
+                    break
+            out.append(entry)
+    out.reverse()
+    return out, truncated
+
+
 def _load_subagent_rows_by_parent_task_id(
     parent_task_id: str,
 ) -> list[dict[str, object]]:
