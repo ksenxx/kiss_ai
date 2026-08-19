@@ -77,8 +77,10 @@ class TestResumeSessionWithTaskId:
             assert te_specific[0]["task"] == "task alpha"
             ev_list = te_specific[0].get("events", [])
             assert isinstance(ev_list, list)
-            assert len(ev_list) == 2
-            assert ev_list[0]["text"] == "alpha response"
+            # The synthesized task_settings event leads the replay.
+            assert len(ev_list) == 3
+            assert ev_list[0]["type"] == "task_settings"
+            assert ev_list[1]["text"] == "alpha response"
             assert te_specific[0]["chat_id"] == chat_id
         finally:
             th._close_db()

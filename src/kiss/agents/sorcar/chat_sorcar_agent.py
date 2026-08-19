@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +29,9 @@ from kiss.agents.sorcar.persistence import (
     _record_frequent_task,
     _save_task_extra,
     _save_task_result,
-    _task_has_events,
+    _task_has_transcript_events,
 )
+from kiss.agents.sorcar.relentless_agent import DEFAULT_MAX_BUDGET
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core._version import __version__
 from kiss.core.printer import parse_result_yaml
@@ -156,6 +158,11 @@ class ChatSorcarAgent(SorcarAgent):
         self._last_user_prompt: str = ""
         self._last_result_summary: str = ""
         self._task_id_lock: threading.RLock = threading.RLock()
+        # Whether the CURRENT run executes inside a git worktree —
+        # computed at the top of :meth:`run` and read by the
+        # system-prompt settings hook and the ``task_settings``
+        # broadcast.
+        self._run_is_worktree: bool = False
 
     @property
     def chat_id(self) -> str:
@@ -266,6 +273,7 @@ class ChatSorcarAgent(SorcarAgent):
         work_dir: str,
         is_parallel: bool,
         is_worktree: bool,
+        max_budget: float | None = None,
     ) -> dict[str, object]:
         """Build the task-history "extra" payload for persistence.
 
@@ -279,6 +287,8 @@ class ChatSorcarAgent(SorcarAgent):
             work_dir: Working directory to record.
             is_parallel: Whether parallel sub-agents are enabled.
             is_worktree: Whether worktree isolation is in effect.
+            max_budget: The run's resolved budget cap in USD, or None
+                to omit it from the payload.
 
         Returns:
             The extra-payload dict.
@@ -290,8 +300,82 @@ class ChatSorcarAgent(SorcarAgent):
             "is_parallel": is_parallel,
             "is_worktree": is_worktree,
         }
+        if max_budget is not None:
+            payload["max_budget"] = max_budget
         if self._subagent_info is not None:
             payload["subagent"] = self._subagent_info
+        return payload
+
+    def _system_prompt_task_settings(self) -> dict[str, str]:
+        """Extend the settings with this chat run's identity and modes.
+
+        Adds the worktree mode, the chat / task ids allocated at the
+        top of :meth:`run`, and the sub-agent parentage — everything
+        this class knows that the base agents do not.
+
+        Returns:
+            The base label → value pairs plus the chat-level ones.
+        """
+        settings = super()._system_prompt_task_settings()
+        settings["Worktree mode"] = (
+            "worktree" if self._run_is_worktree else "no worktree"
+        )
+        settings["Chat id"] = self._chat_id
+        settings["Task id"] = self.last_task_id
+        sub = self._subagent_info
+        settings["Is subagent"] = "yes" if sub is not None else "no"
+        parent_id = str((sub or {}).get("parent_task_id") or "")
+        if parent_id:
+            settings["Parent task id"] = parent_id
+        return settings
+
+    def _task_settings_payload(
+        self,
+        model: str,
+        work_dir: str,
+        is_parallel: bool,
+        is_worktree: bool,
+        max_budget: float | None,
+        start_ts: int,
+        task_id: str,
+    ) -> dict[str, object]:
+        """Build the ``task_settings`` display-event payload.
+
+        The shape mirrors the task-history sidebar's session fields so
+        the chat webview can render the static task panel's info line
+        exactly like a history row (see ``renderHistory`` and
+        ``taskPanelInfoHTML`` in ``media/main.js``).
+
+        Args:
+            model: Model name the run was asked for ("" when the
+                caller left it to the default).
+            work_dir: Working directory of the run.
+            is_parallel: Whether parallel sub-agents are enabled.
+            is_worktree: Whether worktree isolation is in effect.
+            max_budget: The run's budget cap in USD, or None when
+                unstated.
+            start_ts: The run's start timestamp (ms since epoch) — the
+                same value persisted as the row's ``startTs``.
+            task_id: The freshly allocated ``task_history`` row id.
+
+        Returns:
+            The settings dict carried by the event.
+        """
+        payload: dict[str, object] = {
+            "model": model,
+            "work_dir": strip_worktree_suffix(work_dir),
+            "is_parallel": is_parallel,
+            "is_worktree": is_worktree,
+            "start_ts": start_ts,
+            "chat_id": self._chat_id,
+            "task_id": task_id,
+            "is_subagent": self._subagent_info is not None,
+        }
+        if max_budget is not None:
+            payload["max_budget"] = max_budget
+        parent_id = str((self._subagent_info or {}).get("parent_task_id") or "")
+        if parent_id:
+            payload["parent_task_id"] = parent_id
         return payload
 
     def _persist_replay_events_if_missing(
@@ -315,8 +399,9 @@ class ChatSorcarAgent(SorcarAgent):
         This synthesizes the two events the webview needs to render the
         exchange — a ``prompt`` event (the user's task) and a ``result``
         event (the agent's summary / success / cost) — but only when the
-        task has no events yet, so a recording printer's full event
-        stream is never duplicated.
+        task has no transcript events yet (the run's ``task_settings``
+        metadata event, persisted before any output, is ignored), so a
+        recording printer's full event stream is never duplicated.
 
         Args:
             task_id: Stable ``task_history`` row id for this run.
@@ -327,7 +412,7 @@ class ChatSorcarAgent(SorcarAgent):
                 (used to recover ``success`` / ``is_continue``).
             result_summary: The extracted human-readable summary text.
         """
-        if _task_has_events(task_id):
+        if _task_has_transcript_events(task_id):
             return
         prompt_text = prompt or ""
         if prompt_text:
@@ -398,13 +483,33 @@ class ChatSorcarAgent(SorcarAgent):
             kwargs.get("work_dir", "") or "",
             getattr(self, "_wt_dir", None),
         )
+        self._run_is_worktree = is_worktree
+        raw_budget = kwargs.get("max_budget")
+        try:
+            run_max_budget = None if raw_budget is None else float(raw_budget)
+        except (TypeError, ValueError):
+            run_max_budget = None
+        # One authoritative per-run settings snapshot, resolved exactly
+        # the way ``_reset`` will resolve them: the early history row,
+        # the ``task_settings`` event, and the final save must all
+        # agree with the run itself — not echo raw (possibly omitted)
+        # kwargs that the run later resolves differently.
+        resolved_model = self._resolve_model_name(kwargs.get("model_name"))
+        resolved_budget = (
+            run_max_budget if run_max_budget is not None else DEFAULT_MAX_BUDGET
+        )
+        resolved_work_dir = str(Path(kwargs.get("work_dir") or ".").resolve())
+        run_is_parallel = bool(kwargs.get("is_parallel", True))
+        start_ts_ms = int(time.time() * 1000)
 
         early_extra = self._build_extra_payload(
-            model=kwargs.get("model_name", "") or "",
-            work_dir=kwargs.get("work_dir", "") or "",
-            is_parallel=bool(kwargs.get("is_parallel", True)),
+            model=resolved_model,
+            work_dir=resolved_work_dir,
+            is_parallel=run_is_parallel,
             is_worktree=is_worktree,
+            max_budget=resolved_budget,
         )
+        early_extra["startTs"] = start_ts_ms
 
         task_id, self._chat_id = _add_task(
             prompt_template, chat_id=self._chat_id, extra=early_extra,
@@ -461,6 +566,33 @@ class ChatSorcarAgent(SorcarAgent):
                         task_id,
                         exc_info=True,
                     )
+            if printer is not None:
+                # Emitted AFTER on_task_id_allocated: the server's
+                # WebPrinter only sends a task event's stamped copies
+                # to tabs subscribed via register_task_ui, which that
+                # callback performs.  The event is also recorded and
+                # persisted (``task_settings`` is a display event), so
+                # replays and shares repopulate the static task
+                # panel's settings info.
+                broadcast = getattr(printer, "broadcast", None)
+                if broadcast is not None:
+                    try:
+                        broadcast({
+                            "type": "task_settings",
+                            "settings": self._task_settings_payload(
+                                model=resolved_model,
+                                work_dir=resolved_work_dir,
+                                is_parallel=run_is_parallel,
+                                is_worktree=is_worktree,
+                                max_budget=resolved_budget,
+                                start_ts=start_ts_ms,
+                                task_id=task_id,
+                            ),
+                        })
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "task_settings broadcast raised", exc_info=True,
+                        )
             if self._subagent_info is None:
                 _record_frequent_task(prompt_template)
 
@@ -506,10 +638,17 @@ class ChatSorcarAgent(SorcarAgent):
                     model=(
                         getattr(self, "_launch_model_name", "")
                         or getattr(self, "model_name", "")
+                        or resolved_model
                     ),
                     work_dir=self.work_dir,
                     is_parallel=self._is_parallel,
                     is_worktree=is_worktree,
+                    # The per-run resolved value, NOT ``self.max_budget``:
+                    # on a reused agent whose setup failed before
+                    # ``_reset``, the attribute still holds the PREVIOUS
+                    # run's budget.  ``_reset`` sets the attribute to
+                    # exactly this value, so nothing is lost on success.
+                    max_budget=resolved_budget,
                 )
                 extra_payload["tokens"] = int(
                     getattr(self, "total_tokens_used", 0) or 0

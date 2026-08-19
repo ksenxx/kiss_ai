@@ -634,6 +634,28 @@ body {
   text-overflow: ellipsis;
 }
 
+/* The task's settings info (model, worktree / parallel modes, budget,
+   start time, chat / task / parent ids) — shown only while the panel
+   is expanded, like the info rows of the history sidebar. */
+#task-panel-info {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--panel-fg) 20%, transparent);
+  font-size: 0.85em;
+  color: var(--panel-dim);
+  line-height: 1.5;
+}
+
+#task-panel-info:empty,
+#task-panel.drawer-collapsed #task-panel-info {
+  display: none;
+}
+
+.task-panel-info-line {
+  display: block;
+  word-break: break-word;
+}
+
 #output {
   flex: 1; overflow-y: auto; overflow-x: hidden;
   overscroll-behavior-y: none;
