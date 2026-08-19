@@ -256,15 +256,21 @@ body.remote-chat #task-input {
 body.remote-chat #task-input::placeholder { color: var(--faint); }
 
 body.remote-chat #input-footer {
-  border-top: none;
   padding-top: 2px;
   margin-top: 2px;
 }
 
+/* 36px touch targets sit side by side with a small gap so they never
+   overlap; when a row cannot hold them all (narrow phones, or the
+   running state's spinner + send + stop) the buttons wrap onto the
+   next row instead of colliding. */
+body.remote-chat #model-picker { gap: 2px; }
+
 body.remote-chat #menu-btn,
 body.remote-chat #upload-btn,
 body.remote-chat #tricks-btn,
-body.remote-chat #voice-btn {
+body.remote-chat #voice-btn,
+body.remote-chat #share-btn {
   width: 36px;
   height: 36px;
   min-width: 36px;
@@ -272,8 +278,6 @@ body.remote-chat #voice-btn {
   align-items: center;
   justify-content: center;
   padding: 0;
-  margin-left: -8px;
-  margin-right: -8px;
   background: transparent;
   border: none;
   border-radius: 50%;
@@ -284,7 +288,8 @@ body.remote-chat #voice-btn {
 body.remote-chat #menu-btn:hover:not(:disabled),
 body.remote-chat #upload-btn:hover:not(:disabled),
 body.remote-chat #tricks-btn:hover:not(:disabled),
-body.remote-chat #voice-btn:hover:not(:disabled) {
+body.remote-chat #voice-btn:hover:not(:disabled),
+body.remote-chat #share-btn:hover:not(:disabled) {
   background: var(--hover-strong);
   color: var(--fg);
 }
@@ -295,10 +300,6 @@ body.remote-chat #voice-btn.active {
   color: var(--fg-strong);
 }
 
-body.remote-chat #menu-btn { margin-left: 0; }
-
-body.remote-chat #voice-btn { margin-right: 0; }
-
 body.remote-chat #model-btn {
   background: transparent;
   border: 1px solid var(--border-15);
@@ -306,6 +307,10 @@ body.remote-chat #model-btn {
   padding: 6px 12px;
   height: 32px;
   color: var(--icon);
+
+  /* Cap the pill (its label truncates via #model-name) so the footer
+     usually keeps every button on one row even at phone widths. */
+  max-width: clamp(72px, 21vw, 220px);
 }
 
 body.remote-chat #model-btn:hover:not(:disabled) {

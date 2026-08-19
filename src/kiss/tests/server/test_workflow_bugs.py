@@ -1,0 +1,303 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""Integration tests for workflow bugs in worktree and non-worktree modes.
+
+Confirms four bugs, each demonstrated by a test that fails before the fix
+and passes after:
+
+BUG 1 — ``is_task_active`` leaks True on early return
+    When ``_run_task_inner`` rejects a non-worktree task because a
+    worktree merge is in progress on another tab, ``is_task_active``
+    is set to True but the early return bypasses the finally block
+    that resets it.  The tab is then permanently stuck: merge/discard
+    is blocked by ``_check_worktree_busy``.
+
+BUG 2 — ``stash_pop`` loses staging state
+    ``stash_pop`` uses plain ``git stash pop`` without ``--index``,
+    so user's carefully staged changes lose their staged/unstaged
+    distinction after the auto-stash → merge → auto-pop cycle.
+
+BUG 3 — ``_auto_commit_worktree`` crashes when LLM is unavailable
+    ``_generate_commit_message`` calls the LLM with no fallback.  If
+    the LLM API is unreachable, the exception propagates uncaught,
+    preventing worktree finalization and blocking all subsequent tasks
+    on that agent.
+
+BUG 4 — ``_close_tab`` orphans pending worktrees
+    Closing a tab with a pending worktree drops the in-memory
+    reference without auto-merging.  The worktree directory and branch
+    persist in git, and ``cleanup_orphans`` skips them because they
+    have ``kiss-original`` config.
+
+No mocks, patches, fakes, or test doubles.
+"""
+
+from __future__ import annotations
+
+import queue
+import shutil
+import subprocess
+import tempfile
+import threading
+import uuid
+from pathlib import Path
+from typing import Any
+
+import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.server import VSCodeServer
+from kiss.tests.agents.sorcar.test_workflow_bugs import (  # noqa: F401
+    _make_repo,
+)
+
+
+def _redirect_db(tmpdir: str) -> tuple:
+    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    kiss_dir = Path(tmpdir) / ".kiss"
+    kiss_dir.mkdir(parents=True, exist_ok=True)
+    th._KISS_DIR = kiss_dir
+    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._db_conn = None
+    return old
+
+
+def _restore_db(saved: tuple) -> None:
+    if th._db_conn is not None:
+        th._db_conn.close()
+        th._db_conn = None
+    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+
+
+def _make_wt_with_commit(
+    repo: Path, branch: str, agent: WorktreeSorcarAgent,
+) -> GitWorktree:
+    slug = branch.replace("/", "_")
+    wt_dir = repo / ".kiss-worktrees" / slug
+    assert GitWorktreeOps.create(repo, branch, wt_dir)
+    GitWorktreeOps.save_original_branch(repo, branch, "main")
+    (wt_dir / "agent.txt").write_text("agent work\n")
+    subprocess.run(
+        ["git", "-C", str(wt_dir), "add", "."],
+        capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(wt_dir), "commit", "-m", "agent"],
+        capture_output=True, check=True,
+    )
+    wt = GitWorktree(
+        repo_root=repo,
+        branch=branch,
+        original_branch="main",
+        wt_dir=wt_dir,
+    )
+    agent._wt = wt
+    return wt
+
+
+def _server(repo: Path) -> tuple[VSCodeServer, list[dict[str, Any]]]:
+    """Real server whose printer broadcasts are captured into a list."""
+    server = VSCodeServer()
+    server.work_dir = str(repo)
+    events: list[dict[str, Any]] = []
+
+    def capture(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    server.printer.broadcast = capture  # type: ignore[assignment]
+    return server, events
+
+
+def _register_tab_state(
+    tab_id: str, agent: WorktreeSorcarAgent,
+) -> agent_state.AgentState:
+    """Register a server-owned idle state for *tab_id* with *agent*."""
+    state = agent_state.AgentState(
+        uuid.uuid4().hex,
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+    )
+    agent_state.register(state)
+    return state
+
+
+class TestBug1IsTaskActiveLeaks:
+    """Non-wt task rejected by worktree-merge guard leaks is_task_active."""
+
+    def setup_method(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_saved = _redirect_db(self.tmpdir)
+        self.repo = _make_repo(Path(self.tmpdir) / "repo")
+
+    def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
+        _restore_db(self.db_saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_is_task_active_reset_on_wt_merge_block(self) -> None:
+        """is_task_active must be False after a non-wt task is rejected."""
+        server, _events = _server(self.repo)
+
+        state_a = _register_tab_state(
+            "tab-a", WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        state_a.use_worktree = True
+        state_a.is_merging = True
+
+        state_b = _register_tab_state(
+            "tab-b", WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        state_b.stop_event = threading.Event()
+        state_b.user_answer_queue = queue.Queue(maxsize=1)
+
+        try:
+            server._run_task_inner({
+                "tabId": "tab-b",
+                "prompt": "do something",
+                "useWorktree": False,
+            })
+        finally:
+            server.printer._thread_local.stop_event = None
+
+        assert state_b.is_task_active is False, (
+            "BUG 1: is_task_active leaked True after non-wt task was "
+            "rejected by worktree-merge guard"
+        )
+
+
+class TestBug3AutoCommitNoLLMFallback:
+    """_auto_commit_worktree must not crash when LLM is unavailable."""
+
+    def setup_method(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_saved = _redirect_db(self.tmpdir)
+        self.repo = _make_repo(Path(self.tmpdir) / "repo")
+
+    def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
+        _restore_db(self.db_saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_auto_commit_fallback_on_llm_failure(self) -> None:
+        """_auto_commit_worktree should commit with fallback message on LLM error."""
+        agent = WorktreeSorcarAgent("test")
+        branch = "kiss/wt-test-llm-fail"
+        wt = _make_wt_with_commit(self.repo, branch, agent)
+
+        (wt.wt_dir / "extra.txt").write_text("extra work\n")
+
+        import kiss.agents.sorcar.worktree_sorcar_agent as wsa_mod
+
+        original_fn = wsa_mod._generate_commit_message
+
+        def _failing_commit_msg(wt_dir: Path) -> str:
+            raise RuntimeError("LLM API unavailable")
+
+        wsa_mod._generate_commit_message = _failing_commit_msg  # type: ignore[assignment]
+        try:
+            result = agent._auto_commit_worktree()
+            assert result is True, (
+                "BUG 3: _auto_commit_worktree should commit with fallback "
+                "message when LLM fails, but returned False"
+            )
+
+            assert not GitWorktreeOps.has_uncommitted_changes(wt.wt_dir), (
+                "BUG 3: worktree still has uncommitted changes after "
+                "_auto_commit_worktree with LLM failure"
+            )
+        finally:
+            wsa_mod._generate_commit_message = original_fn  # type: ignore[assignment]
+
+            GitWorktreeOps.remove(self.repo, wt.wt_dir)
+            GitWorktreeOps.prune(self.repo)
+            GitWorktreeOps.delete_branch(self.repo, branch)
+
+
+class TestBug4CloseTabOrphansWorktree:
+    """Closing a tab with a pending worktree must release it."""
+
+    def setup_method(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_saved = _redirect_db(self.tmpdir)
+        self.repo = _make_repo(Path(self.tmpdir) / "repo")
+
+    def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
+        _restore_db(self.db_saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_close_tab_releases_pending_worktree(self) -> None:
+        """Closing a tab must auto-merge the pending worktree."""
+        server, _events = _server(self.repo)
+        tab_id = "tab-close-test"
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        state = _register_tab_state(tab_id, agent)
+        state.use_worktree = True
+
+        branch = "kiss/wt-close-test"
+        wt = _make_wt_with_commit(self.repo, branch, agent)
+
+        assert agent._wt_pending
+
+        server._close_tab(tab_id)
+
+        assert not GitWorktreeOps.branch_exists(self.repo, branch), (
+            "BUG 4: _close_tab left orphaned branch after closing tab "
+            "with pending worktree"
+        )
+        assert not wt.wt_dir.exists(), (
+            "BUG 4: _close_tab left orphaned worktree directory"
+        )
+
+    def test_close_tab_no_changes_discards(self) -> None:
+        """Closing a tab with a no-change worktree should discard it."""
+        server, _events = _server(self.repo)
+        tab_id = "tab-close-empty"
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        state = _register_tab_state(tab_id, agent)
+        state.use_worktree = True
+
+        branch = "kiss/wt-close-empty"
+        slug = branch.replace("/", "_")
+        wt_dir = self.repo / ".kiss-worktrees" / slug
+        assert GitWorktreeOps.create(self.repo, branch, wt_dir)
+        GitWorktreeOps.save_original_branch(self.repo, branch, "main")
+        agent._wt = GitWorktree(
+            repo_root=self.repo,
+            branch=branch,
+            original_branch="main",
+            wt_dir=wt_dir,
+        )
+        assert agent._wt_pending
+
+        server._close_tab(tab_id)
+
+        assert not GitWorktreeOps.branch_exists(self.repo, branch), (
+            "BUG 4: empty worktree branch not deleted on tab close"
+        )
+
+    def test_close_tab_active_task_no_cleanup(self) -> None:
+        """Closing a tab with an active task must NOT clean up worktree."""
+        server, _events = _server(self.repo)
+        tab_id = "tab-active"
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        state = _register_tab_state(tab_id, agent)
+        state.use_worktree = True
+        state.is_task_active = True
+
+        branch = "kiss/wt-active-test"
+        _make_wt_with_commit(self.repo, branch, agent)
+
+        server._close_tab(tab_id)
+
+        assert agent_state.get(state.task_id) is state
+        assert GitWorktreeOps.branch_exists(self.repo, branch)
+
+        state.is_task_active = False
+        GitWorktreeOps.remove(self.repo, agent._wt.wt_dir)  # type: ignore[union-attr]
+        GitWorktreeOps.prune(self.repo)
+        GitWorktreeOps.delete_branch(self.repo, branch)

@@ -500,7 +500,7 @@ _HISTORY_SELECT = (
     "SELECT id, timestamp, task, has_events, result, chat_id, "
     "model, work_dir, version, tokens, cost, steps, "
     "is_parallel, is_worktree, auto_commit_mode, "
-    "start_ts, end_ts, is_favorite, parent_task_id "
+    "start_ts, end_ts, is_favorite, parent_task_id, max_budget "
     "FROM task_history "
 )
 
@@ -552,8 +552,16 @@ def _row_to_extra_json(row: sqlite3.Row) -> str:
         payload["steps"] = _safe_int(row["steps"], 0)
         payload["is_parallel"] = bool(row["is_parallel"])
         payload["is_worktree"] = bool(row["is_worktree"])
-        payload["startTs"] = _safe_int(row["start_ts"], 0)
+        # Fall back to the row's insertion timestamp — the same
+        # fallback the history sidebar applies (_safe_start_ms in
+        # server.py) — so replay synthesis (task_settings events) and
+        # the sidebar agree on when a legacy task started.
+        start_ms = _safe_int(row["start_ts"], 0)
+        if start_ms <= 0:
+            start_ms = int(_safe_float(row["timestamp"], 0.0) * 1000)
+        payload["startTs"] = start_ms
         payload["endTs"] = _safe_int(row["end_ts"], 0)
+        payload["max_budget"] = _safe_float(row["max_budget"], 0.0)
         payload["is_favorite"] = bool(row["is_favorite"])
         if row["parent_task_id"]:
             payload["subagent"] = {
@@ -652,6 +660,9 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             end_ts INTEGER DEFAULT 0,
             is_favorite INTEGER DEFAULT 0,
             parent_task_id TEXT DEFAULT '',
+            -- The run's budget cap in USD (0.0 = unknown / legacy
+            -- row); shown by the static task panel's settings info.
+            max_budget REAL DEFAULT 0.0,
             -- Token of the process that created the row; see
             -- _process_owner_token / _recover_orphaned_tasks.
             owner TEXT DEFAULT ''
@@ -707,14 +718,19 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
     cols = {
         r[1] for r in conn.execute("PRAGMA table_info(task_history)").fetchall()
     }
-    if "owner" in cols:
-        return
-    try:
-        conn.execute(
-            "ALTER TABLE task_history ADD COLUMN owner TEXT DEFAULT ''"
-        )
-    except sqlite3.OperationalError:  # pragma: no cover — lost the race
-        logger.debug("owner column already present", exc_info=True)
+    added_columns = (
+        ("owner", "TEXT DEFAULT ''"),
+        ("max_budget", "REAL DEFAULT 0.0"),
+    )
+    for name, column_ddl in added_columns:
+        if name in cols:
+            continue
+        try:
+            conn.execute(
+                f"ALTER TABLE task_history ADD COLUMN {name} {column_ddl}"
+            )
+        except sqlite3.OperationalError:  # pragma: no cover — lost the race
+            logger.debug("%s column already present", name, exc_info=True)
 
 
 def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
@@ -1150,8 +1166,8 @@ def _add_task(
             "INSERT INTO task_history (id, timestamp, task, chat_id, result, "
             "model, work_dir, version, tokens, cost, steps, is_parallel, "
             "is_worktree, auto_commit_mode, start_ts, end_ts, is_favorite, "
-            "parent_task_id, owner) VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "parent_task_id, max_budget, owner) VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id, time.time(), task, chat_id,
                 "Agent Failed Abruptly",
@@ -1168,6 +1184,7 @@ def _add_task(
                 _safe_int(payload.get("endTs"), 0),
                 1 if payload.get("is_favorite") else 0,
                 parent_task_id,
+                _safe_float(payload.get("max_budget"), 0.0),
                 _process_owner_token(),
             ),
         )
@@ -1666,6 +1683,7 @@ _EXTRA_COL_MAP: dict[str, tuple[str, object, object]] = {
     "is_worktree": ("is_worktree", lambda v: 1 if v else 0, 0),
     "startTs": ("start_ts", int, 0),
     "endTs": ("end_ts", int, 0),
+    "max_budget": ("max_budget", float, 0.0),
 }
 
 
@@ -2437,6 +2455,46 @@ def _task_has_events(task_id: str) -> bool:
         return row is not None
 
 
+def _task_has_transcript_events(task_id: str) -> bool:
+    """Return whether any TRANSCRIPT events are persisted for *task_id*.
+
+    Like :func:`_task_has_events` but ignoring the run's single
+    ``task_settings`` metadata event, which is broadcast (and
+    persisted) BEFORE the agent produces any output.  Used by
+    :meth:`ChatSorcarAgent._persist_replay_events_if_missing`: a run
+    that failed right after allocation must still get its synthesized
+    ``prompt``/``result`` events even though the metadata event
+    already exists.
+
+    Args:
+        task_id: Stable ``task_history`` row id.
+
+    Returns:
+        ``True`` if at least one persisted event is not a
+        ``task_settings`` event.
+    """
+    _flush_chat_events(task_id)
+    with _rw_lock.read_lock():
+        db = _get_db()
+        rows = db.execute(
+            "SELECT event_json FROM events WHERE task_id = ? "
+            "ORDER BY seq ASC LIMIT 3",
+            (task_id,),
+        ).fetchall()
+    for row in rows:
+        try:
+            event = json.loads(row["event_json"])
+        except (json.JSONDecodeError, TypeError):
+            return True
+        if not isinstance(event, dict):
+            return True
+        if event.get("type") != "task_settings":
+            return True
+    # A run broadcasts task_settings once, so three metadata-only rows
+    # cannot occur; anything beyond the scanned window is transcript.
+    return len(rows) >= 3
+
+
 def _descendant_task_ids(root_task_id: str) -> list[str]:
     """Return the ids of all tasks below *root_task_id*.
 
@@ -2664,6 +2722,70 @@ def _load_chat_events_by_task_id(
     return _load_events_session_row("WHERE id = ?", (task_id,))
 
 
+def _load_all_chat_events_by_chat_id(
+    chat_id: str,
+    max_json_bytes: int | None = None,
+) -> tuple[list[dict[str, object]], bool]:
+    """Load every task of a chat session and its events, oldest first.
+
+    Powers the daemon's ``shareChatTasks`` command: the chat webview
+    exports a chat as one standalone HTML page and needs the
+    transcripts of ALL of the chat's tasks, not just the latest one
+    (:func:`_load_latest_chat_events_by_chat_id`) — earlier tasks are
+    no longer in the webview's DOM after a reload, because a session
+    replay repaints only one task.  Sub-agent rows are skipped exactly
+    like the latest-task lookup skips them: they replay inside their
+    parent's transcript, not as chat tasks of their own.
+
+    The rows are walked newest first so a *max_json_bytes* budget can
+    stop BEFORE decoding an oversized chat's older transcripts — the
+    newest ones are the ones the webview cannot redraw from its own
+    DOM — instead of materializing every event and discarding the
+    surplus afterwards.
+
+    Args:
+        chat_id: The string chat session identifier.
+        max_json_bytes: Optional byte budget; each task is charged the
+            UTF-8 length of its JSON encoding, and loading stops at
+            the first task that does not fit.  ``None`` loads all.
+
+    Returns:
+        ``(tasks, truncated)``.  *tasks* is ordered by ``timestamp
+        ASC, rowid ASC`` (the order the tasks ran in), each dict with
+        ``task`` (str), ``task_id`` (str), ``events`` (list of event
+        dicts), ``chat_id`` (str), and ``extra`` (str, JSON metadata);
+        empty when *chat_id* is ``""`` or names no non-sub-agent
+        tasks.  *truncated* is True when the budget dropped at least
+        one (oldest) task.
+    """
+    if not chat_id:
+        return [], False
+    out: list[dict[str, object]] = []
+    truncated = False
+    budget = max_json_bytes
+    with _rw_lock.read_lock():
+        db = _get_db()
+        rows = db.execute(
+            _HISTORY_SELECT
+            + f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
+            "ORDER BY timestamp DESC, rowid DESC",
+            (chat_id,),
+        ).fetchall()
+        for row in rows:
+            entry = _events_session_dict(
+                db, str(row["id"]), row["task"], str(row["chat_id"] or ""),
+                _row_to_extra_json(row),
+            )
+            if budget is not None:
+                budget -= len(json.dumps(entry).encode("utf-8"))
+                if budget < 0:
+                    truncated = True
+                    break
+            out.append(entry)
+    out.reverse()
+    return out, truncated
+
+
 def _load_subagent_rows_by_parent_task_id(
     parent_task_id: str,
 ) -> list[dict[str, object]]:
@@ -2750,8 +2872,8 @@ def _get_adjacent_task_by_chat_id(
 
         if direction == "prev":
             adj = db.execute(
-                "SELECT id, task FROM task_history "
-                "WHERE chat_id = ? "
+                _HISTORY_SELECT
+                + "WHERE chat_id = ? "
                 "AND (timestamp < ? OR (timestamp = ? AND rowid < ?)) "
                 f"AND {_HISTORY_NOT_SUBAGENT} "
                 "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
@@ -2759,8 +2881,8 @@ def _get_adjacent_task_by_chat_id(
             ).fetchone()
         else:
             adj = db.execute(
-                "SELECT id, task FROM task_history "
-                "WHERE chat_id = ? "
+                _HISTORY_SELECT
+                + "WHERE chat_id = ? "
                 "AND (timestamp > ? OR (timestamp = ? AND rowid > ?)) "
                 f"AND {_HISTORY_NOT_SUBAGENT} "
                 "ORDER BY timestamp ASC, rowid ASC LIMIT 1",
@@ -2775,6 +2897,10 @@ def _get_adjacent_task_by_chat_id(
             "task": adj["task"],
             "task_id": adj_id,
             "events": _fetch_events_for_task_id(db, adj_id),
+            "chat_id": str(adj["chat_id"] or ""),
+            # The synthesized extra lets the replay reply builder attach
+            # a task_settings event for rows that predate the event.
+            "extra": _row_to_extra_json(adj),
         }
 
 

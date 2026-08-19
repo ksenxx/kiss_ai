@@ -104,7 +104,14 @@ def _persist_stream(task_id: str, stream: list[dict]) -> None:
 
 
 def _assert_coalesced(events: list[dict]) -> None:
-    """Assert *events* is the coalesced form of ``_RAW_STREAM``."""
+    """Assert *events* is the coalesced form of ``_RAW_STREAM``.
+
+    Replay payloads start with the ``task_settings`` event the reply
+    builder ensures (synthesized from the task row when the persisted
+    stream carries none); it is asserted and stripped first.
+    """
+    assert events and events[0].get("type") == "task_settings"
+    events = events[1:]
     types = [e.get("type") for e in events]
     assert types == _COALESCED_TYPES, f"got types={types}"
     deltas = [e for e in events if e.get("type") == "thinking_delta"]
@@ -189,7 +196,8 @@ class TestReplayCoalescing:
         assert len(adj) == 1
         assert adj[0]["task_id"] == first_id
         assert adj[0]["task"] == "short empty task"
-        assert adj[0]["events"] == []
+        # Only the synthesized task_settings event — no transcript.
+        assert [e.get("type") for e in adj[0]["events"]] == ["task_settings"]
 
     def test_persisted_subagent_task_events_coalesced(self) -> None:
         chat_id = "chat-coalesce-3"
@@ -238,9 +246,9 @@ class TestReplayCoalescing:
         assert len(replays) == 1
         got = replays[0]["events"]
         assert [e.get("type") for e in got] == [
-            "text_delta", "text_end", "result",
+            "task_settings", "text_delta", "text_end", "result",
         ]
-        assert got[0]["text"] == "only"
+        assert got[1]["text"] == "only"
 
 
 class TestFanoutSingleSerialization:

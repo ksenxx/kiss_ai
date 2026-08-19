@@ -6,9 +6,13 @@
 
 from __future__ import annotations
 
+import getpass
 import logging
 import os
+import platform
+import socket
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +51,11 @@ as HTML (e.g. <ol>, <p>, <pre><code>), never Markdown")**
 - Current process PID: {current_pid} — NEVER kill this process.
 """
 
+TASK_SETTINGS_HEADER = "\n# Task Settings\n"
+
+#: Budget cap (USD) a run falls back to when the caller states none.
+DEFAULT_MAX_BUDGET = 200.0
+
 CONTINUATION_PROMPT = """
 # Task Progress (Continuation {continuation_number})
 
@@ -78,6 +87,63 @@ Read relevant portions of the file using your tools:
 """
 
 MAX_PROGRESS_CHARS = 60_000
+
+
+def _local_ip_address() -> str:
+    """Best-effort primary IP address of this machine.
+
+    Opens a UDP socket "connected" to a public address, which selects
+    the outbound interface without sending any packets (the numeric
+    destination also avoids DNS), and reads the socket's own address.
+    Returns ``"unknown"`` when the host has no route — deliberately
+    with no hostname-resolution fallback, which could stall on a
+    broken resolver or report loopback.
+
+    Returns:
+        The machine's primary IPv4 address, or ``"unknown"``.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return str(sock.getsockname()[0])
+    except OSError:
+        return "unknown"
+
+
+def _nonempty(value: str) -> str:
+    """*value* stripped, or ``"unknown"`` when nothing remains.
+
+    ``platform.uname()`` reports fields it cannot determine as ``""``
+    (per its documented contract); this keeps such fields readable.
+
+    Args:
+        value: A possibly empty host-identification field.
+
+    Returns:
+        The stripped value, or ``"unknown"`` if it is empty.
+    """
+    return value.strip() or "unknown"
+
+
+def _host_settings() -> dict[str, str]:
+    """User and host identification for the "# Task Settings" section.
+
+    Returns:
+        Label → value pairs for the unix user name, the machine's
+        primary IP address, the OS name and release, and the machine's
+        hostname and hardware architecture.
+    """
+    try:
+        user = getpass.getuser()
+    except OSError:
+        user = "unknown"
+    uname = platform.uname()
+    return {
+        "User id": _nonempty(user),
+        "IP address": _local_ip_address(),
+        "OS": f"{_nonempty(uname.system)} {_nonempty(uname.release)}",
+        "Machine info": f"{_nonempty(uname.node)} ({_nonempty(uname.machine)})",
+    }
 
 
 def _capped_progress_text(summaries: list[str]) -> str:
@@ -172,7 +238,9 @@ class RelentlessAgent(Base):
 
         self.max_sub_sessions = max_sub_sessions if max_sub_sessions is not None else 10000
         self.max_steps = max_steps if max_steps is not None else 10000
-        self.max_budget = max_budget if max_budget is not None else 200.0
+        self.max_budget = (
+            max_budget if max_budget is not None else DEFAULT_MAX_BUDGET
+        )
         self.model_name = model_name if model_name is not None else "claude-opus-4-6"
         self.verbose = verbose
         self.budget_used: float = 0.0
@@ -222,6 +290,49 @@ class RelentlessAgent(Base):
             raise KISSError("Docker manager not initialized")
         return str(self.docker_manager.Bash(command, description))
 
+    def _system_prompt_task_settings(self) -> dict[str, str]:
+        """Label → value pairs appended to the system prompt as "# Task Settings".
+
+        Called once per task by :meth:`perform_task`, after ``_reset``
+        resolved the run's model and budget, so the values describe the
+        settings the task actually runs with, plus the host environment
+        (unix user, IP address, OS, machine).  Subclasses extend the
+        dict with the settings they know about (parallel mode, worktree
+        mode, chat / task / parent ids, ...).
+
+        Returns:
+            Ordered mapping of setting labels to display values.
+        """
+        return {
+            "Model name": self.model_name,
+            "Max budget (USD)": f"${self.max_budget:.2f}",
+            "Starting time": datetime.now().astimezone().strftime(
+                "%Y-%m-%d %H:%M:%S %Z"
+            ),
+            **_host_settings(),
+        }
+
+    def _task_settings_section(self) -> str:
+        """The "# Task Settings" system-prompt section for this run.
+
+        Every value is collapsed to a single whitespace-normalized
+        line, so host-derived strings (user name, hostname, ...)
+        containing newlines cannot inject extra lines or headings into
+        the system prompt.
+
+        Returns:
+            The formatted section, or ``""`` when
+            :meth:`_system_prompt_task_settings` yields nothing.
+        """
+        settings = self._system_prompt_task_settings()
+        if not settings:  # pragma: no cover — base hook never empty
+            return ""
+        lines = "".join(
+            f"- {label}: {' '.join(str(value).split())}\n"
+            for label, value in settings.items()
+        )
+        return TASK_SETTINGS_HEADER + lines
+
     def perform_task(
         self,
         tools: list[Callable[..., Any]],
@@ -258,6 +369,7 @@ class RelentlessAgent(Base):
             work_dir=self.work_dir,
             current_pid=current_pid,
         )
+        important_instructions += self._task_settings_section()
         sorcar_md = config_module.kiss_home() / "SORCAR.md"
         if sorcar_md.is_file():
             important_instructions += "\n" + sorcar_md.read_text()

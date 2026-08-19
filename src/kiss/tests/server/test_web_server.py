@@ -74,6 +74,24 @@ class TestBuildHtml(unittest.TestCase):
         html = _build_html()
         self.assertIn('<body class="remote-chat">', html)
 
+    def test_html_includes_ws_shim(self) -> None:
+        """The generated HTML injects the WebSocket shim before main.js."""
+        html = _build_html()
+        self.assertIn("acquireVsCodeApi", html)
+        self.assertIn("WebSocket", html)
+        shim_pos = html.index("acquireVsCodeApi")
+        main_js_pos = html.index('src="/media/main.js?v=')
+        self.assertLess(shim_pos, main_js_pos)
+
+    def test_html_includes_media_refs(self) -> None:
+        """The HTML references all required media assets."""
+        html = _build_html()
+        self.assertIn("/media/main.css", html)
+        self.assertIn("/media/highlight-github-dark.min.css", html)
+        self.assertIn("/media/highlight.min.js", html)
+        self.assertIn("/media/marked.min.js", html)
+        self.assertIn("/media/main.js", html)
+
 
 class TestWebappServerLoadingOverlay(unittest.TestCase):
     """End-to-end regression for the "KISS Sorcar Server is starting ..."
@@ -5480,6 +5498,70 @@ class TestDeadProcessClearsMetricsState(IsolatedAsyncioTestCase):
             except subprocess.TimeoutExpired:
                 self.server._tunnel_proc.kill()
             self.server._tunnel_proc = None
+
+
+
+
+class TestDiscoverTunnelUrlFromMetricsFiltersApi(unittest.TestCase):
+    """``_query_quicktunnel_hostname`` must filter out api.trycloudflare.com.
+
+    Runs the REAL production function against a local HTTP server that
+    plays the cloudflared ``/quicktunnel`` metrics endpoint (the
+    function queries ``http://127.0.0.1:{metrics_port}/quicktunnel``,
+    so passing the local server's port exercises the exact production
+    request + filtering path with no test doubles).
+    """
+
+    def _serve_hostname(self, hostname: str) -> tuple[HTTPServer, int]:
+        """Start a local /quicktunnel endpoint reporting *hostname*."""
+        port = _find_free_port()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                if self.path == "/quicktunnel":
+                    body = json.dumps({"hostname": hostname}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_error(404)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+        httpd = HTTPServer(("127.0.0.1", port), Handler)
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        return httpd, port
+
+    def test_filters_api_hostname(self) -> None:
+        """When the metrics API reports api.trycloudflare.com, return None."""
+        from kiss.server.web_server import _query_quicktunnel_hostname
+
+        httpd, port = self._serve_hostname("api.trycloudflare.com")
+        try:
+            self.assertIsNone(
+                _query_quicktunnel_hostname(port),
+                "api.trycloudflare.com must be filtered out by metrics discovery",
+            )
+        finally:
+            httpd.shutdown()
+
+    def test_allows_real_hostname(self) -> None:
+        """When the metrics API reports a real tunnel hostname, return the URL."""
+        from kiss.server.web_server import _query_quicktunnel_hostname
+
+        httpd, port = self._serve_hostname("test-word-abc-xyz.trycloudflare.com")
+        try:
+            self.assertEqual(
+                _query_quicktunnel_hostname(port),
+                "https://test-word-abc-xyz.trycloudflare.com",
+                "Real tunnel hostnames must be returned",
+            )
+        finally:
+            httpd.shutdown()
 
 
 if __name__ == "__main__":

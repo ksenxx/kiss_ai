@@ -1438,7 +1438,7 @@ class SorcarAgent(RelentlessAgent):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        resolved_model = model_name or _load_last_model() or get_default_model()
+        resolved_model = self._resolve_model_name(model_name)
         self._launch_model_name = resolved_model
         super()._reset(
             model_name=resolved_model,
@@ -1450,6 +1450,37 @@ class SorcarAgent(RelentlessAgent):
             printer=printer,
             verbose=verbose if verbose is not None else False,
         )
+
+    @staticmethod
+    def _resolve_model_name(model_name: str | None) -> str:
+        """The model a run asked to use *model_name* actually runs with.
+
+        The same fallback chain ``_reset`` applies: the caller's model,
+        else the user's last-selected model, else the configured
+        default.  Exposed so callers that record a run's settings
+        BEFORE ``_reset`` executes (``ChatSorcarAgent.run``'s early
+        history row and ``task_settings`` event) persist the resolved
+        value instead of a blank.
+
+        Args:
+            model_name: The caller-supplied model name, possibly None.
+
+        Returns:
+            The resolved model name.
+        """
+        return model_name or _load_last_model() or get_default_model()
+
+    def _system_prompt_task_settings(self) -> dict[str, str]:
+        """Extend the base settings with this agent's parallel mode.
+
+        Returns:
+            The base label → value pairs plus "Parallel mode".
+        """
+        settings = super()._system_prompt_task_settings()
+        settings["Parallel mode"] = (
+            "parallel" if self._is_parallel else "sequential"
+        )
+        return settings
 
     def run(  # type: ignore[override]
         self,

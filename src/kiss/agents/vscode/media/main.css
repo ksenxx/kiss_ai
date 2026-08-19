@@ -634,6 +634,28 @@ body {
   text-overflow: ellipsis;
 }
 
+/* The task's settings info (model, worktree / parallel modes, budget,
+   start time, chat / task / parent ids) — shown only while the panel
+   is expanded, like the info rows of the history sidebar. */
+#task-panel-info {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--panel-fg) 20%, transparent);
+  font-size: 0.85em;
+  color: var(--panel-dim);
+  line-height: 1.5;
+}
+
+#task-panel-info:empty,
+#task-panel.drawer-collapsed #task-panel-info {
+  display: none;
+}
+
+.task-panel-info-line {
+  display: block;
+  word-break: break-word;
+}
+
 #output {
   flex: 1; overflow-y: auto; overflow-x: hidden;
   overscroll-behavior-y: none;
@@ -1163,11 +1185,11 @@ body.remote-chat #welcome-config { display: none !important; }
 
 #input-footer {
   display: flex; justify-content: space-between; align-items: center;
-  margin-top: 5px; padding-top: 5px; border-top: 1px solid color-mix(in srgb, var(--fg) 5%, transparent);
-  flex-wrap: wrap; gap: 4px;
+  margin-top: 8px;
+  flex-wrap: wrap; gap: 4px 8px;
 }
 
-#model-picker { position: relative; display: flex; align-items: center; gap: 1px; min-width: 0; overflow: visible; flex-wrap: wrap; }
+#model-picker { position: relative; display: flex; align-items: center; gap: 6px; min-width: 0; overflow: visible; flex-wrap: wrap; }
 
 #model-btn {
   display: flex; align-items: center; gap: 6px;
@@ -1177,6 +1199,7 @@ body.remote-chat #welcome-config { display: none !important; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: min(300px, 50vw);
   outline: none;
 }
+#model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #model-btn:hover:not(:disabled) { border-color: color-mix(in srgb, var(--fg) 20%, transparent); color: color-mix(in srgb, var(--fg) 74%, transparent); }
 #model-btn:disabled { opacity: 0.45; cursor: default; pointer-events: none; }
 #model-btn svg { flex-shrink: 0; opacity: 0.55; }
@@ -1209,6 +1232,8 @@ body.remote-chat #welcome-config { display: none !important; }
 
 #upload-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
+#share-btn.share-ok { color: var(--green); }
+#share-btn.share-err { color: var(--red); }
 #voice-btn.voice-loading, .ask-user-mic.voice-loading { opacity: 0.5; }
 #voice-btn.voice-listening, .ask-user-mic.voice-listening { animation: voice-pulse 1.6s ease-in-out infinite; }
 #voice-btn.voice-error, .ask-user-mic.voice-error { color: var(--error, #f48771); }

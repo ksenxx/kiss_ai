@@ -48,7 +48,7 @@ Agent with both coding tools and browser automation for web + code tasks.
 ### Module helpers
 
 - **`auto_commit_changes(commit_dir, user_prompt, message_fn, notify_fn=None, task_result=None) -> bool`** — Stage all changes, generate a commit message (typically via an LLM), and commit. Re-stages just before committing so late-arriving files are included. Falls back to a generic message if `message_fn` raises. Returns True if a commit was created.
-- **`run_tasks_parallel(tasks, max_workers=None, model_name=None, work_dir=None, printer=None, totals_out=None, max_budget=None, model_config=None, usage_monitor=None) -> list[str]`** — Execute multiple SorcarAgent tasks concurrently with a thread pool; each task gets its own `ChatSorcarAgent`. Returns YAML result strings in the same order as `tasks`.
+- **`run_tasks_parallel(tasks, max_workers=None, model_name=None, work_dir=None, printer=None, totals_out=None, max_budget=None, model_config=None, usage_monitor=None, parent_agent=None, chat_id='', parent_tab_id='', base_system_prompt='', system_prompt_suffix='') -> list[str]`** — Execute multiple SorcarAgent tasks concurrently with a thread pool; each task gets its own `ChatSorcarAgent`. Returns YAML result strings in the same order as `tasks`.
 
 ## `kiss.agents.sorcar.chat_sorcar_agent` — Chat-session persistence
 
@@ -76,7 +76,7 @@ Highlights (all methods take explicit `repo`/`wt_dir` paths):
 - `discover_repo(path)`, `current_branch(repo)`, `head_sha(wt_dir)`, `branch_exists(repo, branch)`
 - `create(repo, branch, wt_dir)`, `remove(repo, wt_dir)`, `prune(repo)`, `cleanup_partial(repo, branch, wt_dir)`
 - `stage_all(wt_dir)`, `commit_all(wt_dir, message)`, `commit_staged(wt_dir, message, no_verify=False)`, `staged_diff(wt_dir)`
-- `has_uncommitted_changes(wt_dir)`, `status_porcelain(wt_dir)`, `staged_diff(wt_dir)`
+- `has_uncommitted_changes(wt_dir)`, `status_porcelain(wt_dir)`
 - `checkout(repo, branch)`, `stash_if_dirty(repo)`, `stash_pop(repo)`, `delete_branch(repo, branch)`
 - `squash_merge_branch(repo, branch)`, `squash_merge_from_baseline(repo, branch, baseline)` — squash-merge a task branch (or only the agent's changes after a baseline commit) into HEAD, returning `MergeResult`
 - `copy_dirty_state(repo, wt_dir)`, `save_baseline_commit` / `load_baseline_commit`, `save_original_branch` / `load_original_branch`

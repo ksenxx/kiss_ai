@@ -144,7 +144,7 @@ class TestSetTaskFavorite:
         for k in (
             "auto_commit_mode", "is_parallel", "is_worktree",
             "model", "work_dir", "version",
-            "tokens", "cost", "steps", "startTs", "endTs",
+            "tokens", "cost", "steps", "startTs", "endTs", "max_budget",
         ):
             extra.pop(k, None)
         assert extra == {"is_favorite": True}

@@ -5,6 +5,13 @@
 """Integration tests for: budget limit, custom endpoint+key, web browser toggle,
 and API key setup/deletion in the configuration panel.
 
+Split out of ``tests/server/test_features_integration.py``: these methods
+depend only on ``kiss.core`` (``KISSAgent``, ``kiss_error``,
+``vscode_config``, ``config``), so they belong in ``tests/core`` per the
+placement invariants.  The methods that exercise
+``kiss.agents.sorcar.sorcar_agent`` or ``kiss.server.server`` remain in
+``tests/server``, importing the shared fixture below.
+
 Each test uses real HTTP servers, real file I/O, and real objects —
 no mocks, patches, fakes, or test doubles (except monkeypatch for env
 isolation, which is not a test double).
@@ -239,37 +246,7 @@ class TestCustomEndpointRealHTTP:
             srv.shutdown()
 
 class TestWebBrowserToggle:
-    """web_tools parameter controls browser tool availability."""
-
-    def test_web_tools_false_no_browser_tools(self) -> None:
-        """When web_tools=False, SorcarAgent._setup_tools skips web tools."""
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
-        agent = SorcarAgent("no-web")
-        agent._use_web_tools = False
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        tool_names = [t.__name__ for t in tools]
-        browser_names = {
-            "go_to_url", "click", "type_text", "press_key",
-            "scroll", "screenshot", "get_page_content", "close_browser",
-        }
-        assert not browser_names.intersection(tool_names)
-        assert agent.web_use_tool is None
-
-    def test_web_tools_true_has_browser_tools(self) -> None:
-        """When web_tools=True, _setup_tools includes web tools."""
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
-        agent = SorcarAgent("with-web")
-        agent._use_web_tools = True
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        tool_names = [t.__name__ for t in tools]
-        assert "go_to_url" in tool_names
-        assert agent.web_use_tool is not None
-        agent.web_use_tool.close()
-        agent.web_use_tool = None
+    """use_web_browser config persistence (web-tool wiring is in tests/server)."""
 
     def test_config_use_web_browser_false_saved_and_loaded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -290,7 +267,7 @@ class TestWebBrowserToggle:
 
 
 class TestApiKeySetupAndDeletion:
-    """Full lifecycle: save key → verify → delete key → verify gone."""
+    """Full lifecycle: save key → verify → overwrite → verify replaced."""
 
     @pytest.fixture(autouse=True)
     def _isolate(
@@ -331,36 +308,6 @@ class TestApiKeySetupAndDeletion:
         assert "old-val" not in content
         assert f"export OPENAI_API_KEY={shlex.quote('new-val')}" in content
         assert os.environ["OPENAI_API_KEY"] == "new-val"
-
-    def test_delete_key_by_saving_empty(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Saving an empty key via config panel skips writing to RC.
-
-        The VSCodeServer saveConfig handler skips empty keys, so
-        after the key is removed from the env and not written to RC,
-        it is effectively deleted.
-        """
-        from kiss.server.server import VSCodeServer
-
-        server = VSCodeServer()
-
-        server._handle_command({
-            "type": "saveConfig",
-            "config": {"max_budget": 100},
-            "apiKeys": {"ANTHROPIC_API_KEY": "ant-key-to-delete"},
-        })
-        assert os.environ["ANTHROPIC_API_KEY"] == "ant-key-to-delete"
-        rc = Path.home() / ".zshrc"
-        assert "ant-key-to-delete" in rc.read_text()
-
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        server._handle_command({
-            "type": "saveConfig",
-            "config": {"max_budget": 100},
-            "apiKeys": {"ANTHROPIC_API_KEY": ""},
-        })
-        assert os.environ.get("ANTHROPIC_API_KEY") is None
 
     def test_multiple_keys_independent(self) -> None:
         """Saving/deleting one key doesn't affect others."""

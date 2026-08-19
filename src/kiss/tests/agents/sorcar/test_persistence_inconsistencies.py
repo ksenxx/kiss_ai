@@ -171,7 +171,7 @@ class TestA3SaveTaskExtraPreservesFavorite(_TempDbTestBase):
         for k in (
             "auto_commit_mode", "is_parallel", "is_worktree",
             "is_favorite", "model", "work_dir", "version",
-            "cost", "steps", "startTs", "endTs",
+            "cost", "steps", "startTs", "endTs", "max_budget",
         ):
             extra.pop(k, None)
         assert extra == {"tokens": 7}

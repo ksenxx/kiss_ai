@@ -1,15 +1,16 @@
 """End-to-end tests for Z.AI + Moonshot API key support (and MiniMax removal).
 
-These tests verify that the agent platform exposes API keys for Z.AI and
-Moonshot AI (and *not* MiniMax) across every surface that previously
-referenced MiniMax:
+Split out of ``tests/agents/vscode/test_zai_moonshot_keys.py``: these
+methods depend only on ``kiss.core`` (``config``, ``vscode_config``) and
+``kiss.core.models.model_info``, so they belong in ``tests/core`` per the
+placement invariants.  The vendor-display and settings-panel asset tests
+remain in ``tests/agents/vscode``; the provider-routing and catalog tests
+live in ``tests/core/models/test_zai_moonshot_keys.py``.
 
 * ``kiss.core.config.Config`` field names and env-var defaults.
-* The VS Code settings panel allowlist + HTML inputs + JS env mapping.
-* Provider-routing functions in ``kiss.core.models.model_info``.
-* The provider/vendor display used by the model picker.
-* The ``MODEL_INFO.json`` catalog (at least one glm-* and one moonshot/kimi
-  entry, and zero ``minimax-*``/``MiniMaxAI/*`` entries).
+* The VS Code env-var allowlist and current-key surface in
+  ``kiss.core.vscode_config``.
+* Key-gated model availability in ``kiss.core.models.model_info``.
 
 Run with::
 
@@ -18,20 +19,12 @@ Run with::
 
 from __future__ import annotations
 
-import json
-import re
-from pathlib import Path
-
 import pytest
 
 from kiss.core import config as config_module
 from kiss.core import vscode_config
 from kiss.core.models import model_info
-from kiss.server import helpers
 
-# ---------------------------------------------------------------------------
-# config.Config
-# ---------------------------------------------------------------------------
 
 def test_config_has_zai_and_moonshot_fields() -> None:
     """`Config` exposes ZAI_API_KEY and MOONSHOT_API_KEY str fields."""
@@ -56,8 +49,6 @@ def test_config_defaults_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.MOONSHOT_API_KEY == "moonshot-test-token"
 
 
-# ---------------------------------------------------------------------------
-
 def test_vscode_allowlist_replaced() -> None:
     """The VS Code env-var allowlist swaps MINIMAX for Z.AI + Moonshot."""
     allow = vscode_config.API_KEY_ENV_VARS
@@ -76,90 +67,6 @@ def test_get_current_api_keys_includes_new_keys(
     assert current.get("ZAI_API_KEY") == "z-abc"
     assert current.get("MOONSHOT_API_KEY") == "m-xyz"
     assert "MINIMAX_API_KEY" not in current
-
-
-def test_model_vendor_zai_and_moonshot() -> None:
-    """`model_vendor` routes glm-* to Z.AI and kimi-*/moonshot-* to Moonshot."""
-    assert helpers.model_vendor("glm-4.6")[0] == "Z.AI"
-    assert helpers.model_vendor("kimi-k2.6")[0] == "Moonshot"
-    assert helpers.model_vendor("moonshot-v1-32k")[0] == "Moonshot"
-    assert helpers.model_vendor("minimax-m2.5")[0] != "MiniMax"
-
-
-def test_get_model_provider_zai_and_moonshot() -> None:
-    """`get_model_provider` recognizes Z.AI and Moonshot prefixes."""
-    assert model_info.get_model_provider("glm-4.6") == "Z.AI"
-    assert model_info.get_model_provider("kimi-k2.6") == "Moonshot"
-    assert model_info.get_model_provider("moonshot-v1-32k") == "Moonshot"
-
-
-def test_get_model_provider_no_minimax_branch() -> None:
-    """The dedicated MiniMax provider label is no longer returned."""
-    for name in ("minimax-m2.5", "minimax-m2.5-lightning", "minimax-m1"):
-        assert model_info.get_model_provider(name) != "MiniMax"
-
-
-def test_model_routing_advertises_new_providers() -> None:
-    """The generation catalog routes to the new providers, not MiniMax."""
-    providers = {
-        model_info.get_model_provider(name)
-        for name, info in model_info.MODEL_INFO.items()
-        if info.is_generation_supported
-    }
-    assert "Z.AI" in providers
-    assert "Moonshot" in providers
-    assert "MiniMax" not in providers
-
-
-_MODEL_INFO_PATH = (
-    Path(model_info.__file__).resolve().parent / "MODEL_INFO.json"
-)
-
-
-def test_model_info_json_has_zai_and_moonshot_entries() -> None:
-    raw = json.loads(_MODEL_INFO_PATH.read_text())
-    glm_models = [k for k in raw if k.startswith("glm-")]
-    moonshot_models = [
-        k for k in raw if k.startswith("moonshot-") or k.startswith("kimi-")
-    ]
-    assert glm_models, "Expected at least one glm-* entry in MODEL_INFO.json"
-    assert moonshot_models, (
-        "Expected at least one moonshot-*/kimi-* entry in MODEL_INFO.json"
-    )
-
-
-def test_model_info_json_has_no_minimax_entries() -> None:
-    raw = json.loads(_MODEL_INFO_PATH.read_text())
-    bad = [
-        k
-        for k in raw
-        if k.startswith("minimax-")
-        or k.startswith("MiniMaxAI/")
-        or k.startswith("openrouter/minimax/")
-    ]
-    assert not bad, f"MiniMax entries remain in MODEL_INFO.json: {bad!r}"
-
-
-_VSCODE_MEDIA = Path(__file__).resolve().parents[2] / "agents" / "vscode" / "media"
-
-
-def test_settings_panel_html_has_new_inputs() -> None:
-    html = (_VSCODE_MEDIA / "chat.html").read_text()
-    assert 'id="cfg-key-ZAI_API_KEY"' in html
-    assert 'id="cfg-key-MOONSHOT_API_KEY"' in html
-    assert "MINIMAX_API_KEY" not in html
-    assert re.search(r"Z\.?AI API Key", html, flags=re.IGNORECASE)
-    assert re.search(r"Moonshot API Key", html, flags=re.IGNORECASE)
-
-
-def test_settings_panel_js_registers_new_keys() -> None:
-    js = (_VSCODE_MEDIA / "main.js").read_text()
-    assert "'cfg-key-ZAI_API_KEY'" in js
-    assert "'cfg-key-MOONSHOT_API_KEY'" in js
-    assert "ZAI_API_KEY" in js
-    assert "MOONSHOT_API_KEY" in js
-    assert "MINIMAX_API_KEY" not in js
-    assert "minimax_api_key" not in js
 
 
 def test_available_models_includes_glm_when_zai_key_set(

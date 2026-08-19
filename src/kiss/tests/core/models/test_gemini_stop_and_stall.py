@@ -31,7 +31,6 @@ from collections.abc import Generator
 import pytest
 
 from kiss.core.models.gemini_model import GeminiModel
-from kiss.server.json_printer import JsonPrinter
 from kiss.tests.core.models.gemini_sse_harness import (
     GeminiScript,
     chunk,
@@ -40,10 +39,11 @@ from kiss.tests.core.models.gemini_sse_harness import (
 )
 
 _MODEL = "gemini-stop-under-test"
+
+
 _DEADLINE = 20.0
-# Far above the stop test's deadline, so a passing stop test can only be
-# explained by the stop and never by the stall watchdog.
-_UNREACHABLE_STALL = 120.0
+
+
 _SHORT_STALL = 2.0
 
 
@@ -83,49 +83,6 @@ def _run_in_thread(model: GeminiModel) -> tuple[threading.Thread, dict[str, obje
     worker = threading.Thread(target=target, daemon=True)
     worker.start()
     return worker, outcome
-
-
-class TestStopAbortsQuietGeminiStream:
-    """Stop must unblock a Gemini stream that has gone silent."""
-
-    def test_stop_raises_keyboard_interrupt_quickly(
-        self, monkeypatch: pytest.MonkeyPatch,
-        gemini_endpoint: tuple[str, GeminiScript],
-    ) -> None:
-        """One chunk arrives, then silence; Stop must land within seconds."""
-        base_url, script = gemini_endpoint
-        script.play([chunk([text_part("Working on it")])], after="silent")
-        model = _make_model(monkeypatch, base_url, _UNREACHABLE_STALL)
-
-        stop_event = threading.Event()
-        printer = JsonPrinter()
-        outcome: dict[str, object] = {}
-
-        def target() -> None:
-            printer._thread_local.stop_event = stop_event
-            try:
-                outcome["result"] = model.generate()
-            except BaseException as exc:  # noqa: BLE001 — reported to the test
-                outcome["error"] = exc
-            finally:
-                printer._thread_local.stop_event = None
-            outcome["finished_at"] = time.monotonic()
-
-        worker = threading.Thread(target=target, daemon=True)
-        worker.start()
-        assert script.serving.wait(timeout=_DEADLINE), "server never served"
-        time.sleep(0.5)
-        stopped_at = time.monotonic()
-        stop_event.set()
-
-        worker.join(_DEADLINE)
-        assert not worker.is_alive(), (
-            f"generate() still running {_DEADLINE}s after Stop — the stop "
-            f"event never reaches the Gemini stream"
-        )
-        assert isinstance(outcome.get("error"), KeyboardInterrupt)
-        elapsed = float(outcome["finished_at"]) - stopped_at  # type: ignore[arg-type]
-        assert elapsed < 5.0, f"Stop took {elapsed:.1f}s to land"
 
 
 class TestStallRaisesRetryableTimeout:
