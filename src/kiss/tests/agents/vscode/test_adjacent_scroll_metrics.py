@@ -20,6 +20,13 @@ The fix:
   - ``replayTaskEvents`` and ``processOutputEvent`` snapshot the current
     task's metrics into ``currentTaskMetrics`` so they can be restored.
   - ``clearUsageMetrics`` resets ``currentTaskMetrics``.
+
+The savedSteps/dataset-metrics bookkeeping was later refactored out of
+``renderAdjacentTask`` into the shared helper ``replayDetachedTranscript``
+(also used by the share export). The tests follow that delegation via
+``_render_adjacent_replay_body`` instead of pinning the code to the
+``renderAdjacentTask`` body, so the behavioral guarantee — not the code
+layout — is what is asserted.
 """
 
 from __future__ import annotations
@@ -54,22 +61,48 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
         )
 
 
-    def test_render_adjacent_task_saves_status_steps(self) -> None:
-        """renderAdjacentTask must save statusSteps before replay and
-        restore it after, so the adjacent task doesn't clobber the
-        current task's step count."""
+    def _render_adjacent_replay_body(self) -> str:
+        """Return the code that renderAdjacentTask replays a transcript with.
+
+        The savedSteps/dataset-metrics bookkeeping originally lived inline
+        in ``renderAdjacentTask``; it was later refactored into the shared
+        helper ``replayDetachedTranscript`` (also used by the share
+        export), which ``renderAdjacentTask`` delegates to. Follow that
+        delegation so the behavioral guarantee is asserted wherever the
+        replay code actually lives.
+        """
+        body = self._function_body("renderAdjacentTask")
+        for helper in re.findall(r"\b(\w+)\s*\(", body):
+            if helper != "renderAdjacentTask" and "replayEventsInto" in (
+                self._function_body(helper, required=False)
+            ):
+                return self._function_body(helper)
+        return body
+
+
+    def _function_body(self, name: str, required: bool = True) -> str:
+        """Extract the body of top-level ``function name(...) {...}``."""
         m = re.search(
-            r"function renderAdjacentTask\b[^{]*\{(.*?)^\s{2}\}",
+            r"function " + re.escape(name) + r"\b[^{]*\{(.*?)^\s{2}\}",
             self.src,
             re.DOTALL | re.MULTILINE,
         )
-        self.assertIsNotNone(m, "Could not find renderAdjacentTask body")
-        assert m is not None
-        body = m.group(1)
+        if m is None:
+            if required:
+                self.fail(f"Could not find {name} body")
+            return ""
+        return m.group(1)
+
+
+    def test_render_adjacent_task_saves_status_steps(self) -> None:
+        """The adjacent-task replay must save statusSteps before replay and
+        restore it after, so the adjacent task doesn't clobber the
+        current task's step count."""
+        body = self._render_adjacent_replay_body()
         self.assertIn(
             "savedSteps",
             body,
-            "renderAdjacentTask does not save statusSteps",
+            "the adjacent-task replay does not save statusSteps",
         )
         replay_pos = body.index("replayEventsInto")
         save_pos = body.index("savedSteps")
@@ -91,19 +124,13 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
         """The adjacent-task container must have dataset.metricTokens,
         dataset.metricBudget, and dataset.metricSteps set from the
         replayed events."""
-        m = re.search(
-            r"function renderAdjacentTask\b[^{]*\{(.*?)^\s{2}\}",
-            self.src,
-            re.DOTALL | re.MULTILINE,
-        )
-        self.assertIsNotNone(m, "Could not find renderAdjacentTask body")
-        assert m is not None
-        body = m.group(1)
+        body = self._render_adjacent_replay_body()
         for attr in ("metricTokens", "metricBudget", "metricSteps"):
             self.assertIn(
                 f"dataset.{attr}",
                 body,
-                f"renderAdjacentTask does not set container.dataset.{attr}",
+                "the adjacent-task replay does not set "
+                f"container.dataset.{attr}",
             )
 
 
