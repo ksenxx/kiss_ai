@@ -1,0 +1,445 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""End-to-end tests for the review-round fixes to the "interact with a
+RUNNING sub-agent" feature:
+
+1. ``VSCodeServer._open_persisted_subagent_tabs`` must SUBSCRIBE the
+   reopened deterministic frontend tab (``{parent_tab_id}__sub_{id}``)
+   to a STILL-RUNNING sub-agent's live stream — otherwise the input
+   textbox shown on that tab is a dead surface (Stop / prompt
+   injection cannot resolve the sub-agent, live events never arrive).
+
+2. ``VSCodeServer._stop_task`` must FORCE-STOP a sub-agent wedged in an
+   uninterruptible call (never polling its cooperative stop event) by
+   injecting ``KeyboardInterrupt`` into the pool worker thread
+   published on the sub-agent's registry state.
+
+3. The force-stop watchdog's ownership guard must NEVER interrupt a
+   SIBLING task that a reused ``ThreadPoolExecutor`` worker thread
+   picked up after the stopped sub-agent finished cooperatively.
+
+4. ``_SubagentStopEvent.wait`` semantics: own set, parent set mid-wait,
+   and timeout expiry.
+
+All tests drive the real production code (``_run_tasks_parallel``,
+``VSCodeServer._stop_task`` / ``_open_persisted_subagent_tabs``, the
+real registry and printer) — no mocks of the code under test.
+"""
+
+from __future__ import annotations
+
+import shutil
+import tempfile
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _SubagentStopEvent
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.core import stop_signal
+from kiss.server import agent_state
+from kiss.server.json_printer import JsonPrinter
+from kiss.server.server import VSCodeServer
+
+
+def _clear_registry() -> None:
+    with agent_state.STATE_LOCK:
+        agent_state.agent_states.clear()
+
+
+def _wait_until(predicate: Any, timeout: float = 10.0) -> bool:
+    """Poll *predicate* until truthy or *timeout* elapses."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
+class _RecordingPrinter(JsonPrinter):
+    """``JsonPrinter`` that records broadcasts and subscriptions."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[dict[str, Any]] = []
+        self.subscribe_calls: list[tuple[Any, str]] = []
+        self._ev_lock = threading.Lock()
+
+    def broadcast(self, event: dict[str, Any]) -> None:
+        with self._ev_lock:
+            self.events.append(event)
+
+    def subscribe_tab(self, task_id: Any, tab_id: str) -> None:
+        self.subscribe_calls.append((task_id, tab_id))
+        super().subscribe_tab(task_id, tab_id)
+
+
+class _DbRedirectBase:
+    """Per-test ``sorcar.db`` redirection + registry cleanup."""
+
+    def setup_method(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        kiss_dir = Path(self.tmpdir) / ".kiss"
+        kiss_dir.mkdir(parents=True, exist_ok=True)
+        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        th._KISS_DIR = kiss_dir
+        th._DB_PATH = kiss_dir / "sorcar.db"
+        th._db_conn = None
+        _clear_registry()
+
+    def teardown_method(self) -> None:
+        _clear_registry()
+        if th._db_conn is not None:
+            th._db_conn.close()
+            th._db_conn = None
+        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+
+class TestPersistedReopenSubscribesRunningSubagent(_DbRedirectBase):
+    """Reopening a persisted parent whose sub-agent is STILL RUNNING
+    must wire the deterministic sub tab into the live stream so the
+    running-input surface (Stop / inject) actually works."""
+
+    def _setup_rows_and_server(
+        self,
+    ) -> tuple[VSCodeServer, _RecordingPrinter, str, str, str]:
+        chat_id = "chat-persisted-reopen"
+        parent_id, _ = th._add_task("parent task", chat_id=chat_id)
+        sub_id, _ = th._add_task(
+            "sub task body",
+            chat_id=chat_id,
+            extra={"subagent": {"parent_task_id": parent_id}},
+        )
+        printer = _RecordingPrinter()
+        server = VSCodeServer(printer=printer)
+        return server, printer, chat_id, parent_id, sub_id
+
+    def _register_live_sub(
+        self, chat_id: str, parent_id: str, sub_id: str,
+    ) -> agent_state.AgentState:
+        """Register the live sub-agent exactly as the printer bridge
+        (``agent_task_allocated``) does mid-flight."""
+        agent = WorktreeSorcarAgent("sub")
+        agent._last_task_id = sub_id
+        backend_tab_id = f"task-{parent_id}__sub_0"
+        state = agent_state.AgentState(
+            sub_id,
+            agent=agent,
+            chat_id=chat_id,
+            tab_id=backend_tab_id,
+            parent_task_id=parent_id,
+            stop_event=_SubagentStopEvent(threading.Event()),
+            is_task_active=True,
+        )
+        agent_state.register(state)
+        return state
+
+    def test_running_sub_reopen_subscribes_and_routes_stop_inject(
+        self,
+    ) -> None:
+        server, printer, chat_id, parent_id, sub_id = (
+            self._setup_rows_and_server()
+        )
+        state = self._register_live_sub(chat_id, parent_id, sub_id)
+        frontend_sub_tab = f"tab-parent__sub_{sub_id}"
+
+        server._open_persisted_subagent_tabs(
+            parent_task_id=parent_id, parent_tab_id="tab-parent",
+        )
+
+        assert (sub_id, frontend_sub_tab) in printer.subscribe_calls, (
+            f"reopened running sub tab was not subscribed; got "
+            f"{printer.subscribe_calls!r}"
+        )
+        assert frontend_sub_tab in printer._fanout_targets(sub_id)
+
+        opens = [
+            e for e in printer.events if e.get("type") == "openSubagentTab"
+        ]
+        assert len(opens) == 1
+        assert opens[0]["tab_id"] == frontend_sub_tab
+        assert opens[0]["isDone"] is False
+
+        server._stop_task(frontend_sub_tab)
+        assert state.stop_event is not None and state.stop_event.is_set(), (
+            "Stop on the reopened running sub tab must set the "
+            "sub-agent's own stop event"
+        )
+        assert isinstance(state.stop_event, _SubagentStopEvent)
+        parent_ev = state.stop_event._parent_event
+        assert parent_ev is not None and not parent_ev.is_set()
+
+        server._cmd_append_user_message(
+            {"tabId": frontend_sub_tab, "prompt": "steer the sub"},
+        )
+        assert state.pending_user_messages == ["steer the sub"]
+
+    def test_completion_race_during_reopen_emits_subagent_done(
+        self,
+    ) -> None:
+        """The sub-agent finishes at the exact moment the persisted
+        parent is reopened: its own ``subagentDone`` fan-out ran before
+        the reopened tab subscribed.  ``_open_persisted_subagent_tabs``
+        must recheck after broadcasting and emit ``subagentDone`` for
+        the reopened tab itself — otherwise the tab pulses "running"
+        (with a dead input surface) forever.
+
+        The race is made deterministic through the pluggable printer:
+        the moment the ``openSubagentTab`` broadcast goes out, the
+        printer emulates the sub-agent's completion exactly as
+        production does it (``agent_task_finished`` unregisters the
+        non-server-owned state) — i.e. AFTER the ``is_done`` snapshot,
+        BEFORE the recheck.
+        """
+        server, printer, chat_id, parent_id, sub_id = (
+            self._setup_rows_and_server()
+        )
+        self._register_live_sub(chat_id, parent_id, sub_id)
+        frontend_sub_tab = f"tab-parent__sub_{sub_id}"
+
+        original_broadcast = _RecordingPrinter.broadcast
+
+        def _broadcast_with_finish(
+            self_p: _RecordingPrinter, event: dict[str, Any],
+        ) -> None:
+            original_broadcast(self_p, event)
+            if event.get("type") == "openSubagentTab":
+                agent_state.unregister(sub_id)
+
+        printer.broadcast = (  # type: ignore[method-assign]
+            _broadcast_with_finish.__get__(printer, _RecordingPrinter)
+        )
+
+        server._open_persisted_subagent_tabs(
+            parent_task_id=parent_id, parent_tab_id="tab-parent",
+        )
+
+        dones = [
+            e
+            for e in printer.events
+            if e.get("type") == "subagentDone"
+            and e.get("tab_id") == frontend_sub_tab
+        ]
+        assert dones, (
+            "a sub-agent that finished during the reopen must get a "
+            "subagentDone broadcast for the reopened tab, else the tab "
+            "shows a running input surface forever; events: "
+            f"{[e.get('type') for e in printer.events]}"
+        )
+
+    def test_done_sub_reopen_is_not_subscribed(self) -> None:
+        """A FINISHED sub-agent row reopens as a plain done tab: no
+        live-stream subscription and ``isDone`` is True (the frontend
+        then keeps the input hidden)."""
+        server, printer, _chat_id, parent_id, sub_id = (
+            self._setup_rows_and_server()
+        )
+
+        server._open_persisted_subagent_tabs(
+            parent_task_id=parent_id, parent_tab_id="tab-parent",
+        )
+
+        frontend_sub_tab = f"tab-parent__sub_{sub_id}"
+        assert (sub_id, frontend_sub_tab) not in printer.subscribe_calls
+        opens = [
+            e for e in printer.events if e.get("type") == "openSubagentTab"
+        ]
+        assert len(opens) == 1
+        assert opens[0]["isDone"] is True
+
+
+class TestForceStopBlockedSubagent(_DbRedirectBase):
+    """Stop on a sub-agent that NEVER polls its cooperative stop event
+    (wedged in an API call) must still abort it — via the watchdog's
+    ``KeyboardInterrupt`` injection into the published worker thread —
+    while the sibling and the parent keep running.
+
+    The wedge is simulated by stubbing ``SorcarAgent.run`` (the model
+    loop) while the REAL ``ChatSorcarAgent.run`` still executes — i.e.
+    persistence, ``agent_task_allocated`` registration and
+    ``agent_task_finished`` cleanup all run through the production
+    printer bridge.
+    """
+
+    def test_stop_force_interrupts_wedged_subagent_only(
+        self, monkeypatch: Any,
+    ) -> None:
+        release_sibling = threading.Event()
+        sibling_interrupted = threading.Event()
+
+        def _stub_run(
+            self: SorcarAgent,
+            model_name: str | None = None,
+            prompt_template: str = "",
+            **kwargs: Any,
+        ) -> str:
+            if "victim-task-marker" in prompt_template:
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    time.sleep(0.02)
+                return "success: true\nsummary: never stopped\n"
+            try:
+                assert release_sibling.wait(20)
+            except KeyboardInterrupt:
+                sibling_interrupted.set()
+                raise
+            return "success: true\nsummary: sibling done\n"
+
+        monkeypatch.setattr(SorcarAgent, "run", _stub_run)
+
+        server = VSCodeServer()
+        printer = server.printer
+        parent = ChatSorcarAgent("parent")
+        parent._last_task_id = "ptask"
+        parent.printer = printer
+        parent_stop = threading.Event()
+
+        results: list[str] = []
+
+        def _runner() -> None:
+            printer._thread_local.stop_event = parent_stop
+            try:
+                results.extend(
+                    parent._run_tasks_parallel(
+                        ["victim-task-marker", "sibling-task-marker"],
+                        max_workers=2,
+                    ),
+                )
+            finally:
+                printer._thread_local.stop_event = None
+
+        runner = threading.Thread(target=_runner, daemon=True)
+        runner.start()
+
+        victim_tab = "task-ptask__sub_0"
+
+        def _victim_armed() -> bool:
+            with agent_state.STATE_LOCK:
+                st = agent_state.find_by_tab(victim_tab)
+                return (
+                    st is not None
+                    and st.stop_event is not None
+                    and st.task_thread is not None
+                    and st.task_thread.is_alive()
+                )
+
+        assert _wait_until(_victim_armed), (
+            "victim sub-agent never published its stop event + worker "
+            "thread in the registry"
+        )
+
+        server._stop_task(victim_tab)
+
+        def _victim_gone() -> bool:
+            with agent_state.STATE_LOCK:
+                return agent_state.find_by_tab(victim_tab) is None
+
+        assert _wait_until(_victim_gone, timeout=15), (
+            "the wedged victim was never force-stopped"
+        )
+        release_sibling.set()
+        runner.join(timeout=20)
+        assert not runner.is_alive(), "parallel fan-out never finished"
+
+        assert len(results) == 2, results
+        assert "stopped" in results[0].lower(), (
+            "the wedged sub-agent must be force-stopped and report a "
+            f"stopped-by-user result; got: {results[0]!r}"
+        )
+        assert "sibling done" in results[1], results[1]
+        assert not sibling_interrupted.is_set(), (
+            "the sibling sub-agent must never receive the injected "
+            "KeyboardInterrupt"
+        )
+        assert not parent_stop.is_set(), (
+            "force-stopping one sub-agent must not stop the parent"
+        )
+
+    def test_watchdog_never_interrupts_reused_pool_thread(
+        self, monkeypatch: Any,
+    ) -> None:
+        """max_workers=1: the stopped sub-agent exits cooperatively
+        within the watchdog's 1 s grace window and the SAME pool thread
+        picks up the sibling.  The ownership guard must observe that
+        the victim's registry entry is gone and skip the injection —
+        the sibling must complete untouched."""
+        sibling_interrupted = threading.Event()
+
+        def _stub_run(
+            self: SorcarAgent,
+            model_name: str | None = None,
+            prompt_template: str = "",
+            **kwargs: Any,
+        ) -> str:
+            stop = stop_signal.get_thread_stop_event()
+            assert stop is not None
+            if "victim-task-marker" in prompt_template:
+                assert _wait_until(stop.is_set, 10)
+                return "success: false\nsummary: victim exited\n"
+            try:
+                deadline = time.monotonic() + 2.5
+                while time.monotonic() < deadline:
+                    time.sleep(0.02)
+            except KeyboardInterrupt:
+                sibling_interrupted.set()
+                raise
+            return "success: true\nsummary: sibling done\n"
+
+        monkeypatch.setattr(SorcarAgent, "run", _stub_run)
+
+        server = VSCodeServer()
+        printer = server.printer
+        parent = ChatSorcarAgent("parent")
+        parent._last_task_id = "ptask2"
+        parent.printer = printer
+
+        results: list[str] = []
+
+        def _runner() -> None:
+            printer._thread_local.stop_event = threading.Event()
+            try:
+                results.extend(
+                    parent._run_tasks_parallel(
+                        ["victim-task-marker", "sibling-task-marker"],
+                        max_workers=1,
+                    ),
+                )
+            finally:
+                printer._thread_local.stop_event = None
+
+        runner = threading.Thread(target=_runner, daemon=True)
+        runner.start()
+
+        victim_tab = "task-ptask2__sub_0"
+
+        def _victim_armed() -> bool:
+            with agent_state.STATE_LOCK:
+                st = agent_state.find_by_tab(victim_tab)
+                return (
+                    st is not None
+                    and st.stop_event is not None
+                    and st.task_thread is not None
+                )
+
+        assert _wait_until(_victim_armed)
+        server._stop_task(victim_tab)
+
+        runner.join(timeout=25)
+        assert not runner.is_alive(), "parallel fan-out never finished"
+        assert len(results) == 2, results
+        assert "victim exited" in results[0], results[0]
+        assert "sibling done" in results[1], (
+            "the sibling running on the REUSED pool worker thread must "
+            f"complete untouched; got: {results[1]!r}"
+        )
+        assert not sibling_interrupted.is_set(), (
+            "the force-stop watchdog interrupted the sibling task that "
+            "the reused pool thread picked up after the victim finished"
+        )

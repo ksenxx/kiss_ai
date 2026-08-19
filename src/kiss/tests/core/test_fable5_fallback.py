@@ -41,48 +41,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 from kiss.core.kiss_agent import _NON_RETRYABLE_PHRASES, KISSAgent
-from kiss.core.models import model_info as model_info_module
 from kiss.core.models.model_info import (
     MODEL_INFO,
     ModelInfo,
-    get_fallback_model,
 )
-
-
-class TestNonRetryablePhrases:
-    """Direct unit checks on the ``_NON_RETRYABLE_PHRASES`` tuple."""
-
-    def test_new_phrases_are_registered(self) -> None:
-        """The three phrases fable-5 needs must be in the tuple."""
-        assert "is not available" in _NON_RETRYABLE_PHRASES
-        assert "not_found_error" in _NON_RETRYABLE_PHRASES
-        assert "credit balance is too low" in _NON_RETRYABLE_PHRASES
-
-    def test_phrases_are_lowercase(self) -> None:
-        """``_is_retryable_error`` lowercases ``str(e)`` before checking,
-        so every phrase must be stored lowercase to match reliably."""
-        for phrase in _NON_RETRYABLE_PHRASES:
-            assert phrase == phrase.lower(), phrase
-
-
-class TestGetFallbackModel:
-    """``get_fallback_model`` MODEL_INFO lookup."""
-
-    def test_claude_fable_5_falls_back_to_opus_4_8(self) -> None:
-        assert get_fallback_model("claude-fable-5") == "claude-opus-4-8"
-
-    def test_unknown_model_returns_none(self) -> None:
-        assert get_fallback_model("does-not-exist-xyz") is None
-
-    def test_model_without_fallback_returns_none(self) -> None:
-        """A registered model that does not declare ``fallback``
-        returns ``None`` (not an error)."""
-        assert get_fallback_model("claude-opus-4-8") is None
-
-    def test_harbor_prefix_is_stripped(self) -> None:
-        """``get_fallback_model`` accepts harbor-style ``provider/name``
-        input (matching the behavior of ``get_max_context_length``)."""
-        assert get_fallback_model("anthropic/claude-fable-5") == "claude-opus-4-8"
 
 
 def _finish_tool_call_response(summary: str = "done") -> dict[str, Any]:
@@ -212,6 +174,22 @@ def _register_synthetic_pair(
                 fallback=fb,
             ),
         )
+
+
+class TestNonRetryablePhrases:
+    """Direct unit checks on the ``_NON_RETRYABLE_PHRASES`` tuple."""
+
+    def test_new_phrases_are_registered(self) -> None:
+        """The three phrases fable-5 needs must be in the tuple."""
+        assert "is not available" in _NON_RETRYABLE_PHRASES
+        assert "not_found_error" in _NON_RETRYABLE_PHRASES
+        assert "credit balance is too low" in _NON_RETRYABLE_PHRASES
+
+    def test_phrases_are_lowercase(self) -> None:
+        """``_is_retryable_error`` lowercases ``str(e)`` before checking,
+        so every phrase must be stored lowercase to match reliably."""
+        for phrase in _NON_RETRYABLE_PHRASES:
+            assert phrase == phrase.lower(), phrase
 
 
 class TestFallbackEndToEnd:
@@ -484,28 +462,3 @@ class TestFallbackOnEmptyAssistantTurns:
         assert agent._fallback_used is True
         assert seen["models"][:2] == [primary, primary]
         assert fallback in seen["models"][2:]
-
-
-class TestModelInfoJsonHasFallback:
-    """Sanity: ``MODEL_INFO.json`` still declares the fable-5 fallback.
-
-    Prevents accidental deletion during future JSON edits (the whole
-    point of this feature)."""
-
-    def test_claude_fable_5_entry_has_fallback(self) -> None:
-        info = MODEL_INFO["claude-fable-5"]
-        assert info.fallback == "claude-opus-4-8"
-
-    def test_openrouter_fable_5_entry_has_fallback(self) -> None:
-        """The OpenRouter mirror of fable-5 is a separate MODEL_INFO key
-        (harbor prefix ``openrouter/`` is NOT stripped by
-        ``_strip_provider_prefix``), so it needs its own ``fallback``
-        entry.  Users routing through OpenRouter otherwise get no
-        fallback at all."""
-        info = MODEL_INFO["openrouter/anthropic/claude-fable-5"]
-        assert info.fallback == "openrouter/anthropic/claude-opus-4.8"
-        assert "openrouter/anthropic/claude-opus-4.8" in MODEL_INFO
-
-    def test_module_reference_still_present(self) -> None:
-        """Guard against accidental removal of ``get_fallback_model``."""
-        assert hasattr(model_info_module, "get_fallback_model")

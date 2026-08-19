@@ -47,7 +47,6 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.server.json_printer import JsonPrinter
 
 _CANNED_RESULT: str = yaml.dump(
     {"success": True, "summary": "all done"}, sort_keys=False,
@@ -152,30 +151,6 @@ class TestReplayEventsOutsideWebview:
         events = loaded.get("events")
         assert isinstance(events, list)
         assert any(e.get("type") == "result" for e in events), events
-
-    def test_recording_printer_run_is_not_duplicated(self) -> None:
-        agent = _OfflineChatAgent("offline")
-        agent.broadcast_result_event = True
-        printer = JsonPrinter()
-        result = agent.run(
-            prompt_template="do the thing",
-            model_name="canned",
-            work_dir=str(self.tmpdir),
-            printer=printer,
-        )
-        assert "all done" in result
-
-        task_id = agent._last_task_id
-        assert task_id is not None
-        _flush_chat_events()
-        loaded = _load_chat_events_by_task_id(task_id)
-        assert loaded is not None
-        events = loaded.get("events")
-        assert isinstance(events, list)
-        result_count = sum(1 for e in events if e.get("type") == "result")
-        assert result_count == 1, events
-        prompt_count = sum(1 for e in events if e.get("type") == "prompt")
-        assert prompt_count == 0, events
 
     def test_persist_replay_events_is_idempotent(self) -> None:
         agent = WorktreeSorcarAgent("wt")

@@ -25,6 +25,7 @@ import pytest
 
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.codex_model import CodexModel
+from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 from kiss.tests.core.models.test_cli_subprocess_lifecycle import install_cli
 
 _NON_ASCII_PROMPT = "Please review the café résumé ☕😀 and reply 'ok'."

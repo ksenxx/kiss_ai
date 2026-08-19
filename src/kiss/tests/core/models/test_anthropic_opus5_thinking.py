@@ -71,7 +71,6 @@ from kiss.core.models.anthropic_model import (
     _uses_adaptive_thinking,
 )
 from kiss.core.models.model_info import MODEL_INFO
-from kiss.server.json_printer import JsonPrinter
 
 _ANTHROPIC_FINISH_TOOL = {
     "name": "finish",
@@ -82,6 +81,251 @@ _ANTHROPIC_FINISH_TOOL = {
         "required": ["result"],
     },
 }
+
+
+def _opus5_thinking_events() -> list[tuple[str, str]]:
+    """SSE pairs for a claude-opus-5 turn with a real thinking stream.
+
+    Mirrors the wire shape Anthropic produces for adaptive-thinking
+    models when ``display: "summarized"`` is requested: a thinking block
+    with ``thinking_delta`` chunks (plus a trailing ``signature_delta``),
+    followed by a text block.
+    """
+    events: list[tuple[str, str]] = []
+    events.append((
+        "message_start",
+        json.dumps({
+            "type": "message_start",
+            "message": {
+                "id": "msg_opus5",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-opus-5",
+                "stop_reason": None,
+                "usage": {"input_tokens": 10, "output_tokens": 0},
+            },
+        }),
+    ))
+    events.append((
+        "content_block_start",
+        json.dumps({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""},
+        }),
+    ))
+    events.append((
+        "content_block_delta",
+        json.dumps({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Pondering "},
+        }),
+    ))
+    events.append((
+        "content_block_delta",
+        json.dumps({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "the request."},
+        }),
+    ))
+    events.append((
+        "content_block_delta",
+        json.dumps({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "sig_opus5"},
+        }),
+    ))
+    events.append((
+        "content_block_stop",
+        json.dumps({"type": "content_block_stop", "index": 0}),
+    ))
+    events.append((
+        "content_block_start",
+        json.dumps({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text", "text": ""},
+        }),
+    ))
+    events.append((
+        "content_block_delta",
+        json.dumps({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "Four."},
+        }),
+    ))
+    events.append((
+        "content_block_stop",
+        json.dumps({"type": "content_block_stop", "index": 1}),
+    ))
+    events.append((
+        "message_delta",
+        json.dumps({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 9},
+        }),
+    ))
+    events.append((
+        "message_stop",
+        json.dumps({"type": "message_stop"}),
+    ))
+    return events
+
+
+def _opus5_signature_only_events() -> list[tuple[str, str]]:
+    """SSE pairs where opus-5 decides not to think (signature-only block)."""
+    events: list[tuple[str, str]] = []
+    events.append((
+        "message_start",
+        json.dumps({
+            "type": "message_start",
+            "message": {
+                "id": "msg_opus5_sig",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-opus-5",
+                "stop_reason": None,
+                "usage": {"input_tokens": 10, "output_tokens": 0},
+            },
+        }),
+    ))
+    events.append((
+        "content_block_start",
+        json.dumps({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""},
+        }),
+    ))
+    events.append((
+        "content_block_delta",
+        json.dumps({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "sig_only"},
+        }),
+    ))
+    events.append((
+        "content_block_stop",
+        json.dumps({"type": "content_block_stop", "index": 0}),
+    ))
+    events.append((
+        "content_block_start",
+        json.dumps({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text", "text": ""},
+        }),
+    ))
+    events.append((
+        "content_block_delta",
+        json.dumps({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "Quick answer."},
+        }),
+    ))
+    events.append((
+        "content_block_stop",
+        json.dumps({"type": "content_block_stop", "index": 1}),
+    ))
+    events.append((
+        "message_delta",
+        json.dumps({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 4},
+        }),
+    ))
+    events.append((
+        "message_stop",
+        json.dumps({"type": "message_stop"}),
+    ))
+    return events
+
+
+_RESPONSE_EVENTS: list[tuple[str, str]] = []
+
+
+_LAST_REQUEST: dict[str, object] = {}
+
+
+def _strip_thinking_events(
+    events: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Drop every thinking-block SSE event from *events*.
+
+    Mirrors the real Anthropic API: a request WITHOUT the ``thinking``
+    param never receives thinking content blocks.  This keeps the
+    end-to-end UI test coupled to the request gate — if the opus-5
+    gating bug ever regressed (no ``thinking`` param sent), the served
+    stream would carry no thinking events and the UI assertions would
+    fail.
+    """
+    filtered: list[tuple[str, str]] = []
+    thinking_indices: set[int] = set()
+    for event_type, data in events:
+        payload = json.loads(data)
+        index = payload.get("index")
+        if (
+            event_type == "content_block_start"
+            and payload.get("content_block", {}).get("type") == "thinking"
+        ):
+            thinking_indices.add(index)
+            continue
+        if index in thinking_indices:
+            continue
+        if isinstance(index, int):
+            # Re-number so the surviving blocks stay contiguous — the
+            # anthropic SDK accumulates blocks by index.
+            payload["index"] = index - sum(1 for i in thinking_indices if i < index)
+            data = json.dumps(payload)
+        filtered.append((event_type, data))
+    return filtered
+
+
+class _AnthropicOpus5Handler(BaseHTTPRequestHandler):
+    """Serves ``_RESPONSE_EVENTS`` and records the last request payload.
+
+    Thinking-block events are served only when the request actually
+    carries the ``thinking`` param, exactly like the real API.
+    """
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        request_json = json.loads(body)
+        _LAST_REQUEST.clear()
+        _LAST_REQUEST["json"] = request_json
+        _LAST_REQUEST["anthropic-beta"] = self.headers.get("anthropic-beta", "")
+        events = _RESPONSE_EVENTS
+        if "thinking" not in request_json:
+            events = _strip_thinking_events(events)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        for event_type, data in events:
+            self.wfile.write(f"event: {event_type}\ndata: {data}\n\n".encode())
+            self.wfile.flush()
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        pass
+
+
+@pytest.fixture(scope="module")
+def anthropic_server() -> Generator[str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _AnthropicOpus5Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
 
 
 class TestClaudeOpus5ThinkingConfig:
@@ -279,322 +523,8 @@ class TestVersionAwareHeuristicBranches:
         assert "thinking" not in kwargs, kwargs.get("thinking")
 
 
-def _opus5_thinking_events() -> list[tuple[str, str]]:
-    """SSE pairs for a claude-opus-5 turn with a real thinking stream.
-
-    Mirrors the wire shape Anthropic produces for adaptive-thinking
-    models when ``display: "summarized"`` is requested: a thinking block
-    with ``thinking_delta`` chunks (plus a trailing ``signature_delta``),
-    followed by a text block.
-    """
-    events: list[tuple[str, str]] = []
-    events.append((
-        "message_start",
-        json.dumps({
-            "type": "message_start",
-            "message": {
-                "id": "msg_opus5",
-                "type": "message",
-                "role": "assistant",
-                "content": [],
-                "model": "claude-opus-5",
-                "stop_reason": None,
-                "usage": {"input_tokens": 10, "output_tokens": 0},
-            },
-        }),
-    ))
-    events.append((
-        "content_block_start",
-        json.dumps({
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "thinking", "thinking": ""},
-        }),
-    ))
-    events.append((
-        "content_block_delta",
-        json.dumps({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "thinking_delta", "thinking": "Pondering "},
-        }),
-    ))
-    events.append((
-        "content_block_delta",
-        json.dumps({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "thinking_delta", "thinking": "the request."},
-        }),
-    ))
-    events.append((
-        "content_block_delta",
-        json.dumps({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "signature_delta", "signature": "sig_opus5"},
-        }),
-    ))
-    events.append((
-        "content_block_stop",
-        json.dumps({"type": "content_block_stop", "index": 0}),
-    ))
-    events.append((
-        "content_block_start",
-        json.dumps({
-            "type": "content_block_start",
-            "index": 1,
-            "content_block": {"type": "text", "text": ""},
-        }),
-    ))
-    events.append((
-        "content_block_delta",
-        json.dumps({
-            "type": "content_block_delta",
-            "index": 1,
-            "delta": {"type": "text_delta", "text": "Four."},
-        }),
-    ))
-    events.append((
-        "content_block_stop",
-        json.dumps({"type": "content_block_stop", "index": 1}),
-    ))
-    events.append((
-        "message_delta",
-        json.dumps({
-            "type": "message_delta",
-            "delta": {"stop_reason": "end_turn"},
-            "usage": {"output_tokens": 9},
-        }),
-    ))
-    events.append((
-        "message_stop",
-        json.dumps({"type": "message_stop"}),
-    ))
-    return events
-
-
-def _opus5_signature_only_events() -> list[tuple[str, str]]:
-    """SSE pairs where opus-5 decides not to think (signature-only block)."""
-    events: list[tuple[str, str]] = []
-    events.append((
-        "message_start",
-        json.dumps({
-            "type": "message_start",
-            "message": {
-                "id": "msg_opus5_sig",
-                "type": "message",
-                "role": "assistant",
-                "content": [],
-                "model": "claude-opus-5",
-                "stop_reason": None,
-                "usage": {"input_tokens": 10, "output_tokens": 0},
-            },
-        }),
-    ))
-    events.append((
-        "content_block_start",
-        json.dumps({
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "thinking", "thinking": ""},
-        }),
-    ))
-    events.append((
-        "content_block_delta",
-        json.dumps({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "signature_delta", "signature": "sig_only"},
-        }),
-    ))
-    events.append((
-        "content_block_stop",
-        json.dumps({"type": "content_block_stop", "index": 0}),
-    ))
-    events.append((
-        "content_block_start",
-        json.dumps({
-            "type": "content_block_start",
-            "index": 1,
-            "content_block": {"type": "text", "text": ""},
-        }),
-    ))
-    events.append((
-        "content_block_delta",
-        json.dumps({
-            "type": "content_block_delta",
-            "index": 1,
-            "delta": {"type": "text_delta", "text": "Quick answer."},
-        }),
-    ))
-    events.append((
-        "content_block_stop",
-        json.dumps({"type": "content_block_stop", "index": 1}),
-    ))
-    events.append((
-        "message_delta",
-        json.dumps({
-            "type": "message_delta",
-            "delta": {"stop_reason": "end_turn"},
-            "usage": {"output_tokens": 4},
-        }),
-    ))
-    events.append((
-        "message_stop",
-        json.dumps({"type": "message_stop"}),
-    ))
-    return events
-
-
-_RESPONSE_EVENTS: list[tuple[str, str]] = []
-_LAST_REQUEST: dict[str, object] = {}
-
-
-def _strip_thinking_events(
-    events: list[tuple[str, str]],
-) -> list[tuple[str, str]]:
-    """Drop every thinking-block SSE event from *events*.
-
-    Mirrors the real Anthropic API: a request WITHOUT the ``thinking``
-    param never receives thinking content blocks.  This keeps the
-    end-to-end UI test coupled to the request gate — if the opus-5
-    gating bug ever regressed (no ``thinking`` param sent), the served
-    stream would carry no thinking events and the UI assertions would
-    fail.
-    """
-    filtered: list[tuple[str, str]] = []
-    thinking_indices: set[int] = set()
-    for event_type, data in events:
-        payload = json.loads(data)
-        index = payload.get("index")
-        if (
-            event_type == "content_block_start"
-            and payload.get("content_block", {}).get("type") == "thinking"
-        ):
-            thinking_indices.add(index)
-            continue
-        if index in thinking_indices:
-            continue
-        if isinstance(index, int):
-            # Re-number so the surviving blocks stay contiguous — the
-            # anthropic SDK accumulates blocks by index.
-            payload["index"] = index - sum(1 for i in thinking_indices if i < index)
-            data = json.dumps(payload)
-        filtered.append((event_type, data))
-    return filtered
-
-
-class _AnthropicOpus5Handler(BaseHTTPRequestHandler):
-    """Serves ``_RESPONSE_EVENTS`` and records the last request payload.
-
-    Thinking-block events are served only when the request actually
-    carries the ``thinking`` param, exactly like the real API.
-    """
-
-    def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length)
-        request_json = json.loads(body)
-        _LAST_REQUEST.clear()
-        _LAST_REQUEST["json"] = request_json
-        _LAST_REQUEST["anthropic-beta"] = self.headers.get("anthropic-beta", "")
-        events = _RESPONSE_EVENTS
-        if "thinking" not in request_json:
-            events = _strip_thinking_events(events)
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.end_headers()
-        for event_type, data in events:
-            self.wfile.write(f"event: {event_type}\ndata: {data}\n\n".encode())
-            self.wfile.flush()
-
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        pass
-
-
-@pytest.fixture(scope="module")
-def anthropic_server() -> Generator[str]:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _AnthropicOpus5Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield f"http://127.0.0.1:{server.server_port}"
-    server.shutdown()
-
-
-def _build_opus_5_model(server_url: str, printer: JsonPrinter) -> AnthropicModel:
-    """Return an AnthropicModel for claude-opus-5 wired to the local server."""
-    m = AnthropicModel(
-        "claude-opus-5",
-        api_key="test-key",
-        token_callback=printer.token_callback,
-        thinking_callback=printer.thinking_callback,
-    )
-    m.client = anthropic.Anthropic(api_key="test-key", base_url=server_url)
-    m.conversation = [{"role": "user", "content": "What is 2+2?"}]
-    return m
-
-
 class TestOpus5EndToEndThinkingStream:
     """Real SSE streaming through a local server: thinking must reach the UI."""
-
-    def test_thinking_text_reaches_ui_events(self, anthropic_server: str) -> None:
-        """End-to-end bug reproduction: the thoughts panel must receive
-        ``thinking_start`` / ``thinking_delta`` / ``thinking_end`` events
-        carrying the streamed thinking text for claude-opus-5."""
-        global _RESPONSE_EVENTS
-        _RESPONSE_EVENTS = _opus5_thinking_events()
-
-        printer = JsonPrinter()
-        printer._thread_local.task_id = "test-opus5-thinking"
-        printer.start_recording()
-        m = _build_opus_5_model(anthropic_server, printer)
-        m._create_message(m._build_create_kwargs())
-
-        recorded = printer.stop_recording()
-        types = [e["type"] for e in recorded]
-
-        assert types.count("thinking_start") == 1, types
-        assert types.count("thinking_end") == 1, types
-
-        start_idx = types.index("thinking_start")
-        end_idx = types.index("thinking_end")
-        assert start_idx < end_idx, types
-        thinking_deltas = [
-            e for e in recorded[start_idx + 1 : end_idx] if e["type"] == "thinking_delta"
-        ]
-        thought = "".join(d["text"] for d in thinking_deltas)
-        assert thought == "Pondering the request.", thought
-
-        text_deltas = [e for e in recorded if e["type"] == "text_delta"]
-        text = "".join(d.get("text", "") for d in text_deltas)
-        assert text == "Four.", text
-
-    def test_request_carries_thinking_param_and_beta_header(
-        self, anthropic_server: str
-    ) -> None:
-        """The actual HTTP request for opus-5 must carry the adaptive
-        thinking param and the interleaved-thinking beta header."""
-        global _RESPONSE_EVENTS
-        _RESPONSE_EVENTS = _opus5_thinking_events()
-
-        printer = JsonPrinter()
-        printer._thread_local.task_id = "test-opus5-request"
-        printer.start_recording()
-        m = _build_opus_5_model(anthropic_server, printer)
-        m._create_message(m._build_create_kwargs())
-        printer.stop_recording()
-
-        payload = _LAST_REQUEST.get("json")
-        assert isinstance(payload, dict), _LAST_REQUEST
-        assert payload.get("thinking") == {
-            "type": "adaptive",
-            "display": "summarized",
-        }, payload.get("thinking")
-        assert payload.get("max_tokens") == 65536, payload.get("max_tokens")
-        beta = _LAST_REQUEST.get("anthropic-beta", "")
-        assert isinstance(beta, str)
-        assert "interleaved-thinking-2025-05-14" in beta, beta
 
     def test_raw_thinking_callback_fires_true_then_false(
         self, anthropic_server: str

@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Optimizing SQLite Against Its Official and Academic Benchmarks</title>
+<style>
+  :root{
+    --ink:#1e2430; --muted:#5b6572; --line:#d8dde4; --bg:#f7f8fa;
+    --card:#ffffff; --accent:#2456a6; --good:#1e7a46; --warn:#a05a1c;
+    --bad:#a03030; --code:#eef1f5;
+  }
+  *{box-sizing:border-box}
+  html{font-size:18px}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:1rem/1.6 Georgia,'Times New Roman',serif}
+  header{background:#22314a;color:#f2f4f8;padding:2.4rem 1rem 2rem}
+  header .wrap,main{max-width:920px;margin:0 auto;padding:0 1rem}
+  header h1{font-size:1.7rem;margin:0 0 .4rem;line-height:1.3}
+  header p{margin:.2rem 0;color:#c3cddd;font-size:.98rem}
+  h2{font-size:1.25rem;margin:2.4rem 0 .7rem;border-bottom:2px solid var(--line);
+     padding-bottom:.3rem}
+  h3{font-size:1.05rem;margin:1.5rem 0 .5rem}
+  table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.93rem;
+        background:var(--card)}
+  th,td{border:1px solid var(--line);padding:.45rem .6rem;text-align:left}
+  th{background:#eceff4}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  .good{color:var(--good);font-weight:bold}
+  .warn{color:var(--warn)}
+  .bad{color:var(--bad);font-weight:bold}
+  code,pre{font-family:Menlo,Consolas,monospace;font-size:.86em}
+  code{background:var(--code);padding:.08em .3em;border-radius:3px}
+  pre{background:var(--code);padding:.8rem 1rem;overflow-x:auto;
+      border:1px solid var(--line);border-radius:4px;line-height:1.45}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:6px;
+        padding:1rem 1.2rem;margin:1rem 0}
+  .clean{border-left:5px solid var(--good)}
+  figure{margin:1.4rem 0}
+  figcaption{font-size:.85rem;color:var(--muted);margin-top:.4rem}
+  ul{padding-left:1.3rem}
+  .small{font-size:.88rem;color:var(--muted)}
+  footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;
+         text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>Optimizing SQLite Against Its Official and Academic Benchmarks</h1>
+    <p>SQLite 3.54.0 development trunk</p>
+    <p>Benchmarks: speedtest1 &middot; kvtest &middot; TATP (OLTP) &middot; Star Schema Benchmark (OLAP)</p>
+    <p>Published at <a href="https://github.com/ksenxx/sqlite-optimized"
+       style="color:#9fc0ee">github.com/ksenxx/sqlite-optimized</a> &middot;
+       independently re-verified from a fresh clone on 8&nbsp;Aug&nbsp;2026</p>
+    <p>Optimized end-to-end by <a href="https://github.com/ksenxx/kiss_ai"
+       style="color:#9fc0ee">KISS Sorcar</a> in under 8 hours, on a budget
+       under $150</p>
+  </div>
+</header>
+<main>
+
+<h2>What this is about</h2>
+<p>SQLite is the most widely deployed database engine in the world: it ships
+inside every phone, every major browser, and most embedded devices. This post
+describes making a development build of SQLite faster on four benchmarks:
+the two official ones that ship with SQLite itself (<code>speedtest1</code>, a broad mix of ~30,000 SQL
+statements, and <code>kvtest</code>, raw blob I/O) and two standard academic
+workloads (TATP, a telecom-style OLTP transaction mix, and the Star Schema
+Benchmark, an OLAP query suite).</p>
+
+<h2>The problem</h2>
+<p>SQLite&rsquo;s out-of-the-box configuration is deliberately conservative:
+it defaults to rollback-journal mode, which pays a
+create&ndash;write&ndash;fsync&ndash;unlink cycle on every transaction; its
+bytecode interpreter re-enters a giant switch statement for every opcode; and
+small write-ahead-log writes reach the filesystem one frame at a time.
+Profiling showed these costs dominate real workloads &mdash; on
+<code>speedtest1</code> alone, roughly 45% of the runtime was journal churn.</p>
+<p>For context: the SQLite team has spent nearly 20 years tuning this code.
+Their own measurements show roughly a 3.5&times; total CPU improvement since
+2008, earned a few percent at a time. The gains described here come from
+trading away default conservatism (journaling mode, portability of the
+interpreter loop, per-frame WAL writes), not from finding waste the SQLite
+authors missed.</p>
+<p>SQLite&rsquo;s reputation rests on correctness and durability, so the
+binding constraint was to get the speed without breaking anything: every
+change had to produce byte-identical query results, pass the entire
+million-plus-case SQLite test suite, hold up under adversarial and security
+testing, and stay opt-in so that default builds remain untouched.</p>
+
+<h2>Summary</h2>
+<div class="card clean">
+  <p><strong>Result: a verified geometric-mean speedup of 1.59&times;</strong>
+  across the four benchmarks (best case 2.06&times; on speedtest1). The full
+  SQLite test suite passes: 1,032,940 test cases across all 1,462 TCL test
+  scripts, zero errors. Benchmark results are byte-identical to the baseline,
+  enforced by checksums on every run.</p>
+  <p>All of the work (profiling, engine changes, benchmark harness,
+  adversarial testing, security hardening, and reviews) was carried out by
+  <a href="https://github.com/ksenxx/kiss_ai">KISS Sorcar</a> in under
+  8 hours on a budget under $150, using <code>claude-fable-5</code> for
+  development, <code>kimi-k3</code> for security hardening, and
+  <code>gpt-sol5.6-sol-high</code> for independent read-only review.</p>
+</div>
+
+<h2>Final measured results</h2>
+<p>Protocol: identical workloads, seeds, and statement mixes for every build;
+3 repetitions; medians reported. The harness (<code>benchks/bench.sh</code>)
+aborts unless every run passes its correctness gates:
+<code>speedtest1&nbsp;--verify</code>, <code>kvtest&nbsp;--integrity-check</code>
+(&ldquo;ok&rdquo; required), and hard-coded expected TATP transaction counts +
+result checksum and SSB row count + result checksum.</p>
+
+<table>
+  <tr>
+    <th>Benchmark (measured phase)</th>
+    <th class="num">Baseline&nbsp;(s)</th>
+    <th class="num">Optimized&nbsp;(s)</th>
+    <th class="num">Speedup</th>
+    <th class="num">Durability-neutral&nbsp;(s)</th>
+    <th class="num">Speedup</th>
+  </tr>
+  <tr><td>speedtest1 (official, ~30k statements, size 100)</td>
+      <td class="num">10.362</td><td class="num">5.019</td>
+      <td class="num good">2.06&times;</td>
+      <td class="num">5.620</td><td class="num">1.84&times;</td></tr>
+  <tr><td>TATP transaction mix (400k txns, 100k subscribers)</td>
+      <td class="num">3.823</td><td class="num">2.016</td>
+      <td class="num good">1.90&times;</td>
+      <td class="num">2.021</td><td class="num">1.89&times;</td></tr>
+  <tr><td>SSB 13 queries &times; 2 (1.5M-row lineorder)</td>
+      <td class="num">2.806</td><td class="num">2.166</td>
+      <td class="num good">1.30&times;</td>
+      <td class="num">2.192</td><td class="num">1.28&times;</td></tr>
+  <tr><td>kvtest blob I/O (40k &times; 10KB; seq + random + update)</td>
+      <td class="num">2.767</td><td class="num">2.209</td>
+      <td class="num good">1.25&times;</td>
+      <td class="num">2.220</td><td class="num">1.25&times;</td></tr>
+  <tr><th>Geometric mean</th><th></th><th></th>
+      <th class="num good">1.59&times;</th><th></th>
+      <th class="num">1.54&times;</th></tr>
+</table>
+
+<figure>
+<svg viewBox="0 0 880 300" xmlns="http://www.w3.org/2000/svg" role="img"
+     aria-label="Bar chart of speedups per benchmark">
+  <style>
+    .lbl{font:13px Georgia,serif;fill:#1e2430}
+    .val{font:bold 13px Georgia,serif;fill:#1e2430}
+    .axis{stroke:#d8dde4;stroke-width:1}
+    .tick{font:11px Georgia,serif;fill:#5b6572}
+  </style>
+  <!-- axis lines at 1x..2.5x ; scale: 1x=140px baseline offset, 240px per 1x -->
+  <g>
+    <line class="axis" x1="200" y1="20" x2="200" y2="250"/>
+    <line class="axis" x1="440" y1="20" x2="440" y2="250"/>
+    <line class="axis" x1="680" y1="20" x2="680" y2="250"/>
+    <text class="tick" x="196" y="264">1&times;</text>
+    <text class="tick" x="430" y="264">2&times;</text>
+    <text class="tick" x="670" y="264">3&times;</text>
+  </g>
+  <!-- bars: x = 200 + (speedup-1)*240 -->
+  <g>
+    <text class="lbl" x="8" y="52">speedtest1</text>
+    <rect x="200" y="36" width="254" height="24" fill="#2456a6"/>
+    <text class="val" x="462" y="53">2.06&times;</text>
+    <text class="lbl" x="8" y="97">TATP (OLTP)</text>
+    <rect x="200" y="81" width="216" height="24" fill="#2456a6"/>
+    <text class="val" x="424" y="98">1.90&times;</text>
+    <text class="lbl" x="8" y="142">SSB (OLAP)</text>
+    <rect x="200" y="126" width="72" height="24" fill="#2456a6"/>
+    <text class="val" x="280" y="143">1.30&times;</text>
+    <text class="lbl" x="8" y="187">kvtest (blobs)</text>
+    <rect x="200" y="171" width="60" height="24" fill="#2456a6"/>
+    <text class="val" x="268" y="188">1.25&times;</text>
+    <text class="lbl" x="8" y="232">geometric mean</text>
+    <rect x="200" y="216" width="142" height="24" fill="#1e7a46"/>
+    <text class="val" x="350" y="233">1.59&times;</text>
+  </g>
+</svg>
+<figcaption>Speedup of the optimized build over the pristine baseline
+(median of 3 runs; the 1&times; line is &ldquo;no change&rdquo;).</figcaption>
+</figure>
+
+<p class="small">The <em>durability-neutral</em> column re-measures everything
+with <code>synchronous=FULL</code> in WAL mode, so a committed transaction
+survives power loss exactly as strongly as in the baseline&rsquo;s rollback
+journal mode. Even under that stricter comparison the tree is 1.54&times;
+faster overall. The optimized deployment configuration (WAL +
+<code>synchronous=NORMAL</code>) is the setting the SQLite documentation
+itself recommends for most applications; in WAL mode NORMAL keeps the
+database consistent across power loss but a transaction committed
+immediately before the crash may roll back.</p>
+
+<h2>What was changed</h2>
+<p>All engine changes are opt-in compile options (default builds remain
+byte-for-byte the traditional code), and every changed default remains
+overridable at runtime by applications.</p>
+
+<h3>1. Write-ahead-log journaling by default (largest gain)</h3>
+<ul>
+  <li>New documented compile option <code>SQLITE_DEFAULT_JOURNAL_MODE_WAL</code>
+  (<code>src/main.c</code>): file-backed writable databases open in WAL mode
+  automatically, eliminating the rollback journal&rsquo;s create&ndash;write&ndash;
+  fsync&ndash;unlink cycle per transaction. Profiling showed ~45% of speedtest1
+  was journal churn: 4,910 fsyncs and 1,203 journal unlinks.</li>
+  <li>&ldquo;Born-in-WAL&rdquo; support (<code>src/btree.c</code>): brand-new
+  zero-byte databases are created directly in WAL format without first
+  materializing a rollback-journal page 1, preserving
+  <code>PRAGMA auto_vacuum</code> and every other pre-write setting.</li>
+</ul>
+
+<h3>2. WAL write coalescing</h3>
+<ul>
+  <li>Opt-in <code>SQLITE_WAL_WRITE_BUFFER_SIZE=65536</code>
+  (<code>src/wal.c</code>): consecutive small WAL frame writes are coalesced
+  into 64&nbsp;KB batches before reaching the VFS, with flushes at exactly the
+  same sync points as before (sync semantics untouched), plus a fix keeping
+  each <code>xWrite</code> within the unix VFS write-size contract.</li>
+</ul>
+
+<h3>3. Computed-goto opcode dispatch</h3>
+<ul>
+  <li>Opt-in <code>SQLITE_ENABLE_COMPUTED_GOTO</code> (<code>src/vdbe.c</code>,
+  <code>tool/mkopcodeh.tcl</code>): the bytecode interpreter dispatches the
+  next opcode by jumping through a generated table of label addresses
+  (<code>SQLITE_OPCODE_LABELS</code>, 191 labels) instead of re-entering a
+  switch statement &mdash; the classic threaded-interpreter technique. GCC/Clang
+  only; automatically disabled for debug/profile/test builds so their
+  per-opcode instrumentation is never bypassed.</li>
+</ul>
+
+<h3>4. Faster build and tuned defaults</h3>
+<ul>
+  <li><code>-O3 -march=native</code> plus two-phase profile-guided
+  optimization, shipped as <code>benchks/build_pgo.sh</code> (trained on
+  <em>different</em> workload sizes &mdash; and, where the tool
+  supports them, different seeds &mdash; than the measured runs, so the profile
+  cannot memoize benchmark answers).</li>
+  <li>Tuned runtime-overridable defaults (<code>benchks/optflags.sh</code>):
+  128&nbsp;MB page cache, 256&nbsp;MB mmap, lookaside 4096&times;256,
+  memory temp store, WAL autocheckpoint 16384, <code>STAT4</code> planner
+  statistics, <code>fdatasync</code>, <code>SQLITE_USE_ALLOCA</code>,
+  memory-status tracking off.</li>
+</ul>
+
+<h2>How the work was verified</h2>
+<div class="card clean">
+<ul>
+  <li><strong>Full SQLite test suite</strong> (<code>testrunner.tcl full</code>,
+  all 1,462 TCL scripts): <strong>0 errors out of 1,032,940 tests</strong>.
+  (One script, <code>misc7.test</code>, appeared to hang &mdash; proven to be a
+  machine artifact: this host allows 1,048,576 open files and the test
+  deliberately exhausts file descriptors, which makes the TCL runtime itself,
+  not SQLite, quadratically slow; with a normal 1024-descriptor limit it
+  passes, 0 errors of 1,248, in seconds.)</li>
+  <li><strong>Adversarial testing</strong> (run as a separate attack
+  campaign): differential corpus of 37 SQL scripts (DDL/DML, recursive CTEs, window
+  functions, triggers, UPSERT, JSON, FTS5, rtree, UTF-8 edge cases, corrupt
+  inputs, boundary integers&hellip;) compared byte-for-byte against a pristine
+  build, under ASan/UBSan; WAL-file corruption attacks; multi-process
+  <code>mptest</code>; fd-exhaustion, symlink, and read-only-media attacks.
+  It found two real bugs in early versions of the changes (a fresh-database
+  initialization side effect and an oversized WAL flush); both were fixed
+  and re-verified. The corpus now matches the pristine build everywhere except
+  one documented, runtime-restorable error-message difference caused by
+  disabling memory-status tracking.</li>
+  <li><strong>Security hardening</strong> (two rounds, kimi-k3): in-tree
+  fuzzers (<code>fuzzcheck</code> over all 8 corpora, <code>sessionfuzz</code>)
+  plain and sanitized &mdash; clean; 14 hostile-WAL corruption scenarios &mdash;
+  graceful errors, no crashes; OOM-injection harness; page sizes 512&ndash;65536
+  and WAL-buffer boundary sweeps; one real bug found (a born-WAL connection
+  briefly staying on rollback journaling) and fixed.</li>
+  <li><strong>Independent read-only review</strong> (gpt-sol5.6-sol-high):
+  confirmed the engine changes clean &mdash; opcode table complete and ordered,
+  dispatch semantics exact, WAL buffering flushed at every sync point, no
+  leftover diagnostics.
+  It flagged the benchmark harness itself: failures could pass silently
+  through shell pipelines, checksums were printed but not enforced, and one
+  kvtest fixture was nondeterministic. <strong>All harness findings were
+  fixed</strong> (fail-fast shell, enforced expected checksums, deterministic
+  fixtures, result-code checks in the TATP/SSB harnesses) and the fixed
+  gates were negative-tested (a deliberately failing binary now aborts the
+  whole benchmark). It also found two opcodes still using the safe fallback
+  dispatch path; both were wired to direct dispatch. All numbers above were
+  re-measured after these fixes.</li>
+  <li><strong>No diagnostic code left behind:</strong> profiling was done
+  externally (<code>perf</code>, <code>strace</code>, cachegrind), and the
+  final source diff was checked to contain no printf/timing instrumentation.</li>
+</ul>
+</div>
+
+<h2>Reproducing the results</h2>
+<p>The complete protocol ships as <code>benchks/README.md</code> in the
+public repository. The PGO step (<code>build_pgo.sh</code>) is required for the
+full speedup &mdash; without it the CPU-bound SSB benchmark loses most of its
+gain (1.03&times; instead of 1.30&times;).</p>
+<pre><code>git clone https://github.com/ksenxx/sqlite-optimized
+cd sqlite-optimized &amp;&amp; mkdir build-base build-opt
+( cd build-base &amp;&amp; ../configure &amp;&amp; make sqlite3.c )   # generate amalgamation
+cp build-base/sqlite3.{c,h} build-opt/
+
+benchks/build_bench.sh build-base                     # pristine baseline
+benchks/bench.sh build-base baseline 3                # medians of 3 reps
+
+. benchks/optflags.sh                                 # optimized + PGO build
+benchks/build_pgo.sh build-opt $OPT_DEFS
+benchks/bench.sh build-opt final 3
+
+# upstream test suite (default build options)
+( cd build-base &amp;&amp; make testfixture &amp;&amp; \
+  ./testfixture ../test/testrunner.tcl --jobs 24 full )
+</code></pre>
+<p class="small">Generated benchmark outputs land in
+<code>benchks/results/</code> (gitignored; not tracked on GitHub). Reviews and
+audits are included in the repository: <code>benchks/ADVERSARIAL.md</code>,
+<code>benchks/HARDENING.md</code>, <code>benchks/REVIEW.md</code>. Absolute
+times, and therefore exact ratios, vary a few percent with machine
+load, thermal state, and the exact PGO profile; following the published
+protocol end-to-end reproduces 1.53&ndash;1.55&times; geomean on the same class
+of machine (1.50&times; if the PGO step is skipped). All testing so far has
+been on standard Linux provided by GCP; other operating systems and
+filesystems have not yet been benchmarked.</p>
+
+<footer>SQLite optimization by
+<a href="https://github.com/ksenxx/kiss_ai">KISS Sorcar</a>: benchmarked,
+adversarially tested, independently reviewed, published at
+<a href="https://github.com/ksenxx/sqlite-optimized">github.com/ksenxx/sqlite-optimized</a>,
+and independently reproduced from a fresh clone
+(<a href="sqlite-optimized-verification-report.html">verification report</a>).
+Machine: 32-core Linux VM (standard Linux on Google Cloud Platform); all
+numbers are medians of 3 repetitions on a quiet system. Last updated 8&nbsp;Aug&nbsp;2026.</footer>
+</main>
+</body>
+</html>

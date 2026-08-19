@@ -2,27 +2,26 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end test: the default step budget of every agent is 10000.
+"""End-to-end test: the default step budget of ``KISSAgent`` is 10000.
 
-When a caller does not pass ``max_steps``, both :class:`KISSAgent` and the
-auto-continuing :class:`RelentlessAgent` / :class:`SorcarAgent` family must
-allow 10000 steps per session, and the per-step usage banner handed to the
-model must advertise that same number.
+When a caller does not pass ``max_steps``, ``KISSAgent`` must allow 10000
+steps per session, and the per-step usage banner handed to the model must
+advertise that same number.  The RelentlessAgent / SorcarAgent halves of
+this contract live in ``kiss.tests.agents.sorcar.test_default_max_steps``,
+which reuses this file's ``_ScriptedServer`` harness.
 """
 
 from __future__ import annotations
 
 import http.server
 import json
-import tempfile
 import threading
 import unittest
 
-from kiss.agents.sorcar.relentless_agent import RelentlessAgent
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.kiss_agent import KISSAgent
 
 DEFAULT_MAX_STEPS = 10000
+
 
 
 def _tool_call_response(name: str, arguments: dict) -> dict:
@@ -57,6 +56,7 @@ def _tool_call_response(name: str, arguments: dict) -> dict:
     }
 
 
+
 def ping() -> str:
     """Return a fixed string; a harmless tool used to advance one agent step.
 
@@ -64,6 +64,7 @@ def ping() -> str:
         The literal string ``"pong"``.
     """
     return "pong"
+
 
 
 class _ScriptedServer:
@@ -106,6 +107,7 @@ class _ScriptedServer:
         self._server.shutdown()
 
 
+
 def _all_text(payload: object) -> str:
     """Flatten every string inside a JSON-like payload into one blob."""
     if isinstance(payload, str):
@@ -117,8 +119,8 @@ def _all_text(payload: object) -> str:
     return ""
 
 
-class TestDefaultMaxSteps(unittest.TestCase):
-    """The resolved default of ``max_steps`` is 10000 for every agent class."""
+class TestKISSAgentDefaultMaxSteps(unittest.TestCase):
+    """The resolved default of ``max_steps`` is 10000 for ``KISSAgent``."""
 
     def test_kiss_agent_default_and_banner(self) -> None:
         """``KISSAgent.run`` without ``max_steps`` allows 10000 steps."""
@@ -138,68 +140,6 @@ class TestDefaultMaxSteps(unittest.TestCase):
             self.assertIn(
                 f"Steps: 1/{DEFAULT_MAX_STEPS}", _all_text(server.request_bodies)
             )
-        finally:
-            server.stop()
-
-    def test_relentless_agent_default_and_banner(self) -> None:
-        """``RelentlessAgent`` defaults to 10000 and tells the model so."""
-        server = _ScriptedServer(
-            [
-                ("ping", {}),
-                (
-                    "finish",
-                    {
-                        "success": True,
-                        "is_continue": False,
-                        "summary_in_html": "<p>done</p>",
-                    },
-                ),
-            ]
-        )
-        try:
-            agent = RelentlessAgent("DefaultStepsRelentless")
-            with tempfile.TemporaryDirectory() as work_dir:
-                agent.run(
-                    model_name="gpt-4o-mini",
-                    prompt_template="Call ping, then finish.",
-                    tools=[ping],
-                    work_dir=work_dir,
-                    model_config=server.model_config(),
-                    verbose=False,
-                )
-            self.assertEqual(agent.max_steps, DEFAULT_MAX_STEPS)
-            self.assertIn(
-                f"Steps: 1/{DEFAULT_MAX_STEPS}", _all_text(server.request_bodies)
-            )
-        finally:
-            server.stop()
-
-    def test_sorcar_agent_default(self) -> None:
-        """``SorcarAgent`` inherits the 10000-step default."""
-        server = _ScriptedServer(
-            [
-                (
-                    "finish",
-                    {
-                        "success": True,
-                        "is_continue": False,
-                        "summary_in_html": "<p>done</p>",
-                    },
-                )
-            ]
-        )
-        try:
-            agent = SorcarAgent("DefaultStepsSorcar")
-            with tempfile.TemporaryDirectory() as work_dir:
-                agent.run(
-                    model_name="gpt-4o-mini",
-                    prompt_template="Call finish immediately.",
-                    work_dir=work_dir,
-                    model_config=server.model_config(),
-                    web_tools=False,
-                    verbose=False,
-                )
-            self.assertEqual(agent.max_steps, DEFAULT_MAX_STEPS)
         finally:
             server.stop()
 

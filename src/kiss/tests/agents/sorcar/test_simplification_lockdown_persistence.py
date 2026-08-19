@@ -208,7 +208,7 @@ class TestSaveResultAndExtra(_PersistenceTestBase):
         for k in (
             "auto_commit_mode", "is_parallel", "is_worktree",
             "work_dir", "version", "steps", "startTs", "endTs",
-            "is_favorite",
+            "is_favorite", "max_budget",
         ):
             loaded.pop(k, None)
         assert loaded == extra
@@ -216,7 +216,7 @@ class TestSaveResultAndExtra(_PersistenceTestBase):
         for k in (
             "auto_commit_mode", "is_parallel", "is_worktree",
             "work_dir", "version", "steps", "startTs", "endTs",
-            "is_favorite",
+            "is_favorite", "max_budget",
         ):
             row_extra.pop(k, None)
         assert row_extra == extra

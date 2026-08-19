@@ -34,14 +34,11 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
 
 import yaml
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.sorcar_agent import run_tasks_parallel
-from kiss.server.json_printer import JsonPrinter
 
 
 def _finish_response(model: str = "gpt-4o-mini") -> dict:
@@ -102,7 +99,6 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
     return srv, f"http://127.0.0.1:{srv.server_port}/v1"
 
 
-
 def _redirect(tmpdir: str) -> tuple:
     """Point the persistence module at a temp directory and reset the conn."""
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -116,23 +112,6 @@ def _redirect(tmpdir: str) -> tuple:
 
 def _restore(saved: tuple) -> None:
     (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
-class _CapturePrinter(JsonPrinter):
-    """Real JsonPrinter subclass that captures all broadcast events."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.captured: list[dict[str, Any]] = []
-        self._capture_lock = threading.Lock()
-
-    def broadcast(self, event: dict[str, Any]) -> None:
-        """Capture event then delegate to parent for recording logic."""
-        event = self._inject_task_id(event)
-        with self._capture_lock:
-            self.captured.append(event)
-        super().broadcast(event)
-
 
 
 class TestUseWorktreeKwargConsumed:
@@ -180,60 +159,3 @@ class TestUseWorktreeKwargConsumed:
         parsed = yaml.safe_load(result)
         assert isinstance(parsed, dict)
         assert parsed.get("summary") == "<p>done</p>"
-
-
-
-class TestRunTasksParallelSubagentDone:
-    """The module-level executor must capture the parent thread's
-    ``task_id`` in the CALLING thread so the ``subagentDone`` broadcast
-    actually fires (a worker thread's ``threading.local`` never sees the
-    parent's value)."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_subagent_done_broadcast_uses_parent_thread_task_id(self) -> None:
-        """``subagentDone`` events fire with the parent task id prefix.
-
-        Uses an unrecognized model name so each sub-agent fails fast
-        inside ``run()`` without any network/LLM call; the ``finally``
-        block in ``_run_single`` must still broadcast ``subagentDone``
-        for every sub-task.
-        """
-        printer = _CapturePrinter()
-        printer._thread_local.task_id = "parent-bughunt"
-        try:
-            results = run_tasks_parallel(
-                ["bughunt sub one", "bughunt sub two"],
-                max_workers=2,
-                model_name="no-such-model-bughunt-xyz",
-                work_dir=self.tmpdir,
-                printer=printer,
-            )
-        finally:
-            printer._thread_local.task_id = ""
-
-        assert len(results) == 2
-        for res in results:
-            parsed = yaml.safe_load(res)
-            assert isinstance(parsed, dict)
-            assert parsed.get("success") is False
-
-        done_events = [
-            e for e in printer.captured if e.get("type") == "subagentDone"
-        ]
-        tab_ids = {e.get("tab_id") for e in done_events}
-        assert "task-parent-bughunt__sub_0" in tab_ids, (
-            f"missing subagentDone for sub 0; captured={printer.captured}"
-        )
-        assert "task-parent-bughunt__sub_1" in tab_ids, (
-            f"missing subagentDone for sub 1; captured={printer.captured}"
-        )

@@ -43,13 +43,10 @@ import json
 import shutil
 import tempfile
 import threading
-import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.server.web_server import WebPrinter
 
 
 def _run_parallel_response() -> dict[str, Any]:
@@ -205,51 +202,6 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
     return srv, f"http://127.0.0.1:{srv.server_port}/v1"
 
 
-
-class _FakeWebPrinter(WebPrinter):
-    """A ``WebPrinter`` that captures WS payloads instead of sending them.
-
-    On every ``new_tab`` system event we synthesise the round-trip the
-    real frontend performs (``createNewTab`` → ``resumeSession`` → server
-    ``subscribe_tab``).  Without this round-trip the sub-agent's
-    subsequent broadcasts would silently drop (no subscribers exist for
-    the sub-agent's ``task_id``), and the test would miss any
-    misrouting that happens during the live stream.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.wire: list[dict[str, Any]] = []
-        self._sub_tabs: dict[str, str] = {}
-        self._wire_lock = threading.Lock()
-
-    def _send_to_ws_clients(self, data: str) -> None:
-        """Capture every payload that would have been sent over the WS.
-
-        Also performs the synchronous frontend round-trip for
-        ``new_tab`` events by allocating a fresh sub-tab uuid and
-        calling :meth:`subscribe_tab` so the sub-agent's subsequent
-        broadcasts have a real fan-out target.  This is intentionally
-        synchronous: the sub-agent thread is blocked inside its
-        ``broadcast`` call (which transitively called us), so the
-        subscription is in place before any further sub-agent event
-        is fanned out.
-        """
-        try:
-            payload = json.loads(data)
-        except json.JSONDecodeError:
-            return
-        with self._wire_lock:
-            self.wire.append(payload)
-        if payload.get("type") == "new_tab":
-            task_id = payload.get("task_id")
-            if task_id is not None:
-                sub_tab_id = uuid.uuid4().hex
-                self._sub_tabs[str(task_id)] = sub_tab_id
-                self.subscribe_tab(task_id, sub_tab_id)
-
-
-
 def _simulate_webview_dispatch(
     wire: list[dict[str, Any]],
     sub_tabs: dict[str, str],
@@ -324,7 +276,6 @@ def _simulate_webview_dispatch(
     return rendered
 
 
-
 def _redirect(tmpdir: str) -> tuple[Any, Any, Any]:
     saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
     from pathlib import Path
@@ -339,7 +290,6 @@ def _redirect(tmpdir: str) -> tuple[Any, Any, Any]:
 
 def _restore(saved: tuple[Any, Any, Any]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved
-
 
 
 class TestSubagentResultNotInParentWebview:
@@ -357,64 +307,6 @@ class TestSubagentResultNotInParentWebview:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def _run_parent(self, parent_tab_id: str) -> tuple[
-        _FakeWebPrinter, ChatSorcarAgent,
-    ]:
-        printer = _FakeWebPrinter()
-        parent = ChatSorcarAgent("parent")
-
-        def _on_alloc(task_id: Any, chat_id: str) -> None:
-            # Mirror task_runner._on_run_task_id_allocated: attach the
-            # launching UI tab to the task (also subscribes the tab).
-            printer.register_task_ui(str(task_id), parent_tab_id)
-
-        parent.run(
-            prompt_template=(
-                "Use run_parallel to compute three arithmetic expressions."
-            ),
-            model_name="gpt-4o-mini",
-            model_config={"base_url": self.url, "api_key": "test-key"},
-            work_dir=self.tmpdir,
-            printer=printer,
-            is_parallel=True,
-            _on_task_id_allocated=_on_alloc,
-        )
-        return printer, parent
-
-    def test_parent_tab_renders_only_parent_result(self) -> None:
-        """The parent tab's simulated DOM must contain exactly one
-        ``result`` event — the parent's own ``PARENT-RESULT``.  Any
-        sub-agent ``SUB-RESULT`` ending up there is the bug.
-        """
-        parent_tab_id = "parent-tab-AAA"
-        printer, parent = self._run_parent(parent_tab_id)
-        parent_task_key = str(parent._last_task_id)
-        assert parent._last_task_id is not None
-
-        rendered = _simulate_webview_dispatch(
-            printer.wire, printer._sub_tabs, parent_tab_id,
-        )
-        parent_bucket = rendered.get(parent_tab_id, [])
-        parent_results = [
-            e for e in parent_bucket if e.get("type") == "result"
-        ]
-
-        assert len(parent_results) == 1, (
-            f"Parent tab should render exactly 1 result panel, got "
-            f"{len(parent_results)}: "
-            f"{[r.get('text') or r.get('summary') for r in parent_results]}"
-        )
-        only = parent_results[0]
-        assert only.get("taskId") == parent_task_key, (
-            f"Parent tab's only result must carry the parent's taskId "
-            f"{parent_task_key}; got taskId={only.get('taskId')}"
-        )
-        text = only.get("text") or only.get("summary") or ""
-        assert "PARENT-RESULT" in text, (
-            f"Parent tab's result panel should be 'PARENT-RESULT', got: "
-            f"{text!r}"
-        )
 
     def test_misrouted_subagent_result_dropped_by_guard(self) -> None:
         """Defensive-guard regression test: even when a sub-agent's

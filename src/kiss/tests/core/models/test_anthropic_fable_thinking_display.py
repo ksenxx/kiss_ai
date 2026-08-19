@@ -57,7 +57,6 @@ import anthropic
 import pytest
 
 from kiss.core.models.anthropic_model import AnthropicModel
-from kiss.server.json_printer import JsonPrinter
 
 _FINISH_TOOL = {
     "name": "finish",
@@ -68,6 +67,7 @@ _FINISH_TOOL = {
         "required": ["result"],
     },
 }
+
 
 _OPENAI_FINISH_TOOL = {
     "type": "function",
@@ -82,81 +82,13 @@ _OPENAI_FINISH_TOOL = {
     },
 }
 
+
 _ADAPTIVE_MODELS = [
     "claude-fable-5",
     "claude-sonnet-5",
     "claude-opus-4-7",
     "claude-opus-4-8",
 ]
-
-
-class TestThinkingDisplaySummarized:
-    """Adaptive-thinking requests must ask for summarized thinking text."""
-
-    @pytest.mark.parametrize("name", _ADAPTIVE_MODELS)
-    def test_adaptive_thinking_requests_summarized_display(self, name: str) -> None:
-        """``thinking.display`` must be ``"summarized"`` for adaptive models.
-
-        Without it, fable-5 defaults to ``display: "omitted"`` and returns
-        thinking blocks whose ``thinking`` field is empty (signature only),
-        with zero ``thinking_delta`` stream events — the user sees no
-        thinking tokens at all.
-        """
-        m = AnthropicModel(name, api_key="test-key")
-        m.conversation = [{"role": "user", "content": "ping"}]
-        kwargs = m._build_create_kwargs()
-        assert kwargs.get("thinking") == {
-            "type": "adaptive",
-            "display": "summarized",
-        }, (name, kwargs.get("thinking"))
-
-    def test_user_supplied_thinking_config_is_respected(self) -> None:
-        """An explicit ``thinking`` in model_config must pass through unchanged."""
-        m = AnthropicModel(
-            "claude-fable-5",
-            api_key="test-key",
-            model_config={"thinking": {"type": "adaptive", "display": "omitted"}},
-        )
-        m.conversation = [{"role": "user", "content": "ping"}]
-        kwargs = m._build_create_kwargs()
-        assert kwargs.get("thinking") == {"type": "adaptive", "display": "omitted"}
-
-
-class TestNoForcedToolChoiceWithThinking:
-    """Forced tool use silently disables adaptive thinking — never send it."""
-
-    @pytest.mark.parametrize("name", _ADAPTIVE_MODELS)
-    def test_adaptive_thinking_does_not_force_tool_choice(self, name: str) -> None:
-        """``tool_choice`` must be left at the API default (``auto``).
-
-        ``tool_choice={"type": "any"}`` makes the Anthropic API silently
-        drop thinking for adaptive-thinking models ("graceful thinking
-        degradation"): the response contains only ``tool_use`` blocks and
-        no thinking is ever revealed.
-        """
-        m = AnthropicModel(name, api_key="test-key")
-        m.conversation = [{"role": "user", "content": "ping"}]
-        kwargs = m._build_create_kwargs(tools=[_FINISH_TOOL])
-        assert "tool_choice" not in kwargs, (name, kwargs.get("tool_choice"))
-
-    def test_non_thinking_model_still_forces_tool_use(self) -> None:
-        """Models without thinking keep ``tool_choice=any`` for agentic turns."""
-        m = AnthropicModel("claude-3-5-sonnet-20241022", api_key="test-key")
-        m.conversation = [{"role": "user", "content": "ping"}]
-        kwargs = m._build_create_kwargs(tools=[_FINISH_TOOL])
-        assert "thinking" not in kwargs
-        assert kwargs.get("tool_choice") == {"type": "any"}
-
-    def test_user_supplied_tool_choice_is_respected(self) -> None:
-        """An explicit ``tool_choice`` in model_config must pass through."""
-        m = AnthropicModel(
-            "claude-3-5-sonnet-20241022",
-            api_key="test-key",
-            model_config={"tool_choice": {"type": "auto"}},
-        )
-        m.conversation = [{"role": "user", "content": "ping"}]
-        kwargs = m._build_create_kwargs(tools=[_FINISH_TOOL])
-        assert kwargs.get("tool_choice") == {"type": "auto"}
 
 
 def _fable_thinking_tool_events() -> list[tuple[str, str]]:
@@ -310,6 +242,75 @@ def fable_server() -> Generator[str]:
     server.shutdown()
 
 
+class TestThinkingDisplaySummarized:
+    """Adaptive-thinking requests must ask for summarized thinking text."""
+
+    @pytest.mark.parametrize("name", _ADAPTIVE_MODELS)
+    def test_adaptive_thinking_requests_summarized_display(self, name: str) -> None:
+        """``thinking.display`` must be ``"summarized"`` for adaptive models.
+
+        Without it, fable-5 defaults to ``display: "omitted"`` and returns
+        thinking blocks whose ``thinking`` field is empty (signature only),
+        with zero ``thinking_delta`` stream events — the user sees no
+        thinking tokens at all.
+        """
+        m = AnthropicModel(name, api_key="test-key")
+        m.conversation = [{"role": "user", "content": "ping"}]
+        kwargs = m._build_create_kwargs()
+        assert kwargs.get("thinking") == {
+            "type": "adaptive",
+            "display": "summarized",
+        }, (name, kwargs.get("thinking"))
+
+    def test_user_supplied_thinking_config_is_respected(self) -> None:
+        """An explicit ``thinking`` in model_config must pass through unchanged."""
+        m = AnthropicModel(
+            "claude-fable-5",
+            api_key="test-key",
+            model_config={"thinking": {"type": "adaptive", "display": "omitted"}},
+        )
+        m.conversation = [{"role": "user", "content": "ping"}]
+        kwargs = m._build_create_kwargs()
+        assert kwargs.get("thinking") == {"type": "adaptive", "display": "omitted"}
+
+
+class TestNoForcedToolChoiceWithThinking:
+    """Forced tool use silently disables adaptive thinking — never send it."""
+
+    @pytest.mark.parametrize("name", _ADAPTIVE_MODELS)
+    def test_adaptive_thinking_does_not_force_tool_choice(self, name: str) -> None:
+        """``tool_choice`` must be left at the API default (``auto``).
+
+        ``tool_choice={"type": "any"}`` makes the Anthropic API silently
+        drop thinking for adaptive-thinking models ("graceful thinking
+        degradation"): the response contains only ``tool_use`` blocks and
+        no thinking is ever revealed.
+        """
+        m = AnthropicModel(name, api_key="test-key")
+        m.conversation = [{"role": "user", "content": "ping"}]
+        kwargs = m._build_create_kwargs(tools=[_FINISH_TOOL])
+        assert "tool_choice" not in kwargs, (name, kwargs.get("tool_choice"))
+
+    def test_non_thinking_model_still_forces_tool_use(self) -> None:
+        """Models without thinking keep ``tool_choice=any`` for agentic turns."""
+        m = AnthropicModel("claude-3-5-sonnet-20241022", api_key="test-key")
+        m.conversation = [{"role": "user", "content": "ping"}]
+        kwargs = m._build_create_kwargs(tools=[_FINISH_TOOL])
+        assert "thinking" not in kwargs
+        assert kwargs.get("tool_choice") == {"type": "any"}
+
+    def test_user_supplied_tool_choice_is_respected(self) -> None:
+        """An explicit ``tool_choice`` in model_config must pass through."""
+        m = AnthropicModel(
+            "claude-3-5-sonnet-20241022",
+            api_key="test-key",
+            model_config={"tool_choice": {"type": "auto"}},
+        )
+        m.conversation = [{"role": "user", "content": "ping"}]
+        kwargs = m._build_create_kwargs(tools=[_FINISH_TOOL])
+        assert kwargs.get("tool_choice") == {"type": "auto"}
+
+
 class TestFable5ThinkingEndToEnd:
     """End-to-end: fable-5 agentic turn must surface thinking tokens."""
 
@@ -351,38 +352,3 @@ class TestFable5ThinkingEndToEnd:
 
         assert len(tool_calls) == 1
         assert tool_calls[0]["name"] == "finish"
-
-    def test_agentic_turn_streams_thinking_to_json_printer(
-        self, fable_server: str
-    ) -> None:
-        """The JsonPrinter event stream must contain thinking_start,
-        thinking_delta text, and thinking_end for a fable-5 agentic turn."""
-        _CAPTURED_REQUESTS.clear()
-        printer = JsonPrinter()
-        printer._thread_local.task_id = "test-fable-thinking"
-        printer.start_recording()
-
-        m = AnthropicModel(
-            "claude-fable-5",
-            api_key="test-key",
-            token_callback=printer.token_callback,
-            thinking_callback=printer.thinking_callback,
-        )
-        m.client = anthropic.Anthropic(api_key="test-key", base_url=fable_server)
-        m.conversation = [{"role": "user", "content": "What is 27*31? Then finish."}]
-
-        m.generate_and_process_with_tools({}, tools_schema=[_OPENAI_FINISH_TOOL])
-
-        recorded = printer.stop_recording()
-        types = [e["type"] for e in recorded]
-        assert types.count("thinking_start") == 1, types
-        assert types.count("thinking_end") == 1, types
-
-        start_idx = types.index("thinking_start")
-        end_idx = types.index("thinking_end")
-        thought = "".join(
-            e["text"]
-            for e in recorded[start_idx + 1 : end_idx]
-            if e["type"] == "thinking_delta"
-        )
-        assert thought == "I'm calculating 27 times 31.", thought

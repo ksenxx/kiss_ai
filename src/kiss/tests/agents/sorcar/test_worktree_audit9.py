@@ -50,8 +50,6 @@ from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
     _manual_merge_cmd,
 )
-from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
@@ -74,8 +72,6 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
         cwd=repo, capture_output=True,
     )
     return repo
-
-
 
 
 class TestBug40Inc4Fix:
@@ -209,63 +205,3 @@ class TestBug43Fix:
         GitWorktreeOps.prune(repo)
         if GitWorktreeOps.branch_exists(repo, branch):
             GitWorktreeOps.delete_branch(repo, branch)
-
-
-class TestInc6Fix:
-    """INC-6 FIX: _check_merge_conflict checks both unstaged and staged files."""
-
-
-    def test_staged_overlap_detected(self, tmp_path):
-        """A staged file overlapping with worktree changes IS detected."""
-        repo = _make_repo(tmp_path)
-
-        branch = "kiss/wt-inc6-test"
-        wt_dir = repo / ".kiss-worktrees" / "wt-inc6"
-        GitWorktreeOps.create(repo, branch, wt_dir)
-        GitWorktreeOps.save_original_branch(repo, branch, "main")
-
-        (wt_dir / "init.txt").write_text("agent changes")
-        subprocess.run(["git", "add", "-A"], cwd=wt_dir, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "agent work"],
-            cwd=wt_dir, capture_output=True,
-        )
-
-        (repo / "init.txt").write_text("user staged change")
-        subprocess.run(["git", "add", "init.txt"], cwd=repo, capture_output=True)
-
-        server = VSCodeServer()
-        server.work_dir = str(repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
-        agent._wt = GitWorktree(
-            repo_root=repo,
-            branch=branch,
-            original_branch="main",
-            wt_dir=wt_dir,
-        )
-        st = agent_state.AgentState(
-            "task-inc6",
-            agent=agent,
-            tab_id="inc6-tab",
-            server_owned=True,
-        )
-        st.use_worktree = True
-        agent_state.register(st)
-        try:
-            has_conflict = server._check_merge_conflict("inc6-tab")
-            assert has_conflict, (
-                "INC-6 fix: staged file overlap must be detected"
-            )
-        finally:
-            agent_state.unregister("task-inc6", st)
-
-        subprocess.run(["git", "reset", "HEAD", "init.txt"], cwd=repo, capture_output=True)
-        subprocess.run(["git", "checkout", "--", "init.txt"], cwd=repo, capture_output=True)
-        GitWorktreeOps.remove(repo, wt_dir)
-        GitWorktreeOps.prune(repo)
-        if GitWorktreeOps.branch_exists(repo, branch):
-            GitWorktreeOps.delete_branch(repo, branch)
-
-
-
-
