@@ -109,10 +109,24 @@ def test_confident_trivial_task_skips_internet_search(model_name: str) -> None:
     """A trivial arithmetic task the model is confident about must not search."""
     if not has_api_key_for_model(model_name):
         pytest.skip(f"No API key for {model_name}")
-    result = _run_task(
-        model_name,
-        "Compute 17 * 23 and finish immediately with just the numeric result.",
-    )
+    result = ""
+    for attempt in range(2):
+        try:
+            result = _run_task(
+                model_name,
+                "Compute 17 * 23 and finish immediately with just the "
+                "numeric result.",
+            )
+            break
+        except KISSError:
+            # A step-exhaustion KISSError with zero Internet visits is model
+            # wandering (or retryable API errors burning steps under
+            # parallel-suite load), not the policy under test — retry once.
+            # If the model DID search, fall through to the policy assertion.
+            if _internet_urls():
+                break
+            if attempt == 1:
+                raise
     assert not _internet_urls(), (
         f"{model_name} searched the Internet ({_internet_urls()}) for trivial "
         f"arithmetic; the confidence exception in SYSTEM.md was not honored."

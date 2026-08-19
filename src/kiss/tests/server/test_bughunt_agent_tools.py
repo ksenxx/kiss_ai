@@ -1,0 +1,116 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""Bug-hunt integration tests for the sorcar agent modules.
+
+Covers two real bugs (no mocks/patches/fakes; no paid LLM calls):
+
+1. ``ChatSorcarAgent.run`` read ``use_worktree`` from ``**kwargs`` via
+   ``kwargs.get`` (for the early "extra" persistence payload) but did
+   not remove it before forwarding ``**kwargs`` to
+   ``SorcarAgent.run()``, whose explicit signature has no
+   ``use_worktree`` parameter — so any direct caller passing the
+   anticipated kwarg got ``TypeError``.
+
+2. The module-level ``run_tasks_parallel`` in ``sorcar_agent.py``
+   resolved the parent's thread-local ``task_id`` INSIDE the worker
+   thread (where ``threading.local`` never carries the parent thread's
+   value, and where ``ChatSorcarAgent.run`` clears its own id before
+   the ``finally`` runs), so the ``subagentDone`` broadcast — needed by
+   the frontend to stop the running indicator — never fired.
+
+Uses a real local HTTP server returning OpenAI-format ``finish`` tool
+calls, a real ``JsonPrinter`` subclass that records broadcasts, and a
+temp-dir-redirected persistence DB (same patterns as
+``test_chat_parallel_integration.py`` / ``test_run_parallel_integration.py``).
+"""
+
+from __future__ import annotations
+
+import shutil
+import tempfile
+import threading
+from typing import Any
+
+import yaml
+
+import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.sorcar_agent import run_tasks_parallel
+from kiss.server.json_printer import JsonPrinter
+from kiss.tests.agents.sorcar.test_bughunt_agent_tools import (  # noqa: F401
+    _redirect,
+    _restore,
+)
+
+
+class _CapturePrinter(JsonPrinter):
+    """Real JsonPrinter subclass that captures all broadcast events."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.captured: list[dict[str, Any]] = []
+        self._capture_lock = threading.Lock()
+
+    def broadcast(self, event: dict[str, Any]) -> None:
+        """Capture event then delegate to parent for recording logic."""
+        event = self._inject_task_id(event)
+        with self._capture_lock:
+            self.captured.append(event)
+        super().broadcast(event)
+
+
+class TestRunTasksParallelSubagentDone:
+    """The module-level executor must capture the parent thread's
+    ``task_id`` in the CALLING thread so the ``subagentDone`` broadcast
+    actually fires (a worker thread's ``threading.local`` never sees the
+    parent's value)."""
+
+    def setup_method(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = _redirect(self.tmpdir)
+
+    def teardown_method(self) -> None:
+        if th._db_conn is not None:
+            th._db_conn.close()
+            th._db_conn = None
+        _restore(self.saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_subagent_done_broadcast_uses_parent_thread_task_id(self) -> None:
+        """``subagentDone`` events fire with the parent task id prefix.
+
+        Uses an unrecognized model name so each sub-agent fails fast
+        inside ``run()`` without any network/LLM call; the ``finally``
+        block in ``_run_single`` must still broadcast ``subagentDone``
+        for every sub-task.
+        """
+        printer = _CapturePrinter()
+        printer._thread_local.task_id = "parent-bughunt"
+        try:
+            results = run_tasks_parallel(
+                ["bughunt sub one", "bughunt sub two"],
+                max_workers=2,
+                model_name="no-such-model-bughunt-xyz",
+                work_dir=self.tmpdir,
+                printer=printer,
+            )
+        finally:
+            printer._thread_local.task_id = ""
+
+        assert len(results) == 2
+        for res in results:
+            parsed = yaml.safe_load(res)
+            assert isinstance(parsed, dict)
+            assert parsed.get("success") is False
+
+        done_events = [
+            e for e in printer.captured if e.get("type") == "subagentDone"
+        ]
+        tab_ids = {e.get("tab_id") for e in done_events}
+        assert "task-parent-bughunt__sub_0" in tab_ids, (
+            f"missing subagentDone for sub 0; captured={printer.captured}"
+        )
+        assert "task-parent-bughunt__sub_1" in tab_ids, (
+            f"missing subagentDone for sub 1; captured={printer.captured}"
+        )

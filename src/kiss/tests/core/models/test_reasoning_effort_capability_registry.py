@@ -22,8 +22,8 @@ Contract verified here:
   vendor set here.
 * The ``model()`` factory routes every registered prefix to the registered
   ``base_url`` (registry and routing cannot drift — they are one table).
-* SorcarAgent's ``set_model`` endpoint carry-over set derives from the
-  registry.
+  (SorcarAgent's ``set_model`` endpoint carry-over side of this contract is
+  pinned in ``kiss.tests.agents.sorcar.test_reasoning_effort_capability_registry``.)
 * On the wire (real in-process HTTP server, no mocks): declared-True hosts
   keep the effort; declared-False hosts strip it; unknown and
   declared-None hosts send it optimistically, retry once without it when
@@ -126,15 +126,6 @@ class TestFactoryRoutesMatchRegistry:
         together = model("openai/gpt-oss-20b")
         assert isinstance(together, OpenAICompatibleModel)
         assert together.base_url == "https://api.together.xyz/v1"
-
-    def test_sorcar_default_base_urls_derive_from_registry(self) -> None:
-        """set_model's endpoint carry-over set covers every registered vendor."""
-        from kiss.agents.sorcar.sorcar_agent import _FACTORY_DEFAULT_BASE_URLS
-
-        assert _FACTORY_DEFAULT_BASE_URLS == frozenset(
-            p.base_url.rstrip("/") for p in OPENAI_COMPATIBLE_PROVIDERS
-        )
-
 
 
 def _chat_ok_json() -> bytes:

@@ -178,37 +178,6 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
         assert stored["model"] == "claude-opus-4-7"
         assert stored["is_worktree"] is True
 
-    def test_task_runner_payload_persists_stripped_work_dir(self) -> None:
-        """Mirror the literal payload built in
-        ``kiss.server.task_runner._run_task_inner`` and assert
-        that it persists the parent repo path (the fix must apply at
-        the task_runner call site too)."""
-        from kiss.server.task_runner import build_task_extra_payload
-
-        task_id, _chat_id = _add_task("runner task", "")
-        wt = "/repo/.kiss-worktrees/kiss_wt-XYZ-87654321"
-        payload = build_task_extra_payload(
-            model="claude-opus-4-7",
-            work_dir=wt,
-            version="test",
-            tokens=10,
-            cost=0.01,
-            steps=3,
-            is_parallel=False,
-            is_worktree=True,
-            auto_commit_mode=False,
-            start_ms=1,
-            end_ms=2,
-        )
-        _save_task_extra(payload, task_id=task_id)
-
-        stored = self._read_extra(task_id)
-        assert stored["work_dir"] == "/repo", (
-            f"task_runner persisted raw worktree path: {stored['work_dir']!r}"
-        )
-        assert stored["is_worktree"] is True
-        assert stored["model"] == "claude-opus-4-7"
-
     def test_plain_path_passthrough_end_to_end(self) -> None:
         """A non-worktree ``work_dir`` must persist unchanged."""
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent

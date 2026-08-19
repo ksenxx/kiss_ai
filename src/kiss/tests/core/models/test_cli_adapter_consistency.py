@@ -34,6 +34,7 @@ from anthropic.types.cache_creation import CacheCreation
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.codex_model import CodexModel
+from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 from kiss.tests.core.models.test_cli_subprocess_lifecycle import install_cli
 
 _CODEX_EMITS_A_TOOL_CALL = """

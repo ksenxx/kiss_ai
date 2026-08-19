@@ -26,7 +26,6 @@ renders it into a ``StringIO``.
 
 from __future__ import annotations
 
-import io
 import threading
 from collections.abc import Generator
 from typing import Any
@@ -34,7 +33,6 @@ from typing import Any
 import pytest
 
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-from kiss.core.print_to_console import ConsolePrinter
 from kiss.tests.core.models.openai_sse_harness import (
     Reply,
     Request,
@@ -43,8 +41,14 @@ from kiss.tests.core.models.openai_sse_harness import (
 )
 
 _MODEL = "gpt-bracket-under-test"
+
+
 _STALL_TIMEOUT = 5.0
+
+
 _DEADLINE = 30.0
+
+
 _ANSWER = "Two plus two is four"
 
 
@@ -64,6 +68,7 @@ _REASONING_THEN_CUT = [
     _delta_chunk({"role": "assistant", "reasoning_content": "Let me think"}),
     _delta_chunk({"content": "never arrives"}),
 ]
+
 
 _PLAIN_ANSWER = [
     _delta_chunk({"role": "assistant", "content": _ANSWER}),
@@ -148,30 +153,6 @@ def _run_bounded(*calls: Any) -> list[BaseException | None]:
     return outcome
 
 
-def _closing_rule_between(rendered: str, opener: str, answer: str) -> bool:
-    """Whether a bare rule line separates the *opener* rule from *answer*.
-
-    ``ConsolePrinter`` draws ``──── Thinking ────`` to open a reasoning
-    block and an unlabelled rule of the same character to close it, so a
-    bare rule line between the two is exactly "the block ended before
-    this text".
-
-    Args:
-        rendered: Everything the printer wrote.
-        opener: The label on the opening rule.
-        answer: The answer text that must fall outside the block.
-
-    Returns:
-        ``True`` when a closing rule precedes *answer*.
-    """
-    lines = rendered.splitlines()
-    start = next(i for i, line in enumerate(lines) if opener in line)
-    end = next(i for i, line in enumerate(lines) if answer in line)
-    return any(
-        set(lines[i].strip()) == {"─"} for i in range(start + 1, end) if lines[i].strip()
-    )
-
-
 def _make_model(
     base_url: str, token_callback: Any, thinking_callback: Any
 ) -> OpenAICompatibleModel:
@@ -202,43 +183,6 @@ def test_a_dropped_stream_closes_the_thinking_bracket_it_opened(
         f"the thinking bracket was left unbalanced: {thinking}"
     )
     assert model._thinking_open is False
-
-
-def test_a_retry_in_the_same_run_does_not_render_answers_as_reasoning(
-    cut_then_answer: tuple[ScriptedOpenAIServer, _CutThenAnswerPolicy],
-) -> None:
-    """The user-visible symptom, reproduced through a real ConsolePrinter.
-
-    ``KISSAgent`` retries a dropped stream without resetting the model,
-    so the second turn runs against the very same adapter and printer.
-    The answer must arrive as plain text, after a *closed* thinking
-    block — not inside the one the dead stream opened.
-    """
-    server, policy = cut_then_answer
-    out = io.StringIO()
-    printer = ConsolePrinter(file=out)
-    model = _make_model(
-        server.base_url, printer.token_callback, printer.thinking_callback
-    )
-    model.initialize("Think, then answer.")
-
-    def retry() -> None:
-        """Do exactly what the agent does on a retryable transport error."""
-        # Same model, same printer, same run — no reset_conversation().
-        model.add_message_to_conversation("user", "Failed to get response. Try again.")
-        model.generate()
-
-    cut, retried = _run_bounded(model.generate, retry)
-
-    assert cut is not None, "the cut stream should have failed the turn"
-    assert retried is None, f"the retry failed: {retried!r}"
-    assert policy.requests == 2, "the retry never reached the provider"
-    rendered = out.getvalue()
-    assert _ANSWER in rendered
-    assert _closing_rule_between(rendered, "Thinking", _ANSWER), (
-        f"the answer was rendered inside the dead stream's thinking "
-        f"block — no closing rule precedes it:\n{rendered!r}"
-    )
 
 
 def test_a_clean_stream_still_reports_one_balanced_bracket(

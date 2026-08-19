@@ -4,13 +4,17 @@
 # add your name here
 """Targeted integration tests to cover partial branches across the codebase.
 
+The ``drain_queue_messages`` tests moved to
+``tests/agents/third_party_agents/test_partial_branch_coverage.py`` and
+the ``generate_api_docs`` test to
+``tests/scripts/test_partial_branch_coverage.py``, per the packaging
+invariants for tests depending on those areas.  The remaining test
+depends on ``kiss.agents.obsolete``, which no invariant constrains.
+
 No mocks, test doubles, or fakes.
 """
 
 from __future__ import annotations
-
-import queue
-from typing import Any
 
 
 class TestEscapeInvalidTemplateFieldNames:
@@ -24,43 +28,3 @@ class TestEscapeInvalidTemplateFieldNames:
 
         result = escape_invalid_template_field_names("{bad!r:>10}", set())
         assert "{{bad!r:>10}}" in result
-
-
-
-
-class TestDrainQueueMessages:
-    """Cover branches in drain_queue_messages."""
-
-    def test_drain_with_filter(self) -> None:
-        """Filter keeps some messages, rejects others (line 83 keep branch)."""
-        from kiss.agents.third_party_agents._backend_utils import drain_queue_messages
-
-        q: queue.Queue[dict[str, Any]] = queue.Queue()
-        q.put({"id": 1, "good": True})
-        q.put({"id": 2, "good": False})
-        q.put({"id": 3, "good": True})
-        result = drain_queue_messages(q, limit=10, keep=lambda m: m["good"])
-        assert len(result) == 2
-
-    def test_drain_hits_limit(self) -> None:
-        """Queue has more items than limit, while condition exits (line 78->85)."""
-        from kiss.agents.third_party_agents._backend_utils import drain_queue_messages
-
-        q: queue.Queue[dict[str, Any]] = queue.Queue()
-        for i in range(5):
-            q.put({"id": i})
-        result = drain_queue_messages(q, limit=3)
-        assert len(result) == 3
-
-
-class TestGenerateApiDocsBranches:
-    """Cover partial branches in generate_api_docs.py."""
-
-    def test_module_to_path_package(self) -> None:
-        """Module path resolution for a package covers line 261 is_dir check."""
-        from kiss.scripts.generate_api_docs import _module_to_path
-
-        path = _module_to_path("kiss.core")
-        assert path.exists()
-
-
