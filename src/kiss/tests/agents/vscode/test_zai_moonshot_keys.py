@@ -1,16 +1,13 @@
 """End-to-end tests for Z.AI + Moonshot API key support (and MiniMax removal).
 
-These tests verify the surfaces that read real files or route through
-``kiss.server``:
-
-* The provider/vendor display used by the model picker
-  (``kiss.server.helpers.model_vendor``).
-* The VS Code settings panel HTML inputs and JS env mapping
-  (``agents/vscode/media``).
+These tests verify the VS Code settings panel HTML inputs and JS env
+mapping (``agents/vscode/media``).
 
 The ``kiss.core`` config/allowlist/availability tests moved to
 ``tests/core/test_zai_moonshot_keys.py``; the provider-routing and
-catalog tests live in ``tests/core/models/test_zai_moonshot_keys.py``.
+catalog tests live in ``tests/core/models/test_zai_moonshot_keys.py``;
+the ``kiss.server.helpers.model_vendor`` display test moved to
+``tests/server/test_zai_moonshot_keys.py``.
 
 Run with::
 
@@ -24,17 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.server import helpers
-
 _VSCODE_MEDIA = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media"
-
-
-def test_model_vendor_zai_and_moonshot() -> None:
-    """`model_vendor` routes glm-* to Z.AI and kimi-*/moonshot-* to Moonshot."""
-    assert helpers.model_vendor("glm-4.6")[0] == "Z.AI"
-    assert helpers.model_vendor("kimi-k2.6")[0] == "Moonshot"
-    assert helpers.model_vendor("moonshot-v1-32k")[0] == "Moonshot"
-    assert helpers.model_vendor("minimax-m2.5")[0] != "MiniMax"
 
 
 def test_settings_panel_html_has_new_inputs() -> None:

@@ -16,10 +16,9 @@ unaffected.  The restyle therefore lives in a NEW stylesheet
 ``body.remote-chat`` — the class only the remote page's
 ``BODY_CLASS_ATTR`` substitution adds.
 
-Coverage:
+Coverage (the ``_build_html()`` link/order/substitution checks moved
+to ``kiss.tests.server.test_codex_mobile_layout``):
 
-* ``_build_html()`` links ``remote-codex.css`` with a cache-busted
-  ``/media/`` URL (after ``main.css`` so it can override it).
 * ``RemoteAccessServer._process_request`` serves the new stylesheet
   over HTTP with a CSS content type (real server, real socket).
 * Control parity — the full inventory of element ids from
@@ -171,34 +170,6 @@ CONTROL_IDS = [
 def _read_codex_css() -> str:
     assert CODEX_CSS.is_file(), "media/remote-codex.css must exist"
     return CODEX_CSS.read_text(encoding="utf-8")
-
-
-def test_built_html_links_codex_stylesheet_cache_busted() -> None:
-    """The built remote page links remote-codex.css with ?v=<sha16>."""
-    html = _build_html()
-    m = re.search(
-        r'<link href="(/media/remote-codex\.css\?v=[0-9a-f]{16})"'
-        r'\s+rel="stylesheet">',
-        html,
-    )
-    assert m, "remote-codex.css <link> missing from built HTML"
-
-
-def test_codex_stylesheet_linked_after_main_css() -> None:
-    """remote-codex.css must come AFTER main.css so overrides win."""
-    html = _build_html()
-    main_pos = html.find("/media/main.css")
-    codex_pos = html.find("/media/remote-codex.css")
-    assert main_pos != -1 and codex_pos != -1
-    assert codex_pos > main_pos, (
-        "remote-codex.css must be linked after main.css to override it"
-    )
-
-
-def test_no_unsubstituted_placeholders_remain() -> None:
-    """Adding the link must not leave {{...}} placeholders behind."""
-    html = _build_html()
-    assert not re.search(r"\{\{[A-Z_]+\}\}", html)
 
 
 def test_all_control_ids_still_present() -> None:

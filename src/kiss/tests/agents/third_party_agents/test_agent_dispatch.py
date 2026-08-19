@@ -7,7 +7,8 @@
 Everything runs against the real installed channel modules and the
 real agent-script loader — no mocks or test doubles (``monkeypatch``
 is used only to isolate environment variables, the working directory,
-and the cron module's daemon-socket default between tests).  Branches
+and the cron module's daemon-socket default between tests, and to
+capture the daemon submission that a live dispatch would perform).  Branches
 not exercised here, and why they need no doubles-based tests:
 
 - ``run_agent``'s successful and timed-out dispatch paths submit a
@@ -22,11 +23,14 @@ not exercised here, and why they need no doubles-based tests:
 - ``_run_agent``'s no-agent-class guard is unreachable for any
   installed channel (``test_every_channel_module_is_dispatchable``
   proves the contract holds for all of them).
+
+The agent-script loader tests that never touch a channel (pure
+kiss.agents.sorcar + kiss.server closure) moved to
+``kiss.tests.server.test_agent_dispatch``.
 """
 
 from __future__ import annotations
 
-import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +44,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     get_tools,
     make_run_agent_tool,
 )
-from kiss.server.agent_file import AgentFileError, apply_agent_overrides
+from kiss.server.agent_file import apply_agent_overrides
 
 # The standalone tool (no calling-task work directory): relative agent
 # paths resolve against the process working directory and path-mode
@@ -219,20 +223,6 @@ def test_cron_dispatch_unreachable_daemon_is_a_clean_error(
     assert (tmp_path / "cron" / "work").is_dir()
     assert not (tmp_path / "channel_work").exists()
     assert not (tmp_path / "agent_work").exists()
-
-
-def test_cron_agent_module_is_a_valid_agent_script() -> None:
-    # The contract the cron dispatch relies on: passing the cron
-    # module as ``extension_agent_path`` makes it its own tools file (its
-    # ``get_tools()`` returns the cron_job tool) and moves the session
-    # to ~/.kiss/cron/work with no git lifecycle.
-    cmd = {"agentPath": cron_agent.__file__, "toolsFile": ""}
-    overridden = apply_agent_overrides(cmd)
-    assert overridden == {"toolsFile", "workDir", "useWorktree", "autoCommit"}
-    assert cmd["toolsFile"] == cron_agent.__file__
-    assert cmd["workDir"] == cron_agent.get_work_dir()
-    assert cmd["useWorktree"] is False
-    assert cmd["autoCommit"] is False
 
 
 def test_docstring_and_error_mention_cron() -> None:
@@ -428,37 +418,6 @@ def test_channel_module_is_a_valid_agent_script() -> None:
     overridden = apply_agent_overrides(cmd)
     assert overridden == {"toolsFile"}
     assert cmd["toolsFile"] == ntfy_agent.__file__
-
-
-def test_agent_script_get_tools_list_normalizes_to_own_path(
-    tmp_path: Path,
-) -> None:
-    script = tmp_path / "self_tools_agent.py"
-    script.write_text(textwrap.dedent("""
-        def _hello() -> str:
-            \"\"\"Say hello.
-
-            Returns:
-                A greeting.
-            \"\"\"
-            return "hello"
-
-        def get_tools() -> list:
-            return [_hello]
-    """))
-    cmd = {"agentPath": str(script), "toolsFile": ""}
-    assert apply_agent_overrides(cmd) == {"toolsFile"}
-    assert cmd["toolsFile"] == str(script)
-
-
-def test_agent_script_get_tools_wrong_type_still_rejected(
-    tmp_path: Path,
-) -> None:
-    script = tmp_path / "bad_tools_agent.py"
-    script.write_text("def get_tools():\n    return 42\n")
-    cmd = {"agentPath": str(script), "toolsFile": ""}
-    with pytest.raises(AgentFileError, match="get_tools"):
-        apply_agent_overrides(cmd)
 
 
 def test_get_tools_and_sorcar_wiring() -> None:

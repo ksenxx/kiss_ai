@@ -4,22 +4,12 @@
 # add your name here
 """Integration tests: remote webview fits mobile screens horizontally.
 
-Verifies that:
-- The viewport meta tag prevents zoom and sets width=device-width
-- Key CSS rules prevent horizontal overflow on narrow screens
-- The generated HTML from _build_html() includes mobile-safe constraints
+The viewport meta value is substituted by ``kiss.server.web_server``
+itself (the ``{{VIEWPORT}}`` placeholder), so this test's dependency
+closure is server-only; the file moved here from tests/agents/vscode.
 """
 
 import re
-from pathlib import Path
-
-CSS_PATH = (
-    Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media" / "main.css"
-)
-
-
-def _read_css() -> str:
-    return CSS_PATH.read_text()
 
 
 def _build_html() -> str:
@@ -36,19 +26,3 @@ def test_viewport_meta_has_device_width_and_max_scale() -> None:
     content = meta.group(1)
     assert "width=device-width" in content
     assert "maximum-scale=1" in content
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
