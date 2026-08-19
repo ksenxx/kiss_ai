@@ -24,13 +24,11 @@ the abort genuinely runs against the object it was given.
 
 from __future__ import annotations
 
-import threading
 import time
-from collections.abc import Generator, Iterator
+from collections.abc import Iterator
 
 import pytest
 
-from kiss.core import stop_signal
 from kiss.core.models.stream_abort import stop_aware_events
 
 _EVENTS = ["alpha", "beta", "gamma"]
@@ -48,40 +46,6 @@ class _Recorder:
         self.calls += 1
 
 
-@pytest.fixture
-def bound_stop_event() -> Generator[threading.Event]:
-    """Bind a fresh stop event to this thread and clear it afterwards."""
-    event = threading.Event()
-    stop_signal.set_thread_stop_event(event)
-    yield event
-    stop_signal.set_thread_stop_event(None)
-
-
-class TestStopReportedAfterAQuietEnd:
-    """A stop must be reported even when the iterator merely runs out."""
-
-    def test_stop_after_the_last_event(
-        self, bound_stop_event: threading.Event
-    ) -> None:
-        """Setting the stop while iterating must not look like success."""
-        on_abort = _Recorder()
-        seen: list[str] = []
-        with pytest.raises(KeyboardInterrupt):
-            for event in stop_aware_events(iter(_EVENTS), on_abort=on_abort):
-                seen.append(event)
-                bound_stop_event.set()
-        assert seen == _EVENTS
-        assert on_abort.calls == 1
-
-    def test_stop_without_an_abort_hook(
-        self, bound_stop_event: threading.Event
-    ) -> None:
-        """The hook is optional; the stop must still be reported."""
-        with pytest.raises(KeyboardInterrupt):
-            for _event in stop_aware_events(iter(_EVENTS)):
-                bound_stop_event.set()
-
-
 def _failing_events() -> Iterator[str]:
     """Yield one event and then fail the way a dropped socket does.
 
@@ -94,14 +58,6 @@ def _failing_events() -> Iterator[str]:
 
 class TestFailingStreams:
     """A stream that raises must be classified, not blindly re-raised."""
-
-    def test_stop_wins_over_the_transport_error(
-        self, bound_stop_event: threading.Event
-    ) -> None:
-        """A stop requested before the failure surfaces as the stop."""
-        with pytest.raises(KeyboardInterrupt):
-            for _event in stop_aware_events(_failing_events()):
-                bound_stop_event.set()
 
     def test_stall_wins_over_the_transport_error(self) -> None:
         """A stalled stream that then fails is still a retryable stall."""

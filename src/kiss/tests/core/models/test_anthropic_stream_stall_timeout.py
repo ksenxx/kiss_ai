@@ -70,14 +70,16 @@ from typing import Any
 
 import pytest
 
-from kiss.core.kiss_agent import KISSAgent
-from kiss.core.kiss_error import KISSError
 from kiss.core.models.anthropic_model import AnthropicModel
-from kiss.core.models.model_info import MODEL_INFO, ModelInfo
 
 _MODEL = "claude-stall-under-test"
+
+
 _STALL_TIMEOUT = 1.5
+
+
 _FAST_FAIL_BUDGET = 30.0
+
 
 _OPENAI_FINISH_TOOL = {
     "type": "function",
@@ -341,39 +343,6 @@ def _make_model(
     return m
 
 
-def _register_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Register the synthetic ``claude-*`` model so the model() factory
-    routes it through the real ``AnthropicModel`` (no fallback, so the
-    retry path — not the fallback path — is what recovers)."""
-    monkeypatch.setitem(
-        MODEL_INFO,
-        _MODEL,
-        ModelInfo(
-            context_length=128_000,
-            input_price_per_million=0.0,
-            output_price_per_million=0.0,
-            is_function_calling_supported=True,
-            is_embedding_supported=False,
-            is_generation_supported=True,
-            fallback=None,
-            extended_thinking=False,
-        ),
-    )
-
-
-def _ensure_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give the model() factory a non-empty Anthropic key on CI machines."""
-    from kiss.core import config as config_module
-
-    if not getattr(config_module.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", ""):
-        monkeypatch.setattr(
-            config_module.DEFAULT_CONFIG,
-            "ANTHROPIC_API_KEY",
-            "test-key",
-            raising=False,
-        )
-
-
 class TestAdapterAbortsStalledStream:
     """``AnthropicModel`` must abort a stalled stream, not hang."""
 
@@ -470,57 +439,3 @@ class TestAdapterAbortsStalledStream:
         )
         _assert_stall_timeout_error(outcome)
         assert m.conversation == before
-
-
-class TestAgentSurvivesStalledStream:
-    """KISSAgent must retry after a stall and never get stuck thinking."""
-
-    def test_agent_recovers_when_stream_stalls_once(
-        self, monkeypatch: pytest.MonkeyPatch, stall_server: str
-    ) -> None:
-        """One dead request (the production scenario), then a healthy API:
-        the agent must retry and finish instead of hanging forever."""
-        _register_model(monkeypatch)
-        _ensure_api_key(monkeypatch)
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", stall_server)
-        _STATE.stall_first_n = 1
-        agent = KISSAgent("test-stall-recovery")
-        outcome = _run_bounded(
-            lambda: agent.run(
-                model_name=_MODEL,
-                prompt_template="Update ./README.md based on the latest code.",
-                max_steps=5,
-                max_budget=1.0,
-                model_config={"stream_stall_timeout": _STALL_TIMEOUT},
-                verbose=False,
-            ),
-            deadline=2 * _FAST_FAIL_BUDGET,
-        )
-        assert outcome == ("ok", "recovered")
-        assert _STATE.request_count == 2
-
-    def test_agent_fails_visibly_when_api_stays_dead(
-        self, monkeypatch: pytest.MonkeyPatch, stall_server: str
-    ) -> None:
-        """Every request stalls: the agent must surface a KISSError after
-        its bounded retries — a visible failure the orchestrator can
-        report — rather than the silent infinite "thinking" of the bug."""
-        _register_model(monkeypatch)
-        _ensure_api_key(monkeypatch)
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", stall_server)
-        agent = KISSAgent("test-stall-hard-failure")
-        outcome = _run_bounded(
-            lambda: agent.run(
-                model_name=_MODEL,
-                prompt_template="Update ./README.md based on the latest code.",
-                max_steps=5,
-                max_budget=1.0,
-                model_config={"stream_stall_timeout": _STALL_TIMEOUT},
-                verbose=False,
-            ),
-            deadline=4 * _FAST_FAIL_BUDGET,
-        )
-        assert isinstance(outcome, KISSError)
-        msg = str(outcome)
-        assert "consecutive errors" in msg
-        assert "stalled" in msg

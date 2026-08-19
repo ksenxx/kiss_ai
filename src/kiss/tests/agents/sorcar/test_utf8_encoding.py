@@ -23,10 +23,13 @@ from pathlib import Path
 from kiss.tests.core.test_utf8_encoding import _run_in_c_locale
 
 NON_ASCII = "café ☕ — ünïcode"
+
+
 NON_ASCII_JSON = json.dumps(NON_ASCII)
 
 
 class TestUtf8Encoding:
+
     def test_write_read_edit_tools_round_trip_in_c_locale(self, tmp_path: Path) -> None:
         target = tmp_path / "unicode.txt"
         script = f"""
@@ -52,20 +55,3 @@ print("OK")
         assert "OK" in proc.stdout
         on_disk = target.read_text(encoding="utf-8")
         assert on_disk == NON_ASCII.replace("ünïcode", "ünïcode✓")
-
-    def test_task_file_loads_in_c_locale(self, tmp_path: Path) -> None:
-        task_file = tmp_path / "task.md"
-        task_file.write_bytes(NON_ASCII.encode("utf-8"))
-        script = f"""
-import argparse, json
-from kiss.agents.third_party_agents._channel_cli import _resolve_task
-
-args = argparse.Namespace(file={str(task_file)!r}, task=None)
-loaded = _resolve_task(args)
-expected = json.loads({NON_ASCII_JSON!r})
-assert loaded == expected, repr(loaded)
-print("OK")
-"""
-        proc = _run_in_c_locale(script, tmp_path)
-        assert proc.returncode == 0, proc.stderr
-        assert "OK" in proc.stdout

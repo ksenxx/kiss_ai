@@ -70,7 +70,11 @@ from kiss.server.helpers import (
     generate_followup_text,
     model_vendor,
 )
-from kiss.server.json_printer import JsonPrinter, _coalesce_events
+from kiss.server.json_printer import (
+    JsonPrinter,
+    _coalesce_events,
+    with_task_settings_event,
+)
 from kiss.server.merge_flow import _MergeFlowMixin
 from kiss.server.tab_registry import TabRegistry
 from kiss.server.task_runner import _TaskRunnerMixin, parse_task_tags
@@ -1362,7 +1366,9 @@ class VSCodeServer(
         self.printer.broadcast(
             {
                 "type": "task_events",
-                "events": _coalesced_replay_events(result["events"]),
+                "events": with_task_settings_event(
+                    _coalesced_replay_events(result["events"]), result,
+                ),
                 "task": result["task"],
                 "task_id": result.get("task_id"),
                 "chat_id": chat_id,
@@ -1561,7 +1567,9 @@ class VSCodeServer(
             self.printer.broadcast(
                 {
                     "type": "task_events",
-                    "events": _coalesced_replay_events(row["events"]),
+                    "events": with_task_settings_event(
+                        _coalesced_replay_events(row["events"]), row,
+                    ),
                     "task": description,
                     "task_id": sub_task_id,
                     "chat_id": row.get("chat_id", ""),
@@ -1798,7 +1806,13 @@ class VSCodeServer(
             "direction": direction,
             "task": result["task"] if result else "",
             "task_id": result["task_id"] if result else None,
-            "events": (_coalesced_replay_events(result["events"]) if result else []),
+            "events": (
+                with_task_settings_event(
+                    _coalesced_replay_events(result["events"]), result,
+                )
+                if result
+                else []
+            ),
             "tabId": tab_id,
         }
         self.printer.broadcast(event)

@@ -42,86 +42,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-MAIN_JS = (
-    Path(__file__).resolve().parents[3]
-    / "agents"
-    / "vscode"
-    / "media"
-    / "main.js"
-)
-
 CHAT_AGENT_PY = (
     Path(__file__).resolve().parents[3]
     / "agents"
     / "sorcar"
     / "chat_sorcar_agent.py"
 )
-
-
-def _case_block(case_label: str, next_case_label: str) -> str:
-    js = MAIN_JS.read_text()
-    case_start = js.find(case_label)
-    assert case_start > 0, f"{case_label} not found in main.js"
-    case_end = js.find(next_case_label, case_start)
-    assert case_end > case_start, f"{next_case_label} not found after {case_label}"
-    return js[case_start:case_end]
-
-
-class TestOpenSubagentTabGuardsOnParentTabId:
-    """The ``openSubagentTab`` handler must skip the event when its
-    ``parent_tab_id`` does not correspond to a tab in the receiving
-    webview's local ``tabs[]`` — that webview does not own the parent
-    and must not spawn a phantom sub-agent tab."""
-
-    def test_handler_short_circuits_when_parent_tab_id_unknown(
-        self,
-    ) -> None:
-        block = _case_block(
-            "case 'openSubagentTab':", "case 'subagentDone':",
-        )
-        assert "ev.parent_tab_id" in block
-        assert "tabs.find" in block, (
-            "openSubagentTab handler must consult local tabs[] to "
-            "filter phantom sub-tab broadcasts from other webviews / "
-            "chats.  Block was:\n" + block
-        )
-        guard_idx = block.find("ev.parent_tab_id")
-        make_tab_idx = block.find("makeTab")
-        assert 0 < guard_idx < make_tab_idx, (
-            "The parent_tab_id guard must appear BEFORE makeTab so "
-            "no phantom sub-tab is created."
-        )
-        early = block[:make_tab_idx]
-        assert "tabs.find" in early and (
-            "break" in early or "return" in early
-        ), (
-            "Early-guard must short-circuit with break/return when "
-            "parent_tab_id is unknown locally.  Early block was:\n" + early
-        )
-
-
-class TestNewTabHandlerGuardsOnParentTabId:
-    """The ``case 'new_tab':`` handler must apply the same guard so
-    sub-agent ``new_tab`` broadcasts (taskId='') from chat A do not
-    cause webviews bound to chat B to allocate phantom tabs and post
-    ``resumeSession`` for the cross-chat sub-agent task."""
-
-    def test_new_tab_handler_short_circuits_when_parent_unknown(
-        self,
-    ) -> None:
-        block = _case_block("case 'new_tab':", "case 'openSubagentTab':")
-        assert "ev.parent_tab_id" in block, (
-            "case 'new_tab' must inspect ev.parent_tab_id to filter "
-            "out cross-chat sub-agent new_tab broadcasts.  Block was:\n"
-            + block
-        )
-        assert "tabs.find" in block
-        guard_idx = block.find("ev.parent_tab_id")
-        create_idx = block.find("createBackgroundSubagentTab(")
-        assert 0 < guard_idx < create_idx, (
-            "The parent_tab_id guard must appear BEFORE the tab is "
-            "created (createBackgroundSubagentTab)."
-        )
 
 
 class TestSubagentNewTabBroadcastIncludesParentTabId:

@@ -4,7 +4,8 @@
 # add your name here
 
 
-"""Server-only tests extracted from ``kiss.tests.agents.vscode.test_config_custom_headers``.
+"""Server-only tests extracted from
+``kiss.tests.agents.third_party_agents.test_config_custom_headers``.
 
 Moved here because their full dependency closure touches only
 kiss.core, kiss.agents.sorcar and kiss.server (task: relocate

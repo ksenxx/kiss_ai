@@ -46,7 +46,7 @@ from typing import Any
 
 import pytest
 
-from kiss.tests.core.test_update_models_thinking_audit import ALL_LEVELS, MOONSHOT_LEVELS
+from kiss.tests.core.models.test_update_models_thinking_audit import ALL_LEVELS, MOONSHOT_LEVELS
 
 # Levels expected on the five vendor scale shapes supported by
 # ``update_models.py`` (OpenAI, Moonshot, Grok effort, Grok-3-mini,

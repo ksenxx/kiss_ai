@@ -4,14 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.</title>
-  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 603 models. Works as a VS Code extension, a web/mobile app, and a Python API.">
+  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 622 models. Works as a VS Code extension, a web/mobile app, and a Python API.">
   <link rel="canonical" href="https://kisssorcar.github.io/">
   <link rel="alternate" type="text/markdown" href="https://kisssorcar.github.io/index.html.md" title="This page as Markdown">
   <link rel="llms-txt" type="text/plain" href="https://kisssorcar.github.io/llms.txt" title="LLM-friendly content index">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://kisssorcar.github.io/">
   <meta property="og:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
-  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 603 models.">
+  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 622 models.">
   <meta property="og:image" content="https://kisssorcar.github.io/assets/KISS-Sorcar.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -1918,6 +1918,7 @@
         <li><a href="#compare">Compare</a></li>
         <li><a href="#prompts">Prompts</a></li>
         <li><a href="#papers">Papers</a></li>
+        <li><a href="#blog">Blog</a></li>
         <li><a href="#ai-software-engineering">Videos</a></li>
         <li><a href="#install">Install</a></li>
         <li><a href="#models">Models</a></li>
@@ -1951,8 +1952,8 @@
     <h1>Tell it what to do, in any language and give it a concrete goal. It picks the best LLMs, runs on your laptop, and ships the work.</h1>
     <div class="hero-trust" aria-label="At a glance">
       <span><strong>Apache 2.0</strong> · open source</span>
-      <span><strong>603 models</strong> · 9 providers</span>
-      <span><strong>~2,850 lines</strong> of core agents code</span>
+      <span><strong>622 models</strong> · 9 providers</span>
+      <span><strong>~3,000 lines</strong> of core agents code</span>
     </div>
   </div>
 
@@ -2075,13 +2076,13 @@
             </tr>
             <tr>
               <th class="cap">Core Agents # LoC</th>
-              <td class="kiss"><strong>~2850</strong></td>
+              <td class="kiss"><strong>~3000</strong></td>
               <td>Unknown</td>
               <td>Unknown</td>
             </tr>
             <tr>
               <th class="cap">Models in bundled catalog</th>
-              <td class="kiss">603 across 9 provider categories</td>
+              <td class="kiss">622 across 9 provider categories</td>
               <td>Claude family only</td>
               <td>Subset chosen by Cursor</td>
             </tr>
@@ -2111,9 +2112,21 @@
             </tr>
             <tr>
               <th class="cap">Messaging and communication channels</th>
-              <td class="kiss"><span class="yes">✓</span> 23 third-party agents, including Slack, Gmail, Phone Control, SMS, and WhatsApp</td>
+              <td class="kiss"><span class="yes">✓</span> 32 third-party channel agents, including Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, and Home Assistant</td>
               <td><span class="warn">⚠</span> Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
               <td><span class="warn">⚠</span> Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
+            </tr>
+            <tr>
+              <th class="cap">Scheduled automations</th>
+              <td class="kiss"><span class="yes">✓</span> Natural-language cron agent</td>
+              <td><span class="no">✗</span></td>
+              <td><span class="no">✗</span></td>
+            </tr>
+            <tr>
+              <th class="cap">Wake word for voice interaction</th>
+              <td class="kiss">Sorcar</td>
+              <td>N/A</td>
+              <td>N/A</td>
             </tr>
           </tbody>
         </table>
@@ -2127,7 +2140,7 @@
   <section id="prompts" class="section-card">
     <span class="num">§ 02 — All you need is a short prompt in KISS Sorcar to do big complex tasks</span>
     <h2>All You Need is a Short Prompt in KISS Sorcar to do Big Complex Tasks.<a href="#prompts" class="anchor">¶</a></h2>
-    <p class="sub" style="font-size:0.88rem; line-height:1.55;">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the CLI or VS Code extension or Web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your tasks at <code>~/.kiss/MY_TASK_TEMPLATES.md</code> and your promptlets at <code>~/.kiss/MY_INJECTION.md</code>.</p>
+    <p class="sub" style="font-size:0.88rem; line-height:1.55;">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the VS Code extension or Web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your tasks at <code>~/.kiss/MY_TASK_TEMPLATES.md</code> and your promptlets at <code>~/.kiss/MY_INJECTION.md</code>.</p>
     <div class="section-body">
 
       <div class="prompt-carousel" id="prompt-carousel" aria-roledescription="carousel" aria-label="Sample tasks and promptlet tricks">
@@ -2205,7 +2218,7 @@
           </div>
           <p class="panel-desc">Dispatch a one-line SMS to any phone number through Sorcar's messaging agents — no scripting required.</p>
           <div class="prompt-body">
-            <pre>Can you send "Hello from Sorcar!" to 1-510-289-3391?</pre>
+            <pre>Can you send "Hello from Sorcar!" to 1-800-772-1213?</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2244,7 +2257,7 @@
           </div>
           <p class="panel-desc">Let Sorcar search, train, and benchmark candidate models on your data to find the lightest, fastest, cheapest model that hits your target accuracy, recall, and price-per-query.</p>
           <div class="prompt-body">
-            <pre>Sorcar for AI Discovery: Can you AI discover the lightest and fastest AI model that will give the best accuracy and recall on the data at &lt;&lt;/path/to/data&gt;&gt; at the cheapest price? Use 'modal' CLI to train your models on GPUs and evaluate if needed. The total budget for Modal.com is $ 1,000. Do not STOP until accuracy/recall reaches 99% and price per query on the model is less that $0.5.  Craete a report.</pre>
+            <pre>Sorcar for AI Discovery: Can you AI discover the lightest and fastest AI model that will give the best accuracy and recall on the data at &lt;&lt;/path/to/data&gt;&gt; at the cheapest price? Use 'modal' CLI to train your models on GPUs and evaluate if needed. The total budget for Modal.com is $ 1,000. Do not STOP until accuracy/recall reaches 99% and price per query on the model is less than $0.50. Create a report.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2315,9 +2328,9 @@ At each step, keep track of the best prompt, which has the maximum number of suc
             <h3 class="panel-title">Pair-program with multi-model review</h3>
             <span class="panel-badge trick">Trick</span>
           </div>
-          <p class="panel-desc">Use Claude Fable as the implementer and GPT-5.6 Sol as a read-only reviewer/debugger &mdash; capped at 20% of the task budget and told not to invent new problems &mdash; so missed code, missing wirings, and silent bugs are caught before they ship.</p>
+          <p class="panel-desc">Use Claude Fable as the implementer and GPT-5.6 Sol as a read-only reviewer/debugger &mdash; capped at 50% of the task budget and told not to invent new problems &mdash; so missed code, missing wirings, and silent bugs are caught before they ship.</p>
           <div class="prompt-body">
-            <pre>Use 'claude-fable-5' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 20% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the model to not invent new problems. Use the model names literally without hallucinating new model names.</pre>
+            <pre>Use 'claude-fable-5' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the model to not invent new problems. Use the model names literally without hallucinating new model names.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2362,6 +2375,45 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
+        <article class="inner-card prompt-panel" style="--i:4">
+          <div class="panel-head">
+            <h3 class="panel-title">Authenticate on the user's behalf</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Have Sorcar drive your default browser with computer use to complete logins and OAuth flows itself, asking for your help only when it is stuck on a login or CAPTCHA.</p>
+          <div class="prompt-body">
+            <pre>You MUST use the user's default browser and computer use to authenticate using claude-fable-5 as the model. Do all the steps on user's behalf and ask user's help ONLY if you are stuck on login or captcha.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:5">
+          <div class="panel-head">
+            <h3 class="panel-title">Pair-program with Kimi K3 + review</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">The same implement-and-review pattern with Kimi K3 as a lower-cost implementer and GPT-5.6 Sol as the read-only reviewer, capped at 50% of the task budget.</p>
+          <div class="prompt-body">
+            <pre>Use 'openrouter/moonshotai/kimi-k3' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the model to not invent new problems. Use the model names literally without hallucinating new model names.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:6">
+          <div class="panel-head">
+            <h3 class="panel-title">Self-improving model routing</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Route each subtask to the best cheap model &mdash; following <code>./ROUTING.md</code> when it exists &mdash; and have Sorcar rewrite the routing strategy after every task so token cost falls without degrading quality.</p>
+          <div class="prompt-body">
+            <pre>If ./ROUTING.md exists, use the instructions in the file for model routing. Otherwise, use the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet extensively to figure out which model is best yet cheap for each subtask. Here are some hints, but the internet has better knowledge: claude-fable-5 and openrouter/moonshotai/kimi-k3 — best for SWE work; gpt-5.6-sol — best for reviewing; openrouter/qwen/qwen3.8-max, openrouter/x-ai/grok-4.6, openrouter/z-ai/glm-5.2-max, openrouter/deepseek/deepseek-v4-pro-0813 — for SWE tasks when budget is low; and gpt-5.6-luna and openrouter/deepseek/deepseek-v4-pro-0813 for review when budget is low. Irrespective of whether ./ROUTING.md exists or not, after the task completes, based on your experience in completing the task, create or update the model routing strategy (as text) in ./ROUTING.md that reduces token cost while not degrading the quality of the work.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
         </div>
 
         <div class="carousel-controls">
@@ -2381,7 +2433,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   <section id="papers" class="section-card">
     <span class="num">§ 03 — Papers</span>
     <h2>📑 Papers.<a href="#papers" class="anchor">¶</a></h2>
-    <p class="sub">Read the research behind KISS Sorcar &mdash; the system, how it built itself, and how it wrote its own paper.</p>
+    <p class="sub">Read the research behind KISS Sorcar &mdash; the system, how it built itself, how it wrote its own paper, and the systems, defenses, and test generators it produced.</p>
     <div class="section-body">
       <div class="papers-grid">
         <div class="inner-card paper-card" style="--i:0">
@@ -2390,7 +2442,6 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <p>Introduces KISS Sorcar and the underlying KISS Agent Framework: a deliberately minimal, open-source agent runtime designed for long-horizon tasks, rigorous review, multi-model orchestration, and AI discovery.</p>
           <div class="paper-actions">
             <a class="paper-pill primary" href="assets/kiss_sorcar.pdf">PDF</a>
-            <a class="paper-pill" href="https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/kiss_sorcar.tex">Source</a>
           </div>
         </div>
         <div class="inner-card paper-card" style="--i:1">
@@ -2399,7 +2450,6 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <p>A case study of building KISS Sorcar with KISS Sorcar itself. Over 44 days the developer issued 3,099 tasks through the system's own interface; we analyze the SQLite usage log and surface nine recurring human&ndash;AI collaboration patterns.</p>
           <div class="paper-actions">
             <a class="paper-pill primary" href="assets/se_kiss_sorcar.pdf">PDF</a>
-            <a class="paper-pill" href="https://github.com/ksenxx/kiss_ai/blob/main/papers/sekisssorcar/se_kiss_sorcar.tex">Source</a>
           </div>
         </div>
         <div class="inner-card paper-card" style="--i:2">
@@ -2408,7 +2458,30 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <p>A nine-day, hundred-task chronicle of KISS Sorcar drafting, citing, compiling, and debugging its own research paper &mdash; doubling as a stress test of the agent itself.</p>
           <div class="paper-actions">
             <a class="paper-pill primary" href="assets/writing_paper.pdf">PDF</a>
-            <a class="paper-pill" href="https://github.com/ksenxx/kiss_ai/blob/main/papers/writingpaper/writing_paper.tex">Source</a>
+          </div>
+        </div>
+        <div class="inner-card paper-card" style="--i:3">
+          <div class="k">Systems / AI discovery</div>
+          <h3>HydraKV: Adversarial AI Discovery of a Larger-than-Memory Key-Value Store that Outperforms FASTER on Skewed YCSB-A</h3>
+          <p>A larger-than-memory key-value store in dependency-free C++17 that outperforms Microsoft's FASTER on skewed YCSB-A under a hard memory budget &mdash; designed, implemented, and tested almost entirely by KISS Sorcar through natural-language tasks, and verified by independent audits.</p>
+          <div class="paper-actions">
+            <a class="paper-pill primary" href="assets/hydra_kv.pdf">PDF</a>
+          </div>
+        </div>
+        <div class="inner-card paper-card" style="--i:4">
+          <div class="k">Security</div>
+          <h3>SWEDefend: A Confidence-Gated Intent-Alignment Judge with Capability-Diff Reasoning for Automated-Program-Repair Backdoor Defense</h3>
+          <p>A defense against backdoored patches from LLM program-repair agents: a confidence-gated intent-alignment judge with capability-diff reasoning, evaluated on a five-CWE-family corpus and under adaptive attack &mdash; with an honestly reported partial-defense result.</p>
+          <div class="paper-actions">
+            <a class="paper-pill primary" href="assets/swedefend.pdf">PDF</a>
+          </div>
+        </div>
+        <div class="inner-card paper-card" style="--i:5">
+          <div class="k">Testing</div>
+          <h3>Cleverest+: A Fixed-Budget Portfolio and Signature-Grounded Oracle for LLM-Based Commit-Directed Test Generation</h3>
+          <p>Improves LLM-based commit-directed test generation over the Cleverest baseline with a fixed-budget three-model portfolio, sanitizer-signature-grounded oracles, and shell-free execution.</p>
+          <div class="paper-actions">
+            <a class="paper-pill primary" href="assets/cleverest_plus.pdf">PDF</a>
           </div>
         </div>
       </div>
@@ -2416,10 +2489,63 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 04 — AI Software Engineering ================ -->
+  <!-- ================ § 04 — Blog ================ -->
+  <div class="section-wrap">
+  <section id="blog" class="section-card">
+    <span class="num">§ 04 — Blog</span>
+    <h2>✍️ Blog.<a href="#blog" class="anchor">¶</a></h2>
+    <p class="sub">Write-ups of real optimization and discovery runs performed end-to-end by KISS Sorcar, with reproducible numbers.</p>
+    <div class="section-body">
+      <div class="papers-grid">
+        <div class="inner-card paper-card" style="--i:0">
+          <div class="k">10 Aug 2026 &middot; Systems</div>
+          <h3>Making LZ4&rsquo;s Multithreaded File Compression Scale</h3>
+          <p>Rewires the multithreaded file-mode pipeline of lz4 v1.10.0 to reach 1.88&ndash;2.57&times; the throughput of the stock CLI at level -1 (3,810 vs 1,519 MB/s at 32 threads), with compressed output byte-identical to upstream at every tested level. Includes head-to-head runs against pigz, pzstd, and zstd -T. Done in about 7&frac12; hours of agent wall-clock time.</p>
+          <div class="paper-actions">
+            <a class="paper-pill primary" href="blog/lz4-optimization-blog.html">Read post</a>
+          </div>
+        </div>
+        <div class="inner-card paper-card" style="--i:1">
+          <div class="k">10 Aug 2026 &middot; Systems</div>
+          <h3>Optimizing DuckDB Against Its Official and Academic Benchmarks</h3>
+          <p>Makes an upstream DuckDB development tree faster on five suites &mdash; TPC-H sf1, TPC-DS sf1, IMDB/JOB, h2oai group/join, and ClickBench &mdash; with verified geometric-mean speedups of 1.152&ndash;1.237&times; per suite over the stock release build and a largest single-query win of ~1.73&times;. Three of the five suites were held out from all profile training.</p>
+          <div class="paper-actions">
+            <a class="paper-pill primary" href="blog/duckdb-optimization-blog.html">Read post</a>
+          </div>
+        </div>
+        <div class="inner-card paper-card" style="--i:2">
+          <div class="k">9 Aug 2026 &middot; AI Discovery</div>
+          <h3>Reaching 99+ on Biomni &times; TusoAI-Style Biology Benchmarks with AI Discovery</h3>
+          <p>Reconstructs the two benchmark families from Phylo&rsquo;s Biomni &times; TusoAI blog &mdash; perturbation-response prediction (Replogle, Adamson, Norman) and pgBoost-style enhancer&ndash;gene linking &mdash; then runs an AI-discovery loop until one evolved method scores at least 99/100 on every task. Code and full protocol at github.com/ksenxx/biomni_tuso.</p>
+          <div class="paper-actions">
+            <a class="paper-pill primary" href="blog/tuso-evolved-blog.html">Read post</a>
+          </div>
+        </div>
+        <div class="inner-card paper-card" style="--i:3">
+          <div class="k">8 Aug 2026 &middot; Systems</div>
+          <h3>Optimizing SQLite Against Its Official and Academic Benchmarks</h3>
+          <p>Speeds up the SQLite 3.54.0 development trunk on speedtest1, kvtest, TATP (OLTP), and the Star Schema Benchmark (OLAP), reaching a verified geometric-mean speedup of 1.59&times;. Full source published at github.com/ksenxx/sqlite-optimized.</p>
+          <div class="paper-actions">
+            <a class="paper-pill primary" href="blog/sqlite-optimization-blog.html">Read post</a>
+          </div>
+        </div>
+        <div class="inner-card paper-card" style="--i:4">
+          <div class="k">8 Aug 2026 &middot; Audit</div>
+          <h3>Verification of the sqlite-optimized Repository</h3>
+          <p>An independent rebuild-and-reproduce audit of the sqlite-optimized repository: builds cleanly from scratch, no code or wiring missing, and the claimed benchmark results reproduce. A companion piece to the SQLite optimization post.</p>
+          <div class="paper-actions">
+            <a class="paper-pill primary" href="blog/sqlite-optimized-verification-report.html">Read post</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 05 — AI Software Engineering ================ -->
   <div class="section-wrap">
   <section id="ai-software-engineering" class="section-card">
-    <span class="num">§ 04 — AI Software Engineering</span>
+    <span class="num">§ 05 — AI Software Engineering</span>
     <h2>🛠️ AI Software Engineering.<a href="#ai-software-engineering" class="anchor">¶</a></h2>
     <p class="sub">Talks, demos, and case studies on doing real software engineering with KISS Sorcar.</p>
     <div class="section-body">
@@ -2474,10 +2600,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 05 — What is in the Name ================ -->
+  <!-- ================ § 06 — What is in the Name ================ -->
   <div class="section-wrap">
   <section id="name" class="section-card">
-    <span class="num">§ 05 — What is in the Name</span>
+    <span class="num">§ 06 — What is in the Name</span>
     <h2>What is in the Name?<a href="#name" class="anchor">¶</a></h2>
     <p class="sub">Two names. One principle. A nod to a Bengali magician.</p>
     <div class="section-body">
@@ -2497,10 +2623,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 06 — Installation ================ -->
+  <!-- ================ § 07 — Installation ================ -->
   <div class="section-wrap">
   <section id="install" class="section-card">
-    <span class="num">§ 06 — Installation</span>
+    <span class="num">§ 07 — Installation</span>
     <h2>Install in one line.<a href="#install" class="anchor">¶</a></h2>
     <p class="sub">Pick the install path that fits you &mdash; full source, Python package, or the VS Code extension. All you need is at least one API key from a major LLM provider. <strong>The one-line install script below is the recommended way to install the full KISS Sorcar stack.</strong></p>
     <div class="section-body">
@@ -2548,10 +2674,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 07 — Python client API (condensed) ================ -->
+  <!-- ================ § 08 — Python client API (condensed) ================ -->
   <div class="section-wrap">
   <section id="cli" class="section-card">
-    <span class="num">§ 07 — Python API in 30 seconds</span>
+    <span class="num">§ 08 — Python API in 30 seconds</span>
     <h2>The <code style="background:var(--surface);padding:0.05rem 0.45rem;border-radius:6px;font-size:0.85em;color:var(--primary-dark);">sorcar.run</code> Python API.<a href="#cli" class="anchor">¶</a></h2>
     <p class="sub">
       The <code>kiss-web</code> daemon serves every client — the VS Code sidebar, the remote web/mobile app, and your own Python scripts. Call <code>kiss.server.sorcar.run</code> to launch a task on the daemon and block until it finishes: pick any model with <code>model=</code>, cap spend with <code>max_budget=</code>, continue a chat with <code>chat_id=</code>, and hand the agent your own tools with <code>tools=</code>.
@@ -2583,21 +2709,24 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 08 — Messaging & Third-Party Agents ================ -->
+  <!-- ================ § 09 — Messaging & Third-Party Agents ================ -->
   <div class="section-wrap">
   <section id="agents" class="section-card">
-    <span class="num">§ 08 — Messaging &amp; Third-Party Agents</span>
+    <span class="num">§ 09 — Messaging &amp; Third-Party Agents</span>
     <h2>💬 Reach the agent from anywhere.<a href="#agents" class="anchor">¶</a></h2>
-    <p class="sub">KISS Sorcar includes <strong>23 third-party messaging agents</strong> that can send and receive messages on your behalf. It also ships a <strong>Govee smart-home CLI</strong> for controlling IoT lights (on/off, brightness, color, and color temperature) via the Govee Developer API. These agents live in <code>src/kiss/agents/third_party_agents/</code>.</p>
+    <p class="sub">KISS Sorcar includes <strong>32 third-party channel agents</strong> that act on messaging services, mailboxes, and devices on your behalf, plus two infrastructure agents: an <strong>A2A agent</strong> (<code>kiss-a2a</code>) exposing Sorcar over the agent-to-agent protocol and an <strong>OpenAI-compatible server</strong> (<code>kiss-oai</code>) that serves Sorcar behind an OpenAI-style HTTP API. It also ships a <strong>Govee smart-home CLI</strong> for controlling IoT lights (on/off, brightness, color, and color temperature) via the Govee Developer API. These agents live in <code>src/kiss/agents/third_party_agents/</code>.</p>
     <div class="section-body">
       <div class="inner-card" style="--i:0;margin-bottom:1.1rem;">
-        <h3>23 messaging channels</h3>
+        <h3>32 channel agents</h3>
         <div class="chip-cloud" style="margin-top:0.7rem;">
           <span class="chip">BlueBubbles</span>
+          <span class="chip">DingTalk</span>
           <span class="chip">Discord</span>
+          <span class="chip">Email (IMAP/SMTP)</span>
           <span class="chip">Feishu</span>
           <span class="chip">Gmail</span>
           <span class="chip">Google Chat</span>
+          <span class="chip">Home Assistant</span>
           <span class="chip">iMessage</span>
           <span class="chip">IRC</span>
           <span class="chip">LINE</span>
@@ -2606,14 +2735,20 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <span class="chip">Microsoft Teams</span>
           <span class="chip">Nextcloud Talk</span>
           <span class="chip">Nostr</span>
+          <span class="chip">ntfy</span>
           <span class="chip">Phone Control</span>
+          <span class="chip">QQ</span>
           <span class="chip">Signal</span>
+          <span class="chip">SimpleX</span>
           <span class="chip">Slack</span>
           <span class="chip">SMS</span>
           <span class="chip">Synology Chat</span>
           <span class="chip">Telegram</span>
           <span class="chip">Tlon</span>
           <span class="chip">Twitch</span>
+          <span class="chip">Webhook</span>
+          <span class="chip">WeCom</span>
+          <span class="chip">WeiXin</span>
           <span class="chip">WhatsApp</span>
           <span class="chip">Zalo</span>
         </div>
@@ -2626,12 +2761,12 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 09 — Models Supported ================ -->
+  <!-- ================ § 10 — Models Supported ================ -->
   <div class="section-wrap">
   <section id="models" class="section-card">
-    <span class="num">§ 09 — Models Supported</span>
-    <h2>🤖 603 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
-    <p class="sub">KISS Sorcar ships a catalog of <strong>603 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>.</p>
+    <span class="num">§ 10 — Models Supported</span>
+    <h2>🤖 622 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
+    <p class="sub">KISS Sorcar ships a catalog of <strong>622 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>.</p>
 
     <div class="section-body">
       <div class="grid-2">
@@ -2640,12 +2775,12 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <div style="margin-top:0.5rem;">
             <div class="provider-row"><span class="label">OpenAI</span><span class="count">105</span></div>
             <div class="provider-row"><span class="label">Anthropic</span><span class="count">13</span></div>
-            <div class="provider-row"><span class="label">Gemini / Google</span><span class="count">27</span></div>
-            <div class="provider-row"><span class="label">Together AI</span><span class="count">86</span></div>
+            <div class="provider-row"><span class="label">Gemini / Google</span><span class="count">25</span></div>
+            <div class="provider-row"><span class="label">Together AI</span><span class="count">88</span></div>
             <div class="provider-row"><span class="label">Z.AI</span><span class="count">8</span></div>
             <div class="provider-row"><span class="label">Moonshot AI</span><span class="count">10</span></div>
-            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">342</span></div>
-            <div class="provider-row"><span class="label">Claude Code CLI (<code>cc/*</code>)</span><span class="count">3</span></div>
+            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">351</span></div>
+            <div class="provider-row"><span class="label">Claude Code CLI (<code>cc/*</code>)</span><span class="count">13</span></div>
             <div class="provider-row"><span class="label">Codex CLI (<code>codex/*</code>)</span><span class="count">9</span></div>
           </div>
         </div>
@@ -2655,15 +2790,15 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <p>Across all bundled providers, the catalog currently reports:</p>
           <div class="stat-row">
             <div class="stat-pill">
-              <div class="n">586</div>
+              <div class="n">603</div>
               <div class="l">generation-capable models</div>
             </div>
             <div class="stat-pill">
-              <div class="n">428</div>
+              <div class="n">444</div>
               <div class="l">function-calling-capable models</div>
             </div>
             <div class="stat-pill">
-              <div class="n">8</div>
+              <div class="n">10</div>
               <div class="l">embedding models</div>
             </div>
           </div>
@@ -2674,10 +2809,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 10 — Contributing ================ -->
+  <!-- ================ § 11 — Contributing ================ -->
   <div class="section-wrap">
   <section id="contributing" class="section-card">
-    <span class="num">§ 10 — Contributing</span>
+    <span class="num">§ 11 — Contributing</span>
     <h2>🤗 Contributing.<a href="#contributing" class="anchor">¶</a></h2>
     <p class="sub">Contributions in the form of issues are welcome. KISS Sorcar should be able to help implement and review them.</p>
     <div class="section-body">
@@ -2697,10 +2832,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 11 — License ================ -->
+  <!-- ================ § 12 — License ================ -->
   <div class="section-wrap">
   <section id="license" class="section-card">
-    <span class="num">§ 11 — License</span>
+    <span class="num">§ 12 — License</span>
     <h2>📄 License.<a href="#license" class="anchor">¶</a></h2>
     <p class="sub">KISS Sorcar is released under a permissive open-source license.</p>
     <div class="section-body">
@@ -2713,10 +2848,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 12 — Citation ================ -->
+  <!-- ================ § 13 — Citation ================ -->
   <div class="section-wrap">
   <section id="citation" class="section-card">
-    <span class="num">§ 12 — Citation</span>
+    <span class="num">§ 13 — Citation</span>
     <h2>📚 Cite the paper.<a href="#citation" class="anchor">¶</a></h2>
     <p class="sub">If you use KISS Sorcar in your research, please cite:</p>
     <div class="section-body">
@@ -2745,6 +2880,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
       KISS Sorcar &middot; Apache 2.0 &middot;
       <a href="https://github.com/ksenxx/kiss_ai">GitHub</a> &middot;
       <a href="#papers">Papers</a> &middot;
+      <a href="#blog">Blog</a> &middot;
       <a href="assets/kiss_sorcar.pdf">Main paper</a> &middot;
       <a href="assets/se_kiss_sorcar.pdf">SE paper</a> &middot;
       <a href="assets/writing_paper.pdf">Writing paper</a> &middot;
@@ -3441,7 +3577,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
     (function () {
       if (!('IntersectionObserver' in window)) return;
       const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      // Find hero-trust strong elements containing numeric content (e.g. "603 models").
+      // Find hero-trust strong elements containing numeric content (e.g. "622 models").
       const strongs = document.querySelectorAll('.hero-trust strong');
       const items = [];
       strongs.forEach(el => {

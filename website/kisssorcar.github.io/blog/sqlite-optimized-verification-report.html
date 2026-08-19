@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Verification of the sqlite-optimized Repository</title>
+<style>
+  body { font-family: Georgia, 'Times New Roman', serif; color: #222; max-width: 900px;
+         margin: 2.5em auto; padding: 0 1.5em; line-height: 1.55; background: #fdfdfa; }
+  h1 { font-size: 1.7em; border-bottom: 3px double #8a8a7a; padding-bottom: .3em; }
+  h2 { font-size: 1.25em; margin-top: 2em; color: #3a3a2e; border-bottom: 1px solid #d8d8c8; padding-bottom: .2em; }
+  h3 { font-size: 1.05em; color: #4a4a3a; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: .95em; }
+  th, td { border: 1px solid #c8c8b8; padding: .45em .7em; text-align: left; }
+  th { background: #eeeee2; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  code, pre { font-family: 'SF Mono', Consolas, Menlo, monospace; font-size: .88em; background: #f2f2e8; }
+  pre { padding: .8em 1em; overflow-x: auto; border: 1px solid #ddd; border-left: 4px solid #9a9a82; }
+  .verdict { background: #eef6ee; border: 1px solid #b8d4b8; padding: .9em 1.2em; margin: 1.2em 0; }
+  .caveat { background: #fbf6ea; border: 1px solid #e0d0a8; padding: .9em 1.2em; margin: 1.2em 0; }
+  .small { font-size: .85em; color: #555; }
+  figure { margin: 1.6em 0; }
+  figcaption { font-size: .85em; color: #555; margin-top: .4em; }
+  .bar { display: flex; align-items: center; margin: .25em 0; }
+  .bar .label { width: 220px; font-size: .88em; }
+  .bar .track { flex: 1; background: #ececdf; height: 20px; position: relative; }
+  .bar .fill { height: 100%; }
+  .bar .val { margin-left: .6em; font-size: .85em; font-variant-numeric: tabular-nums; width: 70px; }
+</style>
+</head>
+<body>
+
+<h1>Verification of the <code>sqlite-optimized</code> Repository</h1>
+<p class="small">Independent rebuild-and-reproduce audit &middot; 8 August 2026 &middot;
+repository <a href="https://github.com/ksenxx/sqlite-optimized">github.com/ksenxx/sqlite-optimized</a>
+(commit <code>4b19d6bcf</code> on upstream SQLite&nbsp;3.54.0 trunk <code>d0afe9c60</code>),
+cloned to <code>~/sqllite-optimized</code></p>
+
+<div class="verdict">
+<strong>Verdict.</strong> The repository builds cleanly from scratch, no code or wiring is missing,
+the upstream regression suite is green under the documented test protocol, and the published
+benchmark speedups reproduce closely: <strong>1.50&times;</strong> geometric mean using the exact
+documented reproduce steps, <strong>1.55&times;</strong> after adding a fresh profile-guided-optimization
+(PGO) build, versus the published <strong>1.59&times;</strong> (a 2.5% shortfall consistent with
+machine drift and PGO-training differences). Every anti-cheating gate &mdash; result checksums,
+<code>speedtest1 --verify</code>, <code>kvtest --integrity-check</code> &mdash; passed on every
+repetition of every configuration. An independent read-only review by a second model
+(<code>gpt-5.6-sol</code>) recomputed all numbers, confirmed the build fairness, and found
+<em>no engine bug, no cheating, and no verifier-introduced changes</em>.
+</div>
+
+<h2>1. What was verified, and how</h2>
+<ol>
+  <li><strong>Fresh clone.</strong> <code>git clone</code> of the public repository into
+      <code>~/sqllite-optimized</code>; integrity checked (<code>git fsck</code> clean, HEAD as published).</li>
+  <li><strong>Build from scratch.</strong> <code>configure</code> + <code>make sqlite3.c</code>
+      regenerated the 9.5&nbsp;MB amalgamation; the four benchmark binaries
+      (<code>speedtest1</code>, <code>kvtest</code>, <code>tatp</code>, <code>ssb</code>) were built
+      twice from the <em>same</em> amalgamation and sources:
+      a baseline build (<code>-O2&nbsp;-g</code>, stock defaults) and the optimized build
+      (<code>-O3&nbsp;-march=native</code> + the repository&rsquo;s <code>OPT_DEFS</code> stack) &mdash;
+      exactly the reproduce commands published with the repository.</li>
+  <li><strong>Benchmarks.</strong> The repository&rsquo;s fixed protocol <code>benchks/bench.sh</code>
+      (3 repetitions, hard-coded expected checksums, fail-fast) was run for baseline, optimized,
+      and a freshly retrained PGO build whose training workloads deliberately used different
+      sizes and seeds than the measured runs.</li>
+  <li><strong>Tests.</strong> The upstream <code>veryquick</code> suite (~332,000 checks) was run against
+      four differently-configured <code>testfixture</code> builds to separate code effects from
+      changed-default effects.</li>
+  <li><strong>Independent review.</strong> A second model, <code>gpt-5.6-sol</code>, performed a strictly
+      read-only audit of every claim, log, and result file (&asymp;0.03% of task budget, well under the 20% cap).</li>
+</ol>
+
+<h2>2. Benchmark reproducibility</h2>
+<p>Medians of 3 repetitions; smaller is faster. &ldquo;Published&rdquo; figures are from the original
+optimization report (its <code>v4</code> data).</p>
+
+<table>
+<tr><th>Benchmark</th><th class="num">Baseline (today)</th><th class="num">Optimized, documented steps</th><th class="num">Speedup</th><th class="num">Optimized + fresh PGO</th><th class="num">Speedup</th><th class="num">Published speedup</th></tr>
+<tr><td>speedtest1 (official, <code>--verify</code>)</td><td class="num">11.54 s</td><td class="num">5.51 s</td><td class="num"><strong>2.09&times;</strong></td><td class="num">5.86 s</td><td class="num">1.97&times;</td><td class="num">2.06&times;</td></tr>
+<tr><td>TATP transaction mix (academic OLTP)</td><td class="num">4.30 s</td><td class="num">2.37 s</td><td class="num"><strong>1.82&times;</strong></td><td class="num">2.15 s</td><td class="num">2.00&times;</td><td class="num">1.90&times;</td></tr>
+<tr><td>kvtest blob I/O (official, 3 phases)</td><td class="num">2.95 s</td><td class="num">2.31 s</td><td class="num"><strong>1.28&times;</strong></td><td class="num">2.31 s</td><td class="num">1.28&times;</td><td class="num">1.25&times;</td></tr>
+<tr><td>SSB 13 queries (academic OLAP)</td><td class="num">2.85 s</td><td class="num">2.76 s</td><td class="num"><strong>1.03&times;</strong></td><td class="num">2.48 s</td><td class="num">1.15&times;</td><td class="num">1.30&times;</td></tr>
+<tr><th>Geometric mean</th><th></th><th></th><th class="num"><strong>1.50&times;</strong></th><th></th><th class="num"><strong>1.55&times;</strong></th><th class="num">1.59&times;</th></tr>
+</table>
+
+<figure>
+  <div class="bar"><div class="label">Published (with original PGO)</div><div class="track"><div class="fill" style="width:100%;background:#7a9a6a"></div></div><div class="val">1.59&times;</div></div>
+  <div class="bar"><div class="label">Reproduced, fresh PGO</div><div class="track"><div class="fill" style="width:97.5%;background:#8aaa7a"></div></div><div class="val">1.55&times;</div></div>
+  <div class="bar"><div class="label">Reproduced, documented steps</div><div class="track"><div class="fill" style="width:94.1%;background:#9aba8a"></div></div><div class="val">1.50&times;</div></div>
+  <figcaption>Geometric-mean speedup over the four benchmarks: published versus the two independent reproductions.</figcaption>
+</figure>
+
+<h3>Why not exactly 1.59&times;?</h3>
+<ul>
+  <li><strong>Machine drift.</strong> The same physical binaries from the original work, re-run today,
+      give baseline speedtest1 11.77&nbsp;s (published 10.36&nbsp;s) and optimized 5.13&nbsp;s (published
+      5.02&nbsp;s) &mdash; the machine is measurably slower on this path today, yet the <em>ratio</em>
+      still holds at 2.29&times;. The original optimized SSB binary still runs its queries in 2.30&nbsp;s today.</li>
+  <li><strong>PGO training quality.</strong> The published reproduce commands omit the PGO step, which
+      matters most for CPU-bound SSB. A first light PGO retrain gave SSB 1.10&times;, a heavier one 1.15&times;;
+      the original, more extensively trained binary achieves 1.24&times; today. All other benchmarks
+      reproduce at or above their published speedups in at least one configuration.</li>
+  <li>Per the independent reviewer, the honest statement is: <em>&ldquo;closely but not exactly reproduced
+      (1.55&times; vs 1.59&times;), with plausible run-to-run/machine and PGO-profile sensitivity; the exact
+      residual cause was not isolated.&rdquo;</em> The largest single deviation is SSB (&minus;12% vs published).</li>
+</ul>
+
+<h3>Anti-cheating gates (all passed, every repetition)</h3>
+<ul>
+  <li><code>speedtest1 --verify</code> internal result verification.</li>
+  <li><code>kvtest --integrity-check</code> reported <code>ok</code> after all 9 runs.</li>
+  <li>TATP transaction counts <code>139981 39920 140288 7955 55905 8107 7844</code> and checksum
+      <code>10123417494647775989</code>, and SSB row count <code>3394</code> / checksum
+      <code>13164251427055023644</code>, matched the hard-coded expected values on every repetition
+      of every build &mdash; identical answers from baseline and optimized builds.</li>
+  <li>The reviewer confirmed via SHA-256 that <strong>all builds compiled the identical amalgamation</strong>,
+      that the committed benchmark scripts and expected checksums were not altered, and via DWARF metadata
+      that each binary was compiled with exactly the claimed flags.</li>
+</ul>
+
+<h2>3. Test-suite results</h2>
+<table>
+<tr><th>testfixture configuration</th><th>veryquick result</th><th>Interpretation</th></tr>
+<tr><td>Stock defaults (baseline)</td><td>1 error / 332,420 &mdash; only <code>zipfile-25.0</code></td><td>Green. The one failure is a proven environmental artifact: a directory left behind by <code>symlink.test</code>; <code>zipfile.test</code> alone in a clean directory passes 0/120.</td></tr>
+<tr><td>Code changes only (computed-goto + WAL write buffer)</td><td>1 error / 332,420 &mdash; only <code>zipfile-25.0</code></td><td>Green. The engine <em>code changes</em> introduce no regression.</td></tr>
+<tr><td>All tuned defaults except WAL-by-default</td><td>26 errors / 332,796, run completed</td><td>Every failure is in a test that asserts a specific <em>default value</em> the build intentionally changes (WAL autocheckpoint 1000&rarr;16384, cache size, temp store, mmap). All 26 files pass in the code-only build.</td></tr>
+<tr><td>Full <code>OPT_DEFS</code> incl. WAL-by-default</td><td>Fails; aborted mid-suite</td><td>Expected: the upstream suite assumes rollback-journal defaults. Bisection proved the pattern: a WAL-default-only build reproduces the <code>attach2</code> (26/71) and <code>autovacuum</code> (23/339) failures exactly, while the stock build passes them 0 errors.</td></tr>
+</table>
+
+<div class="caveat">
+<strong>Caveat carried over from the original work, now made explicit.</strong> The claim
+&ldquo;full test suite green&rdquo; applies to the <em>source-code changes under default build options</em>
+&mdash; which is exactly how the repository&rsquo;s own audit documents (<code>ADVERSARIAL.md</code>,
+<code>HARDENING.md</code>) say testing was done, and which this verification reproduced. The upstream
+suite does not support builds whose <em>runtime defaults</em> are changed (WAL-by-default, autocheckpoint,
+cache/mmap/temp-store); those failures were bisected to the changed defaults, not to code. Two related
+reviewer notes: (a) two bisected files plus the completed defaults-minus-WAL run make the attribution
+strong but not exhaustive for every failing case; (b) testfixture builds define <code>SQLITE_TEST</code>,
+which by design disables computed-goto dispatch, so the suite exercises the fallback dispatch path
+(the benchmark binaries do exercise computed-goto, under checksum verification).
+</div>
+
+<h2>4. Independent read-only review (gpt-5.6-sol)</h2>
+<ul>
+  <li>Recomputed every median, speedup, and geomean from the raw result files: <strong>no arithmetic errors</strong>
+      (1.4961&times; documented steps; 1.5499&times; PGO round 2).</li>
+  <li>Verified clone integrity, build fairness (same sources, same feature defines, only
+      <code>OPT_DEFS</code>/CFLAGS differ), and that the optimized defaults were genuinely active
+      (fresh databases born in WAL mode; baseline stays on rollback journal).</li>
+  <li>Independently re-ran the zipfile and WAL-default bisections and got identical results.</li>
+  <li>Confirmed <strong>no tracked file was modified</strong> in either repository during verification.</li>
+  <li>PGO anti-cheating check passed: training workloads differ from measured workloads in size and seed
+      for all four benchmarks; final binaries carry <code>-fprofile-use</code> and no instrumentation.</li>
+  <li>Findings were limited to reporting-precision qualifications (incorporated above); no invented problems.</li>
+</ul>
+
+<h2>5. Reproduce it yourself</h2>
+<pre><code>git clone https://github.com/ksenxx/sqlite-optimized ~/sqllite-optimized
+cd ~/sqllite-optimized &amp;&amp; mkdir build-base build-opt
+( cd build-base &amp;&amp; ../configure &amp;&amp; make sqlite3.c )
+cp build-base/sqlite3.{c,h} build-opt/
+benchks/build_bench.sh build-base                    # baseline: -O2, stock defaults
+. benchks/optflags.sh
+CFLAGS="-O3 -march=native -g" benchks/build_bench.sh build-opt $OPT_DEFS
+benchks/bench.sh build-base baseline 3               # results: benchks/results/baseline.txt
+benchks/bench.sh build-opt  final    3               # results: benchks/results/final.txt
+( cd build-base &amp;&amp; make testfixture &amp;&amp; ./testfixture ../test/veryquick.test )
+</code></pre>
+<p class="small">Raw artifacts from this verification remain in
+<code>~/sqllite-optimized/benchks/results/</code> (<code>baseline-repro.txt</code>,
+<code>final-repro.txt</code>, <code>final-pgo-repro.txt</code>, <code>final-pgo2-repro.txt</code>)
+and the build directories <code>build-base</code>, <code>build-opt</code>, <code>build-pgo</code>,
+<code>build-code</code>, <code>build-waldef</code>, <code>build-tunes</code>.</p>
+
+</body>
+</html>

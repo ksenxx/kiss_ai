@@ -1,0 +1,145 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""Backend ``isDone`` regression tests extracted from
+``kiss.tests.agents.vscode.test_subagent_history_tab_icon``.
+
+``_replay_session`` consults the task-id-keyed registry
+:mod:`kiss.server.agent_state` (via ``_subagent_is_done``) to decide
+whether a sub-agent tab reopened from history is still running or
+already done; the result is broadcast as ``isDone`` on
+``openSubagentTab``.  Moved here because the dependency closure is
+kiss.agents.sorcar (persistence) + kiss.server only; the static
+``media/main.js`` handler checks stayed behind in tests/agents/vscode.
+"""
+
+from __future__ import annotations
+
+import shutil
+import tempfile
+import threading
+from pathlib import Path
+
+import kiss.agents.sorcar.persistence as th
+from kiss.server import agent_state
+from kiss.server.server import VSCodeServer
+
+
+def _redirect(tmpdir: str) -> tuple[Path, object, Path]:
+    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    kiss_dir = Path(tmpdir) / ".kiss"
+    kiss_dir.mkdir(parents=True, exist_ok=True)
+    th._KISS_DIR = kiss_dir
+    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._db_conn = None
+    return saved  # type: ignore[return-value]
+
+
+def _restore(saved: tuple[Path, object, Path]) -> None:
+    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
+
+
+def _make_server() -> tuple[VSCodeServer, list[dict]]:
+    server = VSCodeServer()
+    events: list[dict] = []
+    lock = threading.Lock()
+
+    def capture(event: dict) -> None:
+        ev = server.printer._inject_task_id(event)
+        with server.printer._lock:
+            server.printer._record_event(ev)
+        with lock:
+            events.append(ev)
+
+    server.printer.broadcast = capture  # type: ignore[assignment]
+    return server, events
+
+
+def _seed_subagent_row(
+    *,
+    parent_task_id: str,
+    chat_id: str,
+    description: str,
+) -> str:
+    task_id, _ = th._add_task(description, chat_id=chat_id)
+    th._append_chat_event(
+        {"type": "text_delta", "text": "x"}, task_id=task_id,
+    )
+    th._save_task_extra(
+        {
+            "model": "m",
+            "work_dir": "/tmp",
+            "version": "v",
+            "tokens": 0,
+            "cost": 0.0,
+            "is_parallel": False,
+            "is_worktree": False,
+            "subagent": {"parent_task_id": parent_task_id},
+        },
+        task_id=task_id,
+    )
+    return task_id
+
+
+class TestBackendIsDoneSignal:
+    """``_replay_session`` decides ``isDone`` from task-id-keyed
+    :mod:`kiss.server.agent_state` registry membership."""
+
+    def setup_method(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = _redirect(self.tmpdir)
+        agent_state.agent_states.clear()
+
+    def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
+        if th._db_conn is not None:
+            th._db_conn.close()
+            th._db_conn = None
+        _restore(self.saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_completed_subagent_emits_is_done_true(self) -> None:
+        chat_id = "chat-done"
+        parent_id, _ = th._add_task("parent", chat_id=chat_id)
+        task_id = _seed_subagent_row(
+            parent_task_id=parent_id,
+            chat_id=chat_id,
+            description="Completed sub-task",
+        )
+        server, events = _make_server()
+        assert agent_state.get(task_id) is None
+
+        server._replay_session(
+            chat_id=chat_id,
+            tab_id="tab-history-click",
+            task_id=task_id,
+        )
+
+        opens = [e for e in events if e.get("type") == "openSubagentTab"]
+        assert len(opens) == 1, events
+        assert opens[0]["isDone"] is True
+
+    def test_running_subagent_emits_is_done_false(self) -> None:
+        chat_id = "chat-running"
+        parent_id, _ = th._add_task("parent", chat_id=chat_id)
+        task_id = _seed_subagent_row(
+            parent_task_id=parent_id,
+            chat_id=chat_id,
+            description="Running sub-task",
+        )
+        server, events = _make_server()
+        running_state = agent_state.AgentState(task_id, is_task_active=True)
+        agent_state.register(running_state)
+        try:
+            server._replay_session(
+                chat_id=chat_id,
+                tab_id="tab-history-click",
+                task_id=task_id,
+            )
+        finally:
+            agent_state.unregister(task_id, running_state)
+
+        opens = [e for e in events if e.get("type") == "openSubagentTab"]
+        assert len(opens) == 1, events
+        assert opens[0]["isDone"] is False

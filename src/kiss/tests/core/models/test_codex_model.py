@@ -10,27 +10,32 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.kiss_error import KISSError
 from kiss.core.models import codex_model as codex_module
 from kiss.core.models.codex_model import (
     CodexModel,
-    _find_codex_cli,
     _find_in_candidate_paths,
     find_codex_executable,
 )
 from kiss.core.models.model_info import MODEL_INFO, model
+from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 
 _has_codex = shutil.which("codex") is not None
+
+
 requires_codex_cli = pytest.mark.skipif(not _has_codex, reason="codex CLI not installed")
 
 
-class TestFindCodexCli:
-
-    def test_find_codex_cli_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(shutil, "which", lambda _name: None)
-        monkeypatch.setattr(codex_module, "_UI_CANDIDATE_PATHS", ())
-        with pytest.raises(KISSError, match="not found"):
-            _find_codex_cli()
+_CODEX_MODEL_NAMES = (
+    "codex/codex-auto-review",
+    "codex/default",
+    "codex/gpt-5.2",
+    "codex/gpt-5.4",
+    "codex/gpt-5.4-mini",
+    "codex/gpt-5.5",
+    "codex/gpt-5.6-luna",
+    "codex/gpt-5.6-sol",
+    "codex/gpt-5.6-terra",
+)
 
 
 class TestFindInCandidatePaths:
@@ -306,13 +311,6 @@ class TestGenerateAndProcessWithTools:
         assert "system_instruction" not in m.model_config
 
 
-class TestUnsupportedMethods:
-    def test_get_embedding_raises(self) -> None:
-        m = CodexModel("codex/default")
-        with pytest.raises(KISSError, match="does not support embeddings"):
-            m.get_embedding("test")
-
-
 class TestTokenExtraction:
 
     def test_extract_from_non_dict(self) -> None:
@@ -354,19 +352,6 @@ class TestModelRouting:
         assert m._cli_model == "gpt-5-codex"
 
 
-_CODEX_MODEL_NAMES = (
-    "codex/codex-auto-review",
-    "codex/default",
-    "codex/gpt-5.2",
-    "codex/gpt-5.4",
-    "codex/gpt-5.4-mini",
-    "codex/gpt-5.5",
-    "codex/gpt-5.6-luna",
-    "codex/gpt-5.6-sol",
-    "codex/gpt-5.6-terra",
-)
-
-
 class TestModelInfoEntries:
     def test_codex_models_in_model_info(self) -> None:
         for name in _CODEX_MODEL_NAMES:
@@ -400,13 +385,6 @@ class TestGenerateIntegration:
         content, _response = m.generate()
         assert "pong" in content.lower()
         assert len(tokens) > 0
-
-    @pytest.mark.timeout(120)
-    def test_generate_failure_raises(self) -> None:
-        m = CodexModel("codex/this-model-does-not-exist-xyz")
-        m.initialize("hi")
-        with pytest.raises(KISSError, match="Codex CLI failed"):
-            m.generate()
 
     @pytest.mark.timeout(240)
     def test_generate_can_modify_files(

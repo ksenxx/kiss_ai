@@ -226,6 +226,10 @@ class TestSaveTaskExtra:
         entries = th._load_history(limit=1)
         import json as _json
         loaded = _json.loads(str(entries[0]["extra"]))
+        # A row that never recorded a startTs reports its insertion
+        # timestamp instead (the history sidebar's own fallback).
+        start_ts = loaded.pop("startTs")
+        assert start_ts > 0
         assert loaded == {
             "model": "",
             "work_dir": "",
@@ -236,8 +240,8 @@ class TestSaveTaskExtra:
             "steps": 0,
             "is_parallel": False,
             "is_worktree": False,
-            "startTs": 0,
             "endTs": 0,
+            "max_budget": 0.0,
             "is_favorite": False,
         }
 

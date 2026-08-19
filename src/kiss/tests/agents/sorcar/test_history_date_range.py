@@ -27,11 +27,9 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
-from kiss.server.server import VSCodeServer
 
 
 def _redirect(tmpdir: str) -> tuple:
@@ -47,23 +45,6 @@ def _redirect(tmpdir: str) -> tuple:
 
 def _restore(saved: tuple) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved
-
-
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    """Create a VSCodeServer whose broadcasts go into an in-memory list."""
-    server = VSCodeServer()
-    events: list[dict] = []
-    lock = threading.Lock()
-
-    def capture(event: dict) -> None:
-        ev = server.printer._inject_task_id(event)
-        with server.printer._lock:
-            server.printer._record_event(ev)
-        with lock:
-            events.append(ev)
-
-    server.printer.broadcast = capture  # type: ignore[assignment]
-    return server, events
 
 
 def _set_timestamp(task_id: str, ts: float) -> None:
@@ -116,40 +97,3 @@ class TestHistoryDateRange:
         )
         _set_timestamp(sub_id, 10.0)
         assert th._history_date_range() == (5_000.0, 5_000.0)
-
-    def test_history_event_carries_date_range(self) -> None:
-        id1, _ = th._add_task("first task", chat_id="c1")
-        id2, _ = th._add_task("last task", chat_id="c2")
-        _set_timestamp(id1, 1_234.5)
-        _set_timestamp(id2, 6_789.5)
-
-        server, events = _make_server()
-        server._get_history(query=None, offset=0, generation=0)
-
-        hist = [e for e in events if e.get("type") == "history"]
-        assert len(hist) == 1
-        assert hist[0]["dateRange"] == {"min": 1_234.5, "max": 6_789.5}
-
-    def test_history_event_date_range_on_empty_db(self) -> None:
-        server, events = _make_server()
-        server._get_history(query=None, offset=0, generation=0)
-
-        hist = [e for e in events if e.get("type") == "history"]
-        assert len(hist) == 1
-        assert hist[0]["dateRange"] == {"min": None, "max": None}
-
-    def test_search_history_event_also_carries_date_range(self) -> None:
-        """The range reflects the WHOLE db even for filtered queries,
-        so the auto-fill never narrows below the true first/last."""
-        id1, _ = th._add_task("alpha task", chat_id="c1")
-        id2, _ = th._add_task("beta task", chat_id="c2")
-        _set_timestamp(id1, 100.0)
-        _set_timestamp(id2, 200.0)
-
-        server, events = _make_server()
-        server._get_history(query="beta", offset=0, generation=0)
-
-        hist = [e for e in events if e.get("type") == "history"]
-        assert len(hist) == 1
-        assert [s["title"] for s in hist[0]["sessions"]] == ["beta task"]
-        assert hist[0]["dateRange"] == {"min": 100.0, "max": 200.0}

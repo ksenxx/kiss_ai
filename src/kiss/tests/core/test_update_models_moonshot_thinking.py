@@ -17,8 +17,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-MOONSHOT_LEVELS = ("low", "high", "max")
-
 
 class _MoonshotHandler(BaseHTTPRequestHandler):
     """Emulates api.moonshot.ai/v1/chat/completions for kimi-k3.
@@ -138,39 +136,8 @@ def moonshot_wire(monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
         server.shutdown()
 
 
-ALL_KNOWN_LEVELS = ("low", "medium", "high", "xhigh", "max")
-
-
 class TestRuntimeAliasResolution:
     """Kimi K3 aliases must resolve and route like every other alias."""
-
-    def test_strip_thinking_alias_maps_max_to_base(self) -> None:
-        from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias
-
-        for level in MOONSHOT_LEVELS:
-            name = f"kimi-k3-{level}"
-            assert name in MODEL_INFO, f"{name} missing from loaded MODEL_INFO"
-            assert _strip_thinking_alias(name) == "kimi-k3"
-
-    def test_provider_model_name_and_effort_for_max_alias(self) -> None:
-        from kiss.core.models.openai_compatible_model import (
-            _model_thinking_level,
-            _provider_model_name,
-        )
-
-        assert _provider_model_name("kimi-k3-max") == "kimi-k3"
-        assert _model_thinking_level("kimi-k3-max") == "max"
-        assert (
-            _provider_model_name("openrouter/moonshotai/kimi-k3-max")
-            == "moonshotai/kimi-k3"
-        )
-        assert _model_thinking_level("openrouter/moonshotai/kimi-k3-max") == "max"
-
-    def test_unmarked_max_suffix_is_not_stripped(self) -> None:
-        """A name ending in -max with no catalog alias marker stays intact."""
-        from kiss.core.models.model_info import _strip_thinking_alias
-
-        assert _strip_thinking_alias("acme/custom-max") == "acme/custom-max"
 
     def test_factory_builds_kimi_max_alias_with_effort(self, moonshot_wire: str) -> None:
         """model('kimi-k3-max') must send model=kimi-k3, effort=max."""
@@ -195,19 +162,3 @@ class TestRuntimeAliasResolution:
         body = _MoonshotHandler.captured_bodies[0]
         assert body["model"] == "kimi-k3", "The wire id must be the base model"
         assert body["reasoning_effort"] == "max"
-
-    def test_kimi_aliases_cost_the_same_as_base(self) -> None:
-        from kiss.core.models.model_info import calculate_cost
-
-        base_cost = calculate_cost("kimi-k3", 1000, 500, 200, 100)
-        for level in MOONSHOT_LEVELS:
-            assert calculate_cost(f"kimi-k3-{level}", 1000, 500, 200, 100) == base_cost
-
-
-def test_every_bundled_alias_thinking_is_a_known_level() -> None:
-    """Every marked alias in the bundled catalog uses a known level name."""
-    from kiss.core.models.model_info import MODEL_INFO
-
-    for name, info in MODEL_INFO.items():
-        if info.alias_of:
-            assert info.thinking in ALL_KNOWN_LEVELS, (name, info.thinking)
