@@ -292,6 +292,72 @@ async function run() {
     );
   });
 
+  await test('the saved-page path in the banner becomes a file link', () => {
+    // The path holds a space, which the prose regex of
+    // linkifyFilePaths() would split in two: the banner must wrap the
+    // EXACT path the daemon replied with.
+    const SAVED = '/tmp/My Project/reports/chat-link.html';
+    const wv = makeWebview();
+    const TAB = runSmallTask(wv, 'chat-link', 'task-link');
+    send(wv.win, {type: 'share_done', ok: true, path: SAVED, tabId: TAB});
+    // The path starts as an inert candidate span and the webview asks
+    // the host whether the file exists — the same round-trip every
+    // transcript file path takes.
+    const cand = wv.win.document.querySelector(
+      '#output .ev.note [data-path-candidate]',
+    );
+    assert.ok(cand, 'the saved path must be wrapped in a candidate span');
+    assert.strictEqual(cand.getAttribute('data-path-candidate'), SAVED);
+    assert.strictEqual(cand.textContent, SAVED);
+    const check = wv.posted.filter(m => m.type === 'checkPaths').pop();
+    assert.ok(
+      check && check.paths.includes(SAVED),
+      'the webview must ask the host whether the saved page exists',
+    );
+    assert.strictEqual(check.tabId, TAB);
+    // The host confirms (the daemon just wrote the file) and the span
+    // is promoted to a clickable link.
+    const results = {};
+    results[SAVED] = true;
+    send(wv.win, {
+      type: 'pathsExist',
+      results: results,
+      workDir: check.workDir,
+      tabId: check.tabId,
+    });
+    const link = wv.win.document.querySelector('#output .ev.note [data-path]');
+    assert.ok(link, 'the confirmed path must become a clickable file link');
+    assert.strictEqual(link.getAttribute('data-path'), SAVED);
+    // Clicking the promoted link asks the host to open the saved page.
+    click(link);
+    const open = wv.posted.filter(m => m.type === 'openFile').pop();
+    assert.ok(open, 'clicking the link must post an openFile command');
+    assert.strictEqual(open.path, SAVED);
+    assert.strictEqual(open.tabId, TAB);
+  });
+
+  await test('a share_done reply without a path is still a plain note', () => {
+    const wv = makeWebview();
+    const TAB = runSmallTask(wv, 'chat-nopath', 'task-nopath');
+    const before = wv.posted.filter(m => m.type === 'checkPaths').length;
+    send(wv.win, {type: 'share_done', ok: true, tabId: TAB});
+    const banners = wv.win.document.querySelectorAll('#output .ev.note');
+    const texts = Array.from(banners, b => b.textContent);
+    assert.ok(
+      texts.some(t => t.includes('Chat page saved to reports/')),
+      'the note must fall back to the reports/ directory',
+    );
+    assert.ok(
+      !wv.win.document.querySelector('#output .ev.note [data-path-candidate]'),
+      'no candidate span exists without an exact path',
+    );
+    assert.strictEqual(
+      wv.posted.filter(m => m.type === 'checkPaths').length,
+      before,
+      'no existence check is posted without an exact path',
+    );
+  });
+
   await test('share_done failure shows an error banner and a red flash', () => {
     const wv = makeWebview();
     const TAB = runSmallTask(wv, 'chat-2', 'task-2');
