@@ -109,7 +109,9 @@ class TestReplaySessionWithEvents:
             assert len(task_ev) == 1
             ev_list = task_ev[0].get("events", [])
             assert isinstance(ev_list, list)
-            assert len(ev_list) == 2
+            # The synthesized task_settings event leads the replay.
+            assert len(ev_list) == 3
+            assert ev_list[0].get("type") == "task_settings"
         finally:
             th._close_db()
             th._db_conn = orig_conn

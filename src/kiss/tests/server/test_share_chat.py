@@ -316,10 +316,16 @@ class TestShareChatTasksOverUds(_UdsServerTestCase):
             [t["task"] for t in event["tasks"]],
             ["first task", "second task"],
         )
+        # Each task's events start with the ensured task_settings event
+        # (synthesized from the row when the stream carries none).
         self.assertEqual(
-            event["tasks"][0]["events"][0]["command"], "ls -la"
+            [t["events"][0]["type"] for t in event["tasks"]],
+            ["task_settings", "task_settings"],
         )
-        self.assertEqual(event["tasks"][1]["events"][0]["command"], "pwd")
+        self.assertEqual(
+            event["tasks"][0]["events"][1]["command"], "ls -la"
+        )
+        self.assertEqual(event["tasks"][1]["events"][1]["command"], "pwd")
 
     def test_subagent_rows_are_not_chat_tasks(self) -> None:
         parent = self._seed("chat-s", "parent task", "ls")
@@ -512,7 +518,10 @@ class TestShareChatOverWss(IsolatedAsyncioTestCase):
             [t["task_id"] for t in event["tasks"]], [first, second]
         )
         self.assertEqual(
-            event["tasks"][1]["events"][0]["command"], "pwd"
+            event["tasks"][1]["events"][0]["type"], "task_settings"
+        )
+        self.assertEqual(
+            event["tasks"][1]["events"][1]["command"], "pwd"
         )
 
 

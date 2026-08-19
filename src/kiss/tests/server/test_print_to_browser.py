@@ -61,7 +61,7 @@ class TestDisplayEventTypes(unittest.TestCase):
             "system_output", "result", "system_prompt", "prompt",
             "task_done", "task_error", "task_stopped", "task_interrupted",
             "followup_suggestion", "autocommit_done", "warning",
-            "usage_info",
+            "usage_info", "task_settings",
         }
         assert _DISPLAY_EVENT_TYPES == expected
 
