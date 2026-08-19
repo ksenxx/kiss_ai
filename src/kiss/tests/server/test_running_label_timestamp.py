@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 
 import kiss.server
+from kiss.server import web_server
 
 
 def test_task_runner_persists_start_end_ts_to_extra():
@@ -112,3 +113,12 @@ def test_get_history_emits_start_ts_per_session():
     assert 'session["endTs"]' in body, (
         "_get_history must set session['endTs'] (ms since epoch or 0)"
     )
+
+
+def test_built_html_loads_main_js():
+    """Smoke check: the served HTML still references main.js so the
+    frontend timestamp handling (pinned by the static main.js checks in
+    ``kiss.tests.agents.vscode.test_running_label_timestamp``) is
+    actually delivered to the webview."""
+    html = web_server._build_html()  # type: ignore[attr-defined]
+    assert "main.js" in html
