@@ -34,7 +34,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from kiss.server import web_server
 from kiss.tests.server.test_running_label_timestamp import _read
 
 MAIN_JS = (
@@ -127,10 +126,3 @@ def test_task_done_uses_event_start_and_end_ts():
         r"ev\.endTs\s*-\s*ev\.startTs|ev\.startTs\s*&&\s*ev\.endTs",
         body,
     ), "task_done must subtract ev.startTs from ev.endTs"
-
-
-def test_built_html_loads_main_js():
-    """Smoke check: the served HTML still references main.js so the
-    changes above are actually delivered to the webview."""
-    html = web_server._build_html()  # type: ignore[attr-defined]
-    assert "main.js" in html

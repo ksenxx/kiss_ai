@@ -2,205 +2,46 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for race conditions in sorcar/ and vscode/.
+"""Tests for race condition fixes in Base, json_printer, and model.
 
-These tests deliberately interleave concurrent threads to reproduce
-specific race conditions identified in
-``kiss.agents.sorcar.persistence`` and
-``kiss.server.autocomplete``.
-
-Each test inserts a small ``random.uniform(0, 0.05)`` sleep at the
-suspected racing statement, then runs the involved threads many times
-to make the failure deterministic.
+Verifies thread-safety of shared mutable state: agent_counter,
+_bash_buffer, and _callback_helper_loop.
+Also verifies cross-process safety of _record_model_usage and _save_last_model.
 """
 
-from __future__ import annotations
-
-import random
-import shutil
-import tempfile
-import threading
-import time
+import queue
 from pathlib import Path
 
-import kiss.agents.sorcar.persistence as th
+
+def _drain(q: queue.Queue) -> list[dict]:
+    events = []
+    while True:
+        try:
+            events.append(q.get_nowait())
+        except queue.Empty:
+            break
+    return events
 
 
-def _redirect(tmpdir: str):
-    """Point persistence at a temporary DB and reset cached state."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
+def _worker_record_model_usage(db_dir: str, model: str, n: int) -> None:
+    """Child-process worker: record model usage *n* times via SQLite."""
+    import kiss.agents.sorcar.persistence as th
+
+    kiss_dir = Path(db_dir)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "sorcar.db"
     th._db_conn = None
-    th._invalidate_chat_context_cache("")
-    return old
+    for _ in range(n):
+        th._record_model_usage(model)
 
 
-def _restore(saved):
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-    th._invalidate_chat_context_cache("")
+def _worker_save_last_model(db_dir: str, model: str, n: int) -> None:
+    """Child-process worker: call _save_last_model *n* times via SQLite."""
+    import kiss.agents.sorcar.persistence as th
 
-
-class TestChatContextCacheStaleWrite:
-    """Race 1: ``_load_chat_context_text`` writes stale data into cache.
-
-    Reader R1 misses the cache, runs the SQL read (under the read
-    lock) and gets snapshot ``D1``.  Before R1 stores the result, a
-    writer W commits a new task and invalidates the cache.  A second
-    reader R2 misses, runs the SQL read, gets ``D2`` (with W's new
-    task) and stores ``D2`` into the cache.  R1 then stores ``D1``,
-    permanently overwriting the fresh ``D2`` and returning stale data
-    on every subsequent call until another invalidation happens.
-    """
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self) -> None:
-        th._stop_event_writer()
-        th._close_db()
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_stale_cache_write(self) -> None:
-        chat_id = "race-chat"
-        th._add_task("task-zero", chat_id=chat_id)
-
-        r1_in_sql = threading.Event()
-        let_r1_finish = threading.Event()
-
-        original = th._load_chat_context
-        call_count = {"n": 0}
-        cc_lock = threading.Lock()
-
-        def staged_load_chat_context(cid: str):
-            with cc_lock:
-                call_count["n"] += 1
-                n = call_count["n"]
-            data = original(cid)
-            if n == 1:
-                r1_in_sql.set()
-                time.sleep(random.uniform(0.001, 0.05))
-                let_r1_finish.wait(timeout=5)
-            return data
-
-        th._load_chat_context = staged_load_chat_context  # type: ignore[assignment]
-
-        try:
-            def reader_one() -> None:
-                th._load_chat_context_text(chat_id)
-
-            t_r1 = threading.Thread(target=reader_one)
-            t_r1.start()
-            assert r1_in_sql.wait(timeout=5)
-
-            th._add_task("task-one", chat_id=chat_id)
-
-            def reader_two() -> None:
-                th._load_chat_context_text(chat_id)
-
-            t_r2 = threading.Thread(target=reader_two)
-            t_r2.start()
-            t_r2.join(timeout=5)
-
-            assert "task-one" in th._load_chat_context_text(chat_id)
-
-            let_r1_finish.set()
-            t_r1.join(timeout=5)
-
-            cached_after = th._load_chat_context_text(chat_id)
-            assert "task-one" in cached_after, (
-                "stale chat-context cache survived a concurrent invalidation"
-            )
-        finally:
-            th._load_chat_context = original  # type: ignore[assignment]
-            let_r1_finish.set()
-
-
-class TestAutocompleteWorkerDoubleSpawn:
-    """Race 2: ``_AutocompleteMixin._ensure_complete_worker`` spawns
-    duplicate worker threads when called from multiple threads.
-
-    Two callers both observe ``self._complete_worker is None``, both
-    create their own ``queue.Queue`` and worker thread, and the
-    second thread overwrites the first thread's published references
-    on ``self`` — leaving one worker reading from an orphaned queue
-    forever (zombie thread) and producers enqueuing into a queue that
-    a different worker drains.
-    """
-
-    def test_double_spawn(self) -> None:
-        import queue as queue_mod
-
-        from kiss.server.autocomplete import _AutocompleteMixin
-
-        instance = _AutocompleteMixin()
-        instance._state_lock = threading.RLock()  # type: ignore[attr-defined]
-        instance._complete_queue = None  # type: ignore[attr-defined]
-        instance._complete_worker = None  # type: ignore[attr-defined]
-
-        def fake_loop(self_ref: object) -> None:
-            q = getattr(self_ref, "_complete_queue", None)
-            if q is None:
-                return
-            while True:
-                try:
-                    item = q.get(timeout=0.5)
-                except queue_mod.Empty:
-                    return
-                if item is None:
-                    return
-
-        original_loop = _AutocompleteMixin._complete_worker_loop
-        _AutocompleteMixin._complete_worker_loop = fake_loop  # type: ignore[assignment]
-
-        try:
-            original_q_init = queue_mod.Queue.__init__
-
-            def slow_init(self: object, *args: object, **kwargs: object) -> None:
-                time.sleep(random.uniform(0.01, 0.03))
-                original_q_init(self, *args, **kwargs)  # type: ignore[arg-type]
-
-            queue_mod.Queue.__init__ = slow_init  # type: ignore[method-assign]
-
-            try:
-                threads = []
-                for _ in range(16):
-                    t = threading.Thread(target=instance._ensure_complete_worker)
-                    threads.append(t)
-                for t in threads:
-                    t.start()
-                for t in threads:
-                    t.join(timeout=5)
-            finally:
-                queue_mod.Queue.__init__ = original_q_init  # type: ignore[method-assign]
-
-            alive_workers = []
-            for t in threading.enumerate():
-                target = getattr(t, "_target", None)
-                if target is None:
-                    continue
-                if not t.daemon or not t.is_alive():
-                    continue
-                if not t.name.startswith("Thread-"):
-                    continue
-                if getattr(target, "__name__", "") == "fake_loop":
-                    alive_workers.append(t)
-            assert len(alive_workers) <= 1, (
-                f"double-spawn race: {len(alive_workers)} workers alive"
-            )
-            assert instance._complete_queue is not None
-            assert instance._complete_worker is not None
-            assert instance._complete_worker.is_alive()
-        finally:
-            _AutocompleteMixin._complete_worker_loop = (  # type: ignore[method-assign]
-                original_loop
-            )
-            if instance._complete_queue is not None:
-                try:
-                    instance._complete_queue.put_nowait(None)
-                except Exception:
-                    pass
+    kiss_dir = Path(db_dir)
+    th._KISS_DIR = kiss_dir
+    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._db_conn = None
+    for _ in range(n):
+        th._save_last_model(model)

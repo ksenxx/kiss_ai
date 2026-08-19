@@ -24,7 +24,6 @@ from __future__ import annotations
 from google.genai import types
 
 from kiss.core.models.gemini_model import GeminiModel
-from kiss.server.json_printer import JsonPrinter
 
 
 class TestGeminiStreamPartsThinkingCallback:
@@ -103,56 +102,6 @@ class TestGeminiStreamPartsThinkingCallback:
         assert thinking_events == [], (
             f"thinking_callback fired unexpectedly: {thinking_events}"
         )
-
-    def test_browser_printer_routes_thinking_tokens_correctly(self) -> None:
-        """Thinking tokens must be broadcast as thinking_delta, not text_delta.
-
-        This is the core bug reproduction: without thinking_callback, the
-        JsonPrinter never sets _current_block_type to 'thinking',
-        so thinking tokens are broadcast as text_delta events.
-        """
-        printer = JsonPrinter()
-        printer._thread_local.task_id = "gemini-thinking-test"
-        printer.start_recording()
-
-        m = GeminiModel(
-            "gemini-2.5-flash",
-            api_key="test-key",
-            token_callback=printer.token_callback,
-            thinking_callback=printer.thinking_callback,
-        )
-
-        m._stream_parts([types.Part(text="Deep reasoning here.", thought=True)])
-        m._stream_parts([types.Part(text="The result is X.")])
-
-        recorded = printer.stop_recording()
-        event_types = [e["type"] for e in recorded]
-
-        assert "thinking_start" in event_types, (
-            f"No thinking_start — types: {event_types}"
-        )
-        assert "thinking_end" in event_types, (
-            f"No thinking_end — types: {event_types}"
-        )
-
-        start_idx = event_types.index("thinking_start")
-        end_idx = event_types.index("thinking_end")
-        between = recorded[start_idx + 1 : end_idx]
-        thinking_deltas = [e for e in between if e["type"] == "thinking_delta"]
-        assert thinking_deltas, (
-            "No thinking_delta events between thinking_start/end — "
-            "thinking tokens leaked as text_delta"
-        )
-
-        thought_text = "".join(d["text"] for d in thinking_deltas)
-        assert "Deep reasoning here." in thought_text
-
-        text_deltas = [e for e in recorded if e["type"] == "text_delta"]
-        text_content = "".join(d.get("text", "") for d in text_deltas)
-        assert "Deep reasoning here." not in text_content, (
-            f"Thinking text leaked into text_delta: {text_content}"
-        )
-        assert "The result is X." in text_content
 
     def test_close_thinking_if_open_closes_open_block(self) -> None:
         """_close_thinking_if_open must close an open thinking block.

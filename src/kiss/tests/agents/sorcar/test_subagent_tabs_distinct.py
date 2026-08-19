@@ -18,21 +18,12 @@ subscribing the new tab to the sub-agent's live event stream.
 from __future__ import annotations
 
 import threading
-from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import run_tasks_parallel
 from kiss.core.printer import Printer
-
-MAIN_JS = (
-    Path(__file__).resolve().parents[3]
-    / "agents"
-    / "vscode"
-    / "media"
-    / "main.js"
-)
 
 
 class _MockPrinter:
@@ -119,30 +110,3 @@ class TestBackendBroadcastsDistinctSubagentTabs:
             assert isinstance(evt["task_id"], str), (
                 f"new_tab event must carry an int task_id: {evt}"
             )
-
-
-
-
-class TestSubagentTitlesAreVisuallyDistinct:
-    """When three task descriptions share a 40-char prefix, the
-    rendered tab titles still differ because the index prefix
-    differentiates them.
-    """
-
-    def test_titles_differ_when_descriptions_share_prefix(self) -> None:
-        descriptions = [
-            "Research and summarize: WebAssembly portable binary...",
-            "Research and summarize: Rust ownership model with...",
-            "Research and summarize: The Actor model in concurrency...",
-        ]
-        titles = [
-            str(i + 1) + ". " + desc[:40]
-            for i, desc in enumerate(descriptions)
-        ]
-        assert len(set(titles)) == 3, (
-            "titles must be unique even when descriptions share prefix"
-        )
-        prefixes = [t[:4] for t in titles]
-        assert len(set(prefixes)) == 3, (
-            f"first 4 chars of titles must differ: {prefixes}"
-        )

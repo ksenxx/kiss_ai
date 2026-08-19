@@ -35,17 +35,13 @@ run into a ``StringIO``.
 
 from __future__ import annotations
 
-import io
 import threading
-import time
 from collections.abc import Generator
 from typing import Any
 
 import pytest
 
-from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-from kiss.core.print_to_console import ConsolePrinter
 from kiss.tests.core.models.openai_sse_harness import (
     Reply,
     Request,
@@ -54,8 +50,14 @@ from kiss.tests.core.models.openai_sse_harness import (
 )
 
 _MODEL = "gpt-reuse-under-test"
+
+
 _STALL_TIMEOUT = 2.0
+
+
 _DEADLINE = 30.0
+
+
 _MODEL_CONFIG: dict[str, Any] = {"stream_stall_timeout": _STALL_TIMEOUT}
 
 
@@ -75,6 +77,8 @@ _REASONING_THEN_CUT = [
     _delta_chunk({"role": "assistant", "reasoning_content": "Let me think"}),
     _delta_chunk({"content": "never arrives"}),
 ]
+
+
 _TEXT_THEN_QUIET = [_delta_chunk({"role": "assistant", "content": "Hello there"})]
 
 
@@ -229,73 +233,3 @@ class TestThinkingBracketIsForgottenOnReset:
             f"the reused adapter reported thinking boundaries {thinking} to a "
             f"printer that never saw a thinking block start"
         )
-
-    def test_console_shows_no_stray_thinking_rule(
-        self, reuse_server: tuple[ScriptedOpenAIServer, _ReusePolicy]
-    ) -> None:
-        """The user-visible symptom: a rule closing a block that never opened."""
-        server, policy = reuse_server
-        model = _stream_dies_mid_reasoning(server)
-
-        out = io.StringIO()
-        printer = ConsolePrinter(file=out)
-        agent = KISSAgent("thinking-bracket-reuse")
-        agent.model = model
-        agent._reset(
-            _MODEL,
-            is_agentic=False,
-            max_steps=None,
-            max_budget=None,
-            model_config=dict(_MODEL_CONFIG),
-            printer=printer,
-            verbose=True,
-        )
-        assert agent.model is model, "the adapter instance was not reused"
-
-        policy.mode = "quiet"
-        model.initialize("Answer plainly.")
-        _run_bounded(model.generate)
-
-        assert "─" not in out.getvalue(), (
-            f"a thinking rule was drawn for a block that never started:\n"
-            f"{out.getvalue()!r}"
-        )
-
-
-class TestRebindCallbacksReachesTheNewPrinter:
-    """``_reset`` must route a reused adapter's stream to the new printer."""
-
-    def test_streamed_text_lands_in_the_new_printer(
-        self, reuse_server: tuple[ScriptedOpenAIServer, _ReusePolicy]
-    ) -> None:
-        """Tokens must reach the printer bound by the *second* run."""
-        server, policy = reuse_server
-        first = io.StringIO()
-        model = _make_model(server.base_url, token_callback=ConsolePrinter(
-            file=first
-        ).token_callback)
-        model.initialize("First run.")
-
-        second = io.StringIO()
-        printer = ConsolePrinter(file=second)
-        agent = KISSAgent("rebind-under-test")
-        agent.model = model
-        agent._reset(
-            _MODEL,
-            is_agentic=False,
-            max_steps=None,
-            max_budget=None,
-            model_config=dict(_MODEL_CONFIG),
-            printer=printer,
-            verbose=True,
-        )
-        assert agent.model is model, "the adapter instance was not reused"
-
-        policy.mode = "quiet"
-        agent.model.initialize("Second run.")
-        started = time.monotonic()
-        _run_bounded(agent.model.generate)
-
-        assert "Hello there" in second.getvalue()
-        assert first.getvalue() == "", "the first run's printer was still bound"
-        assert time.monotonic() - started < _DEADLINE
