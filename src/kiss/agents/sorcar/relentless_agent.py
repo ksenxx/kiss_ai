@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,11 @@ as HTML (e.g. <ol>, <p>, <pre><code>), never Markdown")**
 - Work dir: {work_dir}
 - Current process PID: {current_pid} — NEVER kill this process.
 """
+
+TASK_SETTINGS_HEADER = "\n# Task Settings\n"
+
+#: Budget cap (USD) a run falls back to when the caller states none.
+DEFAULT_MAX_BUDGET = 200.0
 
 CONTINUATION_PROMPT = """
 # Task Progress (Continuation {continuation_number})
@@ -172,7 +178,9 @@ class RelentlessAgent(Base):
 
         self.max_sub_sessions = max_sub_sessions if max_sub_sessions is not None else 10000
         self.max_steps = max_steps if max_steps is not None else 10000
-        self.max_budget = max_budget if max_budget is not None else 200.0
+        self.max_budget = (
+            max_budget if max_budget is not None else DEFAULT_MAX_BUDGET
+        )
         self.model_name = model_name if model_name is not None else "claude-opus-4-6"
         self.verbose = verbose
         self.budget_used: float = 0.0
@@ -222,6 +230,39 @@ class RelentlessAgent(Base):
             raise KISSError("Docker manager not initialized")
         return str(self.docker_manager.Bash(command, description))
 
+    def _system_prompt_task_settings(self) -> dict[str, str]:
+        """Label → value pairs appended to the system prompt as "# Task Settings".
+
+        Called once per task by :meth:`perform_task`, after ``_reset``
+        resolved the run's model and budget, so the values describe the
+        settings the task actually runs with.  Subclasses extend the
+        dict with the settings they know about (parallel mode, worktree
+        mode, chat / task / parent ids, ...).
+
+        Returns:
+            Ordered mapping of setting labels to display values.
+        """
+        return {
+            "Model name": self.model_name,
+            "Max budget (USD)": f"${self.max_budget:.2f}",
+            "Starting time": datetime.now().astimezone().strftime(
+                "%Y-%m-%d %H:%M:%S %Z"
+            ),
+        }
+
+    def _task_settings_section(self) -> str:
+        """The "# Task Settings" system-prompt section for this run.
+
+        Returns:
+            The formatted section, or ``""`` when
+            :meth:`_system_prompt_task_settings` yields nothing.
+        """
+        settings = self._system_prompt_task_settings()
+        if not settings:  # pragma: no cover — base hook never empty
+            return ""
+        lines = "".join(f"- {label}: {value}\n" for label, value in settings.items())
+        return TASK_SETTINGS_HEADER + lines
+
     def perform_task(
         self,
         tools: list[Callable[..., Any]],
@@ -258,6 +299,7 @@ class RelentlessAgent(Base):
             work_dir=self.work_dir,
             current_pid=current_pid,
         )
+        important_instructions += self._task_settings_section()
         sorcar_md = config_module.kiss_home() / "SORCAR.md"
         if sorcar_md.is_file():
             important_instructions += "\n" + sorcar_md.read_text()

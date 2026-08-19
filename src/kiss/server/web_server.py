@@ -70,7 +70,7 @@ from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlsplit
 
 import websockets
@@ -90,7 +90,11 @@ from kiss.core.vscode_config import (
     source_shell_env,
 )
 from kiss.server import sorcar as sorcar_api
-from kiss.server.json_printer import JsonPrinter, stamp_event_ts
+from kiss.server.json_printer import (
+    JsonPrinter,
+    stamp_event_ts,
+    with_task_settings_event,
+)
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
@@ -4626,7 +4630,13 @@ class RemoteAccessServer:
                 {
                     "task": row.get("task", ""),
                     "task_id": row.get("task_id", ""),
-                    "events": row.get("events", []),
+                    # The settings event lets the export's synthesized
+                    # task panels carry the same settings info the live
+                    # panel shows (see shareTaskPanel in media/main.js).
+                    "events": with_task_settings_event(
+                        cast("list[dict[str, Any]]", row.get("events") or []),
+                        row,
+                    ),
                 }
                 for row in rows
             ]

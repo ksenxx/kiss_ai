@@ -473,6 +473,15 @@
 
   let currentTaskName = '';
   let currentTaskId = null;
+  // Settings of the active tab's OWN current task (model, worktree /
+  // parallel modes, budget, start time, chat / task / parent ids) —
+  // what the static task panel's info block shows while the panel
+  // names that task. Mirrors currentTaskName's lifecycle.
+  let currentTaskSettings = null;
+  // Settings of every task seen by this window, keyed by task id, so
+  // the panel info can follow the reader across spliced-in
+  // `.adjacent-task` neighbours (see updateVisibleTask).
+  const taskSettingsById = Object.create(null);
   let oldestLoadedTaskId = null;
   let newestLoadedTaskId = null;
   let adjacentLoading = false;
@@ -519,6 +528,9 @@
       outputFragment: null,
       taskPanelHTML: '',
       taskPanelVisible: false,
+      // Settings of the tab's own current task, restored into
+      // currentTaskSettings on switch (see saveCurrentTab).
+      taskSettings: null,
       statusTextContent: 'Ready',
       statusTextColor: 'var(--green)',
       statusTokensText: '',
@@ -705,6 +717,9 @@
       : taskPanel
         ? taskPanel.classList.contains('visible')
         : false;
+    // Always the tab's OWN task's settings: the info block may be
+    // showing a neighbour's, but that is a viewing position too.
+    tab.taskSettings = currentTaskSettings;
     tab.statusTextContent = statusText ? statusText.textContent : 'Ready';
     tab.statusTextColor = statusText ? statusText.style.color : 'var(--green)';
     tab.statusTokensText = neighbour
@@ -824,6 +839,8 @@
       if (tab.taskPanelVisible) taskPanel.classList.add('visible');
       else taskPanel.classList.remove('visible');
     }
+    currentTaskSettings = tab.taskSettings || null;
+    renderTaskPanelInfo(currentTaskSettings);
     currentTaskName = (tab.taskPanelHTML || '').trim();
     currentTaskId = tab.currentTaskId !== undefined ? tab.currentTaskId : null;
     if (statusText) {
@@ -2475,6 +2492,7 @@
   const shareBtn = document.getElementById('share-btn');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
+  const taskPanelInfo = document.getElementById('task-panel-info');
   const taskPanelCopy = document.getElementById('task-panel-copy');
   const taskPanelDrawerBtn = document.getElementById('task-panel-drawer-btn');
   const inputDrawerBtn = document.getElementById('input-drawer-btn');
@@ -2523,6 +2541,75 @@
       taskPanel.classList.remove('visible');
     }
   }
+
+  // taskinfo-coverage:start
+  /**
+   * The static task panel's settings info as HTML — the same shape the
+   * history sidebar's info rows use: a `workDir • model • wt •
+   * parallel • budget • started` line and a `chat • task • parent •
+   * subagent` ids line.
+   *
+   * @param {object|null} s A task_settings event's settings payload.
+   * @returns {string} The info HTML, '' when there is nothing to show.
+   */
+  function taskPanelInfoHTML(s) {
+    if (!s || typeof s !== 'object') return '';
+    const parts = [];
+    if (s.work_dir) parts.push(String(s.work_dir));
+    if (s.model) parts.push(String(s.model));
+    if ('is_worktree' in s) parts.push(s.is_worktree ? 'wt' : 'no-wt');
+    if ('is_parallel' in s) {
+      parts.push(s.is_parallel ? 'parallel' : 'sequential');
+    }
+    const budget = Number(s.max_budget || 0);
+    if (budget > 0) parts.push('budget $' + budget.toFixed(2));
+    const startTs = Number(s.start_ts || 0);
+    if (startTs > 0) {
+      const d = new Date(startTs);
+      if (!isNaN(d.getTime())) {
+        parts.push(
+          'started ' +
+            d.toLocaleString(undefined, {
+              year: 'numeric',
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            }),
+        );
+      }
+    }
+    const ids = [];
+    if (s.chat_id) ids.push('chat ' + s.chat_id);
+    if (s.task_id !== undefined && s.task_id !== null && s.task_id !== '') {
+      ids.push('task ' + s.task_id);
+    }
+    if (s.parent_task_id) ids.push('parent ' + s.parent_task_id);
+    if (s.is_subagent) ids.push('subagent');
+    const lines = [];
+    if (parts.length) lines.push(parts.join(' \u2022 '));
+    if (ids.length) lines.push(ids.join(' \u2022 '));
+    return lines
+      .map(l => '<span class="task-panel-info-line">' + esc(l) + '</span>')
+      .join('');
+  }
+
+  /** Paint *s* into the panel's info block (clears it for null). */
+  function renderTaskPanelInfo(s) {
+    if (!taskPanelInfo) return;
+    taskPanelInfo.innerHTML = taskPanelInfoHTML(s);
+  }
+
+  /**
+   * Adopt *s* as the active tab's own task's settings and show them.
+   * Mirrors setTaskText: callers that only LEND the panel to a
+   * neighbouring task use renderTaskPanelInfo directly instead.
+   */
+  function setTaskSettings(s) {
+    currentTaskSettings = s && typeof s === 'object' ? s : null;
+    renderTaskPanelInfo(currentTaskSettings);
+  }
+  // taskinfo-coverage:end
 
   // chevron-coverage:start
   function applyChevronState(taskName) {
@@ -4884,6 +4971,50 @@
         }
         break;
       }
+      // taskinfo-coverage:start
+      case 'task_settings': {
+        const s =
+          ev.settings && typeof ev.settings === 'object' ? ev.settings : null;
+        if (!s) break;
+        const sid =
+          s.task_id === undefined || s.task_id === null
+            ? ''
+            : String(s.task_id);
+        if (sid) taskSettingsById[sid] = s;
+        if (ownerTabId === undefined) {
+          // Live event already routed to the tab on screen.
+          setTaskSettings(s);
+        } else if (ownerTabId === activeTabId) {
+          // A replay into the visible transcript: only the tab's own
+          // task may repaint the panel — a spliced-in neighbour's
+          // detached replay shares this owner id.
+          if (
+            sid &&
+            currentTaskId !== null &&
+            currentTaskId !== undefined &&
+            String(currentTaskId) === sid
+          ) {
+            setTaskSettings(s);
+          }
+        } else {
+          const ownerTab = getTab(ownerTabId);
+          if (ownerTab) {
+            ownerTab.taskSettings = s;
+            // The settings name the task the tab is now running; a
+            // background tab must adopt that id like the visible
+            // tab's dispatcher would, or a later switch pairs the
+            // new transcript with the previous task's id and the
+            // share export splices the live DOM into the wrong
+            // section.
+            if (sid && String(ownerTab.currentTaskId) !== sid) {
+              ownerTab.currentTaskId = sid;
+              ownerTab.pendingTaskId = null;
+            }
+          }
+        }
+        break;
+      }
+      // taskinfo-coverage:end
       case 'autocommit_progress':
       case 'worktree_progress': {
         renderActionProgress(target, ev.message || ev.text || '');
@@ -5453,6 +5584,15 @@
     if (!region) return;
     const container = regionNeighbour(region);
     setTaskText(region.task || currentTaskName);
+    // taskinfo-coverage:start
+    // The info block follows the panel: a neighbour's settings while
+    // the reader is parked on it, the tab's own otherwise.
+    renderTaskPanelInfo(
+      container
+        ? taskSettingsById[container.dataset.taskId || ''] || null
+        : currentTaskSettings,
+    );
+    // taskinfo-coverage:end
     if (container) {
       if (statusTokens)
         statusTokens.textContent = container.dataset.metricTokens || '';
@@ -5543,6 +5683,7 @@
     if (O.querySelector('.adjacent-task[data-task]')) {
       taskWheelLastTarget = null;
       setTaskText(currentTaskName);
+      renderTaskPanelInfo(currentTaskSettings);
       showLiveMetrics();
     }
     return true;
@@ -5764,6 +5905,7 @@
     'prompt',
     'result',
     'usage_info',
+    'task_settings',
   ]);
 
   /**
@@ -6242,6 +6384,9 @@
         if (clearTab) {
           clearTab.lastTaskFailed = false;
           clearTab.hasRunTask = true;
+          // A new run replaces the tab's task: its settings arrive
+          // with the run's own task_settings event.
+          clearTab.taskSettings = null;
         }
         if (ev.chat_id && clearTab) {
           clearTab.backendChatId = ev.chat_id;
@@ -6258,6 +6403,7 @@
           collapseNestedRunParallel(O);
           clearOutput();
           resetOutputState();
+          setTaskSettings(null);
           showSpinner();
         } else if (clearTab) {
           collapseNestedRunParallel(clearTab.outputFragment);
@@ -6515,6 +6661,11 @@
             }
           } catch (_e) {}
         }
+        // The replay REPLACES the transcript: the replayed stream's own
+        // task_settings event (persisted or synthesized server-side)
+        // repopulates the info block, so a previous task's settings
+        // must not survive a replay that carries none.
+        setTaskSettings(null);
         replayTaskEvents(ev.events || []);
         break;
       }
@@ -6549,6 +6700,11 @@
             }
             updateActiveTabTitle(stt);
           }
+          // Settings are NOT cleared here: the server echoes
+          // setTaskText for queued follow-ups and refused submits too,
+          // which stay part of the CURRENT task. A real replacement
+          // task announces itself with the 'clear' event, which is
+          // where the previous task's settings are dropped.
           setTaskText(ev.text || '');
         } else if (stt) {
           const sttTab = getTab(ev.tabId);
@@ -7252,9 +7408,11 @@
    *
    * @param {string} taskText The task's description text.
    * @param {number} seq 1-based position of the task on the page.
+   * @param {object|null} settings The task's task_settings payload,
+   *     rendered into the panel's info block (cleared when null).
    * @returns {Element|null} The panel, or null without a template.
    */
-  function shareTaskPanel(taskText, seq) {
+  function shareTaskPanel(taskText, seq, settings) {
     if (!taskPanel) return null;
     const panel = taskPanel.cloneNode(true);
     panel.classList.add('visible');
@@ -7269,6 +7427,12 @@
       // attribute would only mislead anyone reading the markup.
       txt.removeAttribute('data-tooltip');
     }
+    // taskinfo-coverage:start
+    // The clone carries the LIVE task's info block; every exported
+    // panel must show ITS OWN task's settings instead.
+    const info = panel.querySelector('#task-panel-info');
+    if (info) info.innerHTML = taskPanelInfoHTML(settings || null);
+    // taskinfo-coverage:end
     const btn = panel.querySelector('#task-panel-drawer-btn');
     if (btn) {
       btn.setAttribute('aria-expanded', 'true');
@@ -7304,16 +7468,44 @@
    * @param {string} taskText The task's description text.
    * @param {Element} body Holder whose children are the transcript.
    * @param {number} seq 1-based position of the task on the page.
+   * @param {object|null} settings The task's task_settings payload.
    * @returns {Element} The assembled section.
    */
-  function shareTaskSection(taskText, body, seq) {
+  function shareTaskSection(taskText, body, seq, settings) {
     const section = document.createElement('div');
     section.className = 'share-task';
-    const panel = shareTaskPanel(taskText || '(untitled task)', seq);
+    const panel = shareTaskPanel(taskText || '(untitled task)', seq, settings);
     if (panel) section.appendChild(panel);
     while (body.firstChild) section.appendChild(body.firstChild);
     return section;
   }
+
+  // taskinfo-coverage:start
+  /**
+   * The task_settings payload carried by *events*, or null. Feeds the
+   * exported task panels: a persisted task's settings ride in its
+   * event stream (broadcast live, or synthesized by the daemon for
+   * tasks that predate the event).
+   *
+   * @param {Array<object>} events A task's replay events.
+   * @returns {object|null} The settings payload.
+   */
+  function taskSettingsFromEvents(events) {
+    const list = events || [];
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      if (
+        e &&
+        e.type === 'task_settings' &&
+        e.settings &&
+        typeof e.settings === 'object'
+      ) {
+        return e.settings;
+      }
+    }
+    return null;
+  }
+  // taskinfo-coverage:end
 
   /**
    * Build the HTML body of the standalone shared page: one section
@@ -7353,14 +7545,16 @@
             ? ''
             : String(t.task_id);
         let body;
+        let settings = taskSettingsFromEvents(t.events);
         if (liveId && tid === liveId) {
           body = shareLiveTranscript();
           liveUsed = true;
+          if (!settings) settings = currentTaskSettings;
         } else {
           body = replayDetachedTranscript(t.events || [], activeTabId);
           body.classList.remove('adjacent-task');
         }
-        out.appendChild(shareTaskSection(t.task, body, i + 1));
+        out.appendChild(shareTaskSection(t.task, body, i + 1, settings));
       }
     } finally {
       _suppressFileLinkChecks = false;
@@ -7381,7 +7575,12 @@
           // all (the chat was never persisted). It is the chat's
           // newest surface, so it closes the page.
           out.appendChild(
-            shareTaskSection(currentTaskName, live, list.length + 1),
+            shareTaskSection(
+              currentTaskName,
+              live,
+              list.length + 1,
+              currentTaskSettings,
+            ),
           );
         }
       }

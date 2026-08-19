@@ -19,6 +19,7 @@ payload are treated as "system" events targeted at a specific tab and
 are forwarded directly without recording or persistence.
 """
 
+import json
 import logging
 import threading
 import time
@@ -71,6 +72,11 @@ _DISPLAY_EVENT_TYPES = frozenset(
         # stop/error, when no ``result`` event exists) shows only the
         # step count in the status row.
         "usage_info",
+        # Persisted so replays repopulate the static task panel's
+        # settings info (model, worktree / parallel modes, budget,
+        # start time, chat / task / parent ids); broadcast once per
+        # run by ``ChatSorcarAgent.run``.
+        "task_settings",
     }
 )
 
@@ -127,6 +133,95 @@ def _coalesce_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             result.append(ev)
     return result
+
+
+def _task_settings_event_from_session(
+    session: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Synthesize a ``task_settings`` display event from a session dict.
+
+    Tasks that ran before the ``task_settings`` event existed (or ran
+    without a broadcasting printer) have no such event persisted, yet
+    their settings live in the ``task_history`` row.  This builds the
+    event the live run would have broadcast from the session dict the
+    persistence loaders return (``{task, task_id, chat_id, events,
+    extra}``), so replays and shares can repopulate the static task
+    panel's settings info for every task.
+
+    Args:
+        session: A loader session dict.  ``extra`` is the JSON string
+            synthesized by ``_row_to_extra_json``.
+
+    Returns:
+        The event dict, or None when *session* has no task id or its
+        ``extra`` does not parse to a dict.
+    """
+    task_id = str(session.get("task_id") or "")
+    if not task_id:
+        return None
+    extra_raw = session.get("extra")
+    if not isinstance(extra_raw, str) or not extra_raw:
+        return None
+    try:
+        extra = json.loads(extra_raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(extra, dict):
+        return None
+    settings: dict[str, Any] = {
+        "model": str(extra.get("model") or ""),
+        "work_dir": str(extra.get("work_dir") or ""),
+        "is_parallel": bool(extra.get("is_parallel", False)),
+        "is_worktree": bool(extra.get("is_worktree", False)),
+        "chat_id": str(session.get("chat_id") or ""),
+        "task_id": task_id,
+    }
+    try:
+        start_ts = int(extra.get("startTs", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        start_ts = 0
+    if start_ts > 0:
+        settings["start_ts"] = start_ts
+    try:
+        max_budget = float(extra.get("max_budget", 0.0) or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        max_budget = 0.0
+    if max_budget > 0:
+        settings["max_budget"] = max_budget
+    sub = extra.get("subagent")
+    parent_id = str(sub.get("parent_task_id") or "") if isinstance(sub, dict) else ""
+    settings["is_subagent"] = bool(parent_id)
+    if parent_id:
+        settings["parent_task_id"] = parent_id
+    return {"type": "task_settings", "settings": settings, "taskId": task_id}
+
+
+def with_task_settings_event(
+    events: list[dict[str, Any]],
+    session: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return *events* with a leading ``task_settings`` event ensured.
+
+    Used by every replay / share reply builder: when the persisted
+    stream already carries the run's own ``task_settings`` event the
+    list is returned unchanged; otherwise the event synthesized from
+    *session* (see :func:`_task_settings_event_from_session`) is
+    prepended.  When nothing can be synthesized the list is returned
+    unchanged.
+
+    Args:
+        events: The task's replay events (already coalesced or raw).
+        session: The loader session dict the events came from.
+
+    Returns:
+        The events list, never None.
+    """
+    if any(ev.get("type") == "task_settings" for ev in events):
+        return events
+    synthesized = _task_settings_event_from_session(session)
+    if synthesized is None:
+        return events
+    return [synthesized, *events]
 
 
 class _BashState:
