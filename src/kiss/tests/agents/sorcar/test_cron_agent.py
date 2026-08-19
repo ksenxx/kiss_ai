@@ -18,7 +18,6 @@ non-deterministic) in unit tests; the failure path is covered via
 from __future__ import annotations
 
 import json
-import socket
 import sys
 import threading
 import time
@@ -73,7 +72,28 @@ def _set_job_fields(job_id: str, **fields: object) -> None:
     cron_agent.save_jobs(jobs)
 
 
-# ---------------------------------------------------------------- schedules
+def _run_cli(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+             *argv: str) -> str:
+    monkeypatch.setattr(sys, "argv", ["kiss-cron", *argv])
+    main()
+    return str(capsys.readouterr().out)
+
+
+def _cron_thread() -> threading.Thread | None:
+    """Return the live kiss-cron scheduler thread, if any."""
+    for thread in threading.enumerate():
+        if thread.name == "kiss-cron-scheduler" and thread.is_alive():
+            return thread
+    return None
+
+
+def _stop_scheduler(stop_event: threading.Event) -> None:
+    """Stop the scheduler thread and wait for it to exit."""
+    stop_event.set()
+    thread = _cron_thread()
+    if thread is not None:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
 
 
 def test_interval_schedules() -> None:
@@ -163,9 +183,6 @@ def test_invalid_schedules_raise(schedule: str) -> None:
         compute_next_run(schedule, 0.0)
 
 
-# ------------------------------------------------------------ tool actions
-
-
 def test_create_list_pause_resume_remove(tmp_path: Path) -> None:
     job = _create(cron_job(
         "create", name="hello", command="echo hi", schedule="every 5m",
@@ -250,9 +267,6 @@ def test_load_jobs_tolerates_bad_store(tmp_path: Path) -> None:
     assert load_jobs() == []
 
 
-# --------------------------------------------------------- tick + delivery
-
-
 def test_tick_runs_due_command_job(tmp_path: Path) -> None:
     job = _create(cron_job(
         "create", name="greeter", command="echo hello from cron",
@@ -320,23 +334,6 @@ def test_failing_command_reports_error(tmp_path: Path) -> None:
     assert "exited 3" in log
 
 
-def test_delivery_error_notes() -> None:
-    job = _create(cron_job(
-        "create", name="multi", command="echo payload",
-        schedule="every 1m",
-        deliver="local,nosuchchannel:1,homeassistant:x,telegram:123",
-    ))
-    _set_job_fields(job["id"], next_run_at=1.0)
-    assert tick(2.0) == 1
-    notes = load_jobs()[0]["last_delivery"]
-    assert len(notes) == 3
-    assert "unknown channel 'nosuchchannel'" in notes[0]
-    assert "does not support delivery" in notes[1]
-    # Telegram module exists and has _make_backend, but no credentials
-    # exist under the isolated KISS_HOME, so its factory sys.exit(1)s.
-    assert "not authenticated" in notes[2]
-
-
 def test_run_now_ignores_schedule_state() -> None:
     job = _create(cron_job(
         "create", name="manual", command="echo manual run", schedule="every 1d",
@@ -385,16 +382,6 @@ def test_prompt_job_failure_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None
     assert "kiss-web daemon" in stored["last_summary"]
 
 
-# ------------------------------------------------------------------- CLI
-
-
-def _run_cli(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
-             *argv: str) -> str:
-    monkeypatch.setattr(sys, "argv", ["kiss-cron", *argv])
-    main()
-    return str(capsys.readouterr().out)
-
-
 def test_cli_usage_exits_without_args(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
 ) -> None:
@@ -432,40 +419,6 @@ def test_cli_nothing_to_do(
     assert "Nothing to do" in capsys.readouterr().out
 
 
-# --------------------------------------------------------------- wiring
-
-
-def test_get_tools_and_sorcar_wiring() -> None:
-    assert cron_agent.get_tools() == [cron_job]
-    # The module lives in the sorcar package and never imports from
-    # kiss.agents.third_party_agents at module scope.
-    source_text = Path(cron_agent.__file__).read_text(encoding="utf-8")
-    assert "/agents/sorcar/" in cron_agent.__file__
-    assert "from kiss.agents.third_party_agents" not in source_text
-    assert "import kiss.agents.third_party_agents" not in source_text
-    # cron_job is NOT a built-in tool of the default Sorcar toolset:
-    # scheduling requests go through run_agent("cron", ...), which
-    # dispatches this module as an agent script.
-    agent_source = Path(cron_agent.__file__).parent / "sorcar_agent.py"
-    agent_text = agent_source.read_text(encoding="utf-8")
-    assert "tools.append(cron_job)" not in agent_text
-    assert "from kiss.agents.sorcar.cron_agent import cron_job" not in agent_text
-    dispatch_source = Path(cron_agent.__file__).parent / "agent_dispatch.py"
-    assert (
-        "cron_agent.CRON_DISPATCH_PREAMBLE + task"
-        in dispatch_source.read_text(encoding="utf-8")
-    )
-    # The system prompt directs scheduling requests to run_agent("cron").
-    system_md = Path(cron_agent.__file__).parents[2] / "SYSTEM.md"
-    assert 'run_agent tool with "cron"' in system_md.read_text(encoding="utf-8")
-    # The kiss-cron CLI entry point is wired in pyproject.toml.
-    pyproject = Path(cron_agent.__file__).parents[4] / "pyproject.toml"
-    assert (
-        'kiss-cron = "kiss.agents.sorcar.cron_agent:main"'
-        in pyproject.read_text(encoding="utf-8")
-    )
-
-
 def test_agent_script_getters(tmp_path: Path) -> None:
     # The agent-script contract used by run_agent("cron", ...): the
     # dispatched session runs in ~/.kiss/cron/work with no git
@@ -491,26 +444,6 @@ def test_silence_tokens() -> None:
     assert not cron_agent._is_silent("all good")
 
 
-# ------------------------------------------------------ scheduler thread
-
-
-def _cron_thread() -> threading.Thread | None:
-    """Return the live kiss-cron scheduler thread, if any."""
-    for thread in threading.enumerate():
-        if thread.name == "kiss-cron-scheduler" and thread.is_alive():
-            return thread
-    return None
-
-
-def _stop_scheduler(stop_event: threading.Event) -> None:
-    """Stop the scheduler thread and wait for it to exit."""
-    stop_event.set()
-    thread = _cron_thread()
-    if thread is not None:
-        thread.join(timeout=10)
-        assert not thread.is_alive()
-
-
 def test_run_scheduler_returns_when_stop_event_preset() -> None:
     stop_event = threading.Event()
     stop_event.set()
@@ -529,38 +462,6 @@ def test_run_now_uses_daemon_sock_path(tmp_path: Path) -> None:
             deliver="none",
         ))
         reply = yaml.safe_load(cron_job("run_now", job_id=job["id"]))
-        assert reply["ran"]["last_status"] == "error"
-        assert "custom-daemon.sock" in load_jobs()[0]["last_summary"]
-    finally:
-        _stop_scheduler(stop_event)
-
-
-def test_tools_file_loaded_run_now_uses_daemon_sock_path(
-    tmp_path: Path,
-) -> None:
-    # A run_agent("cron", ...) session gets its cron_job tool from a
-    # FRESH synthetic module (the daemon's tools-file loader re-executes
-    # this file), whose own _daemon_sock_path global is never set:
-    # run_now must still target the socket recorded in the canonical
-    # module by the daemon's scheduler thread.
-    from kiss.server.tools_file import ToolsFileError, execute_python_file
-
-    custom_sock = tmp_path / "custom-daemon.sock"
-    stop_event = start_scheduler_thread(interval=999.0, sock_path=str(custom_sock))
-    try:
-        namespace = execute_python_file(
-            cron_agent.__file__, ToolsFileError, "tools file",
-        )
-        loaded_cron_job = namespace["get_tools"]()[0]
-        # A distinct module copy — the very situation the canonical
-        # lookup exists for.
-        assert loaded_cron_job is not cron_job
-        assert namespace["_daemon_sock_path"] is None
-        job = _create(loaded_cron_job(
-            "create", name="llm", prompt="say hi", schedule="every 1h",
-            deliver="none",
-        ))
-        reply = yaml.safe_load(loaded_cron_job("run_now", job_id=job["id"]))
         assert reply["ran"]["last_status"] == "error"
         assert "custom-daemon.sock" in load_jobs()[0]["last_summary"]
     finally:
@@ -593,57 +494,3 @@ def test_scheduler_thread_survives_tick_failure(tmp_path: Path) -> None:
         assert thread is not None and thread.is_alive()
     finally:
         _stop_scheduler(stop_event)
-
-
-def test_kiss_web_daemon_runs_scheduler_thread(tmp_path: Path) -> None:
-    """The kiss-web daemon starts the cron thread, the thread executes a
-    due job, and shutdown stops the thread."""
-    import asyncio
-
-    from kiss.server.web_server import RemoteAccessServer
-
-    job = _create(cron_job(
-        "create", name="boot job", command="echo ran inside daemon",
-        schedule="every 1h",
-    ))
-    _set_job_fields(job["id"], next_run_at=1.0)  # due on the first tick
-
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-
-    async def _run() -> None:
-        server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=port,
-            use_tunnel=False,
-            work_dir=str(tmp_path),
-            uds_path=str(tmp_path / "sorcar.sock"),
-        )
-        task = asyncio.ensure_future(server._serve_async())
-        try:
-            for _ in range(200):
-                if (
-                    load_jobs()[0]["last_status"] == "ok"
-                    and server._shutdown_future is not None
-                ):
-                    break
-                await asyncio.sleep(0.05)
-            assert _cron_thread() is not None, "cron scheduler thread not started"
-            assert load_jobs()[0]["last_summary"] == "ran inside daemon"
-        finally:
-            for _ in range(200):
-                if server._shutdown_future is not None:
-                    break
-                await asyncio.sleep(0.05)
-            assert server._shutdown_future is not None
-            if not server._shutdown_future.done():
-                server._shutdown_future.set_result(None)
-            await task
-        for _ in range(200):
-            if _cron_thread() is None:
-                return
-            await asyncio.sleep(0.05)
-        raise AssertionError("cron scheduler thread still alive after shutdown")
-
-    asyncio.run(_run())

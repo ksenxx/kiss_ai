@@ -29,7 +29,7 @@ import pytest
 
 from kiss.scripts import update_models as _update_models
 from kiss.scripts.update_models import _noop_token_callback, detect_thinking_level
-from kiss.tests.core.test_update_models_stream_only import _stream_only_server
+from kiss.tests.core.models.test_update_models_stream_only import _stream_only_server
 
 _probe_generate = _update_models.test_generate
 _probe_function_calling = _update_models.test_function_calling

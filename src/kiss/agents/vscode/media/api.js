@@ -34,6 +34,8 @@
     'recordFileUsage',
     'openFile',
     'checkPaths',
+    'shareChat',
+    'shareChatTasks',
     'complete',
     'worktreeAction',
     'generateCommitMessage',

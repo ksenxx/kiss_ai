@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Server-only tests extracted from
-``kiss.tests.agents.vscode.test_bash_stream_thread_routing``.
+``kiss.tests.agents.sorcar.test_bash_stream_thread_routing``.
 
 Moved here because their full dependency closure touches only
 kiss.agents.sorcar and kiss.server (task: relocate

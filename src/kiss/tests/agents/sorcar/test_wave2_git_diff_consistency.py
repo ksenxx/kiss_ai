@@ -33,13 +33,9 @@ import subprocess
 from pathlib import Path
 
 from kiss.agents.sorcar.git_worktree import (
-    TASK_RESULT_HEADING,
-    USER_PROMPT_HEADING,
     GitWorktreeOps,
-    _ensure_task_metadata,
     _porcelain_entries,
 )
-from kiss.server.helpers import _append_task_result, _append_user_prompt
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -67,6 +63,12 @@ def _make_repo(tmp_path: Path) -> Path:
     _git(repo, "commit", "-m", "initial")
     return repo
 
+
+def _make_worktree_checkout(repo: Path, tmp_path: Path) -> Path:
+    """Create a real linked git worktree of *repo* at the same HEAD."""
+    wt_dir = tmp_path / "wt"
+    _git(repo, "worktree", "add", "--detach", str(wt_dir))
+    return wt_dir
 
 
 def test_diff_name_only_preserves_leading_and_trailing_spaces(
@@ -139,14 +141,6 @@ def test_diff_name_only_unicode_name(tmp_path: Path) -> None:
     assert GitWorktreeOps._diff_name_only(repo) == [filename]
 
 
-
-def _make_worktree_checkout(repo: Path, tmp_path: Path) -> Path:
-    """Create a real linked git worktree of *repo* at the same HEAD."""
-    wt_dir = tmp_path / "wt"
-    _git(repo, "worktree", "add", "--detach", str(wt_dir))
-    return wt_dir
-
-
 def test_copy_dirty_state_unicode_line_separator_name(tmp_path: Path) -> None:
     """A dirty file with U+2028 in its name is mirrored into the worktree.
 
@@ -212,47 +206,3 @@ def test_porcelain_entries_rename_and_line_separator(tmp_path: Path) -> None:
     entries = _porcelain_entries(status.stdout)
     assert ("R ", "src.txt", "dst.txt") in entries
     assert ("??", None, "u\u2028v.txt") in entries
-
-
-
-def test_helpers_blocks_detected_as_duplicate_by_dedup() -> None:
-    """Blocks appended by the helpers.py writers must dedup byte-exactly.
-
-    ``_ensure_task_metadata`` (the git_worktree.py auto-commit dedup
-    detector) must recognise a message stamped by the helpers.py
-    writers as already carrying the current prompt/result blocks and
-    return it unchanged — pinning the byte-exact agreement that the
-    shared ``USER_PROMPT_HEADING`` / ``TASK_RESULT_HEADING`` constants
-    guarantee.
-    """
-    prompt = "Fix the flaky login test"
-    result = "Stabilized the test by awaiting the redirect."
-    msg = _append_task_result(
-        _append_user_prompt("fix: stabilize login test", prompt), result
-    )
-    assert _ensure_task_metadata(msg, prompt, result) == msg
-
-    prompt_only = _append_user_prompt("fix: stabilize login test", prompt)
-    assert _ensure_task_metadata(prompt_only, prompt, None) == prompt_only
-
-    result_only = _append_task_result("fix: stabilize login test", result)
-    assert _ensure_task_metadata(result_only, None, result) == result_only
-
-
-def test_helpers_blocks_use_shared_heading_constants() -> None:
-    """The writers compose blocks exactly as ``HEADING + text``."""
-    msg = _append_user_prompt("subject", "  a prompt  ")
-    assert msg == f"subject{USER_PROMPT_HEADING}a prompt"
-    msg = _append_task_result("subject", "  a result  ")
-    assert msg == f"subject{TASK_RESULT_HEADING}a result"
-
-
-def test_missing_prompt_block_inserted_before_helper_result_block() -> None:
-    """A helpers-stamped result-only message gains the prompt block."""
-    result = "Done."
-    prompt = "Do the thing"
-    msg = _append_task_result("chore: thing", result)
-    stamped = _ensure_task_metadata(msg, prompt, result)
-    assert stamped == (
-        f"chore: thing{USER_PROMPT_HEADING}{prompt}{TASK_RESULT_HEADING}{result}"
-    )

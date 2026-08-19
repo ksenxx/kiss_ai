@@ -4,7 +4,7 @@
 # add your name here
 """Integration test that reproduces bug I6 listed in bugs.md.
 
-Moved from ``kiss.tests.test_bugs_reproduction`` because this test
+Moved from ``kiss.tests.agents.third_party_agents.test_bugs_reproduction`` because this test
 depends only on ``kiss.agents.sorcar`` (the Discord bug I2 test, which
 depends on ``kiss.agents.third_party_agents``, remains in the original
 module).  The test demonstrates the buggy behavior and should FAIL

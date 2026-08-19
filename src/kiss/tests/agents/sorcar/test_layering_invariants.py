@@ -5,6 +5,7 @@
 """Enforce the sorcar-layer packaging invariant.
 
 Moved from the root-level ``kiss.tests.test_layering_invariants``
+(a module that no longer exists)
 because this test depends only on ``kiss.core`` and
 ``kiss.agents.sorcar`` (plus the core-only shared AST import scanner
 imported below from ``kiss.tests.core.test_layering_invariants``,

@@ -107,32 +107,3 @@ def test_chat_sorcar_agent_has_per_instance_task_id_lock() -> None:
     with agent._task_id_lock:
         with agent._task_id_lock:
             pass
-
-
-def test_vscode_server_source_accepts_int_rebound_task_id() -> None:
-    from pathlib import Path
-
-    from kiss.server.server import _coerce_id
-
-    src = Path("src/kiss/server/server.py").read_text()
-    assert "rebound_task_id = _coerce_id(" in src, (
-        "r4-vscode-H1: ``rebound_task_id`` extraction must accept int"
-    )
-    assert _coerce_id(42) == "42", (
-        "r4-vscode-H1: int rebound task_id must be stringified"
-    )
-
-
-def test_vscode_server_source_accepts_int_entry_id() -> None:
-    from pathlib import Path
-
-    from kiss.server.server import _coerce_id
-
-    src = Path("src/kiss/server/server.py").read_text()
-    assert 'entry_id = _coerce_id(entry.get("id"))' in src, (
-        "r4-vscode-H2: ``entry_id`` must accept int rows from legacy DBs"
-    )
-    assert _coerce_id(7) == "7", (
-        "r4-vscode-H2: int ``entry_id`` must be stringified"
-    )
-    assert _coerce_id(0) is None

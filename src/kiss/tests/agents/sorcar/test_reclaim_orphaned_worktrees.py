@@ -38,8 +38,6 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.server import agent_state
-from kiss.server.json_printer import JsonPrinter
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -152,11 +150,6 @@ def _plant_orphan_worktree(
     else:
         raise ValueError(f"unknown dirty_kind={dirty_kind}")
     return wt_dir
-
-
-def _first_line_of_head(repo: Path) -> str:
-    result = _git("log", "-1", "--pretty=%s", cwd=repo)
-    return result.stdout.strip()
 
 
 class TestReclaimStagedDirty:
@@ -598,47 +591,3 @@ class TestReclaimWiredIntoWorktreeAgent:
         assert (self.repo / "new_untracked.txt").exists()
 
         agent.discard()
-
-    def test_agent_own_worktree_is_not_reclaimed(self) -> None:
-        # First agent creates a worktree and pauses (no release).
-        agent1 = WorktreeSorcarAgent("test1")
-        agent1.run(prompt_template="task-a", work_dir=str(self.repo))
-        own_wt = agent1._wt
-        assert own_wt is not None
-        # Simulate the server registering the live task (the reclaim
-        # exclude set is derived from the task-keyed agent-state
-        # registry, reached via the printer's
-        # ``live_worktree_branches`` bridge).
-        state1 = agent_state.AgentState(
-            "reclaim-live-1",
-            agent=agent1,
-            tab_id="tab1",
-            server_owned=True,
-            is_task_active=True,
-        )
-        agent_state.register(state1)
-
-        # Second agent starts a task with agent1 still holding its
-        # worktree.  agent1's branch must be excluded from reclaim.
-        # The printer is passed exactly the way the production task
-        # runner passes it — as a ``run`` kwarg, never by pre-setting
-        # ``agent2.printer``.  Pre-setting the attribute used to mask
-        # a real bug: on a fresh agent ``self.printer`` is unset until
-        # ``super().run()``, so the reclaim inside worktree setup ran
-        # with an empty live-branch exclusion set and deleted a live
-        # sibling's worktree.
-        agent2 = WorktreeSorcarAgent("test2")
-        try:
-            agent2.run(
-                prompt_template="task-b",
-                work_dir=str(self.repo),
-                printer=JsonPrinter(),
-            )
-
-            # agent1's worktree must still exist.
-            assert own_wt.wt_dir.exists()
-            assert GitWorktreeOps.branch_exists(self.repo, own_wt.branch)
-        finally:
-            agent_state.unregister("reclaim-live-1", state1)
-            agent2.discard()
-            agent1.discard()

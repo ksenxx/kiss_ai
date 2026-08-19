@@ -1,0 +1,46 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""End-to-end regression tests for issue #43: explicit UTF-8 file I/O.
+
+The core-only system-prompt check moved to
+``kiss.tests.core.test_utf8_encoding``, which also owns the
+:func:`_run_in_c_locale` helper imported below.
+
+Every test runs a child Python interpreter with a forced C locale
+(``LC_ALL=C``, ``LANG=C``) and Python's UTF-8 mode disabled
+(``PYTHONUTF8=0``) so the platform default text encoding is ASCII.
+Before the fix, text file I/O that omitted ``encoding="utf-8"``
+mis-decoded UTF-8 content or raised ``UnicodeEncodeError`` /
+``UnicodeDecodeError`` in this environment; after the fix the
+round-trips must succeed byte-for-byte.
+"""
+
+from pathlib import Path
+
+from kiss.tests.agents.sorcar.test_utf8_encoding import (  # noqa: F401
+    NON_ASCII,
+    NON_ASCII_JSON,
+)
+from kiss.tests.core.test_utf8_encoding import _run_in_c_locale
+
+
+class TestUtf8Encoding:
+
+    def test_task_file_loads_in_c_locale(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.md"
+        task_file.write_bytes(NON_ASCII.encode("utf-8"))
+        script = f"""
+import argparse, json
+from kiss.agents.third_party_agents._channel_cli import _resolve_task
+
+args = argparse.Namespace(file={str(task_file)!r}, task=None)
+loaded = _resolve_task(args)
+expected = json.loads({NON_ASCII_JSON!r})
+assert loaded == expected, repr(loaded)
+print("OK")
+"""
+        proc = _run_in_c_locale(script, tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert "OK" in proc.stdout

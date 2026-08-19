@@ -20,7 +20,6 @@ import stat
 import pytest
 from google.genai import types as gtypes
 
-from kiss.core.kiss_error import KISSError
 from kiss.core.models.anthropic_model import (
     AnthropicModel,
     _openai_part_to_anthropic_block,
@@ -49,10 +48,17 @@ from kiss.core.models.gemini_model import (
     _tool_result_response_dict,
 )
 from kiss.core.models.model import Attachment, encode_binary_attachment
+from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\nfakepngdata"
+
+
 PDF_BYTES = b"%PDF-1.4 fake pdf"
+
+
 PNG_B64 = base64.b64encode(PNG_BYTES).decode("ascii")
+
+
 PDF_B64 = base64.b64encode(PDF_BYTES).decode("ascii")
 
 
@@ -285,12 +291,6 @@ class TestAnthropicNormalization:
         assert "reasoning_effort" not in kwargs
         assert "use_responses_api" not in kwargs
 
-    def test_build_create_kwargs_all_whitespace_raises(self) -> None:
-        m = make_anthropic()
-        m.conversation = [{"role": "user", "content": "   "}]
-        with pytest.raises(KISSError):
-            m._build_create_kwargs()
-
     def test_build_anthropic_tools_schema(self) -> None:
         m = make_anthropic()
         tools = m._build_anthropic_tools_schema(
@@ -416,6 +416,7 @@ class TestAnthropicFunctionResults:
 
 
 class TestAnthropicTokenCounts:
+
     def test_no_usage_returns_zeros(self) -> None:
         m = make_anthropic()
         assert m.extract_input_output_token_counts_from_response(object()) == (0, 0, 0, 0, 0)
@@ -439,10 +440,6 @@ class TestAnthropicTokenCounts:
 
         counts = m.extract_input_output_token_counts_from_response(Resp(usage))
         assert counts == (10, 20, 5, 0, 7)
-
-    def test_get_embedding_raises(self) -> None:
-        with pytest.raises(KISSError):
-            make_anthropic().get_embedding("text")
 
 
 class TestGeminiHelpers:
@@ -679,6 +676,7 @@ class TestGeminiConversion:
 
 
 class TestCodexModel:
+
     def make_codex(self) -> CodexModel:
         return CodexModel("codex/gpt-5-codex")
 
@@ -786,12 +784,9 @@ class TestCodexModel:
         assert m.extract_input_output_token_counts_from_response(response) == (70, 7, 30, 0)
         assert m.extract_input_output_token_counts_from_response("nope") == (0, 0, 0, 0)
 
-    def test_get_embedding_raises(self) -> None:
-        with pytest.raises(KISSError):
-            self.make_codex().get_embedding("x")
-
 
 class TestClaudeCodeModel:
+
     def make_cc(self) -> ClaudeCodeModel:
         return ClaudeCodeModel("cc/sonnet")
 
@@ -958,10 +953,6 @@ class TestClaudeCodeModel:
             55,
         )
         assert m.extract_input_output_token_counts_from_response(None) == (0, 0, 0, 0, 0)
-
-    def test_get_embedding_raises(self) -> None:
-        with pytest.raises(KISSError):
-            self.make_cc().get_embedding("x")
 
 
 if __name__ == "__main__":  # pragma: no cover

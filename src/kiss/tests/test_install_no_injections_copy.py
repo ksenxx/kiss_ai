@@ -4,10 +4,10 @@
 # add your name here
 """End-to-end test: the installer must NOT copy ``INJECTIONS.md`` into ``~/.kiss/``.
 
-Two install entry points must skip the copy:
-
-* ``install.sh``       (bash bootstrap, runs before VS Code launches)
-* ``DependencyInstaller.ts`` (VS Code extension finalization step)
+The ``install.sh`` (bash bootstrap, runs before VS Code launches)
+entry point must skip the copy.  The ``DependencyInstaller.ts`` (VS
+Code extension finalization step) tests moved to
+``kiss.tests.agents.vscode.test_install_no_injections_copy``.
 
 These tests grep the source files for any path that would write
 ``$KISS_HOME/INJECTIONS.md`` or ``~/.kiss/INJECTIONS.md``.  The
@@ -43,30 +43,6 @@ def test_install_sh_does_not_copy_injections_md() -> None:
         )
 
 
-def test_dependency_installer_does_not_copy_injections_md() -> None:
-    """``DependencyInstaller.ts`` must not include INJECTIONS.md in install assets."""
-    di = (
-        _REPO / "src" / "kiss" / "agents" / "vscode" / "src"
-        / "DependencyInstaller.ts"
-    )
-    assert di.exists(), f"DependencyInstaller.ts not found at {di}"
-    text = di.read_text()
-    if "installMarkdownAssets" in text:
-        for m in re.finditer(r"copyFileSync\(([^)]*)\)", text):
-            args = m.group(1)
-            assert "INJECTIONS.md" not in args, (
-                f"DependencyInstaller.ts still calls "
-                f"copyFileSync with INJECTIONS.md: {m.group(0)!r}"
-            )
-    assert (
-        re.search(
-            r"path\.join\(\s*kissHomeDir\s*,\s*['\"]INJECTIONS\.md['\"]\s*\)",
-            text,
-        )
-        is None
-    ), "DependencyInstaller.ts still writes to kissHomeDir/INJECTIONS.md"
-
-
 def test_install_sh_explains_no_injections_copy() -> None:
     """A comment in install.sh explains why INJECTIONS.md is no longer copied.
 
@@ -79,17 +55,4 @@ def test_install_sh_explains_no_injections_copy() -> None:
         "install.sh should retain a comment explaining that "
         "INJECTIONS.md is intentionally NOT copied (bundled file is "
         "read directly at runtime)."
-    )
-
-
-def test_dependency_installer_explains_no_injections_copy() -> None:
-    """A comment in DependencyInstaller.ts explains why no copy happens."""
-    di = (
-        _REPO / "src" / "kiss" / "agents" / "vscode" / "src"
-        / "DependencyInstaller.ts"
-    )
-    text = di.read_text()
-    assert "INJECTIONS.md" in text, (
-        "DependencyInstaller.ts should retain a comment explaining "
-        "that INJECTIONS.md is intentionally NOT copied."
     )

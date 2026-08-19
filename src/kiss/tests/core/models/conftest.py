@@ -20,44 +20,8 @@ the module attribute, so they continue to exercise the real lookup logic.
 
 from __future__ import annotations
 
-from types import ModuleType
-
-import pytest
-
-
-@pytest.fixture(autouse=True)
-def _stub_cli_locators(
-    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Stub Claude Code / Codex binary lookups for offline test runs.
-
-    Tests marked ``@pytest.mark.live_cli`` opt out: they actually spawn
-    the real CLI (guarded by ``@requires_claude_cli`` /
-    ``@requires_codex_cli`` skipifs), so replacing a working locator
-    with a fake ``/usr/bin/...`` path would break them with
-    ``FileNotFoundError``.  Every other test in this directory gets the
-    deterministic fake path regardless of what is installed locally.
-    """
-    if request.node.get_closest_marker("live_cli") is not None:
-        return
-    cc_mod: ModuleType | None
-    try:
-        import kiss.core.models.claude_code_model as cc_mod
-    except ImportError:
-        pass
-    else:
-        monkeypatch.setattr(
-            cc_mod, "_find_claude_cli", lambda: "/usr/bin/claude",
-            raising=False,
-        )
-
-    cx_mod: ModuleType | None
-    try:
-        import kiss.core.models.codex_model as cx_mod
-    except ImportError:
-        pass
-    else:
-        monkeypatch.setattr(
-            cx_mod, "_find_codex_cli", lambda: "/usr/bin/codex",
-            raising=False,
-        )
+# The fixture body lives in kiss.tests.cli_locator_stub so test modules
+# relocated out of this directory by the packaging invariants can import
+# the same autouse fixture per-module.  Importing it here registers it
+# for every test in this directory, exactly as before.
+from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401

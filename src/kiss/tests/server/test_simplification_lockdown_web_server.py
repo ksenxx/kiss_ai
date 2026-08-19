@@ -11,10 +11,11 @@ coverage gaps) cannot silently change it:
 
 * HTTP endpoint matrix served by ``_process_request``: the substituted
   chat page (no leftover ``{{...}}`` placeholders, auth modal, main.js
-  script tag), ``/media/`` static serving with MIME type, rejection of
-  path-traversal attempts, 404 for unknown paths, and the raw
-  ``HEAD`` 200/empty-body health-check reply from
-  ``_HeadAwareServerConnection``.
+  script tag), rejection of path-traversal attempts, 404 for unknown
+  paths, and the raw ``HEAD`` 200/empty-body health-check reply from
+  ``_HeadAwareServerConnection``.  (The exact ``/media/`` static
+  file-bytes/MIME check reads the real media asset, so it lives in
+  ``kiss.tests.agents.vscode.test_simplification_lockdown_web_server``.)
 * Silent dropping of VS Code-only webview commands
   (``notificationAction``, ``sizeReport``) on a live server connection,
   contrasted with the ``Unknown command`` error broadcast for genuinely
@@ -142,6 +143,9 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
         return _parse_http_response(await self._raw_request(payload))
 
 
+_PLACEHOLDER_RE = re.compile(r"\{\{[A-Z_]+\}\}")
+
+
 class TestHttpEndpointMatrix(_ServerTestBase):
     """Lock down the HTTP responses produced by ``_process_request``."""
 
@@ -177,6 +181,24 @@ class TestHttpEndpointMatrix(_ServerTestBase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["content-length"], "0")
         self.assertEqual(body, b"")
+
+    async def test_chat_page_html_fully_substituted(self) -> None:
+        """GET / serves chat.html with every {{...}} placeholder substituted."""
+        status, headers, body = await self._http_get("/")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["content-type"], "text/html; charset=utf-8")
+        html = body.decode("utf-8")
+        self.assertIsNone(
+            _PLACEHOLDER_RE.search(html),
+            "served chat page contains unsubstituted template placeholders",
+        )
+        self.assertIn('id="auth-modal"', html)
+        self.assertRegex(
+            html,
+            r'"/media/main\.js\?v=[0-9a-f]+"',
+            "served chat page is missing a cache-busted main.js script tag",
+        )
+        self.assertIn('class="remote-chat"', html)
 
 
 class TestVscodeOnlyCommandsDropped(_ServerTestBase):

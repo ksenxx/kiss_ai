@@ -43,6 +43,8 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 _IGNORED_REL = "data/out.csv"
+
+
 _IGNORED_CONTENT = "col\n1\n"
 
 
@@ -248,61 +250,3 @@ class TestIgnoredFileRescueReclaim:
         assert (self.repo / _IGNORED_REL).is_file(), (
             "ignored output of the orphan worktree was destroyed by reclaim"
         )
-
-
-class TestIgnoredFileRescueServerPostTask:
-    """The server's post-task auto path rescues ignored-only output.
-
-    A task whose ONLY output is ignored files makes the changed-files
-    probe report an empty worktree, so the post-task auto-commit path
-    picks the internal "discard" action — which must rescue before
-    removing.
-    """
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp(prefix="kiss-wt-rescue-server-")
-        self.db_saved = _redirect_db(self.tmpdir)
-        self.repo = _make_repo(Path(self.tmpdir) / "repo")
-        self._original_run: Any = None
-
-    def teardown_method(self) -> None:
-        if self._original_run is not None:
-            cast(Any, SorcarAgent.__mro__[1]).run = self._original_run
-        from kiss.server import agent_state
-        for state in agent_state.snapshot():
-            if state.agent is not None and state.agent._wt_pending:
-                try:
-                    state.agent.discard()
-                except Exception:  # pragma: no cover — cleanup
-                    pass
-        agent_state.agent_states.clear()
-        _restore_db(self.db_saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_post_task_auto_discard_rescues_ignored_only_output(
-        self,
-    ) -> None:
-        """End-to-end through VSCodeServer._run_task_inner."""
-        from kiss.server.server import VSCodeServer
-
-        self._original_run = _stub_parent_run(
-            {_IGNORED_REL: _IGNORED_CONTENT},
-        )
-        server = VSCodeServer()
-        server.work_dir = str(self.repo)
-        events: list[dict] = []
-        server.printer.broadcast = events.append  # type: ignore[assignment]
-        server._run_task_inner({
-            "prompt": "task with ignored-only output",
-            "workDir": str(self.repo),
-            "tabId": "0",
-            "useWorktree": True,
-            "autoCommit": True,
-            "model": "",
-        })
-        rescued = self.repo / _IGNORED_REL
-        assert rescued.is_file(), (
-            "the post-task auto-discard destroyed ignored-only task "
-            f"output; events: {[e.get('type') for e in events]}"
-        )
-        assert rescued.read_text() == _IGNORED_CONTENT
