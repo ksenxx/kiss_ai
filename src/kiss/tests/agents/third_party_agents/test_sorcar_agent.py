@@ -2,19 +2,20 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tests for sorcar_agent.py: prompt construction, arg parsing, task resolution,
-CLI callbacks, callback wiring, bash streaming, and autocomplete clipping."""
+"""Tests for the channel-agent CLI helpers: arg parsing, task
+resolution, and the default-task credential guard.
+
+The bash-streaming test (pure kiss.agents.sorcar + kiss.server
+closure) moved to ``kiss.tests.server.test_sorcar_agent``."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._channel_cli import (
     _build_arg_parser,
     _resolve_task,
 )
-from kiss.server.json_printer import JsonPrinter
 
 
 class TestResolveTask:
@@ -55,28 +56,3 @@ class TestBuildArgParser:
         assert args.max_budget == 1.5
         assert args.work_dir == "/tmp/test"
         assert args.task == "hello world"
-
-
-class TestSorcarBashStreaming:
-    def test_multiline_bash_streams_all_lines(self):
-        agent = SorcarAgent("test")
-        tools = agent._get_tools()
-        bash_tool = tools[0]
-
-        printer = JsonPrinter()
-        printer._thread_local.task_id = "0"
-        printer.start_recording()
-        agent.printer = printer
-
-        result = bash_tool(
-            command="printf 'line1\\nline2\\nline3\\n'",
-            description="multiline",
-        )
-        printer._flush_bash()
-
-        assert "line1" in result
-        events = printer.stop_recording()
-        sys_text = "".join(e["text"] for e in events if e["type"] == "system_output")
-        assert "line1" in sys_text
-        assert "line2" in sys_text
-        assert "line3" in sys_text
