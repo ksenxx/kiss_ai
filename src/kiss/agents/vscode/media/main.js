@@ -6188,7 +6188,29 @@
         // transcript on screen.
         if (ev.tabId !== undefined && !isForActiveTab(ev)) break;
         if (ev.ok) {
-          addNotice('Chat page saved to ' + (ev.path || 'reports/'));
+          const savedPath = typeof ev.path === 'string' ? ev.path : '';
+          const banner = addNotice(
+            'Chat page saved to ' + (savedPath ? '' : 'reports/'),
+          );
+          // The daemon replied with the EXACT path it wrote, so that
+          // path is wrapped in a candidate span directly — running the
+          // prose regex of linkifyFilePaths() over the banner instead
+          // would split a path containing spaces. The span then takes
+          // the same checkPaths -> pathsExist promotion every
+          // transcript file link takes; the daemon just wrote the
+          // file, so the check confirms it and the path becomes a
+          // clickable link that opens the saved page.
+          if (savedPath) {
+            const span = document.createElement('span');
+            span.setAttribute('data-path-candidate', savedPath);
+            span.textContent = savedPath;
+            banner.appendChild(span);
+            verifyFileLinkCandidates(
+              banner,
+              workDirForTab(activeTabId) || '',
+              activeTabId,
+            );
+          }
         } else {
           addError('Share failed: ' + (ev.error || 'unknown error'));
         }
@@ -7348,14 +7370,15 @@
     // autoscroll-coverage:start
     autoScrollLatestEventPanel(div);
     // autoscroll-coverage:end
+    return div;
   }
 
   function addError(text) {
-    addBanner('err', 'Error:', text);
+    return addBanner('err', 'Error:', text);
   }
 
   function addNotice(text) {
-    addBanner('note', 'Note:', text);
+    return addBanner('note', 'Note:', text);
   }
 
   function addWarning(text) {
