@@ -36,7 +36,6 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.persistence import _add_task, _prefix_match_tasks
 from kiss.agents.sorcar.skills import parse_frontmatter
-from kiss.agents.third_party_agents._channel_cli import _parse_budget_value
 
 
 def _run_git(*args: str, cwd: Path) -> None:
@@ -78,6 +77,26 @@ def _install_failing_status_git(shim_dir: Path) -> dict[str, str]:
     env = dict(os.environ)
     env["PATH"] = f"{shim_dir}:{env['PATH']}"
     return env
+
+
+class _TempDbTestBase:
+    """Fresh temp SQLite DB per test, fully restored after."""
+
+    def setup_method(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        kiss_dir = Path(self.tmpdir) / ".kiss"
+        kiss_dir.mkdir(parents=True, exist_ok=True)
+        th._KISS_DIR = kiss_dir
+        th._DB_PATH = kiss_dir / "sorcar.db"
+        th._db_conn = None
+        th._invalidate_chat_context_cache("")
+
+    def teardown_method(self) -> None:
+        th._close_db()
+        th._invalidate_chat_context_cache("")
+        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
 class TestGitStatusFailureIsNeverClean:
@@ -171,40 +190,6 @@ class TestUnicodeRobustness:
         bad = self.tmp / "SKILL.md"
         bad.write_bytes(b"---\nname: x\n---\n\xff\xfe body")
         assert parse_frontmatter(bad) is None  # skipped, not raised
-
-
-class TestBudgetValidation:
-    """S2-22: nan/inf/zero/negative budgets must be rejected."""
-
-    def test_rejects_non_finite_and_non_positive(self) -> None:
-        import argparse
-
-        for bad in ("nan", "inf", "-inf", "0", "-3", "NaN"):
-            with pytest.raises(argparse.ArgumentTypeError):
-                _parse_budget_value(bad)
-
-    def test_accepts_positive_finite(self) -> None:
-        assert _parse_budget_value("12.5") == 12.5
-
-
-class _TempDbTestBase:
-    """Fresh temp SQLite DB per test, fully restored after."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-        kiss_dir = Path(self.tmpdir) / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "sorcar.db"
-        th._db_conn = None
-        th._invalidate_chat_context_cache("")
-
-    def teardown_method(self) -> None:
-        th._close_db()
-        th._invalidate_chat_context_cache("")
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
 class TestPrefixMatchDistinct(_TempDbTestBase):

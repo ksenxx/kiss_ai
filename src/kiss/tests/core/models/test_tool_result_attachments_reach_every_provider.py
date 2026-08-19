@@ -39,6 +39,7 @@ from kiss.core.models.gemini_model import GeminiModel
 from kiss.core.models.model import encode_binary_attachment
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
+from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 from kiss.tests.core.models.anthropic_sse_harness import ScriptedAnthropicServer
 from kiss.tests.core.models.gemini_sse_harness import (
     GeminiScript,
@@ -52,7 +53,7 @@ from kiss.tests.core.models.openai_sse_harness import (
     ScriptedOpenAIServer,
 )
 from kiss.tests.core.models.test_cli_subprocess_lifecycle import install_cli
-from kiss.tests.core.test_heif_attachment import _write_gradient_png
+from kiss.tests.core.models.test_heif_attachment import _write_gradient_png
 
 
 def _payload_is_present(body: dict[str, Any], data: bytes) -> bool:

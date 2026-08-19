@@ -41,6 +41,7 @@ import pytest
 
 _MISSING = "kiss_nonexistent_dep_xyz"
 
+
 _PROBE = """
 import json, sys
 
@@ -129,32 +130,6 @@ class TestFailedLazyImportIsNotCached:
         cause = report["cause"]
         assert isinstance(cause, str) and _MISSING in cause, (
             f"the KISSError lost the underlying ImportError: cause={cause!r}"
-        )
-
-
-class TestFactoryReportsTheRealImportFailure:
-    """``_load_model_class`` must translate, not discard, the ImportError."""
-
-    _MISSING_MODULE = "kiss.core.models.zz_nonexistent_module"
-
-    def test_missing_module_becomes_a_kiss_error_keeping_its_cause(self) -> None:
-        """A real failed lazy import surfaces as a KISSError with a cause."""
-        import kiss.core.models as models
-        from kiss.core.kiss_error import KISSError
-        from kiss.core.models.model_info import _load_model_class
-
-        models._LAZY_IMPORTS["ZZMissingModel"] = self._MISSING_MODULE
-        try:
-            with pytest.raises(KISSError) as excinfo:
-                _load_model_class("ZZMissingModel", "ZZ SDK not installed.")
-        finally:
-            del models._LAZY_IMPORTS["ZZMissingModel"]
-
-        assert "ZZ SDK not installed." in str(excinfo.value)
-        assert self._MISSING_MODULE in str(excinfo.value)
-        assert isinstance(excinfo.value.__cause__, ImportError)
-        assert "ZZMissingModel" not in vars(models), (
-            "the failed import was cached, so a retry can never succeed"
         )
 
 

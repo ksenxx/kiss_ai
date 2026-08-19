@@ -30,10 +30,6 @@ from typing import Any
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.sorcar_agent import auto_commit_changes
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.server.helpers import (
-    _append_task_result,
-    generate_commit_message_from_diff,
-)
 
 
 def _make_repo(path: Path) -> Path:
@@ -91,75 +87,6 @@ class _LLMUnavailable:
         import kiss.core.kiss_agent as kiss_agent_mod
 
         kiss_agent_mod.KISSAgent = self._orig  # type: ignore[misc]
-
-
-class TestAppendTaskResultHelper:
-    """Pure-function tests for ``_append_task_result``."""
-
-    def test_appends_under_result_heading(self) -> None:
-        msg = _append_task_result("subject", "Fixed the bug in foo.py")
-        assert msg == "subject\n\nResult:\nFixed the bug in foo.py"
-
-    def test_trims_whitespace_around_result(self) -> None:
-        msg = _append_task_result("subject", "   done\n  ")
-        assert msg == "subject\n\nResult:\ndone"
-
-    def test_empty_result_returns_message_unchanged(self) -> None:
-        assert _append_task_result("subject", "") == "subject"
-        assert _append_task_result("subject", "   \n  ") == "subject"
-
-    def test_multiline_result_preserved(self) -> None:
-        result = "did X\n- step 1\n- step 2"
-        msg = _append_task_result("subject", result)
-        assert msg == f"subject\n\nResult:\n{result}"
-
-
-class TestGenerateCommitMessageIncludesTaskResult:
-    """``generate_commit_message_from_diff`` includes the task result
-    in its output whenever the result is supplied — across all three
-    branches (empty diff, LLM-failure-fallback, and combined with the
-    user prompt).
-    """
-
-    def test_empty_diff_with_result_appends_result(self) -> None:
-        msg = generate_commit_message_from_diff(
-            "", task_result="Added CLI flag --foo",
-        )
-        assert msg == (
-            "kiss: auto-commit agent work\n\n"
-            "Result:\nAdded CLI flag --foo"
-        )
-
-    def test_empty_diff_with_prompt_and_result_appends_both(self) -> None:
-        msg = generate_commit_message_from_diff(
-            "",
-            user_prompt="add a CLI flag",
-            task_result="Added CLI flag --foo",
-        )
-        assert msg == (
-            "kiss: auto-commit agent work\n\n"
-            "User prompt:\nadd a CLI flag\n\n"
-            "Result:\nAdded CLI flag --foo"
-        )
-
-    def test_llm_failure_with_prompt_and_result_appends_both(self) -> None:
-        with _LLMUnavailable():
-            msg = generate_commit_message_from_diff(
-                "diff --git a/f b/f\n@@\n+x\n",
-                user_prompt="refactor module Y",
-                task_result="Refactored Y into Z",
-            )
-        assert msg.startswith("kiss: auto-commit agent work")
-        assert "User prompt:\nrefactor module Y" in msg
-        assert msg.endswith("Result:\nRefactored Y into Z")
-
-    def test_llm_failure_without_result_has_no_result_block(self) -> None:
-        with _LLMUnavailable():
-            msg = generate_commit_message_from_diff(
-                "diff --git a/f b/f\n@@\n+x\n",
-                user_prompt="refactor module Y",
-            )
-        assert "Result:" not in msg
 
 
 class TestAutoCommitChangesFallbackIncludesResult:

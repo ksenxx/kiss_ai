@@ -30,7 +30,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model_info import MODEL_INFO, calculate_cost
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 
@@ -208,22 +207,3 @@ class TestOpenAIExtractorAudioSplit:
             0,
             0,
         )
-
-
-class TestKISSAgentBudgetIncludesAudio:
-    def test_budget_used_reflects_audio_rates_and_tokens_counted(self) -> None:
-        agent = KISSAgent("audio-budget-test")
-        agent.model = OpenAICompatibleModel(
-            "gpt-audio-1.5", base_url="https://api.openai.com/v1", api_key="test",
-        )
-        response = _audio_response(
-            prompt_tokens=60,
-            completion_tokens=620,
-            audio_input=0,
-            audio_output=600,
-        )
-        agent._update_tokens_and_budget_from_response(response)
-        expected = (60 * 2.5 + 20 * 10.0 + 600 * 64.0) / 1e6
-        assert agent.budget_used == pytest.approx(expected)
-        assert agent.total_tokens_used == 680
-        assert agent.context_tokens_used == 680

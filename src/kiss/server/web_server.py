@@ -45,6 +45,7 @@ import contextlib
 import datetime
 import errno
 import hashlib
+import html
 import ipaddress
 import json
 import logging
@@ -69,7 +70,7 @@ from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlsplit
 
 import websockets
@@ -78,6 +79,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
 from kiss.agents.sorcar import cron_agent
+from kiss.agents.sorcar.persistence import _load_all_chat_events_by_chat_id
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.models.model_info import get_default_model
@@ -88,7 +90,11 @@ from kiss.core.vscode_config import (
     source_shell_env,
 )
 from kiss.server import sorcar as sorcar_api
-from kiss.server.json_printer import JsonPrinter, stamp_event_ts
+from kiss.server.json_printer import (
+    JsonPrinter,
+    stamp_event_ts,
+    with_task_settings_event,
+)
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
@@ -337,6 +343,20 @@ def _truncate_utf8_bytes(text: str, max_bytes: int) -> tuple[str, int]:
 
 
 _MAX_LINE_BYTES = 64 * 1024 * 1024
+
+# Byte budget for the JSON tasks of one ``share_tasks`` reply.  The
+# reply's smallest receiver is NOT this server's own 64 MiB frame
+# (``_MAX_LINE_BYTES``) but the VS Code extension's UDS client, which
+# destroys the connection past MAX_LINE_BUFFER_BYTES = 32 MiB
+# (``src/AgentClient.ts``); the 8 MiB headroom under that covers the
+# reply envelope and the frame's UTF-8 / escaping overhead.  Older
+# tasks beyond the budget are dropped and the reply is flagged
+# ``truncated`` (see _handle_share_chat_tasks).
+_SHARE_TASKS_MAX_REPLY_BYTES = 24 * 1024 * 1024
+
+# Echoed identifiers ride in every ``share_tasks`` reply; a client
+# cannot make the reply overflow its frame by inflating them.
+_SHARE_TASKS_MAX_ID_CHARS = 256
 
 # ``websockets`` wraps the whole opening handshake - including a plain
 # HTTP reply produced by ``process_request`` - in ``open_timeout``.  Its
@@ -2454,6 +2474,117 @@ def _media_url(name: str) -> str:
     return f"/media/{name}?v={ver}"
 
 
+_VSCODE_THEME_VARS_CSS = (
+    ":root {\n"
+    "      --vscode-font-size: 16px;\n"
+    "      --vscode-font-family: -apple-system, BlinkMacSystemFont, "
+    "'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;\n"
+    "      --vscode-editor-font-size: 16px;\n"
+    "      --vscode-editor-font-family: Menlo, Monaco, "
+    "'Courier New', monospace;\n"
+    "      --vscode-editor-background: #1e1e1e;\n"
+    "      --vscode-editor-foreground: #cccccc;\n"
+    "      --vscode-input-background: #3c3c3c;\n"
+    "      --vscode-button-foreground: #ffffff;\n"
+    "      --vscode-sideBar-background: #252526;\n"
+    "      --vscode-textLink-foreground: #3794ff;\n"
+    "      --vscode-descriptionForeground: #8b8b8b;\n"
+    "      --vscode-panel-border: #80808059;\n"
+    "      --vscode-terminal-ansiRed: #f44747;\n"
+    "      --vscode-terminal-ansiGreen: #6a9955;\n"
+    "      --vscode-terminal-ansiYellow: #d7ba7d;\n"
+    "      --vscode-terminal-ansiMagenta: #c586c0;\n"
+    "      --vscode-terminal-ansiCyan: #4ec9b0;\n"
+    "    }\n"
+)
+"""The VS Code theme variables main.css derives its palette from.
+
+The webview gets them from VS Code itself; the remote webapp
+(:func:`_build_html`) and the shared chat pages
+(:func:`_build_share_page`) run in a plain browser, so both inline
+this block — one copy, so the two pages can never disagree on the
+palette.
+"""
+
+_SHARE_PAGE_CSS = """\
+/* A shared chat page is a normal scrolling document, not the
+   fixed-height webview app shell that main.css lays out. */
+html, body { height: auto; overflow: auto; }
+#app { height: auto; display: block; }
+#output { overflow: visible; }
+/* Chrome that only works inside the live chat webview. */
+.panel-copy-btn, #task-panel-copy { display: none !important; }
+/* One .share-task section per task of the chat, oldest first. */
+.share-task + .share-task {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+}
+/* Each task's panel text carries a per-task unique id (its drawer's
+   aria-controls target), so main.css's #task-panel-text rules are
+   replicated here by id prefix. */
+[id^='task-panel-text'] {
+  max-height: 60vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#task-panel.drawer-collapsed [id^='task-panel-text'] {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+"""
+"""Layout overrides appended after main.css on a shared chat page."""
+
+
+def _build_share_page(title: str, body_html: str) -> str:
+    """Build one standalone, self-contained shared chat page.
+
+    Wraps *body_html* — the chat webview's serialized chat, one
+    ``.share-task`` section (static task panel + transcript) per task
+    of the chat (see ``buildShareableHtml`` in ``media/main.js``) —
+    in a complete HTML document that needs no
+    server: ``media/main.css`` (the exact stylesheet the webview
+    uses), the highlight.js theme, the VS Code palette variables and
+    ``media/share.js`` (collapse / expand behaviour for the event
+    panels and the static task panel) are all inlined.
+
+    Args:
+        title: Page title; falls back to "KISS Sorcar chat".
+        body_html: The serialized ``#output`` markup (one
+            ``.share-task`` section per task), placed verbatim inside
+            the page's ``#app``.
+
+    Returns:
+        The complete HTML document string.
+    """
+    main_css = (MEDIA_DIR / "main.css").read_text(encoding="utf-8")
+    hljs_css = (MEDIA_DIR / "highlight-github-dark.min.css").read_text(
+        encoding="utf-8",
+    )
+    share_js = (MEDIA_DIR / "share.js").read_text(encoding="utf-8")
+    page_title = html.escape(title.strip()) or "KISS Sorcar chat"
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '<meta charset="UTF-8">\n'
+        '<meta name="viewport" content="width=device-width, '
+        'initial-scale=1.0">\n'
+        f"<title>{page_title}</title>\n"
+        "<style>\n" + _VSCODE_THEME_VARS_CSS + "</style>\n"
+        "<style>\n" + hljs_css + "\n</style>\n"
+        "<style>\n" + main_css + "\n</style>\n"
+        "<style>\n" + _SHARE_PAGE_CSS + "</style>\n"
+        "</head>\n"
+        "<body>\n"
+        '<div id="app">\n' + body_html + "\n</div>\n"
+        "<script>\n" + share_js + "</script>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
 def _build_html() -> str:
     """Build the standalone HTML page for remote Sorcar access.
 
@@ -2482,28 +2613,7 @@ def _build_html() -> str:
         "    html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }\n"
         "    body { background: var(--vscode-editor-background, #1e1e1e);\n"
         "            color: var(--vscode-editor-foreground, #cccccc); }\n"
-        "    :root {\n"
-        "      --vscode-font-size: 16px;\n"
-        "      --vscode-font-family: -apple-system, BlinkMacSystemFont, "
-        "'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;\n"
-        "      --vscode-editor-font-size: 16px;\n"
-        "      --vscode-editor-font-family: Menlo, Monaco, "
-        "'Courier New', monospace;\n"
-        "      --vscode-editor-background: #1e1e1e;\n"
-        "      --vscode-editor-foreground: #cccccc;\n"
-        "      --vscode-input-background: #3c3c3c;\n"
-        "      --vscode-button-foreground: #ffffff;\n"
-        "      --vscode-sideBar-background: #252526;\n"
-        "      --vscode-textLink-foreground: #3794ff;\n"
-        "      --vscode-descriptionForeground: #8b8b8b;\n"
-        "      --vscode-panel-border: #80808059;\n"
-        "      --vscode-terminal-ansiRed: #f44747;\n"
-        "      --vscode-terminal-ansiGreen: #6a9955;\n"
-        "      --vscode-terminal-ansiYellow: #d7ba7d;\n"
-        "      --vscode-terminal-ansiMagenta: #c586c0;\n"
-        "      --vscode-terminal-ansiCyan: #4ec9b0;\n"
-        "    }\n"
-        "  </style>"
+        "    " + _VSCODE_THEME_VARS_CSS + "  </style>"
     )
     auth_modal = (
         '    <div id="auth-modal" style="display:none;">\n'
@@ -4369,6 +4479,177 @@ class RemoteAccessServer:
             await self._endpoint_send(endpoint, json.dumps(reply))
         except Exception:
             logger.debug("openFile: failed to write reply", exc_info=True)
+
+    async def _handle_share_chat(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Save a chat transcript as a standalone HTML page and reply.
+
+        Handles the ``shareChat`` command sent by ``media/main.js``
+        when the user clicks the share button next to the mic button:
+        the webview serialized the highlighted tab's static task panel
+        and every event panel of its transcript, and this handler
+        wraps them into a self-contained page
+        (:func:`_build_share_page`) written to
+        ``<workDir>/reports/chat-<chatId>.html``.  Both clients take
+        this path — the VS Code extension forwards the command over
+        UDS, the remote webapp sends it over WSS — so the page is
+        built in exactly one place.  The reply is a single
+        ``share_done`` JSON object sent directly to the requesting
+        *endpoint* — never broadcast — with the shape::
+
+            {"type": "share_done", "tabId": <echo>, "ok": true,
+             "path": <abs path of the written page>}   # on success
+            {"type": "share_done", "tabId": <echo>, "ok": false,
+             "error": <message>}                       # on failure
+
+        The chat id is sanitized to a filename-safe token; the target
+        directory is created when missing.  ``workDir`` falls back to
+        the daemon work dir exactly like :meth:`_handle_open_file`.
+
+        Args:
+            cmd: The parsed ``shareChat`` command (``chatId``,
+                ``html``, optional ``title``, ``workDir``, ``tabId``).
+            endpoint: The requesting connection (WSS or UDS).
+        """
+        tab_id = cmd.get("tabId", "")
+        if not isinstance(tab_id, str):
+            tab_id = ""
+        chat_id = cmd.get("chatId", "")
+        body_html = cmd.get("html", "")
+        title = cmd.get("title", "")
+        if not isinstance(title, str):
+            title = ""
+        work_dir = cmd.get("workDir", "")
+        if not isinstance(work_dir, str) or not work_dir:
+            work_dir = self._vscode_server.work_dir or self.work_dir
+
+        def _write_page() -> dict[str, Any]:
+            reply: dict[str, Any] = {
+                "type": "share_done",
+                "tabId": tab_id,
+                "ok": False,
+            }
+            if not isinstance(chat_id, str) or not chat_id.strip():
+                reply["error"] = "Missing chat id"
+                return reply
+            if not isinstance(body_html, str) or not body_html.strip():
+                reply["error"] = "Nothing to share: the chat is empty"
+                return reply
+            safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", chat_id)
+            safe_id = safe_id.strip("-.")[:80] or "chat"
+            try:
+                page = _build_share_page(title, body_html)
+                out_path = (
+                    Path(work_dir).expanduser()
+                    / "reports"
+                    / f"chat-{safe_id}.html"
+                )
+                # Atomic: a reader with the previous share of this chat
+                # open, or a concurrent share of the same chat from
+                # another client, must never observe a torn page.
+                _atomic_write_text(out_path, page)
+                reply["ok"] = True
+                reply["path"] = str(out_path)
+            except OSError as exc:
+                reply["error"] = f"Failed to write the chat page: {exc}"
+            return reply
+
+        reply = await asyncio.to_thread(_write_page)
+        try:
+            await self._endpoint_send(endpoint, json.dumps(reply))
+        except Exception:
+            logger.debug("shareChat: failed to write reply", exc_info=True)
+
+    async def _handle_share_chat_tasks(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Send a chat's every persisted task transcript for a share.
+
+        Handles the ``shareChatTasks`` command sent by
+        ``media/main.js`` when the user clicks the share button: the
+        webview needs the transcripts of ALL of the chat's tasks —
+        after a webview reload its DOM holds only the one task the
+        session replay repainted — so this returns every non-sub-agent
+        ``task_history`` row of the chat, oldest first, straight from
+        the history database
+        (:func:`~kiss.agents.sorcar.persistence._load_all_chat_events_by_chat_id`).
+        The reply is a single ``share_tasks`` JSON object sent
+        directly to the requesting *endpoint* — never broadcast —
+        with the shape::
+
+            {"type": "share_tasks", "tabId": <echo>, "chatId": <echo>,
+             "tasks": [{"task": <str>, "task_id": <str>,
+                        "events": [<event>, ...]}, ...],
+             "truncated": <bool>}
+
+        Every receiver caps one frame — this server at
+        ``_MAX_LINE_BYTES``, the VS Code extension's UDS client at a
+        smaller 32 MiB — and drops the connection on overflow, so when
+        the tasks do not fit ``_SHARE_TASKS_MAX_REPLY_BYTES`` the
+        OLDEST ones are left out and ``truncated`` is set — the newest
+        transcripts are the ones the export cannot redraw from its own
+        DOM.  An unknown or empty chat id yields an empty task list:
+        the webview then exports just what is on screen.  A history
+        database failure yields an ``error`` string in the reply, so
+        the share click never silently stalls.
+
+        Args:
+            cmd: The parsed ``shareChatTasks`` command (``chatId``,
+                optional ``tabId``).
+            endpoint: The requesting connection (WSS or UDS).
+        """
+        tab_id = cmd.get("tabId", "")
+        if not isinstance(tab_id, str):
+            tab_id = ""
+        chat_id = cmd.get("chatId", "")
+        if not isinstance(chat_id, str):
+            chat_id = ""
+        tab_id = tab_id[:_SHARE_TASKS_MAX_ID_CHARS]
+        chat_id = chat_id[:_SHARE_TASKS_MAX_ID_CHARS]
+
+        def _load_tasks() -> dict[str, Any]:
+            reply: dict[str, Any] = {
+                "type": "share_tasks",
+                "tabId": tab_id,
+                "chatId": chat_id,
+                "tasks": [],
+                "truncated": False,
+            }
+            if not chat_id.strip():
+                return reply
+            try:
+                rows, truncated = _load_all_chat_events_by_chat_id(
+                    chat_id, _SHARE_TASKS_MAX_REPLY_BYTES,
+                )
+            except Exception as exc:
+                logger.warning("shareChatTasks: load failed", exc_info=True)
+                reply["error"] = f"Failed to load the chat history: {exc}"
+                return reply
+            reply["tasks"] = [
+                {
+                    "task": row.get("task", ""),
+                    "task_id": row.get("task_id", ""),
+                    # The settings event lets the export's synthesized
+                    # task panels carry the same settings info the live
+                    # panel shows (see shareTaskPanel in media/main.js).
+                    "events": with_task_settings_event(
+                        cast("list[dict[str, Any]]", row.get("events") or []),
+                        row,
+                    ),
+                }
+                for row in rows
+            ]
+            reply["truncated"] = truncated
+            return reply
+
+        reply = await asyncio.to_thread(_load_tasks)
+        try:
+            await self._endpoint_send(endpoint, json.dumps(reply))
+        except Exception:
+            logger.debug(
+                "shareChatTasks: failed to write reply", exc_info=True,
+            )
 
     async def _handle_check_paths(
         self, cmd: dict[str, Any], endpoint: Any,

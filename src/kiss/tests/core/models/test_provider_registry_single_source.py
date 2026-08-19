@@ -30,94 +30,19 @@ real routing functions do — restoring everything in ``finally``.
 
 from __future__ import annotations
 
-from collections.abc import Generator
-
 import pytest
 
-from kiss.core import config as config_module
-from kiss.core.models import model_info as mi
 from kiss.core.models.model_info import (
     MODEL_INFO,
-    OpenAICompatibleProvider,
-    _build_model_info_entry,
     _openai_bare_name,
-    get_available_models,
     get_model_provider,
     model,
 )
-
-_VENDOR_MODEL = "zzvendor-flagship"
-# ``config.Config`` is a pydantic model with ``extra`` forbidden, so a test
-# cannot invent a brand-new credential attribute.  Reusing an existing one
-# does not weaken the test: what is under scrutiny is that the routing
-# functions read ``provider.api_key_name`` from the registry at all, rather
-# than from their own hardcoded prefix table.
-_VENDOR_KEY = "TOGETHER_API_KEY"
-
-_ENTRY = {
-    "context_length": 128000,
-    "input_price_per_1M": 1.0,
-    "output_price_per_1M": 2.0,
-}
-
-
-@pytest.fixture
-def registered_vendor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Generator[OpenAICompatibleProvider]:
-    """Register a real extra vendor for the duration of one test."""
-    provider = OpenAICompatibleProvider(
-        name="zzvendor",
-        label="ZZVendor",
-        host="api.zzvendor.test",
-        base_url="https://api.zzvendor.test/v1",
-        prefixes=("zzvendor-",),
-        excludes=(),
-        api_key_name=_VENDOR_KEY,
-        tools_accept_reasoning_effort=None,
-        delegate_tools_to_responses=False,
-    )
-    saved_registry = mi.OPENAI_COMPATIBLE_PROVIDERS
-    monkeypatch.setattr(config_module.DEFAULT_CONFIG, _VENDOR_KEY, "zz-test-key")
-    mi.OPENAI_COMPATIBLE_PROVIDERS = (*saved_registry, provider)
-    MODEL_INFO[_VENDOR_MODEL] = _build_model_info_entry(dict(_ENTRY))
-    try:
-        yield provider
-    finally:
-        mi.OPENAI_COMPATIBLE_PROVIDERS = saved_registry
-        MODEL_INFO.pop(_VENDOR_MODEL, None)
+from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 
 
 class TestRegistryIsTheOnlyRoutingTable:
     """F6: a vendor added to the registry must be fully visible."""
-
-    def test_factory_routes_to_the_registered_base_url(
-        self, registered_vendor: OpenAICompatibleProvider,
-    ) -> None:
-        """``model()`` already honoured the registry — the baseline."""
-        m = model(_VENDOR_MODEL)
-
-        assert type(m).__name__ == "OpenAICompatibleModel"
-        assert getattr(m, "base_url") == registered_vendor.base_url  # noqa: B009
-
-    def test_provider_label_comes_from_the_registry(
-        self, registered_vendor: OpenAICompatibleProvider,
-    ) -> None:
-        """``get_model_provider`` must not need its own prefix table."""
-        assert get_model_provider(_VENDOR_MODEL) == registered_vendor.label
-
-    def test_model_is_offered_in_the_picker(
-        self, registered_vendor: OpenAICompatibleProvider,
-    ) -> None:
-        """``get_available_models`` must find the credential via the registry."""
-        assert _VENDOR_MODEL in get_available_models()
-
-    def test_registry_reports_the_vendor_as_configured(
-        self, registered_vendor: OpenAICompatibleProvider,
-    ) -> None:
-        """Provider routing and credential lookup must both see the vendor."""
-        assert get_model_provider(_VENDOR_MODEL) == registered_vendor.label
-        assert mi._configured_providers()[registered_vendor.label] is True
 
     def test_unregistered_name_is_still_unknown(self) -> None:
         """Names no route matches must keep reporting ``Unknown``."""

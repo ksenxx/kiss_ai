@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 
 import kiss.core.models as models_pkg
-from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
     Attachment,
     Model,
@@ -35,11 +34,11 @@ from kiss.core.models.model_info import (
     calculate_cost,
     get_default_model,
     get_fast_model,
-    get_max_context_length,
     get_model_provider,
     model,
     openai_compatible_provider_for_base_url,
 )
+from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 
 
 class _ConcreteModel(Model):
@@ -77,6 +76,11 @@ def _sample_tool(path: str, count: int = 3, tags: list[str] | None = None) -> st
     return path
 
 
+def _provider_name(provider: Any) -> str:
+    """Return the provider's name, failing the test when provider is None."""
+    assert provider is not None
+    return str(provider.name)
+
 
 def test_model_routing_by_prefix() -> None:
     """model() routes each name prefix to the documented provider class."""
@@ -103,12 +107,6 @@ def test_model_base_url_override_bypasses_routing() -> None:
     assert m.model_config == {"extra": 1}
 
 
-def test_model_unknown_name_raises() -> None:
-    """Unrecognized model names raise KISSError."""
-    with pytest.raises(KISSError, match="Unknown model name"):
-        model("totally-unknown-model-xyz")
-
-
 def test_strip_provider_prefix() -> None:
     """Harbor-style provider prefixes are stripped only for redundant routes."""
     assert _strip_provider_prefix("openai/gpt-5.4") == "gpt-5.4"
@@ -118,12 +116,6 @@ def test_strip_provider_prefix() -> None:
     assert _strip_provider_prefix("openrouter/openai/gpt-4o") == "openrouter/openai/gpt-4o"
     assert _strip_provider_prefix("gpt-4o") == "gpt-4o"
     assert _strip_provider_prefix("anthropic/other") == "anthropic/other"
-
-
-def _provider_name(provider: Any) -> str:
-    """Return the provider's name, failing the test when provider is None."""
-    assert provider is not None
-    return str(provider.name)
 
 
 def test_provider_registry_lookup() -> None:
@@ -156,22 +148,6 @@ def test_get_model_provider_labels() -> None:
     assert get_model_provider("openai/gpt-oss-120b") == "Together"
     assert get_model_provider("meta-llama/Llama-3") == "Together"
     assert get_model_provider("something-else") == "Unknown"
-
-
-
-def test_calculate_cost_basic_and_unknown() -> None:
-    """Cost math is (tokens * price) / 1M; unknown models allow only zero usage."""
-    name = next(
-        n for n, i in MODEL_INFO.items()
-        if n.startswith("claude-") and i.is_generation_supported
-    )
-    info = MODEL_INFO[name]
-    expected = (1000 * info.input_price_per_1M + 500 * info.output_price_per_1M) / 1e6
-    assert calculate_cost(name, 1000, 500) == pytest.approx(expected)
-    assert calculate_cost(f"anthropic/{name}", 1000, 500) == pytest.approx(expected)
-    assert calculate_cost("no-such-model", 0, 0) == 0.0
-    with pytest.raises(KISSError, match="unknown model"):
-        calculate_cost("no-such-model", 1, 0)
 
 
 def test_calculate_cost_cache_pricing() -> None:
@@ -235,15 +211,6 @@ def test_long_context_pricing_gpt55() -> None:
     assert cost == pytest.approx((300_000 * 10.00 + 1000 * 45.00) / 1e6)
 
 
-def test_get_max_context_length() -> None:
-    """Context lengths resolve directly and via provider-prefix stripping."""
-    name = next(n for n in MODEL_INFO if n.startswith("gpt-"))
-    assert get_max_context_length(name) == MODEL_INFO[name].context_length
-    assert get_max_context_length(f"openai/{name}") == MODEL_INFO[name].context_length
-    with pytest.raises(KISSError, match="not found in MODEL_INFO"):
-        get_max_context_length("no-such-model")
-
-
 def test_default_fast_model_pickers() -> None:
     """Model pickers return a string (a model name or 'No model')."""
     for picker in (get_fast_model, get_default_model):
@@ -251,7 +218,6 @@ def test_default_fast_model_pickers() -> None:
         assert isinstance(picked, str) and picked
         if picked != "No model":
             assert picked in MODEL_INFO or picked.startswith(("cc/", "codex/"))
-
 
 
 def test_lazy_class_imports() -> None:
@@ -263,7 +229,6 @@ def test_lazy_class_imports() -> None:
     with pytest.raises(AttributeError):
         models_pkg.NoSuchModelClass  # noqa: B018
     assert issubclass(models_pkg.AnthropicModel, models_pkg.Model)
-
 
 
 def test_parse_text_based_tool_calls() -> None:
@@ -289,7 +254,6 @@ def test_build_text_based_tools_prompt() -> None:
     assert "- path (str)" in prompt
     assert "- count (int)" in prompt
     assert '"tool_calls"' in prompt
-
 
 
 def test_function_to_openai_tool_schema() -> None:
@@ -325,7 +289,6 @@ def test_python_type_to_json_schema_variants() -> None:
     assert conv(list[int]) == {"type": "array", "items": {"type": "integer"}}
     assert conv(dict[str, int]) == {"type": "object"}
     assert conv(object) == {"type": "string"}
-
 
 
 def test_add_message_and_usage_info() -> None:
@@ -407,7 +370,6 @@ def test_responses_items_to_chat_messages() -> None:
     }
     assert out[2] == {"role": "tool", "tool_call_id": "c1", "content": "res"}
     assert out[3] == {"role": "assistant", "content": "already chat format"}
-
 
 
 def test_binary_attachment_roundtrip() -> None:

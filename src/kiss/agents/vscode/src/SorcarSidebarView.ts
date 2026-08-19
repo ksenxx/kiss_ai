@@ -215,6 +215,17 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   getAdjacentTask: ['tabId', 'taskId', 'direction'],
   getConfig: [],
   saveConfig: ['config', 'apiKeys'],
+  // The daemon builds and writes the shared chat page for both the
+  // extension and the remote webapp, so the webview's serialized
+  // transcript travels through whole; the daemon answers with a
+  // direct `share_done` that the client-listener relay above passes
+  // straight back to the webview.
+  shareChat: ['tabId', 'chatId', 'title', 'html', 'workDir'],
+  // A share exports ALL of the chat's tasks; the daemon answers with a
+  // direct `share_tasks` carrying every persisted transcript of the
+  // chat, which the webview assembles into the page it then sends
+  // back via `shareChat`.
+  shareChatTasks: ['tabId', 'chatId'],
 };
 
 export class SorcarSidebarView implements vscode.WebviewViewProvider {

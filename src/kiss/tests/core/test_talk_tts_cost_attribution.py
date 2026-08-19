@@ -5,7 +5,7 @@
 """End-to-end tests: talk-tool TTS spend must reach the task's reported cost.
 
 Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.agents.sorcar.test_talk_tts_cost_attribution``; the non-core tests remain there.
+``kiss.tests.server.test_talk_tts_cost_attribution``; the non-core tests remain there.
 """
 
 import os

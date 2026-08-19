@@ -473,6 +473,15 @@
 
   let currentTaskName = '';
   let currentTaskId = null;
+  // Settings of the active tab's OWN current task (model, worktree /
+  // parallel modes, budget, start time, chat / task / parent ids) —
+  // what the static task panel's info block shows while the panel
+  // names that task. Mirrors currentTaskName's lifecycle.
+  let currentTaskSettings = null;
+  // Settings of every task seen by this window, keyed by task id, so
+  // the panel info can follow the reader across spliced-in
+  // `.adjacent-task` neighbours (see updateVisibleTask).
+  const taskSettingsById = Object.create(null);
   let oldestLoadedTaskId = null;
   let newestLoadedTaskId = null;
   let adjacentLoading = false;
@@ -519,6 +528,9 @@
       outputFragment: null,
       taskPanelHTML: '',
       taskPanelVisible: false,
+      // Settings of the tab's own current task, restored into
+      // currentTaskSettings on switch (see saveCurrentTab).
+      taskSettings: null,
       statusTextContent: 'Ready',
       statusTextColor: 'var(--green)',
       statusTokensText: '',
@@ -705,6 +717,9 @@
       : taskPanel
         ? taskPanel.classList.contains('visible')
         : false;
+    // Always the tab's OWN task's settings: the info block may be
+    // showing a neighbour's, but that is a viewing position too.
+    tab.taskSettings = currentTaskSettings;
     tab.statusTextContent = statusText ? statusText.textContent : 'Ready';
     tab.statusTextColor = statusText ? statusText.style.color : 'var(--green)';
     tab.statusTokensText = neighbour
@@ -824,6 +839,8 @@
       if (tab.taskPanelVisible) taskPanel.classList.add('visible');
       else taskPanel.classList.remove('visible');
     }
+    currentTaskSettings = tab.taskSettings || null;
+    renderTaskPanelInfo(currentTaskSettings);
     currentTaskName = (tab.taskPanelHTML || '').trim();
     currentTaskId = tab.currentTaskId !== undefined ? tab.currentTaskId : null;
     if (statusText) {
@@ -1891,6 +1908,7 @@
     '#upload-btn',
     '#tricks-btn',
     '#voice-btn',
+    '#share-btn',
     '#send-btn',
     '#stop-btn',
     '.chat-tab-add',
@@ -2471,8 +2489,10 @@
     'server-reset-confirm-cancel',
   );
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
+  const shareBtn = document.getElementById('share-btn');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
+  const taskPanelInfo = document.getElementById('task-panel-info');
   const taskPanelCopy = document.getElementById('task-panel-copy');
   const taskPanelDrawerBtn = document.getElementById('task-panel-drawer-btn');
   const inputDrawerBtn = document.getElementById('input-drawer-btn');
@@ -2521,6 +2541,75 @@
       taskPanel.classList.remove('visible');
     }
   }
+
+  // taskinfo-coverage:start
+  /**
+   * The static task panel's settings info as HTML — the same shape the
+   * history sidebar's info rows use: a `workDir • model • wt •
+   * parallel • budget • started` line and a `chat • task • parent •
+   * subagent` ids line.
+   *
+   * @param {object|null} s A task_settings event's settings payload.
+   * @returns {string} The info HTML, '' when there is nothing to show.
+   */
+  function taskPanelInfoHTML(s) {
+    if (!s || typeof s !== 'object') return '';
+    const parts = [];
+    if (s.work_dir) parts.push(String(s.work_dir));
+    if (s.model) parts.push(String(s.model));
+    if ('is_worktree' in s) parts.push(s.is_worktree ? 'wt' : 'no-wt');
+    if ('is_parallel' in s) {
+      parts.push(s.is_parallel ? 'parallel' : 'sequential');
+    }
+    const budget = Number(s.max_budget || 0);
+    if (budget > 0) parts.push('budget $' + budget.toFixed(2));
+    const startTs = Number(s.start_ts || 0);
+    if (startTs > 0) {
+      const d = new Date(startTs);
+      if (!isNaN(d.getTime())) {
+        parts.push(
+          'started ' +
+            d.toLocaleString(undefined, {
+              year: 'numeric',
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            }),
+        );
+      }
+    }
+    const ids = [];
+    if (s.chat_id) ids.push('chat ' + s.chat_id);
+    if (s.task_id !== undefined && s.task_id !== null && s.task_id !== '') {
+      ids.push('task ' + s.task_id);
+    }
+    if (s.parent_task_id) ids.push('parent ' + s.parent_task_id);
+    if (s.is_subagent) ids.push('subagent');
+    const lines = [];
+    if (parts.length) lines.push(parts.join(' \u2022 '));
+    if (ids.length) lines.push(ids.join(' \u2022 '));
+    return lines
+      .map(l => '<span class="task-panel-info-line">' + esc(l) + '</span>')
+      .join('');
+  }
+
+  /** Paint *s* into the panel's info block (clears it for null). */
+  function renderTaskPanelInfo(s) {
+    if (!taskPanelInfo) return;
+    taskPanelInfo.innerHTML = taskPanelInfoHTML(s);
+  }
+
+  /**
+   * Adopt *s* as the active tab's own task's settings and show them.
+   * Mirrors setTaskText: callers that only LEND the panel to a
+   * neighbouring task use renderTaskPanelInfo directly instead.
+   */
+  function setTaskSettings(s) {
+    currentTaskSettings = s && typeof s === 'object' ? s : null;
+    renderTaskPanelInfo(currentTaskSettings);
+  }
+  // taskinfo-coverage:end
 
   // chevron-coverage:start
   function applyChevronState(taskName) {
@@ -2853,37 +2942,41 @@
    * the replay so file links are cached and stamped against that tab rather
    * than against whichever tab happens to be on screen.
    */
-  function renderAdjacentTask(direction, task, events, taskId, ownerTabId) {
-    removeAdjacentLoader();
-    adjacentLoading = false;
-    // taskwheel-coverage:start
-    const wheelScrollPending = taskWheelPendingDir === direction;
-    taskWheelPendingDir = '';
-    // taskwheel-coverage:end
-
-    const hasTaskId = taskId !== undefined && taskId !== null && taskId !== '';
-    if (!hasTaskId && !task) {
-      if (direction === 'prev') noPrevTask = true;
-      else noNextTask = true;
-      return;
-    }
-
-    const taskLabel = task || '(untitled task)';
-
+  /**
+   * Replay *events* into a detached `.adjacent-task` container through
+   * the very renderers the live stream uses, and put the live view's
+   * numbers back afterwards. Shared by renderAdjacentTask (which
+   * splices the container into #output) and the share export (which
+   * serializes one container per persisted task of the chat).
+   *
+   * The container carries the `adjacent-task` class WHILE the replay
+   * runs: the collapse passes and the file-link stamping skip
+   * everything inside such a container, so the replay can never adopt
+   * or close a live sub-agent tab. The metrics the replay walked are
+   * left on the container's dataset (metricTokens / metricBudget /
+   * metricSteps) for renderAdjacentTask's region bookkeeping.
+   *
+   * @param {Array<object>} events The transcript to replay.
+   * @param {string|undefined} ownerTabId The tab the transcript
+   *     belongs to; file links are cached and stamped against it.
+   * @returns {Element} The detached container.
+   */
+  function replayDetachedTranscript(events, ownerTabId) {
     const container = mkEl('div', 'adjacent-task');
-    container.dataset.task = taskLabel;
-    if (hasTaskId) container.dataset.taskId = String(taskId);
-
     const savedTokens = statusTokens ? statusTokens.textContent : '';
     const savedBudget = statusBudget ? statusBudget.textContent : '';
     const savedSteps = statusSteps ? statusSteps.textContent : '';
     // visibletask-coverage:start
-    // The replay below renders a neighbour's transcript through the very
-    // renderers the live stream uses, so it walks the live task's step
-    // counter and metrics along with it. They are put back afterwards.
+    // The replay below renders another task's transcript through the
+    // very renderers the live stream uses, so it walks the live task's
+    // step counter and metrics along with it. They are put back
+    // afterwards — and so is the tab's failure flag, which a replayed
+    // task's OWN failed result would otherwise pin onto the tab.
     const savedMetrics = currentTaskMetrics;
     const savedStepCount = stepCount;
     const savedVisibleTab = activeTabId;
+    const savedTab = getTab(activeTabId);
+    const savedTaskFailed = savedTab ? savedTab.lastTaskFailed : false;
     currentTaskMetrics = {tokens: '', budget: '', steps: ''};
     // visibletask-coverage:end
     if (events && events.length > 0) {
@@ -2892,11 +2985,6 @@
         ownerTabId: ownerTabId || activeTabId,
       });
       // tableak-coverage:end
-    }
-    if (!container.firstChild) {
-      const ph = mkEl('div', 'adjacent-task-placeholder');
-      ph.textContent = taskLabel + ' — (no output recorded)';
-      container.appendChild(ph);
     }
     container.dataset.metricTokens = statusTokens
       ? statusTokens.textContent
@@ -2914,8 +3002,37 @@
     if (activeTabId === savedVisibleTab) {
       currentTaskMetrics = savedMetrics;
       stepCount = savedStepCount;
+      if (savedTab) savedTab.lastTaskFailed = savedTaskFailed;
     }
     // visibletask-coverage:end
+    return container;
+  }
+
+  function renderAdjacentTask(direction, task, events, taskId, ownerTabId) {
+    removeAdjacentLoader();
+    adjacentLoading = false;
+    // taskwheel-coverage:start
+    const wheelScrollPending = taskWheelPendingDir === direction;
+    taskWheelPendingDir = '';
+    // taskwheel-coverage:end
+
+    const hasTaskId = taskId !== undefined && taskId !== null && taskId !== '';
+    if (!hasTaskId && !task) {
+      if (direction === 'prev') noPrevTask = true;
+      else noNextTask = true;
+      return;
+    }
+
+    const taskLabel = task || '(untitled task)';
+
+    const container = replayDetachedTranscript(events, ownerTabId);
+    container.dataset.task = taskLabel;
+    if (hasTaskId) container.dataset.taskId = String(taskId);
+    if (!container.firstChild) {
+      const ph = mkEl('div', 'adjacent-task-placeholder');
+      ph.textContent = taskLabel + ' — (no output recorded)';
+      container.appendChild(ph);
+    }
 
     if (direction === 'prev') {
       const prevScrollHeight = O.scrollHeight;
@@ -3222,6 +3339,14 @@
   const _pendingPathChecks = new Set();
   const _pendingFileLinkSpans = new Set();
 
+  // share-coverage:start
+  // Raised while a share export replays persisted tasks into detached
+  // containers: their file-path spans can never be clicked, so
+  // registering them would leak detached nodes into
+  // _pendingFileLinkSpans and post needless checkPaths commands.
+  let _suppressFileLinkChecks = false;
+  // share-coverage:end
+
   // tableak-coverage:start
   // Keyed by tab as well as workDir: a check in flight for one tab must
   // not suppress the same check for another, or that tab's links stay
@@ -3275,6 +3400,9 @@
   }
 
   function verifyFileLinkCandidates(root, workDir, ownerTabId) {
+    // share-coverage:start
+    if (_suppressFileLinkChecks) return;
+    // share-coverage:end
     const spans = root.querySelectorAll('[data-path-candidate]');
     if (!spans.length) return;
     const wd =
@@ -4843,6 +4971,50 @@
         }
         break;
       }
+      // taskinfo-coverage:start
+      case 'task_settings': {
+        const s =
+          ev.settings && typeof ev.settings === 'object' ? ev.settings : null;
+        if (!s) break;
+        const sid =
+          s.task_id === undefined || s.task_id === null
+            ? ''
+            : String(s.task_id);
+        if (sid) taskSettingsById[sid] = s;
+        if (ownerTabId === undefined) {
+          // Live event already routed to the tab on screen.
+          setTaskSettings(s);
+        } else if (ownerTabId === activeTabId) {
+          // A replay into the visible transcript: only the tab's own
+          // task may repaint the panel — a spliced-in neighbour's
+          // detached replay shares this owner id.
+          if (
+            sid &&
+            currentTaskId !== null &&
+            currentTaskId !== undefined &&
+            String(currentTaskId) === sid
+          ) {
+            setTaskSettings(s);
+          }
+        } else {
+          const ownerTab = getTab(ownerTabId);
+          if (ownerTab) {
+            ownerTab.taskSettings = s;
+            // The settings name the task the tab is now running; a
+            // background tab must adopt that id like the visible
+            // tab's dispatcher would, or a later switch pairs the
+            // new transcript with the previous task's id and the
+            // share export splices the live DOM into the wrong
+            // section.
+            if (sid && String(ownerTab.currentTaskId) !== sid) {
+              ownerTab.currentTaskId = sid;
+              ownerTab.pendingTaskId = null;
+            }
+          }
+        }
+        break;
+      }
+      // taskinfo-coverage:end
       case 'autocommit_progress':
       case 'worktree_progress': {
         renderActionProgress(target, ev.message || ev.text || '');
@@ -5412,6 +5584,15 @@
     if (!region) return;
     const container = regionNeighbour(region);
     setTaskText(region.task || currentTaskName);
+    // taskinfo-coverage:start
+    // The info block follows the panel: a neighbour's settings while
+    // the reader is parked on it, the tab's own otherwise.
+    renderTaskPanelInfo(
+      container
+        ? taskSettingsById[container.dataset.taskId || ''] || null
+        : currentTaskSettings,
+    );
+    // taskinfo-coverage:end
     if (container) {
       if (statusTokens)
         statusTokens.textContent = container.dataset.metricTokens || '';
@@ -5502,6 +5683,7 @@
     if (O.querySelector('.adjacent-task[data-task]')) {
       taskWheelLastTarget = null;
       setTaskText(currentTaskName);
+      renderTaskPanelInfo(currentTaskSettings);
       showLiveMetrics();
     }
     return true;
@@ -5723,6 +5905,7 @@
     'prompt',
     'result',
     'usage_info',
+    'task_settings',
   ]);
 
   /**
@@ -5977,6 +6160,63 @@
       case 'pathsExist':
         handlePathsExist(ev);
         return;
+      case 'share_tasks': {
+        // share-coverage:start
+        // The export splices the transcript on screen into the chat's
+        // persisted tasks, so a reply for a tab that is no longer
+        // highlighted would serialize the WRONG screen: it is dropped,
+        // and that tab's share button can simply be clicked again.
+        if (ev.tabId !== undefined && !isForActiveTab(ev)) break;
+        if (ev.error) {
+          addError('Share failed: ' + ev.error);
+          flashShareBtn(false);
+          break;
+        }
+        const stTab = getTab(activeTabId);
+        const stChatId = String(
+          ev.chatId || (stTab && stTab.backendChatId) || activeTabId || '',
+        );
+        sendShareExport(stChatId, ev.tasks || [], !!ev.truncated);
+        // share-coverage:end
+        break;
+      }
+      case 'share_done': {
+        // share-coverage:start
+        flashShareBtn(!!ev.ok);
+        // The saved-page banner belongs to the conversation that was
+        // shared; a reply for a background tab must not write into the
+        // transcript on screen.
+        if (ev.tabId !== undefined && !isForActiveTab(ev)) break;
+        if (ev.ok) {
+          const savedPath = typeof ev.path === 'string' ? ev.path : '';
+          const banner = addNotice(
+            'Chat page saved to ' + (savedPath ? '' : 'reports/'),
+          );
+          // The daemon replied with the EXACT path it wrote, so that
+          // path is wrapped in a candidate span directly — running the
+          // prose regex of linkifyFilePaths() over the banner instead
+          // would split a path containing spaces. The span then takes
+          // the same checkPaths -> pathsExist promotion every
+          // transcript file link takes; the daemon just wrote the
+          // file, so the check confirms it and the path becomes a
+          // clickable link that opens the saved page.
+          if (savedPath) {
+            const span = document.createElement('span');
+            span.setAttribute('data-path-candidate', savedPath);
+            span.textContent = savedPath;
+            banner.appendChild(span);
+            verifyFileLinkCandidates(
+              banner,
+              workDirForTab(activeTabId) || '',
+              activeTabId,
+            );
+          }
+        } else {
+          addError('Share failed: ' + (ev.error || 'unknown error'));
+        }
+        // share-coverage:end
+        break;
+      }
       case 'status': {
         const evTab = findTabByEvt(ev);
         if (evTab) {
@@ -6166,6 +6406,9 @@
         if (clearTab) {
           clearTab.lastTaskFailed = false;
           clearTab.hasRunTask = true;
+          // A new run replaces the tab's task: its settings arrive
+          // with the run's own task_settings event.
+          clearTab.taskSettings = null;
         }
         if (ev.chat_id && clearTab) {
           clearTab.backendChatId = ev.chat_id;
@@ -6182,6 +6425,7 @@
           collapseNestedRunParallel(O);
           clearOutput();
           resetOutputState();
+          setTaskSettings(null);
           showSpinner();
         } else if (clearTab) {
           collapseNestedRunParallel(clearTab.outputFragment);
@@ -6213,7 +6457,6 @@
         const swTab = getTab(swTabId);
         if (swTab) {
           if (ev.model) applyModelPick(swTabId, ev.model, 'restore');
-
           if (swTabId === activeTabId) {
             // Resetting the chat to the welcome screen discards its
             // transcript, fan-out panels and all; their sub-agent tabs
@@ -6440,6 +6683,11 @@
             }
           } catch (_e) {}
         }
+        // The replay REPLACES the transcript: the replayed stream's own
+        // task_settings event (persisted or synthesized server-side)
+        // repopulates the info block, so a previous task's settings
+        // must not survive a replay that carries none.
+        setTaskSettings(null);
         replayTaskEvents(ev.events || []);
         break;
       }
@@ -6474,6 +6722,11 @@
             }
             updateActiveTabTitle(stt);
           }
+          // Settings are NOT cleared here: the server echoes
+          // setTaskText for queued follow-ups and refused submits too,
+          // which stay part of the CURRENT task. A real replacement
+          // task announces itself with the 'clear' event, which is
+          // where the previous task's settings are dropped.
           setTaskText(ev.text || '');
         } else if (stt) {
           const sttTab = getTab(ev.tabId);
@@ -7117,19 +7370,312 @@
     // autoscroll-coverage:start
     autoScrollLatestEventPanel(div);
     // autoscroll-coverage:end
+    return div;
   }
 
   function addError(text) {
-    addBanner('err', 'Error:', text);
+    return addBanner('err', 'Error:', text);
   }
 
   function addNotice(text) {
-    addBanner('note', 'Note:', text);
+    return addBanner('note', 'Note:', text);
   }
 
   function addWarning(text) {
     addBanner('warn', 'Warning:', text);
   }
+
+  // share-coverage:start
+  // The daemon reads one frame of at most 64 MiB (_MAX_LINE_BYTES in
+  // web_server.py) and silently drops the connection on overflow, so
+  // an export that cannot fit — measured as the REAL UTF-8 byte
+  // length of the JSON-escaped html, with headroom for the envelope —
+  // must be refused here, with an error the user can see.
+  const SHARE_MAX_HTML_JSON_BYTES = 56 * 1024 * 1024;
+
+  /**
+   * The UTF-8 byte length of *str* — what the transport actually
+   * counts. `str.length` counts UTF-16 units: quotes and backslashes
+   * that JSON escaping doubles, and non-ASCII text that UTF-8 widens,
+   * would slip past a character-based cap and overflow the frame.
+   *
+   * @param {string} str The string to measure.
+   * @returns {number} Its UTF-8 encoding's byte length.
+   */
+  function utf8ByteLength(str) {
+    let bytes = 0;
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      if (c < 0x80) bytes += 1;
+      else if (c < 0x800) bytes += 2;
+      else if (c >= 0xd800 && c < 0xdc00) {
+        // A surrogate pair encodes as one 4-byte sequence; count it
+        // here and skip its low half.
+        bytes += 4;
+        i++;
+      } else bytes += 3;
+    }
+    return bytes;
+  }
+
+  /**
+   * Synthesize one static task panel for the shared page, showing
+   * *taskText*. The live #task-panel is cloned as the template (same
+   * id, classes and buttons, so the page's inlined main.css and
+   * share.js style and drive every copy alike) and reset to the
+   * expanded, visible state. The text element alone gets a per-task
+   * unique id so each drawer button's aria-controls names ITS text —
+   * assistive technology cannot resolve a duplicated id (the styling
+   * ids stay duplicated on purpose: main.css keys on them, and
+   * share.js scopes every interaction with closest()).
+   *
+   * @param {string} taskText The task's description text.
+   * @param {number} seq 1-based position of the task on the page.
+   * @param {object|null} settings The task's task_settings payload,
+   *     rendered into the panel's info block (cleared when null).
+   * @returns {Element|null} The panel, or null without a template.
+   */
+  function shareTaskPanel(taskText, seq, settings) {
+    if (!taskPanel) return null;
+    const panel = taskPanel.cloneNode(true);
+    panel.classList.add('visible');
+    panel.classList.remove('drawer-collapsed');
+    const textId = 'task-panel-text-' + seq;
+    const txt = panel.querySelector('#task-panel-text');
+    if (txt) {
+      txt.textContent = taskText;
+      txt.id = textId;
+      // The live panel's hover tooltip names the task on SCREEN; the
+      // static page has no tooltip machinery, so the leftover
+      // attribute would only mislead anyone reading the markup.
+      txt.removeAttribute('data-tooltip');
+    }
+    // taskinfo-coverage:start
+    // The clone carries the LIVE task's info block; every exported
+    // panel must show ITS OWN task's settings instead.
+    const info = panel.querySelector('#task-panel-info');
+    if (info) info.innerHTML = taskPanelInfoHTML(settings || null);
+    // taskinfo-coverage:end
+    const btn = panel.querySelector('#task-panel-drawer-btn');
+    if (btn) {
+      btn.setAttribute('aria-expanded', 'true');
+      btn.setAttribute('aria-label', 'Collapse task panel');
+      if (txt) btn.setAttribute('aria-controls', textId);
+    }
+    return panel;
+  }
+
+  /**
+   * Clone the transcript on screen for the share export. The welcome
+   * screen (an input surface, not a panel) is dropped, and so are the
+   * spliced-in `.adjacent-task` neighbours and their loader — those
+   * tasks are exported from their own persisted transcripts, so
+   * keeping the splices would print them twice.
+   *
+   * @returns {Element} A detached holder of the cloned transcript.
+   */
+  function shareLiveTranscript() {
+    const live = O.cloneNode(true);
+    const drop = live.querySelectorAll(
+      '#welcome, #adjacent-loader, .adjacent-task',
+    );
+    for (let i = 0; i < drop.length; i++) drop[i].remove();
+    return live;
+  }
+
+  /**
+   * Wrap one task of the chat — its synthesized static task panel and
+   * the children of *body* — into a `.share-task` section of the
+   * shared page.
+   *
+   * @param {string} taskText The task's description text.
+   * @param {Element} body Holder whose children are the transcript.
+   * @param {number} seq 1-based position of the task on the page.
+   * @param {object|null} settings The task's task_settings payload.
+   * @returns {Element} The assembled section.
+   */
+  function shareTaskSection(taskText, body, seq, settings) {
+    const section = document.createElement('div');
+    section.className = 'share-task';
+    const panel = shareTaskPanel(taskText || '(untitled task)', seq, settings);
+    if (panel) section.appendChild(panel);
+    while (body.firstChild) section.appendChild(body.firstChild);
+    return section;
+  }
+
+  // taskinfo-coverage:start
+  /**
+   * The task_settings payload carried by *events*, or null. Feeds the
+   * exported task panels: a persisted task's settings ride in its
+   * event stream (broadcast live, or synthesized by the daemon for
+   * tasks that predate the event).
+   *
+   * @param {Array<object>} events A task's replay events.
+   * @returns {object|null} The settings payload.
+   */
+  function taskSettingsFromEvents(events) {
+    const list = events || [];
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      if (
+        e &&
+        e.type === 'task_settings' &&
+        e.settings &&
+        typeof e.settings === 'object'
+      ) {
+        return e.settings;
+      }
+    }
+    return null;
+  }
+  // taskinfo-coverage:end
+
+  /**
+   * Build the HTML body of the standalone shared page: one section
+   * per task of the chat, oldest first — every section a static task
+   * panel above the task's transcript. *tasks* is the chat's
+   * persisted task list from the daemon's `share_tasks` reply; the
+   * task on screen contributes the live DOM (a running task's newest
+   * panels are not in the database yet) and every other task replays
+   * its persisted events through the live renderers, so the shared
+   * page's inlined main.css and share.js reproduce the exact panel
+   * styling and collapse / expand behaviour. Code blocks whose
+   * highlighting was deferred (collapsed panels, replayed history)
+   * are highlighted here, because the shared page inlines only the
+   * highlight THEME, not highlight.js itself.
+   *
+   * @param {Array<object>} tasks The chat's persisted tasks, oldest
+   *     first, each {task, task_id, events}.
+   * @returns {string} The share page body's HTML, or '' when neither
+   *     the tasks nor the screen have anything to share.
+   */
+  function buildShareableHtml(tasks) {
+    // The module-level id, deliberately WITHOUT a tab-state fallback:
+    // a new task's setTaskText nulls it but leaves the tab's field on
+    // the PREVIOUS task, and a stale match would hand that task's
+    // section the new task's live panels.
+    const liveId = currentTaskId ? String(currentTaskId) : '';
+    const out = document.createElement('div');
+    out.id = 'output';
+    let liveUsed = false;
+    const list = tasks || [];
+    _suppressFileLinkChecks = true;
+    try {
+      for (let i = 0; i < list.length; i++) {
+        const t = list[i] || {};
+        const tid =
+          t.task_id === undefined || t.task_id === null
+            ? ''
+            : String(t.task_id);
+        let body;
+        let settings = taskSettingsFromEvents(t.events);
+        if (liveId && tid === liveId) {
+          body = shareLiveTranscript();
+          liveUsed = true;
+          if (!settings) settings = currentTaskSettings;
+        } else {
+          body = replayDetachedTranscript(t.events || [], activeTabId);
+          body.classList.remove('adjacent-task');
+        }
+        out.appendChild(shareTaskSection(t.task, body, i + 1, settings));
+      }
+    } finally {
+      _suppressFileLinkChecks = false;
+    }
+    if (!liveUsed) {
+      const live = shareLiveTranscript();
+      if (live.querySelector('.ev, .llm-panel')) {
+        const last = out.lastElementChild;
+        if (last && !last.querySelector('.ev, .llm-panel')) {
+          // A task the daemon listed without events while the screen
+          // is streaming panels is that same task mid-write (its row
+          // lands in the database at start, its events follow): the
+          // live DOM completes the section instead of duplicating the
+          // task at the end of the page.
+          while (live.firstChild) last.appendChild(live.firstChild);
+        } else {
+          // The screen shows a task the database does not know at
+          // all (the chat was never persisted). It is the chat's
+          // newest surface, so it closes the page.
+          out.appendChild(
+            shareTaskSection(
+              currentTaskName,
+              live,
+              list.length + 1,
+              currentTaskSettings,
+            ),
+          );
+        }
+      }
+    }
+    // A task can legitimately have no recorded output; its section
+    // (the task text is content in itself) says so instead of being
+    // silently dropped.
+    const sections = out.children;
+    for (let i = 0; i < sections.length; i++) {
+      if (sections[i].querySelector('.ev, .llm-panel')) continue;
+      const ph = mkEl('div', 'adjacent-task-placeholder');
+      ph.textContent = '(no output recorded)';
+      sections[i].appendChild(ph);
+    }
+    if (!out.firstChild) return '';
+    highlightPending(out);
+    return out.outerHTML;
+  }
+
+  /**
+   * Assemble the shared page's body from *tasks* plus the screen and
+   * hand it to the daemon as a `shareChat` command — the shared tail
+   * of the two export triggers (the `share_tasks` reply for a chat
+   * tab, the direct click path for a sub-agent tab). An empty or
+   * oversized export is refused with a visible error instead.
+   *
+   * @param {string} chatId The chat id naming the page's file.
+   * @param {Array<object>} tasks The chat's persisted tasks.
+   * @param {boolean} truncated Whether the daemon dropped old tasks.
+   */
+  function sendShareExport(chatId, tasks, truncated) {
+    const tab = getTab(activeTabId);
+    const htmlStr = buildShareableHtml(tasks);
+    if (!htmlStr) {
+      addError('Share failed: the chat is empty');
+      flashShareBtn(false);
+      return;
+    }
+    if (utf8ByteLength(JSON.stringify(htmlStr)) > SHARE_MAX_HTML_JSON_BYTES) {
+      addError('Share failed: this chat is too large to export as one page');
+      flashShareBtn(false);
+      return;
+    }
+    if (truncated) {
+      addWarning(
+        'The chat is too large to export whole: the shared page ' +
+          'holds only its most recent tasks.',
+      );
+    }
+    api.shareChat({
+      tabId: activeTabId,
+      chatId: chatId,
+      title: (tab && tab.title) || 'KISS Sorcar chat',
+      html: htmlStr,
+      workDir: workDirForTab(activeTabId) || undefined,
+    });
+  }
+
+  /**
+   * Flash the share button green (saved) or red (failed) for a
+   * moment, so the click visibly landed even when the transcript's
+   * banner is off screen.
+   *
+   * @param {boolean} ok Whether the daemon saved the shared page.
+   */
+  function flashShareBtn(ok) {
+    if (!shareBtn) return;
+    const cls = ok ? 'share-ok' : 'share-err';
+    shareBtn.classList.add(cls);
+    setTimeout(() => shareBtn.classList.remove(cls), 2000);
+  }
+  // share-coverage:end
 
   function _buildRemoteUrlBar(displayUrl, isNtfy) {
     const wrapper = document.createElement('div');
@@ -7781,6 +8327,28 @@
       markStopping(activeTabId, true);
       api.stop({tabId: activeTabId});
     });
+    // share-coverage:start
+    if (shareBtn) {
+      shareBtn.addEventListener('click', () => {
+        const tab = getTab(activeTabId);
+        if (tab && tab.isSubagentTab) {
+          // A sub-agent tab shows one fan-out worker's transcript,
+          // not the chat: its rows are deliberately absent from the
+          // chat's task list, so it exports its own screen — under
+          // its own file name, never over the parent chat's page.
+          sendShareExport(String(tab.id), [], false);
+          return;
+        }
+        // The page must show ALL tasks of the chat, and after a
+        // reload the DOM holds only the one task the session replay
+        // repainted — so the daemon is asked for every persisted
+        // transcript of the chat first; the export is assembled in
+        // the `share_tasks` reply handler.
+        const chatId = String((tab && tab.backendChatId) || activeTabId || '');
+        api.shareChatTasks({tabId: activeTabId, chatId: chatId});
+      });
+    }
+    // share-coverage:end
     uploadBtn.addEventListener('click', () => {
       const input = document.createElement('input');
       input.type = 'file';
