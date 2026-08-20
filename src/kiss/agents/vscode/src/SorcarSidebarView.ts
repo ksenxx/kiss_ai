@@ -548,12 +548,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           progress.report({message: msg.message});
         }
       }
-      if (msg.type === 'worktree_result' && msg.success) {
+      if (msg.type === 'worktree_result' && msg.success && !msg.kept) {
         // Mirrors the unconditional recording above: a merge/discard
         // finished by any client retires the worktree directory, so the
         // fallback entry must go even when this window never claimed
         // the tab. git.close on a repository that was never opened is
-        // a harmless no-op.
+        // a harmless no-op. A "Do nothing" result (kept: true) leaves
+        // the worktree on disk, so its fallback entry must survive for
+        // transcript file links to keep resolving into it.
         const doneTabId = msg.tabId;
         if (doneTabId !== undefined) {
           const doneDir = this._worktreeDirs.get(doneTabId);
@@ -583,6 +585,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           }
         } else {
           showErrorNotification(msg.message || 'Worktree action failed.');
+        }
+      }
+      if (msg.type === 'main_tree_result' && this._isOwnTab(msg.tabId)) {
+        // Same toast rule as worktree_result above: the post-task
+        // main-tree bar's Discard / Do nothing outcome is surfaced as
+        // a notification (the webview renders the transcript line).
+        if (msg.success) {
+          showInformationNotification(
+            msg.message || 'Main-tree action completed.',
+          );
+        } else {
+          showErrorNotification(msg.message || 'Main-tree action failed.');
         }
       }
       if (
@@ -1145,6 +1159,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._getApi().worktreeAction(wtAction, wtTabId);
         break;
       }
+
+      // The post-task bar of a non-worktree manual-commit run: the
+      // daemon discards the main tree's uncommitted changes (or, for
+      // "nothing", just acknowledges) and reports the outcome through
+      // a broadcast main_tree_result event that the webview renders on
+      // its own. (The bar's Auto commit button sends autocommitAction.)
+      case 'mainTreeAction':
+        this._getApi().mainTreeAction(
+          message.action,
+          message.tabId,
+          message.workDir || this._getWorkDir(),
+        );
+        break;
 
       // The settings panel's "Git Commit" button: the daemon commits
       // the tab's working tree and reports progress and the outcome

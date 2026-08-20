@@ -81,7 +81,17 @@ export type FromWebviewMessage =
   | {type: 'focusEditor'}
   | {type: 'closeTab'; tabId: string}
   | {type: 'getInputHistory'}
-  | {type: 'worktreeAction'; action: 'merge' | 'discard'; tabId?: string}
+  | {
+      type: 'worktreeAction';
+      action: 'merge' | 'discard' | 'nothing';
+      tabId?: string;
+    }
+  | {
+      type: 'mainTreeAction';
+      action: 'discard' | 'nothing';
+      tabId?: string;
+      workDir?: string;
+    }
   | {type: 'autocommitAction'; tabId?: string; workDir?: string}
   | {type: 'resolveDroppedPaths'; uris: string[]; workDir?: string}
   | {type: 'webviewFocusChanged'; focused: boolean}
@@ -278,7 +288,18 @@ type ToWebviewMessageBody =
       hasConflict?: boolean;
     }
   | {type: 'worktree_progress'; message: string}
-  | {type: 'worktree_result'; success: boolean; message: string}
+  | {
+      type: 'worktree_result';
+      success: boolean;
+      message: string;
+      kept?: boolean;
+    }
+  | {
+      type: 'main_tree_done';
+      workDir?: string;
+      changedFiles: string[];
+    }
+  | {type: 'main_tree_result'; success: boolean; message: string}
   | {type: 'warning'; message: string; tabId?: string}
   | {type: 'autocommit_progress'; message: string; tabId?: string}
   | {
@@ -289,6 +310,7 @@ type ToWebviewMessageBody =
       commitMessage?: string;
       tabId?: string;
       manual?: boolean;
+      workDir?: string;
     }
   | {type: 'droppedPaths'; paths: string[]}
   | {
@@ -378,6 +400,7 @@ export interface AgentCommand {
     | 'autocommitAction'
     | 'getInputHistory'
     | 'worktreeAction'
+    | 'mainTreeAction'
     | 'getAdjacentTask'
     | 'setWorkDir'
     | 'getConfig'
@@ -401,7 +424,7 @@ export interface AgentCommand {
   chatId?: number | string;
   taskId?: string | number | null;
   activeFileContent?: string;
-  action?: 'merge' | 'discard';
+  action?: 'merge' | 'discard' | 'nothing';
   useWorktree?: boolean;
   useParallel?: boolean;
   autoCommit?: boolean;
