@@ -2885,6 +2885,12 @@
   }
 
   function resetOutputState() {
+    // streamtail-coverage:start
+    // The transcript is being replaced wholesale (replay, clear); a
+    // chunk tail deferred for the outgoing content must not sweep the
+    // replacement.
+    cancelStreamTailSweep();
+    // streamtail-coverage:end
     state = mkS();
     llmPanel = null;
     llmPanelState = mkS();
@@ -5240,8 +5246,92 @@
     stepCount = ctx.stepCount;
   }
 
+  // streamtail-coverage:start
+  // One coalesced per-frame pass over the transcript for streamed
+  // delta chunks (see processOutputEvent).  The pass runs the exact
+  // tail work a chunk event used to run synchronously — collapse the
+  // container's older panels when a chunk rendered into the container,
+  // re-derive every panel's chevron state, auto-scroll the latest
+  // event panel's subpanels and the chat, and re-derive the static
+  // task panel and status row from what is visible — but once per
+  // animation frame instead of once per chunk.  Its callback is always
+  // registered after the chunk's own flush callback, so within a frame
+  // it observes the flushed text.
+  let _tailSweepRaf = 0;
+  let _tailSweepTabId = '';
+  let _tailSweepCollapse = false;
+
+  function runStreamTailSweep() {
+    const needCollapse = _tailSweepCollapse;
+    _tailSweepCollapse = false;
+    // A transcript that left the screen was repainted by the tab
+    // switch itself; sweeping the replacement would collapse panels
+    // an event of ITS stream never asked to collapse.
+    if (_tailSweepTabId !== activeTabId) return;
+    if (needCollapse) collapseOlderPanels(O, activeTabId);
+    applyChevronState(currentTaskName);
+    autoScrollLatestEventPanel(O.lastElementChild);
+    updateVisibleTask();
+  }
+
+  function cancelStreamTailSweep() {
+    // The transcript the sweep was deferred for is being replaced
+    // (replay, clear): its tail work no longer applies to anything.
+    if (_tailSweepRaf) {
+      cancelAnimationFrame(_tailSweepRaf);
+      _tailSweepRaf = 0;
+    }
+    _tailSweepCollapse = false;
+  }
+
+  function flushStreamTailSweep() {
+    // Run a pending sweep NOW.  Called before a non-chunk event is
+    // processed and before the running state flips off, so the
+    // deferred tail executes in the same order the synchronous
+    // per-event tail used to: after its own chunk, before the next
+    // event or state transition (a sweep left queued past
+    // setRunningState(false) would find isRunning off and hide the
+    // finished task's panels — chevron state the synchronous tail,
+    // which always ran while the task was still running, never
+    // produced).
+    if (!_tailSweepRaf) return;
+    cancelAnimationFrame(_tailSweepRaf);
+    _tailSweepRaf = 0;
+    runStreamTailSweep();
+  }
+
+  function scheduleStreamTailSweep(needsCollapse) {
+    if (_tailSweepRaf && _tailSweepTabId !== activeTabId) {
+      // The pending sweep belongs to a transcript that left the screen;
+      // the tab switch repainted panels, chevrons and status row itself,
+      // so its collapse debt does not carry over to this transcript.
+      // Re-arming (rather than keeping the old registration) also puts
+      // the sweep behind THIS tab's already-queued flush callback.
+      cancelStreamTailSweep();
+    }
+    _tailSweepTabId = activeTabId;
+    if (needsCollapse) _tailSweepCollapse = true;
+    if (_tailSweepRaf) return;
+    _tailSweepRaf = requestAnimationFrame(() => {
+      _tailSweepRaf = 0;
+      runStreamTailSweep();
+    });
+  }
+  // streamtail-coverage:end
+
   function processOutputEvent(ev) {
     normalizeEventTs(ev);
+    // streamtail-coverage:start
+    // A non-chunk event settles any deferred chunk tail first, so the
+    // tail runs in the same order the synchronous per-event tail used
+    // to: after its chunk, before the next event.  A chunk event needs
+    // no flush — it either joins the pending sweep or runs the full
+    // tail itself below.
+    const t = ev.type;
+    if (t !== 'thinking_delta' && t !== 'text_delta' && t !== 'system_output') {
+      flushStreamTailSweep();
+    }
+    // streamtail-coverage:end
     // visibletask-coverage:start
     // A live event reads and rewrites the status row, so the row must be
     // showing the live task's own numbers while it is handled — the
@@ -5250,11 +5340,46 @@
     showLiveMetrics();
     // visibletask-coverage:end
     const ctx = liveStreamCtx();
-    const t = ev.type;
+    // streamtail-coverage:start
+    const stepsBefore = ctx.stepCount;
+    // streamtail-coverage:end
     const where = streamBegin(ctx, ev);
     const target = where.target;
     const tState = where.state;
     handleOutputEvent(ev, target, tState);
+    // streamtail-coverage:start
+    // Fast path for streamed delta chunks.  A chunk whose DOM write was
+    // buffered into a pending flush frame (thinkRaf/txtRaf/bashRaf, see
+    // handleOutputEvent) leaves the transcript's layout untouched until
+    // that frame runs, so the tail work below — the auto-scroll pass,
+    // the chevron sweep over every collapsible panel, the visible-task
+    // re-derivation — would examine unchanged layout, and a fast stream
+    // repeats it for every chunk: O(transcript) DOM scans and forced
+    // reflows per chunk, O(n²) over a long task.  The flush frame
+    // auto-scrolls the panels it grows itself (autoScrollStreamed), so
+    // for those chunks one coalesced sweep per frame replaces the
+    // per-event tail with no visible difference — rAF callbacks run
+    // before the next paint.  A chunk that opened or adopted a thoughts
+    // panel (streamBegin counted a step) restructured the transcript
+    // NOW, and a chunk rendered without a pending flush wrote its text
+    // NOW: both take the full synchronous tail.  (A first text chunk
+    // may append its empty .txt holder synchronously even on the fast
+    // path; the flush frame fills and scrolls it before the paint.)
+    // For the three chunk types streamEnd() is exactly "collapse the
+    // container's older panels when the chunk rendered into the
+    // container" (no other streamEnd branch matches them), which the
+    // sweep replays.
+    const deferTail =
+      ctx.stepCount === stepsBefore &&
+      ((t === 'thinking_delta' && !!tState.thinkRaf && !!tState.thinkCnt) ||
+        (t === 'text_delta' && !!tState.txtRaf) ||
+        (t === 'system_output' && !!tState.bashRaf && !!tState.bashPanel));
+    if (deferTail) {
+      saveLiveStreamCtx(ctx);
+      scheduleStreamTailSweep(target === O);
+      return;
+    }
+    // streamtail-coverage:end
     // autoscroll-coverage:start
     // Capture the latest event panel now: right below, a provisional
     // thoughts panel may be appended after a tool_result, which would
@@ -6401,6 +6526,7 @@
         // previous task that never reached a terminal event is stale.
         discardReadyReports(ev.tabId);
         // report-coverage:end
+        dropStaleMainTreeBar(ev.tabId);
         const clearTab =
           ev.tabId !== undefined ? getTab(ev.tabId) : getTab(activeTabId);
         if (clearTab) {
@@ -6516,6 +6642,7 @@
       case 'task_events': {
         const teTabId = ev.tabId || activeTabId;
         const teTab = getTab(teTabId);
+        dropStaleMainTreeBar(teTabId);
         if (ev.chat_id && teTab) {
           teTab.backendChatId = ev.chat_id;
           if (!teTab.workDir && configWorkDir) {
@@ -6860,6 +6987,24 @@
         }
         showWorktreeActions(ev);
         break;
+      case 'main_tree_done': {
+        // Post-task presentation for a non-worktree manual-commit run:
+        // the task's edits sit uncommitted in the main checkout, so
+        // show the Auto commit / Discard / Do nothing bar.
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+          const bgMtTab = getTab(ev.tabId);
+          if (bgMtTab) {
+            bgMtTab.worktreeBarEl = createMainTreeBar(
+              ev.tabId,
+              ev.workDir || '',
+            );
+          }
+          break;
+        }
+        showMainTreeActions(ev);
+        break;
+      }
+      case 'main_tree_result':
       case 'worktree_result':
         // A merge just copied the task's committed files into the
         // original checkout; a discard just deleted the worktree copy.
@@ -6892,6 +7037,16 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgAdTab = getTab(ev.tabId);
           if (bgAdTab) {
+            // Terminal for the main-tree bar's "Auto commit" button
+            // (success or failure — same one-shot rule as
+            // handleWorktreeResult), matched by workDir so a commit
+            // in another repository sharing the tab leaves the bar
+            // alone. A pending WORKTREE bar stays: a Git Commit on
+            // the main tree says nothing about the still-undecided
+            // worktree branch.
+            if (autocommitDoneOwnsMainTreeBar(bgAdTab.worktreeBarEl, ev)) {
+              bgAdTab.worktreeBarEl = null;
+            }
             clearActionProgress(bgAdTab.outputFragment);
             // A successful manual Git Commit is reported by a toast
             // notification instead; only failures earn transcript text.
@@ -6903,6 +7058,12 @@
             }
           }
           break;
+        }
+        // Foreground twin of the background main-tree-bar dismissal
+        // above; clearing first so handleAutocommitResult's input
+        // refocus lands on a visible input box.
+        if (autocommitDoneOwnsMainTreeBar(worktreeBar, ev)) {
+          clearWorktreeBar();
         }
         handleAutocommitResult(ev);
         break;
@@ -7289,6 +7450,13 @@
   }
 
   function setRunningState(running) {
+    // streamtail-coverage:start
+    // A deferred chunk tail must run while the task still counts as
+    // running (exactly when its synchronous ancestor ran): swept after
+    // the flip below, applyChevronState() would hide the finished
+    // task's panels and collapseOlderPanels() would drop its debt.
+    if (!running) flushStreamTailSweep();
+    // streamtail-coverage:end
     isRunning = running;
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
@@ -8075,7 +8243,7 @@
   }
 
   function createWorktreeBar(ownerTabId) {
-    return createActionBar('Auto-commit and merge or Discard?', [
+    return createActionBar('Auto-commit and merge, Discard, or Do nothing?', [
       {
         cls: 'wt-merge',
         text: 'Auto-commit and merge',
@@ -8094,12 +8262,115 @@
           tabId: ownerTabId,
         }),
       },
+      {
+        cls: 'wt-nothing',
+        text: 'Do nothing',
+        msg: () => ({
+          type: 'worktreeAction',
+          action: 'nothing',
+          tabId: ownerTabId,
+        }),
+      },
     ]);
+  }
+
+  // The non-worktree counterpart of createWorktreeBar: after a
+  // manual-commit task edited the main checkout directly, the daemon's
+  // main_tree_done event offers the same explicit choice. "Auto
+  // commit" reuses the settings drawer's autocommitAction flow (its
+  // terminal autocommit_done event dismisses the bar); Discard and Do
+  // nothing go through mainTreeAction / main_tree_result. The bar is
+  // stored in the same worktreeBar / tab.worktreeBarEl slot — a tab
+  // can only ever have one pending bar — and is tagged with the
+  // main-tree-bar class so autocommit_done can tell it apart from a
+  // worktree bar (which a Git Commit on the MAIN tree must not close).
+  function createMainTreeBar(ownerTabId, workDir) {
+    const bar = createActionBar('Auto-commit, Discard, or Do nothing?', [
+      {
+        cls: 'wt-merge',
+        text: 'Auto commit',
+        msg: () => ({
+          type: 'autocommitAction',
+          tabId: ownerTabId,
+          workDir: workDir,
+        }),
+      },
+      {
+        cls: 'wt-discard',
+        text: 'Discard',
+        msg: () => ({
+          type: 'mainTreeAction',
+          action: 'discard',
+          tabId: ownerTabId,
+          workDir: workDir,
+        }),
+      },
+      {
+        cls: 'wt-nothing',
+        text: 'Do nothing',
+        msg: () => ({
+          type: 'mainTreeAction',
+          action: 'nothing',
+          tabId: ownerTabId,
+          workDir: workDir,
+        }),
+      },
+    ]);
+    bar.classList.add('main-tree-bar');
+    bar.dataset.workDir = workDir || '';
+    return bar;
+  }
+
+  function isMainTreeBar(bar) {
+    return !!(bar && bar.classList.contains('main-tree-bar'));
+  }
+
+  // Whether an autocommit_done event is the terminal of THIS main-tree
+  // bar's "Auto commit" click. The bar stamps its workDir on the
+  // autocommitAction it sends and the daemon echoes it back on the
+  // event, so a commit targeting a DIFFERENT repository that happens
+  // to share the tab (a settings-drawer Git Commit from another
+  // window, a post-task commit of another repo) can never strip the
+  // bar's controls while its own tree is still dirty.
+  function autocommitDoneOwnsMainTreeBar(bar, ev) {
+    return (
+      isMainTreeBar(bar) &&
+      !!ev &&
+      typeof ev.workDir === 'string' &&
+      ev.workDir === (bar.dataset.workDir || '')
+    );
+  }
+
+  // A new task (`clear`) or a replayed transcript (`task_events`)
+  // replaces the tab's task binding; a main-tree bar left over from
+  // the previous task would keep offering actions on its OLD workDir
+  // (e.g. a Discard resetting a repository the tab no longer shows),
+  // so it is retired. A WORKTREE bar is deliberately left alone: its
+  // pending branch outlives the transcript, and the daemon
+  // re-presents or finalizes it through its own lifecycle.
+  function dropStaleMainTreeBar(tabId) {
+    if (
+      isMainTreeBar(worktreeBar) &&
+      (tabId === undefined || tabId === activeTabId)
+    ) {
+      clearWorktreeBar();
+    }
+    const tab = getTab(tabId === undefined ? activeTabId : tabId);
+    if (tab && isMainTreeBar(tab.worktreeBarEl)) tab.worktreeBarEl = null;
   }
 
   function showWorktreeActions(ev) {
     clearWorktreeBar();
     worktreeBar = createWorktreeBar((ev && ev.tabId) || activeTabId);
+    attachActionBar(worktreeBar);
+  }
+
+  function showMainTreeActions(ev) {
+    clearWorktreeBar();
+    worktreeBar = createMainTreeBar(
+      (ev && ev.tabId) || activeTabId,
+      (ev && ev.workDir) || '',
+    );
     attachActionBar(worktreeBar);
   }
 
