@@ -38,6 +38,7 @@
     'shareChatTasks',
     'complete',
     'worktreeAction',
+    'mainTreeAction',
     'generateCommitMessage',
     'autocommitAction',
     'auth',
