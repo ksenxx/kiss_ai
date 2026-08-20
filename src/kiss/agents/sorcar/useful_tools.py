@@ -865,37 +865,7 @@ class UsefulTools:
             return self._bash_streaming(command, timeout_seconds, max_output_chars)
 
         try:
-            process = self._spawn(command)
-            done = threading.Event()
-            self._start_stop_monitor(process, done)
-            try:
-                stdout, _ = process.communicate(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired as timeout_exc:
-                shell_running = process.poll() is None
-                _kill_process_group(process)
-                stdout = ""
-                try:
-                    stdout, _ = process.communicate(timeout=5)
-                except Exception:
-                    raw = timeout_exc.output
-                    if isinstance(raw, bytes):  # pragma: no cover — platform-dependent
-                        raw = raw.decode("utf-8", errors="replace")
-                    stdout = raw or ""
-                if shell_running:
-                    return "Error: Command execution timeout"
-                return _format_bash_result(
-                    process.returncode, stdout, max_output_chars,
-                )
-            except BaseException:  # pragma: no cover — KeyboardInterrupt timing-dependent
-                _kill_process_group(process)
-                try:
-                    process.communicate(timeout=5)
-                except Exception:
-                    pass
-                raise
-            finally:
-                done.set()
-            return _format_bash_result(process.returncode, stdout, max_output_chars)
+            return self._bash_streaming(command, timeout_seconds, max_output_chars)
         except Exception as e:  # pragma: no cover
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
@@ -925,7 +895,6 @@ class UsefulTools:
         Returns:
             True when the EOF sentinel was received, False on deadline.
         """
-        assert self.stream_callback is not None
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -937,20 +906,47 @@ class UsefulTools:
             if line is None:
                 return True
             chunks.append(line)
-            self.stream_callback(line)
+            if self.stream_callback is not None:
+                self.stream_callback(line)
 
     def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:
-        assert self.stream_callback is not None
+        """Run *command* through a reader thread, bounded by *timeout_seconds*.
+
+        Single engine behind :meth:`Bash` for both the streaming and the
+        non-streaming case (``stream_callback`` may be ``None``).  The
+        timeout is a deadline on the SHELL, not on its descendants:
+
+        * Shell still running at the deadline — genuine timeout.  The
+          whole process group is killed and the timeout error returned.
+        * Shell already exited but the stdout pipe is still open (a
+          background child inherited it — e.g. ``cd d && nohup job &``
+          wraps ``job`` in a pipe-holding subshell) — the command itself
+          SUCCEEDED, so its output is returned and the lingering
+          children are LEFT RUNNING.  Killing the group here used to
+          silently SIGKILL deliberately detached background jobs minutes
+          after this method returned success-looking output.  The reader
+          thread stays behind in discard mode so a child that writes to
+          the inherited pipe can never block on a full pipe buffer.
+        """
         process = self._spawn(command)
         done = threading.Event()
+        abandoned = threading.Event()
         out_queue: queue.Queue[str | None] = queue.Queue()
 
         def _drain_stdout() -> None:
             try:
                 assert process.stdout is not None
                 for line in iter(process.stdout.readline, ""):
-                    out_queue.put(line)
+                    if not abandoned.is_set():
+                        out_queue.put(line)
             finally:
+                if abandoned.is_set():
+                    # The main thread returned long ago and never closes
+                    # the pipe in this mode; release the fd here.
+                    try:
+                        process.stdout.close()  # type: ignore[union-attr]
+                    except Exception:
+                        logger.debug("stdout close failed", exc_info=True)
                 out_queue.put(None)
 
         reader = threading.Thread(target=_drain_stdout, daemon=True)
@@ -965,15 +961,18 @@ class UsefulTools:
             )
             if not eof:
                 timed_out = process.poll() is None
-                _kill_process_group(process)
+                if timed_out:
+                    _kill_process_group(process)
                 eof = self._consume_stream(
                     out_queue, chunks, time.monotonic() + 5,
                 )
                 if not eof:
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:  # pragma: no cover
-                        pass
+                    abandoned.set()
+                    if timed_out:
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:  # pragma: no cover
+                            pass
             else:
                 try:
                     process.wait(timeout=5)
