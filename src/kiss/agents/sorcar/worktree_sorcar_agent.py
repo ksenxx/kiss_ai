@@ -1519,6 +1519,52 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             "    agent.discard()"
         )
 
+    def leave_as_is(self) -> str:
+        """Detach from the pending worktree, leaving it untouched on disk.
+
+        Serves the "Do nothing" button of the post-task worktree bar:
+        the branch, the worktree directory, and any uncommitted
+        changes inside it are all left exactly as the task ended.
+        Only the agent's in-memory claim on the worktree is dropped,
+        so later tasks, new chats, and session resumes on this tab
+        never auto-merge, re-present, or clean up the parked work.
+
+        A preserve-for-review marker is persisted on the branch so
+        :meth:`GitWorktreeOps.reclaim_orphaned_worktrees` in a future
+        process also refuses to silently publish it — the same
+        contract as :meth:`_preserve_pending_worktree_for_review`,
+        minus any commit or directory cleanup.
+
+        Returns:
+            Message telling the user where the untouched worktree is.
+
+        Raises:
+            RuntimeError: If no worktree task is pending, or if the
+                preserve marker could not be written.  Failing closed
+                matters: dropping the in-memory claim without the
+                durable marker would let a later orphan reclaim
+                silently merge the branch the user explicitly parked
+                (gpt-5.6-sol review finding) — so on failure the
+                worktree stays pending and the bar keeps its controls.
+        """
+        if self._wt is None:
+            raise RuntimeError("No pending worktree task to leave as is")
+        wt = self._wt
+        if not GitWorktreeOps.save_preserve_marker(wt.repo_root, wt.branch):
+            raise RuntimeError(
+                f"Could not record the keep decision for branch "
+                f"'{wt.branch}' (writing the preserve marker to git "
+                "config failed); the worktree is still pending. Retry, "
+                "or merge/discard it instead."
+            )
+        self._wt = None
+        self._pending_review = False
+        return (
+            f"Left branch '{wt.branch}' and its worktree at "
+            f"{wt.wt_dir} as they are. Merge or discard them "
+            "manually when you are ready."
+        )
+
     def discard(self, *, rescue_ignored: bool = False) -> str:
         """Throw away the task branch and worktree, checkout original.
 

@@ -446,7 +446,13 @@ class TestListenerSpeechLanguage(unittest.TestCase):
                     for line in lines
                     if line.startswith("SPEECH ")
                 ]
-                transcripts.append(proc.stdout)
+                # Keep stderr alongside stdout: a NO_SPEECH run is only
+                # diagnosable from the listener's stderr, which says
+                # whether the transcription API call failed/timed out or
+                # returned a refusal-shaped hallucination.
+                transcripts.append(
+                    {"stdout": proc.stdout, "stderr": proc.stderr[-2000:]}
+                )
                 if payloads:
                     break
         self.assertEqual(
