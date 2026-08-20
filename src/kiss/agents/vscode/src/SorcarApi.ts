@@ -78,8 +78,19 @@ export class SorcarApi {
     this._post({type: 'recordFileUsage', path, workDir});
   }
 
-  worktreeAction(action: 'merge' | 'discard', tabId?: string): void {
+  worktreeAction(
+    action: 'merge' | 'discard' | 'nothing',
+    tabId?: string,
+  ): void {
     this._post({type: 'worktreeAction', action, tabId});
+  }
+
+  mainTreeAction(
+    action: 'discard' | 'nothing',
+    tabId?: string,
+    workDir?: string,
+  ): void {
+    this._post({type: 'mainTreeAction', action, tabId, workDir});
   }
 
   generateCommitMessage(model: string, tabId: string, workDir: string): void {

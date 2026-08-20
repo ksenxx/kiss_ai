@@ -1,10 +1,23 @@
-"""E2E tests: streaming Bash must not hang when background children hold stdout.
+"""E2E tests: Bash must neither hang on nor kill pipe-holding background jobs.
 
-Reproduces the frozen sub-agent bug: a command like ``(sleep 30) & echo go``
-exits immediately, but the backgrounded subshell inherits the stdout pipe.
-The old ``_bash_streaming`` timer callback saw ``process.poll() is not None``
-and returned without killing anything, so ``readline()`` blocked until every
-background child exited — 94 minutes in the observed incident.
+Covers two historical bugs around background children that inherit the
+tool's stdout pipe:
+
+* The frozen sub-agent bug: a command like ``(sleep 30) & echo go`` exits
+  immediately, but the backgrounded subshell inherits the stdout pipe.
+  The old ``_bash_streaming`` timer callback saw ``process.poll() is not
+  None`` and returned without unblocking anything, so ``readline()``
+  blocked until every background child exited — 94 minutes in the
+  observed incident.  The tool must return at the deadline instead.
+* The silent background-job kill: the first fix unblocked the call by
+  SIGKILLing the WHOLE process group at the deadline even when the shell
+  itself had already exited successfully.  A deliberately detached job —
+  ``cd d && nohup job > log 2>&1 < /dev/null &`` — wraps ``job`` in a
+  pipe-holding ``&&``-subshell, so minutes after Bash returned
+  success-looking output the framework SIGKILLed the user's nohup'd job
+  (observed as whole pytest runs dying ~300 s after launch).  The group
+  may be killed only on a GENUINE timeout (shell still running at the
+  deadline); children of an exited shell must be left running.
 """
 
 from __future__ import annotations
@@ -25,20 +38,51 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _assert_alive_and_kill(pid_file: Path) -> None:
+    """Assert the pid recorded in *pid_file* is alive, then SIGKILL it.
+
+    Used by the background-job survival tests: the recorded child must
+    have outlived the Bash call (the old deadline group-kill would have
+    SIGKILLed it before Bash returned), and is then reaped so no test
+    process leaks past the suite.
+    """
+    assert pid_file.exists(), "background child never started"
+    pid = int(pid_file.read_text())
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pytest.fail(f"background child {pid} was killed by the Bash deadline")
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+
+
+def _background_job_command(pid_file: Path) -> str:
+    """Shell snippet: record the job's pid in *pid_file*, then sleep."""
+    return (
+        f"echo $$ > {shlex.quote(str(pid_file))}; exec sleep 30"
+    )
+
+
 def test_background_child_in_group_does_not_block_past_timeout(
     tmp_path: Path,
 ) -> None:
     """Shell exits fast, in-group background child holds the pipe.
 
-    The timeout must kill the process group so the pipe closes, and the
-    completed command's real output must be returned (not a timeout error,
-    since the command itself finished successfully).
+    The tool must return at the deadline with the completed command's
+    real output (not a timeout error, since the command itself finished
+    successfully), and the background child must be LEFT RUNNING — the
+    shell exited on time, so nothing timed out and nothing may be
+    killed.
     """
+    pid_file = tmp_path / "child.pid"
     lines: list[str] = []
     tools = UsefulTools(stream_callback=lines.append, work_dir=str(tmp_path))
     start = time.monotonic()
     out = tools.Bash(
-        "(sleep 30) & echo launched",
+        f"sh -c {shlex.quote(_background_job_command(pid_file))} & echo launched",
         "background child holds pipe",
         timeout_seconds=2,
     )
@@ -46,6 +90,62 @@ def test_background_child_in_group_does_not_block_past_timeout(
     assert elapsed < 15, f"Bash blocked for {elapsed:.1f}s on background child"
     assert "launched" in out
     assert "timeout" not in out.lower()
+    _assert_alive_and_kill(pid_file)
+
+
+def test_cd_prefixed_nohup_background_job_survives_deadline(
+    tmp_path: Path,
+) -> None:
+    """The exact silent-kill incident: ``cd d && nohup job … & echo ok``.
+
+    ``&`` backgrounds the whole ``&&`` list, so an intermediate subshell
+    keeps the tool's stdout pipe open even though the job's own stdio is
+    fully redirected.  The shell exits instantly, Bash returns "ok" at
+    the deadline — and the nohup'd job must still be alive afterwards.
+    The pre-fix code SIGKILLed the job's process group at the deadline
+    while returning this very success-looking output (observed killing
+    whole background pytest runs ~300 s after launch).
+    """
+    pid_file = tmp_path / "job.pid"
+    job = _background_job_command(pid_file)
+    log = tmp_path / "job.log"
+    lines: list[str] = []
+    tools = UsefulTools(stream_callback=lines.append, work_dir=str(tmp_path))
+    start = time.monotonic()
+    out = tools.Bash(
+        f"cd {shlex.quote(str(tmp_path))} && "
+        f"nohup sh -c {shlex.quote(job)} > {shlex.quote(str(log))} 2>&1 "
+        "< /dev/null & echo ok",
+        "cd && nohup launch",
+        timeout_seconds=2,
+    )
+    elapsed = time.monotonic() - start
+    assert elapsed < 15, f"Bash blocked for {elapsed:.1f}s on nohup launch"
+    assert "ok" in out
+    assert "timeout" not in out.lower()
+    _assert_alive_and_kill(pid_file)
+
+
+def test_non_streaming_cd_prefixed_nohup_job_survives_deadline(
+    tmp_path: Path,
+) -> None:
+    """Non-streaming path of the same incident: the job must survive."""
+    pid_file = tmp_path / "job.pid"
+    job = _background_job_command(pid_file)
+    tools = UsefulTools(work_dir=str(tmp_path))
+    start = time.monotonic()
+    out = tools.Bash(
+        f"cd {shlex.quote(str(tmp_path))} && "
+        f"nohup sh -c {shlex.quote(job)} > /dev/null 2>&1 "
+        "< /dev/null & echo ok",
+        "non-streaming cd && nohup launch",
+        timeout_seconds=2,
+    )
+    elapsed = time.monotonic() - start
+    assert elapsed < 15, f"Bash blocked for {elapsed:.1f}s on nohup launch"
+    assert "ok" in out
+    assert "timeout" not in out.lower()
+    _assert_alive_and_kill(pid_file)
 
 
 @pytest.mark.slow
