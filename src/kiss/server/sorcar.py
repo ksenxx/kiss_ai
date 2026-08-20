@@ -267,6 +267,7 @@ API: dict[str, ApiCommand] = _catalog(
     ),
     ApiCommand("complete", required=("query",)),
     ApiCommand("worktreeAction", required=("action",)),
+    ApiCommand("mainTreeAction", required=("action",)),
     ApiCommand("generateCommitMessage"),
     ApiCommand("autocommitAction"),
     ApiCommand("auth", required=("password",), handler="drop"),

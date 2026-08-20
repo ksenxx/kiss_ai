@@ -312,11 +312,14 @@ class _CommandsMixin:
         def _broadcast_autocommit_done(
             self, tab_id: str, *, success: bool, committed: bool,
             message: str, commit_message: str | None = None,
-            manual: bool = False,
+            manual: bool = False, work_dir: str = "",
         ) -> dict[str, Any]: ...
         def _handle_worktree_action(
             self, action: str, tab_id: str = "", *,
             internal: bool = False, already_claimed: bool = False,
+        ) -> dict[str, Any]: ...
+        def _handle_main_tree_action(
+            self, action: str, work_dir: str,
         ) -> dict[str, Any]: ...
         def _handle_delete_frequent_task(self, task: str) -> None: ...
         def _handle_set_favorite(
@@ -1074,7 +1077,7 @@ class _CommandsMixin:
                     tab_id, success=False, committed=False,
                     message="A task is still running in this folder; "
                             "wait for it to finish before committing.",
-                    manual=True,
+                    manual=True, work_dir=work_dir,
                 )
                 return
             if tab_id in self._autocommit_tabs:
@@ -1119,6 +1122,29 @@ class _CommandsMixin:
             result = {"success": False, "message": str(e)}
         self.printer.broadcast(
             {"type": "worktree_result", "tabId": wt_tab_id, **result},
+        )
+
+    def _cmd_main_tree_action(self, cmd: dict[str, Any]) -> None:
+        """Execute a main-tree discard/do-nothing action.
+
+        Serves the Discard and Do-nothing buttons of the post-task
+        action bar shown after a non-worktree manual-commit run (the
+        bar's Auto-commit button sends the existing
+        ``autocommitAction`` command instead).  Delegates to
+        :meth:`_handle_main_tree_action` and always answers with a
+        broadcast ``main_tree_result`` event so every client dismisses
+        the bar — mirroring :meth:`_cmd_worktree_action`.
+        """
+        action = cmd.get("action", "")
+        tab_id = cmd.get("tabId", "")
+        work_dir = cmd.get("workDir", "")
+        try:
+            result = self._handle_main_tree_action(action, work_dir)
+        except Exception as e:
+            logger.debug("Main-tree action error", exc_info=True)
+            result = {"success": False, "message": str(e)}
+        self.printer.broadcast(
+            {"type": "main_tree_result", "tabId": tab_id, **result},
         )
 
     def _cmd_get_config(self, cmd: dict[str, Any]) -> None:
@@ -1305,6 +1331,7 @@ class _CommandsMixin:
         "generateCommitMessage": _cmd_generate_commit_message,
         "autocommitAction": _cmd_autocommit_action,
         "worktreeAction": _cmd_worktree_action,
+        "mainTreeAction": _cmd_main_tree_action,
         "setWorkDir": _cmd_set_work_dir,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,

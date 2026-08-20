@@ -33,6 +33,12 @@ class TestOperatorRegistry:
         assert subtract.eval(5, 3) == 2
         assert subtract.eval(0, 5) == -5
 
+    def test_multiply_not_registered(self):
+        assert "*" not in OPERATORS
+
+    def test_divide_not_registered(self):
+        assert "/" not in OPERATORS
+
 
 class TestTokenizer:
     def test_simple(self):
@@ -48,10 +54,12 @@ class TestTokenizer:
         with pytest.raises(ValueError, match="unexpected character"):
             tokenize("2 @ 3")
 
-    def test_removed_operators_raise(self):
-        with pytest.raises(ValueError, match="unexpected character"):
+    def test_multiply_rejected(self):
+        with pytest.raises(ValueError, match="unexpected character: '\\*'"):
             tokenize("6 * 7")
-        with pytest.raises(ValueError, match="unexpected character"):
+
+    def test_divide_rejected(self):
+        with pytest.raises(ValueError, match="unexpected character: '/'"):
             tokenize("8/2")
 
 
@@ -92,6 +100,14 @@ class TestEvaluator:
         with pytest.raises(ValueError, match="unexpected token"):
             evaluate("2 3")
 
+    def test_multiplication_rejected(self):
+        with pytest.raises(ValueError, match="unexpected character: '\\*'"):
+            evaluate("6 * 7")
+
+    def test_division_rejected(self):
+        with pytest.raises(ValueError, match="unexpected character: '/'"):
+            evaluate("8 / 2")
+
     def test_complex_expression(self):
         assert evaluate("2 + (3 - 4)") == 1
 
@@ -119,12 +135,15 @@ class TestCLI:
         captured = capsys.readouterr()
         assert "Error" in captured.err
 
-    def test_removed_operators_rejected(self, capsys):
-        for expr in ("6 * 7", "8 / 2"):
-            ret = main([expr])
-            assert ret == 1
-            captured = capsys.readouterr()
-            assert "Error" in captured.err
+    def test_multiply_rejected(self, capsys):
+        ret = main(["6 * 7"])
+        assert ret == 1
+        assert "Error: unexpected character: '*'" in capsys.readouterr().err
+
+    def test_divide_rejected(self, capsys):
+        ret = main(["8 / 2"])
+        assert ret == 1
+        assert "Error: unexpected character: '/'" in capsys.readouterr().err
 
     def test_subprocess_integration(self):
         result = subprocess.run(
