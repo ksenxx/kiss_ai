@@ -6526,6 +6526,7 @@
         // previous task that never reached a terminal event is stale.
         discardReadyReports(ev.tabId);
         // report-coverage:end
+        dropStaleMainTreeBar(ev.tabId);
         const clearTab =
           ev.tabId !== undefined ? getTab(ev.tabId) : getTab(activeTabId);
         if (clearTab) {
@@ -6641,6 +6642,7 @@
       case 'task_events': {
         const teTabId = ev.tabId || activeTabId;
         const teTab = getTab(teTabId);
+        dropStaleMainTreeBar(teTabId);
         if (ev.chat_id && teTab) {
           teTab.backendChatId = ev.chat_id;
           if (!teTab.workDir && configWorkDir) {
@@ -6985,6 +6987,24 @@
         }
         showWorktreeActions(ev);
         break;
+      case 'main_tree_done': {
+        // Post-task presentation for a non-worktree manual-commit run:
+        // the task's edits sit uncommitted in the main checkout, so
+        // show the Auto commit / Discard / Do nothing bar.
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+          const bgMtTab = getTab(ev.tabId);
+          if (bgMtTab) {
+            bgMtTab.worktreeBarEl = createMainTreeBar(
+              ev.tabId,
+              ev.workDir || '',
+            );
+          }
+          break;
+        }
+        showMainTreeActions(ev);
+        break;
+      }
+      case 'main_tree_result':
       case 'worktree_result':
         // A merge just copied the task's committed files into the
         // original checkout; a discard just deleted the worktree copy.
@@ -7017,6 +7037,16 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgAdTab = getTab(ev.tabId);
           if (bgAdTab) {
+            // Terminal for the main-tree bar's "Auto commit" button
+            // (success or failure — same one-shot rule as
+            // handleWorktreeResult), matched by workDir so a commit
+            // in another repository sharing the tab leaves the bar
+            // alone. A pending WORKTREE bar stays: a Git Commit on
+            // the main tree says nothing about the still-undecided
+            // worktree branch.
+            if (autocommitDoneOwnsMainTreeBar(bgAdTab.worktreeBarEl, ev)) {
+              bgAdTab.worktreeBarEl = null;
+            }
             clearActionProgress(bgAdTab.outputFragment);
             // A successful manual Git Commit is reported by a toast
             // notification instead; only failures earn transcript text.
@@ -7028,6 +7058,12 @@
             }
           }
           break;
+        }
+        // Foreground twin of the background main-tree-bar dismissal
+        // above; clearing first so handleAutocommitResult's input
+        // refocus lands on a visible input box.
+        if (autocommitDoneOwnsMainTreeBar(worktreeBar, ev)) {
+          clearWorktreeBar();
         }
         handleAutocommitResult(ev);
         break;
@@ -8207,7 +8243,7 @@
   }
 
   function createWorktreeBar(ownerTabId) {
-    return createActionBar('Auto-commit and merge or Discard?', [
+    return createActionBar('Auto-commit and merge, Discard, or Do nothing?', [
       {
         cls: 'wt-merge',
         text: 'Auto-commit and merge',
@@ -8226,12 +8262,115 @@
           tabId: ownerTabId,
         }),
       },
+      {
+        cls: 'wt-nothing',
+        text: 'Do nothing',
+        msg: () => ({
+          type: 'worktreeAction',
+          action: 'nothing',
+          tabId: ownerTabId,
+        }),
+      },
     ]);
+  }
+
+  // The non-worktree counterpart of createWorktreeBar: after a
+  // manual-commit task edited the main checkout directly, the daemon's
+  // main_tree_done event offers the same explicit choice. "Auto
+  // commit" reuses the settings drawer's autocommitAction flow (its
+  // terminal autocommit_done event dismisses the bar); Discard and Do
+  // nothing go through mainTreeAction / main_tree_result. The bar is
+  // stored in the same worktreeBar / tab.worktreeBarEl slot — a tab
+  // can only ever have one pending bar — and is tagged with the
+  // main-tree-bar class so autocommit_done can tell it apart from a
+  // worktree bar (which a Git Commit on the MAIN tree must not close).
+  function createMainTreeBar(ownerTabId, workDir) {
+    const bar = createActionBar('Auto-commit, Discard, or Do nothing?', [
+      {
+        cls: 'wt-merge',
+        text: 'Auto commit',
+        msg: () => ({
+          type: 'autocommitAction',
+          tabId: ownerTabId,
+          workDir: workDir,
+        }),
+      },
+      {
+        cls: 'wt-discard',
+        text: 'Discard',
+        msg: () => ({
+          type: 'mainTreeAction',
+          action: 'discard',
+          tabId: ownerTabId,
+          workDir: workDir,
+        }),
+      },
+      {
+        cls: 'wt-nothing',
+        text: 'Do nothing',
+        msg: () => ({
+          type: 'mainTreeAction',
+          action: 'nothing',
+          tabId: ownerTabId,
+          workDir: workDir,
+        }),
+      },
+    ]);
+    bar.classList.add('main-tree-bar');
+    bar.dataset.workDir = workDir || '';
+    return bar;
+  }
+
+  function isMainTreeBar(bar) {
+    return !!(bar && bar.classList.contains('main-tree-bar'));
+  }
+
+  // Whether an autocommit_done event is the terminal of THIS main-tree
+  // bar's "Auto commit" click. The bar stamps its workDir on the
+  // autocommitAction it sends and the daemon echoes it back on the
+  // event, so a commit targeting a DIFFERENT repository that happens
+  // to share the tab (a settings-drawer Git Commit from another
+  // window, a post-task commit of another repo) can never strip the
+  // bar's controls while its own tree is still dirty.
+  function autocommitDoneOwnsMainTreeBar(bar, ev) {
+    return (
+      isMainTreeBar(bar) &&
+      !!ev &&
+      typeof ev.workDir === 'string' &&
+      ev.workDir === (bar.dataset.workDir || '')
+    );
+  }
+
+  // A new task (`clear`) or a replayed transcript (`task_events`)
+  // replaces the tab's task binding; a main-tree bar left over from
+  // the previous task would keep offering actions on its OLD workDir
+  // (e.g. a Discard resetting a repository the tab no longer shows),
+  // so it is retired. A WORKTREE bar is deliberately left alone: its
+  // pending branch outlives the transcript, and the daemon
+  // re-presents or finalizes it through its own lifecycle.
+  function dropStaleMainTreeBar(tabId) {
+    if (
+      isMainTreeBar(worktreeBar) &&
+      (tabId === undefined || tabId === activeTabId)
+    ) {
+      clearWorktreeBar();
+    }
+    const tab = getTab(tabId === undefined ? activeTabId : tabId);
+    if (tab && isMainTreeBar(tab.worktreeBarEl)) tab.worktreeBarEl = null;
   }
 
   function showWorktreeActions(ev) {
     clearWorktreeBar();
     worktreeBar = createWorktreeBar((ev && ev.tabId) || activeTabId);
+    attachActionBar(worktreeBar);
+  }
+
+  function showMainTreeActions(ev) {
+    clearWorktreeBar();
+    worktreeBar = createMainTreeBar(
+      (ev && ev.tabId) || activeTabId,
+      (ev && ev.workDir) || '',
+    );
     attachActionBar(worktreeBar);
   }
 

@@ -319,6 +319,7 @@ class _MergeFlowMixin:
         message: str,
         commit_message: str | None = None,
         manual: bool = False,
+        work_dir: str = "",
     ) -> dict[str, Any]:
         """Broadcast an ``autocommit_done`` event and return it.
 
@@ -339,6 +340,12 @@ class _MergeFlowMixin:
             commit_message: Full commit message (only when committed).
             manual: ``True`` when the user pressed the Git Commit
                 button (as opposed to the post-task autocommit).
+            work_dir: The working directory the commit targeted.
+                Carried on the event as ``workDir`` so the webview's
+                post-task main-tree bar dismisses itself only for the
+                commit flow it started — an ``autocommit_done`` for a
+                DIFFERENT repository sharing the tab must not strip
+                the bar's controls (gpt-5.6-sol review finding).
 
         Returns:
             The event dict (for optional persistence).
@@ -365,6 +372,8 @@ class _MergeFlowMixin:
             event["commitMessage"] = commit_message
         if manual:
             event["manual"] = True
+        if work_dir:
+            event["workDir"] = work_dir
         self.printer.broadcast(event)
         return event
 
@@ -407,6 +416,12 @@ class _MergeFlowMixin:
                 button (as opposed to the post-task autocommit).
         """
         work_dir = work_dir or self.work_dir
+        # Echoed on every autocommit_done as `workDir` — the DIR THE
+        # CALLER NAMED, not any stale-worktree fallback remap below —
+        # so the webview's main-tree bar (which stamped this exact
+        # string on its autocommitAction) can recognize its own
+        # terminal event.
+        requested_dir = work_dir
         try:
             work_path = Path(work_dir)
             if not work_path.exists():
@@ -418,7 +433,7 @@ class _MergeFlowMixin:
             if repo is None:
                 self._broadcast_autocommit_done(
                     tab_id, success=False, committed=False,
-                    message="Not a git repository.", manual=manual,
+                    message="Not a git repository.", manual=manual, work_dir=requested_dir,
                 )
                 return
             with repo_lock(repo):
@@ -435,14 +450,14 @@ class _MergeFlowMixin:
                     self._broadcast_autocommit_done(
                         tab_id, success=False, committed=False,
                         message=f"Staging failed: {first_line}",
-                        manual=manual,
+                        manual=manual, work_dir=requested_dir,
                     )
                     return
                 diff = _git(work_dir, "diff", "--cached")
                 if not diff.stdout.strip():
                     self._broadcast_autocommit_done(
                         tab_id, success=True, committed=False,
-                        message="Nothing to commit.", manual=manual,
+                        message="Nothing to commit.", manual=manual, work_dir=requested_dir,
                     )
                     return
                 if manual:
@@ -500,7 +515,7 @@ class _MergeFlowMixin:
                 done_event = self._broadcast_autocommit_done(
                     tab_id, success=True, committed=True,
                     message=f"Committed: {subject}",
-                    commit_message=msg, manual=manual,
+                    commit_message=msg, manual=manual, work_dir=requested_dir,
                 )
                 if tab_id and not manual:
                     with self._state_lock:
@@ -516,13 +531,13 @@ class _MergeFlowMixin:
                 self._broadcast_autocommit_done(
                     tab_id, success=False, committed=False,
                     message=f"git commit failed: {reason}",
-                    manual=manual,
+                    manual=manual, work_dir=requested_dir,
                 )
         except Exception as e:  # pragma: no cover — unexpected git/LLM error
             logger.debug("Autocommit action failed", exc_info=True)
             self._broadcast_autocommit_done(
                 tab_id, success=False, committed=False,
-                message=str(e), manual=manual,
+                message=str(e), manual=manual, work_dir=requested_dir,
             )
 
     def _autocommit_changed_repos(
@@ -1325,7 +1340,10 @@ class _MergeFlowMixin:
         server process restart where in-memory state was lost).
 
         Args:
-            action: One of ``"merge"`` or ``"discard"``.
+            action: One of ``"merge"``, ``"discard"`` or ``"nothing"``
+                (the Do-nothing button: detach from the worktree,
+                leaving its branch, directory, and any uncommitted
+                changes untouched on disk).
             tab_id: The tab whose worktree to act on.
             internal: When True, bypass the ``_check_worktree_busy``
                 guard.  Used by ``_run_task_inner``'s post-task
@@ -1360,7 +1378,11 @@ class _MergeFlowMixin:
                 "message": "No pending worktree changes to act on",
             }
         wt = wt_agent
-        verb = {"merge": "merging", "discard": "discarding"}.get(action)
+        verb = {
+            "merge": "merging",
+            "discard": "discarding",
+            "nothing": "detaching",
+        }.get(action)
         if verb is None:
             return {"success": False, "message": f"Unknown action: {action}"}
         repo_root = wt._repo_root
@@ -1431,6 +1453,26 @@ class _MergeFlowMixin:
         # finding).
         try:
             with repo_lock(repo_root):
+                if action == "nothing":
+                    # "Do nothing": detach from the worktree without
+                    # touching git state beyond the preserve marker.
+                    # ``kept: True`` tells the clients to KEEP their
+                    # pending-worktree fallback directory — the
+                    # worktree stays on disk, so transcript file links
+                    # into it must keep resolving.  A failed marker
+                    # write leaves the worktree pending (fail closed),
+                    # and the failure is ``retryable`` so the webview
+                    # keeps the bar's buttons instead of stripping the
+                    # only retry controls.
+                    try:
+                        msg = wt.leave_as_is()
+                    except RuntimeError as e:
+                        return {
+                            "success": False,
+                            "message": str(e),
+                            "retryable": True,
+                        }
+                    return {"success": True, "message": msg, "kept": True}
                 if action == "merge":
                     progress_event: dict[str, Any] = {
                         "type": "worktree_progress",
@@ -1477,3 +1519,122 @@ class _MergeFlowMixin:
                 # tab busy and deferred disposal; without this call the
                 # backend tab state would leak indefinitely (F4-23).
                 self._dispose_if_closed(tab_id)
+
+    def _handle_main_tree_action(
+        self, action: str, work_dir: str,
+    ) -> dict[str, Any]:
+        """Execute a main-working-tree discard or do-nothing action.
+
+        Serves the post-task action bar of non-worktree manual-commit
+        runs (its third button, Auto commit, reuses the existing
+        ``autocommitAction`` command instead).  The bar's other two
+        choices land here:
+
+        * ``"discard"`` — throw away every uncommitted change in the
+          repository containing *work_dir*: ``git reset --hard``
+          restores tracked files, ``git clean -fd`` removes untracked
+          ones.  Ignored files (``.kiss-worktrees/``, build output…)
+          are untouched — ``clean`` runs without ``-x``.  Refused
+          while a non-worktree task is running in the same repository,
+          exactly like a manual commit: the reset would yank
+          half-written files out from under the live agent.  The
+          per-repo ``repo_lock`` additionally serializes against a
+          concurrent worktree merge stashing/rewriting the same main
+          tree.
+        * ``"nothing"`` — leave the working tree exactly as the task
+          ended, changes uncommitted.  Nothing to do daemon-side; the
+          success result exists so every connected client dismisses
+          the bar together.
+
+        Args:
+            action: One of ``"discard"`` or ``"nothing"``.
+            work_dir: The tab's working directory (any folder inside
+                the target repository).
+
+        Returns:
+            Dict with ``success`` bool and ``message`` string.
+        """
+        if action == "nothing":
+            return {
+                "success": True,
+                "message": (
+                    "Left the changes in the working tree, uncommitted."
+                ),
+            }
+        if action != "discard":
+            return {"success": False, "message": f"Unknown action: {action}"}
+        work_dir = work_dir or self.work_dir
+        repo = GitWorktreeOps.discover_repo(Path(work_dir))
+        if repo is None:
+            return {
+                "success": False,
+                "message": f"{work_dir} is not inside a git repository.",
+            }
+        with repo_lock(repo):
+            # Re-checked under the repo lock (not only before taking
+            # it) to narrow the window in which a direct task starting
+            # on another tab could have its half-written files reset
+            # out from under it.  The residual TOCTOU — a task starting
+            # after this check — is the same window the manual Git
+            # Commit already has (`_cmd_autocommit_action` probes the
+            # same predicate before its own git mutations); a full fix
+            # needs task startup to take a per-repo claim, which
+            # neither flow does today.
+            with self._state_lock:
+                if self._any_non_wt_running(repo):
+                    return {
+                        "success": False,
+                        "message": (
+                            "A task is still running in this folder; "
+                            "wait for it to finish before discarding."
+                        ),
+                    }
+            dirty = self._main_dirty_files(str(repo))
+            if not dirty:
+                return {
+                    "success": True,
+                    "message": "Nothing to discard: the working tree is clean.",
+                }
+            reset = _git(str(repo), "reset", "--hard")
+            if reset.returncode != 0:
+                return {
+                    "success": False,
+                    "message": (
+                        "git reset --hard failed: "
+                        + (reset.stderr or reset.stdout).strip()
+                    ),
+                }
+            clean = _git(str(repo), "clean", "-fd")
+            if clean.returncode != 0:
+                return {
+                    "success": False,
+                    "message": (
+                        "Tracked changes were reset, but git clean -fd "
+                        "failed: " + (clean.stderr or clean.stdout).strip()
+                    ),
+                }
+            # Both commands can return 0 and still leave dirt behind:
+            # `reset --hard` does not enter submodules and `clean -fd`
+            # refuses to delete an untracked nested git repository.
+            # Claiming success then would dismiss the bar over a tree
+            # that `git status` still reports dirty (gpt-5.6-sol
+            # review finding).
+            leftover = self._main_dirty_files(str(repo))
+            if leftover:
+                return {
+                    "success": False,
+                    "message": (
+                        f"Discarded {len(dirty) - len(leftover)} of "
+                        f"{len(dirty)} uncommitted file(s) in "
+                        f"{repo.name}; still dirty (submodule or "
+                        "nested git repository?): "
+                        + ", ".join(leftover[:10])
+                    ),
+                }
+            return {
+                "success": True,
+                "message": (
+                    f"Discarded {len(dirty)} uncommitted file(s) "
+                    f"in {repo.name}."
+                ),
+            }
