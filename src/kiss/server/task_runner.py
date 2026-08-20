@@ -1352,6 +1352,38 @@ class _TaskRunnerMixin:
                             )
                     except BaseException:
                         logger.debug("Worktree presentation error", exc_info=True)
+                elif not use_worktree:
+                    # Direct-checkout counterpart of the worktree
+                    # presentation above: when the task's edits are
+                    # left sitting uncommitted in the user's own
+                    # working tree, offer the explicit choice through
+                    # a ``main_tree_done`` action bar (Auto commit /
+                    # Discard / Do nothing).  Gated on the tree
+                    # actually being dirty rather than on
+                    # ``effective_auto_commit``: an auto-commit that
+                    # was attempted above but refused (a pre-commit
+                    # hook, say) leaves the checkout dirty all the
+                    # same, and suppressing the bar there would strand
+                    # the user with a failure line and no controls
+                    # (gpt-5.6-sol review finding).  A successful
+                    # auto-commit leaves the tree clean, so the
+                    # auto-commit fast path stays event-free — as do
+                    # clean trees and non-git folders.
+                    try:
+                        dirty = self._main_dirty_files(work_dir)
+                        if dirty:
+                            self.printer.broadcast(
+                                {
+                                    "type": "main_tree_done",
+                                    "tabId": tab_id,
+                                    "workDir": work_dir,
+                                    "changedFiles": dirty,
+                                }
+                            )
+                    except BaseException:
+                        logger.debug(
+                            "Main-tree presentation error", exc_info=True,
+                        )
                 with self._state_lock:
                     state.is_task_active = False
                 self.printer.broadcast(

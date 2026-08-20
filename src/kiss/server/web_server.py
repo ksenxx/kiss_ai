@@ -1870,7 +1870,16 @@ class WebPrinter(JsonPrinter):
             )
             if isinstance(wt_dir, str) and wt_dir:
                 self._tab_worktree_dirs[tab_id] = wt_dir
-        elif etype == "worktree_result" and event.get("success"):
+        elif (
+            etype == "worktree_result"
+            and event.get("success")
+            and not event.get("kept")
+        ):
+            # A "Do nothing" result (kept: true) leaves the worktree on
+            # disk, so the remote client's openFile/checkPaths fallback
+            # must survive for transcript file links to keep resolving
+            # into it — mirroring the VS Code host (gpt-5.6-sol review
+            # finding).
             self._tab_worktree_dirs.pop(tab_id, None)
 
     def worktree_dir_for_tab(self, tab_id: str) -> str:
