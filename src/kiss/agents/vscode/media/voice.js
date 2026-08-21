@@ -69,6 +69,25 @@
   let lastWakeAt = 0;
   let outstandingRounds = 0;
 
+  // How long a CANCELLED round entry is kept. A cancelled round's
+  // transcript can only still arrive within the transcribe-flash window
+  // (60s, see the flash('voice-transcribing', 60000) calls); entries older
+  // than that are dead weight that repeated listener restarts would grow
+  // without bound.
+  const CANCELLED_ROUND_TTL_MS = 60000;
+
+  // When each CANCELLED entry in roundOwners was cancelled, by round key.
+  const cancelledRoundAt = new Map();
+
+  /** Drop CANCELLED entries older than the transcribe-flash window. */
+  function evictStaleCancelledRounds(now) {
+    for (const [key, at] of cancelledRoundAt) {
+      if (now - at <= CANCELLED_ROUND_TTL_MS) continue;
+      cancelledRoundAt.delete(key);
+      if (roundOwners.get(key) === CANCELLED) roundOwners.delete(key);
+    }
+  }
+
   // tableak-coverage:start
   // The conversation that was on screen when each outstanding round began,
   // keyed by that round's id. A transcript arrives seconds after the words
@@ -128,9 +147,14 @@
    * null when it sends none.
    */
   function markSpeechStart(key) {
+    evictStaleCancelledRounds(Date.now());
     const owner = currentOwner() || UNSCOPED;
-    if (key === null) unkeyedOwners.push(owner);
-    else roundOwners.set(key, owner);
+    if (key === null) {
+      unkeyedOwners.push(owner);
+    } else {
+      roundOwners.set(key, owner);
+      cancelledRoundAt.delete(key);
+    }
     outstandingRounds++;
   }
 
@@ -143,7 +167,12 @@
    * have nothing to be recognised by, so they are only counted.
    */
   function resetSpeechRounds() {
-    for (const key of roundOwners.keys()) roundOwners.set(key, CANCELLED);
+    const now = Date.now();
+    evictStaleCancelledRounds(now);
+    for (const key of roundOwners.keys()) {
+      roundOwners.set(key, CANCELLED);
+      if (!cancelledRoundAt.has(key)) cancelledRoundAt.set(key, now);
+    }
     cancelledUnkeyedRounds += unkeyedOwners.length;
     unkeyedOwners.length = 0;
     outstandingRounds = 0;
@@ -169,6 +198,7 @@
     if (key !== null && roundOwners.has(key)) {
       const owner = roundOwners.get(key);
       roundOwners.delete(key);
+      cancelledRoundAt.delete(key);
       outstandingRounds = Math.max(0, outstandingRounds - 1);
       return owner;
     }

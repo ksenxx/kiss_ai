@@ -82,8 +82,8 @@ def _pop_states(*task_ids: str) -> None:
         agent_state.unregister(task_id)
     with agent_state.STATE_LOCK:
         stale = [
-            key
-            for key, st in agent_state.iter_items()
+            st.task_id
+            for st in agent_state.snapshot()
             if st.tab_id.startswith("w2")
         ]
         for key in stale:

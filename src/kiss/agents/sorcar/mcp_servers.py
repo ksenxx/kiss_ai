@@ -596,8 +596,6 @@ def _child_errlog() -> Any:
 
 async def _enter_transport(stack: Any, config: MCPServerConfig, auth: Any) -> tuple:
     """Open *config*'s transport on *stack* and return ``(read, write)``."""
-    import os
-
     if config.transport == "stdio":
         from mcp.client.stdio import StdioServerParameters, stdio_client
 

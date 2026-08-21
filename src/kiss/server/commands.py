@@ -29,6 +29,7 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
+from kiss.server.tab_registry import OpenTabOutcome
 
 if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
@@ -110,6 +111,15 @@ def _task_accepts_input(state: AgentState | None) -> bool:
     ``server.py``.  MUST be called while holding
     :data:`agent_state.STATE_LOCK`.
 
+    Delegates the thread-liveness half to
+    :meth:`AgentState.thread_alive`, which deliberately counts a
+    created-but-not-yet-started thread (``ident is None``,
+    ``is_alive()`` False) as alive: ``_cmd_run`` installs
+    ``task_thread`` and broadcasts before ``thread.start()``, so an
+    ``appendUserMessage`` from another connection in that window must
+    still be accepted — a raw ``is_alive()`` check here reopened the
+    exact S3-05 drop this predicate exists to close.
+
     Args:
         state: The agent state to inspect (``None`` accepted).
 
@@ -119,9 +129,7 @@ def _task_accepts_input(state: AgentState | None) -> bool:
     """
     if state is None:
         return False
-    if state.is_task_active:
-        return True
-    return state.task_thread is not None and state.task_thread.is_alive()
+    return state.is_task_active or state.thread_alive()
 
 
 def _restart_kiss_web_daemon() -> bool:
@@ -326,6 +334,28 @@ class _CommandsMixin:
             self, task_id: str, is_favorite: bool,
         ) -> None: ...
 
+
+    def _apply_new_work_dir(self, new_dir: str) -> None:
+        """Adopt *new_dir* as the daemon-wide fallback working directory.
+
+        Single shared implementation of the work-dir update used by
+        both :meth:`_cmd_set_work_dir` and :meth:`_cmd_save_config`
+        (D-R1: the latter used to copy-paste the former's block).
+        Invalidates the autocomplete file cache only when the
+        directory actually changes, and mirrors the value onto the
+        printer either way.  Takes ``_state_lock`` itself; the lock is
+        re-entrant, so callers already holding it may call this
+        directly.
+
+        Args:
+            new_dir: The non-empty directory to adopt.
+        """
+        with self._state_lock:
+            if self.work_dir != new_dir:
+                self.work_dir = new_dir
+                self._file_cache = {}
+            if hasattr(self.printer, "work_dir"):
+                setattr(self.printer, "work_dir", new_dir)
 
     def _cmd_run(self, cmd: dict[str, Any]) -> None:
         """Start an agent task in a background thread.
@@ -840,7 +870,12 @@ class _CommandsMixin:
         A REJECTED open (registry at its hard cap) is answered with an
         ``openTabRejected`` event to the originating client — without
         it the client would keep a permanently local, snapshot-immune
-        tab no other client ever sees.
+        tab no other client ever sees.  The exists/full distinction is
+        made atomically inside :meth:`TabRegistry.open_tab` (its
+        :class:`~kiss.server.tab_registry.OpenTabOutcome` return): an
+        unlocked ``has_tab`` re-probe here used to let a concurrent
+        ``closeTab`` turn a benign re-announce of an existing tab into
+        a spurious "Tab limit reached" rejection (D-RC2).
         """
         tab_id = cmd.get("tabId", "")
         if not isinstance(tab_id, str) or not tab_id:
@@ -851,9 +886,10 @@ class _CommandsMixin:
         work_dir = cmd.get("workDir", "")
         if not isinstance(work_dir, str):
             work_dir = ""
-        if self.tab_registry.open_tab(tab_id, title, work_dir):
+        outcome = self.tab_registry.open_tab(tab_id, title, work_dir)
+        if outcome is OpenTabOutcome.OPENED:
             self._broadcast_tabs_state()
-        elif not self.tab_registry.has_tab(tab_id):
+        elif outcome is OpenTabOutcome.FULL:
             self._broadcast_to_conn(
                 {
                     "type": "openTabRejected",
@@ -1223,12 +1259,7 @@ class _CommandsMixin:
 
             new_work_dir = cfg.get("work_dir", "")
             if new_work_dir:
-                with self._state_lock:
-                    if self.work_dir != new_work_dir:
-                        self.work_dir = new_work_dir
-                        self._file_cache = {}
-                    if hasattr(self.printer, "work_dir"):
-                        setattr(self.printer, "work_dir", new_work_dir)
+                self._apply_new_work_dir(new_work_dir)
 
             # Persist API keys INSIDE ``_save_config_lock``.  Each
             # ``save_api_key_to_shell`` does an unlocked
@@ -1301,12 +1332,7 @@ class _CommandsMixin:
             # fail (``seq != -1``); the next ``complete`` command
             # re-creates the entry with a fresh sequence number.
             self._complete_seq_latest.pop(conn_id, None)
-            if self.work_dir == new_dir:
-                return
-            self.work_dir = new_dir
-            self._file_cache = {}
-            if hasattr(self.printer, "work_dir"):
-                setattr(self.printer, "work_dir", new_dir)
+            self._apply_new_work_dir(new_dir)
 
     _HANDLERS: dict[str, Any] = {
         "run": _cmd_run,

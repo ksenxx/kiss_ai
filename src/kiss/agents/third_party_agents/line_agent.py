@@ -28,6 +28,7 @@ from typing import Any
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
+    start_http_server,
     stop_http_server,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -111,20 +112,18 @@ class LineChannelBackend(ToolMethodBackend):
                 pass
 
         self.disconnect()
-        try:
-            self._webhook_server = ThreadedHTTPServer(("0.0.0.0", port), Handler)
-            self._webhook_thread = threading.Thread(
-                target=self._webhook_server.serve_forever, daemon=True
-            )
-            self._webhook_thread.start()
-            logger.info("LINE webhook server started on port %d", port)
-            return True
-        except OSError as e:
-            self._connection_info = f"LINE webhook bind failed: {e}"
-            logger.warning("Could not start LINE webhook server: %s", e)
-            self._webhook_server = None
-            self._webhook_thread = None
+        self._webhook_server, self._webhook_thread, error = start_http_server(
+            ("0.0.0.0", port),
+            Handler,
+            log=logger,
+            started_log="LINE webhook server started on port %d",
+            error_prefix="LINE webhook bind failed",
+            error_log="Could not start LINE webhook server: %s",
+        )
+        if error is not None:
+            self._connection_info = error
             return False
+        return True
 
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10

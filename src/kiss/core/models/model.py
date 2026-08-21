@@ -40,6 +40,7 @@ from kiss.core.models.heif import (
     heif_to_jpeg,
     is_heif,
 )
+from kiss.core.models.stream_abort import DEFAULT_STREAM_STALL_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -400,17 +401,54 @@ def _tool_result_to_string(result_dict: dict[str, Any]) -> str:
         return str(raw_result)
 
 
-_AUDIO_MIME_TO_EXT: dict[str, str] = {
-    "audio/mpeg": ".mp3",
-    "audio/mp3": ".mp3",
-    "audio/wav": ".wav",
-    "audio/x-wav": ".wav",
-    "audio/ogg": ".ogg",
-    "audio/webm": ".webm",
-    "audio/flac": ".flac",
-    "audio/aac": ".aac",
-    "audio/mp4": ".m4a",
+# The one canonical audio table: MIME type -> the short format string the
+# OpenAI SDKs use (``input_audio.format``).  The two other spellings of the
+# same knowledge — format -> MIME (Anthropic's Whisper fallback) and
+# MIME -> file extension (the Whisper upload filename) — are derived below,
+# so a new audio format is added in exactly one place.
+_AUDIO_MIME_TO_FORMAT: dict[str, str] = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/ogg": "ogg",
+    "audio/webm": "webm",
+    "audio/flac": "flac",
+    "audio/aac": "aac",
+    "audio/mp4": "mp4",
 }
+
+# format -> MIME, keeping the FIRST (canonical) MIME for formats that have
+# aliases: mp3 -> audio/mpeg (not audio/mp3), wav -> audio/wav.
+def _invert_audio_table(mime_to_format: dict[str, str]) -> dict[str, str]:
+    """Invert a MIME->format table, keeping the first (canonical) MIME per format."""
+    inverted: dict[str, str] = {}
+    for mime, fmt in mime_to_format.items():
+        inverted.setdefault(fmt, mime)
+    return inverted
+
+
+_AUDIO_FORMAT_TO_MIME: dict[str, str] = _invert_audio_table(_AUDIO_MIME_TO_FORMAT)
+
+# MIME -> filename extension; audio/mp4 bytes conventionally use ``.m4a``.
+_AUDIO_MIME_TO_EXT: dict[str, str] = {
+    mime: (".m4a" if fmt == "mp4" else f".{fmt}")
+    for mime, fmt in _AUDIO_MIME_TO_FORMAT.items()
+}
+
+
+def _audio_mime_to_format(mime_type: str) -> str:
+    """Map an audio MIME type to the short format string expected by OpenAI.
+
+    Args:
+        mime_type: An audio MIME type (e.g. "audio/mpeg").
+
+    Returns:
+        The short format string (e.g. "mp3"). Falls back to the MIME subtype
+        if no explicit mapping exists.
+    """
+    fallback = mime_type.split("/", 1)[1] if "/" in mime_type else mime_type
+    return _AUDIO_MIME_TO_FORMAT.get(mime_type, fallback)
 
 
 def _is_transient_transcription_error(exc: Exception) -> bool:
@@ -595,6 +633,15 @@ class Model(ABC):
         self.usage_info_for_messages: str = ""
         self.conversation: list[Any] = []
         self.client: Any = None
+        # Seconds of event-level silence tolerated before a streamed
+        # request is aborted with a retryable TimeoutError.  Read here
+        # once for every streaming transport (the key is in
+        # FRAMEWORK_ONLY_CONFIG_KEYS, so no adapter forwards it).
+        self._stream_stall_timeout = float(
+            self.model_config.get(
+                "stream_stall_timeout", DEFAULT_STREAM_STALL_TIMEOUT
+            )
+        )
         # Whether a thinking block is currently open, so an aborted
         # stream can close it (see _close_thinking_if_open).
         self._thinking_open = False
@@ -1283,6 +1330,16 @@ class CLITextModel(Model):
         config["system_instruction"] = (original_system + "\n\n" + tools_prompt).strip()
         self.model_config = config
         return original_config
+
+    def _emit_as_thinking(self, text: str) -> None:
+        """Forward *text* to the token callback wrapped in a thinking block.
+
+        Args:
+            text: The text to stream inside a thinking start/end pair.
+        """
+        self._invoke_thinking_callback(True)
+        self._invoke_token_callback(text)
+        self._invoke_thinking_callback(False)
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Not supported — the CLI transports do not provide embeddings.
