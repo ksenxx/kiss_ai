@@ -160,8 +160,19 @@ function decideRestart(state) {
   };
 }
 
+/**
+ * Resolve after `ms` milliseconds.
+ *
+ * @param {number} ms How long to wait.
+ * @returns {Promise<void>} Settles once the delay has elapsed.
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 module.exports = {
   probeDaemonHealth,
   daemonHasActiveTasks,
   decideRestart,
+  sleep,
 };

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import base64
 import json
-import sys
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -36,6 +35,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
     channel_main,
+    write_private_file,
 )
 from kiss.core.config import kiss_home
 
@@ -98,16 +98,12 @@ def _load_credentials() -> Credentials | None:
 
 
 def _save_credentials(creds: Credentials) -> None:
-    """Save OAuth2 credentials to disk with restricted permissions.
+    """Save OAuth2 credentials to disk atomically with restricted permissions.
 
     Args:
         creds: Google OAuth2 Credentials object.
     """
-    path = _token_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(creds.to_json(), encoding="utf-8")
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+    write_private_file(_token_path(), creds.to_json())
 
 
 def _clear_credentials() -> None:
@@ -255,86 +251,6 @@ class GmailChannelBackend(ToolMethodBackend):
         except Exception as e:
             self._connection_info = f"Gmail auth failed: {e}"
             return False
-
-    def find_channel(self, name: str) -> str | None:
-        """Find a Gmail label by name (used as channel ID).
-
-        Args:
-            name: Label name to search for.
-
-        Returns:
-            Label ID string, or None if not found.
-        """
-        assert self._service is not None
-        try:
-            resp = self._service.users().labels().list(userId="me").execute()
-            for lbl in resp.get("labels", []):  # pragma: no branch
-                if lbl.get("name") == name:  # pragma: no branch
-                    return str(lbl["id"])
-        except Exception:
-            pass
-        return None
-
-    def poll_messages(
-        self, channel_id: str, oldest: str, limit: int = 10
-    ) -> tuple[list[dict[str, Any]], str]:
-        """Poll Gmail inbox for new messages.
-
-        Args:
-            channel_id: Label ID to poll (use "INBOX" for inbox).
-            oldest: History ID or timestamp string for incremental polling.
-            limit: Maximum messages to return.
-
-        Returns:
-            Tuple of (messages, updated_oldest). Each message dict has:
-            ts (date), user (from address), text (body).
-        """
-        assert self._service is not None
-        try:
-            kwargs: dict[str, Any] = {
-                "userId": "me",
-                "maxResults": limit,
-                "q": "is:unread",
-            }
-            if channel_id and channel_id != "INBOX":  # pragma: no branch
-                kwargs["labelIds"] = [channel_id]
-            else:
-                kwargs["labelIds"] = ["INBOX"]
-            resp = self._service.users().messages().list(**kwargs).execute()
-            messages = []
-            for stub in resp.get("messages", []):  # pragma: no branch
-                try:
-                    msg = (
-                        self._service.users()
-                        .messages()
-                        .get(
-                            userId="me",
-                            id=stub["id"],
-                            format="metadata",
-                            metadataHeaders=["Subject", "From", "Date"],
-                        )
-                        .execute()
-                    )
-                    headers = {
-                        h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])
-                    }
-                    messages.append(
-                        {
-                            "ts": headers.get("Date", ""),
-                            "user": headers.get("From", ""),
-                            "text": (
-                                f"Subject: {headers.get('Subject', '')} | {msg.get('snippet', '')}"
-                            ),
-                            "id": stub["id"],
-                            "thread_id": msg.get("threadId", ""),
-                            "thread_ts": msg.get("threadId", ""),
-                        }
-                    )
-                except Exception:
-                    pass
-            return messages, oldest
-        except Exception:
-            return [], oldest
 
     def _thread_reply_headers(self, thread_id: str) -> dict[str, str]:
         """Return the From/Subject headers of the newest message in a thread.

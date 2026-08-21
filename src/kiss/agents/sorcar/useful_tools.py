@@ -45,15 +45,15 @@ _MAX_BINARY_READ_BYTES = 20 * 1024 * 1024
 
 
 @contextmanager
-def _file_lock(lock_path: Path) -> Any:
+def _file_lock(lock_path: Path, blocking: bool = True) -> Any:
     """Hold an exclusive advisory inter-process lock on *lock_path*.
 
     Serializes check-then-use sequences on resources shared by every
     kiss process on the machine — MCP configs and OAuth token stores,
-    and the Chromium profile directory — across daemons, CLI runs,
-    channel-agent processes, and event loops.  A ``threading`` lock
-    cannot do this: the resources live on disk, not in one process.
-    The lock file itself is created mode ``0600``.
+    the cron job store, and the Chromium profile directory — across
+    daemons, CLI runs, channel-agent processes, and event loops.  A
+    ``threading`` lock cannot do this: the resources live on disk, not
+    in one process.  The lock file itself is created mode ``0600``.
 
     Cross-platform: ``fcntl.flock`` on POSIX, ``msvcrt.locking`` on
     Windows (where ``fcntl`` does not exist — an unconditional import
@@ -63,30 +63,58 @@ def _file_lock(lock_path: Path) -> Any:
 
     Args:
         lock_path: The lock file to hold; parent directories are created.
+        blocking: Whether to wait for the lock.  ``False`` gives up
+            immediately when another process holds it (the cron
+            scheduler's overlapping-tick skip) instead of waiting.
+
+    Yields:
+        ``True`` while the lock is held (including the degraded no-op
+        case), or ``None`` when *blocking* is ``False`` and another
+        process holds the lock.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    locked = False
     try:
         if fcntl is not None:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+            try:
+                fcntl.flock(descriptor, flags)
+                locked = True
+            except BlockingIOError:
+                pass
         elif msvcrt is not None:  # pragma: no cover — Windows-only branch
             os.lseek(descriptor, 0, os.SEEK_SET)
-            while True:
+            if blocking:
+                while True:
+                    try:
+                        msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
+                            descriptor,
+                            msvcrt.LK_LOCK,  # pyright: ignore[reportAttributeAccessIssue]
+                            1,
+                        )
+                        locked = True
+                        break
+                    except OSError:
+                        time.sleep(0.05)
+            else:
                 try:
                     msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
                         descriptor,
-                        msvcrt.LK_LOCK,  # pyright: ignore[reportAttributeAccessIssue]
+                        msvcrt.LK_NBLCK,  # pyright: ignore[reportAttributeAccessIssue]
                         1,
                     )
-                    break
+                    locked = True
                 except OSError:
-                    time.sleep(0.05)
-        yield
+                    pass
+        else:  # pragma: no cover — platform without either primitive
+            locked = True
+        yield True if locked else None
     finally:
         try:
-            if fcntl is not None:
+            if locked and fcntl is not None:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
-            elif msvcrt is not None:  # pragma: no cover — Windows-only branch
+            elif locked and msvcrt is not None:  # pragma: no cover — Windows-only branch
                 os.lseek(descriptor, 0, os.SEEK_SET)
                 with suppress(OSError):
                     msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
@@ -479,6 +507,15 @@ def _kill_process_group(process: subprocess.Popen) -> None:
             capture_output=True,
         )
     else:
+        if process.poll() is not None:
+            # Already reaped: the shell's PID — and therefore the PGID
+            # named after it — may have been recycled by an unrelated
+            # process, so ``killpg`` here could SIGKILL a stranger's
+            # process group.  Nothing is left to kill anyway (the group
+            # leader is gone and its exit already broke the pipes this
+            # module reads).  Same hazard ``web_use_tool`` guards with
+            # ``_process_identity``.
+            return
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except OSError:
@@ -862,8 +899,11 @@ class UsefulTools:
             return guard
 
         if self.stream_callback:
+            # Contract (see test_bash_background_pipe_hang): an exception
+            # raised by the caller-supplied stream callback must PROPAGATE
+            # out of Bash (after the process group is killed), not be
+            # swallowed into an "Error:" string like internal failures are.
             return self._bash_streaming(command, timeout_seconds, max_output_chars)
-
         try:
             return self._bash_streaming(command, timeout_seconds, max_output_chars)
         except Exception as e:  # pragma: no cover

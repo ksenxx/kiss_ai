@@ -652,6 +652,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._viewSubs = [];
     this._view = webviewView;
     this._webviewReady = false;
+    // A fresh webview has not reported focus yet; a stale true here
+    // (left by a disposed webview) would make toggleFocus believe the
+    // chat is focused and never focus it.
+    this._webviewHasFocus = false;
     setWebviewNotificationPoster(message =>
       this._sendToWebview(message as ToWebviewMessage),
     );
@@ -693,7 +697,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
       } else if (this._voiceWake?.running) {
         this._voiceWakeSuspendedByHide = true;
-        this._voiceWake.stop();
+        void this._voiceWake.stop();
       }
     });
     this._viewSubs.push(visibilitySub);
@@ -704,9 +708,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           this._view = undefined;
           this._disposed = true;
           this._webviewReady = false;
+          // A disposed webview cannot hold focus; without this reset a
+          // view disposed while focused leaves hasFocus stuck true and
+          // the toggleFocus keybinding can never refocus the chat.
+          this._webviewHasFocus = false;
           setWebviewNotificationPoster(undefined);
           this._voiceWakeSuspendedByHide = false;
-          this._voiceWake?.stop();
+          void this._voiceWake?.stop();
         }
         this._resolveAllWorktreeActions();
       }),
@@ -1235,7 +1243,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
         this._voiceWakeSuspendedByHide = false;
         if (message.enabled) this._voiceWake.start(this._voiceSensitivity);
-        else this._voiceWake.stop();
+        else void this._voiceWake.stop();
         break;
       }
 
@@ -1261,8 +1269,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (typeof message.value !== 'number') break;
         this._voiceSensitivity = message.value;
         if (this._voiceWake?.running) {
-          this._voiceWake.stop();
-          this._voiceWake.start(this._voiceSensitivity);
+          // Wait for the old listener process to exit before spawning
+          // the new one: on exclusive-capture audio backends a listener
+          // started while its predecessor is still dying cannot open
+          // the microphone.
+          const voiceWake = this._voiceWake;
+          await voiceWake.stop();
+          // Restart only if nothing else started or replaced the
+          // service while the old process was exiting.
+          if (this._voiceWake === voiceWake && !voiceWake.running) {
+            voiceWake.start(this._voiceSensitivity);
+          }
         }
         break;
       }

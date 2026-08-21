@@ -340,12 +340,20 @@ class RemoteConfigTest(unittest.TestCase):
         self.assertEqual(self.config.stat().st_mode & 0o077, 0)
 
     def test_no_half_written_file_is_left_behind(self) -> None:
-        """The new content is renamed over the old one, never poured into it."""
+        """The new content is renamed over the old one, never poured into it.
+
+        The ``.config.lock`` file is the cross-process flock the script
+        shares with the web app's own config writer; it is empty,
+        harmless, and deliberately left in place (unlinking a lock file
+        another process may hold reintroduces the race it exists to
+        close).
+        """
         self._configure(_SERVER)
         self._configure(_SERVER)
 
         self.assertEqual(
-            sorted(p.name for p in self.tmp.iterdir()), ["config.json"])
+            sorted(p.name for p in self.tmp.iterdir()),
+            [".config.lock", "config.json"])
 
 
 class RunningTasksTest(unittest.TestCase):

@@ -11,6 +11,20 @@ export function kissHomeDir(): string {
   return process.env.KISS_HOME || path.join(os.homedir(), '.kiss');
 }
 
+/**
+ * The Unix socket the kiss-web daemon listens on.
+ *
+ * Must mirror the daemon's own resolution (web_server.py binds under
+ * $KISS_HOME): every extension-host probe, kill and startup-poll of the
+ * daemon has to look at the SAME socket, or a window with KISS_HOME set
+ * kills a healthy daemon and then polls a path it never binds.
+ */
+export function sorcarSockPath(): string {
+  return (
+    process.env.KISS_SORCAR_SOCK || path.join(kissHomeDir(), 'sorcar.sock')
+  );
+}
+
 export function ensureUserAssetFromDefault(
   name: string,
   defaultContent: string,
