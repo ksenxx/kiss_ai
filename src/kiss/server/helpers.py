@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import logging
 
-from kiss.agents.sorcar.commit_message import (  # noqa: F401 — re-exported
-    _append_task_result,
-    _append_user_prompt,
+# ``generate_commit_message_from_diff`` is re-exported: production
+# callers (``server.py``, ``merge_flow.py``) import it from here.
+from kiss.agents.sorcar.commit_message import (
     _run_oneshot_llm,
-    clean_llm_output,
-    generate_commit_message_from_diff,
+    generate_commit_message_from_diff,  # noqa: F401 — re-exported
 )
 from kiss.core.models.model_info import _OPENAI_PREFIXES
 

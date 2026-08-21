@@ -134,41 +134,27 @@ def _is_silent(summary: str) -> bool:
 
 @contextlib.contextmanager
 def _jobs_lock(blocking: bool) -> Iterator[Any | None]:
-    """Acquire the ``flock`` guarding the job store.
+    """Acquire the inter-process lock guarding the job store.
 
     The same lock serializes the scheduler's tick (non-blocking: an
     overlapping tick skips) and the tool's read-modify-write
     (blocking: the tool waits for a running tick to finish), so a job
-    edit can never be overwritten by a stale in-memory save.  On
-    platforms without ``fcntl`` the lock file is opened but not
-    locked.
+    edit can never be overwritten by a stale in-memory save.  Thin
+    wrapper over :func:`kiss.agents.sorcar.useful_tools._file_lock`,
+    which owns the cross-platform (fcntl/msvcrt/no-op) mechanics.
 
     Args:
         blocking: Whether to wait for the lock (tool path) or give up
             immediately when it is held (tick path).
 
     Yields:
-        The open lock file object while the lock is held, or ``None``
-        when *blocking* is ``False`` and another process holds it.
+        A truthy value while the lock is held, or ``None`` when
+        *blocking* is ``False`` and another process holds it.
     """
-    lock_path = _jobs_path().with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fp = lock_path.open("a+", encoding="utf-8")
-    try:
-        try:
-            import fcntl
-        except ImportError:  # pragma: no cover - non-Unix platforms
-            yield fp
-            return
-        flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-        try:
-            fcntl.flock(fp.fileno(), flags)
-        except BlockingIOError:
-            yield None
-            return
-        yield fp
-    finally:
-        fp.close()
+    from kiss.agents.sorcar.useful_tools import _file_lock
+
+    with _file_lock(_jobs_path().with_suffix(".lock"), blocking=blocking) as held:
+        yield held
 
 
 def load_jobs() -> list[dict[str, Any]]:

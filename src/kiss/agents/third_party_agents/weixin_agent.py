@@ -46,6 +46,7 @@ from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
     drain_request_body,
+    start_http_server,
     stop_http_server,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -212,20 +213,19 @@ class WeixinChannelBackend(ToolMethodBackend):
                 pass
 
         self.disconnect()
-        try:
-            self._callback_server = ThreadedHTTPServer(("0.0.0.0", int(self._port)), Handler)
-            self._callback_thread = threading.Thread(
-                target=self._callback_server.serve_forever, daemon=True
-            )
-            self._callback_thread.start()
-            logger.info("Weixin callback server started on port %s", self._port)
-            return True
-        except (OSError, ValueError, OverflowError) as e:
-            self._connection_info = f"Weixin callback bind failed: {e}"
-            logger.warning("Could not start Weixin callback server: %s", e)
-            self._callback_server = None
-            self._callback_thread = None
+        self._callback_server, self._callback_thread, error = start_http_server(
+            ("0.0.0.0", self._port),
+            Handler,
+            log=logger,
+            started_log="Weixin callback server started on port %s",
+            error_prefix="Weixin callback bind failed",
+            error_log="Could not start Weixin callback server: %s",
+            catch=(OSError, ValueError, OverflowError),
+        )
+        if error is not None:
+            self._connection_info = error
             return False
+        return True
 
     def _queue_xml_message(self, raw: bytes) -> None:
         """Parse a plaintext WeChat XML payload and queue the message.

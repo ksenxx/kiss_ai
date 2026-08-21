@@ -31,6 +31,7 @@ thread lock suffices for the registry's readers and writers.
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import os
@@ -39,6 +40,33 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class OpenTabOutcome(enum.Enum):
+    """Atomic result of :meth:`TabRegistry.open_tab`.
+
+    The three cases are decided in ONE locked section so callers never
+    need an unlocked follow-up probe (``has_tab``) to tell "already
+    registered" apart from "registry full" — a concurrent ``closeTab``
+    between two such calls used to turn a benign re-announce of an
+    existing tab into a spurious "Tab limit reached" rejection.
+
+    Truth-value compatibility: only :attr:`OPENED` is truthy, matching
+    the method's previous boolean contract (``True`` exactly when a
+    new tab was appended), so existing boolean callers keep working.
+    """
+
+    OPENED = "opened"
+    """A new tab was appended (and the registry persisted)."""
+
+    EXISTS = "exists"
+    """The tab id is already registered; nothing changed."""
+
+    FULL = "full"
+    """The registry is at its hard cap; the tab was refused."""
+
+    def __bool__(self) -> bool:
+        return self is OpenTabOutcome.OPENED
 
 _MAX_TITLE_CHARS = 200
 """Cap stored titles: clients clip for display, the wire stays small."""
@@ -214,7 +242,7 @@ class TabRegistry:
 
     def open_tab(
         self, tab_id: str, title: str = "", work_dir: str = "",
-    ) -> bool:
+    ) -> OpenTabOutcome:
         """Register a new tab (no-op when it already exists).
 
         Args:
@@ -223,20 +251,25 @@ class TabRegistry:
             work_dir: The tab's pinned working directory, if any.
 
         Returns:
-            ``True`` when a new tab was appended.
+            The :class:`OpenTabOutcome`, decided atomically under the
+            registry lock: :attr:`~OpenTabOutcome.OPENED` (truthy)
+            when a new tab was appended, :attr:`~OpenTabOutcome.EXISTS`
+            when the id is already registered (also returned for a
+            blank id — nothing to open, nothing to reject), and
+            :attr:`~OpenTabOutcome.FULL` when the hard cap refused it.
         """
         tab_id = _clean_str(tab_id)
         if not tab_id:
-            return False
+            return OpenTabOutcome.EXISTS
         with self._lock:
             if self._find_locked(tab_id) is not None:
-                return False
+                return OpenTabOutcome.EXISTS
             if len(self._tabs) >= _MAX_TABS:
                 logger.warning(
                     "Tab registry full (%d); refusing to open %r",
                     _MAX_TABS, tab_id,
                 )
-                return False
+                return OpenTabOutcome.FULL
             self._tabs.append({
                 "tabId": tab_id,
                 "chatId": "",
@@ -246,7 +279,7 @@ class TabRegistry:
                 "taskId": "",
             })
             self._save_locked()
-            return True
+            return OpenTabOutcome.OPENED
 
     def close_tab(self, tab_id: str) -> bool:
         """Remove a tab.

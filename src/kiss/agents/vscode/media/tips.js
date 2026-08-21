@@ -125,21 +125,9 @@
     '}';
 
   function copyViaExecCommand(text) {
-    const area = document.createElement('textarea');
-    area.value = text;
-    area.setAttribute('readonly', '');
-    area.style.position = 'fixed';
-    area.style.left = '-9999px';
-    document.body.appendChild(area);
-    area.select();
-    let ok = false;
-    try {
-      ok = document.execCommand('copy');
-    } catch (_err) {
-      ok = false;
-    }
-    area.remove();
-    return ok;
+    // Looked up at call time: panelCopy.js loads after tips.js.
+    const pc = window.PanelCopy;
+    return !!(pc && pc.fallbackCopyText && pc.fallbackCopyText(text));
   }
 
   function copyTextToClipboard(text) {

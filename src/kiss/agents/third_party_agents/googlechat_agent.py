@@ -25,6 +25,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
     channel_main,
+    write_private_file,
 )
 from kiss.core.config import kiss_home
 
@@ -58,6 +59,21 @@ def _credentials_path() -> Path:
 def _service_account_path() -> Path:
     """Return the path to the service account JSON file."""
     return _gchat_dir() / "service_account.json"
+
+
+def _save_token(creds: Any) -> None:
+    """Persist OAuth2 credentials atomically with owner-only permissions.
+
+    Mirrors gmail's ``_save_credentials``: the token JSON is written via
+    :func:`~kiss.agents.third_party_agents._channel_agent_utils.write_private_file`
+    (mkstemp ``0o600`` + ``os.replace``), so concurrent readers never
+    observe a torn file and the secret is never even briefly
+    world-readable.
+
+    Args:
+        creds: A ``google.oauth2.credentials.Credentials`` instance.
+    """
+    write_private_file(_token_path(), creds.to_json())
 
 
 def _load_service(sa_path: str = "") -> Any:
@@ -95,9 +111,7 @@ def _load_service(sa_path: str = "") -> Any:
             return build("chat", "v1", credentials=creds)
         if creds.expired and creds.refresh_token:  # pragma: no branch
             creds.refresh(Request())
-            token_file.write_text(creds.to_json(), encoding="utf-8")
-            if sys.platform != "win32":  # pragma: no branch
-                token_file.chmod(0o600)
+            _save_token(creds)
             return build("chat", "v1", credentials=creds)
     except Exception:
         pass
@@ -128,11 +142,7 @@ def _run_oauth_flow() -> Any:
         creds = cast(Credentials, flow.run_local_server(port=0, open_browser=False))
     else:
         creds = cast(Credentials, flow.run_local_server(port=0))
-    token_file = _token_path()
-    token_file.parent.mkdir(parents=True, exist_ok=True)
-    token_file.write_text(creds.to_json(), encoding="utf-8")
-    if sys.platform != "win32":  # pragma: no branch
-        token_file.chmod(0o600)
+    _save_token(creds)
     return build("chat", "v1", credentials=creds)
 
 

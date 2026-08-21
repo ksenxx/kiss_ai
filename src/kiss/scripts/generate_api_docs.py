@@ -61,7 +61,6 @@ class ModuleDoc:
     classes: list[ClassInfo] = field(default_factory=list)
     functions: list[FuncInfo] = field(default_factory=list)
     is_package: bool = False
-    deprecated: bool = False
 
 
 def _format_annotation(node: ast.expr | None) -> str:
@@ -331,8 +330,7 @@ def discover_modules() -> list[ModuleDoc]:
         tree = ast.parse(source)
         all_list = _parse_all_list(tree)
         doc = _get_summary(tree)
-        deprecated = "deprecated" in source[:500].lower()
-        if deprecated:  # pragma: no branch
+        if "deprecated" in source[:500].lower():  # pragma: no branch
             continue
 
         imports = _parse_imports(tree)
@@ -364,7 +362,6 @@ def discover_modules() -> list[ModuleDoc]:
                 classes=classes,
                 functions=functions,
                 is_package=True,
-                deprecated=deprecated,
             )
         )
 
