@@ -2960,6 +2960,36 @@ _WS_SHIM_JS = r"""
     _updateLoadingMsg(true);
   }
 
+  // Deliver a server frame (or a synthesised ``daemonStatus`` post) to
+  // the app as a window ``message`` event.  This shim script runs at
+  // the TOP of the body script list, so the WebSocket regularly
+  // authenticates while the HTML parser is still fetching
+  // ``media/main.js`` — whose ``message`` listener therefore is not
+  // registered yet.  A MessageEvent dispatched in that gap is silently
+  // lost; the observed symptom was the one-shot
+  // ``daemonStatus connected:true`` falling into it, leaving the
+  // "KISS Sorcar Server is starting ..." overlay covering ``#app``
+  // forever.  Queue events while the document is still parsing and
+  // flush once DOMContentLoaded fires: every body script (main.js
+  // included) has run by then, so the listener exists and ordering is
+  // preserved.
+  var _preParseQueue = [];
+  document.addEventListener('DOMContentLoaded', function () {
+    var q = _preParseQueue;
+    _preParseQueue = null;
+    if (!q) return;
+    for (var i = 0; i < q.length; i++) {
+      window.dispatchEvent(new MessageEvent('message', {data: q[i]}));
+    }
+  });
+  function _dispatchToApp(data) {
+    if (_preParseQueue !== null && document.readyState === 'loading') {
+      _preParseQueue.push(data);
+      return;
+    }
+    window.dispatchEvent(new MessageEvent('message', {data: data}));
+  }
+
   function _scheduleReconnect() {
     if (_reconnectTimer !== null) return;
     // Aggressive backoff: 250ms, 500ms, 1s, 2s, 4s, capped at 5s.
@@ -3134,9 +3164,7 @@ _WS_SHIM_JS = r"""
         // same window ``message`` event ``media/main.js`` listens for.
         // Without this the overlay covers ``#app`` forever and the
         // user only ever sees "KISS Sorcar Server is starting ...".
-        window.dispatchEvent(new MessageEvent('message', {
-          data: {type: 'daemonStatus', connected: true}
-        }));
+        _dispatchToApp({type: 'daemonStatus', connected: true});
         return;
       }
       if (msg.type === 'auth_required') {
@@ -3151,9 +3179,7 @@ _WS_SHIM_JS = r"""
         // overlay forever and the user can never enter their
         // password.  Symmetric to the auth_ok dispatch above — both
         // states prove the server is reachable.
-        window.dispatchEvent(new MessageEvent('message', {
-          data: {type: 'daemonStatus', connected: true}
-        }));
+        _dispatchToApp({type: 'daemonStatus', connected: true});
         _showAuthModal().then(function(pwd) {
           if (pwd === null || pwd === undefined) {
             // SECURITY — do NOT leave the app usable when the user
@@ -3166,9 +3192,7 @@ _WS_SHIM_JS = r"""
             // overlay (``connected:false``).  The still-open, still-
             // unauthenticated socket times out server-side and the
             // ensuing reconnect re-prompts for the password.
-            window.dispatchEvent(new MessageEvent('message', {
-              data: {type: 'daemonStatus', connected: false}
-            }));
+            _dispatchToApp({type: 'daemonStatus', connected: false});
             return;
           }
           try { localStorage.setItem('sorcar-remote-pwd', pwd); } catch(e) {}
@@ -3194,9 +3218,7 @@ _WS_SHIM_JS = r"""
         _showLockedMsg(secs);
         // Re-gate the app while we wait (idempotent when the loading
         // overlay is already up, e.g. on a fresh page load).
-        window.dispatchEvent(new MessageEvent('message', {
-          data: {type: 'daemonStatus', connected: false}
-        }));
+        _dispatchToApp({type: 'daemonStatus', connected: false});
         return;
       }
       // SECURITY — never forward server data frames to the app before
@@ -3207,7 +3229,7 @@ _WS_SHIM_JS = r"""
       // server does not send data pre-auth, but a bug or a hostile proxy
       // must not be able to bypass the remote-password gate this way).
       if (!_authenticated) return;
-      window.dispatchEvent(new MessageEvent('message', {data: msg}));
+      _dispatchToApp(msg);
     };
 
     _ws.onclose = function() {
@@ -3239,9 +3261,7 @@ _WS_SHIM_JS = r"""
         // re-sends ``auth_locked`` with a fresher ``retry_after``.
         var lockedDelay = _lockedRetryMs;
         _lockedRetryMs = 0;
-        window.dispatchEvent(new MessageEvent('message', {
-          data: {type: 'daemonStatus', connected: false}
-        }));
+        _dispatchToApp({type: 'daemonStatus', connected: false});
         try { clearTimeout(_reconnectTimer); } catch (e) {}
         _reconnectTimer = setTimeout(function () {
           _reconnectTimer = null;
@@ -3259,9 +3279,7 @@ _WS_SHIM_JS = r"""
       // the ``auth_ok`` dispatch above and to
       // ``SorcarSidebarView.ts``'s disconnect handler in the VS Code
       // path.
-      window.dispatchEvent(new MessageEvent('message', {
-        data: {type: 'daemonStatus', connected: false}
-      }));
+      _dispatchToApp({type: 'daemonStatus', connected: false});
       _scheduleReconnect();
     };
 
