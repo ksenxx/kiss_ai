@@ -98,6 +98,10 @@ function stopTimer() { calls.push('stopTimer'); }
 function showSpinner() { calls.push('showSpinner'); }
 function removeSpinner() { calls.push('removeSpinner'); }
 function doneLabelFor(start, end) { return 'Done'; }
+// Collaborator added to setRunningState's not-running branch by the
+// stream-tail sweep coalescing change; spied like the others so the
+// extracted source runs unmodified.
+function flushStreamTailSweep() { calls.push('flushStreamTailSweep'); }
 
 """
         + set_running_state_src
