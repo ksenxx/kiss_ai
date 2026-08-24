@@ -37,6 +37,7 @@ import requests
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
+    start_http_server,
     stop_http_server,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -180,20 +181,18 @@ class DingTalkChannelBackend(ToolMethodBackend):
                 pass
 
         self.disconnect()
-        try:
-            self._webhook_server = ThreadedHTTPServer(("0.0.0.0", port), Handler)
-            self._webhook_thread = threading.Thread(
-                target=self._webhook_server.serve_forever, daemon=True
-            )
-            self._webhook_thread.start()
-            logger.info("DingTalk callback server started on port %d", port)
-            return True
-        except OSError as e:
-            self._connection_info = f"DingTalk callback bind failed: {e}"
-            logger.warning("Could not start DingTalk callback server: %s", e)
-            self._webhook_server = None
-            self._webhook_thread = None
+        self._webhook_server, self._webhook_thread, error = start_http_server(
+            ("0.0.0.0", port),
+            Handler,
+            log=logger,
+            started_log="DingTalk callback server started on port %d",
+            error_prefix="DingTalk callback bind failed",
+            error_log="Could not start DingTalk callback server: %s",
+        )
+        if error is not None:
+            self._connection_info = error
             return False
+        return True
 
     def _verify_inbound(self, timestamp_ms: str, sign: str) -> bool:
         """Verify an outgoing-robot callback signature and timestamp skew.

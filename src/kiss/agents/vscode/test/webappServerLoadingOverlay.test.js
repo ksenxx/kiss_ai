@@ -144,6 +144,13 @@ async function run() {
     });
 
     window.eval(shimJs);
+    // The shim defers app-bound dispatches until the parser finishes
+    // (DOMContentLoaded) so none are lost while main.js is still being
+    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
+    // so fire it now to switch the shim to direct dispatch.
+    window.document.dispatchEvent(
+      new window.Event('DOMContentLoaded', {bubbles: true}),
+    );
 
     assert.strictEqual(
       sockets.length,
@@ -218,6 +225,13 @@ async function run() {
     });
 
     window.eval(shimJs);
+    // The shim defers app-bound dispatches until the parser finishes
+    // (DOMContentLoaded) so none are lost while main.js is still being
+    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
+    // so fire it now to switch the shim to direct dispatch.
+    window.document.dispatchEvent(
+      new window.Event('DOMContentLoaded', {bubbles: true}),
+    );
     const sock = sockets[0];
     sock.fireOpen();
     sock.fireMessage({type: 'auth_required'});
@@ -268,6 +282,13 @@ async function run() {
     });
 
     window.eval(shimJs);
+    // The shim defers app-bound dispatches until the parser finishes
+    // (DOMContentLoaded) so none are lost while main.js is still being
+    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
+    // so fire it now to switch the shim to direct dispatch.
+    window.document.dispatchEvent(
+      new window.Event('DOMContentLoaded', {bubbles: true}),
+    );
     const sock = sockets[0];
 
     sock.fireOpen();
@@ -314,6 +335,13 @@ async function run() {
     setupSimulatedSetServerLoading(window);
 
     window.eval(shimJs);
+    // The shim defers app-bound dispatches until the parser finishes
+    // (DOMContentLoaded) so none are lost while main.js is still being
+    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
+    // so fire it now to switch the shim to direct dispatch.
+    window.document.dispatchEvent(
+      new window.Event('DOMContentLoaded', {bubbles: true}),
+    );
     const sock = sockets[0];
 
     sock.fireOpen();
@@ -361,6 +389,13 @@ async function run() {
     window.sessionStorage.setItem('sorcar-reconnect-pending', '1');
 
     window.eval(shimJs);
+    // The shim defers app-bound dispatches until the parser finishes
+    // (DOMContentLoaded) so none are lost while main.js is still being
+    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
+    // so fire it now to switch the shim to direct dispatch.
+    window.document.dispatchEvent(
+      new window.Event('DOMContentLoaded', {bubbles: true}),
+    );
 
     const msg = window.document.getElementById('kiss-server-loading-msg');
     try {
@@ -396,6 +431,13 @@ async function run() {
     setupSimulatedSetServerLoading(window);
 
     window.eval(shimJs);
+    // The shim defers app-bound dispatches until the parser finishes
+    // (DOMContentLoaded) so none are lost while main.js is still being
+    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
+    // so fire it now to switch the shim to direct dispatch.
+    window.document.dispatchEvent(
+      new window.Event('DOMContentLoaded', {bubbles: true}),
+    );
     const sock = sockets[0];
 
     sock.fireOpen();
@@ -442,6 +484,13 @@ async function run() {
     setupSimulatedSetServerLoading(window);
 
     window.eval(shimJs);
+    // The shim defers app-bound dispatches until the parser finishes
+    // (DOMContentLoaded) so none are lost while main.js is still being
+    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
+    // so fire it now to switch the shim to direct dispatch.
+    window.document.dispatchEvent(
+      new window.Event('DOMContentLoaded', {bubbles: true}),
+    );
     const sock = sockets[0];
 
     sock.fireOpen();

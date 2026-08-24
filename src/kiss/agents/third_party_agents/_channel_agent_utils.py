@@ -70,6 +70,8 @@ _NON_TOOL_METHODS = frozenset(
         "disconnect",
         "get_tool_methods",
         "poll_thread_messages",
+        "ack_message",
+        "bind_channel_state",
     }
 )
 
@@ -200,17 +202,39 @@ def load_json_config(path: Path, required_keys: tuple[str, ...]) -> dict[str, st
     return result
 
 
+def write_private_file(path: Path, content: str) -> None:
+    """Write *content* to *path* atomically with owner-only permissions.
+
+    Writes to a uniquely named temporary sibling file (created
+    ``0o600`` by :func:`tempfile.mkstemp`), then renames it over
+    *path*, so concurrent readers never observe a torn file, concurrent
+    writers never clobber each other's temp file, and secret content is
+    never even briefly world-readable.
+
+    Args:
+        path: Destination file path.
+        content: Full text content to persist.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            fp.write(content)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
 def save_json_config(path: Path, data: dict[str, str]) -> None:
-    """Save a JSON config file with restricted permissions.
+    """Save a JSON config file atomically with restricted permissions.
 
     Args:
         path: Config file path.
         data: String dictionary to persist.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    if sys.platform != "win32":
-        path.chmod(0o600)
+    write_private_file(path, json.dumps(data, indent=2))
 
 
 def clear_json_config(path: Path) -> None:
@@ -314,8 +338,8 @@ def default_channel_state() -> dict[str, Any]:
 
     Returns:
         A state dict with empty ``threads``/``ledger``/``approved_users``/
-        ``pending_pairing`` collections and zeroed ``failures``/
-        ``paused_until`` counters.
+        ``pending_pairing``/``pending_envelopes`` collections and zeroed
+        ``failures``/``paused_until`` counters.
     """
     return {
         "threads": {},
@@ -326,6 +350,7 @@ def default_channel_state() -> dict[str, Any]:
         "pending_pairing": {},
         "cursor": "0",
         "thread_rotation": 0,
+        "pending_envelopes": [],
     }
 
 
@@ -430,6 +455,13 @@ def _normalize_state(data: dict[str, Any]) -> dict[str, Any]:
     cursor = data.get("cursor")
     if isinstance(cursor, str) and cursor:
         state["cursor"] = cursor
+    envelopes = data.get("pending_envelopes")
+    if isinstance(envelopes, list):
+        state["pending_envelopes"] = [
+            {"ts": str(e.get("ts", "")), "user": str(e.get("user", "")), "text": e["text"]}
+            for e in envelopes
+            if isinstance(e, dict) and isinstance(e.get("text"), str)
+        ]
     rotation = data.get("thread_rotation")
     if isinstance(rotation, int) and not isinstance(rotation, bool) and rotation >= 0:
         state["thread_rotation"] = rotation
@@ -474,16 +506,7 @@ def save_channel_state(path: Path, state: dict[str, Any]) -> None:
         path: State file path.
         state: The channel state dict to persist.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fp:
-            fp.write(json.dumps(state, indent=2))
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    write_private_file(path, json.dumps(state, indent=2))
 
 
 @contextlib.contextmanager
@@ -933,7 +956,22 @@ class ChannelRunner:
             oldest = "0"
             if self._state is not None:
                 oldest = str(self._state.get("cursor", "0") or "0")
+            bind_state = getattr(self._backend, "bind_channel_state", None)
+            state_bound = False
+            if bind_state is not None and self._state is not None:
+                # Destructive-read backends (Signal) park consumed
+                # envelopes they cannot return this tick (foreign
+                # senders, overflow past the limit) in the shared state
+                # dict under "pending_envelopes" instead of losing them.
+                bind_state(self._state)
+                state_bound = True
             messages, new_cursor = self._backend.poll_messages(channel_id, oldest, limit=50)
+            if state_bound:
+                # Persist queue changes immediately: the rest of the
+                # tick launches agent tasks that can run for minutes,
+                # and a crash would lose envelopes that the destructive
+                # poll already consumed server-side.
+                self._save_state()
 
             processed = 0
             allow = self._effective_allow()
@@ -947,6 +985,7 @@ class ChannelRunner:
                 if self._has_bot_reply(channel_id, msg):
                     continue
                 self._handle_message(channel_id, msg)
+                self._ack_message(channel_id, msg)
                 processed += 1
 
             continued, continuations_ok = self._process_thread_continuations(channel_id)
@@ -1277,6 +1316,30 @@ class ChannelRunner:
         )
         self._store_thread_state(thread_ts, agent.chat_id, last_reply_ts)
         return result
+
+    def _ack_message(self, channel_id: str, msg: dict[str, Any]) -> None:
+        """Tell the backend a message has been fully handled.
+
+        Backends whose poll is not cursor-based (e.g. email's UNSEEN
+        search, which re-serves every still-unread message on each
+        tick) implement an optional ``ack_message(channel_id, msg)``
+        hook to mark the message consumed so it is not redelivered.
+        Backends without the hook rely on their poll cursor and need no
+        ack.  Ack failures are logged, never raised: the message was
+        already handled and a reply sent, so failing the tick would
+        only cause the redelivery the ack exists to prevent.
+
+        Args:
+            channel_id: Channel the message came from.
+            msg: The handled message dict from ``poll_messages``.
+        """
+        ack = getattr(self._backend, "ack_message", None)
+        if ack is None:
+            return
+        try:
+            ack(channel_id, msg)
+        except Exception:
+            logger.warning("ack_message failed for ts=%s", msg.get("ts", ""), exc_info=True)
 
     def _handle_message(self, channel_id: str, msg: dict[str, Any]) -> None:
         """Run one agent task for an inbound message.

@@ -37,7 +37,23 @@ function extraListenerArgs(): string[] {
 }
 
 export class VoiceWakeService {
+  // Stays assigned until the child's exit event fires: a listener that is
+  // still dying holds the exclusive microphone, so it must keep counting
+  // as "present" until it has actually exited.
   private _proc: ChildProcess | undefined;
+
+  // Resolves when the child being stopped has exited. start() calls that
+  // arrive while this is pending are queued (see _queuedStart) instead of
+  // spawning a second listener against the mic the dying one still holds.
+  private _stopping: Promise<void> | undefined;
+
+  // The start() request deferred until the in-flight stop completes.
+  // A later stop() cancels it (hide → show → hide must end stopped).
+  private _queuedStart: {sensitivity?: number} | undefined;
+
+  // The child whose exit was requested by stop(), so the exit handler
+  // reports a clean shutdown instead of a listener error.
+  private _stopRequestedFor: ChildProcess | undefined;
 
   // Monotonic across the whole session, so a round id is never reused and a
   // transcript can only ever be paired with the wake it came from.
@@ -56,10 +72,20 @@ export class VoiceWakeService {
   ) {}
 
   get running(): boolean {
-    return this._proc !== undefined;
+    // A dying listener still holds the microphone and a queued start
+    // will hold it again momentarily; both count as "running" so that
+    // visibility handlers suspend/resume symmetrically around them.
+    return this._proc !== undefined || this._queuedStart !== undefined;
   }
 
   start(sensitivity?: number): void {
+    if (this._stopping) {
+      // The previous listener is still dying; spawning now would fight
+      // it for the exclusive microphone. Defer until it has exited
+      // (stop() cancels the deferred start).
+      this._queuedStart = {sensitivity};
+      return;
+    }
     if (this._proc) {
       this._onState(true);
       return;
@@ -104,15 +130,21 @@ export class VoiceWakeService {
     }
     this._proc = proc;
 
+    // Output from a listener whose stop has been requested is stale:
+    // the process may keep printing while it shuts down (or while it
+    // ignores SIGTERM until the SIGKILL escalation), and none of it may
+    // flip the UI back to "listening".
+    const isActive = () =>
+      this._proc === proc && this._stopRequestedFor !== proc;
     let stdoutBuf = '';
     proc.stdout?.on('data', (chunk: Buffer) => {
-      if (this._proc !== proc) return;
+      if (!isActive()) return;
       stdoutBuf += chunk.toString('utf-8');
       let idx = stdoutBuf.indexOf('\n');
       while (idx >= 0) {
         const line = stdoutBuf.slice(0, idx).trim();
         stdoutBuf = stdoutBuf.slice(idx + 1);
-        if (this._proc !== proc) return;
+        if (!isActive()) return;
         if (line === 'WAKE') {
           this._speechRoundId = ++this._roundId;
           this._onWake(this._speechRoundId);
@@ -161,7 +193,9 @@ export class VoiceWakeService {
     proc.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
       if (this._proc !== proc) return;
       this._proc = undefined;
-      if (code === 0 || (code === null && signal === null)) {
+      const requested = this._stopRequestedFor === proc;
+      if (requested) this._stopRequestedFor = undefined;
+      if (requested || code === 0 || (code === null && signal === null)) {
         this._onState(false);
       } else {
         const detail = stderrTail.trim().split('\n').pop() || '';
@@ -174,35 +208,90 @@ export class VoiceWakeService {
     });
   }
 
-  stop(): void {
+  /**
+   * Stop the listener and report when it has actually exited.
+   *
+   * The kill is asynchronous: on exclusive-capture audio backends a new
+   * listener spawned while the old process is still dying fails to open
+   * the microphone. The child therefore stays tracked (and `running`
+   * stays true) until its exit event fires, and a start() issued while
+   * the stop is in flight is queued behind it instead of overlapping it
+   * — so even fire-and-forget callers cannot double-open the mic.
+   * Resolves immediately when no listener is running; a process that
+   * ignores SIGTERM is SIGKILLed after 5s as an escalation, but the
+   * promise still resolves only from the exit event itself.
+   *
+   * @returns A promise that resolves once the child process has exited.
+   */
+  stop(): Promise<void> {
+    this._queuedStart = undefined;
     const proc = this._proc;
-    this._proc = undefined;
-    if (proc) {
-      try {
-        if (typeof proc.pid === 'number') {
-          if (process.platform === 'win32') {
-            const result = spawnSync(
-              'taskkill',
-              ['/PID', String(proc.pid), '/T', '/F'],
-              {stdio: 'ignore', windowsHide: true},
-            );
-            if (result.error || result.status !== 0) proc.kill();
-          } else {
-            process.kill(-proc.pid, 'SIGTERM');
+    if (!proc) {
+      this._onState(false);
+      return this._stopping ?? Promise.resolve();
+    }
+    if (this._stopping) return this._stopping;
+    this._stopRequestedFor = proc;
+    let exited: Promise<void> = Promise.resolve();
+    if (proc.exitCode === null && proc.signalCode === null) {
+      exited = new Promise<void>(resolve => {
+        // SIGKILL is an escalation only: resolution comes solely from
+        // the exit event, never from the timer, so the promise cannot
+        // claim the child is gone while it still holds the microphone.
+        const killTimer = setTimeout(() => {
+          try {
+            if (typeof proc.pid === 'number' && process.platform !== 'win32') {
+              process.kill(-proc.pid, 'SIGKILL');
+            } else {
+              proc.kill('SIGKILL');
+            }
+          } catch {
+            try {
+              proc.kill('SIGKILL');
+            } catch {}
           }
+        }, 5000);
+        proc.once('exit', () => {
+          clearTimeout(killTimer);
+          resolve();
+        });
+      });
+    }
+    try {
+      if (typeof proc.pid === 'number') {
+        if (process.platform === 'win32') {
+          const result = spawnSync(
+            'taskkill',
+            ['/PID', String(proc.pid), '/T', '/F'],
+            {stdio: 'ignore', windowsHide: true},
+          );
+          if (result.error || result.status !== 0) proc.kill();
         } else {
-          proc.kill();
+          process.kill(-proc.pid, 'SIGTERM');
         }
-      } catch {
-        try {
-          proc.kill();
-        } catch {}
+      } else {
+        proc.kill();
       }
+    } catch {
+      try {
+        proc.kill();
+      } catch {}
     }
     this._onState(false);
+    const settled: Promise<void> = exited.then(() => {
+      if (this._proc === proc) this._proc = undefined;
+      if (this._stopping === settled) this._stopping = undefined;
+      const queued = this._queuedStart;
+      if (queued) {
+        this._queuedStart = undefined;
+        this.start(queued.sensitivity);
+      }
+    });
+    this._stopping = settled;
+    return settled;
   }
 
   dispose(): void {
-    this.stop();
+    void this.stop();
   }
 }

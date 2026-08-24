@@ -44,7 +44,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.server.helpers import clean_llm_output
+from kiss.agents.sorcar.commit_message import clean_llm_output
 from kiss.server.user_assets import ensure_user_asset_from_default
 
 

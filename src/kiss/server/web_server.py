@@ -2960,6 +2960,36 @@ _WS_SHIM_JS = r"""
     _updateLoadingMsg(true);
   }
 
+  // Deliver a server frame (or a synthesised ``daemonStatus`` post) to
+  // the app as a window ``message`` event.  This shim script runs at
+  // the TOP of the body script list, so the WebSocket regularly
+  // authenticates while the HTML parser is still fetching
+  // ``media/main.js`` — whose ``message`` listener therefore is not
+  // registered yet.  A MessageEvent dispatched in that gap is silently
+  // lost; the observed symptom was the one-shot
+  // ``daemonStatus connected:true`` falling into it, leaving the
+  // "KISS Sorcar Server is starting ..." overlay covering ``#app``
+  // forever.  Queue events while the document is still parsing and
+  // flush once DOMContentLoaded fires: every body script (main.js
+  // included) has run by then, so the listener exists and ordering is
+  // preserved.
+  var _preParseQueue = [];
+  document.addEventListener('DOMContentLoaded', function () {
+    var q = _preParseQueue;
+    _preParseQueue = null;
+    if (!q) return;
+    for (var i = 0; i < q.length; i++) {
+      window.dispatchEvent(new MessageEvent('message', {data: q[i]}));
+    }
+  });
+  function _dispatchToApp(data) {
+    if (_preParseQueue !== null && document.readyState === 'loading') {
+      _preParseQueue.push(data);
+      return;
+    }
+    window.dispatchEvent(new MessageEvent('message', {data: data}));
+  }
+
   function _scheduleReconnect() {
     if (_reconnectTimer !== null) return;
     // Aggressive backoff: 250ms, 500ms, 1s, 2s, 4s, capped at 5s.
@@ -3134,9 +3164,7 @@ _WS_SHIM_JS = r"""
         // same window ``message`` event ``media/main.js`` listens for.
         // Without this the overlay covers ``#app`` forever and the
         // user only ever sees "KISS Sorcar Server is starting ...".
-        window.dispatchEvent(new MessageEvent('message', {
-          data: {type: 'daemonStatus', connected: true}
-        }));
+        _dispatchToApp({type: 'daemonStatus', connected: true});
         return;
       }
       if (msg.type === 'auth_required') {
@@ -3151,9 +3179,7 @@ _WS_SHIM_JS = r"""
         // overlay forever and the user can never enter their
         // password.  Symmetric to the auth_ok dispatch above — both
         // states prove the server is reachable.
-        window.dispatchEvent(new MessageEvent('message', {
-          data: {type: 'daemonStatus', connected: true}
-        }));
+        _dispatchToApp({type: 'daemonStatus', connected: true});
         _showAuthModal().then(function(pwd) {
           if (pwd === null || pwd === undefined) {
             // SECURITY — do NOT leave the app usable when the user
@@ -3166,9 +3192,7 @@ _WS_SHIM_JS = r"""
             // overlay (``connected:false``).  The still-open, still-
             // unauthenticated socket times out server-side and the
             // ensuing reconnect re-prompts for the password.
-            window.dispatchEvent(new MessageEvent('message', {
-              data: {type: 'daemonStatus', connected: false}
-            }));
+            _dispatchToApp({type: 'daemonStatus', connected: false});
             return;
           }
           try { localStorage.setItem('sorcar-remote-pwd', pwd); } catch(e) {}
@@ -3194,9 +3218,7 @@ _WS_SHIM_JS = r"""
         _showLockedMsg(secs);
         // Re-gate the app while we wait (idempotent when the loading
         // overlay is already up, e.g. on a fresh page load).
-        window.dispatchEvent(new MessageEvent('message', {
-          data: {type: 'daemonStatus', connected: false}
-        }));
+        _dispatchToApp({type: 'daemonStatus', connected: false});
         return;
       }
       // SECURITY — never forward server data frames to the app before
@@ -3207,7 +3229,7 @@ _WS_SHIM_JS = r"""
       // server does not send data pre-auth, but a bug or a hostile proxy
       // must not be able to bypass the remote-password gate this way).
       if (!_authenticated) return;
-      window.dispatchEvent(new MessageEvent('message', {data: msg}));
+      _dispatchToApp(msg);
     };
 
     _ws.onclose = function() {
@@ -3239,9 +3261,7 @@ _WS_SHIM_JS = r"""
         // re-sends ``auth_locked`` with a fresher ``retry_after``.
         var lockedDelay = _lockedRetryMs;
         _lockedRetryMs = 0;
-        window.dispatchEvent(new MessageEvent('message', {
-          data: {type: 'daemonStatus', connected: false}
-        }));
+        _dispatchToApp({type: 'daemonStatus', connected: false});
         try { clearTimeout(_reconnectTimer); } catch (e) {}
         _reconnectTimer = setTimeout(function () {
           _reconnectTimer = null;
@@ -3259,9 +3279,7 @@ _WS_SHIM_JS = r"""
       // the ``auth_ok`` dispatch above and to
       // ``SorcarSidebarView.ts``'s disconnect handler in the VS Code
       // path.
-      window.dispatchEvent(new MessageEvent('message', {
-        data: {type: 'daemonStatus', connected: false}
-      }));
+      _dispatchToApp({type: 'daemonStatus', connected: false});
       _scheduleReconnect();
     };
 
@@ -4881,25 +4899,20 @@ class RemoteAccessServer:
         the protocol difference so :meth:`_handle_ready` and
         :meth:`_uds_handler` share a single dispatch path.
 
-        Acquires the printer's per-endpoint send lock so a direct
-        reply cannot overtake a broadcast event already in flight to
-        the same client: ``Connection.send`` waits out write
-        backpressure BEFORE queuing the frame, so without the lock a
-        suspended earlier sender (e.g. the ``task_events`` replay
-        scheduled by ``resumeSession``) could hit the wire AFTER a
-        later direct send, inverting the wire order the client
-        depends on.
+        Delegates to the printer's :meth:`WebPrinter._locked_send`
+        (C-R1) rather than duplicating it: that path acquires the
+        per-endpoint send lock — so a direct reply cannot overtake a
+        broadcast event already in flight to the same client
+        (``Connection.send`` waits out write backpressure BEFORE
+        queuing the frame) — and, for UDS peers, routes through
+        ``_uds_send``, whose failure handler removes a dead writer
+        from the active set so subsequent broadcasts skip it.
 
         Args:
             endpoint: The connection to send to.
             data: The JSON payload (already encoded with ``json.dumps``).
         """
-        async with self._printer.send_lock(endpoint):
-            if isinstance(endpoint, asyncio.StreamWriter):
-                endpoint.write(data.encode("utf-8") + b"\n")
-                await endpoint.drain()
-            else:
-                await endpoint.send(data)
+        await self._printer._locked_send(endpoint, data)
 
     @staticmethod
     def _sanitized_restored_tabs(cmd: dict[str, Any]) -> list[dict[str, str]]:
@@ -5864,25 +5877,44 @@ class RemoteAccessServer:
         self._printer._loop = self._loop
 
         try:
+            import fcntl
+
             self._uds_path.parent.mkdir(parents=True, exist_ok=True)
-            if self._uds_path.exists() or self._uds_path.is_symlink():
-                await self._wait_for_uds_release()
-                try:
-                    self._uds_path.unlink()
-                except OSError:
-                    logger.debug(
-                        "Could not unlink stale UDS socket at %s",
-                        self._uds_path, exc_info=True,
-                    )
-            self._uds_server = await asyncio.start_unix_server(
-                self._uds_handler, path=str(self._uds_path),
-                limit=_MAX_LINE_BYTES,
+            # Serialise the probe → unlink → bind sequence across
+            # processes with an exclusive sidecar file lock (C-RC3;
+            # same pattern as ``_create_ssl_context``'s ``.tls.lock``):
+            # the sequence is not atomic, so two daemons starting
+            # concurrently (e.g. a launchd respawn racing install.sh)
+            # could otherwise each pass the liveness probe and then
+            # unlink the socket the other had just bound — leaving one
+            # stranded daemon and no socket file.  The blocking
+            # acquisition runs in the executor so a sibling holding
+            # the lock never stalls this event loop.
+            lock_path = self._uds_path.with_name(
+                self._uds_path.name + ".lock",
             )
-            os.chmod(self._uds_path, 0o600)
-            try:
-                self._uds_inode = os.stat(self._uds_path).st_ino
-            except OSError:
-                self._uds_inode = None
+            with open(lock_path, "w", encoding="utf-8") as uds_lock:
+                await self._loop.run_in_executor(
+                    None, fcntl.flock, uds_lock, fcntl.LOCK_EX,
+                )
+                if self._uds_path.exists() or self._uds_path.is_symlink():
+                    await self._wait_for_uds_release()
+                    try:
+                        self._uds_path.unlink()
+                    except OSError:
+                        logger.debug(
+                            "Could not unlink stale UDS socket at %s",
+                            self._uds_path, exc_info=True,
+                        )
+                self._uds_server = await asyncio.start_unix_server(
+                    self._uds_handler, path=str(self._uds_path),
+                    limit=_MAX_LINE_BYTES,
+                )
+                os.chmod(self._uds_path, 0o600)
+                try:
+                    self._uds_inode = os.stat(self._uds_path).st_ino
+                except OSError:
+                    self._uds_inode = None
         except Exception:
             logger.warning(
                 "Failed to bind UDS at %s; local extension clients "
@@ -6421,14 +6453,8 @@ class RemoteAccessServer:
             timeout: Maximum wall-clock seconds to wait, in aggregate,
                 for all active worker threads to unwind.
         """
-        import ctypes
-
-        ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
-            ctypes.c_ulong,
-            ctypes.py_object,
-        ]
-
         from kiss.server import agent_state
+        from kiss.server.task_runner import inject_keyboard_interrupt
 
         active: list[tuple[str, threading.Event | None, threading.Thread]] = []
         active_task_history_ids: set[str] = set()
@@ -6479,10 +6505,7 @@ class RemoteAccessServer:
             if thread.is_alive():
                 tid = thread.ident
                 if tid is not None:
-                    ctypes.pythonapi.PyThreadState_SetAsyncExc(
-                        ctypes.c_ulong(tid),
-                        ctypes.py_object(KeyboardInterrupt),
-                    )
+                    inject_keyboard_interrupt(tid)
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
             if thread.is_alive():
                 logger.warning(

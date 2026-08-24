@@ -396,7 +396,8 @@ class TestTransientBroadcastNearTeardown:
         printer.cleanup_task(task_id)  # drops _task_ui, subscribers linger
         printer._thread_local.task_id = None  # run thread unbound
         assert printer._task_key() == ""
-        assert printer.task_ui(task_id) == ("", "")
+        with printer._lock:
+            assert task_id not in printer._task_ui
         return printer
 
     def test_autocommit_toasts_after_thread_local_cleared(self) -> None:

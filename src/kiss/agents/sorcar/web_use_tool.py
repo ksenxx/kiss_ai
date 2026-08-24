@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
@@ -322,6 +323,11 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
     result_lines: list[str] = []
     elements: list[dict[str, str]] = []
     counter = 0
+    # Running occurrence tallies (this runs on every accessibility-tree
+    # render; rescanning the accumulated element list per element would
+    # be O(n^2) on large pages).
+    pair_counts: Counter[tuple[str, str]] = Counter()
+    role_counts: Counter[str] = Counter()
     for line in snapshot.splitlines():
         m = _ROLE_LINE_RE.match(line)
         if not m:
@@ -340,10 +346,10 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
         # bare role — this element is, in snapshot (document) order, so
         # resolving an ID targets *this* element rather than the first
         # visible one that happens to share its role and name.
-        occurrence = sum(
-            1 for e in elements if e["role"] == role and e["name"] == name
-        )
-        role_occurrence = sum(1 for e in elements if e["role"] == role)
+        occurrence = pair_counts[(role, name)]
+        role_occurrence = role_counts[role]
+        pair_counts[(role, name)] += 1
+        role_counts[role] += 1
         elements.append({
             "role": role,
             "name": name,

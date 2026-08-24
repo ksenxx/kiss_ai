@@ -358,16 +358,6 @@ class ClaudeCodeModel(CLITextModel):
         self.conversation.append({"role": "assistant", "content": content})
         return content, result_json
 
-    def _emit_as_thinking(self, text: str) -> None:
-        """Forward *text* to the token callback wrapped in a thinking block.
-
-        Args:
-            text: The text to stream inside a thinking start/end pair.
-        """
-        self._invoke_thinking_callback(True)
-        self._invoke_token_callback(text)
-        self._invoke_thinking_callback(False)
-
     def _emit_tool_use_as_thinking(
         self, block: dict[str, Any], seen_tool_use_ids: set[str]
     ) -> None:

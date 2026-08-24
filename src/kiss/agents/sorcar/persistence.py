@@ -35,31 +35,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any
 
+from kiss.agents.sorcar._concurrency import _fcntl, _race_delay
 from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
-
-try:
-    import fcntl as _fcntl
-except ImportError:  # pragma: no cover — Windows has no fcntl
-    _fcntl = None  # type: ignore[assignment]
-
-
-def _race_delay() -> None:
-    """Sleep briefly when ``KISS_RACE_DELAY`` is set (no-op by default).
-
-    Concurrency tests need to widen a read-modify-write window to make
-    a cross-process race deterministic.  The delay is opt-in via an
-    environment variable that production never sets, and is capped at
-    100 ms so a stray value can never stall a real run.
-    """
-    raw = os.environ.get("KISS_RACE_DELAY")
-    if not raw:
-        return
-    try:
-        time.sleep(min(float(raw), 0.1))
-    except ValueError:
-        pass
 
 
 @contextmanager
@@ -534,6 +513,41 @@ def _coerce_parent_task_id(value: object) -> str:
     return ""
 
 
+def _extract_parent_task_id(payload: dict[str, object]) -> str:
+    """Extract the canonical parent task id from an extra payload.
+
+    Shared by :func:`_add_task` and :func:`_save_task_extra`, which
+    both accept the parent link in two shapes: a flat
+    ``parent_task_id`` value, or the legacy nested
+    ``{"subagent": {"parent_task_id": <uuid>}}`` object (a bare
+    ``"subagent": <uuid>`` string is tolerated too).  The two shapes
+    are mutually exclusive — passing both keys is always rejected, so
+    a caller can never smuggle two conflicting parents into one write.
+
+    Args:
+        payload: The extra dict a caller handed to the task writer.
+
+    Returns:
+        The coerced parent task id (``""`` when absent or malformed —
+        see :func:`_coerce_parent_task_id`).
+
+    Raises:
+        ValueError: If *payload* contains both ``'subagent'`` and
+            ``'parent_task_id'`` keys.
+    """
+    if "subagent" in payload and "parent_task_id" in payload:
+        raise ValueError(
+            "Cannot pass both 'parent_task_id' and 'subagent' "
+            "in a task extra payload"
+        )
+    sub = payload.get("subagent")
+    if isinstance(sub, dict):
+        return _coerce_parent_task_id(sub.get("parent_task_id"))
+    if sub is not None:
+        return _coerce_parent_task_id(sub)
+    return _coerce_parent_task_id(payload.get("parent_task_id"))
+
+
 def _row_to_extra_json(row: sqlite3.Row) -> str:
     """Build the legacy-compat ``extra`` JSON string from typed columns.
 
@@ -629,7 +643,113 @@ _INDEX_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_th_parent_task_id "
     "ON task_history(parent_task_id)",
     "CREATE INDEX IF NOT EXISTS idx_ev_task_id ON events(task_id)",
+    # UNIQUE: the database is shared by several processes whose
+    # in-memory ``_next_seq_cache`` counters cannot see each other, so
+    # a stale counter must FAIL the insert (and force a re-read of
+    # ``MAX(seq)``) instead of silently persisting a duplicate
+    # ``(task_id, seq)`` pair that misorders replay.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_ev_task_seq "
+    "ON events(task_id, seq)",
 )
+
+
+def _dedupe_event_seqs(conn: sqlite3.Connection) -> None:
+    """Resequence events of tasks holding duplicate ``(task_id, seq)`` rows.
+
+    Databases written before ``idx_ev_task_seq`` existed can already
+    contain duplicate sequence numbers (two processes with stale
+    ``_next_seq_cache`` counters).  Creating the unique index over
+    them would fail forever, so this migration renumbers every
+    affected task's events to ``0..n-1`` in their existing order
+    (``seq`` first, insertion ``id`` as the tie-break, so the first
+    occurrence keeps its position).  No row is deleted — resequencing
+    preserves every recorded event, which is the safest repair.
+
+    Args:
+        conn: Connection to migrate (caller manages the transaction).
+    """
+    dup_tasks = [
+        row[0] for row in conn.execute(
+            "SELECT DISTINCT task_id FROM ("
+            "SELECT task_id FROM events "
+            "GROUP BY task_id, seq HAVING COUNT(*) > 1)"
+        ).fetchall()
+    ]
+    for tid in dup_tasks:
+        rows = conn.execute(
+            "SELECT id FROM events WHERE task_id = ? ORDER BY seq, id",
+            (tid,),
+        ).fetchall()
+        for new_seq, row in enumerate(rows):
+            conn.execute(
+                "UPDATE events SET seq = ? WHERE id = ?", (new_seq, row[0]),
+            )
+    if dup_tasks:
+        logger.warning(
+            "resequenced duplicate event seqs for %d task(s) before "
+            "creating idx_ev_task_seq", len(dup_tasks),
+        )
+
+
+def _repair_and_create_index(conn: sqlite3.Connection, ddl: str) -> None:
+    """Atomically repair duplicate event seqs and create *ddl*'s index.
+
+    ``_init_tables_lock`` is process-LOCAL, so a concurrent old
+    process can insert another duplicate ``(task_id, seq)`` row
+    between an autocommit repair and the index retry — leaving
+    duplicate rows AND no ``idx_ev_task_seq``.  Repair and creation
+    therefore run together inside ONE cross-process SQLite write
+    transaction (``BEGIN IMMEDIATE``), which every process on the
+    database respects, and the combined step is retried a bounded
+    number of times so a writer that sneaks a duplicate in between
+    attempts cannot strand the database without the index.
+
+    Args:
+        conn: Connection to repair and create the index on.  When it
+            already owns a transaction (the legacy-schema migration
+            runs inside its own ``BEGIN IMMEDIATE``), the repair joins
+            that transaction — the caller's write lock already
+            excludes other processes — instead of nesting a ``BEGIN``.
+
+    Raises:
+        sqlite3.IntegrityError: When every attempt was refused (only
+            possible if duplicates keep reappearing, which a held
+            write transaction prevents; kept as a bounded safety
+            valve rather than an infinite loop).
+    """
+    if conn.in_transaction:
+        _dedupe_event_seqs(conn)
+        conn.execute(ddl)
+        return
+    attempts = 3
+    for attempt in range(attempts):
+        try:
+            with _immediate_txn(conn):
+                _dedupe_event_seqs(conn)
+                conn.execute(ddl)
+            return
+        except sqlite3.IntegrityError:
+            if attempt == attempts - 1:
+                raise
+            _race_delay()
+
+
+def _apply_index_ddl(conn: sqlite3.Connection) -> None:
+    """Create every index in :data:`_INDEX_DDL` on *conn*.
+
+    The unique ``idx_ev_task_seq`` index can be refused by a
+    pre-existing database that already holds duplicate
+    ``(task_id, seq)`` rows; those are repaired and the creation
+    retried atomically via :func:`_repair_and_create_index`.
+
+    Args:
+        conn: Connection to create the indexes on.
+    """
+    for ddl in _INDEX_DDL:
+        try:
+            conn.execute(ddl)
+        except sqlite3.IntegrityError:
+            _repair_and_create_index(conn, ddl)
 
 
 def _init_tables(conn: sqlite3.Connection) -> None:
@@ -698,8 +818,7 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             timestamp REAL NOT NULL DEFAULT 0
         );
     """)
-    for ddl in _INDEX_DDL:
-        conn.execute(ddl)
+    _apply_index_ddl(conn)
     _add_missing_columns(conn)
 
 
@@ -915,8 +1034,7 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
         conn.execute(
             "ALTER TABLE events__new RENAME TO events"
         )
-        for ddl in _INDEX_DDL:
-            conn.execute(ddl)
+        _apply_index_ddl(conn)
         conn.execute("COMMIT")
     except Exception:
         try:
@@ -1145,19 +1263,7 @@ def _add_task(
     """
     db = _get_db()
     payload = dict(extra) if extra else {}
-    parent_task_id = ""
-    sub = payload.get("subagent")
-    flat_parent = payload.get("parent_task_id")
-    if sub is not None and flat_parent is not None:
-        raise ValueError(
-            "Cannot pass both 'parent_task_id' and 'subagent' to _add_task",
-        )
-    if isinstance(sub, dict):
-        parent_task_id = _coerce_parent_task_id(sub.get("parent_task_id"))
-    elif isinstance(sub, str):
-        parent_task_id = _coerce_parent_task_id(sub)
-    elif flat_parent is not None:
-        parent_task_id = _coerce_parent_task_id(flat_parent)
+    parent_task_id = _extract_parent_task_id(payload)
     with _rw_lock.write_lock():
         if chat_id == "":
             chat_id = _allocate_chat_id()
@@ -1716,32 +1822,19 @@ def _save_task_extra(
         if resolved is None:
             return
         pairs: list[tuple[str, object]] = []
+        parent = _extract_parent_task_id(extra)
+        if parent:
+            pairs.append(("parent_task_id = ?", parent))
         for k, v in extra.items():
             if k == "is_favorite":
                 raise ValueError(
                     "_save_task_extra does not write 'is_favorite'; "
                     "use _set_task_favorite() instead"
                 )
+            if k in ("parent_task_id", "subagent"):
+                continue
             mapping = _EXTRA_COL_MAP.get(k)
             if mapping is None:
-                if k == "parent_task_id":
-                    if "subagent" in extra:
-                        raise ValueError(
-                            "Cannot pass both 'parent_task_id' and "
-                            "'subagent' to _save_task_extra"
-                        )
-                    coerced = _coerce_parent_task_id(v)
-                    if coerced:
-                        pairs.append(("parent_task_id = ?", coerced))
-                    continue
-                if k == "subagent":
-                    if isinstance(v, dict):
-                        raw_parent = v.get("parent_task_id")
-                    else:
-                        raw_parent = v
-                    coerced = _coerce_parent_task_id(raw_parent)
-                    if coerced:
-                        pairs.append(("parent_task_id = ?", coerced))
                 continue
             col, cast, default = mapping
             try:
@@ -2178,17 +2271,43 @@ def _write_event_batch(batch: list[tuple[str, str, float, str]]) -> None:
     with _rw_lock.write_lock(), _caches_lock:
         try:
             _write_event_batch_locked(db, batch, task_ids)
-        except Exception:
+        except sqlite3.IntegrityError:
+            # ``idx_ev_task_seq`` refused a duplicate ``(task_id,
+            # seq)``: another PROCESS (journal replay from a CLI run,
+            # a second daemon) inserted seqs this process's
+            # ``_next_seq_cache`` never saw.  Re-read ``MAX(seq)``
+            # from the database and retry ONCE; a second refusal is a
+            # real error and propagates like any other failure.
+            _rollback_event_batch(db, task_ids)
             try:
-                db.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            # The seq cache may have advanced past rows that were
-            # rolled back; recompute from the database on retry.
-            for tid in task_ids:
-                _next_seq_cache.pop(tid, None)
-                _marked_has_events.discard(tid)
+                _write_event_batch_locked(db, batch, task_ids)
+            except Exception:
+                _rollback_event_batch(db, task_ids)
+                raise
+        except Exception:
+            _rollback_event_batch(db, task_ids)
             raise
+
+
+def _rollback_event_batch(db: sqlite3.Connection, task_ids: set[str]) -> None:
+    """Roll back a failed event-batch transaction and drop its caches.
+
+    The seq cache may have advanced past rows that were rolled back,
+    and another process may have moved the on-disk ``MAX(seq)`` in
+    the meantime; dropping the entries forces the next attempt to
+    recompute them from the database.
+
+    Args:
+        db: The connection whose open transaction failed.
+        task_ids: Tasks whose cache entries must be invalidated.
+    """
+    try:
+        db.execute("ROLLBACK")
+    except sqlite3.Error:
+        pass
+    for tid in task_ids:
+        _next_seq_cache.pop(tid, None)
+        _marked_has_events.discard(tid)
 
 
 def _write_event_batch_locked(
@@ -2826,14 +2945,10 @@ def _load_subagent_rows_by_parent_task_id(
             (parent_task_id,),
         ).fetchall()
         for r in rows:
-            sub_task_id = str(r["id"])
-            out.append({
-                "task_id": sub_task_id,
-                "task": r["task"],
-                "chat_id": str(r["chat_id"] or ""),
-                "events": _fetch_events_for_task_id(db, sub_task_id),
-                "extra": _row_to_extra_json(r),
-            })
+            out.append(_events_session_dict(
+                db, str(r["id"]), r["task"], str(r["chat_id"] or ""),
+                _row_to_extra_json(r),
+            ))
     return out
 
 
@@ -2892,16 +3007,12 @@ def _get_adjacent_task_by_chat_id(
         if not adj:
             return None
 
-        adj_id = str(adj["id"])
-        return {
-            "task": adj["task"],
-            "task_id": adj_id,
-            "events": _fetch_events_for_task_id(db, adj_id),
-            "chat_id": str(adj["chat_id"] or ""),
-            # The synthesized extra lets the replay reply builder attach
-            # a task_settings event for rows that predate the event.
-            "extra": _row_to_extra_json(adj),
-        }
+        # The synthesized extra lets the replay reply builder attach
+        # a task_settings event for rows that predate the event.
+        return _events_session_dict(
+            db, str(adj["id"]), adj["task"], str(adj["chat_id"] or ""),
+            _row_to_extra_json(adj),
+        )
 
 
 def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:

@@ -46,9 +46,9 @@ def _register_tab_state(task_id: str, tab_id: str, agent: WorktreeSorcarAgent) -
 
 def _unregister_state(st: Any) -> None:
     """Remove *st* from the registry regardless of any mid-run re-keying."""
-    for tid, s in list(agent_state.iter_items()):
+    for s in agent_state.snapshot():
         if s is st:
-            agent_state.unregister(tid, s)
+            agent_state.unregister(s.task_id, s)
 
 
 class TestNoModelAvailableResultEvent(TestCase):
