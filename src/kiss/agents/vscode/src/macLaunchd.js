@@ -6,6 +6,7 @@
 'use strict';
 
 const {execFile} = require('child_process');
+const {sleep} = require('./daemonHealth');
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 25_000;
 
@@ -14,10 +15,6 @@ const DEFAULT_POLL_INTERVAL_MS = 250;
 const DEFAULT_BOOTSTRAP_ATTEMPTS = 4;
 
 const COMMAND_TIMEOUT_MS = 5_000;
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 function runLaunchctl(launchctlPath, args) {
   return new Promise(resolve => {

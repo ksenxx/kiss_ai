@@ -26,15 +26,13 @@ from kiss.core.models.model import (
     Model,
     ThinkingCallback,
     TokenCallback,
+    _audio_mime_to_format,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
     accepted_request_params,
     responses_items_to_chat_messages,
 )
-from kiss.core.models.stream_abort import (
-    DEFAULT_STREAM_STALL_TIMEOUT,
-    stop_aware_events,
-)
+from kiss.core.models.stream_abort import stop_aware_events
 
 logger = logging.getLogger(__name__)
 
@@ -175,32 +173,6 @@ OPENAI_INPUT_IMAGE_MIME_TYPES = frozenset(
     {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
 )
 OPENAI_INPUT_AUDIO_FORMATS = frozenset({"mp3", "wav"})
-
-_AUDIO_MIME_TO_FORMAT: dict[str, str] = {
-    "audio/mpeg": "mp3",
-    "audio/mp3": "mp3",
-    "audio/wav": "wav",
-    "audio/x-wav": "wav",
-    "audio/ogg": "ogg",
-    "audio/webm": "webm",
-    "audio/flac": "flac",
-    "audio/aac": "aac",
-    "audio/mp4": "mp4",
-}
-
-
-def _audio_mime_to_format(mime_type: str) -> str:
-    """Map an audio MIME type to the short format string expected by OpenAI.
-
-    Args:
-        mime_type: An audio MIME type (e.g. "audio/mpeg").
-
-    Returns:
-        The short format string (e.g. "mp3"). Falls back to the MIME subtype
-        if no explicit mapping exists.
-    """
-    fallback = mime_type.split("/", 1)[1] if "/" in mime_type else mime_type
-    return _AUDIO_MIME_TO_FORMAT.get(mime_type, fallback)
 
 
 def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
@@ -405,23 +377,29 @@ class OpenAICompatibleBase(Model):
     prompt-cache request marker live here once.
     """
 
-    _api_model_name: str
-
     def __init__(
         self,
         model_name: str,
+        base_url: str,
+        api_key: str,
         model_config: dict[str, Any] | None = None,
         token_callback: TokenCallback | None = None,
         thinking_callback: ThinkingCallback | None = None,
     ):
         """Initialize the shared OpenAI-compatible state.
 
+        Resolves the provider model name (thinking-alias and
+        ``openrouter/`` prefix stripped) and applies the catalog's default
+        thinking level: when ``MODEL_INFO`` declares one for this model
+        and the caller set neither ``reasoning_effort`` nor a native
+        ``reasoning.effort``, ``reasoning_effort`` is defaulted on a copy
+        of ``model_config``.
+
         Args:
             model_name: The KISS catalog model name.
-            model_config: Optional model parameters.  ``stream_stall_timeout``
-                (seconds of event-level silence tolerated before a
-                streamed request is aborted with a retryable
-                ``TimeoutError``) is read here for both transports.
+            base_url: The base URL for the API endpoint.
+            api_key: API key for authentication.
+            model_config: Optional model parameters.
             token_callback: Optional callback for each streamed text token.
             thinking_callback: Optional callback bracketing thinking blocks.
         """
@@ -431,11 +409,81 @@ class OpenAICompatibleBase(Model):
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-        self._stream_stall_timeout = float(
-            self.model_config.get(
-                "stream_stall_timeout", DEFAULT_STREAM_STALL_TIMEOUT
-            )
+        self.base_url = base_url
+        self.api_key = api_key
+        self._api_model_name = _provider_model_name(model_name)
+        # The (base_url, api_key, headers) triple the current client was
+        # built from, so _ensure_client rebuilds only on a real change.
+        self._client_inputs: tuple[Any, ...] | None = None
+        thinking_level = _model_thinking_level(self.model_name)
+        reasoning_cfg = self.model_config.get("reasoning")
+        has_native_effort = (
+            isinstance(reasoning_cfg, dict) and "effort" in reasoning_cfg
         )
+        if (
+            thinking_level is not None
+            and "reasoning_effort" not in self.model_config
+            and not has_native_effort
+        ):
+            self.model_config = dict(self.model_config)
+            self.model_config["reasoning_effort"] = thinking_level
+
+    def __str__(self) -> str:
+        """Return a debug string showing the class, model and endpoint."""
+        return (
+            f"{self.__class__.__name__}"
+            f"(name={self.model_name}, base_url={self.base_url})"
+        )
+
+    __repr__ = __str__
+
+    def _ensure_client(self) -> None:
+        """Build the SDK client once, so its connection pool is reused.
+
+        ``initialize()`` used to build a fresh client on every call — and
+        the delegated tool-calling transport called it before every
+        single agent step — so a 100-step run built 100 ``OpenAI``
+        clients and 100 httpx connection pools, each paying a fresh TLS
+        handshake while the previous pool waited on the garbage
+        collector.  The client is rebuilt only when the inputs it was
+        constructed from (``base_url``, ``api_key``, ``extra_headers``)
+        have actually changed.
+        """
+        extra_headers = self.model_config.get("extra_headers") or {}
+        inputs = (self.base_url, self.api_key, tuple(sorted(extra_headers.items())))
+        if self.client is not None and inputs == self._client_inputs:
+            return
+        self.client = OpenAI(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            timeout=1800.0,
+            default_headers=extra_headers,
+        )
+        self._client_inputs = inputs
+
+    def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
+        """Generate an embedding vector for the given text.
+
+        Args:
+            text: The text to generate an embedding for.
+            embedding_model: Optional model name for embedding generation. Uses the
+                model's name if not specified.
+
+        Returns:
+            A list of floating point numbers representing the embedding vector.
+
+        Raises:
+            KISSError: If the embedding generation fails.
+        """
+        model_to_use = embedding_model or self.model_name
+        try:
+            response = self.client.embeddings.create(model=model_to_use, input=text)
+            return list(response.data[0].embedding)
+        except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
+            raise KISSError(
+                f"Embedding generation failed for model {model_to_use}: {e}"
+            ) from e
 
     def _is_deepseek_reasoning_model(self) -> bool:
         """Check if this is a DeepSeek R1 reasoning model.
@@ -503,39 +551,15 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         """
         super().__init__(
             model_name,
+            base_url,
+            api_key,
             model_config=model_config,
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-        self.base_url = base_url
-        self.api_key = api_key
-        self._api_model_name = _provider_model_name(model_name)
-        self._effort_verdict_key = (base_url, self._api_model_name)
         self._responses_delegate: OpenAICompatibleModel2 | None = None
         self._delegate_raw_items: dict[str, list[dict[str, Any]]] = {}
-        thinking_level = _model_thinking_level(self.model_name)
-        reasoning_cfg = self.model_config.get("reasoning")
-        has_native_effort = (
-            isinstance(reasoning_cfg, dict) and "effort" in reasoning_cfg
-        )
-        if (
-            thinking_level is not None
-            and "reasoning_effort" not in self.model_config
-            and not has_native_effort
-        ):
-            self.model_config = dict(self.model_config)
-            self.model_config["reasoning_effort"] = thinking_level
         self.last_audio_data: str | None = None
-
-    def __str__(self) -> str:
-        """Return a string representation of the model.
-
-        Returns:
-            A string showing the class name, model name, and base URL.
-        """
-        return f"{self.__class__.__name__}(name={self.model_name}, base_url={self.base_url})"
-
-    __repr__ = __str__
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with an initial user prompt.
@@ -544,13 +568,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             prompt: The initial user prompt to start the conversation.
             attachments: Optional list of file attachments (images, PDFs) to include.
         """
-        extra_headers = self.model_config.get("extra_headers") or {}
-        self.client = OpenAI(
-            base_url=self.base_url,
-            api_key=self.api_key,
-            timeout=1800.0,
-            default_headers=extra_headers,
-        )
+        self._ensure_client()
         self.conversation = []
         system_instruction = self.model_config.get("system_instruction")
         if system_instruction:
@@ -1054,17 +1072,25 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         # would leave the printer rendering the retry's answer as
         # thinking.  `_close_thinking_if_open` is a no-op when the turn
         # ended outside a reasoning block.
+        #
+        # `events` is closed in the same `finally`, mirroring v2's
+        # `_consume_stream`: the loop body can raise (a token callback
+        # propagating Stop, most commonly), and an abandoned generator
+        # runs its cleanup only when the traceback holding its frame is
+        # released — until then a daemon watchdog thread stays alive and
+        # armed over a connection that never returns to the pool.
+        events = stop_aware_events(
+            stream,
+            stall_timeout=self._stream_stall_timeout,
+            on_abort=self._close_thinking_if_open,
+            name=(
+                "openai-tools-stream-abort-watchdog"
+                if adaptive
+                else "openai-stream-abort-watchdog"
+            ),
+        )
         try:
-            for chunk in stop_aware_events(
-                stream,
-                stall_timeout=self._stream_stall_timeout,
-                on_abort=self._close_thinking_if_open,
-                name=(
-                    "openai-tools-stream-abort-watchdog"
-                    if adaptive
-                    else "openai-stream-abort-watchdog"
-                ),
-            ):
+            for chunk in events:
                 last_chunk = chunk
                 if chunk.choices:
                     choice = chunk.choices[0]
@@ -1089,6 +1115,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 if chunk.usage is not None:
                     response = chunk
         finally:
+            events.close()
             self._close_thinking_if_open()
         response = self._finalize_stream_response(response, last_chunk)
         return content, tool_calls_accum, response, finish_reason
@@ -1288,6 +1315,23 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
 
         provider = openai_compatible_provider_for_base_url(self.base_url)
         return provider is not None and provider.delegate_tools_to_responses
+
+    @property
+    def _effort_verdict_key(self) -> tuple[str, str]:
+        """Key for the adaptive ``tools`` + ``reasoning_effort`` verdict cache.
+
+        Computed from the *current* ``base_url``: the endpoint can be
+        reconfigured after construction (the same change that makes
+        ``_ensure_client`` rebuild the SDK client), and a key captured at
+        construction time would make the new endpoint inherit the old
+        endpoint's cached verdict — or record its own probe result under
+        the old endpoint's key.
+
+        Returns:
+            The ``(base_url, api_model_name)`` pair verdicts are cached
+            under.
+        """
+        return (self.base_url, self._api_model_name)
 
     def _tools_reasoning_effort_capability(self) -> bool | None:
         """Return whether this endpoint accepts ``tools`` + ``reasoning_effort``.
@@ -1557,6 +1601,21 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         # every token and thinking bracket into a finished task's printer.
         delegate.token_callback = self.token_callback
         delegate.thinking_callback = self.thinking_callback
+        # The endpoint inputs have to be re-synced for the same reason:
+        # this model's base_url / api_key / extra_headers can be
+        # reconfigured between turns (the very change that rebuilds this
+        # model's own client), and a delegate frozen at construction
+        # time would keep sending tool turns to the OLD endpoint with
+        # the OLD credentials.  _ensure_client compares exactly these
+        # inputs, so mirroring them makes the delegate rebuild its
+        # client precisely when they changed.
+        delegate.base_url = self.base_url
+        delegate.api_key = self.api_key
+        extra_headers = self.model_config.get("extra_headers")
+        if extra_headers is None:
+            delegate.model_config.pop("extra_headers", None)
+        else:
+            delegate.model_config["extra_headers"] = extra_headers
         delegate._ensure_client()
         delegate.reset_conversation()
         input_items = self._chat_conversation_to_responses_input()
@@ -1738,25 +1797,3 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 cache_write_tokens,
             )
         return 0, 0, 0, 0
-
-    def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
-        """Generate an embedding vector for the given text.
-
-        Args:
-            text: The text to generate an embedding for.
-            embedding_model: Optional model name for embedding generation. Uses the
-                model's name if not specified.
-
-        Returns:
-            A list of floating point numbers representing the embedding vector.
-
-        Raises:
-            KISSError: If the embedding generation fails.
-        """
-        model_to_use = embedding_model or self.model_name
-        try:
-            response = self.client.embeddings.create(model=model_to_use, input=text)
-            return list(response.data[0].embedding)
-        except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
-            raise KISSError(f"Embedding generation failed for model {model_to_use}: {e}") from e

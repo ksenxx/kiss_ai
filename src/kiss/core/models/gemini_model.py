@@ -26,10 +26,7 @@ from kiss.core.models.model import (
     TokenCallback,
     responses_items_to_chat_messages,
 )
-from kiss.core.models.stream_abort import (
-    DEFAULT_STREAM_STALL_TIMEOUT,
-    stop_aware_events,
-)
+from kiss.core.models.stream_abort import stop_aware_events
 
 logger = logging.getLogger(__name__)
 
@@ -95,24 +92,53 @@ class _AbortableStream:
     def __init__(self, chunks: Any, http_client: _ResponseTrackingHttpxClient) -> None:
         """Wrap the SDK's chunk generator.
 
+        ``last_response`` is reset here because this stream's request has
+        not been issued yet (the SDK generator is lazy): whatever the
+        shared client still remembers belongs to a PREVIOUS request whose
+        keep-alive connection may already be back in httpx's pool, and an
+        abort must never shut that socket down.
+
         Args:
             chunks: The generator ``generate_content_stream`` returned.
             http_client: The transport that recorded the response.
         """
         self._chunks = chunks
         self._http_client = http_client
+        self._response: httpx.Response | None = None
+        self._closed = False
+        http_client.last_response = None
 
     def __iter__(self) -> Any:
-        """Iterate the SDK's chunks."""
-        return iter(self._chunks)
+        """Iterate the SDK's chunks, snapshotting the in-flight response.
+
+        The snapshot is taken at the first chunk so a watchdog abort that
+        fires late — after this stream is dead and a retry has begun on
+        the SAME shared client — still shuts down THIS request's socket,
+        never the live retry's (``last_response`` is overwritten by every
+        request on the shared client).
+        """
+        for chunk in self._chunks:
+            if self._response is None:
+                self._response = self._http_client.last_response
+            yield chunk
 
     @property
     def response(self) -> httpx.Response | None:
-        """The in-flight httpx response, or ``None`` before the request."""
-        return self._http_client.last_response
+        """This stream's httpx response, or ``None`` before the request.
+
+        Cached on first read; after :meth:`close` only the cached value
+        is ever returned, so a parked abort can no longer observe a later
+        request through the shared client.
+        """
+        if self._response is None and not self._closed:
+            self._response = self._http_client.last_response
+        return self._response
 
     def close(self) -> None:
-        """Close the SDK generator."""
+        """Close the SDK generator, freezing the response snapshot."""
+        if self._response is None:
+            self._response = self._http_client.last_response
+        self._closed = True
         self._chunks.close()
 
 
@@ -276,9 +302,6 @@ class GeminiModel(Model):
         )
         self.api_key = api_key
         self._thought_signatures: dict[str, bytes] = {}
-        self._stream_stall_timeout = float(
-            self.model_config.get("stream_stall_timeout", DEFAULT_STREAM_STALL_TIMEOUT)
-        )
         self._http_client = _ResponseTrackingHttpxClient(self._stream_stall_timeout)
 
     def reset_conversation(self) -> None:
@@ -309,7 +332,25 @@ class GeminiModel(Model):
         self.conversation = [msg]
         self._thought_signatures = {}
 
-    def _tool_call_id_to_name_map(self) -> dict[str, str]:
+    def _chat_messages(self) -> list[dict[str, Any]]:
+        """Return the conversation converted to Chat-Completions messages.
+
+        The one place :func:`responses_items_to_chat_messages` runs for a
+        request: :meth:`generate` and
+        :meth:`generate_and_process_with_tools` convert once and pass the
+        result to the three consumers (:meth:`_tool_call_id_to_name_map`,
+        :meth:`_convert_conversation_to_gemini_contents`,
+        :meth:`_resolve_system_instruction`) instead of each consumer
+        re-running the full conversion.
+
+        Returns:
+            The conversation in Chat-Completions format.
+        """
+        return responses_items_to_chat_messages(self.conversation)
+
+    def _tool_call_id_to_name_map(
+        self, chat_messages: list[dict[str, Any]] | None = None
+    ) -> dict[str, str]:
         """Map tool-call ids to function names across the whole conversation.
 
         Scans assistant messages for both OpenAI-style ``tool_calls``
@@ -317,11 +358,17 @@ class GeminiModel(Model):
         when the conversation was handed off from another provider's
         model, e.g. via the Sorcar ``set_model`` tool).
 
+        Args:
+            chat_messages: The pre-converted conversation, or ``None`` to
+                convert ``self.conversation`` here.
+
         Returns:
             dict[str, str]: Mapping of tool-call id to function name.
         """
         mapping: dict[str, str] = {}
-        for msg in responses_items_to_chat_messages(self.conversation):
+        for msg in (
+            chat_messages if chat_messages is not None else self._chat_messages()
+        ):
             if msg.get("role") != "assistant":
                 continue
             for tc in msg.get("tool_calls") or []:
@@ -435,7 +482,9 @@ class GeminiModel(Model):
                 logger.warning("Dropping unsupported %s block for Gemini.", block_type)
         return parts
 
-    def _convert_conversation_to_gemini_contents(self) -> list[types.Content]:
+    def _convert_conversation_to_gemini_contents(
+        self, chat_messages: list[dict[str, Any]] | None = None
+    ) -> list[types.Content]:
         """Converts the internal conversation format to Gemini contents.
 
         Besides GeminiModel's native format, this also converts foreign
@@ -455,12 +504,18 @@ class GeminiModel(Model):
         :meth:`~kiss.core.models.model.Model._deliver_tool_result_attachments`
         appends them as a follow-up user message instead.
 
+        Args:
+            chat_messages: The pre-converted conversation, or ``None`` to
+                convert ``self.conversation`` here.
+
         Returns:
             list[types.Content]: The conversation in Gemini API format.
         """
-        id_to_name = self._tool_call_id_to_name_map()
+        if chat_messages is None:
+            chat_messages = self._chat_messages()
+        id_to_name = self._tool_call_id_to_name_map(chat_messages)
         contents = []
-        for msg in responses_items_to_chat_messages(self.conversation):
+        for msg in chat_messages:
             role = msg["role"]
             content = msg.get("content", "")
 
@@ -547,7 +602,9 @@ class GeminiModel(Model):
                 )
         return content, function_calls
 
-    def _resolve_system_instruction(self) -> str | None:
+    def _resolve_system_instruction(
+        self, chat_messages: list[dict[str, Any]] | None = None
+    ) -> str | None:
         """Merge configured and conversation-level system instructions.
 
         OpenAI-style ``role="system"`` messages (present when the
@@ -557,12 +614,18 @@ class GeminiModel(Model):
         accept only ``user`` / ``model`` roles.  Duplicates of the
         configured ``system_instruction`` are skipped.
 
+        Args:
+            chat_messages: The pre-converted conversation, or ``None`` to
+                convert ``self.conversation`` here.
+
         Returns:
             str | None: The merged system instruction, or ``None``.
         """
         configured = self.model_config.get("system_instruction")
         system_texts: list[str] = [configured] if configured else []
-        for msg in responses_items_to_chat_messages(self.conversation):
+        for msg in (
+            chat_messages if chat_messages is not None else self._chat_messages()
+        ):
             if msg.get("role") != "system":
                 continue
             content = msg.get("content")
@@ -576,7 +639,11 @@ class GeminiModel(Model):
                 system_texts.append(content)
         return "\n\n".join(system_texts) if system_texts else None
 
-    def _build_config(self, tools: list[types.Tool] | None = None) -> types.GenerateContentConfig:
+    def _build_config(
+        self,
+        tools: list[types.Tool] | None = None,
+        chat_messages: list[dict[str, Any]] | None = None,
+    ) -> types.GenerateContentConfig:
         """Translate ``model_config`` into a Gemini generation config.
 
         Every ``model_config`` key that names a real
@@ -591,6 +658,9 @@ class GeminiModel(Model):
 
         Args:
             tools: Optional Gemini tool declarations for this request.
+            chat_messages: The pre-converted conversation for
+                :meth:`_resolve_system_instruction`, or ``None`` to
+                convert ``self.conversation`` there.
 
         Returns:
             The config to pass to ``generate_content``.
@@ -616,7 +686,7 @@ class GeminiModel(Model):
             params, _GEMINI_CONFIG_FIELDS, "Gemini"
         )
         params["tools"] = tools
-        params["system_instruction"] = self._resolve_system_instruction()
+        params["system_instruction"] = self._resolve_system_instruction(chat_messages)
         return types.GenerateContentConfig(**params)
 
     def _stream_parts(self, parts: list[Any]) -> None:
@@ -680,13 +750,20 @@ class GeminiModel(Model):
             ),
             self._http_client,
         )
+        # `events` is closed in `finally`, mirroring the OpenAI
+        # transports: the loop body can raise (a token callback
+        # propagating Stop, most commonly), and an abandoned generator
+        # runs its cleanup only when the traceback holding its frame is
+        # released — until then a daemon watchdog thread stays alive and
+        # armed over a connection that never returns to the pool.
+        events = stop_aware_events(
+            stream,
+            stall_timeout=self._stream_stall_timeout,
+            on_abort=self._close_thinking_if_open,
+            name="gemini-stream-abort-watchdog",
+        )
         try:
-            for chunk in stop_aware_events(
-                stream,
-                stall_timeout=self._stream_stall_timeout,
-                on_abort=self._close_thinking_if_open,
-                name="gemini-stream-abort-watchdog",
-            ):
+            for chunk in events:
                 last_chunk = chunk
                 if chunk.usage_metadata is not None:
                     usage_chunk = chunk
@@ -699,6 +776,7 @@ class GeminiModel(Model):
                 f"{self._stream_stall_timeout}s (stream_stall_timeout)"
             ) from e
         finally:
+            events.close()
             self._close_thinking_if_open()
         return parts, usage_chunk or last_chunk
 
@@ -739,8 +817,11 @@ class GeminiModel(Model):
         Returns:
             tuple[str, Any]: A tuple of (generated_text, raw_response).
         """
-        contents = self._convert_conversation_to_gemini_contents()
-        parts, response = self._generate_parts(contents, self._build_config())
+        chat_messages = self._chat_messages()
+        contents = self._convert_conversation_to_gemini_contents(chat_messages)
+        parts, response = self._generate_parts(
+            contents, self._build_config(chat_messages=chat_messages)
+        )
         content, _ = self._parse_parts(parts)
         self.conversation.append({"role": "assistant", "content": content})
         return content, response
@@ -774,8 +855,9 @@ class GeminiModel(Model):
             )
         gemini_tools = [types.Tool(function_declarations=declarations)] if declarations else None
 
-        contents = self._convert_conversation_to_gemini_contents()
-        config = self._build_config(tools=gemini_tools)
+        chat_messages = self._chat_messages()
+        contents = self._convert_conversation_to_gemini_contents(chat_messages)
+        config = self._build_config(tools=gemini_tools, chat_messages=chat_messages)
         all_parts, response = self._generate_parts(contents, config)
         content, function_calls = self._parse_parts(all_parts)
 

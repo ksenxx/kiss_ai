@@ -426,8 +426,18 @@ def _run_agent(
     # shared reference-counting registry (used by the channel CLIs'
     # launcher too), not by save/restore snapshots: snapshots taken by
     # overlapping dispatches would restore each other's values out of
-    # order and leave a stale workspace exported.
-    enter_workspace(workspace)
+    # order and leave a stale workspace exported.  A dispatch whose
+    # workspace DIFFERS from a running one's blocks here instead of
+    # overwriting the exported value mid-flight (which would hand the
+    # running session the wrong account's credentials); the wait is
+    # bounded by how long a conflicting dispatch can hold it.
+    if not enter_workspace(workspace, timeout=DISPATCH_TIMEOUT_SECONDS):
+        return (
+            f"Error: workspace {workspace!r} could not be activated for "
+            f"the {channel} agent within {DISPATCH_TIMEOUT_SECONDS:.0f}s "
+            f"because a concurrent channel task is still using a "
+            f"different workspace; retry when it finishes."
+        )
     try:
         return _dispatch(channel, prompt, str(module.__file__),
                          work_dir, model_name, budget, parent_agent,

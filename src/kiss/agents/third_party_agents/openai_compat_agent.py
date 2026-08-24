@@ -57,6 +57,7 @@ from typing import Any
 
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
+    start_http_server,
     stop_http_server,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -308,22 +309,21 @@ class OpenAICompatChannelBackend(ToolMethodBackend):
                 pass
 
         self.disconnect()
-        try:
-            self._server = ThreadedHTTPServer((self._bind_host, self._port), Handler)
-            self._server_thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-            self._server_thread.start()
-            bound_port = self._server.server_address[1]
-            self._connection_info = (
-                f"OpenAI-compatible API serving on {self._bind_host}:{bound_port}"
-            )
-            logger.info("%s", self._connection_info)
-            return True
-        except OSError as e:
-            self._connection_info = f"OpenAI-compatible API bind failed: {e}"
-            logger.warning("Could not start OpenAI-compatible API server: %s", e)
-            self._server = None
-            self._server_thread = None
+        self._server, self._server_thread, error = start_http_server(
+            (self._bind_host, self._port),
+            Handler,
+            log=logger,
+            started_log=None,
+            error_prefix="OpenAI-compatible API bind failed",
+            error_log="Could not start OpenAI-compatible API server: %s",
+        )
+        if error is not None or self._server is None:
+            self._connection_info = error or ""
             return False
+        bound_port = self._server.server_address[1]
+        self._connection_info = f"OpenAI-compatible API serving on {self._bind_host}:{bound_port}"
+        logger.info("%s", self._connection_info)
+        return True
 
     def _handle_chat_completions(self, handler: BaseHTTPRequestHandler) -> None:
         """Serve one ``POST /v1/chat/completions`` request."""

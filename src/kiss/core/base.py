@@ -67,7 +67,6 @@ class Base:
         with Base._class_lock:
             self.id = Base.agent_counter
             Base.agent_counter += 1
-        self.base_dir = ""
         self.printer: Printer | None = None
         self.model_name = ""
         self.messages: list[dict[str, Any]] = []

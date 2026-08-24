@@ -45,7 +45,19 @@ def _assert_alive_and_kill(pid_file: Path) -> None:
     have outlived the Bash call (the old deadline group-kill would have
     SIGKILLed it before Bash returned), and is then reaped so no test
     process leaks past the suite.
+
+    Bash returns at pipe-EOF, which the launching subshell delivers the
+    moment it forks the job — typically a few milliseconds BEFORE the
+    job's ``echo $$ > pid_file`` runs.  Checking existence immediately
+    would race that startup (observed: file appears ~5 ms after Bash
+    returns), so the pid file is polled briefly first.  The survival
+    property is still fully checked: a child SIGKILLed by the old
+    deadline group-kill either never writes the file or fails the
+    liveness probe below.
     """
+    deadline = time.monotonic() + 10
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert pid_file.exists(), "background child never started"
     pid = int(pid_file.read_text())
     try:

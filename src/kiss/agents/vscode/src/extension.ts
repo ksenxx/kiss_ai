@@ -12,7 +12,7 @@ import {isReloadReady} from './reloadGuard';
 
 import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
 import {findKissProject} from './kissPaths';
-import {kissHomeDir} from './userAssets';
+import {kissHomeDir, sorcarSockPath} from './userAssets';
 import {resetTipsOnExtensionUpdate} from './SorcarTab';
 import {checkForExtensionUpdate} from './UpdateChecker';
 import {
@@ -315,8 +315,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');
   const markerPath = path.join(kissHomeDir(), '.extension-updated');
-  const sockPath =
-    process.env.KISS_SORCAR_SOCK || path.join(kissHomeDir(), 'sorcar.sock');
+  const sockPath = sorcarSockPath();
 
   let reloadTriggered = false;
   let settleTimer: ReturnType<typeof setInterval> | undefined;
@@ -411,9 +410,8 @@ export function activate(context: vscode.ExtensionContext): void {
     });
   }
 
-  const extensionUpdatedMarker = markerPath;
   let shouldAutoOpen = !context.workspaceState.get<boolean>('firstLaunchDone');
-  if (fs.existsSync(extensionUpdatedMarker)) {
+  if (fs.existsSync(markerPath)) {
     shouldAutoOpen = true;
     void context.workspaceState.update('firstLaunchDone', undefined);
   }
@@ -432,7 +430,8 @@ export function activate(context: vscode.ExtensionContext): void {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[KISS Sorcar] Dependency setup error:', err);
     showErrorNotification(
-      `KISS Sorcar: Setup failed — ${msg}. Check ~/.kiss/install.log for details.`,
+      `KISS Sorcar: Setup failed — ${msg}. ` +
+        `Check ${path.join(kissHomeDir(), 'install.log')} for details.`,
     );
   });
 

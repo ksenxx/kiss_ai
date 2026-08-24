@@ -24,12 +24,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
-logger = logging.getLogger(__name__)
+from kiss.agents.sorcar._concurrency import _fcntl, _race_delay
 
-try:
-    import fcntl as _fcntl
-except ImportError:  # pragma: no cover — Windows has no fcntl
-    _fcntl = None  # type: ignore[assignment]
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -59,21 +56,57 @@ def _file_lock(handle: IO[Any]) -> Iterator[None]:
         _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
 
 
-def _race_delay() -> None:
-    """Sleep briefly when ``KISS_RACE_DELAY`` is set (no-op by default).
+@contextmanager
+def _reclaim_process_lock(repo: Path) -> Iterator[None]:
+    """Hold the cross-process orphan-reclaim lock for *repo*.
 
-    Concurrency tests need to widen a read-modify-write window to make
-    a cross-process race deterministic.  The delay is opt-in via an
-    environment variable that production never sets, and is capped at
-    100 ms so a stray value can never stall a real run.
+    ``repo_lock`` is a ``threading.RLock`` — it serialises reclaim
+    sweeps inside ONE process only.  Two processes (a ``kiss-web``
+    daemon booting and a ``kiss`` CLI run) reclaiming the same dead
+    owner's worktree can interleave their stage → cherry-pick →
+    commit → cleanup sequences: one process's ``git reset`` wipes the
+    other's staged cherry-pick, ``_commit_staged_merge`` then sees an
+    empty index and reports SUCCESS, and ``cleanup_partial`` deletes
+    the branch and directory — the orphan's work is lost.  An
+    ``flock`` on ``<git_common_dir>/kiss-reclaim.lock`` serialises
+    :meth:`GitWorktreeOps.reclaim_orphaned_worktrees` and
+    :meth:`GitWorktreeOps.sweep_orphaned_state` across processes
+    (mirroring ``persistence._journal_file_lock``); the kernel
+    releases it if the holder dies.
+
+    Degrades to the previous in-process-only behaviour when ``fcntl``
+    is unavailable (Windows), the common dir cannot be resolved, or
+    the lock file cannot be opened.
+
+    Args:
+        repo: Git repo root path.
+
+    Yields:
+        Nothing; the lock is held for the duration of the block.
     """
-    raw = os.environ.get("KISS_RACE_DELAY")
-    if not raw:
+    if _fcntl is None:  # pragma: no cover — Windows has no fcntl
+        yield
+        return
+    result = _git("rev-parse", "--git-common-dir", cwd=repo)
+    if result.returncode != 0:  # pragma: no cover — not a git repo
+        yield
+        return
+    git_common = Path(result.stdout.strip())
+    if not git_common.is_absolute():  # pragma: no branch
+        git_common = (repo / git_common).resolve()
+    try:
+        handle = open(
+            git_common / "kiss-reclaim.lock", "a+", encoding="utf-8",
+        )
+    except OSError:  # pragma: no cover — unwritable git dir
+        yield
         return
     try:
-        time.sleep(min(float(raw), 0.1))
-    except ValueError:
-        pass
+        with _file_lock(handle):
+            yield
+    finally:
+        handle.close()
+
 
 _repo_locks: dict[str, threading.RLock] = {}
 _repo_locks_guard = threading.Lock()
@@ -1456,7 +1489,7 @@ class GitWorktreeOps:
         return False
 
     @staticmethod
-    def list_ignored_files(wt_dir: Path) -> list[str]:
+    def list_ignored_files(wt_dir: Path) -> list[str] | None:
         """Return the git-ignored untracked files present in *wt_dir*.
 
         Uses ``git ls-files --others --ignored --exclude-standard -z``
@@ -1467,7 +1500,11 @@ class GitWorktreeOps:
             wt_dir: Git working directory to inspect.
 
         Returns:
-            Relative paths of ignored files, empty on git failure.
+            Relative paths of ignored files, or ``None`` on git
+            failure — callers that must fail closed (preserve a
+            worktree rather than destroy possibly-unenumerable
+            content) can tell "git failed" apart from "no ignored
+            files".
         """
         result = _git(
             "ls-files", "--others", "--ignored", "--exclude-standard",
@@ -1478,7 +1515,7 @@ class GitWorktreeOps:
                 "git ls-files failed in %s: %s",
                 wt_dir, result.stderr.strip(),
             )
-            return []
+            return None
         return [f for f in result.stdout.split("\0") if f]
 
     @staticmethod
@@ -1538,19 +1575,16 @@ class GitWorktreeOps:
         """
         if _same_path(wt_dir, repo):
             return (0, True)
-        result = _git(
-            "ls-files", "--others", "--ignored", "--exclude-standard",
-            "-z", cwd=wt_dir,
-        )
-        if result.returncode != 0:
+        ignored = GitWorktreeOps.list_ignored_files(wt_dir)
+        if ignored is None:
             logger.warning(
-                "git ls-files failed in %s: %s; preserving worktree",
-                wt_dir, result.stderr.strip(),
+                "cannot enumerate ignored files in %s; preserving worktree",
+                wt_dir,
             )
             return (0, False)
         rescued = 0
         ok = True
-        for rel in (f for f in result.stdout.split("\0") if f):
+        for rel in ignored:
             parts = Path(rel).parts
             if any(p in _RESCUE_SKIP_COMPONENTS for p in parts):
                 continue
@@ -2116,7 +2150,7 @@ class GitWorktreeOps:
         Returns:
             The number of branches deleted.
         """
-        with repo_lock(repo):
+        with repo_lock(repo), _reclaim_process_lock(repo):
             GitWorktreeOps.prune(repo)
             in_use = GitWorktreeOps.checked_out_branches(repo)
             result = _git(
@@ -2244,7 +2278,7 @@ class GitWorktreeOps:
         """
         excluded = exclude_branches or set()
         reclaimed = 0
-        with repo_lock(repo):
+        with repo_lock(repo), _reclaim_process_lock(repo):
             # ``.kiss-worktrees/`` under the main tree would otherwise
             # show up as an untracked directory in ``git status`` and
             # trip the "main tree is dirty" guard below.  ``ensure_
@@ -2294,13 +2328,16 @@ class GitWorktreeOps:
                     # ``list_ignored_files`` is part of the content
                     # probe because porcelain status omits ignored
                     # files — a fresh spare checkout has none, so any
-                    # present were written externally.
+                    # present were written externally.  ``None``
+                    # (git failure) counts as content: unenumerable
+                    # state must be preserved, never destroyed.
+                    ignored = GitWorktreeOps.list_ignored_files(wt_dir)
                     if GitWorktreeOps.has_uncommitted_changes(
                         wt_dir,
-                    ) or GitWorktreeOps.list_ignored_files(
-                        wt_dir,
-                    ) or not GitWorktreeOps._branch_is_expendable(
-                        repo, branch,
+                    ) or ignored is None or ignored or (
+                        not GitWorktreeOps._branch_is_expendable(
+                            repo, branch,
+                        )
                     ):
                         # A spare is never written to, so content here
                         # means something external happened; preserve
@@ -2379,6 +2416,11 @@ class GitWorktreeOps:
                         wt_dir, current, original_branch,
                     )
                     continue
+                # Test hook (no-op in production): widens the window
+                # between the guards above and the commit/merge/cleanup
+                # mutations below so the cross-process reclaim race is
+                # deterministic under KISS_RACE_DELAY.
+                _race_delay()
                 if GitWorktreeOps.has_uncommitted_changes(wt_dir):
                     # ``commit_all`` stages first; an extra
                     # ``stage_all`` here would run a second full

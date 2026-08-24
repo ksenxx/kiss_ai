@@ -174,17 +174,25 @@ def take_spare(repo: Path) -> tuple[str, Path] | None:
             branch,
         )
         return None
+    ignored = GitWorktreeOps.list_ignored_files(wt_dir)
     if (
         GitWorktreeOps.has_uncommitted_changes(wt_dir)
-        or GitWorktreeOps.list_ignored_files(wt_dir)
+        or ignored is None
+        or ignored
         or not GitWorktreeOps._branch_is_expendable(repo, branch)
     ):
         # A spare is never written to, so content in it means an
         # external writer put something there.  Consuming it would
         # destroy that content (`reset --hard` + `git clean -fdq`),
         # which contradicts the preservation policy the reclaim pass
-        # applies to the very same situation.  Leave the directory
-        # for the reclaim pass to preserve; create inline instead.
+        # applies to the very same situation.  ``ignored is None``
+        # means git could not ENUMERATE the ignored files — fail
+        # closed and treat that exactly like "has content" (the same
+        # semantics ``rescue_ignored_files`` and the reclaim spare
+        # probe apply), because handing out a spare whose contents
+        # cannot be verified could destroy foreign data.  Leave the
+        # directory for the reclaim pass to preserve; create inline
+        # instead.
         logger.warning(
             "Pooled spare worktree %s (branch '%s') has unexpected "
             "content; preserving it and falling back to inline "
@@ -219,21 +227,30 @@ def discard_all() -> None:
             # Same guard the reclaim pass applies to orphaned spares:
             # a spare is never written to, so content in it means an
             # external writer put something there — preserve it for
-            # the reclaim pass to inspect rather than destroy it.  A
+            # the reclaim pass to inspect rather than destroy it.
+            # ``list_ignored_files`` returning ``None`` means git
+            # could not enumerate the ignored files; fail closed and
+            # preserve too, since destroying the worktree could
+            # delete content that was never verified absent.  A
             # spare whose directory is already gone is plumbing only
             # and is always cleaned up.
-            if wt_dir.is_dir() and (
-                GitWorktreeOps.has_uncommitted_changes(wt_dir)
-                or GitWorktreeOps.list_ignored_files(wt_dir)
-                or not GitWorktreeOps._branch_is_expendable(repo, branch)
-            ):
-                logger.warning(
-                    "Pooled spare worktree %s (branch '%s') has "
-                    "unexpected content; preserving instead of "
-                    "discarding",
-                    wt_dir, branch,
-                )
-                continue
+            if wt_dir.is_dir():
+                ignored = GitWorktreeOps.list_ignored_files(wt_dir)
+                if (
+                    GitWorktreeOps.has_uncommitted_changes(wt_dir)
+                    or ignored is None
+                    or ignored
+                    or not GitWorktreeOps._branch_is_expendable(
+                        repo, branch,
+                    )
+                ):
+                    logger.warning(
+                        "Pooled spare worktree %s (branch '%s') has "
+                        "unexpected content; preserving instead of "
+                        "discarding",
+                        wt_dir, branch,
+                    )
+                    continue
             GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
         except Exception:  # pragma: no cover — filesystem teardown race
             logger.warning(
@@ -350,16 +367,31 @@ def prewarm_async(
     if not pool_enabled():
         return None
     key = _repo_key(repo)
-    with _pool_lock:
-        if key in _spares or key in _prewarming:
-            return None
     thread = threading.Thread(
         target=prewarm,
         args=(repo, exclude_branches_fn),
         name=f"worktree-pool-prewarm-{Path(key).name}",
         daemon=True,
     )
+    # Dedup check, thread registration, and start share ONE lock
+    # acquisition: ``_prewarming`` is only populated inside
+    # :func:`prewarm` after its thread starts, so with separate lock
+    # blocks two callers could both pass the check and the second
+    # registration would overwrite the first thread — leaving
+    # :func:`discard_all` joining only the loser while the winner
+    # publishes a spare after the sweep.  A live registered thread is
+    # therefore itself treated as "refill in flight", and ``start()``
+    # happens under the lock so a registered thread is always alive
+    # until its refill has finished (a thread is only "alive" between
+    # ``start()`` and the end of ``run()``).  The started thread
+    # merely blocks on this same lock in :func:`prewarm` until the
+    # block exits; nothing here waits on it, so no deadlock.
     with _pool_lock:
+        if key in _spares or key in _prewarming:
+            return None
+        existing = _refill_threads.get(key)
+        if existing is not None and existing.is_alive():
+            return None
         _refill_threads[key] = thread
-    thread.start()
+        thread.start()
     return thread

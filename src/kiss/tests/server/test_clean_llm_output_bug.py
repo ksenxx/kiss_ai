@@ -24,10 +24,8 @@ quotes are both removed regardless of order.
 
 from __future__ import annotations
 
-from kiss.server.helpers import (
-    clean_llm_output,
-    clip_autocomplete_suggestion,
-)
+from kiss.agents.sorcar.commit_message import clean_llm_output
+from kiss.server.helpers import clip_autocomplete_suggestion
 
 
 class TestCleanLlmOutput:

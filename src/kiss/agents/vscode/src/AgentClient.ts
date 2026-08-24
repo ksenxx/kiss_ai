@@ -4,11 +4,10 @@
 // add your name here
 
 import * as net from 'net';
-import * as path from 'path';
 import {EventEmitter} from 'events';
 import {StringDecoder} from 'string_decoder';
 import {AgentCommand, ToWebviewMessage} from './types';
-import {kissHomeDir} from './userAssets';
+import {sorcarSockPath} from './userAssets';
 
 const MAX_LINE_BUFFER_BYTES = 32 * 1024 * 1024;
 
@@ -60,10 +59,7 @@ export class AgentClient extends EventEmitter {
 
   constructor(sockPath?: string, options: AgentClientOptions = {}) {
     super();
-    this._sockPath =
-      sockPath ??
-      process.env.KISS_SORCAR_SOCK ??
-      path.join(kissHomeDir(), 'sorcar.sock');
+    this._sockPath = sockPath ?? sorcarSockPath();
     this._reconnectBaseMs = options.reconnectBaseMs ?? RECONNECT_BASE_DELAY_MS;
     this._reconnectMaxMs = options.reconnectMaxMs ?? RECONNECT_MAX_DELAY_MS;
     this._pendingTtlMs = options.pendingTtlMs ?? PENDING_SEND_TTL_MS;
@@ -90,7 +86,11 @@ export class AgentClient extends EventEmitter {
       }
       this._connecting = false;
       this._connectedAt = Date.now();
-      this.emit('connect');
+      // Flush the queue BEFORE announcing the connection: a 'connect'
+      // handler immediately writes fresh commands (e.g. getModels), and
+      // if those went out ahead of older queued frames the daemon's
+      // reply to the fresh command could overwrite state a queued
+      // command (e.g. selectModel) was about to change.
       const cutoff = Date.now() - this._pendingTtlMs;
       const pending = this._pendingSends;
       this._pendingSends = [];
@@ -101,6 +101,7 @@ export class AgentClient extends EventEmitter {
         }
         sock.write(item.line);
       }
+      this.emit('connect');
     });
 
     sock.on('data', (data: Buffer) => {

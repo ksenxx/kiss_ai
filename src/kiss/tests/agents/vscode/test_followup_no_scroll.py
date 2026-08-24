@@ -87,25 +87,36 @@ def test_live_followup_suggestion_handler_does_not_call_sb() -> None:
 def test_live_followup_suggestion_handler_still_appends_the_bar() -> None:
     """Sanity: removing sb() must not also remove the actual bar render.
 
-    The case body must still:
-      * create a ``followup-bar`` element,
-      * set its inner HTML containing the ``Suggested next`` label, and
-      * append it to the output area ``O``.
+    The live case builds the bar through the shared ``mkFollowupBar``
+    helper (one construction for the live and replay paths), so the case
+    body must call the helper and append its result to the output area
+    ``O``, and the helper itself must create a ``followup-bar`` element
+    carrying the ``Suggested next`` label.
     """
     src = _read_main_js()
     body = _extract_live_followup_case(src)
 
-    assert "followup-bar" in body, (
-        "Live followup_suggestion handler no longer creates a 'followup-bar' "
-        "element."
-    )
-    assert "Suggested next" in body, (
-        "Live followup_suggestion handler no longer renders the "
-        "'Suggested next' label."
+    assert "mkFollowupBar(" in body, (
+        "Live followup_suggestion handler no longer builds the bar via "
+        "mkFollowupBar()."
     )
     assert re.search(r"O\.appendChild\s*\(", body), (
         "Live followup_suggestion handler no longer appends the bar to the "
         "output area O."
+    )
+
+    helper = re.search(
+        r"function\s+mkFollowupBar\s*\([^)]*\)\s*\{(?P<body>.*?)\n\s*\}",
+        src,
+        re.DOTALL,
+    )
+    assert helper, "mkFollowupBar helper not found in main.js."
+    helper_body = helper.group("body")
+    assert "followup-bar" in helper_body, (
+        "mkFollowupBar no longer creates a 'followup-bar' element."
+    )
+    assert "Suggested next" in helper_body, (
+        "mkFollowupBar no longer renders the 'Suggested next' label."
     )
 
 

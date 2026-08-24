@@ -43,6 +43,7 @@ generator are replaced with deterministic functions.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.commit_message as _commit_message_module
@@ -123,6 +124,20 @@ class _RepoAwareGuardBase(_WorktreeNoAutocommitBase):
             "autoCommit": True,
             "model": "",
         })
+        # Calling ``_run_task_inner`` directly skips ``_run_task``,
+        # whose ``finally`` clears the state's ``task_thread`` when a
+        # real run ends.  ``_resolve_run_state`` registered THIS test
+        # thread as the worker, and it stays alive for the whole test,
+        # so without the same clearing ``_check_worktree_busy``'s
+        # startup-window predicate (``thread_alive()``) would read the
+        # finished run as still pending and refuse every manual
+        # worktree action below.
+        with self.server._state_lock:
+            state = agent_state.find_by_tab(_WT_TAB)
+            if state is not None and (
+                state.task_thread is threading.current_thread()
+            ):
+                state.task_thread = None
 
     def _worktree_results(self) -> list[dict]:
         return [e for e in self.events if e["type"] == "worktree_result"]
