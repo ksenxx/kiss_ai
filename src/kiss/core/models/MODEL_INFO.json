@@ -2711,8 +2711,8 @@
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
     "context_length": 500000,
-    "input_price_per_1M": 0.08,
-    "output_price_per_1M": 0.18,
+    "input_price_per_1M": 0.066,
+    "output_price_per_1M": 0.132,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -2720,8 +2720,8 @@
   },
   "openrouter/deepseek/deepseek-v4-pro": {
     "context_length": 500000,
-    "input_price_per_1M": 0.414,
-    "output_price_per_1M": 0.828,
+    "input_price_per_1M": 0.522,
+    "output_price_per_1M": 1.044,
     "fc": false,
     "emb": false,
     "gen": true
@@ -3003,22 +3003,6 @@
     "emb": false,
     "gen": true
   },
-  "openrouter/inclusionai/ling-2.6-1t": {
-    "context_length": 262144,
-    "input_price_per_1M": 0.075,
-    "output_price_per_1M": 0.625,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
-  "openrouter/inclusionai/ling-2.6-flash": {
-    "context_length": 262144,
-    "input_price_per_1M": 0.01,
-    "output_price_per_1M": 0.03,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
   "openrouter/inclusionai/ling-3.0-flash": {
     "context_length": 262144,
     "input_price_per_1M": 0.021,
@@ -3027,14 +3011,6 @@
     "emb": false,
     "gen": true,
     "comment": "NEW"
-  },
-  "openrouter/inclusionai/ring-2.6-1t": {
-    "context_length": 262144,
-    "input_price_per_1M": 0.075,
-    "output_price_per_1M": 0.625,
-    "fc": true,
-    "emb": false,
-    "gen": true
   },
   "openrouter/kwaipilot/kat-coder-air-v2.5": {
     "context_length": 256000,
@@ -3356,8 +3332,8 @@
   },
   "openrouter/moonshotai/kimi-k2.5": {
     "context_length": 262144,
-    "input_price_per_1M": 0.45,
-    "output_price_per_1M": 2.25,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 3.0,
     "fc": true,
     "emb": false,
     "gen": true
@@ -4331,7 +4307,7 @@
     "gen": true
   },
   "openrouter/qwen/qwen3-235b-a22b-thinking-2507": {
-    "context_length": 262144,
+    "context_length": 131072,
     "input_price_per_1M": 0.23,
     "output_price_per_1M": 2.3,
     "fc": true,
@@ -4532,8 +4508,8 @@
   },
   "openrouter/qwen/qwen3.5-397b-a17b": {
     "context_length": 262144,
-    "input_price_per_1M": 0.39,
-    "output_price_per_1M": 2.34,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 3.6,
     "fc": true,
     "emb": false,
     "gen": true
@@ -4572,8 +4548,8 @@
   },
   "openrouter/qwen/qwen3.6-27b": {
     "context_length": 262144,
-    "input_price_per_1M": 0.6,
-    "output_price_per_1M": 3.6,
+    "input_price_per_1M": 0.32,
+    "output_price_per_1M": 3.2,
     "fc": true,
     "emb": false,
     "gen": true
@@ -5170,8 +5146,8 @@
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.065,
-    "output_price_per_1M": 0.128,
+    "input_price_per_1M": 0.04,
+    "output_price_per_1M": 0.08,
     "fc": true,
     "emb": false,
     "gen": true,
