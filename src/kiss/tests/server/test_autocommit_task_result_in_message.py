@@ -22,10 +22,8 @@ model.
 
 from __future__ import annotations
 
-from kiss.server.helpers import (
-    _append_task_result,
-    generate_commit_message_from_diff,
-)
+from kiss.agents.sorcar.commit_message import _append_task_result
+from kiss.server.helpers import generate_commit_message_from_diff
 from kiss.tests.agents.sorcar.test_autocommit_task_result_in_message import (  # noqa: F401
     _LLMUnavailable,
 )

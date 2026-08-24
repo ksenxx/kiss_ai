@@ -170,27 +170,42 @@ if (sockets.length !== 1) {
 const s = sockets[0];
 s.readyState = FakeWS.OPEN;
 s.onopen && s.onopen();
+// auth_ok arrives while the document is still parsing (jsdom keeps
+// readyState 'loading' until a later macrotask) — the exact ordering
+// that used to lose the daemonStatus dispatch.  The shim queues
+// app-bound events until DOMContentLoaded, so the assertions must run
+// after that flush, just like a real page becomes visible only once
+// the parser finishes.
 s.onmessage && s.onmessage({data: JSON.stringify({type: 'auth_ok'})});
 
-const ov = window.document.getElementById('kiss-server-loading');
-const ap = window.document.getElementById('app');
-if (ov.style.display !== 'none') {
-  console.error('FAIL: overlay still visible after auth_ok:', JSON.stringify(ov.style.display));
-  process.exit(4);
-}
-if (ap.style.display === 'none') {
-  console.error('FAIL: #app still hidden after auth_ok'); process.exit(5);
-}
+function runChecks() {
+  const ov = window.document.getElementById('kiss-server-loading');
+  const ap = window.document.getElementById('app');
+  if (ov.style.display !== 'none') {
+    console.error('FAIL: overlay still visible after auth_ok:', JSON.stringify(ov.style.display));
+    process.exit(4);
+  }
+  if (ap.style.display === 'none') {
+    console.error('FAIL: #app still hidden after auth_ok'); process.exit(5);
+  }
 
-s.readyState = FakeWS.CLOSED;
-s.onclose && s.onclose();
-if (ov.style.display === 'none') {
-  console.error('FAIL: overlay still hidden after socket close'); process.exit(6);
+  s.readyState = FakeWS.CLOSED;
+  s.onclose && s.onclose();
+  if (ov.style.display === 'none') {
+    console.error('FAIL: overlay still hidden after socket close'); process.exit(6);
+  }
+  if (ap.style.display !== 'none') {
+    console.error('FAIL: #app still visible after socket close'); process.exit(7);
+  }
+  console.log('OK');
 }
-if (ap.style.display !== 'none') {
-  console.error('FAIL: #app still visible after socket close'); process.exit(7);
+if (window.document.readyState === 'loading') {
+  window.document.addEventListener('DOMContentLoaded', () => {
+    setImmediate(runChecks);
+  });
+} else {
+  runChecks();
 }
-console.log('OK');
                 """,
                 encoding="utf-8",
             )

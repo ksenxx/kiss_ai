@@ -18,6 +18,7 @@ import {
 } from './daemonHealth';
 import {verifyDaemonStartup} from './daemonRestartVerify';
 import {restartLaunchAgent} from './macLaunchd';
+import {kissHomeDir, sorcarSockPath} from './userAssets';
 import {
   showErrorNotification,
   showInformationNotification,
@@ -26,7 +27,10 @@ import {
 } from './WebviewNotifications';
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '';
-const LOG_DIR = path.join(HOME_DIR, '.kiss');
+// The daemon resolves its state directory from $KISS_HOME (see
+// kiss/core/config.py), so everything the extension shares with it —
+// sockets, config.json, markers, logs — must live under the same root.
+const LOG_DIR = kissHomeDir();
 const LOG_FILE = path.join(LOG_DIR, 'install.log');
 const MIN_PYTHON_MAJOR = 3;
 const MIN_PYTHON_MINOR = 13;
@@ -353,8 +357,11 @@ async function runFinalization(
     installCliScript(kissProjectPath, uvPath);
   }
 
-  installModelInfoJson(kissProjectPath);
-  installMarkdownAssets(kissProjectPath);
+  log(
+    'MODEL_INFO.json and INJECTIONS.md are read directly from the bundled ' +
+      'package; no copies are made into ~/.kiss/ (user overrides live in ' +
+      'MY_MODELS.json and MY_INJECTION.md).',
+  );
 
   if (progress) progress.report({message: 'Checking cloudflared...'});
   await installCloudflaredIfNeeded();
@@ -413,16 +420,18 @@ async function ensureDependenciesImpl(): Promise<void> {
     showErrorNotification(
       'KISS Sorcar: Could not find the KISS project directory. ' +
         'Please set "kissSorcar.kissProjectPath" in VS Code settings. ' +
-        'See ~/.kiss/install.log for details.',
+        `See ${path.join(LOG_DIR, 'install.log')} for details.`,
     );
     return;
   }
   log(`KISS project: ${kissProjectPath}`);
 
   const updateMarker = path.join(LOG_DIR, '.extension-updated');
+  let uvPath = findUvPath();
+  let venvExists = fs.existsSync(path.join(kissProjectPath, '.venv'));
   if (
-    findUvPath() &&
-    fs.existsSync(path.join(kissProjectPath, '.venv')) &&
+    uvPath &&
+    venvExists &&
     isChromiumInstalled() &&
     (await isDaemonRunning()) &&
     !fs.existsSync(updateMarker)
@@ -432,9 +441,6 @@ async function ensureDependenciesImpl(): Promise<void> {
     loadApiKeysFromShellRc();
     return;
   }
-
-  let uvPath = findUvPath();
-  let venvExists = fs.existsSync(path.join(kissProjectPath, '.venv'));
 
   if (uvPath && venvExists) {
     const pyStatus = checkPythonVersion(uvPath, kissProjectPath);
@@ -485,7 +491,8 @@ async function ensureDependenciesImpl(): Promise<void> {
         );
         if (!isChromiumInstalled()) {
           showWarningNotification(
-            'KISS Sorcar: Chromium browser update failed in background. See ~/.kiss/install.log for details.',
+            'KISS Sorcar: Chromium browser update failed in background. ' +
+              `See ${path.join(LOG_DIR, 'install.log')} for details.`,
           );
         }
       });
@@ -904,7 +911,7 @@ async function restartKissWebDaemonLocked(
   try {
     savedFp = fs.readFileSync(fpFile, 'utf-8').trim();
   } catch {}
-  const sockPath = path.join(HOME_DIR, '.kiss', 'sorcar.sock');
+  const sockPath = sorcarSockPath();
 
   const health = await probeDaemonHealth(8787, 1500);
   const sockExists = fs.existsSync(sockPath);
@@ -967,6 +974,19 @@ async function restartKissWebDaemonLocked(
       const xPath = xmlEscape(
         `/opt/homebrew/bin:${binDir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
       );
+      // The daemon resolves its state dir — and the socket it binds —
+      // from $KISS_HOME, so a KISS_HOME visible only to the VS Code
+      // process must reach the launchd service too; otherwise the
+      // extension probes $KISS_HOME/sorcar.sock while the daemon binds
+      // ~/.kiss/sorcar.sock, and every health poll restarts a healthy
+      // daemon.  KISS_SORCAR_SOCK is a client-side override only (the
+      // daemon does not read it), so it is deliberately NOT propagated.
+      const kissHomeEnv = process.env.KISS_HOME || '';
+      const xKissHomeEntry = kissHomeEnv
+        ? `\n        <key>KISS_HOME</key>\n        <string>${xmlEscape(
+            kissHomeEnv,
+          )}</string>`
+        : '';
       const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -993,7 +1013,7 @@ async function restartKissWebDaemonLocked(
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>${xPath}</string>
+        <string>${xPath}</string>${xKissHomeEntry}
     </dict>
 </dict>
 </plist>`;
@@ -1034,6 +1054,15 @@ async function restartKissWebDaemonLocked(
       const uProj = unitEscape(workDir);
       const uPath = unitEscape(`${binDir}:/usr/local/bin:/usr/bin:/bin`);
       const uLogDir = unitEscape(LOG_DIR);
+      // Same KISS_HOME propagation as the launchd plist above: the
+      // daemon binds its socket under $KISS_HOME, so the service must
+      // see the same value the extension host sees.  KISS_SORCAR_SOCK
+      // is a client-side override only (the daemon does not read it),
+      // so it is deliberately NOT propagated.
+      const kissHomeEnv = process.env.KISS_HOME || '';
+      const kissHomeLine = kissHomeEnv
+        ? `Environment=KISS_HOME=${unitEscape(kissHomeEnv)}\n`
+        : '';
       const serviceContent = `[Unit]
 Description=KISS Sorcar Remote Web Server
 After=network-online.target
@@ -1046,7 +1075,7 @@ WorkingDirectory=${uProj}
 Restart=always
 RestartSec=5
 Environment=PATH=${uPath}
-StandardOutput=append:${uLogDir}/kiss-web-stdout.log
+${kissHomeLine}StandardOutput=append:${uLogDir}/kiss-web-stdout.log
 StandardError=append:${uLogDir}/kiss-web-stderr.log
 
 [Install]
@@ -1173,25 +1202,6 @@ function computeKissWebFingerprint(
     );
     return '';
   }
-}
-
-function installMarkdownAssets(kissProjectPath: string): void {
-  void kissProjectPath;
-  if (!HOME_DIR) return;
-  log(
-    'INJECTIONS.md is read directly from the bundled package; ' +
-      'no copy is made into ~/.kiss/ (user tricks live in MY_INJECTION.md).',
-  );
-}
-
-function installModelInfoJson(kissProjectPath: string): void {
-  void kissProjectPath;
-  if (!HOME_DIR) return;
-  log(
-    'MODEL_INFO.json is read directly from the bundled package; no copy is ' +
-      'made into ~/.kiss/ (user model overrides live in MY_MODELS.json, ' +
-      'auto-seeded on first import by kiss.core.models.model_info).',
-  );
 }
 
 function installCliScript(kissProjectPath: string, uvPath: string): void {
@@ -1371,7 +1381,7 @@ function playwrightBrowsersPath(): string {
 
 async function isDaemonRunning(): Promise<boolean> {
   if (process.platform === 'win32') return false;
-  const sockPath = path.join(HOME_DIR, '.kiss', 'sorcar.sock');
+  const sockPath = sorcarSockPath();
   for (let attempt = 0; attempt < 3; attempt++) {
     const health = await probeDaemonHealth(8787);
     if (health === 'alive' && fs.existsSync(sockPath)) return true;
@@ -1958,7 +1968,18 @@ function loadApiKeysFromShellRc(): void {
   }
 }
 
-async function ensureApiKeys(): Promise<boolean> {
+// Prompt-then-save of an API key is a read-modify-write of the shell rc
+// shared by every window, so it reuses the restart-lock pattern: the
+// file is exclusively created, stamped with pid+token, and broken only
+// when its owner is provably gone (see acquireDaemonRestartLock).
+const API_KEYS_LOCK_FILE = path.join(LOG_DIR, '.api-keys.lock');
+// How long a window without the lock waits for the prompting window to
+// finish before giving up and reporting whatever keys exist by then.
+const API_KEYS_LOCK_WAIT_MS = 600_000;
+
+export async function ensureApiKeys(
+  lockFile: string = API_KEYS_LOCK_FILE,
+): Promise<boolean> {
   loadApiKeysFromShellRc();
 
   const keys = [
@@ -1981,47 +2002,74 @@ async function ensureApiKeys(): Promise<boolean> {
 
   if (hasAnyKey()) return true;
 
-  const markerPath = path.join(LOG_DIR, '.api-keys-prompted');
-  const alreadyPrompted = fs.existsSync(markerPath);
-  const rcPath = getShellRcPath();
+  const releaseLock = acquireDaemonRestartLock(lockFile);
+  if (!releaseLock) {
+    // Another window is already prompting. Prompting here too would
+    // race it: both windows would read the same shell rc, each append
+    // its own key line, and the second write would drop the first.
+    // Wait for that window to finish, then use whatever it saved.
+    log('another window is prompting for API keys — waiting for it');
+    const deadline = Date.now() + API_KEYS_LOCK_WAIT_MS;
+    while (fs.existsSync(lockFile) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    loadApiKeysFromShellRc();
+    return hasAnyKey();
+  }
+  try {
+    // Re-check under the lock: the window that held it before us may
+    // have saved a key while we were waiting to create the lock file.
+    loadApiKeysFromShellRc();
+    if (hasAnyKey()) return true;
 
-  while (true) {
-    for (const {envName, displayName, placeholder, validate} of keys) {
-      if (process.env[envName]) continue;
-      if (hasAnyKey() && alreadyPrompted) break;
+    const markerPath = path.join(LOG_DIR, '.api-keys-prompted');
+    const alreadyPrompted = fs.existsSync(markerPath);
+    const rcPath = getShellRcPath();
 
-      const key = await promptForApiKey(
-        displayName,
-        placeholder,
-        validate,
-        true,
-      );
-      if (key) {
-        process.env[envName] = key;
-        addToShellRc(rcPath, envName, key);
-        log(`${displayName} saved to ~/${path.basename(rcPath)}`);
+    while (true) {
+      for (const {envName, displayName, placeholder, validate} of keys) {
+        // A prompt can sit open for minutes; keys saved elsewhere in
+        // the meantime (e.g. by `sorcar` in a terminal) make the
+        // remaining prompts unnecessary, so re-read before each one.
+        loadApiKeysFromShellRc();
+        if (process.env[envName]) continue;
+        if (hasAnyKey() && alreadyPrompted) break;
+
+        const key = await promptForApiKey(
+          displayName,
+          placeholder,
+          validate,
+          true,
+        );
+        if (key) {
+          process.env[envName] = key;
+          addToShellRc(rcPath, envName, key);
+          log(`${displayName} saved to ~/${path.basename(rcPath)}`);
+        }
       }
+
+      if (hasAnyKey()) break;
+
+      const choice = await showWarningNotification(
+        'KISS Sorcar requires Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY to work.',
+        'Enter Key',
+        'Skip',
+      );
+      if (choice !== 'Enter Key') break;
     }
 
-    if (hasAnyKey()) break;
+    if (!alreadyPrompted) {
+      try {
+        fs.mkdirSync(LOG_DIR, {recursive: true});
+        fs.writeFileSync(markerPath, new Date().toISOString() + '\n');
+        log('API key prompt marker written');
+      } catch {}
+    }
 
-    const choice = await showWarningNotification(
-      'KISS Sorcar requires Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY to work.',
-      'Enter Key',
-      'Skip',
-    );
-    if (choice !== 'Enter Key') break;
+    return hasAnyKey();
+  } finally {
+    releaseLock();
   }
-
-  if (!alreadyPrompted) {
-    try {
-      fs.mkdirSync(LOG_DIR, {recursive: true});
-      fs.writeFileSync(markerPath, new Date().toISOString() + '\n');
-      log('API key prompt marker written');
-    } catch {}
-  }
-
-  return hasAnyKey();
 }
 
 function readKissConfigOnce():
@@ -2157,5 +2205,5 @@ async function ensureRemotePassword(): Promise<void> {
   const cfg = readKissConfig();
   cfg['remote_password'] = password.trim();
   writeKissConfig(cfg);
-  log('Remote access password saved to ~/.kiss/config.json');
+  log(`Remote access password saved to ${path.join(LOG_DIR, 'config.json')}`);
 }

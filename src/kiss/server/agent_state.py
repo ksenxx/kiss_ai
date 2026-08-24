@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import queue
 import threading
-from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -257,13 +256,11 @@ def find_by_agent(agent: object) -> AgentState | None:
 
 
 def snapshot() -> list[AgentState]:
-    """Return a stable snapshot of every registered state."""
+    """Return a stable snapshot of every registered state.
+
+    Each state carries its registry key as ``state.task_id``, so
+    callers that need ``(task_id, state)`` pairs read it off the
+    snapshot directly.
+    """
     with STATE_LOCK:
         return list(agent_states.values())
-
-
-def iter_items() -> Iterator[tuple[str, AgentState]]:
-    """Yield ``(task_id, state)`` pairs from a locked snapshot."""
-    with STATE_LOCK:
-        items = list(agent_states.items())
-    return iter(items)

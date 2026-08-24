@@ -81,8 +81,15 @@ while not Path(ready_file).exists() and time.monotonic() < deadline:
 
 server._install_signal_handlers()
 
-print("READY", flush=True)
+# READY is printed INSIDE the try: the parent sends the first SIGTERM
+# the instant it reads the line, so under load the KeyboardInterrupt
+# can arrive in the gap right after print() returns — before a
+# try-block placed below it would be entered — and escape as an
+# unhandled traceback (observed under a 30-way parallel test run).
+# The parent only signals after the flushed line was read, so the
+# print itself always completes its write first.
 try:
+    print("READY", flush=True)
     while True:
         time.sleep(3600)
 except KeyboardInterrupt:

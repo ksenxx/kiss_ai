@@ -24,6 +24,13 @@ function readShimJs() {
 
 function evalShim(window, shimJs) {
   window.eval(shimJs + '\n//# sourceURL=ws-shim.js');
+  // The shim defers app-bound dispatches until the parser finishes
+  // (DOMContentLoaded) so none are lost while main.js is still being
+  // fetched; jsdom keeps readyState 'loading' until a later macrotask,
+  // so fire it now to switch the shim to direct dispatch.
+  window.document.dispatchEvent(
+    new window.Event('DOMContentLoaded', {bubbles: true}),
+  );
 }
 
 function ok(msg) {
@@ -660,6 +667,57 @@ async function run() {
       ok('missing retry_after defaults to a 60s wait; no msg node is fine');
     } catch (err) {
       fail('invalid retry_after handling broken', err);
+    }
+    window.close();
+  }
+
+  {
+    // App-bound events produced while the document is still parsing
+    // (before main.js's message listener exists) must be queued and
+    // flushed at DOMContentLoaded, not lost.  The lost dispatch left
+    // the "KISS Sorcar Server is starting ..." overlay up forever
+    // whenever auth_ok beat the main.js fetch.
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    // Eval the shim WITHOUT the parser-finished simulation: jsdom
+    // keeps readyState 'loading' here, exactly like a real page whose
+    // later body scripts are still being fetched.
+    window.eval(shimJs + '\n//# sourceURL=ws-shim.js');
+    const sock = sockets[0];
+    sock.fireOpen();
+    sock.fireMessage({type: 'auth_ok'});
+
+    const overlay = window.document.getElementById('kiss-server-loading');
+    const app = window.document.getElementById('app');
+    try {
+      assert.ok(
+        isVisible(overlay),
+        'pre-DOMContentLoaded daemonStatus must be queued, not dispatched',
+      );
+      window.document.dispatchEvent(
+        new window.Event('DOMContentLoaded', {bubbles: true}),
+      );
+      assert.ok(
+        !isVisible(overlay),
+        'DOMContentLoaded must flush the queued daemonStatus (overlay off)',
+      );
+      assert.ok(isVisible(app), '#app revealed by the flushed daemonStatus');
+      // After the flush the queue is retired: later events dispatch
+      // directly (and a second DOMContentLoaded is a no-op).
+      window.document.dispatchEvent(
+        new window.Event('DOMContentLoaded', {bubbles: true}),
+      );
+      sock.fireClose();
+      assert.ok(
+        isVisible(overlay),
+        'post-flush events must dispatch immediately (overlay re-shown)',
+      );
+      ok('parse-time events are queued and flushed at DOMContentLoaded');
+    } catch (err) {
+      fail('pre-parse event queueing broken', err);
     }
     window.close();
   }

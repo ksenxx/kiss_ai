@@ -60,6 +60,35 @@ ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
 ]
 
 
+def inject_keyboard_interrupt(tid: int) -> int:
+    """Raise ``KeyboardInterrupt`` asynchronously in thread *tid*.
+
+    Single shared wrapper around ``PyThreadState_SetAsyncExc`` (C-R5)
+    used by :meth:`_TaskRunnerMixin._force_stop_thread` and the
+    shutdown path in ``RemoteAccessServer._stop_active_agent_tasks``.
+    When the call reports the exception was set in more than one
+    thread state (``rc > 1``), the injection is undone as CPython's
+    documentation requires.
+
+    Args:
+        tid: The target thread's ``ident``.
+
+    Returns:
+        The number of thread states modified: ``0`` when *tid* no
+        longer names a live thread, ``1`` on success (values above 1
+        have already been rolled back here).
+    """
+    rc = int(
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(tid),
+            ctypes.py_object(KeyboardInterrupt),
+        )
+    )
+    if rc > 1:  # pragma: no cover — rare: exception set in multiple states
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(tid), None)
+    return rc
+
+
 def _state_owns_thread(
     state: AgentState,
     thread: threading.Thread,
@@ -444,84 +473,93 @@ class _TaskRunnerMixin:
 
         An outer try/finally guarantees that ``status: running: False``
         is **always** broadcast when this method exits, regardless of
-        which code-path is taken.
+        which code-path is taken.  The ENTIRE body runs inside it
+        (C-RC2): the agent-script override executes untrusted user
+        code of unbounded duration, so ``_stop_task``'s watchdog can
+        inject a ``KeyboardInterrupt`` before the run reaches the
+        status broadcast; unwinding outside the try/finally would skip
+        clearing ``state.task_thread`` and the ``running=False``
+        broadcast, bricking the tab (``_cmd_run`` queues instead of
+        running while ``task_thread`` is set) until a daemon restart.
         """
         tab_id = cmd.get("tabId", "")
         start_ms = int(time.time() * 1000)
         cmd["_start_ms"] = start_ms
-        # Agent-script overrides (wire field ``agentPath``) rewrite the
-        # run command's parameter fields, so they run FIRST — before
-        # any field is read, including the ``chatId`` that
-        # ``_resolve_run_state`` below consumes.  The script is
-        # untrusted user code, so it executes here on the task's worker
-        # thread (like a tools file), never on the dispatch loop.  A
-        # broken script must still fail the task with the
-        # status-running → result → status-end guarantees of the try
-        # below, so the raise is deferred until after the start status.
-        agent_file_error: AgentFileError | None = None
-        overridden_fields: set[str] = set()
+        state: AgentState | None = None
+        client_task_id = ""
         try:
-            overridden_fields = apply_agent_overrides(cmd)
-        except AgentFileError as exc:
-            agent_file_error = exc
-        client_task_id = _client_task_id_of(cmd)
-        # Capture the state OBJECT up front: the printer bridge re-keys
-        # it to the persisted task id mid-run, so a key lookup in the
-        # finally below would miss and skip the end-of-run cleanup.
-        state = self._resolve_run_state(cmd)
-        # The dispatch handler fixed ``state.chat_id`` from the
-        # client-sent ``chatId`` before this thread started, so a
-        # ``get_chat_id()`` override must be re-applied to the state —
-        # ``_run_task_inner`` binds the agent's chat from it.  Gated on
-        # the OVERRIDDEN set: without a ``get_chat_id()`` getter the
-        # state's chat id (possibly carried over from the tab's
-        # previous run) must stay untouched.
-        if overridden_fields & {"chatId", "prompt", "workDir"}:
-            override_chat_id: str | None = None
-            if "chatId" in overridden_fields:
-                # An empty override means "fresh chat" — mint the id
-                # here, exactly like the dispatch handler does for an
-                # empty client-sent ``chatId``, so the announced and
-                # the persisted chat agree.
-                override_chat_id = (
-                    str(cmd["chatId"] or "") or uuid.uuid4().hex
+            # Agent-script overrides (wire field ``agentPath``) rewrite the
+            # run command's parameter fields, so they run FIRST — before
+            # any field is read, including the ``chatId`` that
+            # ``_resolve_run_state`` below consumes.  The script is
+            # untrusted user code, so it executes here on the task's worker
+            # thread (like a tools file), never on the dispatch loop.  A
+            # broken script must still fail the task with the
+            # status-running → result → status-end guarantees of the try
+            # below, so the raise is deferred until after the start status.
+            agent_file_error: AgentFileError | None = None
+            overridden_fields: set[str] = set()
+            try:
+                overridden_fields = apply_agent_overrides(cmd)
+            except AgentFileError as exc:
+                agent_file_error = exc
+            client_task_id = _client_task_id_of(cmd)
+            # Capture the state OBJECT up front: the printer bridge re-keys
+            # it to the persisted task id mid-run, so a key lookup in the
+            # finally below would miss and skip the end-of-run cleanup.
+            state = self._resolve_run_state(cmd)
+            # The dispatch handler fixed ``state.chat_id`` from the
+            # client-sent ``chatId`` before this thread started, so a
+            # ``get_chat_id()`` override must be re-applied to the state —
+            # ``_run_task_inner`` binds the agent's chat from it.  Gated on
+            # the OVERRIDDEN set: without a ``get_chat_id()`` getter the
+            # state's chat id (possibly carried over from the tab's
+            # previous run) must stay untouched.
+            if overridden_fields & {"chatId", "prompt", "workDir"}:
+                override_chat_id: str | None = None
+                if "chatId" in overridden_fields:
+                    # An empty override means "fresh chat" — mint the id
+                    # here, exactly like the dispatch handler does for an
+                    # empty client-sent ``chatId``, so the announced and
+                    # the persisted chat agree.
+                    override_chat_id = (
+                        str(cmd["chatId"] or "") or uuid.uuid4().hex
+                    )
+                    state.chat_id = override_chat_id
+                    with self._state_lock:
+                        self._tab_chat_views[tab_id] = override_chat_id
+                # The dispatch handler already PINNED the tab's registry
+                # entry (chat, title, work dir) from the client-sent
+                # command, so re-pin whatever the script changed.
+                self._registry_update_tab(
+                    tab_id,
+                    chat_id=override_chat_id,
+                    title=(
+                        cmd["prompt"] if "prompt" in overridden_fields
+                        else None
+                    ),
+                    work_dir=(
+                        # ``TabRegistry.update_tab`` keeps the current
+                        # value for an empty work dir, so an empty override
+                        # (meaning "the daemon's default") must be pinned
+                        # as the EFFECTIVE directory the run uses.
+                        (cmd["workDir"] or self.work_dir)
+                        if "workDir" in overridden_fields
+                        else None
+                    ),
                 )
-                state.chat_id = override_chat_id
-                with self._state_lock:
-                    self._tab_chat_views[tab_id] = override_chat_id
-            # The dispatch handler already PINNED the tab's registry
-            # entry (chat, title, work dir) from the client-sent
-            # command, so re-pin whatever the script changed.
-            self._registry_update_tab(
-                tab_id,
-                chat_id=override_chat_id,
-                title=(
-                    cmd["prompt"] if "prompt" in overridden_fields
-                    else None
-                ),
-                work_dir=(
-                    # ``TabRegistry.update_tab`` keeps the current
-                    # value for an empty work dir, so an empty override
-                    # (meaning "the daemon's default") must be pinned
-                    # as the EFFECTIVE directory the run uses.
-                    (cmd["workDir"] or self.work_dir)
-                    if "workDir" in overridden_fields
-                    else None
-                ),
-            )
-            if override_chat_id is not None:
-                # The dispatch handler also already ANNOUNCED the tab's
-                # chat — a ``clear`` event carrying the pre-override
-                # chat id — so every client tracking the run's chat
-                # from that event (e.g. ``kiss.server.sorcar.run``)
-                # would report a chat this run never touches.
-                # Re-announce the overridden one.
-                self.printer.broadcast({
-                    "type": "clear",
-                    "chat_id": override_chat_id,
-                    "tabId": tab_id,
-                })
-        try:
+                if override_chat_id is not None:
+                    # The dispatch handler also already ANNOUNCED the tab's
+                    # chat — a ``clear`` event carrying the pre-override
+                    # chat id — so every client tracking the run's chat
+                    # from that event (e.g. ``kiss.server.sorcar.run``)
+                    # would report a chat this run never touches.
+                    # Re-announce the overridden one.
+                    self.printer.broadcast({
+                        "type": "clear",
+                        "chat_id": override_chat_id,
+                        "tabId": tab_id,
+                    })
             status_start: dict[str, Any] = {
                 "type": "status",
                 "running": True,
@@ -557,6 +595,16 @@ class _TaskRunnerMixin:
                 }
             )
         finally:
+            if state is None:
+                # The interrupt (or an override crash) landed before
+                # the state was resolved above.  ``_cmd_run`` already
+                # registered the state (keyed by ``cmd["_state_key"]``)
+                # with ``task_thread`` installed, so it MUST still be
+                # cleaned up here; re-resolving is safe because the
+                # printer bridge only re-keys states mid-run, which
+                # this run never reached.
+                with suppress(BaseException):
+                    state = self._resolve_run_state(cmd)
             with self._state_lock:
                 task_id_for_end: str | None = None
                 if state is not None:
@@ -663,9 +711,15 @@ class _TaskRunnerMixin:
                 continue
             with self._state_lock:
                 viewer_state = agent_state.find_by_tab(viewer_tab_id)
+                # ``busy()``, not ``is_task_active`` (C-RC1): the
+                # worker raises the flag only after its thread starts
+                # (S3-05), so a viewer whose OWN task is in that
+                # startup window would otherwise receive a spurious
+                # ``running=False`` for its fresh task and its
+                # composer would re-enable mid-run.
                 if (
                     viewer_state is not None
-                    and viewer_state.is_task_active
+                    and viewer_state.busy()
                     and viewer_state.task_id != task_key
                 ):
                     continue
@@ -1150,29 +1204,19 @@ class _TaskRunnerMixin:
                     )
                     state.last_result_summary = result_summary
                 if subtask_failed:
-                    tokens_delta, cost_delta, steps_delta = self._subtask_metric_deltas(
-                        agent,
-                        sub_tokens_base,
-                        sub_cost_base,
-                        sub_steps_base,
-                    )
                     already_broadcast = bool(
                         getattr(subtask_exc, "terminal_result_broadcast", False)
                     )
                     if not already_broadcast:
-                        failure_result: dict[str, Any] = {
-                            "type": "result",
-                            "text": result_summary,
-                            "success": False,
-                            "total_tokens": tokens_delta,
-                            "cost": f"${cost_delta:.4f}",
-                            "step_count": steps_delta,
-                        }
-                        if task_history_id:
-                            failure_result["taskId"] = str(task_history_id)
-                        else:
-                            failure_result["tabId"] = tab_id
-                        self.printer.broadcast(failure_result)
+                        self._broadcast_failure_result(
+                            agent=agent,
+                            result_summary=result_summary,
+                            task_history_id=task_history_id,
+                            tab_id=tab_id,
+                            sub_tokens_base=sub_tokens_base,
+                            sub_cost_base=sub_cost_base,
+                            sub_steps_base=sub_steps_base,
+                        )
                     break
                 if subtask_index < len(subtasks) - 1:
                     # _persist_subtask_row's cleanup_task frees this
@@ -1212,25 +1256,15 @@ class _TaskRunnerMixin:
             else:
                 task_end_event = task_end_event or {"type": "task_stopped"}
             state.last_result_summary = result_summary
-            tokens_delta, cost_delta, steps_delta = self._subtask_metric_deltas(
-                agent,
-                sub_tokens_base,
-                sub_cost_base,
-                sub_steps_base,
+            self._broadcast_failure_result(
+                agent=agent,
+                result_summary=result_summary,
+                task_history_id=task_history_id,
+                tab_id=tab_id,
+                sub_tokens_base=sub_tokens_base,
+                sub_cost_base=sub_cost_base,
+                sub_steps_base=sub_steps_base,
             )
-            outer_failure_result: dict[str, Any] = {
-                "type": "result",
-                "text": result_summary,
-                "success": False,
-                "total_tokens": tokens_delta,
-                "cost": f"${cost_delta:.4f}",
-                "step_count": steps_delta,
-            }
-            if task_history_id:
-                outer_failure_result["taskId"] = str(task_history_id)
-            else:
-                outer_failure_result["tabId"] = tab_id
-            self.printer.broadcast(outer_failure_result)
         finally:
             end_event_broadcast = False
             try:
@@ -1283,47 +1317,30 @@ class _TaskRunnerMixin:
                             state.is_running_non_wt = False
                             state.non_wt_repo_root = None
                 assert task_end_event is not None
-                _append_chat_event(
-                    task_end_event,
-                    task_id=task_history_id,
-                    task=prompt,
-                )
-                _save_task_result(
-                    result=result_summary,
-                    task_id=task_history_id,
-                    task=prompt,
-                )
-                logger.info(
-                    "Task result persisted: task_id=%s result=%r",
-                    task_history_id,
-                    result_summary[:200],
-                )
-                from kiss.core._version import __version__
-
                 end_ms = int(time.time() * 1000)
-                tokens_delta, cost_delta, steps_delta = self._subtask_metric_deltas(
-                    agent,
-                    sub_tokens_base,
-                    sub_cost_base,
-                    sub_steps_base,
-                )
-                _save_task_extra(
-                    build_task_extra_payload(
-                        model=model,
-                        work_dir=work_dir,
-                        version=__version__,
-                        tokens=tokens_delta,
-                        cost=round(cost_delta, 6),
-                        steps=steps_delta,
-                        is_parallel=state.use_parallel,
-                        is_worktree=use_worktree,
-                        auto_commit_mode=state.auto_commit_mode,
-                        start_ms=sub_start_ms,
-                        end_ms=end_ms,
-                    ),
+                # One shared persistence body with the per-subtask
+                # path (C-R2).  ``cleanup=False``: this finally
+                # releases the printer's persist-agent itself, below,
+                # after the terminal broadcast (S3-08).
+                # ``reraise=True``: the interrupted-cleanup handler of
+                # this try decides what still runs on failure.
+                self._persist_subtask_row(
+                    state,
                     task_id=task_history_id,
+                    task_prompt=prompt,
+                    result_summary=result_summary,
+                    model=model,
+                    work_dir=work_dir,
+                    use_worktree=use_worktree,
+                    sub_start_ms=sub_start_ms,
+                    sub_tokens_base=sub_tokens_base,
+                    sub_cost_base=sub_cost_base,
+                    sub_steps_base=sub_steps_base,
+                    end_event=task_end_event,
+                    end_ms=end_ms,
+                    cleanup=False,
+                    reraise=True,
                 )
-                self.printer.broadcast({"type": "tasks_updated"})
                 if use_worktree and getattr(agent, "_wt_pending", False):
                     if task_failed:
                         agent._pending_review = True
@@ -1480,20 +1497,29 @@ class _TaskRunnerMixin:
         sub_tokens_base: int,
         sub_cost_base: float,
         sub_steps_base: int,
+        end_event: dict[str, Any] | None = None,
+        end_ms: int | None = None,
+        cleanup: bool = True,
+        reraise: bool = False,
     ) -> None:
-        """Persist a completed (non-final) subtask's own history row.
+        """Persist a completed subtask's (or the final run's) history row.
 
         W2-F2: a multi-``<task>`` prompt runs ``tab.agent.run`` once
         per subtask and each run allocates its OWN ``task_history``
         row (with ``_skip_persistence=True`` suppressing the agent's
-        internal result save).  The task-level cleanup ``finally`` in
-        :meth:`_run_task_inner` persists only the LAST subtask's row,
-        so every earlier row must be completed here, right after its
-        subtask succeeds: end event, result summary, and the ``extra``
-        payload with per-subtask metric deltas and timestamps.
+        internal result save).  Persists the end event, result
+        summary, and the ``extra`` payload with per-subtask metric
+        deltas and timestamps, then broadcasts ``tasks_updated``.
 
-        Failures are logged and swallowed — a persistence hiccup for
-        one subtask must not abort the remaining subtasks.
+        The task-level cleanup ``finally`` in :meth:`_run_task_inner`
+        shares this body for the LAST subtask's row (C-R2), with
+        ``end_event`` carrying the run's real lifecycle event,
+        ``cleanup=False`` (the finally releases the printer's
+        persist-agent itself, after the terminal broadcast) and
+        ``reraise=True`` (its own interrupted-cleanup handler decides
+        what still runs).  In the default (non-final) mode failures
+        are logged and swallowed — a persistence hiccup for one
+        subtask must not abort the remaining subtasks.
 
         Args:
             state: The owning agent state.
@@ -1508,12 +1534,25 @@ class _TaskRunnerMixin:
             sub_tokens_base: Agent token counter before the subtask.
             sub_cost_base: Agent budget counter before the subtask.
             sub_steps_base: Agent step counter before the subtask.
+            end_event: The chat end event to append; defaults to
+                ``{"type": "task_done"}`` (a non-final subtask only
+                gets here when it succeeded).
+            end_ms: End timestamp (ms epoch) for the ``extra``
+                payload; defaults to now.
+            cleanup: Release the printer's per-task resources via
+                ``cleanup_task`` after persisting.
+            reraise: Propagate persistence errors instead of logging
+                and swallowing them.
+
+        Raises:
+            Exception: Whatever persistence raised, when *reraise* is
+                true.
         """
         try:
             from kiss.core._version import __version__
 
             _append_chat_event(
-                {"type": "task_done"},
+                end_event if end_event is not None else {"type": "task_done"},
                 task_id=task_id,
                 task=task_prompt,
             )
@@ -1540,19 +1579,24 @@ class _TaskRunnerMixin:
                     is_worktree=use_worktree,
                     auto_commit_mode=state.auto_commit_mode,
                     start_ms=sub_start_ms,
-                    end_ms=int(time.time() * 1000),
+                    end_ms=(
+                        end_ms if end_ms is not None
+                        else int(time.time() * 1000)
+                    ),
                 ),
                 task_id=task_id,
             )
             self.printer.broadcast({"type": "tasks_updated"})
-            if task_id is not None:
+            if cleanup and task_id is not None:
                 self.printer.cleanup_task(task_id)
             logger.info(
-                "Subtask result persisted: task_id=%s result=%r",
+                "Task result persisted: task_id=%s result=%r",
                 task_id,
                 result_summary[:200],
             )
         except Exception:
+            if reraise:
+                raise
             logger.warning(
                 "Failed to persist subtask row: task_id=%s",
                 task_id,
@@ -1605,6 +1649,56 @@ class _TaskRunnerMixin:
             int(getattr(agent, "total_steps", 0) or 0) - steps_base,
         ) or int(getattr(agent, "step_count", 0) or 0)
         return tokens, cost, steps
+
+    def _broadcast_failure_result(
+        self,
+        *,
+        agent: object,
+        result_summary: str,
+        task_history_id: str | None,
+        tab_id: str,
+        sub_tokens_base: int,
+        sub_cost_base: float,
+        sub_steps_base: int,
+    ) -> None:
+        """Broadcast a failed run's terminal ``result`` event.
+
+        Single shared body (C-R3) of the per-subtask failure path and
+        the outer catch-all in :meth:`_run_task_inner`.  Metrics are
+        the failed subtask's own consumption deltas.  The event is
+        addressed by task id when one was allocated — so it reaches
+        every viewer tab subscribed to the task — and falls back to
+        the launcher tab id otherwise.
+
+        Args:
+            agent: The (possibly ``None``) agent to read counters from.
+            result_summary: The failure text shown to the user.
+            task_history_id: The failed run's ``task_history`` row id,
+                or ``None``/empty when none was allocated.
+            tab_id: The launcher tab, used when no task id exists.
+            sub_tokens_base: ``total_tokens_used`` before the subtask.
+            sub_cost_base: ``budget_used`` before the subtask.
+            sub_steps_base: ``total_steps`` before the subtask.
+        """
+        tokens_delta, cost_delta, steps_delta = self._subtask_metric_deltas(
+            agent,
+            sub_tokens_base,
+            sub_cost_base,
+            sub_steps_base,
+        )
+        failure_result: dict[str, Any] = {
+            "type": "result",
+            "text": result_summary,
+            "success": False,
+            "total_tokens": tokens_delta,
+            "cost": f"${cost_delta:.4f}",
+            "step_count": steps_delta,
+        }
+        if task_history_id:
+            failure_result["taskId"] = str(task_history_id)
+        else:
+            failure_result["tabId"] = tab_id
+        self.printer.broadcast(failure_result)
 
     @staticmethod
     def _cancel_outcome(
@@ -1691,7 +1785,13 @@ class _TaskRunnerMixin:
                 if viewed_chat_id != chat_id or viewer_tab_id == source_tab_id:
                     continue
                 viewer_state = agent_state.find_by_tab(viewer_tab_id)
-                if viewer_state is not None and viewer_state.is_task_active:
+                # ``busy()``, not ``is_task_active`` (C-RC1): the
+                # worker raises the flag only after its thread starts
+                # (S3-05), so a tab whose OWN task is in that startup
+                # window would otherwise be subscribed to this OTHER
+                # task's stream — its replayed content cleared and its
+                # status hijacked by a task it never launched.
+                if viewer_state is not None and viewer_state.busy():
                     continue
                 viewers.append(viewer_tab_id)
         for viewer_tab_id in viewers:
@@ -1882,14 +1982,9 @@ class _TaskRunnerMixin:
                 with agent_state.STATE_LOCK:
                     if still_owns is not None and not still_owns():
                         return
-                    rc = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-                        ctypes.c_ulong(tid),
-                        ctypes.py_object(KeyboardInterrupt),
-                    )
+                    rc = inject_keyboard_interrupt(tid)
                 if rc == 0:
                     return
-                if rc > 1:  # pragma: no cover — rare: exception set in multiple states
-                    ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(tid), None)
             task_thread.join(timeout=5)
 
     def _await_user_response(

@@ -25,7 +25,6 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from openai import OpenAI
 from openai.resources.responses import Responses
 from openai.types.responses import response_create_params
 
@@ -35,23 +34,17 @@ from kiss.core.models.model import (
     Attachment,
     ThinkingCallback,
     TokenCallback,
+    _audio_mime_to_format,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
     accepted_request_params,
-)
-from kiss.core.models.model import Model as Model
-from kiss.core.models.openai_compatible_model import (
-    DEEPSEEK_REASONING_MODELS as DEEPSEEK_REASONING_MODELS,
 )
 from kiss.core.models.openai_compatible_model import (
     OPENAI_INPUT_AUDIO_FORMATS,
     OPENAI_INPUT_IMAGE_MIME_TYPES,
     OpenAICompatibleBase,
     OpenAICompatibleModel,
-    _audio_mime_to_format,
     _extract_deepseek_reasoning,
-    _model_thinking_level,
-    _provider_model_name,
 )
 from kiss.core.models.stream_abort import stop_aware_events
 
@@ -102,37 +95,15 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         """
         super().__init__(
             model_name,
+            base_url,
+            api_key,
             model_config=model_config,
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-        self.base_url = base_url
-        self.api_key = api_key
         self._pending_function_calls: list[dict[str, str]] = []
         self._last_stream_item_indexes: dict[str, int] = {}
         self._last_stream_message_output_index: int | None = None
-        self._api_model_name = _provider_model_name(model_name)
-        thinking_level = _model_thinking_level(self.model_name)
-        reasoning_cfg = self.model_config.get("reasoning")
-        has_native_effort = (
-            isinstance(reasoning_cfg, dict) and "effort" in reasoning_cfg
-        )
-        if (
-            thinking_level is not None
-            and "reasoning_effort" not in self.model_config
-            and not has_native_effort
-        ):
-            self.model_config = dict(self.model_config)
-            self.model_config["reasoning_effort"] = thinking_level
-
-    def __str__(self) -> str:
-        """Return a debug string showing the class, model and endpoint."""
-        return (
-            f"{self.__class__.__name__}"
-            f"(name={self.model_name}, base_url={self.base_url})"
-        )
-
-    __repr__ = __str__
 
     def initialize(
         self, prompt: str, attachments: list[Attachment] | None = None
@@ -162,26 +133,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     "content": [{"type": "input_text", "text": prompt}],
                 }
             )
-
-    def _ensure_client(self) -> None:
-        """Build the SDK client once, so its connection pool is reused.
-
-        ``initialize()`` used to be the only place a client was built,
-        and the delegated tool-calling transport called it before every
-        single agent step — a 100-step run therefore built 100 ``OpenAI``
-        clients and 100 httpx connection pools, each paying a fresh TLS
-        handshake while the previous pool waited on the garbage
-        collector.
-        """
-        if self.client is not None:
-            return
-        extra_headers = self.model_config.get("extra_headers") or {}
-        self.client = OpenAI(
-            base_url=self.base_url,
-            api_key=self.api_key,
-            timeout=1800.0,
-            default_headers=extra_headers,
-        )
 
     def _reset_stream_indexes(self) -> None:
         """Forget the item ordering learned from the previous streamed turn."""
@@ -1120,28 +1071,18 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
     def _unanswered_function_calls_from_conversation(self) -> list[str]:
         """Return ``call_id`` of every prior ``function_call`` lacking an output.
 
-        Scans ``self.conversation`` in order; for each
-        ``function_call`` item, expects a later
-        ``function_call_output`` with a matching ``call_id``.
+        Thin id-only view over
+        :meth:`_unanswered_function_calls_from_conversation_with_names`,
+        which owns the single scanning loop.
 
         Returns:
             ``call_id`` strings of unanswered function_calls, in
             declaration order.
         """
-        outstanding: list[str] = []
-        for item in self.conversation:
-            if not isinstance(item, dict):
-                continue
-            itype = item.get("type")
-            if itype == "function_call":
-                call_id = str(item.get("call_id", "") or "")
-                if call_id:
-                    outstanding.append(call_id)
-            elif itype == "function_call_output":
-                call_id = str(item.get("call_id", "") or "")
-                if call_id in outstanding:
-                    outstanding.remove(call_id)
-        return outstanding
+        return [
+            pending["call_id"]
+            for pending in self._unanswered_function_calls_from_conversation_with_names()
+        ]
 
     def _ensure_no_pending_function_calls(self) -> None:
         """Reject new generations while prior ``function_call`` outputs are pending.
@@ -2492,31 +2433,3 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             cached_tokens,
             cache_write_tokens,
         )
-
-    def get_embedding(
-        self, text: str, embedding_model: str | None = None
-    ) -> list[float]:
-        """Generate an embedding vector for ``text``.
-
-        Args:
-            text: Text to embed.
-            embedding_model: Optional embedding model name; defaults to
-                the model's name.
-
-        Returns:
-            The embedding vector.
-
-        Raises:
-            KISSError: When the API call fails for any reason.
-        """
-        model_to_use = embedding_model or self.model_name
-        try:
-            response = self.client.embeddings.create(
-                model=model_to_use, input=text
-            )
-            return list(response.data[0].embedding)
-        except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
-            raise KISSError(
-                f"Embedding generation failed for model {model_to_use}: {e}"
-            ) from e

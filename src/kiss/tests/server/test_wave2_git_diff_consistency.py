@@ -29,12 +29,15 @@ repositories (no mocks, patches, fakes, or test doubles):
 
 from __future__ import annotations
 
+from kiss.agents.sorcar.commit_message import (
+    _append_task_result,
+    _append_user_prompt,
+)
 from kiss.agents.sorcar.git_worktree import (
     TASK_RESULT_HEADING,
     USER_PROMPT_HEADING,
     _ensure_task_metadata,
 )
-from kiss.server.helpers import _append_task_result, _append_user_prompt
 
 
 def test_helpers_blocks_detected_as_duplicate_by_dedup() -> None:

@@ -735,7 +735,12 @@ class VSCodeServer(
         running: set[str] = set()
         with self._state_lock:
             for state in agent_state.agent_states.values():
-                if state.task_thread is not None and state.task_thread.is_alive():
+                # thread_alive() (C-R4) additionally counts a created-
+                # but-not-yet-started worker as running: between
+                # ``_cmd_run`` installing the thread and the worker
+                # starting, the task is real and its live metrics
+                # should already win over the persisted row.
+                if state.thread_alive():
                     running.add(state.task_id)
         return running
 
@@ -1691,20 +1696,20 @@ class VSCodeServer(
             source: AgentState | None = None
             if task_id is not None:
                 candidate = agent_state.get(task_id)
+                # thread_alive() (C-R4) additionally counts a created-
+                # but-not-yet-started worker as live: a task in the
+                # run-startup window is real, and a viewer resuming
+                # its chat must attach to it rather than be treated
+                # as opening a finished session.
                 if candidate is not None and (
-                    candidate.is_task_active
-                    or (
-                        candidate.task_thread is not None
-                        and candidate.task_thread.is_alive()
-                    )
+                    candidate.is_task_active or candidate.thread_alive()
                 ):
                     source = candidate
             if source is None and chat_id and not is_subagent:
                 for t in agent_state.agent_states.values():
                     if t.chat_id != chat_id or t.is_subagent:
                         continue
-                    alive = t.task_thread is not None and t.task_thread.is_alive()
-                    if alive or t.is_task_active:
+                    if t.thread_alive() or t.is_task_active:
                         source = t
                         break
             if source is None:
@@ -1840,8 +1845,6 @@ class VSCodeServer(
         """
         work_dir = work_dir or self.work_dir
         try:
-            from pathlib import Path
-
             from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
             if GitWorktreeOps.discover_repo(Path(work_dir)) is None:

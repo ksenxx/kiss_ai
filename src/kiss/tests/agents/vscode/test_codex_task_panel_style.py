@@ -348,6 +348,36 @@ _INJECT_HISTORY_JS = r"""
 })()
 """
 
+_SHIELD_HISTORY_JS = r"""
+(() => {
+  // Block SERVER-pushed history re-renders for the rest of the test.
+  //
+  // The page runs against the production RemoteAccessServer, whose
+  // WebSocket shim forwards every server frame to main.js via
+  // ``window.dispatchEvent(new MessageEvent('message', ...))``.  When
+  // sibling test sessions mutate the shared task database the server
+  // broadcasts, the page re-requests history, and the real response
+  // re-renders ``#history-list`` — deleting the row injected by
+  // ``_INJECT_HISTORY_JS`` between two probes (observed as
+  // ``null.querySelector`` under parallel suite runs).  Overriding
+  // ``window.dispatchEvent`` drops those ``{type:'history'}`` frames;
+  // the test's own injections use ``window.postMessage``, whose
+  // browser-internal dispatch does not go through this override, so
+  // they still render.  Installed AFTER the boot history render so
+  // page initialization is unaffected.
+  if (window.__kissHistoryShield) return;
+  window.__kissHistoryShield = true;
+  const orig = window.dispatchEvent.bind(window);
+  window.dispatchEvent = ev => {
+    if (ev && ev.type === 'message' && ev.data
+        && ev.data.type === 'history') {
+      return true;
+    }
+    return orig(ev);
+  };
+})()
+"""
+
 _PROBE_STYLES_JS = r"""(() => {
   const tp = getComputedStyle(document.getElementById('task-panel'));
 
@@ -505,6 +535,7 @@ def test_live_task_panel_typography_and_history_rows(
                     state="attached",
                     timeout=60000,
                 )
+                page.evaluate(_SHIELD_HISTORY_JS)
                 for attempt in range(3):
                     page.evaluate(_INJECT_HISTORY_JS)
                     try:
@@ -517,6 +548,31 @@ def test_live_task_panel_typography_and_history_rows(
                     except PlaywrightTimeoutError:
                         if attempt == 2:
                             raise
+                # The shield must hold: replay the exact dispatch the
+                # server shim uses for a pushed history refresh (empty
+                # real DB ⇒ empty sessions) across every plausible
+                # generation and assert the injected row survives.
+                # Without the shield this deterministically clears
+                # ``#history-list`` — the race that flaked this test
+                # under parallel suite runs.
+                survived = page.evaluate(
+                    """() => {
+                        for (let g = 0; g <= 60; g++) {
+                            window.dispatchEvent(new MessageEvent(
+                                'message',
+                                {data: {type: 'history', offset: 0,
+                                        generation: g, sessions: []}},
+                            ));
+                        }
+                        return !!document.querySelector(
+                            '#history-list .running-item'
+                        );
+                    }"""
+                )
+                assert survived, (
+                    "server-pushed history refresh clobbered the "
+                    "injected history row despite the dispatch shield"
+                )
                 # History panels are collapsed by default: only the
                 # clamped task text shows, the metadata is hidden, and
                 # there is no delete button (replaced by the collapse
@@ -799,6 +855,7 @@ def _measure_history_action_row(page: Page) -> ActionRowGeometry:
         state="attached",
         timeout=60000,
     )
+    page.evaluate(_SHIELD_HISTORY_JS)
     for attempt in range(3):
         page.evaluate(_INJECT_HISTORY_JS)
         try:

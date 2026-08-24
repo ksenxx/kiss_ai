@@ -16,8 +16,6 @@ Usage::
 from __future__ import annotations
 
 import json
-import queue
-import threading
 import time
 import uuid
 from pathlib import Path
@@ -43,8 +41,6 @@ class TlonChannelBackend(ToolMethodBackend):
         self._ship_url: str = ""
         self._ship: str = ""
         self._session: requests.Session = requests.Session()
-        self._event_queue: queue.Queue[dict[str, Any]] = queue.Queue()
-        self._sse_thread: threading.Thread | None = None
         self._channel_uid: str = ""
         self._poke_id: int = 0
         self._connection_info: str = ""
@@ -75,11 +71,13 @@ class TlonChannelBackend(ToolMethodBackend):
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
-        """Poll event queue for messages."""
-        messages: list[dict[str, Any]] = []
-        while not self._event_queue.empty() and len(messages) < limit:  # pragma: no branch
-            messages.append(self._event_queue.get_nowait())
-        return messages, oldest
+        """Return no messages: Tlon inbound polling is unsupported.
+
+        Receiving would require an Eyre SSE subscription feeding an
+        event queue, which this outbound-only adapter does not
+        implement, so poll mode always yields zero messages.
+        """
+        return [], oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
         """Send a Tlon/Urbit poke."""

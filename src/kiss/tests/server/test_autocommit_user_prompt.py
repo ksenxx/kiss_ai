@@ -24,10 +24,8 @@ external model.
 
 from __future__ import annotations
 
-from kiss.server.helpers import (
-    _append_user_prompt,
-    generate_commit_message_from_diff,
-)
+from kiss.agents.sorcar.commit_message import _append_user_prompt
+from kiss.server.helpers import generate_commit_message_from_diff
 from kiss.tests.agents.sorcar.test_autocommit_user_prompt import (  # noqa: F401
     _LLMUnavailable,
 )

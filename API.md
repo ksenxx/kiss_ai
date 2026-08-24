@@ -318,12 +318,12 @@
 
 ##### `class TaskResult` — Final outcome of one synchronous daemon task run.
 
-**`resolve_tools_file`** — Validate a client-supplied tools path and resolve it absolutely. Client-side counterpart of the daemon's ``kiss.server.tools_file.load_tools_file``.  The path is resolved against the CLIENT's working directory (the daemon may run with a different one) and validated eagerly so a bad value fails fast, before any daemon connection is made.<br/>`def resolve_tools_file(tools: str | Path | None) -> str`
+**`resolve_tools_file`** — Validate a client-supplied tools path and resolve it absolutely. Client-side counterpart of the daemon's ``kiss.server.tools_file.load_tools_file`` (see :func:`_resolve_py_file` for the resolution rules).<br/>`def resolve_tools_file(tools: str | Path | None) -> str`
 
 - `tools`: Path to a Python file whose ``get_tools()`` function supplies the agent tools, or ``None`` for no extra tools.
 - **Returns:** The absolute path as a string, or ``""`` when *tools* is ``None``.
 
-**`resolve_agent_path`** — Validate a client-supplied agent-script path and resolve it. Client-side counterpart of the daemon's ``kiss.server.agent_file.apply_agent_overrides``.  The path is resolved against the CLIENT's working directory (the daemon may run with a different one) and validated eagerly so a bad value fails fast, before any daemon connection is made.<br/>`def resolve_agent_path(agent_path: str | None) -> str`
+**`resolve_agent_path`** — Validate a client-supplied agent-script path and resolve it. Client-side counterpart of the daemon's ``kiss.server.agent_file.apply_agent_overrides`` (see :func:`_resolve_py_file` for the resolution rules).<br/>`def resolve_agent_path(agent_path: str | None) -> str`
 
 - `agent_path`: Path string of a Python file whose ``get_X()`` functions compute the run's parameters, or ``None``/empty for no agent script.
 - **Returns:** The absolute path as a string, or ``""`` when *agent_path* is ``None`` or empty.

@@ -26,6 +26,7 @@ import os
 import shutil
 import sys
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,56 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _call_with_retry(fn: Any, what: str) -> Any:
+    """Call a Slack API function, retrying transient network errors.
+
+    Retries up to 3 times on ``OSError`` (e.g. SSL handshake timeouts,
+    connection resets) with exponential backoff.
+
+    Args:
+        fn: Zero-argument callable performing the API request.
+        what: Human-readable label for the warning log (e.g.
+            ``"messages"`` or ``"thread replies"``).
+
+    Returns:
+        The API response.
+
+    Raises:
+        OSError: When all 3 attempts fail.
+    """
+    last_err: OSError | None = None
+    for attempt in range(3):  # pragma: no branch
+        try:
+            return fn()
+        except OSError as e:
+            last_err = e
+            if attempt < 2:  # pragma: no branch
+                logger.warning(
+                    "Network error polling %s (attempt %d/3): %s", what, attempt + 1, e
+                )
+                time.sleep(2**attempt)
+    raise last_err  # type: ignore[misc]
+
+
+def _advance_cursor(messages: list[dict[str, Any]], oldest: str) -> str:
+    """Return the poll cursor advanced past the newest message.
+
+    Args:
+        messages: Polled messages (each with a ``ts`` field).
+        oldest: The current cursor.
+
+    Returns:
+        One microsecond past the newest message timestamp at or after
+        *oldest*, or *oldest* unchanged when no message is newer.
+    """
+    new_oldest = oldest
+    for msg in messages:  # pragma: no branch
+        ts = float(msg.get("ts", "0"))
+        if ts >= float(new_oldest):  # pragma: no branch
+            new_oldest = f"{ts + 0.000001:.6f}"
+    return new_oldest
 
 _SLACK_DIR = Path.home() / ".kiss" / "third_party_agents" / "slack"
 
@@ -229,33 +280,15 @@ class SlackChannelBackend(ToolMethodBackend):
         Returns:
             Tuple of (messages sorted oldest-first, updated oldest timestamp).
         """
-        assert self._client is not None
-        last_err: OSError | None = None
-        for attempt in range(3):  # pragma: no branch
-            try:
-                resp = self._client.conversations_history(
-                    channel=channel_id, oldest=oldest, limit=limit
-                )
-                break
-            except OSError as e:
-                last_err = e
-                if attempt < 2:  # pragma: no branch
-                    logger.warning(
-                        "Network error polling messages (attempt %d/3): %s",
-                        attempt + 1,
-                        e,
-                    )
-                    time.sleep(2**attempt)
-        else:
-            raise last_err  # type: ignore[misc]
+        client = self._client
+        assert client is not None
+        resp = _call_with_retry(
+            partial(client.conversations_history, channel=channel_id, oldest=oldest, limit=limit),
+            "messages",
+        )
         messages: list[dict[str, Any]] = resp.get("messages", [])
         messages.sort(key=lambda m: float(m.get("ts", "0")))
-        new_oldest = oldest
-        for msg in messages:  # pragma: no branch
-            ts = float(msg.get("ts", "0"))
-            if ts >= float(new_oldest):  # pragma: no branch
-                new_oldest = f"{ts + 0.000001:.6f}"
-        return messages, new_oldest
+        return messages, _advance_cursor(messages, oldest)
 
     def poll_thread_messages(
         self, channel_id: str, thread_ts: str, oldest: str, limit: int = 10
@@ -278,34 +311,22 @@ class SlackChannelBackend(ToolMethodBackend):
             Tuple of (reply messages sorted oldest-first, updated oldest
             timestamp).
         """
-        assert self._client is not None
-        last_err: OSError | None = None
-        for attempt in range(3):  # pragma: no branch
-            try:
-                resp = self._client.conversations_replies(
-                    channel=channel_id, ts=thread_ts, oldest=oldest, limit=limit
-                )
-                break
-            except OSError as e:
-                last_err = e
-                if attempt < 2:  # pragma: no branch
-                    logger.warning(
-                        "Network error polling thread replies (attempt %d/3): %s",
-                        attempt + 1,
-                        e,
-                    )
-                    time.sleep(2**attempt)
-        else:
-            raise last_err  # type: ignore[misc]
+        client = self._client
+        assert client is not None
+        resp = _call_with_retry(
+            partial(
+                client.conversations_replies,
+                channel=channel_id,
+                ts=thread_ts,
+                oldest=oldest,
+                limit=limit,
+            ),
+            "thread replies",
+        )
         messages: list[dict[str, Any]] = resp.get("messages", [])
         messages = [m for m in messages if m.get("ts") != thread_ts]
         messages.sort(key=lambda m: float(m.get("ts", "0")))
-        new_oldest = oldest
-        for msg in messages:  # pragma: no branch
-            ts = float(msg.get("ts", "0"))
-            if ts >= float(new_oldest):  # pragma: no branch
-                new_oldest = f"{ts + 0.000001:.6f}"
-        return messages, new_oldest
+        return messages, _advance_cursor(messages, oldest)
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
         """Send a message to a Slack channel, optionally in a thread.

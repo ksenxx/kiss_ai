@@ -478,7 +478,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             "the launcher must restore the workspace env var"
         )
 
-    def test_workspace_env_var_survives_overlapping_launches(self) -> None:
+    def test_workspace_env_var_blocks_conflicting_overlap(self) -> None:
         import os
 
         from kiss.agents.third_party_agents.slack_agent import SlackAgent
@@ -509,17 +509,23 @@ class TestLaunchViaApi(_ApiLaunchBase):
             thread_a.start()
             assert started["A"].wait(timeout=30)
             thread_b.start()
-            assert started["B"].wait(timeout=30)
-            # A finishes first while B is still running: the env var
-            # must keep naming an ACTIVE workspace (B's), not be popped
-            # or reset to A's out-of-order snapshot.
+            # B uses a DIFFERENT workspace: it must wait for A instead
+            # of overwriting the env var A's daemon-side get_tools()
+            # reads — that would load the wrong account's credentials.
+            assert not started["B"].wait(timeout=1.0), (
+                "a launch must not start while a different workspace "
+                "is still exported"
+            )
+            assert os.environ.get("KISS_CHANNEL_WORKSPACE") == "wsA", (
+                "a blocked launch must not clobber the env var of a "
+                "still-running launch"
+            )
             release["A"].set()
             thread_a.join(timeout=30)
             assert not thread_a.is_alive()
-            assert os.environ.get("KISS_CHANNEL_WORKSPACE") == "wsB", (
-                "finishing one launch must not clobber the env var of a "
-                "still-running launch"
-            )
+            # A finished: B unblocks and publishes its own workspace.
+            assert started["B"].wait(timeout=30)
+            assert os.environ.get("KISS_CHANNEL_WORKSPACE") == "wsB"
         finally:
             release["A"].set()
             release["B"].set()
