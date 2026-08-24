@@ -332,7 +332,12 @@ class JsonPrinter(Printer):
         self._recordings: dict[str, list[dict[str, Any]]] = {}
         # task id → (tab_id, conn_id) of the UI tab the task was
         # launched from; set via register_task_ui when a task runs in
-        # a UI tab.
+        # a UI tab.  Deliberately TASK-SCOPED: cleanup_task drops the
+        # entry the moment a task ends, which is precisely why
+        # _transient_targets resolves post-task broadcasts from the
+        # (longer-lived) subscriber set instead.  That lifetime
+        # difference is a load-bearing part of the printer's routing
+        # contract.  Read under self._lock.
         self._task_ui: dict[str, tuple[str, str]] = {}
         self._subscribers: dict[str, set[str]] = {}
         self._subscriber_expiry: dict[str, float] = {}
@@ -431,30 +436,6 @@ class JsonPrinter(Printer):
         with self._lock:
             self._task_ui[key] = (tab_id, conn_id)
         self.subscribe_tab(task_id, tab_id)
-
-    def task_ui(self, task_id: Any) -> tuple[str, str]:
-        """Return the ``(tab_id, conn_id)`` registered for *task_id*.
-
-        The registry this reads is deliberately **task-scoped**:
-        :meth:`cleanup_task` drops the entry the moment a task ends,
-        which is precisely why :meth:`_transient_targets` resolves
-        post-task broadcasts from the (longer-lived) subscriber set
-        instead.  That lifetime difference is a load-bearing part of
-        the printer's routing contract, and this accessor is the only
-        way to observe it — the reason it is kept even though event
-        routing itself goes through :meth:`subscribe_tab`.
-
-        Args:
-            task_id: The task identifier.
-
-        Returns:
-            The launching tab and connection ids, or ``("", "")`` when
-            the task was not launched from a UI tab, or once the task
-            has ended.
-        """
-        key = self._coerce_task_id(task_id)
-        with self._lock:
-            return self._task_ui.get(key, ("", ""))
 
     def agent_task_allocated(
         self,
@@ -617,7 +598,9 @@ class JsonPrinter(Printer):
                 return []
             return list(viewers)
 
-    def _transient_targets(self, task_id: Any, tab_id: str = "") -> list[str]:
+    def _transient_targets(
+        self, task_id: Any, tab_id: str = "",
+    ) -> tuple[str, list[str]]:
         """Resolve every tab id watching a task, for transient broadcasts.
 
         The task is identified by the calling thread's task id when
@@ -644,14 +627,20 @@ class JsonPrinter(Printer):
                 ignored).
 
         Returns:
-            Sorted, deduplicated, non-empty tab ids.  Empty when no
-            watching tab is resolvable at all.
+            ``(task_key, targets)``: the resolved task key (thread-
+            local first, else the coerced *task_id* fallback — handed
+            back so callers that also need the key, e.g.
+            :meth:`broadcast_agent_model_pick`, never re-derive it and
+            risk resolving a different key than the one the targets
+            were computed for), and the sorted, deduplicated,
+            non-empty tab ids — empty when no watching tab is
+            resolvable at all.
         """
         task_key = self._task_key() or self._coerce_task_id(task_id)
         targets = {t for t in self._fanout_targets(task_key) if t}
         if tab_id:
             targets.add(tab_id)
-        return sorted(targets)
+        return task_key, sorted(targets)
 
     def broadcast_transient(
         self,
@@ -686,7 +675,8 @@ class JsonPrinter(Printer):
                 watcher, and the sole (possibly empty) stamp of the
                 fallback copy when nothing is resolvable.
         """
-        for target in self._transient_targets(task_id, tab_id) or [tab_id]:
+        _task_key, targets = self._transient_targets(task_id, tab_id)
+        for target in targets or [tab_id]:
             self.broadcast({**event, "tabId": target})
 
     def broadcast_model_pick(
@@ -753,8 +743,10 @@ class JsonPrinter(Printer):
         """
         if not model:
             return
-        task_key = self._task_key() or self._coerce_task_id(task_id)
-        targets = self._transient_targets(task_id, tab_id)
+        # The task key is resolved ONCE, by _transient_targets itself
+        # (D-R5): re-deriving it here duplicated the resolution rule
+        # and could drift from the key the targets were computed for.
+        task_key, targets = self._transient_targets(task_id, tab_id)
         with self._lock:
             self._model_override_tabs.update(targets)
             if task_key:
@@ -987,6 +979,10 @@ class JsonPrinter(Printer):
             self._closed_tasks[key] = None
             while len(self._closed_tasks) > _CLOSED_TASK_MEMORY:
                 self._closed_tasks.pop(next(iter(self._closed_tasks)))
+            # The launching-tab entry dies WITH the task (unlike the
+            # subscriber set, which lingers below to serve post-task
+            # broadcasts): _transient_targets must never route through
+            # a tab whose task already ended.
             self._task_ui.pop(key, None)
             if key in self._subscribers:
                 if subscriber_linger_seconds <= 0:

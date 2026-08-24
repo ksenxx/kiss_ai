@@ -16,6 +16,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +29,8 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
 )
 
+logger = logging.getLogger(__name__)
+
 _SIGNAL_DIR = Path.home() / ".kiss" / "third_party_agents" / "signal"
 _config = ChannelConfig(_SIGNAL_DIR, ("phone_number",))
 
@@ -35,10 +38,30 @@ _config = ChannelConfig(_SIGNAL_DIR, ("phone_number",))
 class SignalChannelBackend(ToolMethodBackend):
     """Channel backend for Signal via signal-cli."""
 
+    # Cap on parked foreign-sender envelopes kept in the channel state;
+    # beyond it the OLDEST foreign envelopes are dropped (with a log).
+    _QUEUE_MAX = 500
+
     def __init__(self) -> None:
         self._phone_number: str = ""
         self._signal_cli: str = "signal-cli"
         self._connection_info: str = ""
+        self._channel_state: dict[str, Any] | None = None
+
+    def bind_channel_state(self, state: dict[str, Any]) -> None:
+        """Receive the channel runner's state dict for envelope parking.
+
+        Called by ``ChannelRunner._run_tick`` right before
+        :meth:`poll_messages`.  ``signal-cli receive`` is destructive
+        (the server acks every delivered envelope), so envelopes that
+        cannot be returned this tick — foreign senders, overflow past
+        the poll limit — are parked in ``state["pending_envelopes"]``,
+        which the runner persists via ``save_channel_state``.
+
+        Args:
+            state: The runner's loaded channel-state dict.
+        """
+        self._channel_state = state
 
     def connect(self) -> bool:
         """Load Signal config."""
@@ -64,37 +87,89 @@ class SignalChannelBackend(ToolMethodBackend):
     ) -> tuple[list[dict[str, Any]], str]:
         """Receive pending Signal messages via signal-cli.
 
-        When ``channel_id`` is non-empty, only messages from that sender are
-        returned; at most ``limit`` messages are returned.
+        ``signal-cli receive`` is a DESTRUCTIVE read: the server acks
+        every delivered envelope, so any envelope this method consumes
+        but does not surface would be lost permanently.  At the same
+        time the channel runner replies to ``channel_id`` (the
+        configured contact), so surfacing another sender's envelope
+        would leak the reply to the wrong contact.  Therefore:
+
+        - With no *channel_id*, ALL received text messages are
+          returned (legacy behaviour; the runner's allow-list decides
+          which ones to act on).
+        - With a *channel_id*, only that sender's envelopes are
+          returned (at most *limit* per tick, queued ones first).  The
+          rest of the consumed envelopes are parked in the channel
+          state bound via :meth:`bind_channel_state`: matching overflow
+          beyond *limit* is delivered on subsequent ticks, and
+          foreign-sender envelopes are kept (capped at ``_QUEUE_MAX``,
+          oldest dropped with a log) so they can be delivered if the
+          contact is later monitored.
+        - With a *channel_id* but NO bound state (a custom stateless
+          runner), foreign-sender envelopes are DROPPED with a warning
+          log — cross-contact reply leakage must be impossible — and
+          *limit* is ignored so matching envelopes are never truncated.
         """
         try:
             stdout, _, _ = self._run_cli("receive", "--output=json", "--timeout", "5")
-            messages: list[dict[str, Any]] = []
-            for line in stdout.strip().split("\n"):  # pragma: no branch
-                if not line.strip():  # pragma: no branch
-                    continue
-                try:
-                    data = json.loads(line)
-                    msg = data.get("envelope", {}).get("dataMessage", {})
-                    sender = data.get("envelope", {}).get("source", "")
-                    if not msg.get("message"):  # pragma: no branch
-                        continue
-                    if channel_id and sender != channel_id:
-                        continue
-                    if len(messages) >= limit:
-                        break
-                    messages.append(
-                        {
-                            "ts": str(data.get("envelope", {}).get("timestamp", "")),
-                            "user": sender,
-                            "text": msg["message"],
-                        }
-                    )
-                except json.JSONDecodeError:
-                    pass
-            return messages, oldest
         except Exception:
             return [], oldest
+        received: list[dict[str, Any]] = []
+        for line in stdout.strip().split("\n"):  # pragma: no branch
+            if not line.strip():  # pragma: no branch
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg = data.get("envelope", {}).get("dataMessage", {})
+            sender = data.get("envelope", {}).get("source", "")
+            if not msg.get("message"):  # pragma: no branch
+                continue
+            received.append(
+                {
+                    "ts": str(data.get("envelope", {}).get("timestamp", "")),
+                    "user": sender,
+                    "text": msg["message"],
+                }
+            )
+        if not channel_id:
+            return received, oldest
+        state = self._channel_state
+        queued: list[dict[str, Any]] = []
+        if state is not None:
+            queued = [e for e in state.get("pending_envelopes", []) if isinstance(e, dict)]
+        matching = [e for e in queued if e.get("user") == channel_id]
+        matching += [e for e in received if e["user"] == channel_id]
+        if state is None:
+            dropped = [e for e in received if e["user"] != channel_id]
+            if dropped:
+                logger.warning(
+                    "Dropping %d Signal envelope(s) from sender(s) other than "
+                    "the monitored contact %s (no channel state to park them in): %s",
+                    len(dropped),
+                    channel_id,
+                    sorted({str(e["user"]) for e in dropped}),
+                )
+            return matching, oldest
+        overflow = matching[max(limit, 0) :] if limit > 0 else []
+        delivered = matching[: max(limit, 0)] if limit > 0 else matching
+        foreign = [e for e in queued if e.get("user") != channel_id]
+        foreign += [
+            e
+            for e in received
+            if e["user"] != channel_id and e["user"] != self._phone_number
+        ]
+        if len(foreign) > self._QUEUE_MAX:
+            logger.warning(
+                "Dropping %d oldest foreign-sender Signal envelope(s): "
+                "the pending-envelope queue is capped at %d",
+                len(foreign) - self._QUEUE_MAX,
+                self._QUEUE_MAX,
+            )
+            foreign = foreign[-self._QUEUE_MAX :]
+        state["pending_envelopes"] = overflow + foreign
+        return delivered, oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
         """Send a Signal message.
@@ -123,9 +198,7 @@ class SignalChannelBackend(ToolMethodBackend):
             JSON string with ok status.
         """
         try:
-            _, stderr, returncode = self._run_cli("send", "-m", message, recipient)
-            if returncode != 0 or (stderr and "error" in stderr.lower()):
-                return json.dumps({"ok": False, "error": stderr.strip()})
+            self.send_message(recipient, message)
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
