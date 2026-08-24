@@ -43,6 +43,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
+    start_http_server,
     stop_http_server,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -208,20 +209,19 @@ class QQChannelBackend(ToolMethodBackend):
                 pass
 
         self.disconnect()
-        try:
-            self._webhook_server = ThreadedHTTPServer(("0.0.0.0", int(self._port)), Handler)
-            self._webhook_thread = threading.Thread(
-                target=self._webhook_server.serve_forever, daemon=True
-            )
-            self._webhook_thread.start()
-            logger.info("QQ webhook server started on port %s", self._port)
-            return True
-        except (OSError, ValueError, OverflowError) as e:
-            self._connection_info = f"QQ webhook bind failed: {e}"
-            logger.warning("Could not start QQ webhook server: %s", e)
-            self._webhook_server = None
-            self._webhook_thread = None
+        self._webhook_server, self._webhook_thread, error = start_http_server(
+            ("0.0.0.0", self._port),
+            Handler,
+            log=logger,
+            started_log="QQ webhook server started on port %s",
+            error_prefix="QQ webhook bind failed",
+            error_log="Could not start QQ webhook server: %s",
+            catch=(OSError, ValueError, OverflowError),
+        )
+        if error is not None:
+            self._connection_info = error
             return False
+        return True
 
     def _sign_validation(self, data: dict[str, Any]) -> dict[str, str]:
         """Answer the op-13 URL-validation challenge.

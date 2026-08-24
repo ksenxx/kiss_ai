@@ -127,7 +127,26 @@ def _add_job_dirs(jobs_dir: Path, found: dict[str, Path]) -> None:
         if not job_dir.is_dir():
             continue
         existing = found.get(job_dir.name)
-        if existing is None or job_dir.stat().st_mtime > existing.stat().st_mtime:
+        if existing is None:
+            found[job_dir.name] = job_dir
+            continue
+        # Another process (e.g. a worktree cleanup) may prune either
+        # directory between the glob and the stat; each side is stat-ed
+        # separately so the walk neither crashes nor keeps pointing at a
+        # copy that no longer exists.
+        try:
+            job_mtime = job_dir.stat().st_mtime
+        except OSError:
+            # The candidate itself is gone; keep whatever was recorded.
+            continue
+        try:
+            existing_mtime = existing.stat().st_mtime
+        except OSError:
+            # The recorded copy was pruned but this same-named candidate
+            # survives: adopt it instead of leaving a dead path mapped.
+            found[job_dir.name] = job_dir
+            continue
+        if job_mtime > existing_mtime:
             found[job_dir.name] = job_dir
 
 
@@ -210,21 +229,29 @@ def list_jobs(artifact_dir: Path) -> list[dict]:
     return jobs
 
 
-def load_job_trajectories(artifact_dir: Path, job_name: str) -> list[dict]:
+def load_job_trajectories(
+    artifact_dir: Path, job_name: str, job_dir: Path | None = None
+) -> list[dict]:
     """Load all trajectory files for a specific job.
 
-    Resolves ``job_name`` across all known job roots and loads from
+    Resolves ``job_name`` across all known job roots (unless the caller
+    already resolved it) and loads from
     ``<job_dir>/trajectories/trajectory_*.yaml``.
 
     Args:
         artifact_dir: Path to the artifact directory containing job folders.
         job_name: Name of the job directory to load trajectories from.
+        job_dir: Pre-resolved job directory.  Callers that already ran
+            :func:`find_job_dir` (e.g. the route handler, which checks
+            existence first) pass it here so the potentially expensive
+            project-wide discovery walk is not repeated.
 
     Returns:
         List of trajectory dictionaries sorted by run_start_timestamp in ascending order.
     """
     trajectories: list[dict] = []
-    job_dir = find_job_dir(artifact_dir, job_name)
+    if job_dir is None:
+        job_dir = find_job_dir(artifact_dir, job_name)
     if job_dir is None:
         return trajectories
     trajectories_dir = job_dir / "trajectories"
@@ -282,10 +309,11 @@ def get_job_trajectories(job_name: str):
     if "/" in job_name or "\\" in job_name or ".." in job_name:
         return jsonify({"error": "Invalid job name"}), 400
 
-    if find_job_dir(ARTIFACT_DIR, job_name) is None:
+    job_dir = find_job_dir(ARTIFACT_DIR, job_name)
+    if job_dir is None:
         return jsonify({"error": f"Job '{job_name}' not found"}), 404
 
-    return jsonify(load_job_trajectories(ARTIFACT_DIR, job_name))
+    return jsonify(load_job_trajectories(ARTIFACT_DIR, job_name, job_dir=job_dir))
 
 
 def main():

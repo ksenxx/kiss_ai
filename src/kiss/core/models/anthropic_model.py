@@ -18,6 +18,7 @@ from anthropic.resources.messages import Messages
 from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError, ModelRefusalError
 from kiss.core.models.model import (
+    _AUDIO_FORMAT_TO_MIME,
     FRAMEWORK_ONLY_CONFIG_KEYS,
     Attachment,
     Model,
@@ -27,11 +28,7 @@ from kiss.core.models.model import (
     responses_items_to_chat_messages,
     transcribe_audio,
 )
-from kiss.core.models.stream_abort import (
-    DEFAULT_STREAM_STALL_TIMEOUT,
-    StreamAbortWatchdog,
-    stall_error,
-)
+from kiss.core.models.stream_abort import StreamAbortWatchdog, stall_error
 
 logger = logging.getLogger(__name__)
 
@@ -210,17 +207,6 @@ def _supports_extended_thinking(model_name: str) -> bool:
         return False
     family, major, _minor = version
     return family in _THINKING_FAMILIES and major >= 4
-
-
-_AUDIO_FORMAT_TO_MIME: dict[str, str] = {
-    "mp3": "audio/mpeg",
-    "wav": "audio/wav",
-    "ogg": "audio/ogg",
-    "webm": "audio/webm",
-    "flac": "audio/flac",
-    "aac": "audio/aac",
-    "mp4": "audio/mp4",
-}
 
 
 def _parse_data_url(url: str) -> tuple[str, str] | None:
@@ -426,9 +412,6 @@ class AnthropicModel(Model):
             thinking_callback=thinking_callback,
         )
         self.api_key = api_key
-        self._stream_stall_timeout = float(
-            self.model_config.get("stream_stall_timeout", DEFAULT_STREAM_STALL_TIMEOUT)
-        )
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initializes the conversation with an initial user prompt.
@@ -860,16 +843,27 @@ class AnthropicModel(Model):
                                 if thinking_started:
                                     self._invoke_thinking_callback(False)
                                     thinking_started = False
+                    # Disarm the watchdog BEFORE reading its flags and
+                    # collecting the final message: stop() waits out an
+                    # abort already claimed, so afterwards the flags are
+                    # final and no late abort can shut down a socket that
+                    # get_final_message() is still using — or one httpx
+                    # has already returned to its pool.  Checking the
+                    # flags first instead would silently swallow a stop
+                    # or stall claimed between the last event and here.
+                    #
                     # An aborted socket ends the iterator at EOF instead
                     # of raising, so the abort has to be reported here
                     # too — otherwise get_final_message() would surface
                     # it as a confusing "incomplete message" error.
+                    watchdog.stop()
                     if watchdog.stopped:
                         raise self._stop_error(thinking_started)
                     if watchdog.stalled:
                         raise self._stall_error(thinking_started)
                     return stream.get_final_message()
                 finally:
+                    # Idempotent second stop for the exception paths.
                     watchdog.stop()
         except (httpx.TimeoutException, APITimeoutError) as exc:
             if self._stream_was_stopped(watchdog):

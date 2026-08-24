@@ -295,9 +295,9 @@ class EmailChannelBackend(ToolMethodBackend):
         """Poll UNSEEN mail in a mailbox (default INBOX), dropping automated mail.
 
         Fetches with ``BODY.PEEK[]`` so polling does NOT mark mail
-        ``\\Seen``; messages are marked read explicitly (e.g. via
-        :meth:`mark_email_read`) only when appropriate, so no mail is
-        lost if the process dies mid-task.
+        ``\\Seen``; the channel runner marks a message read via
+        :meth:`ack_message` only after its task has been handled, so no
+        mail is lost if the process dies mid-task.
         """
         mailbox = channel_id or "INBOX"
         try:
@@ -327,6 +327,34 @@ class EmailChannelBackend(ToolMethodBackend):
         except Exception:
             logger.warning("Email poll failed", exc_info=True)
             return [], oldest
+
+    def ack_message(self, channel_id: str, msg: dict[str, Any]) -> None:
+        """Mark a handled inbound email ``\\Seen`` so it is not redelivered.
+
+        Called by the channel runner after the message's task has been
+        handled.  :meth:`poll_messages` searches ``UNSEEN`` with a peek
+        fetch and never advances a cursor, so without this ack every
+        still-unread email would spawn a fresh task and a fresh SMTP
+        reply on every tick.  The message's ``thread_ts`` is its
+        Message-ID.
+
+        Args:
+            channel_id: Mailbox the message came from (fallback when the
+                message dict lacks ``channel_id``).
+            msg: The handled message dict from :meth:`poll_messages`.
+        """
+        message_id = str(msg.get("thread_ts", "")).strip()
+        if not message_id:
+            return
+        mailbox = str(msg.get("channel_id", "")) or channel_id or "INBOX"
+        result = json.loads(self.mark_email_read(message_id, mailbox))
+        if not result.get("ok"):
+            logger.warning(
+                "Could not mark email %s in %s as read: %s",
+                message_id,
+                mailbox,
+                result.get("error"),
+            )
 
     def _cache_thread(self, normalized: dict[str, str]) -> None:
         """Cache the reply route for a polled message.

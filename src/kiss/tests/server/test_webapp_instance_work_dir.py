@@ -65,7 +65,14 @@ globalThis.localStorage = {
   removeItem: k => { delete _ls[k]; },
 };
 globalThis.location = {host: 'example.test'};
-globalThis.document = {getElementById: () => null};
+// readyState 'complete' makes the shim's _dispatchToApp deliver
+// events immediately instead of queueing them for the (never firing)
+// DOMContentLoaded of this DOM-less harness.
+globalThis.document = {
+  getElementById: () => null,
+  readyState: 'complete',
+  addEventListener: () => {},
+};
 globalThis.window = globalThis;
 globalThis.dispatchEvent = () => {};
 globalThis.MessageEvent = class {

@@ -46,6 +46,7 @@ import requests
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
+    start_http_server,
     stop_http_server,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -334,18 +335,20 @@ class A2AChannelBackend(ToolMethodBackend):
                 pass
 
         self.disconnect()
-        try:
-            self._server = ThreadedHTTPServer((self._bind_host, int(self._port)), Handler)
-            self._server_thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-            self._server_thread.start()
-            logger.info("A2A server started on %s:%s", self._bind_host, self._port)
-            return True
-        except (OSError, ValueError) as e:
-            self._connection_info = f"A2A server bind failed: {e}"
-            logger.warning("Could not start A2A server: %s", e)
-            self._server = None
-            self._server_thread = None
+        self._server, self._server_thread, error = start_http_server(
+            (self._bind_host, self._port),
+            Handler,
+            log=logger,
+            started_log=None,
+            error_prefix="A2A server bind failed",
+            error_log="Could not start A2A server: %s",
+            catch=(OSError, ValueError),
+        )
+        if error is not None:
+            self._connection_info = error
             return False
+        logger.info("A2A server started on %s:%s", self._bind_host, self._port)
+        return True
 
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10

@@ -16,6 +16,14 @@ const DEFAULT_PYPI_URL = 'https://pypi.org/pypi/kiss-agent-framework/json';
 const DEFAULT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
 
+// Mirrors userAssets.kissHomeDir() (this plain-CJS module is also
+// require()d straight from src/ by the tests, where the TypeScript
+// helper is not importable): the cooldown cache must live under the
+// SAME directory every other extension path resolves via $KISS_HOME.
+function kissHomeDir() {
+  return process.env.KISS_HOME || path.join(os.homedir(), '.kiss');
+}
+
 function versionTuple(v) {
   if (typeof v !== 'string') return null;
   const parts = v.trim().split('.').filter(p => p !== '');
@@ -179,8 +187,7 @@ async function checkForExtensionUpdate(opts) {
   const o = opts || {};
   const pypiUrl = o.pypiUrl || DEFAULT_PYPI_URL;
   const cachePath =
-    o.cacheFilePath ||
-    path.join(os.homedir(), '.kiss', '.update-check.json');
+    o.cacheFilePath || path.join(kissHomeDir(), '.update-check.json');
   const cooldownMs =
     typeof o.cooldownMs === 'number' ? o.cooldownMs : DEFAULT_COOLDOWN_MS;
   const fetchTimeoutMs =
@@ -264,6 +271,7 @@ async function checkForExtensionUpdate(opts) {
 module.exports = {
   checkForExtensionUpdate,
   compareVersions,
+  readVersionPy,
   resolveCurrentVersion,
   scanInstalledExtensionVersions,
 };

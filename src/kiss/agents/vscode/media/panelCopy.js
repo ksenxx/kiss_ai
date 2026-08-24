@@ -70,6 +70,36 @@
       .replace(/^\n+|\n+$/g, '');
   }
 
+  /**
+   * Copy `text` to the clipboard through a hidden textarea and
+   * document.execCommand('copy') — the fallback for contexts where the
+   * async clipboard API is unavailable or rejected. Shared by every
+   * same-page copy control (main.js, tips.js and this module).
+   *
+   * @param {string} text What to place on the clipboard.
+   * @param {Document} [doc] Owner document; defaults to the page's.
+   * @returns {boolean} True when the copy command reported success.
+   */
+  function fallbackCopyText(text, doc) {
+    const d = doc || document;
+    const ta = d.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    d.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try {
+      ok = d.execCommand('copy');
+    } catch (_err) {
+      ok = false;
+    } finally {
+      d.body.removeChild(ta);
+    }
+    return ok;
+  }
+
   function addCopyButton(panelEl) {
     if (!panelEl || panelEl.querySelector(':scope > .panel-copy-btn')) return;
     panelEl.classList.add('copyable');
@@ -97,19 +127,8 @@
       const nav = win ? win.navigator : null;
       if (nav && nav.clipboard && nav.clipboard.writeText) {
         nav.clipboard.writeText(text).then(done, () => {});
-      } else {
-        const ta = doc.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        doc.body.appendChild(ta);
-        ta.select();
-        try {
-          doc.execCommand('copy');
-          done();
-        } finally {
-          doc.body.removeChild(ta);
-        }
+      } else if (fallbackCopyText(text, doc)) {
+        done();
       }
     });
     panelEl.appendChild(btn);
@@ -185,6 +204,7 @@
   const api = {
     getRawText: getRawText,
     addCopyButton: addCopyButton,
+    fallbackCopyText: fallbackCopyText,
     formatEventTs: formatEventTs,
     ensurePanelFoot: ensurePanelFoot,
     addPanelTimestamp: addPanelTimestamp,

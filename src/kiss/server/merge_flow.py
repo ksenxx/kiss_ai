@@ -1023,11 +1023,18 @@ class _MergeFlowMixin:
             # the worktree pending (a later resume retries).
             wt_dir = wt_agent._wt_dir
             with self._state_lock:
+                # Occupancy check and ``is_merging`` claim in ONE
+                # critical section (D-RC3): task admission
+                # (``_wt_merge_on_repo``) runs under the same lock and
+                # refuses a task starting inside a worktree only once
+                # ``is_merging`` is set, so releasing the lock between
+                # the check and the claim let a task start inside the
+                # worktree in that window — and the discard below then
+                # deleted the directory out from under it.
                 if wt_dir is not None and self._any_non_wt_running(
                     wt_dir,
                 ):
                     return
-            with self._state_lock:
                 prev_merging = state.is_merging
                 state.is_merging = True
             try:
@@ -1292,7 +1299,16 @@ class _MergeFlowMixin:
         Returns:
             Error dict with ``success: False`` when busy, otherwise ``None``.
         """
-        if state.is_task_active:
+        # ``thread_alive()`` covers the run-startup window: the run
+        # command registers ``state.task_thread`` BEFORE starting it
+        # and before the worker raises ``is_task_active``, so during
+        # that window a manual merge/discard checking only
+        # ``is_task_active`` would pass, claim ``is_merging``, and
+        # destroy the pending worktree the just-submitted task is
+        # about to run in (the worker then sees ``is_merging`` and
+        # refuses the run).  Same predicate ``AgentState.busy`` and
+        # ``_finalize_pending_worktree`` use.
+        if state.is_task_active or state.thread_alive():
             return {
                 "success": False,
                 "message": (

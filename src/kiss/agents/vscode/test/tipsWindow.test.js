@@ -281,6 +281,10 @@ function loadTipsDom(cfg, {withMarked = true, withConfig = true} = {}) {
   if (withMarked) run('marked.min.js');
   if (withConfig) dom.window.eval(`window.__TIPS__ = ${JSON.stringify(cfg)};`);
   run('tips.js');
+  // tips.js delegates its execCommand copy fallback to PanelCopy, which
+  // every real host page loads alongside it (chat.html and the kiss-web
+  // server render both script tags).
+  run('panelCopy.js');
   return dom.window;
 }
 

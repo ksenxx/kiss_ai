@@ -83,7 +83,9 @@ class IRCChannelBackend(ToolMethodBackend):
             self._send_raw(f"NICK {cfg['nick']}")
             self._send_raw(f"USER {cfg['nick']} 0 * :{cfg['nick']}")
             self._connection_info = f"Connected to {cfg['server']} as {cfg['nick']}"
-            self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+            self._reader_thread = threading.Thread(
+                target=self._read_loop, args=(sock,), daemon=True
+            )
             self._reader_thread.start()
             time.sleep(1.0)
             return True
@@ -113,13 +115,20 @@ class IRCChannelBackend(ToolMethodBackend):
             raise RuntimeError("IRC connection lost")
         sock.sendall(f"{line}\r\n".encode("utf-8", errors="replace"))
 
-    def _read_loop(self) -> None:
-        """Background thread reading IRC data."""
+    def _read_loop(self, sock: socket.socket) -> None:
+        """Background thread reading IRC data from *sock*.
+
+        Reads only the socket it was started with and exits as soon as
+        ``self._sock`` no longer refers to it (a reconnect installed a
+        new socket), so an outliving reader never adopts the next
+        connection's socket and splits its protocol lines with the new
+        reader.
+
+        Args:
+            sock: The connected socket this reader owns.
+        """
         buf = ""
-        while True:
-            sock = self._sock
-            if sock is None:
-                break
+        while self._sock is sock:
             try:
                 data = sock.recv(4096)
                 if not data:  # pragma: no branch
@@ -127,16 +136,26 @@ class IRCChannelBackend(ToolMethodBackend):
                 buf += data.decode("utf-8", errors="replace")
                 while "\r\n" in buf:  # pragma: no branch
                     line, buf = buf.split("\r\n", 1)
-                    self._handle_line(line)
+                    self._handle_line(line, sock)
             except TimeoutError:
                 continue
             except OSError:
                 break
 
-    def _handle_line(self, line: str) -> None:
-        """Handle a received IRC line."""
+    def _handle_line(self, line: str, sock: socket.socket) -> None:
+        """Handle a received IRC line.
+
+        PING is answered directly on *sock* — never via
+        :meth:`_send_raw`, whose connect-on-demand would call
+        :meth:`disconnect` from this reader thread and leak the fresh
+        socket it opens.
+
+        Args:
+            line: The raw IRC protocol line (without CRLF).
+            sock: The socket the line arrived on.
+        """
         if line.startswith("PING"):  # pragma: no branch
-            self._send_raw(f"PONG {line[5:]}")
+            sock.sendall(f"PONG {line[5:]}\r\n".encode("utf-8", errors="replace"))
         else:
             parts = line.split(" ", 3)
             if len(parts) >= 4 and parts[1] == "PRIVMSG":
@@ -179,7 +198,13 @@ class IRCChannelBackend(ToolMethodBackend):
         self._send_raw(f"PRIVMSG {channel_id} :{text}")
 
     def disconnect(self) -> None:
-        """Close the IRC socket and join the reader thread."""
+        """Close the IRC socket and join the reader thread.
+
+        Joining is skipped when called from the reader thread itself
+        (``threading.Thread.join`` raises ``RuntimeError`` for the
+        current thread); the reader exits on its own once it observes
+        ``self._sock`` has changed.
+        """
         sock = self._sock
         self._sock = None
         if sock is not None:  # pragma: no branch
@@ -188,8 +213,9 @@ class IRCChannelBackend(ToolMethodBackend):
             except OSError:
                 pass
             sock.close()
-        if self._reader_thread is not None:  # pragma: no branch
-            self._reader_thread.join(timeout=5.0)
+        reader = self._reader_thread
+        if reader is not None and reader is not threading.current_thread():
+            reader.join(timeout=5.0)
             self._reader_thread = None
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:

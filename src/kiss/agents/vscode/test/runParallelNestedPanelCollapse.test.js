@@ -168,6 +168,12 @@ function makeWebview(mode, quiet) {
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  // The real parser fires DOMContentLoaded once every body script has
+  // run; the webapp shim defers app-bound events until then so none
+  // are lost while main.js is still being fetched.  jsdom keeps
+  // readyState 'loading' until a later macrotask, so fire it here to
+  // flush the shim's queue synchronously (harmless in extension mode).
+  win.document.dispatchEvent(new win.Event('DOMContentLoaded', {bubbles: true}));
   if (win.__drain) win.__drain();
 
   return {win, posted, deliver};

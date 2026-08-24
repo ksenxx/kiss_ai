@@ -41,11 +41,15 @@ class Request:
         connection_key: The client's ``host:port``, which identifies the
             TCP connection the request arrived on.  Counting distinct
             values is how connection-pool reuse is asserted.
+        headers: The request headers, keys lower-cased — how a test
+            asserts which credentials (``authorization``) and extra
+            headers actually reached the endpoint.
     """
 
     path: str
     body: dict[str, Any]
     connection_key: str
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -121,6 +125,7 @@ class _ScriptedHandler(BaseHTTPRequestHandler):
             path=self.path,
             body=json.loads(raw or b"{}"),
             connection_key=f"{peer[0]}:{peer[1]}",
+            headers={k.lower(): v for k, v in self.headers.items()},
         )
         with server.lock:
             server.requests.append(request)

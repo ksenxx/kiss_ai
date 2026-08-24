@@ -6,7 +6,11 @@
 'use strict';
 
 const fs = require('fs');
-const {probeDaemonHealth, daemonHasActiveTasks} = require('./daemonHealth');
+const {
+  probeDaemonHealth,
+  daemonHasActiveTasks,
+  sleep,
+} = require('./daemonHealth');
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 
@@ -15,10 +19,6 @@ const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_RESTART_EVERY_MS = 15_000;
 
 const DEFAULT_PROBE_TIMEOUT_MS = 1_000;
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 const fileExists = fs.existsSync;
 
