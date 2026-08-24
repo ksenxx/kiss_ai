@@ -33,6 +33,8 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
 )
 
+logger = logging.getLogger(__name__)
+
 _MATRIX_DIR = Path.home() / ".kiss" / "third_party_agents" / "matrix"
 _config = ChannelConfig(
     _MATRIX_DIR,
@@ -192,16 +194,41 @@ class MatrixChannelBackend(ToolMethodBackend):
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
-        """Poll for new Matrix messages via sync."""
+        """Poll for new Matrix messages via sync.
+
+        The runner's persisted cursor (*oldest*, a ``next_batch`` sync
+        token) takes precedence over the in-memory ``_next_batch``,
+        which is empty in each fresh cron-tick process — syncing with
+        ``since=None`` there would re-deliver recent room timelines on
+        every tick.
+
+        When the homeserver rejects a supplied ``since`` token (nio
+        returns an error response without ``next_batch`` — e.g. a
+        stale or invalidated token), the sync is retried ONCE with
+        ``since=None``: the runner's nonempty-cursor guard would
+        otherwise retain the rejected token forever, permanently
+        bricking the poll.  If the full-sync retry also fails, the
+        tick is a transient no-op (``([], oldest)``).
+        """
         if not self._client:  # pragma: no branch
             return [], oldest
         try:
             from nio import RoomMessageText
 
-            async def _sync() -> Any:
-                return await self._client.sync(since=self._next_batch or None, timeout=0)
+            since = oldest if oldest not in ("", "0") else (self._next_batch or None)
 
-            resp = self._run(_sync())
+            async def _sync(since_token: str | None) -> Any:
+                return await self._client.sync(since=since_token, timeout=0)
+
+            resp = self._run(_sync(since))
+            if since is not None and not hasattr(resp, "next_batch"):
+                logger.warning(
+                    "Matrix sync rejected since-token %r; retrying with a full sync",
+                    since,
+                )
+                resp = self._run(_sync(None))
+                if not hasattr(resp, "next_batch"):
+                    return [], oldest
             if hasattr(resp, "next_batch"):  # pragma: no branch
                 self._next_batch = resp.next_batch
             messages: list[dict[str, Any]] = []

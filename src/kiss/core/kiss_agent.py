@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 
 _NON_RETRYABLE_ERROR_TYPES = (
     "AuthenticationError",
-    "PermissionDeniedError",
     "PermissionDenied",
 )
 _NON_RETRYABLE_PHRASES = (

@@ -11,6 +11,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+"""Repository root (``src/kiss/scripts/check.py`` is four levels deep)."""
+
 
 def run_command(cmd: list[str], description: str) -> bool:
     """Run a command and return True if successful.
@@ -51,11 +54,10 @@ def _should_skip_path(path: Path) -> bool:
     """
     if ".git" in path.parts:
         return True
-    project_root = Path(__file__).parent.parent.parent.parent
     result = subprocess.run(
         ["git", "check-ignore", "-q", str(path)],
         capture_output=True,
-        cwd=project_root,
+        cwd=PROJECT_ROOT,
         check=False,
     )
     return result.returncode == 0
@@ -76,8 +78,6 @@ def clean_build_artifacts() -> None:
     Returns:
         None.
     """
-    project_root = Path(__file__).parent.parent.parent.parent
-
     dirs_to_remove = [
         "dist",
         "build",
@@ -95,25 +95,25 @@ def clean_build_artifacts() -> None:
 
     for pattern in dirs_to_remove:
         if "*" in pattern:
-            for path in project_root.glob(pattern):
+            for path in PROJECT_ROOT.glob(pattern):
                 if path.is_dir():
                     print(f"  Removing: {path}")
                     shutil.rmtree(path)
                     removed_count += 1
         else:
-            path = project_root / pattern
+            path = PROJECT_ROOT / pattern
             if path.exists() and path.is_dir():
                 print(f"  Removing: {path}")
                 shutil.rmtree(path)
                 removed_count += 1
 
-    for pycache in project_root.rglob("__pycache__"):
+    for pycache in PROJECT_ROOT.rglob("__pycache__"):
         if pycache.is_dir() and not _should_skip_path(pycache):
             print(f"  Removing: {pycache}")
             shutil.rmtree(pycache)
             removed_count += 1
 
-    for pyc_file in project_root.rglob("*.pyc"):
+    for pyc_file in PROJECT_ROOT.rglob("*.pyc"):
         if not _should_skip_path(pyc_file):
             print(f"  Removing: {pyc_file}")
             pyc_file.unlink()
@@ -134,9 +134,8 @@ def _sync_extension_version() -> None:
     """
     import json
 
-    project_root = Path(__file__).parent.parent.parent.parent
-    version_file = project_root / "src" / "kiss" / "core" / "_version.py"
-    package_json = project_root / "src" / "kiss" / "agents" / "vscode" / "package.json"
+    version_file = PROJECT_ROOT / "src" / "kiss" / "core" / "_version.py"
+    package_json = PROJECT_ROOT / "src" / "kiss" / "agents" / "vscode" / "package.json"
 
     if not version_file.exists() or not package_json.exists():
         return
@@ -187,8 +186,6 @@ def main() -> int:
         if args.clean_only:
             return 0
 
-    project_root = Path(__file__).parent.parent.parent.parent
-
     _sync_extension_version()
 
     checks = [
@@ -201,7 +198,7 @@ def main() -> int:
 
     if args.full:
         checks.append((["uv", "run", "pyright", "src/"], "Type check (pyright)"))
-        vscode_dir = project_root / "src" / "kiss" / "agents" / "vscode"
+        vscode_dir = PROJECT_ROOT / "src" / "kiss" / "agents" / "vscode"
         if (vscode_dir / "node_modules").is_dir() and shutil.which("npm"):
             checks.append(
                 (

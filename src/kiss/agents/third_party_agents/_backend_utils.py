@@ -102,6 +102,56 @@ def drain_queue_messages(
     return messages
 
 
+def start_http_server(
+    address: tuple[str, Any],
+    handler_class: type,
+    *,
+    log: Any,
+    started_log: str | None,
+    error_prefix: str,
+    error_log: str,
+    catch: tuple[type[BaseException], ...] = (OSError,),
+) -> tuple[ThreadedHTTPServer | None, threading.Thread | None, str | None]:
+    """Start a :class:`ThreadedHTTPServer` on a daemon thread.
+
+    Shared START half of the embedded HTTP-server lifecycle (the STOP
+    half is :func:`stop_http_server`).  Constructs the server (coercing
+    the port with ``int()`` inside the guarded region so string ports
+    fail like a bind error), starts ``serve_forever()`` on a daemon
+    thread, and logs per the caller's labels.
+
+    Args:
+        address: ``(host, port)`` bind address; the port may be a
+            string and is coerced with ``int()``.
+        handler_class: ``BaseHTTPRequestHandler`` subclass serving
+            requests.
+        log: The calling module's logger.
+        started_log: %-style info log format with one placeholder for
+            the bound port, logged on success; ``None`` when the caller
+            does its own success logging (e.g. to include the bound
+            port in its connection info).
+        error_prefix: Prefix for the returned error string, formatted
+            as ``"{error_prefix}: {exception}"``.
+        error_log: %-style warning log format with one placeholder for
+            the exception, logged on failure.
+        catch: Exception types treated as a start failure.
+
+    Returns:
+        ``(server, thread, None)`` on success, or ``(None, None,
+        error_info)`` when construction raised one of *catch*.
+    """
+    try:
+        server = ThreadedHTTPServer((address[0], int(address[1])), handler_class)
+    except catch as e:
+        log.warning(error_log, e)
+        return None, None, f"{error_prefix}: {e}"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    if started_log is not None:
+        log.info(started_log, server.server_address[1])
+    return server, thread, None
+
+
 def stop_http_server(
     server: HTTPServer | None, server_thread: threading.Thread | None
 ) -> tuple[None, None]:

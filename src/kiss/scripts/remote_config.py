@@ -37,12 +37,14 @@ than relying on the checkout there being new enough to have it.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import secrets
 import shutil
 import string
 import sys
+import tempfile
 import time
 from typing import Any
 
@@ -108,27 +110,58 @@ def configure(path: str, work_dir: str, password: str = "") -> str:
     Returns:
         The password in force after the update.
     """
+    # The lock is keyed to the path as *named* -- the web app's save_config
+    # flocks ``.config.lock`` beside the ``config.json`` it was told about,
+    # link or not -- so it must be derived BEFORE the link is resolved:
+    # locking beside the link's target (say ``~/dotfiles/.config.lock``)
+    # while the web app locks ``~/.kiss/.config.lock`` would give two
+    # writers two different locks and no mutual exclusion at all.
+    lock_directory = os.path.dirname(path) or "."
     # Renaming over a link replaces the link; the file it points at -- the one
     # somebody maintains, and the one the web app follows the link to read --
     # would keep the settings this is meant to change.  So the real file is
     # what gets read, backed up and written.
     if os.path.islink(path):
         path = os.path.realpath(path)
-    config = load_config(path)
-    configured = config.get("remote_password")
-    chosen = password or (configured if isinstance(configured, str) else "")
-    chosen = chosen or new_password()
-    config["remote_password"] = chosen
-    config["work_dir"] = work_dir
     directory = os.path.dirname(path) or "."
+    os.makedirs(lock_directory, exist_ok=True)
     os.makedirs(directory, exist_ok=True)
-    temporary = f"{path}.sorcar-new"
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(config, handle, indent=2)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
+    # The load-modify-replace runs under the same ``.config.lock`` flock
+    # the web app's save_config takes for this file, so a deploy and a
+    # settings save (or two concurrent deploys) serialize instead of the
+    # later replace silently discarding the earlier writer's changes.
+    with open(
+        os.path.join(lock_directory, ".config.lock"), "w", encoding="utf-8"
+    ) as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            config = load_config(path)
+            configured = config.get("remote_password")
+            chosen = password or (configured if isinstance(configured, str) else "")
+            chosen = chosen or new_password()
+            config["remote_password"] = chosen
+            config["work_dir"] = work_dir
+            # mkstemp gives every writer its own staging file; a fixed
+            # name would let two concurrent runs truncate and publish
+            # each other's half-written JSON.
+            fd, temporary = tempfile.mkstemp(
+                prefix=os.path.basename(path) + ".sorcar-new-", dir=directory
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(config, handle, indent=2)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.chmod(temporary, 0o600)
+                os.replace(temporary, path)
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
     return chosen
 
 

@@ -9,6 +9,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import {findKissProject} from './kissPaths';
 import {ensureUserAssetFromDefault, kissHomeDir} from './userAssets';
+import {readVersionPy} from './UpdateChecker';
 
 export const MY_INJECTION_DEFAULT_BODY =
   'Write end-to-end 100% coverage tests for the feature first.' +
@@ -20,15 +21,10 @@ export const DEFAULT_MY_INJECTION =
 export function getVersion(): string {
   const kissRoot = findKissProject();
   if (!kissRoot) return '';
-  try {
-    const content = fs.readFileSync(
-      path.join(kissRoot, 'src', 'kiss', 'core', '_version.py'),
-      'utf-8',
-    );
-    const match = content.match(/__version__\s*=\s*["']([^"']+)["']/);
-    if (match) return match[1];
-  } catch {}
-  return '';
+  return (
+    readVersionPy(path.join(kissRoot, 'src', 'kiss', 'core', '_version.py')) ||
+    ''
+  );
 }
 
 function unescapeMarkdown(s: string): string {

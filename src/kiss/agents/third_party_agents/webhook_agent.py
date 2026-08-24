@@ -59,6 +59,7 @@ from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
     drain_request_body,
+    start_http_server,
     stop_http_server,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -221,17 +222,19 @@ class WebhookChannelBackend(ToolMethodBackend):
                 pass
 
         self.disconnect()
-        try:
-            self._server = ThreadedHTTPServer(("0.0.0.0", int(self._port)), Handler)
-        except (OSError, ValueError) as e:
-            self._connection_info = f"Webhook server bind failed: {e}"
-            logger.warning("Could not start webhook server: %s", e)
-            self._server = None
-            self._server_thread = None
+        self._server, self._server_thread, error = start_http_server(
+            ("0.0.0.0", self._port),
+            Handler,
+            log=logger,
+            started_log=None,
+            error_prefix="Webhook server bind failed",
+            error_log="Could not start webhook server: %s",
+            catch=(OSError, ValueError),
+        )
+        if error is not None or self._server is None:
+            self._connection_info = error or ""
             return False
         self._bound_port = self._server.server_address[1]
-        self._server_thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-        self._server_thread.start()
         self._connection_info = (
             f"Webhook server listening on port {self._bound_port} ({len(self._routes)} route(s))"
         )

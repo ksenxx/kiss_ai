@@ -341,9 +341,12 @@ def test_dispatch_uses_launcher_workspace_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The workspace env var follows the launcher's reference-counting
-    # registry (shared with the channel CLIs): overlapping dispatches
-    # keep it pointing at an active workspace, and the last exit
-    # removes it — a pre-existing value counts as stale, exactly as in
+    # registry (shared with the channel CLIs): while a launch with a
+    # DIFFERENT workspace is active a dispatch refuses to overwrite
+    # the exported value (it would hand the running session the wrong
+    # account's credentials) and fails loudly after its bounded wait;
+    # the last exit removes the env var — a pre-existing value counts
+    # as stale, exactly as in
     # kiss.agents.third_party_agents._kiss_web_launcher.
     import os
 
@@ -353,12 +356,18 @@ def test_dispatch_uses_launcher_workspace_registry(
     )
 
     monkeypatch.setenv("KISS_CHANNEL_WORKSPACE", "stale-ws")
-    _enter_workspace("other-ws")  # a concurrent dispatch is active
+    monkeypatch.setattr(agent_dispatch, "DISPATCH_TIMEOUT_SECONDS", 0.2)
+    assert _enter_workspace("other-ws")  # a concurrent dispatch is active
     try:
         out = run_agent("ntfy", "say hi", workspace="my-ws")
+        assert out.startswith("Error: workspace 'my-ws' could not be activated")
+        # The concurrent dispatch is still active; its workspace was
+        # never overwritten.
+        assert os.environ["KISS_CHANNEL_WORKSPACE"] == "other-ws"
+        # A dispatch SHARING the active workspace proceeds normally
+        # (and fails only at the unreachable daemon socket).
+        out = run_agent("ntfy", "say hi", workspace="other-ws")
         assert out.startswith("Error: the ntfy agent task could not run:")
-        # After this dispatch exits, the concurrent one is still
-        # active, so the env var points at its workspace.
         assert os.environ["KISS_CHANNEL_WORKSPACE"] == "other-ws"
     finally:
         _exit_workspace("other-ws")
