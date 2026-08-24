@@ -2032,12 +2032,7 @@
   function updateActiveTabTitle(title) {
     const tab = getTab(activeTabId);
     if (!tab) return;
-    const t = (title || '').trim();
-    tab.title = t
-      ? t.length > 30
-        ? t.substring(0, 30) + '\u2026'
-        : t
-      : 'new chat';
+    tab.title = clipTabTitle(title);
     renderTabBar();
     persistTabState();
   }
@@ -2806,19 +2801,7 @@
   // launchswitch-coverage:end
 
   function fallbackCopyText(text) {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    let ok = false;
-    try {
-      document.execCommand('copy');
-      ok = true;
-    } catch {}
-    document.body.removeChild(ta);
-    return ok;
+    return window.PanelCopy.fallbackCopyText(text);
   }
 
   if (taskPanelCopy && taskPanelText) {
@@ -4657,6 +4640,11 @@
           // autoscroll-coverage:end
         }
         tState.bashPanel = null;
+        // The pending flush frame must be cancelled, not just forgotten:
+        // an orphaned callback would fire after the NEXT tool's panel
+        // exists and flush that panel's buffered text early, with the
+        // OLD event's work dir baked into its linkify pass.
+        if (tState.bashRaf) cancelAnimationFrame(tState.bashRaf);
         tState.bashRaf = 0;
         // report-coverage:start
         stashPendingReport(tState, ev);
@@ -4812,6 +4800,9 @@
         }
         const hadBash = !!tState.bashPanel;
         tState.bashPanel = null;
+        // See the matching cancel in the tool_call case: a forgotten
+        // flush frame outlives this panel and fires against the next.
+        if (tState.bashRaf) cancelAnimationFrame(tState.bashRaf);
         tState.bashRaf = 0;
         if (tState.lastToolCallEl) finalizePanelTime(tState.lastToolCallEl);
         if (
@@ -5506,34 +5497,35 @@
     }
   }
 
-  O.addEventListener('wheel', e => {
-    const _activeTabForAdj = getTab(activeTabId);
-    const _isSubagentActive = !!(
-      _activeTabForAdj && _activeTabForAdj.isSubagentTab
-    );
-    if (
-      !adjacentLoading &&
-      activeTabId &&
-      currentTaskName &&
-      !_isSubagentActive
-    ) {
-      const atTop = O.scrollTop <= 0;
-      const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
+  // One edge-overscroll rule for every input device: scrolling past the
+  // top of the transcript accumulates towards loading the previous
+  // task, past the bottom towards the next one, and any scroll that is
+  // not pinned to an edge resets the accumulator.
+  function handleEdgeOverscroll(delta) {
+    if (adjacentLoading || !activeTabId || !currentTaskName) return;
+    const activeTab = getTab(activeTabId);
+    if (activeTab && activeTab.isSubagentTab) return;
 
-      if (atTop && e.deltaY < 0 && !noPrevTask && oldestLoadedTaskId != null) {
-        accumulateOverscroll('prev', e.deltaY, oldestLoadedTaskId);
-      } else if (
-        atBottom &&
-        e.deltaY > 0 &&
-        !noNextTask &&
-        newestLoadedTaskId != null
-      ) {
-        accumulateOverscroll('next', e.deltaY, newestLoadedTaskId);
-      } else {
-        overscrollAccum = 0;
-        overscrollDir = '';
-      }
+    const atTop = O.scrollTop <= 0;
+    const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
+
+    if (atTop && delta < 0 && !noPrevTask && oldestLoadedTaskId != null) {
+      accumulateOverscroll('prev', delta, oldestLoadedTaskId);
+    } else if (
+      atBottom &&
+      delta > 0 &&
+      !noNextTask &&
+      newestLoadedTaskId != null
+    ) {
+      accumulateOverscroll('next', delta, newestLoadedTaskId);
+    } else {
+      overscrollAccum = 0;
+      overscrollDir = '';
     }
+  }
+
+  O.addEventListener('wheel', e => {
+    handleEdgeOverscroll(e.deltaY);
   });
 
   let _touchOutputLastY = 0;
@@ -5555,32 +5547,7 @@
       const currentY = e.touches[0].clientY;
       const touchDelta = _touchOutputLastY - currentY;
       _touchOutputLastY = currentY;
-
-      if (adjacentLoading || !activeTabId || !currentTaskName) return;
-      const _activeTabT = getTab(activeTabId);
-      if (_activeTabT && _activeTabT.isSubagentTab) return;
-
-      const atTop = O.scrollTop <= 0;
-      const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
-
-      if (
-        atTop &&
-        touchDelta < 0 &&
-        !noPrevTask &&
-        oldestLoadedTaskId != null
-      ) {
-        accumulateOverscroll('prev', touchDelta, oldestLoadedTaskId);
-      } else if (
-        atBottom &&
-        touchDelta > 0 &&
-        !noNextTask &&
-        newestLoadedTaskId != null
-      ) {
-        accumulateOverscroll('next', touchDelta, newestLoadedTaskId);
-      } else {
-        overscrollAccum = 0;
-        overscrollDir = '';
-      }
+      handleEdgeOverscroll(touchDelta);
     },
     {passive: true},
   );
@@ -6031,6 +5998,18 @@
     'result',
     'usage_info',
     'task_settings',
+  ]);
+
+  // Every type handleOutputEvent renders: the streaming set above plus
+  // the task-lifecycle notices. This is the whitelist for handleEvent's
+  // default branch — anything else must never reach processOutputEvent.
+  const TRANSCRIPT_EVENT_TYPES = new Set([
+    ...TASK_SCOPED_STREAM_TYPES,
+    'autocommit_progress',
+    'autocommit_done',
+    'worktree_progress',
+    'warning',
+    'error',
   ]);
 
   /**
@@ -6617,13 +6596,7 @@
         // tableak-coverage:start
         if (!isForActiveTab(ev)) break;
         // tableak-coverage:end
-        const fu = mkEl('div', 'followup-bar');
-        fu.innerHTML =
-          '<span class="fu-label">Suggested next</span>' +
-          '<span class="fu-text">' +
-          esc(ev.text) +
-          '</span>';
-        fu.addEventListener('click', () => {
+        const fu = mkFollowupBar(ev.text, () => {
           inp.value = ev.text;
           syncClearBtn();
           inp.focus();
@@ -6668,10 +6641,7 @@
 
           const taskTitle = (ev.task || '').trim();
           if (taskTitle) {
-            teTab.title =
-              taskTitle.length > 30
-                ? taskTitle.substring(0, 30) + '\u2026'
-                : taskTitle;
+            teTab.title = clipTabTitle(taskTitle);
             teTab.taskPanelHTML = taskTitle;
             teTab.taskPanelVisible = true;
             renderTabBar();
@@ -6858,8 +6828,7 @@
         } else if (stt) {
           const sttTab = getTab(ev.tabId);
           if (sttTab) {
-            sttTab.title =
-              stt.length > 30 ? stt.substring(0, 30) + '\u2026' : stt;
+            sttTab.title = clipTabTitle(stt);
             sttTab.taskPanelHTML = stt;
             sttTab.taskPanelVisible = true;
             renderTabBar();
@@ -6922,7 +6891,10 @@
 
       case 'inputHistory':
         histCache = ev.tasks || [];
-        if (histIdx < 0) histIdx = -1;
+        // A cycling position is an index into the OLD list; keeping it
+        // would resume ArrowUp/ArrowDown from a random place in the
+        // new one.
+        histIdx = -1;
         break;
       case 'ghost':
         // tableak-coverage:start
@@ -7329,6 +7301,12 @@
         break;
       }
       default:
+        // Only types the transcript renderer actually handles may fall
+        // through to processOutputEvent. Host messages owned by other
+        // listeners (voice.js's voiceWake / voiceTranscribing /
+        // voiceSpeech / voiceState) and genuinely unknown types would
+        // each cost an O(transcript) DOM sweep and a spinner reset.
+        if (!TRANSCRIPT_EVENT_TYPES.has(t)) break;
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgTab = findTabByEvt(ev);
           if (bgTab) processOutputEventForBgTab(ev, bgTab);
@@ -8037,6 +8015,25 @@
     return steps;
   }
 
+  /**
+   * Build the "Suggested next" bar shown for a followup_suggestion
+   * event, identical for live streams and history replays.
+   *
+   * @param {string} text The suggested follow-up prompt.
+   * @param {?function} onClick Click handler, or null for a static bar.
+   * @returns {HTMLElement} The bar, ready to append.
+   */
+  function mkFollowupBar(text, onClick) {
+    const fu = mkEl('div', 'followup-bar');
+    fu.innerHTML =
+      '<span class="fu-label">Suggested next</span>' +
+      '<span class="fu-text">' +
+      esc(text) +
+      '</span>';
+    if (onClick) fu.addEventListener('click', onClick);
+    return fu;
+  }
+
   function renderReplayedEvents(container, events, opts) {
     const ownerTabId = opts ? opts.ownerTabId : undefined;
     const rWorkDir =
@@ -8060,18 +8057,11 @@
           return;
         }
         if (t === 'followup_suggestion') {
-          const fu = mkEl('div', 'followup-bar');
-          fu.innerHTML =
-            '<span class="fu-label">Suggested next</span>' +
-            '<span class="fu-text">' +
-            esc(ev.text) +
-            '</span>';
-          if (opts && opts.onFollowupClick) {
-            fu.addEventListener('click', () => {
-              opts.onFollowupClick(ev.text);
-            });
-          }
-          container.appendChild(fu);
+          const onClick =
+            opts && opts.onFollowupClick
+              ? () => opts.onFollowupClick(ev.text)
+              : null;
+          container.appendChild(mkFollowupBar(ev.text, onClick));
           return;
         }
         const where = streamBegin(ctx, ev);

@@ -134,11 +134,33 @@ class TestWebappServerLoadingOverlay(unittest.TestCase):
         self.assertIn("daemonStatus", auth_ok_branch)
         self.assertIn("connected: true", auth_ok_branch)
         self.assertIn(
-            "window.dispatchEvent",
+            "_dispatchToApp",
             auth_ok_branch,
-            "auth_ok must dispatch the daemonStatus event on window so "
-            "media/main.js hides the loading overlay",
+            "auth_ok must deliver the daemonStatus event to the app "
+            "(via _dispatchToApp, which dispatches on window once the "
+            "document has finished parsing) so media/main.js hides "
+            "the loading overlay",
         )
+        self._assert_dispatch_to_app_reaches_window(html)
+
+    def _assert_dispatch_to_app_reaches_window(self, html: str) -> None:
+        """The ``_dispatchToApp`` helper must dispatch on ``window``.
+
+        The lifecycle branches now route through this helper (it
+        queues events while the document is still parsing so a
+        dispatch cannot be lost before ``media/main.js`` registers
+        its listener), so the source-level contract is closed by
+        pinning that the helper itself — and its DOMContentLoaded
+        flush — perform the ``window.dispatchEvent`` call.
+        """
+        marker = "function _dispatchToApp(data)"
+        self.assertIn(marker, html)
+        helper_body = html.split(marker, 1)[1].split("function ", 1)[0]
+        self.assertIn("window.dispatchEvent", helper_body)
+        flush_marker = "document.addEventListener('DOMContentLoaded'"
+        self.assertIn(flush_marker, html)
+        flush_body = html.split(flush_marker, 1)[1].split("});", 1)[0]
+        self.assertIn("window.dispatchEvent", flush_body)
 
     def test_shim_dispatches_daemon_status_on_auth_required(self) -> None:
         """``auth_required`` must also reveal ``#app``.
@@ -161,11 +183,12 @@ class TestWebappServerLoadingOverlay(unittest.TestCase):
         self.assertIn("daemonStatus", required_branch)
         self.assertIn("connected: true", required_branch)
         self.assertIn(
-            "window.dispatchEvent",
+            "_dispatchToApp",
             required_branch,
-            "auth_required must dispatch daemonStatus(connected:true) "
+            "auth_required must deliver daemonStatus(connected:true) "
             "so #app is revealed and the auth modal becomes visible",
         )
+        self._assert_dispatch_to_app_reaches_window(html)
 
     def test_shim_dispatches_daemon_status_on_close(self) -> None:
         """On WebSocket ``onclose`` the shim must dispatch ``connected:false``.
@@ -179,7 +202,8 @@ class TestWebappServerLoadingOverlay(unittest.TestCase):
         onclose_branch = html.split(marker, 1)[1].split("};", 1)[0]
         self.assertIn("daemonStatus", onclose_branch)
         self.assertIn("connected: false", onclose_branch)
-        self.assertIn("window.dispatchEvent", onclose_branch)
+        self.assertIn("_dispatchToApp", onclose_branch)
+        self._assert_dispatch_to_app_reaches_window(html)
 
 
 class TestTranslateWebviewCommand(unittest.TestCase):

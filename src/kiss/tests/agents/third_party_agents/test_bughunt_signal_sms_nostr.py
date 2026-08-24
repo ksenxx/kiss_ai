@@ -5,10 +5,17 @@
 """Integration tests for round-2 bugs in signal_agent, sms_agent and nostr_agent.
 
 Covers:
-- signal_agent.py: ``poll_messages`` must filter by ``channel_id`` and respect
-  ``limit``; ``send_message`` must raise ``RuntimeError`` on CLI failure. Tested
-  end-to-end against a REAL executable ``signal-cli`` shell script placed on PATH
-  (no mock libraries).
+- signal_agent.py: ``poll_messages`` performs a DESTRUCTIVE ``signal-cli
+  receive`` (the server acks every envelope), and the channel runner
+  replies to the configured ``channel_id`` — so with a ``channel_id`` only
+  that sender's envelopes may be surfaced (anything else would leak replies
+  to the wrong contact), while consumed envelopes that are not surfaced are
+  parked in the channel state bound via ``bind_channel_state`` (matching
+  overflow past ``limit`` plus foreign senders) or, without bound state,
+  foreign envelopes are dropped with a log and ``limit`` is ignored;
+  ``send_message`` must raise ``RuntimeError`` on CLI failure. Tested
+  end-to-end against a REAL executable ``signal-cli`` shell script placed
+  on PATH (no mock libraries).
 - sms_agent.py: ``from_number`` is a required config key (a config without it is
   invalid and ``connect()`` reports "No Twilio config found."); ``is_from_bot``
   keys on the bot's number. Runtime Twilio API behavior is skipif-guarded because
@@ -101,18 +108,60 @@ class TestSignalBackend(unittest.TestCase):
         _restore_config(_SIGNAL_CONFIG, _SIGNAL_BACKUP)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_poll_filters_by_channel_id(self) -> None:
-        """Only messages whose sender equals channel_id are returned."""
-        messages, _ = self._backend.poll_messages("+1AAA", "", limit=10)
-        self.assertEqual(len(messages), 2)
-        self.assertEqual({m["user"] for m in messages}, {"+1AAA"})
-        self.assertEqual([m["text"] for m in messages], ["hello A1", "hello A2"])
+    def test_poll_with_channel_returns_only_that_sender(self) -> None:
+        """A configured channel_id surfaces only that sender's envelopes.
 
-    def test_poll_respects_limit(self) -> None:
-        """poll_messages('+1AAA', '', limit=1) returns exactly one +1AAA message."""
+        The channel runner replies to the CONFIGURED contact, so
+        surfacing another sender's envelope would leak the reply to the
+        wrong contact.
+        """
+        messages, _ = self._backend.poll_messages("+1AAA", "", limit=10)
+        self.assertEqual([m["text"] for m in messages], ["hello A1", "hello A2"])
+        self.assertEqual({m["user"] for m in messages}, {"+1AAA"})
+
+    def test_poll_without_state_ignores_limit_for_matching(self) -> None:
+        """Without bound state, matching envelopes are never truncated.
+
+        There is nowhere to park the overflow of an already-consumed
+        destructive read, so truncating would lose it permanently.
+        """
         messages, _ = self._backend.poll_messages("+1AAA", "", limit=1)
-        self.assertEqual(len(messages), 1)
-        self.assertEqual(messages[0]["user"], "+1AAA")
+        self.assertEqual(len(messages), 2)
+
+    def test_poll_with_state_parks_foreign_and_overflow(self) -> None:
+        """Bound state receives the foreign sender and the overflow.
+
+        With ``limit=1`` only the first matching envelope is delivered;
+        the second matching one and the foreign sender's are parked in
+        ``pending_envelopes`` so the destructive read loses nothing.
+        """
+        state: dict = {"pending_envelopes": []}
+        self._backend.bind_channel_state(state)
+        messages, _ = self._backend.poll_messages("+1AAA", "", limit=1)
+        self.assertEqual([m["text"] for m in messages], ["hello A1"])
+        parked = state["pending_envelopes"]
+        self.assertEqual(
+            [(e["user"], e["text"]) for e in parked],
+            [("+1AAA", "hello A2"), ("+1BBB", "hello B")],
+        )
+
+    def test_poll_with_state_delivers_queued_matching_first(self) -> None:
+        """Envelopes parked on an earlier tick are delivered before new ones."""
+        state: dict = {
+            "pending_envelopes": [
+                {"ts": "100", "user": "+1AAA", "text": "parked A0"},
+                {"ts": "101", "user": "+1CCC", "text": "parked C"},
+            ]
+        }
+        self._backend.bind_channel_state(state)
+        messages, _ = self._backend.poll_messages("+1AAA", "", limit=10)
+        self.assertEqual(
+            [m["text"] for m in messages], ["parked A0", "hello A1", "hello A2"]
+        )
+        self.assertEqual(
+            [(e["user"], e["text"]) for e in state["pending_envelopes"]],
+            [("+1CCC", "parked C"), ("+1BBB", "hello B")],
+        )
 
     def test_poll_empty_channel_returns_all_senders(self) -> None:
         """An empty channel_id keeps messages from every sender."""

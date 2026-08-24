@@ -151,14 +151,51 @@ def _to_task_result(
     )
 
 
+def _resolve_py_file(
+    value: str | Path, type_error: str, what: str, allow_path: bool = True,
+) -> str:
+    """Resolve and validate a client-supplied Python-file path.
+
+    Shared tail of :func:`resolve_tools_file` and
+    :func:`resolve_agent_path`: the path is resolved against the
+    CLIENT's working directory (the daemon may run with a different
+    one) and validated eagerly so a bad value fails fast, before any
+    daemon connection is made.
+
+    Args:
+        value: The path to resolve; a wrong-typed value raises.
+        type_error: Error message for a wrong-typed *value*;
+            ``{type}`` and ``{value}`` placeholders are filled in.
+        what: Noun used in the suffix/existence error messages, e.g.
+            ``"tools file"`` or ``"agent script"``.
+        allow_path: Whether a ``pathlib.Path`` *value* is accepted in
+            addition to ``str``.
+
+    Returns:
+        The absolute path as a string.
+
+    Raises:
+        ValueError: When *value* has a wrong type, is not a ``.py``
+            file, or does not exist.
+    """
+    if not isinstance(value, (str, Path) if allow_path else str):
+        raise ValueError(
+            type_error.format(type=type(value).__name__, value=repr(value))
+        )
+    path = Path(value).expanduser().resolve()
+    if path.suffix != ".py":
+        raise ValueError(f"{what} {str(path)!r} is not a Python (.py) file")
+    if not path.is_file():
+        raise ValueError(f"{what} {str(path)!r} does not exist")
+    return str(path)
+
+
 def resolve_tools_file(tools: str | Path | None) -> str:
     """Validate a client-supplied tools path and resolve it absolutely.
 
     Client-side counterpart of the daemon's
-    ``kiss.server.tools_file.load_tools_file``.  The path is resolved
-    against the CLIENT's working directory (the daemon may run with a
-    different one) and validated eagerly so a bad value fails fast,
-    before any daemon connection is made.
+    ``kiss.server.tools_file.load_tools_file`` (see
+    :func:`_resolve_py_file` for the resolution rules).
 
     Args:
         tools: Path to a Python file whose ``get_tools()`` function
@@ -174,26 +211,19 @@ def resolve_tools_file(tools: str | Path | None) -> str:
     """
     if tools is None:
         return ""
-    if not isinstance(tools, (str, Path)):
-        raise ValueError(
-            f"tools must be a path to a Python file, got {type(tools).__name__}: {tools!r}"
-        )
-    path = Path(tools).expanduser().resolve()
-    if path.suffix != ".py":
-        raise ValueError(f"tools file {str(path)!r} is not a Python (.py) file")
-    if not path.is_file():
-        raise ValueError(f"tools file {str(path)!r} does not exist")
-    return str(path)
+    return _resolve_py_file(
+        tools,
+        "tools must be a path to a Python file, got {type}: {value}",
+        "tools file",
+    )
 
 
 def resolve_agent_path(agent_path: str | None) -> str:
     """Validate a client-supplied agent-script path and resolve it.
 
     Client-side counterpart of the daemon's
-    ``kiss.server.agent_file.apply_agent_overrides``.  The path is
-    resolved against the CLIENT's working directory (the daemon may
-    run with a different one) and validated eagerly so a bad value
-    fails fast, before any daemon connection is made.
+    ``kiss.server.agent_file.apply_agent_overrides`` (see
+    :func:`_resolve_py_file` for the resolution rules).
 
     Args:
         agent_path: Path string of a Python file whose ``get_X()``
@@ -208,23 +238,14 @@ def resolve_agent_path(agent_path: str | None) -> str:
         ValueError: When *agent_path* is neither ``None`` nor a string,
             is not a ``.py`` file, or does not exist.
     """
-    if agent_path is None:
+    if agent_path is None or agent_path == "":
         return ""
-    if not isinstance(agent_path, str):
-        raise ValueError(
-            f"agent_path must be a string path to a Python file, got "
-            f"{type(agent_path).__name__}: {agent_path!r}"
-        )
-    if agent_path == "":
-        return ""
-    path = Path(agent_path).expanduser().resolve()
-    if path.suffix != ".py":
-        raise ValueError(
-            f"agent script {str(path)!r} is not a Python (.py) file"
-        )
-    if not path.is_file():
-        raise ValueError(f"agent script {str(path)!r} does not exist")
-    return str(path)
+    return _resolve_py_file(
+        agent_path,
+        "agent_path must be a string path to a Python file, got {type}: {value}",
+        "agent script",
+        allow_path=False,
+    )
 
 
 def run(

@@ -331,6 +331,20 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
     the :data:`kiss.core.config.DEFAULT_CONFIG` singleton so subsequent
     model queries see the new key immediately.
 
+    The read-modify-replace of the RC file runs under the in-process
+    lock plus an ``fcntl`` flock keyed to the RC file itself — a
+    sidecar ``<rc>.kiss.lock`` beside it: two concurrent savers (two
+    daemon threads, or two processes) would otherwise both read the
+    same RC snapshot and the second replace would silently drop the
+    first saver's key.  The lock lives beside the RC rather than in
+    ``$KISS_HOME`` because the RC is selected from ``$HOME``: two
+    daemons sharing one HOME but running with different ``KISS_HOME``
+    values edit the *same* RC file, so a KISS_HOME-based lock would
+    give them two different locks and no exclusion.  The sidecar is
+    flocked rather than the RC itself because the RC is atomically
+    ``os.replace``-d: a lock taken on the old inode would not exclude
+    a writer that opens the new one.
+
     Args:
         key_name: Environment variable name (e.g. ``"GEMINI_API_KEY"``).
             Must be a valid POSIX identifier — anything else (the name
@@ -358,25 +372,34 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
         export_line = f"export {key_name}={quoted}"
         pattern = f"export {key_name}="
 
-    lines: list[str] = []
-    replaced = False
-    if rc.exists():
-        lines = rc.read_text(encoding="utf-8").splitlines(keepends=True)
-        new_lines: list[str] = []
-        for line in lines:
-            if line.strip().startswith(pattern):
-                new_lines.append(export_line + "\n")
-                replaced = True
-            else:
-                new_lines.append(line)
-        lines = new_lines
+    rc_lock = rc.with_name(rc.name + ".kiss.lock")
+    with (
+        _config_lock,
+        open(rc_lock, "w", encoding="utf-8") as lock_file,
+    ):
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            lines: list[str] = []
+            replaced = False
+            if rc.exists():
+                lines = rc.read_text(encoding="utf-8").splitlines(keepends=True)
+                new_lines: list[str] = []
+                for line in lines:
+                    if line.strip().startswith(pattern):
+                        new_lines.append(export_line + "\n")
+                        replaced = True
+                    else:
+                        new_lines.append(line)
+                lines = new_lines
 
-    if not replaced:
-        if lines and not lines[-1].endswith("\n"):
-            lines.append("\n")
-        lines.append(export_line + "\n")
+            if not replaced:
+                if lines and not lines[-1].endswith("\n"):
+                    lines.append("\n")
+                lines.append(export_line + "\n")
 
-    _atomic_write_text_secure(rc, "".join(lines))
+            _atomic_write_text_secure(rc, "".join(lines))
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
     os.environ[key_name] = key_value
     _refresh_config()
@@ -417,11 +440,13 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
 
     Sets ``max_budget`` on the default config.
 
-    A non-numeric value falls back to ``DEFAULTS['max_budget']``: the
-    value can come from the user-editable ``config.json`` (via
-    :func:`load_config`) or from any client's ``saveConfig`` payload,
-    and a bare ``float()`` raising out of the command handler would
-    kill the whole client connection.
+    A junk value (boolean, non-numeric, or non-finite) falls back to
+    ``DEFAULTS['max_budget']``: the value can come from the
+    user-editable ``config.json`` (via :func:`load_config`) or from any
+    client's ``saveConfig`` payload, and a bare ``float()`` raising out
+    of the command handler would kill the whole client connection.  The
+    coercion rules are :func:`sanitize_config`'s — it is applied to the
+    ``max_budget`` entry so the two can never drift apart.
 
     Args:
         cfg: The configuration dict (from :func:`load_config`).
@@ -429,19 +454,8 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
     from kiss.core import config as config_module
 
     budget = cfg.get("max_budget", DEFAULTS["max_budget"])
-    if isinstance(budget, bool):
-        logger.debug("Ignoring boolean max_budget %r", budget)
-        budget_value = float(DEFAULTS["max_budget"])
-    else:
-        try:
-            budget_value = float(budget)
-        except (TypeError, ValueError):
-            logger.debug("Ignoring non-numeric max_budget %r", budget)
-            budget_value = float(DEFAULTS["max_budget"])
-    if not math.isfinite(budget_value):
-        logger.debug("Ignoring non-finite max_budget %r", budget)
-        budget_value = float(DEFAULTS["max_budget"])
-    config_module.DEFAULT_CONFIG.max_budget = budget_value
+    sanitized = sanitize_config({"max_budget": budget})
+    config_module.DEFAULT_CONFIG.max_budget = float(sanitized["max_budget"])
 
 
 def _parse_custom_headers(raw_headers: str) -> dict[str, str]:

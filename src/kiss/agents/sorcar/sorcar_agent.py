@@ -19,6 +19,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.agents.sorcar.skills import make_skill_tool
@@ -447,6 +448,10 @@ class _AbandonedSubagent:
             live[1] - self.counted[1],
             live[2] - self.counted[2],
         )
+        # Test hook (no-op in production): widens the read-modify-
+        # write window so concurrency tests can prove the caller
+        # serialises reclaims (see reclaim_abandoned_subagents).
+        _race_delay()
         self.counted = live
         return delta
 
@@ -826,15 +831,26 @@ class SorcarAgent(RelentlessAgent):
         if not pending:
             return True
         if timeout > 0:
+            # Waiting happens OUTSIDE the lock so a concurrent
+            # zero-timeout poll (e.g. server-side worktree cleanup)
+            # is never blocked for this caller's full timeout.
             wait([item.future for item in pending], timeout=timeout)
-        still_running: list[_AbandonedSubagent] = []
-        for item in pending:
-            budget, tokens, steps = item.unbanked_usage()
-            if budget or tokens or steps:
-                _attribute_sub_usage(self, budget, tokens, steps)
-            if not item.future.done():
-                still_running.append(item)
+        # The whole bank-and-forget sequence holds the lock:
+        # ``item.unbanked_usage()`` (read-modify-write of
+        # ``item.counted``) and ``_attribute_sub_usage`` (read-modify-
+        # write of this agent's ``budget_used`` totals) would otherwise
+        # race a concurrent reclaimer — the agent thread and server-
+        # side worktree cleanup call this concurrently — double-
+        # counting spend or losing a totals update.  Neither callee
+        # acquires ``_abandoned_lock``, so this cannot deadlock.
         with self._abandoned_lock:
+            still_running: list[_AbandonedSubagent] = []
+            for item in pending:
+                budget, tokens, steps = item.unbanked_usage()
+                if budget or tokens or steps:
+                    _attribute_sub_usage(self, budget, tokens, steps)
+                if not item.future.done():
+                    still_running.append(item)
             live = {id(item) for item in still_running}
             self._abandoned_subagents = [
                 item
@@ -922,13 +938,16 @@ class SorcarAgent(RelentlessAgent):
         ``self._subagent_info`` is set.
 
         Args:
-            tasks: List of self-contained task description strings.
+            tasks: List of self-contained task description strings
+                (the ``run_parallel`` tool closure has already coerced
+                the LLM's raw argument via :func:`_coerce_tasks`, and
+                the :func:`run_tasks_parallel` engine re-coerces
+                defensively).
             max_workers: Maximum concurrent threads (``None`` = auto).
 
         Returns:
             List of YAML result strings in the same order as *tasks*.
         """
-        tasks = _coerce_tasks(tasks)
         # Bank whatever an earlier fan-out's abandoned children spent
         # after this agent stopped waiting for them, before the budget
         # share below is computed from those totals.
