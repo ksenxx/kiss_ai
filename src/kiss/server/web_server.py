@@ -55,6 +55,7 @@ import os
 import platform
 import re
 import secrets
+import shutil
 import signal
 import socket
 import ssl
@@ -739,6 +740,72 @@ def _cloudflared_pidfile() -> Path:
     return _kiss_home_dir() / "cloudflared.pid"
 
 
+_SYSTEMD_RUN_SCOPE_PREFIX = (
+    "systemd-run", "--user", "--scope", "--collect", "--quiet", "--",
+)
+
+
+def _current_cgroup() -> str:
+    """Return this process's ``/proc/self/cgroup`` content ('' off-Linux).
+
+    The read only fails where the file does not exist (macOS, BSD) or
+    procfs is unmounted — environments without systemd cgroups, where
+    returning ``''`` correctly reports "not in a systemd service".
+    """
+    try:
+        return Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _cloudflared_launch_prefix(cgroup: str | None = None) -> list[str]:
+    """Return an argv prefix that detaches cloudflared from a service cgroup.
+
+    When ``kiss-web`` runs as a systemd service (the ``kiss-web.service``
+    user unit installed by the VS Code extension), ``systemctl restart``
+    SIGTERMs **every** process in the service's control group — systemd's
+    default ``KillMode=control-group`` — so the ``start_new_session=True``
+    cloudflared dies together with the daemon.  ``start_new_session``
+    creates a new process *session* but cannot leave the *cgroup*, which
+    is why every production restart logged "cloudflared pidfile points to
+    dead pid; ignoring" and minted a fresh ``*.trycloudflare.com``
+    hostname, defeating :func:`_try_adopt_existing_cloudflared`.
+
+    Launching cloudflared through ``systemd-run --user --scope`` places it
+    in its own transient ``run-*.scope`` unit *outside* the service
+    cgroup, out of ``systemctl restart``'s reach.  With ``--scope`` the
+    systemd-run process registers the scope and then ``exec``s the payload
+    in-place, so the :class:`subprocess.Popen` pid IS cloudflared's pid
+    (the pidfile and adoption logic keep working unchanged) and the
+    stderr pipe used to parse the tunnel URL is preserved.  ``--collect``
+    garbage-collects the scope even when cloudflared exits non-zero.
+
+    Args:
+        cgroup: ``/proc/self/cgroup`` content to inspect; ``None`` reads
+            the real file.  Only the *final* path component is matched
+            against ``.service`` — every user process lives under
+            ``user@UID.service``, and transient scopes end in ``.scope``,
+            so a substring match would misfire.
+
+    Returns:
+        The ``systemd-run`` argv prefix when this process is inside a
+        systemd service cgroup and ``systemd-run`` is installed,
+        otherwise ``[]`` (spawn cloudflared directly).
+    """
+    text = _current_cgroup() if cgroup is None else cgroup
+    in_service = False
+    for line in text.splitlines():
+        unit = line.rsplit(":", 1)[-1].rsplit("/", 1)[-1].strip()
+        if unit.endswith(".service"):
+            in_service = True
+            break
+    if not in_service:
+        return []
+    if shutil.which("systemd-run") is None:
+        return []
+    return list(_SYSTEMD_RUN_SCOPE_PREFIX)
+
+
 def _is_pid_alive(pid: int) -> bool:
     """Return True iff a process with *pid* currently exists.
 
@@ -911,9 +978,12 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
     This is how the daemon preserves a single quick-tunnel URL across
     its own restarts: ``cloudflared`` is spawned in its own process
     group (``start_new_session=True``) so it survives ``kiss-web``'s
-    SIGTERM, the VS Code extension's ``pkill kiss-web`` no longer
-    targets it, and the next ``kiss-web`` startup adopts it here
-    instead of spawning a fresh quick-tunnel with a new hostname.
+    SIGTERM and the VS Code extension's ``pkill kiss-web``, and — when
+    ``kiss-web`` runs as a systemd service — in its own transient
+    scope unit (see :func:`_cloudflared_launch_prefix`) so it also
+    survives ``systemctl restart kiss-web``'s cgroup-wide kill.  The
+    next ``kiss-web`` startup then adopts it here instead of spawning
+    a fresh quick-tunnel with a new hostname.
 
     Returns:
         ``(pid, metrics_port, url)`` if adoption succeeded, else
@@ -5111,7 +5181,12 @@ class RemoteAccessServer:
         }
         await self._run_cmd(run_cmd)
 
-    def _spawn_cloudflared(self, args: list[str], retries: int = 3) -> None:
+    def _spawn_cloudflared(
+        self,
+        args: list[str],
+        retries: int = 3,
+        launch_prefix: list[str] | None = None,
+    ) -> None:
         """Spawn ``cloudflared`` with *args* and a free ``--metrics`` port.
 
         Records the subprocess in :attr:`_tunnel_proc`, the metrics
@@ -5120,7 +5195,23 @@ class RemoteAccessServer:
         ``cloudflared tunnel --metrics 127.0.0.1:PORT`` followed by
         *args* (e.g. ``["--url", LOCAL, "--no-tls-verify"]`` for a
         quick tunnel or ``["run", "--token", TOKEN]`` for a named
-        tunnel).
+        tunnel), optionally preceded by the
+        :func:`_cloudflared_launch_prefix` ``systemd-run --scope``
+        prefix so cloudflared escapes the ``kiss-web.service`` cgroup
+        and survives ``systemctl restart`` (keeping the public tunnel
+        URL stable across daemon restarts via pidfile adoption).
+
+        The prefix is best-effort: if ``systemd-run`` is missing, the
+        spawn falls back to launching cloudflared directly.  An
+        immediate exit under the prefix is retried once more WITH the
+        prefix on a fresh port (it may be the metrics-port TOCTOU
+        below, and losing the cgroup escape would silently reintroduce
+        URL rotation); a second immediate exit means ``systemd-run``
+        itself is broken (no session D-Bus, cgroup delegation denied,
+        …), so the prefix is dropped — a working tunnel that rotates
+        on restart beats no tunnel.  Prefix-related failures do not
+        consume *retries* attempts (they are bounded on their own), so
+        the fallback works even with ``retries=1``.
 
         M5: there is a small TOCTOU window between
         :func:`_pick_free_local_port` releasing its probe socket and
@@ -5132,28 +5223,60 @@ class RemoteAccessServer:
         Args:
             args: Extra arguments after ``--metrics 127.0.0.1:PORT``.
             retries: Maximum number of bind-failure retries.
+            launch_prefix: Argv prefix override for tests; ``None``
+                computes it via :func:`_cloudflared_launch_prefix`.
         """
+        prefix = (
+            _cloudflared_launch_prefix() if launch_prefix is None
+            else list(launch_prefix)
+        )
         last_proc: subprocess.Popen[str] | None = None
-        for attempt in range(max(1, retries)):
+        prefixed_failures = 0
+        attempt = 0
+        max_attempts = max(1, retries)
+        while attempt < max_attempts:
             self._tunnel_metrics_port = _pick_free_local_port()
-            proc = subprocess.Popen(
-                [
-                    "cloudflared", "tunnel",
-                    "--metrics",
-                    f"127.0.0.1:{self._tunnel_metrics_port}",
-                    *args,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                start_new_session=True,
-            )
+            base_argv = [
+                "cloudflared", "tunnel",
+                "--metrics",
+                f"127.0.0.1:{self._tunnel_metrics_port}",
+                *args,
+            ]
+            try:
+                proc = subprocess.Popen(
+                    [*prefix, *base_argv],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    start_new_session=True,
+                )
+            except FileNotFoundError:
+                if not prefix:
+                    # cloudflared itself is missing; caller handles.
+                    # Release any failed prefixed proc retained above
+                    # so its stderr pipe does not linger until GC.
+                    if last_proc is not None:
+                        if last_proc.stderr is not None:
+                            last_proc.stderr.close()
+                        last_proc.wait()
+                    raise
+                logger.warning(
+                    "%s not found; spawning cloudflared inside the "
+                    "service cgroup (tunnel URL will rotate on restart)",
+                    prefix[0],
+                )
+                prefix = []
+                continue  # Bounded: the prefix is now empty.
             try:
                 proc.wait(timeout=_SPAWN_FAILFAST_WINDOW)
             except subprocess.TimeoutExpired:
                 pass
             if proc.poll() is None:
+                if last_proc is not None:
+                    if last_proc.stderr is not None:
+                        last_proc.stderr.close()
+                    last_proc.wait()
                 self._tunnel_proc = proc
                 self._tunnel_started_at = time.monotonic()
                 self._tunnel_adopted_pid = None
@@ -5166,12 +5289,33 @@ class RemoteAccessServer:
                     last_proc.stderr.close()
                 last_proc.wait()
             last_proc = proc
+            if prefix:
+                # Bounded: at most two prefixed failures before the
+                # prefix is dropped, and neither consumes an attempt.
+                prefixed_failures += 1
+                if prefixed_failures >= 2:
+                    logger.warning(
+                        "cloudflared under %s exited immediately again "
+                        "(rc=%s); dropping the cgroup-escape prefix "
+                        "(tunnel URL will rotate on restart)",
+                        prefix[0], proc.returncode,
+                    )
+                    prefix = []
+                else:
+                    logger.warning(
+                        "cloudflared under %s exited immediately "
+                        "(rc=%s); retrying once more with the prefix "
+                        "on a fresh metrics port",
+                        prefix[0], proc.returncode,
+                    )
+                continue
             logger.info(
                 "cloudflared exited immediately on metrics port %d "
                 "(attempt %d/%d, rc=%s); retrying with fresh port",
-                self._tunnel_metrics_port, attempt + 1, retries,
+                self._tunnel_metrics_port, attempt + 1, max_attempts,
                 proc.returncode,
             )
+            attempt += 1
         self._tunnel_proc = last_proc
         self._tunnel_started_at = time.monotonic()
 
@@ -5817,6 +5961,7 @@ class RemoteAccessServer:
     @staticmethod
     def _spawn_stderr_drain_shim(
         proc: subprocess.Popen[str],
+        launch_prefix: list[str] | None = None,
     ) -> subprocess.Popen[bytes] | None:
         """Hand off *proc*'s stderr pipe to a detached drain shim.
 
@@ -5830,6 +5975,15 @@ class RemoteAccessServer:
         exits.  When ``cloudflared`` itself eventually dies, the
         pipe closes from the write side and ``cat`` exits cleanly.
 
+        Under systemd the shim must escape the service cgroup exactly
+        like cloudflared itself (:func:`_cloudflared_launch_prefix`):
+        a ``systemctl restart`` kills every cgroup member, and killing
+        the shim closes the pipe's last read end — the very
+        ``SIGPIPE`` this shim exists to prevent would then take down
+        the escaped cloudflared indirectly.  A prefixed shim that
+        exits within 0.2s (broken user manager) falls back to a plain
+        ``cat``, which at worst restores the pre-fix behaviour.
+
         Best-effort: a ``cat`` spawn failure (missing binary, EMFILE,
         permission error) is logged at DEBUG and otherwise ignored.
         The worst case is a return to the pre-fix behaviour for that
@@ -5840,6 +5994,8 @@ class RemoteAccessServer:
         Args:
             proc: The ``cloudflared`` subprocess; must have been
                 started with ``stderr=PIPE``.
+            launch_prefix: Argv prefix override for tests; ``None``
+                computes it via :func:`_cloudflared_launch_prefix`.
 
         Returns:
             The detached shim's ``Popen`` handle on success, or
@@ -5849,22 +6005,45 @@ class RemoteAccessServer:
         stderr = proc.stderr
         if stderr is None:
             return None
-        try:
-            shim = subprocess.Popen(
-                ["cat"],
-                stdin=stderr.fileno(),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                close_fds=True,
-            )
-        except (OSError, ValueError):
-            logger.debug(
-                "Failed to spawn stderr drain shim for cloudflared",
-                exc_info=True,
-            )
-            return None
-        return shim
+        prefix = (
+            _cloudflared_launch_prefix() if launch_prefix is None
+            else list(launch_prefix)
+        )
+        candidates: list[list[str]] = [["cat"]]
+        if prefix:
+            candidates.insert(0, [*prefix, "cat"])
+        for argv in candidates:
+            try:
+                shim = subprocess.Popen(
+                    argv,
+                    stdin=stderr.fileno(),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+            except (OSError, ValueError):
+                logger.debug(
+                    "Failed to spawn stderr drain shim via %r",
+                    argv,
+                    exc_info=True,
+                )
+                continue
+            if len(argv) > 1:
+                # Prefixed spawn: confirm systemd-run did not fail
+                # outright before trusting the shim with the pipe.
+                try:
+                    shim.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    return shim
+                logger.debug(
+                    "Prefixed stderr drain shim exited immediately "
+                    "(rc=%s); falling back to a plain cat",
+                    shim.returncode,
+                )
+                continue
+            return shim
+        return None
 
 
     async def _setup_server(self) -> None:
