@@ -12,7 +12,10 @@ TLS is always enabled; a self-signed certificate is auto-generated in
 ``~/.kiss/tls/`` when no explicit certificate is provided.
 
 Authentication uses the ``remote_password`` setting from
-``~/.kiss/config.json``.  An optional ``cloudflared`` tunnel can
+``~/.kiss/config.json``.  While that password is empty, the server is
+localhost-only: non-loopback peers are refused with 403 (HTTP and the
+WebSocket upgrade alike) and no tunnel is started, so neither the LAN
+nor the internet can reach the app.  An optional ``cloudflared`` tunnel can
 expose the server through Cloudflare so devices outside the LAN can
 connect without manual port-forwarding.
 
@@ -546,6 +549,62 @@ _HEAD_200 = (
     b"\r\n"
 )
 
+_HEAD_403 = (
+    b"HTTP/1.1 403 Forbidden\r\n"
+    b"Content-Length: 0\r\n"
+    b"Connection: close\r\n"
+    b"\r\n"
+)
+
+
+def _connection_peer_is_loopback(connection: Any) -> bool:
+    """Return True when *connection*'s raw TCP peer is loopback.
+
+    Deliberately ignores the forwarded-client headers that
+    :meth:`RemoteAccessServer._client_ip` trusts for loopback peers:
+    this check gates ACCESS (the empty-password localhost-only
+    lockdown), so only the unforgeable transport-level peer address
+    may be consulted.  An unknown peer address counts as NOT loopback
+    (fail closed).
+
+    Args:
+        connection: A WebSocket server connection (or any object with
+            a ``remote_address`` tuple).
+
+    Returns:
+        True when the TCP peer is an IPv4/IPv6 loopback address.
+    """
+    addr = getattr(connection, "remote_address", None)
+    peer_ip = str(addr[0]) if addr and len(addr) >= 1 else ""
+    return _is_loopback_ip(peer_ip)
+
+
+def _head_health_response(connection: Any) -> bytes:
+    """Return the reply for a HEAD health check from *connection*.
+
+    Cloudflare's origin health checks arrive from the local
+    cloudflared (a loopback peer) and must keep getting 200 so the
+    tunnel stays registered.  A NON-loopback HEAD probe is answered
+    403 while the configured ``remote_password`` is empty, matching
+    the localhost-only lockdown that
+    :meth:`RemoteAccessServer._process_request` enforces for every
+    parsed request — without this, a LAN peer's HEAD would bypass the
+    gate (it is answered before the websockets HTTP parser runs).
+    The config file is read only on that rare non-loopback path, so
+    the hot loopback health checks never pay the disk read.
+
+    Args:
+        connection: The server connection that received the HEAD.
+
+    Returns:
+        The raw HTTP response bytes to write to the transport.
+    """
+    if _connection_peer_is_loopback(connection):
+        return _HEAD_200
+    if not str(load_config().get("remote_password", "") or ""):
+        return _HEAD_403
+    return _HEAD_200
+
 # Cap on the bytes buffered while waiting for the first CRLF of an
 # incoming request line.  Matches the conventional HTTP request-line
 # limit; anything longer is fed to the websockets parser (which
@@ -609,7 +668,7 @@ class _HeadAwareServerConnection(ServerConnection):
         if first_line.startswith(b"HEAD "):
             transport = self.transport
             if transport is not None:
-                transport.write(_HEAD_200)
+                transport.write(_head_health_response(self))
                 transport.close()
             return
         buffered = self._head_buffer
@@ -954,6 +1013,34 @@ def _terminate_declined_cloudflared(pid: int) -> None:
         except (ProcessLookupError, PermissionError, OSError):
             pass
     _unlink_cloudflared_pidfile()
+
+
+def _terminate_orphan_cloudflared() -> None:
+    """Kill a previous kiss-web's surviving cloudflared, if any.
+
+    Called at startup when the ``remote_password`` is EMPTY: a tunnel
+    deliberately left alive by the previous instance (so its public
+    URL survives restarts) would keep forwarding internet traffic to
+    this server over loopback, where the empty password authenticates.
+    With no password configured there must be no public tunnel at all,
+    so instead of adopting the orphan it is terminated.
+
+    The signalling (identity check before EVERY signal, SIGTERM,
+    bounded wait, re-verified SIGKILL escalation, pidfile unlink) is
+    delegated to :func:`_terminate_declined_cloudflared`, which exists
+    for exactly this "recorded pid we must not adopt" situation.
+    """
+    data = _load_cloudflared_pidfile()
+    if data is None:
+        return
+    pid = int(data["pid"])
+    if _is_pid_alive(pid) and _looks_like_cloudflared(pid):
+        logger.warning(
+            "remote_password is empty; terminating the cloudflared "
+            "tunnel (pid=%d) left by a previous kiss-web so its "
+            "public URL stops reaching this server.", pid,
+        )
+    _terminate_declined_cloudflared(pid)
 
 
 def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
@@ -3629,20 +3716,50 @@ class RemoteAccessServer:
         self._uds_inode: int | None = None
 
     async def _process_request(
-        self, _connection: ServerConnection, request: Request
+        self, connection: ServerConnection, request: Request
     ) -> Response | None:
         """Serve HTTP requests for the HTML page and static assets.
 
         Returns a :class:`Response` for regular HTTP requests, or
         ``None`` to let the WebSocket handshake proceed for ``/ws``.
 
+        This is the choke point of the no-password lockdown for every
+        PARSED request: when the configured ``remote_password`` is
+        empty, EVERY request from a non-loopback peer — the HTML
+        page, static assets, the trajectory data endpoints, and the
+        ``/ws`` WebSocket upgrade itself — is refused with ``403``.
+        (The one request kind answered before the parser runs, the
+        HEAD health check, applies the same rule in
+        :func:`_head_health_response`.)  Without this gate the
+        default ``0.0.0.0`` bind would let any LAN machine
+        authenticate with the empty password.  Legitimate remote
+        traffic is unaffected: it arrives via the local cloudflared
+        tunnel (a loopback peer), and the tunnel is only started (or
+        kept alive) when a password is configured.
+
         Args:
-            _connection: The server connection (unused for HTTP).
+            connection: The server connection (used for the peer
+                address check above).
             request: The incoming HTTP request.
 
         Returns:
             An HTTP response, or ``None`` for WebSocket upgrade.
         """
+        if not self._peer_is_loopback(connection):
+            cfg = await asyncio.to_thread(load_config)
+            if not str(cfg.get("remote_password", "") or ""):
+                addr = getattr(connection, "remote_address", None)
+                logger.warning(
+                    "Refusing non-localhost request from %s: "
+                    "remote_password is empty", addr,
+                )
+                return _http_response(
+                    403,
+                    "text/plain",
+                    b"Forbidden: no remote_password is configured, so "
+                    b"only localhost may connect. Set remote_password "
+                    b"in ~/.kiss/config.json to allow remote access.",
+                )
         request_path = urlsplit(request.path).path
         path = unquote(request_path)
         if path in ("", "/"):
@@ -3685,6 +3802,22 @@ class RemoteAccessServer:
         for existing callers and tests).
         """
         return sorcar_api.passwords_equal(a, b)
+
+    def _peer_is_loopback(self, connection: Any) -> bool:
+        """Return True when *connection*'s raw TCP peer is loopback.
+
+        Backend primitive for :meth:`ServerApi.authenticate`; thin
+        wrapper over :func:`_connection_peer_is_loopback` (see there
+        for the fail-closed / no-forwarded-headers rationale).
+
+        Args:
+            connection: A WebSocket server connection (or any object
+                with a ``remote_address`` tuple).
+
+        Returns:
+            True when the TCP peer is an IPv4/IPv6 loopback address.
+        """
+        return _connection_peer_is_loopback(connection)
 
     def _client_ip(self, websocket: ServerConnection) -> str:
         """Return the rate-limit bucket key (source IP) of *websocket*.
@@ -3777,9 +3910,12 @@ class RemoteAccessServer:
 
         Returns True on success, False (and closes the socket) on failure.
 
-        When the configured ``remote_password`` is empty, all clients
-        are still required to send an empty-password ``auth`` message
-        (using a constant-time compare).  See also
+        When the configured ``remote_password`` is empty, only
+        loopback peers may connect at all (:meth:`_process_request`
+        refuses non-loopback peers with 403 before the upgrade, and
+        the handshake re-checks the peer address), and a loopback
+        client is still required to send an empty-password ``auth``
+        message (using a constant-time compare).  See also
         :meth:`_setup_server` which refuses to advertise the public
         cloudflared tunnel when no password is configured.
 
@@ -5486,10 +5622,41 @@ class RemoteAccessServer:
             self._tunnel_unhealthy_ticks = 0
             adopted_pid = None
 
+        cfg = await asyncio.to_thread(load_config)
+        if self._shutdown_initiated:
+            # Shutdown may have started while the config read was in
+            # flight (the guard at the top of this method ran before
+            # the flag was set) and detached the tunnel for the next
+            # daemon to adopt.  Acting on the pre-read snapshot now
+            # would wrongly withdraw the URL of a deliberately
+            # surviving tunnel.
+            return
+        if not cfg.get("remote_password", ""):
+            if (
+                self._tunnel_proc is not None
+                or self._tunnel_adopted_pid is not None
+            ):
+                # The password was cleared while a tunnel was live.
+                # Refusing (re)starts is not enough: the running
+                # cloudflared keeps the public URL resolving to this
+                # server over loopback, where the empty password
+                # authenticates — so the tunnel itself must go.
+                logger.warning(
+                    "remote_password was cleared; terminating the "
+                    "live cloudflared tunnel so the public URL stops "
+                    "reaching this server.",
+                )
+                await asyncio.to_thread(self._terminate_tunnel_proc, True)
+            if self._active_url and self._active_url != self._local_url:
+                # Also withdraw a stale public URL left behind by a
+                # tunnel that died on its own (the dead-proc cleanup
+                # above deliberately leaves the URL for a replacement
+                # tunnel to overwrite — but with no password there
+                # will never be a replacement).
+                await self._clear_tunnel_url()
+            return
+
         if proc is None and adopted_pid is None:
-            cfg = await asyncio.to_thread(load_config)
-            if not cfg.get("remote_password", ""):
-                return
             if now >= self._tunnel_next_retry:
                 await self._restart_tunnel_url()
             return
@@ -5563,6 +5730,23 @@ class RemoteAccessServer:
         self._tunnel_force_restart_next_allowed = now + cooldown
         if now >= self._tunnel_next_retry:
             await self._restart_tunnel_url()
+
+    async def _clear_tunnel_url(self) -> None:
+        """Withdraw the advertised public URL after stopping the tunnel.
+
+        Rewrites ``~/.kiss/remote-url.json`` with only the local URL,
+        resets :attr:`_active_url`, and broadcasts the change to
+        connected clients — the mirror image of what
+        :meth:`_restart_tunnel_url` publishes after a start.  Used by
+        the watchdog when the ``remote_password`` is cleared while a
+        tunnel is live.
+        """
+        await asyncio.to_thread(
+            _save_url_file, self._url_file, self._local_url, None,
+        )
+        self._active_url = self._local_url
+        self._broadcast_remote_url(self._active_url, False)
+        await self._post_url_if_changed()
 
     async def _restart_tunnel_url(self) -> None:
         """Start a fresh tunnel and refresh ``~/.kiss/remote-url.json``.
@@ -5655,21 +5839,37 @@ class RemoteAccessServer:
                 proc.kill()
             _unlink_cloudflared_pidfile()
         elif kill_adopted and self._tunnel_adopted_pid is not None:
+            # An adopted pid came from the pidfile of a PREVIOUS
+            # process, so unlike the self-spawned ``proc`` above it
+            # may have been recycled for an unrelated process since
+            # adoption.  Verify the identity before every signal
+            # (same rule as _terminate_declined_cloudflared).
             adopted_pid = self._tunnel_adopted_pid
-            try:
-                os.kill(adopted_pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-            else:
-                for _ in range(50):
-                    if not _is_pid_alive(adopted_pid):
-                        break
-                    time.sleep(0.1)
+            if _looks_like_cloudflared(adopted_pid):
+                try:
+                    os.kill(adopted_pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
                 else:
-                    try:
-                        os.kill(adopted_pid, signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError, OSError):
-                        pass
+                    for _ in range(50):
+                        if not _is_pid_alive(adopted_pid):
+                            break
+                        time.sleep(0.1)
+                    else:
+                        if _looks_like_cloudflared(adopted_pid):
+                            try:
+                                os.kill(adopted_pid, signal.SIGKILL)
+                            except (
+                                ProcessLookupError,
+                                PermissionError,
+                                OSError,
+                            ):
+                                pass
+            else:
+                logger.info(
+                    "Adopted pid %d is no longer a cloudflared process "
+                    "(pid recycled); not signalling it", adopted_pid,
+                )
             _unlink_cloudflared_pidfile()
         self._reset_tunnel_proc_state()
 
@@ -6273,6 +6473,23 @@ class RemoteAccessServer:
 
         tunnel_url: str | None = None
         if self.use_tunnel:
+            # Close the empty-password startup window FIRST: the WSS
+            # listener is already up, so an orphaned cloudflared left
+            # by the previous instance is already relaying internet
+            # visitors to it as loopback peers — whom an empty
+            # password would authenticate.  Waiting up to 30 s for a
+            # password before acting (below) would leave that tunnel
+            # publicly usable for the whole wait, so when the password
+            # is empty RIGHT NOW the orphan is terminated immediately.
+            # Cost of the eager kill: a password saved during the wait
+            # rotates the public URL instead of re-adopting it.
+            initial_cfg = await self._loop.run_in_executor(  # type: ignore[union-attr]
+                None, load_config,
+            )
+            if not initial_cfg.get("remote_password", ""):
+                await self._loop.run_in_executor(  # type: ignore[union-attr]
+                    None, _terminate_orphan_cloudflared,
+                )
             password = await self._loop.run_in_executor(  # type: ignore[union-attr]
                 None, _wait_for_remote_password, 30.0,
             )
@@ -6290,16 +6507,20 @@ class RemoteAccessServer:
                         adopted_pid, adopted_port, adopted_url,
                     )
             if not password:
+                await self._loop.run_in_executor(  # type: ignore[union-attr]
+                    None, _terminate_orphan_cloudflared,
+                )
                 logger.warning(
                     "remote_password is not set in ~/.kiss/config.json; "
-                    "refusing to start the cloudflared tunnel.  "
-                    "Set a password in the config panel to enable "
-                    "remote access.",
+                    "refusing to start the cloudflared tunnel and "
+                    "refusing non-localhost connections.  Set a "
+                    "password in the config panel to enable remote "
+                    "access.",
                 )
                 print(
                     "Warning: remote_password is empty; cloudflared "
-                    "tunnel disabled.  Set a password to enable "
-                    "remote access.",
+                    "tunnel disabled and non-localhost connections "
+                    "refused.  Set a password to enable remote access.",
                     file=sys.stderr,
                 )
             elif tunnel_url is None:

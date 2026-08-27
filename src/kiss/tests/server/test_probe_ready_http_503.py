@@ -43,6 +43,7 @@ from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.server.web_server as ws_mod
+from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _TUNNEL_STARTUP_GRACE,
     _TUNNEL_UNHEALTHY_LIMIT_QUICK,
@@ -236,6 +237,14 @@ class TestWatchdogRestartsDeregisteredTunnel(IsolatedAsyncioTestCase):
         ws_mod._CLOUDFLARED_PIDFILE = (
             Path(self._tmp.name) / "cloudflared.pid"
         )
+        # A live tunnel implies a configured password: the watchdog
+        # now TERMINATES a tracked tunnel when remote_password is
+        # empty, which would short-circuit the health-tick logic
+        # under test here.
+        self._orig_config = (
+            CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
+        )
+        save_config({"remote_password": "test-secret-tunnel"})
         self._metrics = _FakeCloudflaredMetrics(ready_connections=0)
         self._proc = subprocess.Popen(
             ["sleep", "60"],
@@ -259,6 +268,10 @@ class TestWatchdogRestartsDeregisteredTunnel(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         ws_mod._CLOUDFLARED_PIDFILE = self._orig_pidfile
+        if self._orig_config is None:
+            CONFIG_PATH.unlink(missing_ok=True)
+        else:
+            CONFIG_PATH.write_text(self._orig_config)
         self._metrics.close()
         if self._proc.poll() is None:
             self._proc.terminate()
