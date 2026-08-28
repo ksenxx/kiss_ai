@@ -364,13 +364,38 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
     rc = _shell_rc_path(shell)
     rc.parent.mkdir(parents=True, exist_ok=True)
 
+    if shell == "fish":
+        pattern = f"set -gx {key_name} "
+    else:
+        pattern = f"export {key_name}="
+
+    # Empty value means delete: remove the export line and clear the env
+    if not key_value:
+        rc_lock = rc.with_name(rc.name + ".kiss.lock")
+        with (
+            _config_lock,
+            open(rc_lock, "w", encoding="utf-8") as lock_file,
+        ):
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                if rc.exists():
+                    lines = rc.read_text(encoding="utf-8").splitlines(keepends=True)
+                    new_lines = [
+                        line for line in lines if not line.strip().startswith(pattern)
+                    ]
+                    if len(new_lines) != len(lines):
+                        _atomic_write_text_secure(rc, "".join(new_lines))
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+        os.environ.pop(key_name, None)
+        _refresh_config()
+        return
+
     quoted = shlex.quote(key_value)
     if shell == "fish":
         export_line = f"set -gx {key_name} {quoted}"
-        pattern = f"set -gx {key_name} "
     else:
         export_line = f"export {key_name}={quoted}"
-        pattern = f"export {key_name}="
 
     rc_lock = rc.with_name(rc.name + ".kiss.lock")
     with (

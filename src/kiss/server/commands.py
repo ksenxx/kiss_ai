@@ -1276,7 +1276,6 @@ class _CommandsMixin:
                 if (
                     isinstance(key_name, str)
                     and isinstance(key_value, str)
-                    and key_value
                 ):
                     save_api_key_to_shell(key_name, key_value)
 
