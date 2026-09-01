@@ -221,7 +221,7 @@
     "comment": "NEW"
   },
   "cc/claude-fable-5-1": {
-    "context_length": 200000,
+    "context_length": 500000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,
     "fc": true,
@@ -346,13 +346,13 @@
     "adaptive_thinking": true
   },
   "claude-fable-5-1": {
-    "context_length": 200000,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
+    "context_length": 500000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW: needs pricing"
+    "comment": "NEW"
   },
   "claude-haiku-4-5": {
     "context_length": 200000,
