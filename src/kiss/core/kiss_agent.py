@@ -45,6 +45,14 @@ _NON_RETRYABLE_PHRASES = (
 )
 MAX_CONSECUTIVE_ERRORS = 3
 MAX_CONSECUTIVE_NO_TOOL_CALLS = 2
+# A turn is "stagnant" when its tool calls AND their results are identical to
+# the previous turn's — a done-but-not-finishing model padding status turns
+# with a harmless verification call.  Legitimate polling is not stagnant
+# because a changing world changes the results.  After
+# STAGNANT_TURNS_REMINDER such turns the model is reminded to call finish;
+# after STAGNANT_TURNS_FINISH the agent treats the run as an implicit finish.
+STAGNANT_TURNS_REMINDER = 3
+STAGNANT_TURNS_FINISH = 6
 CONTEXT_LIMIT_FRACTION = 0.9
 _CONTEXT_OVERFLOW_PHRASES = (
     "exceeds the context window",
@@ -99,6 +107,7 @@ class KISSAgent(Base):
         self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
         self.context_tokens_used = 0
         self.budget_check_hook: Callable[[], None] | None = None
+        self._reset_progress_trackers()
 
     def _reset(
         self,
@@ -147,9 +156,22 @@ class KISSAgent(Base):
         self.context_tokens_used = 0
         self.budget_used = 0.0
         self.run_start_timestamp = int(time.time())
-        self._consecutive_no_tool_calls = 0
+        self._reset_progress_trackers()
         self._model_config: dict[str, Any] | None = model_config
         self._fallback_used = False
+
+    def _reset_progress_trackers(self) -> None:
+        """Clear the text-only-turn and stagnant-turn counters and last text.
+
+        Called at construction, on every run reset, and after a mid-run
+        fallback model swap, so stale counts — and stale status text that
+        an implicit finish would otherwise report — never leak from the
+        previous model or run into the new one.
+        """
+        self._consecutive_no_tool_calls = 0
+        self._stagnant_call_turns = 0
+        self._last_turn_signature: tuple[Any, ...] | None = None
+        self._last_response_text = ""
 
     def _set_prompt(
         self,
@@ -405,7 +427,7 @@ class KISSAgent(Base):
                     new_name = self._try_switch_to_fallback(reason=reason)
                     if new_name is not None:
                         consecutive_errors = 0
-                        self._consecutive_no_tool_calls = 0
+                        self._reset_progress_trackers()
                         continue
                 raise
             except Exception as e:
@@ -421,7 +443,7 @@ class KISSAgent(Base):
                     if new_name is None:
                         raise KISSError(f"Non-retryable error from model: {e}") from e
                     consecutive_errors = 0
-                    self._consecutive_no_tool_calls = 0
+                    self._reset_progress_trackers()
                     continue
                 consecutive_errors += 1
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
@@ -457,6 +479,8 @@ class KISSAgent(Base):
         function_calls, response_text, response = self.model.generate_and_process_with_tools(
             self.function_map, tools_schema=self._cached_tools_schema
         )
+        if response_text and response_text.strip():
+            self._last_response_text = response_text
         self._update_tokens_and_budget_from_response(response)
         usage_info = self._get_usage_info_string()
         self.model.set_usage_info_for_messages(usage_info)
@@ -492,7 +516,9 @@ class KISSAgent(Base):
                 return str(response_text)
             retry_msg = (
                 "**Your response MUST have at least one function call. "
-                "Your response has 0 function calls.**"
+                "Your response has 0 function calls. If you have completed "
+                "the task, call the `finish` tool now with your final "
+                "result instead of describing it in text.**"
             )
             self._add_message("user", retry_msg)
             self.model.add_message_to_conversation("user", retry_msg)
@@ -502,11 +528,14 @@ class KISSAgent(Base):
         call_reprs = []
         function_results: list[tuple[str, dict[str, Any]]] = []
         finish_result: str | None = None
+        turn_had_blocked_call = False
 
         for fc in function_calls:
             blocked: str | None = None
             if self.tool_call_guard is not None:
                 blocked = self.tool_call_guard(fc["name"], _call_args(fc))
+            if blocked is not None:
+                turn_had_blocked_call = True
             name, response_str = self._execute_tool(fc, blocked=blocked)
             args_str = ", ".join(f"{k}={v!r}" for k, v in _call_args(fc).items())
             call_reprs.append(f"```python\n{name}({args_str})\n```")
@@ -515,6 +544,26 @@ class KISSAgent(Base):
                 finish_result = response_str
             else:
                 self._check_limits()
+
+        if turn_had_blocked_call:
+            # A guard rejected a call this turn: the guard is deliberately
+            # steering the model (e.g. blocking finish until a pending user
+            # message is handled), so such turns must never escalate to an
+            # implicit finish that would bypass the guard.
+            self._stagnant_call_turns = 0
+            self._last_turn_signature = None
+        else:
+            turn_signature: tuple[Any, ...] = (
+                tuple(
+                    (fc["name"], repr(sorted(_call_args(fc).items()))) for fc in function_calls
+                ),
+                tuple(result["result"] for _, result in function_results),
+            )
+            if turn_signature == self._last_turn_signature:
+                self._stagnant_call_turns += 1
+            else:
+                self._stagnant_call_turns = 1
+                self._last_turn_signature = turn_signature
 
         model_content = (
             response_text + "\n" + "\n".join(call_reprs) + "\n```text\n" + usage_info + "\n```\n"
@@ -540,7 +589,67 @@ class KISSAgent(Base):
             return finish_result
 
         self.model.add_function_results_to_conversation_and_return(function_results)
+
+        if self._stagnant_call_turns >= STAGNANT_TURNS_FINISH and (
+            self.tool_call_guard is None or self.tool_call_guard("finish", {}) is None
+        ):
+            logger.info(
+                "Implicit finish: agent=%s step=%d repeated identical tool "
+                "call(s) with identical results for %d consecutive turns",
+                self.name,
+                self.step_count,
+                self._stagnant_call_turns,
+            )
+            return self._implicit_finish_result()
+        if self._stagnant_call_turns >= STAGNANT_TURNS_REMINDER:
+            reminder = (
+                f"**You have repeated the identical tool call(s) with "
+                f"identical results for {self._stagnant_call_turns} "
+                "consecutive turns; this makes no progress. If the task is "
+                "complete, call the `finish` tool now with your final "
+                "result. If you are waiting on a long-running process, "
+                "vary your action (e.g. sleep before checking again). "
+                "Otherwise, take a different action.**"
+            )
+            self.model.add_message_to_conversation("user", reminder)
+            self._add_message("user", reminder)
         return None
+
+    def _implicit_finish_result(self) -> str:
+        """Build the result for a stagnation-triggered implicit finish.
+
+        Preserves the registered ``finish`` tool's output contract: callers
+        like RelentlessAgent register the structured
+        :func:`kiss.core.utils.finish` and parse the result as YAML, so
+        returning raw status text would silently drop the
+        success/is_continue metadata (and could pass a stalled run off as
+        a success).  For that contract the session ends as
+        ``success=False, is_continue=True`` — an incomplete session the
+        caller may resume — with the stall explained in the summary.  The
+        built-in ``finish(result)`` contract (plain text) gets the model's
+        last status text, matching the existing text-only implicit finish.
+
+        Returns:
+            str: The implicit result in the registered finish contract.
+        """
+        explanation = (
+            f"The session stalled: the model repeated the identical tool "
+            f"call(s) with identical results for {self._stagnant_call_turns} "
+            f"consecutive turns without calling finish."
+        )
+        text = self._last_response_text.strip()
+        finish_fn = self.function_map.get("finish")
+        params: set[str] = set()
+        if finish_fn is not None:
+            try:
+                params = set(inspect.signature(finish_fn).parameters)
+            except (TypeError, ValueError):  # pragma: no cover — exotic callable
+                params = set()
+        if "summary_in_html" in params:
+            summary = explanation + (f" Last status from the model: {text}" if text else "")
+            assert finish_fn is not None
+            return str(finish_fn(success=False, is_continue=True, summary_in_html=summary))
+        return text or explanation
 
     def _execute_tool(
         self,
