@@ -1278,6 +1278,10 @@ def compute_changes(
     for name, cur in current.items():
         if name.startswith("openrouter/"):  # pragma: no branch
             continue
+        if name.startswith(("cc/", "codex/")):
+            # Subscription-billed CLI backends: pricing stays $0/0 forever,
+            # even though their slugs have priced OpenRouter twins.
+            continue
         has_pricing = cur["input_price_per_1M"] > 0
         has_context = cur["context_length"] > 0
         if has_pricing and has_context:  # pragma: no branch
