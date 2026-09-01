@@ -12,7 +12,10 @@ TLS is always enabled; a self-signed certificate is auto-generated in
 ``~/.kiss/tls/`` when no explicit certificate is provided.
 
 Authentication uses the ``remote_password`` setting from
-``~/.kiss/config.json``.  An optional ``cloudflared`` tunnel can
+``~/.kiss/config.json``.  While that password is empty, the server is
+localhost-only: non-loopback peers are refused with 403 (HTTP and the
+WebSocket upgrade alike) and no tunnel is started, so neither the LAN
+nor the internet can reach the app.  An optional ``cloudflared`` tunnel can
 expose the server through Cloudflare so devices outside the LAN can
 connect without manual port-forwarding.
 
@@ -55,6 +58,7 @@ import os
 import platform
 import re
 import secrets
+import shutil
 import signal
 import socket
 import ssl
@@ -545,6 +549,62 @@ _HEAD_200 = (
     b"\r\n"
 )
 
+_HEAD_403 = (
+    b"HTTP/1.1 403 Forbidden\r\n"
+    b"Content-Length: 0\r\n"
+    b"Connection: close\r\n"
+    b"\r\n"
+)
+
+
+def _connection_peer_is_loopback(connection: Any) -> bool:
+    """Return True when *connection*'s raw TCP peer is loopback.
+
+    Deliberately ignores the forwarded-client headers that
+    :meth:`RemoteAccessServer._client_ip` trusts for loopback peers:
+    this check gates ACCESS (the empty-password localhost-only
+    lockdown), so only the unforgeable transport-level peer address
+    may be consulted.  An unknown peer address counts as NOT loopback
+    (fail closed).
+
+    Args:
+        connection: A WebSocket server connection (or any object with
+            a ``remote_address`` tuple).
+
+    Returns:
+        True when the TCP peer is an IPv4/IPv6 loopback address.
+    """
+    addr = getattr(connection, "remote_address", None)
+    peer_ip = str(addr[0]) if addr and len(addr) >= 1 else ""
+    return _is_loopback_ip(peer_ip)
+
+
+def _head_health_response(connection: Any) -> bytes:
+    """Return the reply for a HEAD health check from *connection*.
+
+    Cloudflare's origin health checks arrive from the local
+    cloudflared (a loopback peer) and must keep getting 200 so the
+    tunnel stays registered.  A NON-loopback HEAD probe is answered
+    403 while the configured ``remote_password`` is empty, matching
+    the localhost-only lockdown that
+    :meth:`RemoteAccessServer._process_request` enforces for every
+    parsed request — without this, a LAN peer's HEAD would bypass the
+    gate (it is answered before the websockets HTTP parser runs).
+    The config file is read only on that rare non-loopback path, so
+    the hot loopback health checks never pay the disk read.
+
+    Args:
+        connection: The server connection that received the HEAD.
+
+    Returns:
+        The raw HTTP response bytes to write to the transport.
+    """
+    if _connection_peer_is_loopback(connection):
+        return _HEAD_200
+    if not str(load_config().get("remote_password", "") or ""):
+        return _HEAD_403
+    return _HEAD_200
+
 # Cap on the bytes buffered while waiting for the first CRLF of an
 # incoming request line.  Matches the conventional HTTP request-line
 # limit; anything longer is fed to the websockets parser (which
@@ -608,7 +668,7 @@ class _HeadAwareServerConnection(ServerConnection):
         if first_line.startswith(b"HEAD "):
             transport = self.transport
             if transport is not None:
-                transport.write(_HEAD_200)
+                transport.write(_head_health_response(self))
                 transport.close()
             return
         buffered = self._head_buffer
@@ -737,6 +797,72 @@ def _cloudflared_pidfile() -> Path:
     if _CLOUDFLARED_PIDFILE is not None:
         return _CLOUDFLARED_PIDFILE
     return _kiss_home_dir() / "cloudflared.pid"
+
+
+_SYSTEMD_RUN_SCOPE_PREFIX = (
+    "systemd-run", "--user", "--scope", "--collect", "--quiet", "--",
+)
+
+
+def _current_cgroup() -> str:
+    """Return this process's ``/proc/self/cgroup`` content ('' off-Linux).
+
+    The read only fails where the file does not exist (macOS, BSD) or
+    procfs is unmounted — environments without systemd cgroups, where
+    returning ``''`` correctly reports "not in a systemd service".
+    """
+    try:
+        return Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _cloudflared_launch_prefix(cgroup: str | None = None) -> list[str]:
+    """Return an argv prefix that detaches cloudflared from a service cgroup.
+
+    When ``kiss-web`` runs as a systemd service (the ``kiss-web.service``
+    user unit installed by the VS Code extension), ``systemctl restart``
+    SIGTERMs **every** process in the service's control group — systemd's
+    default ``KillMode=control-group`` — so the ``start_new_session=True``
+    cloudflared dies together with the daemon.  ``start_new_session``
+    creates a new process *session* but cannot leave the *cgroup*, which
+    is why every production restart logged "cloudflared pidfile points to
+    dead pid; ignoring" and minted a fresh ``*.trycloudflare.com``
+    hostname, defeating :func:`_try_adopt_existing_cloudflared`.
+
+    Launching cloudflared through ``systemd-run --user --scope`` places it
+    in its own transient ``run-*.scope`` unit *outside* the service
+    cgroup, out of ``systemctl restart``'s reach.  With ``--scope`` the
+    systemd-run process registers the scope and then ``exec``s the payload
+    in-place, so the :class:`subprocess.Popen` pid IS cloudflared's pid
+    (the pidfile and adoption logic keep working unchanged) and the
+    stderr pipe used to parse the tunnel URL is preserved.  ``--collect``
+    garbage-collects the scope even when cloudflared exits non-zero.
+
+    Args:
+        cgroup: ``/proc/self/cgroup`` content to inspect; ``None`` reads
+            the real file.  Only the *final* path component is matched
+            against ``.service`` — every user process lives under
+            ``user@UID.service``, and transient scopes end in ``.scope``,
+            so a substring match would misfire.
+
+    Returns:
+        The ``systemd-run`` argv prefix when this process is inside a
+        systemd service cgroup and ``systemd-run`` is installed,
+        otherwise ``[]`` (spawn cloudflared directly).
+    """
+    text = _current_cgroup() if cgroup is None else cgroup
+    in_service = False
+    for line in text.splitlines():
+        unit = line.rsplit(":", 1)[-1].rsplit("/", 1)[-1].strip()
+        if unit.endswith(".service"):
+            in_service = True
+            break
+    if not in_service:
+        return []
+    if shutil.which("systemd-run") is None:
+        return []
+    return list(_SYSTEMD_RUN_SCOPE_PREFIX)
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -889,6 +1015,34 @@ def _terminate_declined_cloudflared(pid: int) -> None:
     _unlink_cloudflared_pidfile()
 
 
+def _terminate_orphan_cloudflared() -> None:
+    """Kill a previous kiss-web's surviving cloudflared, if any.
+
+    Called at startup when the ``remote_password`` is EMPTY: a tunnel
+    deliberately left alive by the previous instance (so its public
+    URL survives restarts) would keep forwarding internet traffic to
+    this server over loopback, where the empty password authenticates.
+    With no password configured there must be no public tunnel at all,
+    so instead of adopting the orphan it is terminated.
+
+    The signalling (identity check before EVERY signal, SIGTERM,
+    bounded wait, re-verified SIGKILL escalation, pidfile unlink) is
+    delegated to :func:`_terminate_declined_cloudflared`, which exists
+    for exactly this "recorded pid we must not adopt" situation.
+    """
+    data = _load_cloudflared_pidfile()
+    if data is None:
+        return
+    pid = int(data["pid"])
+    if _is_pid_alive(pid) and _looks_like_cloudflared(pid):
+        logger.warning(
+            "remote_password is empty; terminating the cloudflared "
+            "tunnel (pid=%d) left by a previous kiss-web so its "
+            "public URL stops reaching this server.", pid,
+        )
+    _terminate_declined_cloudflared(pid)
+
+
 def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
     """Look for a healthy cloudflared started by a previous kiss-web.
 
@@ -911,9 +1065,12 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
     This is how the daemon preserves a single quick-tunnel URL across
     its own restarts: ``cloudflared`` is spawned in its own process
     group (``start_new_session=True``) so it survives ``kiss-web``'s
-    SIGTERM, the VS Code extension's ``pkill kiss-web`` no longer
-    targets it, and the next ``kiss-web`` startup adopts it here
-    instead of spawning a fresh quick-tunnel with a new hostname.
+    SIGTERM and the VS Code extension's ``pkill kiss-web``, and — when
+    ``kiss-web`` runs as a systemd service — in its own transient
+    scope unit (see :func:`_cloudflared_launch_prefix`) so it also
+    survives ``systemctl restart kiss-web``'s cgroup-wide kill.  The
+    next ``kiss-web`` startup then adopts it here instead of spawning
+    a fresh quick-tunnel with a new hostname.
 
     Returns:
         ``(pid, metrics_port, url)`` if adoption succeeded, else
@@ -3559,20 +3716,50 @@ class RemoteAccessServer:
         self._uds_inode: int | None = None
 
     async def _process_request(
-        self, _connection: ServerConnection, request: Request
+        self, connection: ServerConnection, request: Request
     ) -> Response | None:
         """Serve HTTP requests for the HTML page and static assets.
 
         Returns a :class:`Response` for regular HTTP requests, or
         ``None`` to let the WebSocket handshake proceed for ``/ws``.
 
+        This is the choke point of the no-password lockdown for every
+        PARSED request: when the configured ``remote_password`` is
+        empty, EVERY request from a non-loopback peer — the HTML
+        page, static assets, the trajectory data endpoints, and the
+        ``/ws`` WebSocket upgrade itself — is refused with ``403``.
+        (The one request kind answered before the parser runs, the
+        HEAD health check, applies the same rule in
+        :func:`_head_health_response`.)  Without this gate the
+        default ``0.0.0.0`` bind would let any LAN machine
+        authenticate with the empty password.  Legitimate remote
+        traffic is unaffected: it arrives via the local cloudflared
+        tunnel (a loopback peer), and the tunnel is only started (or
+        kept alive) when a password is configured.
+
         Args:
-            _connection: The server connection (unused for HTTP).
+            connection: The server connection (used for the peer
+                address check above).
             request: The incoming HTTP request.
 
         Returns:
             An HTTP response, or ``None`` for WebSocket upgrade.
         """
+        if not self._peer_is_loopback(connection):
+            cfg = await asyncio.to_thread(load_config)
+            if not str(cfg.get("remote_password", "") or ""):
+                addr = getattr(connection, "remote_address", None)
+                logger.warning(
+                    "Refusing non-localhost request from %s: "
+                    "remote_password is empty", addr,
+                )
+                return _http_response(
+                    403,
+                    "text/plain",
+                    b"Forbidden: no remote_password is configured, so "
+                    b"only localhost may connect. Set remote_password "
+                    b"in ~/.kiss/config.json to allow remote access.",
+                )
         request_path = urlsplit(request.path).path
         path = unquote(request_path)
         if path in ("", "/"):
@@ -3615,6 +3802,22 @@ class RemoteAccessServer:
         for existing callers and tests).
         """
         return sorcar_api.passwords_equal(a, b)
+
+    def _peer_is_loopback(self, connection: Any) -> bool:
+        """Return True when *connection*'s raw TCP peer is loopback.
+
+        Backend primitive for :meth:`ServerApi.authenticate`; thin
+        wrapper over :func:`_connection_peer_is_loopback` (see there
+        for the fail-closed / no-forwarded-headers rationale).
+
+        Args:
+            connection: A WebSocket server connection (or any object
+                with a ``remote_address`` tuple).
+
+        Returns:
+            True when the TCP peer is an IPv4/IPv6 loopback address.
+        """
+        return _connection_peer_is_loopback(connection)
 
     def _client_ip(self, websocket: ServerConnection) -> str:
         """Return the rate-limit bucket key (source IP) of *websocket*.
@@ -3707,9 +3910,12 @@ class RemoteAccessServer:
 
         Returns True on success, False (and closes the socket) on failure.
 
-        When the configured ``remote_password`` is empty, all clients
-        are still required to send an empty-password ``auth`` message
-        (using a constant-time compare).  See also
+        When the configured ``remote_password`` is empty, only
+        loopback peers may connect at all (:meth:`_process_request`
+        refuses non-loopback peers with 403 before the upgrade, and
+        the handshake re-checks the peer address), and a loopback
+        client is still required to send an empty-password ``auth``
+        message (using a constant-time compare).  See also
         :meth:`_setup_server` which refuses to advertise the public
         cloudflared tunnel when no password is configured.
 
@@ -5111,7 +5317,12 @@ class RemoteAccessServer:
         }
         await self._run_cmd(run_cmd)
 
-    def _spawn_cloudflared(self, args: list[str], retries: int = 3) -> None:
+    def _spawn_cloudflared(
+        self,
+        args: list[str],
+        retries: int = 3,
+        launch_prefix: list[str] | None = None,
+    ) -> None:
         """Spawn ``cloudflared`` with *args* and a free ``--metrics`` port.
 
         Records the subprocess in :attr:`_tunnel_proc`, the metrics
@@ -5120,7 +5331,23 @@ class RemoteAccessServer:
         ``cloudflared tunnel --metrics 127.0.0.1:PORT`` followed by
         *args* (e.g. ``["--url", LOCAL, "--no-tls-verify"]`` for a
         quick tunnel or ``["run", "--token", TOKEN]`` for a named
-        tunnel).
+        tunnel), optionally preceded by the
+        :func:`_cloudflared_launch_prefix` ``systemd-run --scope``
+        prefix so cloudflared escapes the ``kiss-web.service`` cgroup
+        and survives ``systemctl restart`` (keeping the public tunnel
+        URL stable across daemon restarts via pidfile adoption).
+
+        The prefix is best-effort: if ``systemd-run`` is missing, the
+        spawn falls back to launching cloudflared directly.  An
+        immediate exit under the prefix is retried once more WITH the
+        prefix on a fresh port (it may be the metrics-port TOCTOU
+        below, and losing the cgroup escape would silently reintroduce
+        URL rotation); a second immediate exit means ``systemd-run``
+        itself is broken (no session D-Bus, cgroup delegation denied,
+        …), so the prefix is dropped — a working tunnel that rotates
+        on restart beats no tunnel.  Prefix-related failures do not
+        consume *retries* attempts (they are bounded on their own), so
+        the fallback works even with ``retries=1``.
 
         M5: there is a small TOCTOU window between
         :func:`_pick_free_local_port` releasing its probe socket and
@@ -5132,28 +5359,60 @@ class RemoteAccessServer:
         Args:
             args: Extra arguments after ``--metrics 127.0.0.1:PORT``.
             retries: Maximum number of bind-failure retries.
+            launch_prefix: Argv prefix override for tests; ``None``
+                computes it via :func:`_cloudflared_launch_prefix`.
         """
+        prefix = (
+            _cloudflared_launch_prefix() if launch_prefix is None
+            else list(launch_prefix)
+        )
         last_proc: subprocess.Popen[str] | None = None
-        for attempt in range(max(1, retries)):
+        prefixed_failures = 0
+        attempt = 0
+        max_attempts = max(1, retries)
+        while attempt < max_attempts:
             self._tunnel_metrics_port = _pick_free_local_port()
-            proc = subprocess.Popen(
-                [
-                    "cloudflared", "tunnel",
-                    "--metrics",
-                    f"127.0.0.1:{self._tunnel_metrics_port}",
-                    *args,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                start_new_session=True,
-            )
+            base_argv = [
+                "cloudflared", "tunnel",
+                "--metrics",
+                f"127.0.0.1:{self._tunnel_metrics_port}",
+                *args,
+            ]
+            try:
+                proc = subprocess.Popen(
+                    [*prefix, *base_argv],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    start_new_session=True,
+                )
+            except FileNotFoundError:
+                if not prefix:
+                    # cloudflared itself is missing; caller handles.
+                    # Release any failed prefixed proc retained above
+                    # so its stderr pipe does not linger until GC.
+                    if last_proc is not None:
+                        if last_proc.stderr is not None:
+                            last_proc.stderr.close()
+                        last_proc.wait()
+                    raise
+                logger.warning(
+                    "%s not found; spawning cloudflared inside the "
+                    "service cgroup (tunnel URL will rotate on restart)",
+                    prefix[0],
+                )
+                prefix = []
+                continue  # Bounded: the prefix is now empty.
             try:
                 proc.wait(timeout=_SPAWN_FAILFAST_WINDOW)
             except subprocess.TimeoutExpired:
                 pass
             if proc.poll() is None:
+                if last_proc is not None:
+                    if last_proc.stderr is not None:
+                        last_proc.stderr.close()
+                    last_proc.wait()
                 self._tunnel_proc = proc
                 self._tunnel_started_at = time.monotonic()
                 self._tunnel_adopted_pid = None
@@ -5166,12 +5425,33 @@ class RemoteAccessServer:
                     last_proc.stderr.close()
                 last_proc.wait()
             last_proc = proc
+            if prefix:
+                # Bounded: at most two prefixed failures before the
+                # prefix is dropped, and neither consumes an attempt.
+                prefixed_failures += 1
+                if prefixed_failures >= 2:
+                    logger.warning(
+                        "cloudflared under %s exited immediately again "
+                        "(rc=%s); dropping the cgroup-escape prefix "
+                        "(tunnel URL will rotate on restart)",
+                        prefix[0], proc.returncode,
+                    )
+                    prefix = []
+                else:
+                    logger.warning(
+                        "cloudflared under %s exited immediately "
+                        "(rc=%s); retrying once more with the prefix "
+                        "on a fresh metrics port",
+                        prefix[0], proc.returncode,
+                    )
+                continue
             logger.info(
                 "cloudflared exited immediately on metrics port %d "
                 "(attempt %d/%d, rc=%s); retrying with fresh port",
-                self._tunnel_metrics_port, attempt + 1, retries,
+                self._tunnel_metrics_port, attempt + 1, max_attempts,
                 proc.returncode,
             )
+            attempt += 1
         self._tunnel_proc = last_proc
         self._tunnel_started_at = time.monotonic()
 
@@ -5342,10 +5622,41 @@ class RemoteAccessServer:
             self._tunnel_unhealthy_ticks = 0
             adopted_pid = None
 
+        cfg = await asyncio.to_thread(load_config)
+        if self._shutdown_initiated:
+            # Shutdown may have started while the config read was in
+            # flight (the guard at the top of this method ran before
+            # the flag was set) and detached the tunnel for the next
+            # daemon to adopt.  Acting on the pre-read snapshot now
+            # would wrongly withdraw the URL of a deliberately
+            # surviving tunnel.
+            return
+        if not cfg.get("remote_password", ""):
+            if (
+                self._tunnel_proc is not None
+                or self._tunnel_adopted_pid is not None
+            ):
+                # The password was cleared while a tunnel was live.
+                # Refusing (re)starts is not enough: the running
+                # cloudflared keeps the public URL resolving to this
+                # server over loopback, where the empty password
+                # authenticates — so the tunnel itself must go.
+                logger.warning(
+                    "remote_password was cleared; terminating the "
+                    "live cloudflared tunnel so the public URL stops "
+                    "reaching this server.",
+                )
+                await asyncio.to_thread(self._terminate_tunnel_proc, True)
+            if self._active_url and self._active_url != self._local_url:
+                # Also withdraw a stale public URL left behind by a
+                # tunnel that died on its own (the dead-proc cleanup
+                # above deliberately leaves the URL for a replacement
+                # tunnel to overwrite — but with no password there
+                # will never be a replacement).
+                await self._clear_tunnel_url()
+            return
+
         if proc is None and adopted_pid is None:
-            cfg = await asyncio.to_thread(load_config)
-            if not cfg.get("remote_password", ""):
-                return
             if now >= self._tunnel_next_retry:
                 await self._restart_tunnel_url()
             return
@@ -5419,6 +5730,23 @@ class RemoteAccessServer:
         self._tunnel_force_restart_next_allowed = now + cooldown
         if now >= self._tunnel_next_retry:
             await self._restart_tunnel_url()
+
+    async def _clear_tunnel_url(self) -> None:
+        """Withdraw the advertised public URL after stopping the tunnel.
+
+        Rewrites ``~/.kiss/remote-url.json`` with only the local URL,
+        resets :attr:`_active_url`, and broadcasts the change to
+        connected clients — the mirror image of what
+        :meth:`_restart_tunnel_url` publishes after a start.  Used by
+        the watchdog when the ``remote_password`` is cleared while a
+        tunnel is live.
+        """
+        await asyncio.to_thread(
+            _save_url_file, self._url_file, self._local_url, None,
+        )
+        self._active_url = self._local_url
+        self._broadcast_remote_url(self._active_url, False)
+        await self._post_url_if_changed()
 
     async def _restart_tunnel_url(self) -> None:
         """Start a fresh tunnel and refresh ``~/.kiss/remote-url.json``.
@@ -5511,21 +5839,37 @@ class RemoteAccessServer:
                 proc.kill()
             _unlink_cloudflared_pidfile()
         elif kill_adopted and self._tunnel_adopted_pid is not None:
+            # An adopted pid came from the pidfile of a PREVIOUS
+            # process, so unlike the self-spawned ``proc`` above it
+            # may have been recycled for an unrelated process since
+            # adoption.  Verify the identity before every signal
+            # (same rule as _terminate_declined_cloudflared).
             adopted_pid = self._tunnel_adopted_pid
-            try:
-                os.kill(adopted_pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-            else:
-                for _ in range(50):
-                    if not _is_pid_alive(adopted_pid):
-                        break
-                    time.sleep(0.1)
+            if _looks_like_cloudflared(adopted_pid):
+                try:
+                    os.kill(adopted_pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
                 else:
-                    try:
-                        os.kill(adopted_pid, signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError, OSError):
-                        pass
+                    for _ in range(50):
+                        if not _is_pid_alive(adopted_pid):
+                            break
+                        time.sleep(0.1)
+                    else:
+                        if _looks_like_cloudflared(adopted_pid):
+                            try:
+                                os.kill(adopted_pid, signal.SIGKILL)
+                            except (
+                                ProcessLookupError,
+                                PermissionError,
+                                OSError,
+                            ):
+                                pass
+            else:
+                logger.info(
+                    "Adopted pid %d is no longer a cloudflared process "
+                    "(pid recycled); not signalling it", adopted_pid,
+                )
             _unlink_cloudflared_pidfile()
         self._reset_tunnel_proc_state()
 
@@ -5817,6 +6161,7 @@ class RemoteAccessServer:
     @staticmethod
     def _spawn_stderr_drain_shim(
         proc: subprocess.Popen[str],
+        launch_prefix: list[str] | None = None,
     ) -> subprocess.Popen[bytes] | None:
         """Hand off *proc*'s stderr pipe to a detached drain shim.
 
@@ -5830,6 +6175,15 @@ class RemoteAccessServer:
         exits.  When ``cloudflared`` itself eventually dies, the
         pipe closes from the write side and ``cat`` exits cleanly.
 
+        Under systemd the shim must escape the service cgroup exactly
+        like cloudflared itself (:func:`_cloudflared_launch_prefix`):
+        a ``systemctl restart`` kills every cgroup member, and killing
+        the shim closes the pipe's last read end — the very
+        ``SIGPIPE`` this shim exists to prevent would then take down
+        the escaped cloudflared indirectly.  A prefixed shim that
+        exits within 0.2s (broken user manager) falls back to a plain
+        ``cat``, which at worst restores the pre-fix behaviour.
+
         Best-effort: a ``cat`` spawn failure (missing binary, EMFILE,
         permission error) is logged at DEBUG and otherwise ignored.
         The worst case is a return to the pre-fix behaviour for that
@@ -5840,6 +6194,8 @@ class RemoteAccessServer:
         Args:
             proc: The ``cloudflared`` subprocess; must have been
                 started with ``stderr=PIPE``.
+            launch_prefix: Argv prefix override for tests; ``None``
+                computes it via :func:`_cloudflared_launch_prefix`.
 
         Returns:
             The detached shim's ``Popen`` handle on success, or
@@ -5849,22 +6205,45 @@ class RemoteAccessServer:
         stderr = proc.stderr
         if stderr is None:
             return None
-        try:
-            shim = subprocess.Popen(
-                ["cat"],
-                stdin=stderr.fileno(),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                close_fds=True,
-            )
-        except (OSError, ValueError):
-            logger.debug(
-                "Failed to spawn stderr drain shim for cloudflared",
-                exc_info=True,
-            )
-            return None
-        return shim
+        prefix = (
+            _cloudflared_launch_prefix() if launch_prefix is None
+            else list(launch_prefix)
+        )
+        candidates: list[list[str]] = [["cat"]]
+        if prefix:
+            candidates.insert(0, [*prefix, "cat"])
+        for argv in candidates:
+            try:
+                shim = subprocess.Popen(
+                    argv,
+                    stdin=stderr.fileno(),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+            except (OSError, ValueError):
+                logger.debug(
+                    "Failed to spawn stderr drain shim via %r",
+                    argv,
+                    exc_info=True,
+                )
+                continue
+            if len(argv) > 1:
+                # Prefixed spawn: confirm systemd-run did not fail
+                # outright before trusting the shim with the pipe.
+                try:
+                    shim.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    return shim
+                logger.debug(
+                    "Prefixed stderr drain shim exited immediately "
+                    "(rc=%s); falling back to a plain cat",
+                    shim.returncode,
+                )
+                continue
+            return shim
+        return None
 
 
     async def _setup_server(self) -> None:
@@ -6094,6 +6473,23 @@ class RemoteAccessServer:
 
         tunnel_url: str | None = None
         if self.use_tunnel:
+            # Close the empty-password startup window FIRST: the WSS
+            # listener is already up, so an orphaned cloudflared left
+            # by the previous instance is already relaying internet
+            # visitors to it as loopback peers — whom an empty
+            # password would authenticate.  Waiting up to 30 s for a
+            # password before acting (below) would leave that tunnel
+            # publicly usable for the whole wait, so when the password
+            # is empty RIGHT NOW the orphan is terminated immediately.
+            # Cost of the eager kill: a password saved during the wait
+            # rotates the public URL instead of re-adopting it.
+            initial_cfg = await self._loop.run_in_executor(  # type: ignore[union-attr]
+                None, load_config,
+            )
+            if not initial_cfg.get("remote_password", ""):
+                await self._loop.run_in_executor(  # type: ignore[union-attr]
+                    None, _terminate_orphan_cloudflared,
+                )
             password = await self._loop.run_in_executor(  # type: ignore[union-attr]
                 None, _wait_for_remote_password, 30.0,
             )
@@ -6111,16 +6507,20 @@ class RemoteAccessServer:
                         adopted_pid, adopted_port, adopted_url,
                     )
             if not password:
+                await self._loop.run_in_executor(  # type: ignore[union-attr]
+                    None, _terminate_orphan_cloudflared,
+                )
                 logger.warning(
                     "remote_password is not set in ~/.kiss/config.json; "
-                    "refusing to start the cloudflared tunnel.  "
-                    "Set a password in the config panel to enable "
-                    "remote access.",
+                    "refusing to start the cloudflared tunnel and "
+                    "refusing non-localhost connections.  Set a "
+                    "password in the config panel to enable remote "
+                    "access.",
                 )
                 print(
                     "Warning: remote_password is empty; cloudflared "
-                    "tunnel disabled.  Set a password to enable "
-                    "remote access.",
+                    "tunnel disabled and non-localhost connections "
+                    "refused.  Set a password to enable remote access.",
                     file=sys.stderr,
                 )
             elif tunnel_url is None:

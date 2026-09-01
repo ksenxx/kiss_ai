@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import re
 import unittest
+from types import SimpleNamespace
 from typing import cast
 
 from websockets.asyncio.server import ServerConnection
@@ -57,8 +58,11 @@ class TestWebviewMediaCacheBust(unittest.TestCase):
         server = RemoteAccessServer(host="127.0.0.1", port=0)
         path = f"/media/main.js?v={_asset_hash('main.js')}"
         request = Request(path=path, headers=Headers())
+        # _process_request fails closed on a missing peer address while
+        # the remote password is empty, so present a loopback peer.
+        conn = SimpleNamespace(remote_address=("127.0.0.1", 0))
         response = asyncio.run(
-            server._process_request(cast(ServerConnection, object()), request),
+            server._process_request(cast(ServerConnection, conn), request),
         )
         self.assertIsNotNone(response)
         assert response is not None
