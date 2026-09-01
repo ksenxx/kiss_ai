@@ -20,6 +20,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -33,6 +34,11 @@ from kiss.tests.server.test_simplify_web_server_regr import (
     _redirect_persistence,
     _restore_persistence,
 )
+
+# ``_process_request`` refuses non-loopback peers while the remote
+# password is empty, and it fails closed on a missing peer address, so
+# a bare ``None`` connection would be answered 403 instead of routed.
+_LOOPBACK_CONN = SimpleNamespace(remote_address=("127.0.0.1", 0))
 
 
 class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
@@ -67,7 +73,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         def req(path: str) -> Request:
             return Request(path, Headers({"Host": "localhost"}))
 
-        conn = cast(Any, None)
+        conn = cast(Any, _LOOPBACK_CONN)
 
         resp = await self.server._process_request(conn, req("/"))
         assert resp is not None

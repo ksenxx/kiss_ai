@@ -47,6 +47,7 @@ import unittest
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.server.web_server as ws_mod
+from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _IP_CHANGE_DEBOUNCE_TICKS,
     _TUNNEL_FORCE_RESTART_COOLDOWN_INITIAL,
@@ -57,6 +58,26 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _get_local_ips,
 )
+
+
+def _config_with_password() -> str | None:
+    """Configure a remote password; return the prior config text.
+
+    The watchdog terminates a tracked tunnel when ``remote_password``
+    is empty, so every test simulating a live tunnel must configure
+    one first.
+    """
+    orig = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
+    save_config({"remote_password": "test-secret-tunnel"})
+    return orig
+
+
+def _restore_config(orig: str | None) -> None:
+    """Restore the config text saved by :func:`_config_with_password`."""
+    if orig is None:
+        CONFIG_PATH.unlink(missing_ok=True)
+    else:
+        CONFIG_PATH.write_text(orig)
 
 
 class TestUnreachableMetricsDoesNotCountAsUnhealthy(IsolatedAsyncioTestCase):
@@ -78,6 +99,10 @@ class TestUnreachableMetricsDoesNotCountAsUnhealthy(IsolatedAsyncioTestCase):
             stderr=subprocess.DEVNULL,
             text=True,
         )
+        # A live tunnel implies a configured password: the watchdog
+        # now TERMINATES a tracked tunnel when remote_password is
+        # empty, which would short-circuit the logic under test here.
+        self._orig_config = _config_with_password()
         self.server = RemoteAccessServer(use_tunnel=False)
         self.server._loop = self._loop
         self.server._tunnel_proc = self._proc
@@ -90,6 +115,7 @@ class TestUnreachableMetricsDoesNotCountAsUnhealthy(IsolatedAsyncioTestCase):
         ws_mod._probe_tunnel_ready = lambda _port: None  # type: ignore[assignment]
 
     async def asyncTearDown(self) -> None:
+        _restore_config(self._orig_config)
         ws_mod._probe_tunnel_ready = self._orig_probe  # type: ignore[assignment]
         if self._proc.poll() is None:
             self._proc.terminate()
@@ -130,6 +156,10 @@ class TestConfirmedZeroStillRestarts(IsolatedAsyncioTestCase):
             stderr=subprocess.DEVNULL,
             text=True,
         )
+        # A live tunnel implies a configured password: the watchdog
+        # now TERMINATES a tracked tunnel when remote_password is
+        # empty, which would short-circuit the logic under test here.
+        self._orig_config = _config_with_password()
         self.server = RemoteAccessServer(use_tunnel=False)
         self.server._loop = self._loop
         self.server._tunnel_proc = self._proc
@@ -149,6 +179,7 @@ class TestConfirmedZeroStillRestarts(IsolatedAsyncioTestCase):
         self.server._restart_tunnel_url = fake_restart  # type: ignore[method-assign]
 
     async def asyncTearDown(self) -> None:
+        _restore_config(self._orig_config)
         ws_mod._probe_tunnel_ready = self._orig_probe  # type: ignore[assignment]
         if self._proc.poll() is None:
             self._proc.terminate()
@@ -285,6 +316,10 @@ class TestChronicMetricsFlakeCoolsDown(IsolatedAsyncioTestCase):
             text=True,
         )
         self._procs.append(first_proc)
+        # A live tunnel implies a configured password: the watchdog
+        # now TERMINATES a tracked tunnel when remote_password is
+        # empty, which would short-circuit the logic under test here.
+        self._orig_config = _config_with_password()
         self.server = RemoteAccessServer(use_tunnel=False)
         self.server._loop = self._loop
         self.server._tunnel_proc = first_proc
@@ -317,6 +352,7 @@ class TestChronicMetricsFlakeCoolsDown(IsolatedAsyncioTestCase):
         self.server._restart_tunnel_url = fake_restart  # type: ignore[method-assign]
 
     async def asyncTearDown(self) -> None:
+        _restore_config(self._orig_config)
         ws_mod._probe_tunnel_ready = self._orig_probe  # type: ignore[assignment]
         for proc in self._procs:
             if proc.poll() is None:

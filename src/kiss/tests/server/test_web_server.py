@@ -1952,6 +1952,11 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
 
     async def test_watchdog_alive_process_not_restarted(self) -> None:
         """A still-running tunnel process is left alone."""
+        # A live tunnel implies a configured password: with the
+        # class's empty password the watchdog would (correctly)
+        # TERMINATE the tracked process instead of leaving it alone.
+        # The class teardown restores the original config.
+        save_config({"remote_password": "test-secret-tunnel"})
         proc = subprocess.Popen(
             ["sleep", "60"],
             stdout=subprocess.PIPE,
@@ -5363,7 +5368,11 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
-        save_config({"remote_password": ""})
+        # A live tunnel implies a configured password: the watchdog
+        # now TERMINATES a tracked tunnel when remote_password is
+        # empty, which would short-circuit the health-tick logic
+        # under test in this class.
+        save_config({"remote_password": "test-secret-tunnel"})
         self._backup_url: bytes | None = None
         if _URL_FILE.is_file():
             self._backup_url = _URL_FILE.read_bytes()

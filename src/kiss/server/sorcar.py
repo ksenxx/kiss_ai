@@ -485,6 +485,8 @@ class ServerBackend(Protocol):
 
     def _client_ip(self, websocket: Any) -> str: ...
 
+    def _peer_is_loopback(self, connection: Any) -> bool: ...
+
     def _auth_lock_remaining(self, ip: str) -> float: ...
 
     def _record_auth_failure(self, ip: str) -> None: ...
@@ -616,6 +618,33 @@ class ServerApi:
                 ctx.conn_state.setdefault("local_tabs", set()),
             )
 
+    async def _refuse_no_password_remote(
+        self, websocket: Any, ip: str,
+    ) -> None:
+        """Refuse a non-loopback peer while no password is configured.
+
+        Sends the explanatory ``error`` event and closes the socket
+        (both best-effort).  Shared by :meth:`authenticate`'s
+        pre-handshake gate and its per-attempt re-check.
+
+        Args:
+            websocket: The remote client's WebSocket connection.
+            ip: The client's rate-limit key, for the log line only.
+        """
+        logger.warning(
+            "Refusing non-localhost auth handshake from %s: "
+            "remote_password is empty", ip,
+        )
+        try:
+            await websocket.send(json.dumps({
+                "type": "error",
+                "text": "No remote_password is configured; only "
+                        "localhost may connect.",
+            }))
+            await websocket.close()
+        except Exception:
+            pass
+
     async def authenticate(self, websocket: Any) -> bool:
         """Authenticate a remote WSS client with the ``auth`` handshake.
 
@@ -634,15 +663,24 @@ class ServerApi:
            failed logins is answered with ``auth_locked`` (carrying
            ``retry_after`` seconds) and closed — telling the client
            WHY instead of leaving its loading overlay spinning.
-        2. Otherwise up to two ``auth`` attempts are read: a correct
-           password (constant-time compare against the configured
-           ``remote_password``, which may be empty) is answered with
+        2. When the configured ``remote_password`` is empty, a
+           non-loopback TCP peer is refused (``error`` + close) before
+           any credential is examined: with no password set, only
+           localhost may connect.  The check runs before the handshake
+           AND again for every attempt (against a freshly re-loaded
+           config), so it mirrors the transport's 403 gate
+           (``RemoteAccessServer._process_request``) and also covers a
+           password cleared at any point mid-handshake.
+        3. Otherwise up to two ``auth`` attempts are read: a correct
+           password (a constant-time compare against the configured
+           ``remote_password`` as re-loaded for that attempt, so a
+           password change applies immediately) is answered with
            ``auth_ok``; the first wrong password elicits an
            ``auth_required`` retry prompt; the second failure is
            answered with an ``error`` event and the socket is closed.
            A first message that is not an ``auth`` at all closes the
            socket without counting a failed login.
-        3. Only NON-EMPTY wrong guesses count toward the brute-force
+        4. Only NON-EMPTY wrong guesses count toward the brute-force
            lockout: every fresh page load probes with the (possibly
            empty) password stored in ``localStorage``, and behind the
            shared cloudflared tunnel penalising that benign empty
@@ -671,6 +709,15 @@ class ServerApi:
                 pass
             return False
         password = load_config().get("remote_password", "")
+        if not password and not backend._peer_is_loopback(websocket):
+            # Defense in depth for the empty-password localhost-only
+            # lockdown (primary gate: the transport's
+            # ``_process_request`` refuses non-loopback peers with 403
+            # before the WS upgrade).  Re-applied per attempt below,
+            # so clearing the password at ANY point before a frame is
+            # examined refuses an already-admitted non-loopback peer.
+            await self._refuse_no_password_remote(websocket, ip)
+            return False
         try:
             for is_retry, timeout in ((False, 30), (True, 60)):
                 raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
@@ -692,6 +739,19 @@ class ServerApi:
                         "retry_after": math.ceil(lock_remaining),
                     }))
                     await websocket.close()
+                    return False
+                # Re-load the configured password before every compare
+                # so a change made while this connection awaited
+                # credentials takes effect NOW.  Without the reload, a
+                # stale snapshot taken at handshake start would keep
+                # accepting the OLD password — and, worse, clearing the
+                # password would not subject an already-admitted
+                # non-loopback peer to the localhost-only rule below.
+                password = load_config().get("remote_password", "")
+                if not password and not backend._peer_is_loopback(
+                    websocket,
+                ):
+                    await self._refuse_no_password_remote(websocket, ip)
                     return False
                 msg = json.loads(raw)
                 client_pw = msg.get("password", "")

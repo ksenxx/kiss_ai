@@ -119,6 +119,14 @@ class TestStartupGracePeriod(unittest.IsolatedAsyncioTestCase):
             stderr=subprocess.DEVNULL,
             text=True,
         )
+        # A live tunnel implies a configured password: the watchdog
+        # now TERMINATES a tracked tunnel when remote_password is
+        # empty, which would short-circuit the grace/tick logic under
+        # test here.
+        self._orig_config = (
+            CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
+        )
+        save_config({"remote_password": "test-secret-tunnel"})
         self.server = RemoteAccessServer(use_tunnel=False)
         self.server._loop = self._loop
         self.server._tunnel_proc = self._proc
@@ -127,6 +135,10 @@ class TestStartupGracePeriod(unittest.IsolatedAsyncioTestCase):
         ws_mod._probe_tunnel_ready = lambda _port: False  # type: ignore[assignment]
 
     async def asyncTearDown(self) -> None:
+        if self._orig_config is None:
+            CONFIG_PATH.unlink(missing_ok=True)
+        else:
+            CONFIG_PATH.write_text(self._orig_config)
         ws_mod._probe_tunnel_ready = self._orig_probe  # type: ignore[assignment]
         self._proc.terminate()
         try:

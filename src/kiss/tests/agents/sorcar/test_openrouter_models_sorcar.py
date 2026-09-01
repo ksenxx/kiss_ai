@@ -23,7 +23,8 @@ objects — that:
 
 The OpenRouter account may only have free-tier credit, so the tests use
 ``:free`` models with tool support and retry across several candidates on
-upstream 429 rate limits, skipping only if every candidate is saturated.
+upstream 429 rate limits and 404s (OpenRouter regularly drops models from
+the free tier), skipping only if every candidate is unavailable.
 """
 
 from __future__ import annotations
@@ -50,10 +51,10 @@ from kiss.tests.core.models.test_multihop_model_switching import (
 )
 
 _FREE_TOOL_MODELS = [
-    "openrouter/nvidia/nemotron-3-nano-30b-a3b:free",
     "openrouter/google/gemma-4-26b-a4b-it:free",
-    "openrouter/nvidia/nemotron-nano-9b-v2:free",
-    "openrouter/openai/gpt-oss-120b:free",
+    "openrouter/nvidia/nemotron-3.5-lightning:free",
+    "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+    "openrouter/z-ai/glm-5.2:free",
 ]
 
 
@@ -148,7 +149,7 @@ class TestSorcarOpenRouterLive:
         )
 
         hop2_done = False
-        rate_limit_errors: list[str] = []
+        candidate_errors: list[str] = []
         for name in _FREE_TOOL_MODELS:
             self._switch(agent, set_model, name)
             assert isinstance(agent.model, OpenAICompatibleModel)
@@ -165,12 +166,15 @@ class TestSorcarOpenRouterLive:
                 )
                 hop2_done = True
                 break
-            except openai.RateLimitError as e:
-                rate_limit_errors.append(f"{name}: {e}")
+            except (openai.RateLimitError, openai.NotFoundError) as e:
+                # 429: free tier saturated; 404: model dropped from the
+                # free tier since this list was last refreshed.  Either
+                # way, try the next candidate.
+                candidate_errors.append(f"{name}: {e}")
         if not hop2_done:
             pytest.skip(
                 "All free OpenRouter tool-capable models are rate-limited "
-                f"upstream: {rate_limit_errors}"
+                f"or unavailable upstream: {candidate_errors}"
             )
 
         self._switch(agent, set_model, "gpt-4o")

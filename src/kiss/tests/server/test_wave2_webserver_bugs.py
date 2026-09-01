@@ -54,6 +54,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 from websockets.datastructures import Headers
@@ -393,7 +394,11 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
         ws_mod.VOICE_MODEL_URL = "http://127.0.0.1:1/model.tar.gz"
         try:
             req = Request("/voice-model.tar.gz", Headers())
-            resp = await self.server._process_request(cast(Any, None), req)
+            # _process_request fails closed on a missing peer address
+            # while the remote password is empty, so present a loopback
+            # peer to exercise the 502 branch rather than the 403 gate.
+            conn = cast(Any, SimpleNamespace(remote_address=("127.0.0.1", 0)))
+            resp = await self.server._process_request(conn, req)
             assert resp is not None
             self.assertEqual(resp.status_code, 502)
         finally:
