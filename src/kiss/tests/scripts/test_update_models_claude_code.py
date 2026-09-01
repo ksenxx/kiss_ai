@@ -175,3 +175,71 @@ def test_cc_entries_untouched_when_anthropic_fetch_is_empty() -> None:
     current = _cc_current("cc/opus", "cc/claude-opus-4-6")
     deprecated = find_deprecated_models(current, {}, {}, {}, {})
     assert deprecated == []
+
+
+def _priced_openrouter_twin() -> dict[str, dict]:
+    """OpenRouter payload with a priced twin of ``claude-fable-5-1``."""
+    return {
+        "openrouter/anthropic/claude-fable-5.1": {
+            "context_length": 1000000,
+            "input_price_per_1M": 10.0,
+            "output_price_per_1M": 50.0,
+            "source": "openrouter",
+        }
+    }
+
+
+def test_existing_cc_entry_never_backfilled_with_openrouter_pricing() -> None:
+    """A $0/0 ``cc/*`` entry must not pick up its OpenRouter twin's pricing.
+
+    The end-of-``compute_changes`` cross-reference pass backfills pricing for
+    unpriced vendor entries. ``cc/*`` is subscription-billed, so it must be
+    skipped even when the direct ``claude-*`` sibling gets backfilled.
+    """
+    current = {
+        "claude-fable-5-1": {
+            "context_length": 500000,
+            "input_price_per_1M": 0.0,
+            "output_price_per_1M": 0.0,
+            "gen": True,
+            "fc": True,
+            "emb": False,
+        },
+        "cc/claude-fable-5-1": {
+            "context_length": 0,
+            "input_price_per_1M": 0.0,
+            "output_price_per_1M": 0.0,
+            "gen": True,
+            "fc": True,
+            "emb": False,
+        },
+    }
+    anthropic = {"claude-fable-5-1": {"source": "anthropic"}}
+    updates, _ = compute_changes(current, _priced_openrouter_twin(), {}, {}, anthropic, {})
+    by_name = {u["name"]: u["changes"] for u in updates}
+    assert by_name["claude-fable-5-1"]["input_price_per_1M"] == 10.0
+    assert "cc/claude-fable-5-1" not in by_name
+
+
+def test_existing_codex_entry_never_backfilled_with_openrouter_pricing() -> None:
+    """``codex/*`` entries are subscription-billed too and stay $0/0."""
+    current = {
+        "codex/gpt-5.5": {
+            "context_length": 0,
+            "input_price_per_1M": 0.0,
+            "output_price_per_1M": 0.0,
+            "gen": True,
+            "fc": True,
+            "emb": False,
+        }
+    }
+    openrouter = {
+        "openrouter/openai/gpt-5.5": {
+            "context_length": 400000,
+            "input_price_per_1M": 2.0,
+            "output_price_per_1M": 8.0,
+            "source": "openrouter",
+        }
+    }
+    updates, _ = compute_changes(current, openrouter, {}, {}, {}, {})
+    assert updates == []

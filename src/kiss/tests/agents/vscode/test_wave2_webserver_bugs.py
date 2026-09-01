@@ -21,6 +21,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 from websockets.datastructures import Headers
@@ -30,6 +31,11 @@ import kiss.server.web_server as ws_mod
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.test_wave2_webserver_bugs import _redirect_persistence, _restore_persistence
+
+# ``_process_request`` refuses non-loopback peers while the remote
+# password is empty, and it fails closed on a missing peer address, so
+# a bare ``None`` connection would be answered 403 instead of routed.
+_LOOPBACK_CONN = SimpleNamespace(remote_address=("127.0.0.1", 0))
 
 
 class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
@@ -63,13 +69,13 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
     async def test_f5_media_and_voice_model_served_correctly(self) -> None:
         """F5: HTTP branches serve correct bytes (reads off the loop)."""
         req = Request("/media/main.js", Headers())
-        resp = await self.server._process_request(cast(Any, None), req)
+        resp = await self.server._process_request(cast(Any, _LOOPBACK_CONN), req)
         assert resp is not None
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.body, (ws_mod.MEDIA_DIR / "main.js").read_bytes())
 
         missing = Request("/media/../secrets.txt", Headers())
-        resp = await self.server._process_request(cast(Any, None), missing)
+        resp = await self.server._process_request(cast(Any, _LOOPBACK_CONN), missing)
         assert resp is not None
         self.assertEqual(resp.status_code, 404)
 
@@ -81,7 +87,7 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
         ws_mod.VOICE_MODEL_CACHE = cache
         try:
             req = Request("/voice-model.tar.gz", Headers())
-            resp = await self.server._process_request(cast(Any, None), req)
+            resp = await self.server._process_request(cast(Any, _LOOPBACK_CONN), req)
             assert resp is not None
             self.assertEqual(resp.status_code, 200)
             self.assertEqual(resp.body, payload)
