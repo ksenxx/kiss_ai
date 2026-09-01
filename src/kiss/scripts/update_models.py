@@ -942,6 +942,19 @@ def _strip_date_suffix(name: str) -> str:
     return re.sub(r"-\d{4}-\d{2}-\d{2}$", "", name)
 
 
+def _dot_version(name: str) -> str:
+    """Convert a hyphenated minor version to dotted form for OpenRouter lookup.
+
+    Anthropic model IDs separate major and minor versions with a hyphen
+    (``claude-fable-5-1``, ``claude-opus-4-6``) while OpenRouter slugs use a
+    dot (``claude-fable-5.1``, ``claude-opus-4.6``). Rewrites every
+    ``<digits>-<digits>`` pair to ``<digits>.<digits>`` so
+    ``claude-3-5-sonnet`` also maps to ``claude-3.5-sonnet``. Names without
+    hyphen-separated version pairs are returned unchanged.
+    """
+    return re.sub(r"(\d)-(\d)", r"\1.\2", name)
+
+
 _VENDOR_OR_PREFIX: dict[str, str] = {
     "openai": "openrouter/openai/",
     "anthropic": "openrouter/anthropic/",
@@ -1080,19 +1093,19 @@ def _lookup_openrouter_pricing(
     """Cross-reference a vendor model name against OpenRouter for pricing/context.
 
     Tries an exact match first (e.g. ``gpt-5.4`` → ``openrouter/openai/gpt-5.4``),
-    then falls back to the base name with date suffixes stripped (e.g.
-    ``gpt-5.4-2026-03-05`` → ``openrouter/openai/gpt-5.4``).
+    then the base name with date suffixes stripped (e.g.
+    ``gpt-5.4-2026-03-05`` → ``openrouter/openai/gpt-5.4``), and finally the
+    base name with hyphenated minor versions rewritten to dotted form, since
+    Anthropic IDs use hyphens where OpenRouter slugs use dots (e.g.
+    ``claude-fable-5-1`` → ``openrouter/anthropic/claude-fable-5.1``).
     """
     prefix = _VENDOR_OR_PREFIX.get(source)
     if not prefix:  # pragma: no branch
         return None
-    or_key = f"{prefix}{model_name}"
-    if or_key in openrouter:  # pragma: no branch
-        return openrouter[or_key]
     base = _strip_date_suffix(model_name)
-    if base != model_name:  # pragma: no branch
-        or_key = f"{prefix}{base}"
-        if or_key in openrouter:  # pragma: no branch
+    for candidate in dict.fromkeys((model_name, base, _dot_version(base))):
+        or_key = f"{prefix}{candidate}"
+        if or_key in openrouter:
             return openrouter[or_key]
     return None
 
@@ -1264,6 +1277,10 @@ def compute_changes(
     update_by_name = {upd["name"]: upd for upd in updates}
     for name, cur in current.items():
         if name.startswith("openrouter/"):  # pragma: no branch
+            continue
+        if name.startswith(("cc/", "codex/")):
+            # Subscription-billed CLI backends: pricing stays $0/0 forever,
+            # even though their slugs have priced OpenRouter twins.
             continue
         has_pricing = cur["input_price_per_1M"] > 0
         has_context = cur["context_length"] > 0
@@ -1670,6 +1687,8 @@ def apply_updates_to_file(
                 entry.pop("thinking", None)
             else:
                 entry[field] = value
+        if entry.get("comment") == "NEW: needs pricing" and entry["input_price_per_1M"] > 0:
+            entry["comment"] = "NEW"
         _write_entry_with_thinking_split(
             data,
             name,
