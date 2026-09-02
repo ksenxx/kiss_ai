@@ -4325,10 +4325,10 @@ class RemoteAccessServer:
         Runs in the executor so file I/O and process spawn never block
         the event loop.  ``start_new_session=True`` keeps the updater
         alive when ``install.sh`` restarts this very daemon.
-        ``stdin=DEVNULL`` detaches the script from the daemon's stdin so
-        its interactive prompts (e.g. the git-upgrade question) fall
-        back to their non-interactive defaults instead of failing a
-        ``read`` on a dead descriptor.  Failures are emitted as
+        ``--non-interactive`` makes the script answer its ``[Y/n]``
+        upgrade questions with their defaults (it would anyway, having
+        no terminal to ask on), and ``stdin=DEVNULL`` detaches it from
+        the daemon's stdin.  Failures are emitted as
         ``error`` events instead of raised, stamped with the
         requesting connection's ``connId`` (when non-empty) so only
         the window that clicked "Update" renders the error banner.
@@ -4341,7 +4341,7 @@ class RemoteAccessServer:
             self._update_log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._update_log_path, "ab") as log:
                 self._update_proc = subprocess.Popen(
-                    ["bash", str(script)],
+                    ["bash", str(script), "--non-interactive"],
                     cwd=str(script.parent),
                     stdin=subprocess.DEVNULL,
                     stdout=log,

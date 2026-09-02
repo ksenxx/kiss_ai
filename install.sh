@@ -11,6 +11,14 @@
 # users get the same installation path whether they run this script or install
 # the VSIX directly.
 #
+# Usage: ./install.sh [--non-interactive]
+#
+#   Run from a terminal, the script asks ``[Y/n]`` before installing Homebrew
+#   or upgrading git, uv, Node.js and VS Code.  ``--non-interactive`` (same as
+#   ``KISS_NONINTERACTIVE=1``) answers every question with its default (Yes)
+#   and never touches the terminal; it is also what happens automatically
+#   when there is no terminal to ask on.  See "Interactive mode" below.
+#
 # Log saved to ~/.kiss/install.log
 #
 # ---------------------------------------------------------------------------
@@ -104,10 +112,50 @@
 #
 # Graceful fallback: if ``perl`` is unavailable (extremely unlikely on
 # macOS / mainstream Linux), the script simply continues without
-# detachment, preserving the previous trap-only behaviour.
+# detachment, preserving the previous trap-only behaviour.  Interactive
+# mode (below) skips the detachment deliberately, for the same trap-only
+# behaviour: its ``[Y/n]`` questions and ``sudo``'s password prompt need
+# the controlling terminal that ``setsid`` would take away.
 # ---------------------------------------------------------------------------
+#
+# ---------------------------------------------------------------------------
+# Interactive mode (the default at a terminal)
+# ---------------------------------------------------------------------------
+# A human running ``./install.sh`` (or the ``curl ... | bash`` one-liner,
+# which still has a controlling terminal) gets a say before anything is
+# installed or upgraded system-wide: installing Homebrew and upgrading git,
+# uv, Node.js and VS Code are each a ``[Y/n]`` question (see ``confirm``
+# below), and "no" keeps the installed version and carries on.
+#
+# ``_KISS_INTERACTIVE`` is 0 instead when
+#
+# * ``--non-interactive`` is passed or ``KISS_NONINTERACTIVE`` is set —
+#   what the automated callers do (the VS Code Update button, the kiss-web
+#   daemon's update endpoint, the Docker entrypoint); or
+# * ``/dev/tty`` cannot be opened, i.e. there is no terminal to ask on
+#   (cron, CI, a daemon), including inside the detached re-exec below.
+#
+# Non-interactive runs behave as before: every question takes its default
+# answer (Yes), outdated tools are upgraded without asking, and a failed
+# upgrade is a warning, never an abort.
+# BEGIN: kiss-interactive-mode
+_KISS_INTERACTIVE=1
+if [ -n "${KISS_NONINTERACTIVE:-}" ]; then
+    _KISS_INTERACTIVE=0
+fi
+for _kiss_arg in "$@"; do
+    if [ "$_kiss_arg" = "--non-interactive" ]; then
+        _KISS_INTERACTIVE=0
+    fi
+done
+unset _kiss_arg
+if [ "$_KISS_INTERACTIVE" = 1 ] && ! { : </dev/tty; } 2>/dev/null; then
+    _KISS_INTERACTIVE=0
+fi
+# END: kiss-interactive-mode
+#
 # BEGIN: kiss-new-session-reexec  (tests extract this block verbatim)
-if [ -z "${_KISS_NEW_SESSION:-}" ] && command -v perl >/dev/null 2>&1; then
+if [ -z "${_KISS_NEW_SESSION:-}" ] && [ "${_KISS_INTERACTIVE:-0}" != 1 ] && command -v perl >/dev/null 2>&1; then
     # Probe POSIX::setsid availability before committing to the re-exec —
     # if perl is present but the POSIX module fails to load (custom
     # micro-perl builds), fall through to the trap-only path.
@@ -256,6 +304,11 @@ LAST_SIGNAL_TS=0
 # — used by ``handle_interrupt`` to forcibly stop it on a confirmed
 # double-interrupt (since the child ignores SIGINT by design).
 CURRENT_CMD_PID=""
+# The ``confirm`` question currently waiting for an answer, if any.  A
+# single Ctrl-C at a question runs ``handle_interrupt`` but, on bash 5,
+# leaves the ``read`` waiting; re-printing the question after the notice
+# tells the user the script still expects an answer.
+CONFIRM_PENDING=""
 handle_interrupt() {
     local now
     now=$(date +%s)
@@ -278,6 +331,9 @@ handle_interrupt() {
     echo "   ⚠ Interrupt received but ignored — long npm/git steps can sit"
     echo "      silent for 30-60 s while they download or extract.  Press"
     echo "      Ctrl+C again within 3 s to really abort."
+    if [ -n "$CONFIRM_PENDING" ]; then
+        printf '   %s [Y/n] ' "$CONFIRM_PENDING"
+    fi
 }
 
 # Re-route stdout/stderr to the log file when the controlling terminal
@@ -369,6 +425,60 @@ run_with_heartbeat() {
     return $rc
 }
 
+# Ask the user a yes/no question; returns 0 for "yes" and 1 for "no".
+#
+# When ``_KISS_INTERACTIVE`` is 0 (see the "Interactive mode" block at the top)
+# this asks nothing and answers "yes", which is the historical behaviour
+# of every caller.  Otherwise the question goes to stdout (so it is logged
+# and stays in order with the surrounding output) and the answer is read
+# from ``/dev/tty`` rather than stdin, so it works for ``curl ... | bash``
+# too.
+#
+# Guards, each of which once crashed this script under ``set -e``:
+#
+# * ``read`` runs in an ``||`` list so a non-zero status can never trip
+#   ``set -e``; EOF (Ctrl-D) and a ``/dev/tty`` that can no longer be
+#   opened (the terminal went away after the startup probe) both take the
+#   default "yes" instead of dying;
+# * the single Ctrl-C that ``handle_interrupt`` deliberately ignores is not
+#   mistaken for an answer: bash 5 keeps the ``read`` waiting after the
+#   trap (the trap re-prints the question via ``CONFIRM_PENDING``), and a
+#   bash whose ``read`` gives up with status > 128 simply reads again.
+#
+# ``read -s`` turns off the terminal's own echo and the answer is printed
+# back through stdout instead, so question and answer travel the same
+# ``tee`` pipe and land in the log complete and in order (a direct append
+# to the log file could overtake ``tee``).
+confirm() {
+    local question="$1" answer rc
+    if [ "$_KISS_INTERACTIVE" != 1 ]; then
+        return 0
+    fi
+    CONFIRM_PENDING="$question"
+    printf '   %s [Y/n] ' "$question"
+    while :; do
+        rc=0
+        IFS= read -rs answer </dev/tty || rc=$?
+        if [ "$rc" -gt 128 ]; then
+            continue
+        fi
+        if [ "$rc" -ne 0 ]; then
+            CONFIRM_PENDING=""
+            echo "(no answer from the terminal; assuming yes)"
+            return 0
+        fi
+        printf '%s\n' "${answer:-yes}"
+        case "$answer" in
+            ""|[Yy]|[Yy][Ee][Ss]) CONFIRM_PENDING=""; return 0 ;;
+            [Nn]|[Nn][Oo]) CONFIRM_PENDING=""; return 1 ;;
+            *)
+                echo "   Please answer y or n."
+                printf '   %s [Y/n] ' "$question"
+                ;;
+        esac
+    done
+}
+
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 case "$OS" in
@@ -441,10 +551,11 @@ ensure_xcode_clt() {
     if xcode-select -p &>/dev/null && [ -e "$(xcode-select -p)/usr/bin/git" ]; then
         echo "   Xcode Command Line Tools installed at $(xcode-select -p)"
     else
-        # This script always runs detached from the controlling terminal
-        # (see the kiss-new-session-reexec block above), so it cannot wait
-        # for keyboard input while the user completes the GUI dialog.
-        # Exit-and-rerun matches the ``install_git`` fallback behaviour.
+        # The GUI install can take many minutes and the non-interactive
+        # runs (detached, see the kiss-new-session-reexec block above)
+        # cannot wait for keyboard input, so exit-and-rerun is the one
+        # behaviour that works for every launch path; it matches the
+        # ``install_git`` fallback.
         echo ""
         echo "   A dialog has appeared to install the Xcode Command Line Tools."
         echo "   Complete the installation in that dialog, then re-run this script."
@@ -472,6 +583,11 @@ ensure_homebrew() {
     echo "   (e.g. git, cloudflared, and other runtime dependencies)."
     echo "   Set KISS_NO_BREW=1 to skip this step."
     echo ""
+    if ! confirm "Install Homebrew now?"; then
+        echo "   Skipping the Homebrew install; KISS Sorcar may not be able to"
+        echo "   install some tools on demand without it."
+        return 0
+    fi
     echo "   Installing Homebrew..."
     # `|| true`: a failed Homebrew bootstrap (no sudo, no network)
     # must not abort the install — the check below prints a warning
@@ -835,12 +951,17 @@ upgrade_vscode() {
                 TMP_APP_DIR="$(mktemp -d /tmp/vscode-app-XXXXXX)"
                 if unzip -q "$TMP_ZIP" -d "$TMP_APP_DIR" \
                         && [ -d "$TMP_APP_DIR/Visual Studio Code.app" ]; then
-                    rm -rf "/Applications/Visual Studio Code.app"
-                    mv "$TMP_APP_DIR/Visual Studio Code.app" /Applications/
-                    echo "   VS Code upgraded in /Applications/"
-                    local CODE_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
-                    if [ -x "$CODE_BIN" ]; then
-                        ln -sf "$CODE_BIN" "$BIN_DIR/code"
+                    # Guarded like every other upgrade: a permission error
+                    # in /Applications must warn, not abort under ``set -e``.
+                    if rm -rf "/Applications/Visual Studio Code.app" \
+                            && mv "$TMP_APP_DIR/Visual Studio Code.app" /Applications/; then
+                        echo "   VS Code upgraded in /Applications/"
+                        local CODE_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+                        if [ -x "$CODE_BIN" ]; then
+                            ln -sf "$CODE_BIN" "$BIN_DIR/code" || true
+                        fi
+                    else
+                        echo "   WARNING: Could not replace /Applications/Visual Studio Code.app; continuing with the installed version."
                     fi
                 else
                     echo "   WARNING: Failed to unpack VS Code; continuing with the installed version."
@@ -984,6 +1105,11 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo "Directory: $PROJECT_DIR"
     echo "OS: $OS ($ARCH)"
+    if [ "$_KISS_INTERACTIVE" = 1 ]; then
+        echo "Mode: interactive (asks before installing Homebrew or upgrading tools; pass --non-interactive to skip the questions)"
+    else
+        echo "Mode: non-interactive (outdated tools are upgraded without asking)"
+    fi
     echo ""
 
     if [ "$OS" = "Darwin" ]; then
@@ -1009,11 +1135,15 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     # would otherwise abort the script at this assignment.
     INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
     if [ -n "$REQUIRED_GIT_VERSION" ] && [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
-        echo "   git $INSTALLED_GIT is older than the required version $REQUIRED_GIT_VERSION — upgrading..."
-        upgrade_git
-        INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-        if [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
-            echo "   WARNING: git is still $INSTALLED_GIT (< $REQUIRED_GIT_VERSION); some features may not work."
+        echo "   git $INSTALLED_GIT is older than the required version $REQUIRED_GIT_VERSION."
+        if confirm "Upgrade git to $REQUIRED_GIT_VERSION or later?"; then
+            upgrade_git
+            INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            if [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
+                echo "   WARNING: git is still $INSTALLED_GIT (< $REQUIRED_GIT_VERSION); some features may not work."
+            fi
+        else
+            echo "   Skipping the git upgrade; some features may not work with git $INSTALLED_GIT."
         fi
     fi
     echo "   git $INSTALLED_GIT ready"
@@ -1027,9 +1157,13 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     if command -v uv &>/dev/null; then
         INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         if [ -n "$REQUIRED_UV_VERSION" ] && [ -n "$INSTALLED_UV" ] && ! version_gte "$INSTALLED_UV" "$REQUIRED_UV_VERSION"; then
-            echo "   uv $INSTALLED_UV is older than the required version $REQUIRED_UV_VERSION — upgrading..."
-            upgrade_uv
-            INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            echo "   uv $INSTALLED_UV is older than the required version $REQUIRED_UV_VERSION."
+            if confirm "Upgrade uv to $REQUIRED_UV_VERSION?"; then
+                upgrade_uv
+                INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            else
+                echo "   Skipping the uv upgrade; continuing with uv $INSTALLED_UV."
+            fi
         fi
         echo "   uv $INSTALLED_UV ready"
     else
@@ -1044,9 +1178,13 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     if command -v node &>/dev/null && command -v npm &>/dev/null && command -v npx &>/dev/null; then
         INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
         if [ -n "$REQUIRED_NODE_VERSION" ] && [ -n "$INSTALLED_NODE" ] && ! version_gte "$INSTALLED_NODE" "$REQUIRED_NODE_VERSION"; then
-            echo "   Node.js $INSTALLED_NODE is older than the required version $REQUIRED_NODE_VERSION — upgrading..."
-            upgrade_node
-            INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
+            echo "   Node.js $INSTALLED_NODE is older than the required version $REQUIRED_NODE_VERSION."
+            if confirm "Upgrade Node.js to $REQUIRED_NODE_VERSION?"; then
+                upgrade_node
+                INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
+            else
+                echo "   Skipping the Node.js upgrade; the extension build may fail with node v$INSTALLED_NODE."
+            fi
         fi
         echo "   node v$INSTALLED_NODE ready"
         echo "   npm $(npm --version) ready"
@@ -1065,9 +1203,16 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     if [ -n "$CODE_CLI" ]; then
         INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
         if [ -n "$REQUIRED_VSCODE_VERSION" ] && [ -n "$INSTALLED_VSCODE" ] && ! version_gte "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"; then
-            echo "   VS Code $INSTALLED_VSCODE is older than the required version $REQUIRED_VSCODE_VERSION — upgrading..."
-            upgrade_vscode
-            INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
+            echo "   VS Code $INSTALLED_VSCODE is older than the required version $REQUIRED_VSCODE_VERSION."
+            if confirm "Upgrade VS Code?"; then
+                upgrade_vscode
+                INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
+                if [ -n "$INSTALLED_VSCODE" ] && ! version_gte "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"; then
+                    echo "   WARNING: VS Code is still $INSTALLED_VSCODE (< $REQUIRED_VSCODE_VERSION); the extension may refuse to install."
+                fi
+            else
+                echo "   Skipping the VS Code upgrade; the extension may refuse to install into VS Code $INSTALLED_VSCODE."
+            fi
         fi
         echo "   code CLI ready: $CODE_CLI (v$INSTALLED_VSCODE)"
     else
@@ -1148,16 +1293,25 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     # VS Code detect the on-disk extension update and reload — and that
     # reload can dispose (or simply stop rendering) the very terminal this
     # script is printing to.  The output then appears to freeze with no
-    # prompt ever returning, and users conclude the install hung.  It did
-    # not: the new-session (setsid) detachment at the top of this script
-    # keeps the install running, and the log (see ``$LOG_FILE``) shows it
-    # completing a few seconds later.  The only reliable channel to tell
-    # the user is this terminal, BEFORE it can die — hence the notice below
-    # must stay ahead of the ``--install-extension`` call.
+    # prompt ever returning, and users conclude the install hung.  In a
+    # non-interactive run it did not: the new-session (setsid) detachment
+    # at the top of this script keeps the install running, and the log
+    # (see ``$LOG_FILE``) shows it completing a few seconds later.  An
+    # interactive run skipped that detachment to keep its terminal, so a
+    # disposed terminal can cut it short; the log tells which happened.
+    # The only reliable channel to tell the user is this terminal, BEFORE
+    # it can die — hence the notice below must stay ahead of the
+    # ``--install-extension`` call.
     echo "   NOTE: VS Code may reload to pick up the update while this step runs."
     echo "         If this terminal stops updating (or never shows a prompt again),"
-    echo "         the install is NOT stuck — it keeps running detached and"
-    echo "         finishes on its own.  Follow progress with:"
+    if [ "${_KISS_INTERACTIVE:-0}" = 1 ]; then
+        echo "         check the log; if the reload closed this terminal the install"
+        echo "         may have been cut short, and re-running this script resumes it."
+    else
+        echo "         the install is NOT stuck — it keeps running detached and"
+        echo "         finishes on its own."
+    fi
+    echo "         Follow progress with:"
     echo "             tail -f \"$LOG_FILE\""
     echo "         Completion is marked by the line: === Source bootstrap complete ==="
     if ! "$CODE_CLI" --install-extension "$VSIX" --force 2>&1; then
