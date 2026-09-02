@@ -9,8 +9,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// The curl installer (scripts/install.sh) clones the public repo into
+// ~/.kiss/kiss_ai; the Update button must run the install.sh of that clone.
 function kissAiRoot() {
-  return path.join(os.homedir(), 'kiss_ai');
+  return path.join(os.homedir(), '.kiss', 'kiss_ai');
 }
 
 function findInstallScript(root) {

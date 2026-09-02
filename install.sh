@@ -30,7 +30,7 @@
 # A user clicked the VS Code "Update" button (settings panel), which calls
 # ``runUpdate()`` in ``SorcarSidebarView.ts``.  That method opens a VS Code
 # integrated terminal and ``terminal.sendText``s a compound command ending in
-# ``bash '/Users/ksen/kiss_ai/install.sh'``.  The install ran through Xcode
+# ``bash '/Users/ksen/.kiss/kiss_ai/install.sh'``.  The install ran through Xcode
 # CLT, Homebrew, git, node and VS Code CLI, then died
 # right in the middle of the TypeScript compile::
 #
