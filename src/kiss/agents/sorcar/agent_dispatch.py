@@ -478,7 +478,9 @@ def make_run_agent_tool(
         max_budget: str = "",
     ) -> str:
         """Run an agent — a channel agent or any agent script — on a task now.
-
+        
+        DO NOT CREATE AN AGENT JUST TO RUN THE 'run_agent' tool.  Use 
+        'run_parallel' instead.
         Use this tool RIGHT AWAY — as the first action, without
         exploring any source code — whenever the task is to act on an
         external messaging service, mailbox, or device channel:
