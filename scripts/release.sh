@@ -893,58 +893,6 @@ publish_vscode_extension() {
     print_info "View at: https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar"
 }
 
-install_local_extension() {
-    local vsix_path="$VSIX_FILE"
-
-    # Install into VS Code
-    local code_cli=""
-    for candidate in \
-        "$(command -v code 2>/dev/null || true)" \
-        "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
-        "$HOME/.local/bin/code"; do
-        if [[ -n "$candidate" && -x "$candidate" ]]; then
-            code_cli="$candidate"
-            break
-        fi
-    done
-    if [[ -n "$code_cli" ]]; then
-        print_step "Installing extension into VS Code..."
-        # VS Code's bundled Node emits DEP0169 (url.parse) when its CLI installs
-        # an extension; --no-deprecation silences that noise (the warning is
-        # internal to VS Code and not actionable for us).
-        if NODE_OPTIONS="--no-deprecation${NODE_OPTIONS:+ $NODE_OPTIONS}" \
-            "$code_cli" --install-extension "$vsix_path" --force 2>&1; then
-            print_info "Extension installed into VS Code"
-            # Write marker so the running extension detects the update and reloads.
-            mkdir -p "$HOME/.kiss"
-            date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
-        else
-            print_warn "Failed to install extension into VS Code — continuing"
-        fi
-    else
-        print_info "VS Code CLI not found — skipping local VS Code install"
-    fi
-
-    # Install into Cursor
-    local cursor_cli=""
-    if command -v cursor &>/dev/null; then
-        cursor_cli="cursor"
-    elif [[ -x "/Applications/Cursor.app/Contents/Resources/app/bin/cursor" ]]; then
-        cursor_cli="/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
-    fi
-    if [[ -n "$cursor_cli" ]]; then
-        print_step "Installing extension into Cursor IDE..."
-        if NODE_OPTIONS="--no-deprecation${NODE_OPTIONS:+ $NODE_OPTIONS}" \
-            "$cursor_cli" --install-extension "$vsix_path" --force 2>&1; then
-            print_info "Extension installed into Cursor IDE"
-        else
-            print_warn "Failed to install extension into Cursor IDE — continuing"
-        fi
-    else
-        print_info "Cursor IDE not found — skipping local Cursor install"
-    fi
-}
-
 # =============================================================================
 # Main Release Process
 # =============================================================================
@@ -1094,10 +1042,7 @@ main() {
     # Step 11: Publish VS Code extension (already built in step 5)
     publish_vscode_extension "$VERSION"
 
-    # Step 12: Install extension into local VS Code and Cursor IDE if available
-    install_local_extension
-
-    # Step 13: Restore stashed changes
+    # Step 12: Restore stashed changes
     trap - EXIT
     if [[ "$STASHED" == true ]]; then
         print_step "Restoring stashed changes..."
