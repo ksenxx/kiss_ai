@@ -49,7 +49,7 @@ from kiss.core.printer import parse_result_yaml
 from kiss.server import agent_state
 from kiss.server.agent_file import AgentFileError, apply_agent_overrides
 from kiss.server.agent_state import AgentState
-from kiss.server.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter, stamp_event_ts
 from kiss.server.tools_file import load_tools_file
 
 logger = logging.getLogger(__name__)
@@ -460,12 +460,6 @@ class _TaskRunnerMixin:
         ) -> None: ...
         def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]: ...
         def _extract_result_summary(self) -> str: ...
-        def _generate_followup_async(
-            self,
-            task: str,
-            result: str,
-            task_id: str | None,
-        ) -> None: ...
         def _refresh_files_after_task(self, work_dir: str = "") -> None: ...
 
     def _run_task(self, cmd: dict[str, Any]) -> None:
@@ -1035,6 +1029,9 @@ class _TaskRunnerMixin:
             prompt[:200],
         )
         result_summary = "Agent Failed Abruptly"
+        # The agent's own ``finish(suggested_next_task=...)`` proposal;
+        # empty on every failure path, so no bar is shown.
+        suggested_next_task = ""
         task_end_event: dict[str, Any] | None = None
         sub_start_ms = start_ms
         sub_tokens_base = int(getattr(agent, "total_tokens_used", 0) or 0)
@@ -1104,6 +1101,9 @@ class _TaskRunnerMixin:
             for subtask_index, task_prompt in enumerate(subtasks):
                 state.last_user_prompt = task_prompt
                 state.last_result_summary = ""
+                # Reset per subtask: a later subtask that fails must not
+                # publish an earlier subtask's suggestion.
+                suggested_next_task = ""
                 if subtask_index > 0:
                     sub_start_ms = int(time.time() * 1000)
                 sub_tokens_base = int(
@@ -1164,6 +1164,9 @@ class _TaskRunnerMixin:
                         result_summary = str(_run_parsed["summary"])
                     else:
                         result_summary = self._extract_result_summary() or "No summary available"
+                    suggested_next_task = str(
+                        (_run_parsed or {}).get("suggested_next_task") or "",
+                    ).strip()
                     task_end_event = {"type": "task_done"}
                     logger.info(
                         "Agent returned: tab_id=%s task_id=%s summary=%r",
@@ -1422,21 +1425,27 @@ class _TaskRunnerMixin:
                 )
                 hist_id = task_history_id
                 if hist_id is not None:
-                    # S3-08: drop the printer's persist-agent BEFORE
-                    # starting the follow-up thread, so the follow-up
-                    # broadcast is never auto-persisted and the explicit
-                    # ``_append_chat_event`` inside the follow-up thread
-                    # is the single, scheduling-independent persistence
-                    # path.  ``cleanup_task`` keeps the subscriber set
-                    # alive for a linger period, so the broadcast still
-                    # fans out to the originating tab.
+                    if suggested_next_task:
+                        # The agent proposed the follow-up itself via
+                        # ``finish(suggested_next_task=...)``.  The
+                        # transient broadcast (one ``tabId``-stamped copy
+                        # per watching tab) is never auto-persisted, so
+                        # the explicit ``_append_chat_event`` below is
+                        # the single persistence path (S3-08) and the
+                        # replayed transcript shows the bar exactly once.
+                        followup_event: dict[str, Any] = {
+                            "type": "followup_suggestion",
+                            "text": suggested_next_task,
+                        }
+                        stamp_event_ts(followup_event)
+                        self.printer.broadcast_transient(
+                            followup_event, task_id=hist_id, tab_id=tab_id,
+                        )
+                        _append_chat_event(
+                            dict(followup_event), task_id=hist_id, task=prompt,
+                        )
                     self.printer.cleanup_task(hist_id)
                     task_history_id = None
-                    self._generate_followup_async(
-                        prompt,
-                        result_summary,
-                        hist_id,
-                    )
             except BaseException:  # pragma: no cover — cleanup interrupted
                 logger.debug("Cleanup interrupted", exc_info=True)
                 # Only emit the terminal event if the normal path did

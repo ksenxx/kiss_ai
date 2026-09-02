@@ -937,8 +937,8 @@ class JsonPrinter(Printer):
         ``system_output`` for the task can be broadcast.
 
         The subscriber set is preserved for ``subscriber_linger_seconds``
-        so any post-task broadcasts (e.g. the async
-        ``followup_suggestion``) still fan out to the originating tab.
+        so a broadcast that lands just after the task ends still fans
+        out to the originating tab.
         Expired sets are pruned opportunistically (no timer thread per
         task) by every subscriber-map operation — previously they were
         kept for the tab's whole lifetime, leaking one entry per
