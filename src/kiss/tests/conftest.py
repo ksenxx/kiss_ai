@@ -44,6 +44,7 @@ body runs.
 
 import functools
 import os
+import shutil
 import tempfile
 import threading
 import unittest
@@ -286,10 +287,7 @@ requires_moonshot_api_key = pytest.mark.skipif(
     reason="MOONSHOT_API_KEY environment variable not set",
 )
 @pytest.fixture(autouse=True)
-def _isolated_default_workdir(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path_factory: pytest.TempPathFactory,
-) -> Iterator[None]:
+def _isolated_default_workdir(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Point ``VSCodeServer``'s default ``work_dir`` away from this repo.
 
     ``VSCodeServer.__init__`` falls back to ``os.getcwd()`` when
@@ -308,15 +306,22 @@ def _isolated_default_workdir(
     matters.  Tests that need a specific work dir must set the
     variable (or assign ``server.work_dir``) inside their own
     setup/body, which runs after this fixture and therefore wins.
-    The directory lives OUTSIDE the test's own ``tmp_path`` so tests
-    that scan their ``tmp_path`` do not see an extra entry.
+    The directory lives in the system temp dir rather than under
+    pytest's ``basetemp``: it must be OUTSIDE the test's own
+    ``tmp_path`` (so tests that scan their ``tmp_path`` do not see an
+    extra entry) and OUTSIDE the repository even when pytest is run
+    with an in-repo ``--basetemp`` (e.g. ``--basetemp=./tmp/...`` from
+    a parallel split runner) — a default work dir nested anywhere
+    inside the repo's git tree would still let the auto-commit reach
+    the developer's checkout.
 
     Yields:
         None.
     """
-    default_dir = tmp_path_factory.mktemp("kiss-default-workdir")
-    monkeypatch.setenv("KISS_WORKDIR", str(default_dir))
+    default_dir = tempfile.mkdtemp(prefix="kiss-default-workdir-")
+    monkeypatch.setenv("KISS_WORKDIR", default_dir)
     yield
+    shutil.rmtree(default_dir, ignore_errors=True)
 
 
 def _drop_redundant_config_overrides() -> None:
