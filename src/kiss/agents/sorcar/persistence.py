@@ -2531,8 +2531,8 @@ def _append_chat_event(
         task: Fallback task description string for legacy callers.
         origin_db_path: Database path *task_id* was resolved against
             (see :func:`_queue_chat_event`).  Late asynchronous
-            callers (e.g. the follow-up suggestion thread) pass the
-            path captured when the task completed so the event is
+            callers pass the path captured when the task completed
+            so the event is
             dropped — instead of attached to an unrelated task with
             the same row id — if the active database has changed.
     """

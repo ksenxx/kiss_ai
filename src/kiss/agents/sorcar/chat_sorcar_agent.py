@@ -396,12 +396,14 @@ class ChatSorcarAgent(SorcarAgent):
         chat webview would load a blank session even though the task and
         its result are in ``task_history``.
 
-        This synthesizes the two events the webview needs to render the
-        exchange — a ``prompt`` event (the user's task) and a ``result``
-        event (the agent's summary / success / cost) — but only when the
-        task has no transcript events yet (the run's ``task_settings``
-        metadata event, persisted before any output, is ignored), so a
-        recording printer's full event stream is never duplicated.
+        This synthesizes the events the webview needs to render the
+        exchange — a ``prompt`` event (the user's task), a ``result``
+        event (the agent's summary / success / cost) and, when the agent
+        proposed one via ``finish(suggested_next_task=...)``, a
+        ``followup_suggestion`` event — but only when the task has no
+        transcript events yet (the run's ``task_settings`` metadata
+        event, persisted before any output, is ignored), so a recording
+        printer's full event stream is never duplicated.
 
         Args:
             task_id: Stable ``task_history`` row id for this run.
@@ -434,6 +436,11 @@ class ChatSorcarAgent(SorcarAgent):
         else:
             event["summary"] = result_summary or ""
         _append_chat_event(event, task_id=task_id)
+        suggestion = str((parsed or {}).get("suggested_next_task") or "").strip()
+        if suggestion:
+            _append_chat_event(
+                {"type": "followup_suggestion", "text": suggestion}, task_id=task_id,
+            )
 
     def run(  # type: ignore[override]
         self,

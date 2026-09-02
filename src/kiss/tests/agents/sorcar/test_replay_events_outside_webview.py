@@ -51,6 +51,10 @@ from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 _CANNED_RESULT: str = yaml.dump(
     {"success": True, "summary": "all done"}, sort_keys=False,
 )
+_CANNED_RESULT_WITH_SUGGESTION: str = yaml.dump(
+    {"success": True, "summary": "all done", "suggested_next_task": "Ship it"},
+    sort_keys=False,
+)
 
 
 class _CannedModelAgent(SorcarAgent):
@@ -63,12 +67,13 @@ class _CannedModelAgent(SorcarAgent):
     """
 
     broadcast_result_event = False
+    canned_result = _CANNED_RESULT
 
     def run(self, prompt_template: str = "", **kwargs: Any) -> str:  # type: ignore[override]
         printer = kwargs.get("printer")
         if self.broadcast_result_event and printer is not None:
-            printer.broadcast({"type": "result", "text": _CANNED_RESULT})
-        return _CANNED_RESULT
+            printer.broadcast({"type": "result", "text": self.canned_result})
+        return self.canned_result
 
 
 class _OfflineChatAgent(ChatSorcarAgent, _CannedModelAgent):
@@ -177,3 +182,55 @@ class TestReplayEventsOutsideWebview:
         assert isinstance(events, list)
         assert sum(1 for e in events if e.get("type") == "result") == 1, events
         assert sum(1 for e in events if e.get("type") == "prompt") == 1, events
+
+    def test_suggested_next_task_is_persisted_after_result(self) -> None:
+        agent = _OfflineChatAgent("offline")
+        agent.canned_result = _CANNED_RESULT_WITH_SUGGESTION
+        agent.run(
+            prompt_template="do the thing",
+            model_name="canned",
+            work_dir=str(self.tmpdir),
+        )
+        task_id = agent._last_task_id
+        assert task_id is not None
+        _flush_chat_events()
+        loaded = _load_chat_events_by_task_id(task_id)
+        assert loaded is not None
+        events = loaded.get("events", [])
+        assert isinstance(events, list)
+        types = [str(e.get("type")) for e in events if e.get("type") != "task_settings"]
+        assert types == ["prompt", "result", "followup_suggestion"], types
+        assert events[-1]["text"] == "Ship it"
+
+    def test_no_suggestion_means_no_followup_event(self) -> None:
+        agent = _OfflineChatAgent("offline")
+        agent.run(
+            prompt_template="do the thing",
+            model_name="canned",
+            work_dir=str(self.tmpdir),
+        )
+        task_id = agent._last_task_id
+        assert task_id is not None
+        _flush_chat_events()
+        loaded = _load_chat_events_by_task_id(task_id)
+        assert loaded is not None
+        events = loaded.get("events", [])
+        assert isinstance(events, list)
+        assert not any(e.get("type") == "followup_suggestion" for e in events)
+
+    def test_suggestion_persistence_is_idempotent(self) -> None:
+        agent = WorktreeSorcarAgent("wt")
+        task_id, _ = _add_task("a worktree task")
+        for _ in range(2):
+            agent._persist_replay_events_if_missing(
+                task_id=task_id,
+                prompt="a worktree task",
+                result_raw=_CANNED_RESULT_WITH_SUGGESTION,
+                result_summary="all done",
+            )
+        _flush_chat_events()
+        loaded = _load_chat_events_by_task_id(task_id)
+        assert loaded is not None
+        events = loaded.get("events", [])
+        assert isinstance(events, list)
+        assert sum(1 for e in events if e.get("type") == "followup_suggestion") == 1, events

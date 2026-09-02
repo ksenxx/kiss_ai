@@ -19,13 +19,13 @@ S3-07  Mandatory end-of-task cleanup (clearing ``is_task_active`` /
        must run in its own ``finally`` so a persistence crash cannot
        leave the task permanently flagged active.
 
-S3-08  The follow-up suggestion must persist exactly once: while the
-       run's agent is still resolvable through the registry (live
-       ``_last_task_id``) a broadcast double-persists; after the
-       production cleanup (``_last_task_id`` cleared +
-       ``cleanup_task``) the explicit append is the single
-       persistence path, and the lingering subscriber set still fans
-       the broadcast out to the tab.
+S3-08  The follow-up suggestion (the agent's own
+       ``finish(suggested_next_task=...)``) must persist exactly once:
+       while the run's agent is still resolvable through the registry
+       (live ``_last_task_id``) a plain broadcast double-persists, so
+       ``_run_task`` emits it with ``broadcast_transient`` (never
+       auto-persisted) plus one explicit append, and every watching
+       tab still receives a stamped copy.
 
 S3-09  ``_subagent_is_done`` must agree with
        ``_reattach_running_chat``: both consult the same live-state
@@ -59,7 +59,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
-import kiss.server.server as _server_module
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
@@ -291,20 +290,19 @@ class TestSubagentDoneConsistency(unittest.TestCase):
 class TestFollowupSinglePersistence(unittest.TestCase):
     """S3-08: the follow-up suggestion must persist exactly once.
 
-    Reproduces both orderings of the race deterministically against a
-    real ``JsonPrinter`` and a real SQLite DB, with the production
-    persistence wiring (a real ``ChatSorcarAgent`` reachable through
-    the task-keyed registry, exactly as ``ChatSorcarAgent.run``
-    installs itself via ``printer.agent_task_allocated``):
+    The suggestion now comes from the agent's own
+    ``finish(suggested_next_task=...)`` and ``_run_task`` emits it
+    synchronously — BEFORE ``cleanup_task`` — while the run's agent is
+    still resolvable through the registry with a live
+    ``_last_task_id`` (the very condition under which a plain
+    ``broadcast`` auto-persists).  Exercises the exact primitive pair
+    ``_run_task`` uses against a real ``JsonPrinter``, a real
+    ``ChatSorcarAgent`` in the task-keyed registry and a real SQLite DB:
 
-    * pre-fix order (broadcast while the agent's ``_last_task_id``
-      is still live in the registry, then the explicit append) →
-      TWO rows;
-    * post-fix order (production cleanup first — ``_last_task_id``
-      cleared and ``cleanup_task`` called, as ``ChatSorcarAgent.run``
-      / ``_run_task_inner`` now do — then the follow-up thread's
-      broadcast + append) → ONE row, and the lingering subscriber
-      set still fans the broadcast out to the tab.
+    * a plain ``broadcast`` + explicit append double-persists (the
+      defect mechanism);
+    * ``broadcast_transient`` + explicit append persists ONE row and
+      still delivers one ``tabId``-stamped copy to every watching tab.
     """
 
     def setUp(self) -> None:
@@ -312,6 +310,14 @@ class TestFollowupSinglePersistence(unittest.TestCase):
         self.saved = _redirect_db(self.tmpdir)
         self.server = VSCodeServer()
         self.printer = self.server.printer
+        self.delivered: list[dict[str, object]] = []
+        original_broadcast = self.printer.broadcast
+
+        def _capturing_broadcast(event: dict[str, object]) -> None:
+            self.delivered.append(dict(event))
+            original_broadcast(event)
+
+        self.printer.broadcast = _capturing_broadcast  # type: ignore[method-assign]
         task_id, _chat_id = th._add_task("s308 follow-up persistence task")
         self.task_id = str(task_id)
         self.agent = ChatSorcarAgent("s308-agent")
@@ -323,7 +329,7 @@ class TestFollowupSinglePersistence(unittest.TestCase):
             is_task_active=True,
         )
         agent_state.register(state)
-        self.state = state
+        self.printer.subscribe_tab(self.task_id, "s308-viewer-tab")
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
@@ -332,63 +338,45 @@ class TestFollowupSinglePersistence(unittest.TestCase):
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _followup_thread_body(self, event: dict[str, object]) -> None:
-        """Exactly what ``_generate_followup_async``'s thread does."""
+    def _event(self, text: str) -> dict[str, object]:
+        return {"type": "followup_suggestion", "text": text}
+
+    def test_plain_broadcast_double_persists(self) -> None:
         self.printer._thread_local.task_id = self.task_id
-        time.sleep(random.uniform(0.001, 0.05))
-        self.printer.broadcast(dict(event))
-        th._append_chat_event(
-            dict(event),
-            task_id=self.task_id,
-            task="s308 follow-up persistence task",
-            origin_db_path=th._current_db_path(),
-        )
-
-    def _run_followup_thread(self, text: str) -> None:
-        event: dict[str, object] = {"type": "followup_suggestion", "text": text}
-        worker = threading.Thread(
-            target=self._followup_thread_body, args=(event,), daemon=True,
-        )
-        worker.start()
-        worker.join(timeout=10)
-        self.assertFalse(worker.is_alive())
-
-    def test_prefix_order_duplicates_and_fixed_order_does_not(self) -> None:
-        # Pre-fix ordering: the agent is still resolvable through the
-        # registry with a live _last_task_id while the follow-up thread
-        # broadcasts — the defect mechanism.
-        self._run_followup_thread("fast follow-up (persist wiring live)")
+        try:
+            event = self._event("plain broadcast follow-up")
+            self.printer.broadcast(dict(event))
+            th._append_chat_event(dict(event), task_id=self.task_id)
+        finally:
+            self.printer._thread_local.task_id = ""
         self.assertEqual(
             _count_followup_rows(self.task_id),
             2,
-            "with the agent still registered and its _last_task_id "
-            "live, broadcast + explicit append must double-persist — "
-            "this is the defect mechanism the cleanup reorder "
-            "eliminates",
+            "with the agent registered and its _last_task_id live, a "
+            "plain broadcast + explicit append double-persists — the "
+            "defect mechanism the transient broadcast avoids",
         )
 
-        # Post-fix ordering: production cleanup runs BEFORE the
-        # follow-up thread — ChatSorcarAgent.run clears _last_task_id
-        # and _run_task_inner calls cleanup_task first.
-        self.printer.subscribe_tab(self.task_id, "s308-viewer-tab")
-        with self.agent._task_id_lock:
-            self.agent._last_task_id = None
-        self.printer.cleanup_task(self.task_id)
-        before = _count_followup_rows(self.task_id)
-        self._run_followup_thread("follow-up after cleanup_task")
-        self.assertEqual(
-            _count_followup_rows(self.task_id) - before,
-            1,
-            "after cleanup the explicit append must be the single "
-            "persistence path",
+    def test_transient_broadcast_persists_once_and_reaches_viewers(self) -> None:
+        event = self._event("transient follow-up")
+        self.printer.broadcast_transient(
+            dict(event), task_id=self.task_id, tab_id="s308-launch-tab",
         )
-        with self.printer._lock:
-            self.assertIn(
-                "s308-viewer-tab",
-                self.printer._subscribers.get(self.task_id, set()),
-                "cleanup_task must keep the subscriber set alive (linger) "
-                "so the follow-up broadcast still reaches the tab",
-            )
+        th._append_chat_event(dict(event), task_id=self.task_id)
+        self.assertEqual(
+            _count_followup_rows(self.task_id),
+            1,
+            "the explicit append must be the single persistence path",
+        )
+        copies = [
+            e for e in self.delivered if e.get("type") == "followup_suggestion"
+        ]
+        self.assertEqual(
+            sorted(str(e.get("tabId")) for e in copies),
+            ["s308-launch-tab", "s308-viewer-tab"],
+            "one tabId-stamped copy per watching tab",
+        )
+        self.assertTrue(all(e["text"] == "transient follow-up" for e in copies))
 
 
 class _CompletingParentRun:
@@ -433,12 +421,6 @@ class TestCleanupExceptionSafety(unittest.TestCase):
         self.server = VSCodeServer()
         self.blocker = _CompletingParentRun()
         self.original_run = self.blocker.install()
-        self._orig_followup = _server_module.generate_followup_text
-
-        def fake_followup(task: str, result: str, model: str) -> str:
-            return ""
-
-        _server_module.generate_followup_text = fake_followup  # type: ignore[assignment]
         self.tab_id = "s307-tab"
 
     def tearDown(self) -> None:
@@ -448,7 +430,6 @@ class TestCleanupExceptionSafety(unittest.TestCase):
         if state is not None and state.task_thread is not None:
             state.task_thread.join(timeout=15)
         cast(Any, SorcarAgent.__mro__[1]).run = self.original_run
-        _server_module.generate_followup_text = self._orig_followup
         agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)

@@ -34,8 +34,6 @@ from typing import Any, cast
 
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.persistence import (
-    _append_chat_event,
-    _current_db_path,
     _delete_frequent_task,
     _get_adjacent_task_by_chat_id,
     _history_date_range,
@@ -55,7 +53,6 @@ from kiss.core import config as config_module
 from kiss.core.models.model_info import (
     MODEL_INFO,
     get_default_model,
-    get_fast_model,
 )
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
@@ -67,7 +64,6 @@ from kiss.server.commands import _CommandsMixin
 from kiss.server.diff_merge import _git
 from kiss.server.helpers import (
     generate_commit_message_from_diff,
-    generate_followup_text,
     model_vendor,
 )
 from kiss.server.json_printer import (
@@ -1717,66 +1713,6 @@ class VSCodeServer(
             source_task_id = source.task_id
         self.printer.subscribe_tab(source_task_id, new_tab_id)
         return True
-
-    def _generate_followup_async(
-        self,
-        task: str,
-        result: str,
-        task_id: str | None,
-    ) -> None:
-        """Generate and broadcast a follow-up suggestion in a background thread.
-
-        The suggestion is broadcast to the webview and also appended to
-        the persisted chat events so it survives panel re-creation.
-
-        Args:
-            task: The completed task description.
-            result: The task result summary.
-            task_id: Stable history row id for the completed task.
-        """
-        owner_task_key = str(task_id) if task_id is not None else None
-        origin_db_path = _current_db_path()
-
-        def _run() -> None:
-            if owner_task_key is not None:
-                self.printer._thread_local.task_id = owner_task_key
-            try:
-                suggestion = generate_followup_text(task, result, get_fast_model())
-                if suggestion:  # pragma: no cover — requires LLM API call
-                    if _current_db_path() != origin_db_path:
-                        return
-                    event: dict[str, object] = {
-                        "type": "followup_suggestion",
-                        "text": suggestion,
-                    }
-                    self.printer.broadcast(event)
-                    _append_chat_event(
-                        event,
-                        task_id=task_id,
-                        task=task,
-                        origin_db_path=origin_db_path,
-                    )
-            except Exception:  # pragma: no cover — LLM API error handler
-                logger.debug("Async followup generation failed", exc_info=True)
-            finally:
-                # The task's subscriber set was kept alive (a bounded
-                # linger) solely so this broadcast could still fan out
-                # after ``cleanup_task``.  The follow-up is the last
-                # post-task event, so release the lease as soon as it
-                # is delivered (or failed) instead of waiting out the
-                # full linger.
-                if owner_task_key is not None:
-                    try:
-                        self.printer.cleanup_task(
-                            owner_task_key, subscriber_linger_seconds=0,
-                        )
-                    except Exception:
-                        logger.debug(
-                            "Follow-up subscriber release failed",
-                            exc_info=True,
-                        )
-
-        threading.Thread(target=_run, daemon=True).start()
 
     def _extract_result_summary(self) -> str:
         """Extract result summary from the current recording."""
