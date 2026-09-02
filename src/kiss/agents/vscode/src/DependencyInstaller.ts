@@ -35,7 +35,6 @@ const LOG_FILE = path.join(LOG_DIR, 'install.log');
 const MIN_PYTHON_MAJOR = 3;
 const MIN_PYTHON_MINOR = 13;
 const UV_VERSION = '0.11.2';
-const NODE_VERSION = 'v22.16.0';
 
 function xmlEscape(s: string): string {
   return s
@@ -135,8 +134,7 @@ function verifyDownloadHash(
  *
  * Returns null on any failure (non-200 status, network error, abort,
  * 15s timeout, or a malformed/non-HTTPS URL).  Redirects are not
- * followed.  Shared transport for the SHA-256 manifest fetchers
- * below, which previously duplicated this boilerplate.
+ * followed.  Transport for the SHA-256 manifest fetcher below.
  */
 export function httpsGetText(url: string): Promise<string | null> {
   return new Promise(resolve => {
@@ -178,25 +176,6 @@ export async function fetchUvStyleSha256(
   if (text === null) return null;
   const m = /^([0-9a-fA-F]{64})/.exec(text.trim());
   return m ? m[1] : null;
-}
-
-/**
- * Look up *assetName*'s digest in the Node.js SHASUMS256.txt manifest
- * for NODE_VERSION, or null when unavailable or unlisted.
- */
-export async function fetchNodeSha256(
-  assetName: string,
-  manifestUrl?: string,
-): Promise<string | null> {
-  const url =
-    manifestUrl || `https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt`;
-  const text = await httpsGetText(url);
-  if (text === null) return null;
-  for (const line of text.split('\n')) {
-    const m = /^([0-9a-fA-F]{64})\s+(.+?)\s*$/.exec(line);
-    if (m && m[2] === assetName) return m[1];
-  }
-  return null;
 }
 
 function sleepSync(ms: number): void {
@@ -294,16 +273,6 @@ function windowsZipInstall(
   );
 }
 
-function findNodeDirWindows(baseDir: string): string {
-  try {
-    for (const entry of fs.readdirSync(baseDir)) {
-      const candidate = path.join(baseDir, entry);
-      if (fs.existsSync(path.join(candidate, 'node.exe'))) return candidate;
-    }
-  } catch {}
-  return baseDir;
-}
-
 export function getFallbackDefaultModel(): string {
   const env = process.env;
   if (env.ANTHROPIC_API_KEY) return 'claude-opus-4-7';
@@ -380,11 +349,6 @@ async function runFinalization(
       const gitCmdDir = path.join(HOME_DIR, '.local', 'git', 'cmd');
       if (fs.existsSync(gitCmdDir)) {
         ensurePathInShellRc(rcPath, gitCmdDir);
-      }
-      const nodeBaseDir = path.join(HOME_DIR, '.local', 'node');
-      const nodeDir = findNodeDirWindows(nodeBaseDir);
-      if (fs.existsSync(nodeDir)) {
-        ensurePathInShellRc(rcPath, nodeDir);
       }
     }
   } catch (err) {
@@ -505,15 +469,6 @@ async function ensureDependenciesImpl(): Promise<void> {
         }
       });
     }
-    if (!commandExists('node')) {
-      void installNode().then(installed => {
-        if (!installed) {
-          showWarningNotification(
-            'KISS Sorcar: Node.js could not be installed automatically. Some agent tools may be unavailable.',
-          );
-        }
-      });
-    }
     if (!commandExists('code')) {
       void installCodeCli();
     }
@@ -557,18 +512,6 @@ async function ensureDependenciesImpl(): Promise<void> {
           if (!gitInstalled) {
             showWarningNotification(
               `KISS Sorcar: git could not be installed automatically. ${gitInstallHint()}`,
-            );
-          }
-        }
-
-        if (!commandExists('node')) {
-          progress.report({message: 'Installing Node.js...'});
-          const nodeInstalled = await installNode();
-          if (!nodeInstalled) {
-            log('Node.js could not be installed automatically');
-            showWarningNotification(
-              'KISS Sorcar: Node.js could not be installed automatically. ' +
-                'Some agent tools may be unavailable. Install from https://nodejs.org',
             );
           }
         }
@@ -1589,69 +1532,6 @@ async function installCloudflaredIfNeeded(): Promise<boolean> {
   } catch (err) {
     log(
       `cloudflared installation failed: ${err instanceof Error ? err.message : err}`,
-    );
-    return false;
-  }
-}
-
-async function installNode(): Promise<boolean> {
-  const archMap: Record<string, string> = {arm64: 'arm64', x64: 'x64'};
-  const arch = archMap[process.arch];
-  if (!arch) {
-    log(`Unsupported architecture for Node.js: ${process.arch}`);
-    return false;
-  }
-
-  if (process.platform === 'win32') {
-    const assetName = `node-${NODE_VERSION}-win-${arch}`;
-    const url = `https://nodejs.org/dist/${NODE_VERSION}/${assetName}.zip`;
-    const installDir = path.join(HOME_DIR, '.local', 'node');
-    log(`Downloading Node.js from ${url}`);
-    try {
-      fs.mkdirSync(installDir, {recursive: true});
-      const zipPath = path.join(installDir, `${assetName}.zip`);
-      await windowsZipInstall(url, zipPath, installDir);
-      const nodeDir = path.join(installDir, assetName);
-      if (fs.existsSync(path.join(nodeDir, 'node.exe'))) {
-        prependToProcessPath(nodeDir);
-        log('Node.js installed successfully (Windows)');
-        return true;
-      }
-    } catch (err) {
-      log(
-        `Node.js installation failed: ${err instanceof Error ? err.message : err}`,
-      );
-    }
-    return false;
-  }
-
-  const osName = process.platform === 'darwin' ? 'darwin' : 'linux';
-  const assetName = `node-${NODE_VERSION}-${osName}-${arch}`;
-  const url = `https://nodejs.org/dist/${NODE_VERSION}/${assetName}.tar.gz`;
-  log(`Downloading Node.js from ${url}`);
-
-  try {
-    const installDir = path.join(HOME_DIR, '.local');
-    fs.mkdirSync(installDir, {recursive: true});
-    const tarPath = path.join(installDir, `${assetName}.tar.gz`);
-    await downloadFile(url, tarPath);
-    const expectedHash = await fetchNodeSha256(`${assetName}.tar.gz`);
-    verifyDownloadHash(tarPath, expectedHash);
-    await spawnPromise('tar', [
-      'xzf',
-      tarPath,
-      '-C',
-      installDir,
-      '--strip-components=1',
-    ]);
-    try {
-      fs.unlinkSync(tarPath);
-    } catch {}
-    log('Node.js installed successfully');
-    return commandExists('node');
-  } catch (err) {
-    log(
-      `Node.js installation failed: ${err instanceof Error ? err.message : err}`,
     );
     return false;
   }
