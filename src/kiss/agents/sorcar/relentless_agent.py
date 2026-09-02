@@ -254,6 +254,10 @@ class RelentlessAgent(Base):
         self.model_config: dict[str, Any] | None = None
         self.pre_step_hook: Callable[..., None] | None = None
         self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
+        self.llm_call_hook: (
+            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
+        ) = None
+        self.tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None
         self.set_printer(printer, verbose=verbose)
 
     def _accumulate_usage(self, agent: Base) -> None:
@@ -397,6 +401,8 @@ class RelentlessAgent(Base):
             executor = KISSAgent(f"{self.name} Session-{session}")
             executor.pre_step_hook = getattr(self, "pre_step_hook", None)
             executor.tool_call_guard = getattr(self, "tool_call_guard", None)
+            llm_call_hook = getattr(self, "llm_call_hook", None)
+            tool_call_hook = getattr(self, "tool_call_hook", None)
             executor.budget_check_hook = self._check_total_budget
             self._current_executor = executor
             try:
@@ -415,6 +421,8 @@ class RelentlessAgent(Base):
                     printer=self.printer,
                     verbose=self.verbose,
                     attachments=attachments if session == 0 else None,
+                    llm_call_hook=llm_call_hook,
+                    tool_call_hook=tool_call_hook,
                 )
             except BudgetExceededError:
                 self._current_executor = None
@@ -655,6 +663,10 @@ class RelentlessAgent(Base):
         verbose: bool | None = None,
         tools: list[Callable[..., Any]] | None = None,
         attachments: list[Attachment] | None = None,
+        llm_call_hook: (
+            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
+        ) = None,
+        tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
     ) -> str:
         """Run the agent with the provided tools.
 
@@ -675,6 +687,18 @@ class RelentlessAgent(Base):
             verbose: Whether to print output to console. Defaults to True.
             tools: List of callable tools available to the agent during execution.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
+            llm_call_hook: Optional hook installed on every per-session
+                executor :class:`KISSAgent` (see
+                :meth:`kiss.core.kiss_agent.KISSAgent.run`): called before
+                every LLM call with the new messages about to be sent, and
+                its return value replaces them.  Defaults to None (no hook).
+            tool_call_hook: Optional hook installed on every per-session
+                executor :class:`KISSAgent` (see
+                :meth:`kiss.core.kiss_agent.KISSAgent.run`): called before
+                every tool call with the tool's name and arguments; any
+                verdict other than ``"OK"`` suppresses the call and is
+                returned to the model as the tool's result.  Defaults to
+                None (no hook).
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -691,6 +715,8 @@ class RelentlessAgent(Base):
         )
         self.system_prompt = system_prompt
         self.model_config = model_config
+        self.llm_call_hook = llm_call_hook
+        self.tool_call_hook = tool_call_hook
         args = arguments or {}
         self.task_description = substitute_prompt_args(prompt_template, args)
 

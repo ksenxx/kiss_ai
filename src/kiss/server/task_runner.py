@@ -1082,6 +1082,21 @@ class _TaskRunnerMixin:
                 if isinstance(_raw_model_config, dict)
                 else None
             )
+            # Agent-script hooks (``get_llm_call_hook`` /
+            # ``get_tool_call_hook``), staged onto the command dict by
+            # ``apply_agent_overrides``.  Guarded with ``callable``:
+            # the fields never travel the wire as callables, so a
+            # (buggy or malicious) client that sends them as JSON
+            # values must not crash the executor — anything
+            # non-callable means "no hook".
+            _raw_llm_hook = cmd.get("llmCallHook")
+            _llm_call_hook = (
+                _raw_llm_hook if callable(_raw_llm_hook) else None
+            )
+            _raw_tool_hook = cmd.get("toolCallHook")
+            _tool_call_hook = (
+                _raw_tool_hook if callable(_raw_tool_hook) else None
+            )
 
             on_task_id_allocated = partial(
                 self._on_run_task_id_allocated,
@@ -1156,6 +1171,8 @@ class _TaskRunnerMixin:
                         # — exactly the ``appendToSystemPrompt``
                         # contract.
                         system_prompt=append_to_system_prompt,
+                        llm_call_hook=_llm_call_hook,
+                        tool_call_hook=_tool_call_hook,
                         _skip_persistence=True,
                         _on_task_id_allocated=on_task_id_allocated,
                     )

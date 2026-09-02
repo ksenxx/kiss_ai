@@ -70,7 +70,12 @@ script* whose top-level ``get_X()`` functions compute the run's
 parameters on the daemon — e.g. a ``get_model()`` overrides *model*, a
 ``get_prompt()`` overrides *prompt* — while parameters without a getter
 keep the values passed to :func:`run` (see the :func:`run` docstring
-for the script format).
+for the script format).  The script may additionally define
+``get_llm_call_hook()`` / ``get_tool_call_hook()``, returning functions
+``llm_call_hook`` and ``tool_call_hook`` that the daemon passes to the
+underlying :class:`kiss.core.kiss_agent.KISSAgent` (see
+:meth:`~kiss.core.kiss_agent.KISSAgent.run`); these two have no
+:func:`run` parameter, since a callable cannot travel the wire.
 
 The function speaks the daemon's newline-delimited JSON protocol over
 its Unix-domain socket (``$KISS_SORCAR_SOCK``, defaulting to
