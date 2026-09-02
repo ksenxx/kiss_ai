@@ -16,11 +16,12 @@
 #    a no-op when that history is already clean
 # 3. Check if origin is ahead of kiss_ai repo
 # 4. If ahead, bump version in _version.py, README.md, SYSTEM.md, package.json, package-lock.json
-# 5. Build VS Code extension (.vsix) so it's included in the commit
-# 6. Commit changes with "Version bumped" (includes vsix)
+# 5. Build VS Code extension (.vsix); it is gitignored, so it is never added
+#    or committed to origin
+# 6. Commit changes with "Version bumped"
 # 7. Push to origin
-# 8. Push to kiss_ai repo (excluding paths listed in scripts/exclude.json)
-#    and tag with version
+# 8. Push to kiss_ai repo (excluding paths listed in scripts/exclude.json,
+#    including the built .vsix) and tag with version
 # 9. Create GitHub release and upload VSIX asset
 # 10. Publish to PyPI
 # 11. Publish VS Code extension to marketplace
@@ -45,6 +46,11 @@ README_FILE="README.md"
 SYSTEM_FILE="src/kiss/SYSTEM.md"
 PYPI_PACKAGE_NAME="kiss-agent-framework"
 VSCODE_EXT_DIR="src/kiss/agents/vscode"
+# The packaged extension built by build_vscode_extension. It matches the *.vsix
+# rule in .gitignore, so it is never added to or committed in origin; instead
+# tree_with_vsix injects it into the snapshot pushed to the public kiss_ai repo
+# so every release there ships the installable extension file.
+VSIX_FILE="${VSCODE_EXT_DIR}/kiss-sorcar.vsix"
 # JSON list of literal file/folder paths (repo-relative, no globs) that MUST
 # NOT be pushed to the public kiss_ai repo. Everything listed here is stripped
 # from the snapshot pushed to $PUBLIC_REPO_URL while remaining tracked in
@@ -352,14 +358,90 @@ filtered_tree() {
     return $status
 }
 
+# Print the tree sha of <tree> with the built extension file added at
+# $VSIX_FILE. Reads the vsix from the working tree (it is gitignored, so no
+# commit of origin contains it) and writes only its blob plus a new tree object
+# into the object store through a temporary index: the real index, the working
+# tree and origin's history stay untouched. Fails when the vsix has not been
+# built, so a release can never publish a snapshot without it.
+tree_with_vsix() {
+    local tree="$1"
+    local blob tmp_index
+    if [[ ! -f "$VSIX_FILE" ]]; then
+        print_error "VSIX not found: $VSIX_FILE - build the extension first" >&2
+        return 1
+    fi
+    blob=$(git hash-object -w -- "$VSIX_FILE") || return 1
+    tmp_index=$(mktemp)
+    if ! GIT_INDEX_FILE="$tmp_index" git read-tree "$tree" ||
+        ! GIT_INDEX_FILE="$tmp_index" git update-index --add \
+            --cacheinfo "100644,${blob},${VSIX_FILE}"; then
+        print_error "Failed to add $VSIX_FILE to the public tree" >&2
+        rm -f "$tmp_index"
+        return 1
+    fi
+    GIT_INDEX_FILE="$tmp_index" git write-tree
+    local status=$?
+    rm -f "$tmp_index"
+    return $status
+}
+
+# Print the tree sha of <tree> with $VSIX_FILE removed (unchanged when absent).
+# The public repo carries the vsix while origin never does, so release_needed
+# compares origin's filtered tree against the public tree minus the vsix;
+# comparing against the raw public tree would report a difference on every run
+# and release the same source again and again.
+tree_without_vsix() {
+    local tree="$1"
+    local tmp_index
+    tmp_index=$(mktemp)
+    # -f: the working tree usually holds a locally built vsix that differs from
+    # the published blob, and without -f git rm refuses to drop an index entry
+    # whose content matches neither HEAD nor the file on disk.
+    if ! GIT_INDEX_FILE="$tmp_index" git read-tree "$tree" ||
+        ! GIT_INDEX_FILE="$tmp_index" git rm -f -q --cached --ignore-unmatch \
+            -- ":(literal)$VSIX_FILE" >/dev/null; then
+        print_error "Failed to strip $VSIX_FILE from tree $tree" >&2
+        rm -f "$tmp_index"
+        return 1
+    fi
+    GIT_INDEX_FILE="$tmp_index" git write-tree
+    local status=$?
+    rm -f "$tmp_index"
+    return $status
+}
+
+# Decide whether <filtered-tree> (origin's HEAD minus excluded paths) must be
+# published on top of the public repo's main <public-head>. Returns 0 (release
+# needed) unless public main already carries exactly that content together with
+# a vsix: a snapshot published before the vsix was bundled is re-released even
+# when its source is current, so the extension file appears in kiss_ai. A public
+# tree that cannot be inspected counts as needing a release rather than being
+# skipped silently. Returns 1 when there is nothing to release.
+release_needed() {
+    local filtered_tree="$1" public_head="$2" stripped
+    if ! git rev-parse --verify --quiet "${public_head}:${VSIX_FILE}" >/dev/null; then
+        print_info "kiss_ai main has no $VSIX_FILE yet - proceeding with release"
+        return 0
+    fi
+    stripped=$(tree_without_vsix "${public_head}^{tree}") || return 0
+    if [[ "$stripped" != "$filtered_tree" ]]; then
+        print_info "Origin differs from kiss_ai - proceeding with release"
+        return 0
+    fi
+    return 1
+}
+
 # Create a commit for the public repo: the tree of <source-commit> minus the
-# excluded paths, parented on the public repo's current main (passed as
-# <parent>, may be empty for the first release) so that excluded content is
-# never reachable from public history. Sets PUBLIC_COMMIT to the new sha.
+# excluded paths plus the built vsix, parented on the public repo's current
+# main (passed as <parent>, may be empty for the first release) so that
+# excluded content is never reachable from public history. Sets PUBLIC_COMMIT
+# to the new sha.
 create_public_commit() {
     local source_commit="$1" version="$2" parent="$3"
     local tree
     tree=$(filtered_tree "$source_commit")
+    tree=$(tree_with_vsix "$tree")
     if [[ -n "$parent" ]]; then
         PUBLIC_COMMIT=$(git commit-tree "$tree" -p "$parent" -m "Release $version")
     else
@@ -812,7 +894,7 @@ publish_vscode_extension() {
 }
 
 install_local_extension() {
-    local vsix_path="${VSCODE_EXT_DIR}/kiss-sorcar.vsix"
+    local vsix_path="$VSIX_FILE"
 
     # Install into VS Code
     local code_cli=""
@@ -925,15 +1007,15 @@ main() {
     # failure inside the [[ ]] condition below would be silently swallowed).
     FILTERED_ORIGIN_TREE=$(filtered_tree "$ORIGIN_HEAD")
 
-    # The public repo holds filtered snapshots (excluded paths stripped), so
-    # compare the filtered tree of origin's HEAD with the public tree.
+    # The public repo holds filtered snapshots (excluded paths stripped, built
+    # vsix added), so release_needed compares the filtered tree of origin's
+    # HEAD with the public tree minus the vsix that origin never carries, and
+    # also insists that the public tree has a vsix at all.
     if [[ -z "$PUBLIC_HEAD" ]]; then
         print_info "Public repo has no main branch yet - will create it"
-    elif [[ "$FILTERED_ORIGIN_TREE" == "$(git rev-parse "${PUBLIC_HEAD}^{tree}")" ]]; then
-        print_info "kiss_ai already matches origin (minus excluded paths) - nothing to release"
+    elif ! release_needed "$FILTERED_ORIGIN_TREE" "$PUBLIC_HEAD"; then
+        print_info "kiss_ai already matches origin (minus excluded paths, plus vsix) - nothing to release"
         exit 0
-    else
-        print_info "Origin differs from kiss_ai - proceeding with release"
     fi
 
     # Step 4: Bump version in _version.py and README.md
@@ -951,10 +1033,12 @@ main() {
     update_vscode_package_version "$VERSION"
     update_vscode_package_lock_version "$VERSION"
 
-    # Step 5: Build VS Code extension (before commit so vsix is included)
+    # Step 5: Build VS Code extension. The vsix is gitignored (*.vsix), so the
+    # commit below never adds it to origin; it reaches kiss_ai only through
+    # create_public_commit in step 8 and the GitHub release asset in step 9.
     build_vscode_extension
 
-    # Step 6: Commit changes (includes version bump + fresh vsix)
+    # Step 6: Commit changes (version bump only; the vsix is ignored by git)
     print_step "Committing version bump..."
     git add -A
     git commit -m "Version bumped to $VERSION"
@@ -979,13 +1063,14 @@ main() {
     # Step 8: Push filtered snapshot to kiss_ai repo. The pushed commit is
     # parented on the public repo's current main (not on origin's history),
     # so paths listed in scripts/exclude.json are never reachable from any
-    # commit in the public repo.
-    print_step "Pushing to kiss_ai repo (excluding paths listed in $EXCLUDE_FILE)..."
+    # commit in the public repo. Its tree also carries the vsix built in
+    # step 5, which origin's history never does.
+    print_step "Pushing to kiss_ai repo (excluding paths listed in $EXCLUDE_FILE, adding $VSIX_FILE)..."
     create_public_commit "$(git rev-parse HEAD)" "$VERSION" "$PUBLIC_HEAD"
     verify_no_excluded_paths "$PUBLIC_COMMIT"
     git tag -a "$TAG_NAME" -m "Release $VERSION" "$PUBLIC_COMMIT"
     push_public_snapshot "$PUBLIC_COMMIT" "$TAG_NAME" "$PUBLIC_HEAD"
-    print_info "Pushed filtered commit and tag $TAG_NAME to kiss_ai repo"
+    print_info "Pushed filtered commit (with $VSIX_FILE) and tag $TAG_NAME to kiss_ai repo"
 
     # Step 9: Create GitHub release and upload VSIX
     print_step "Creating GitHub release..."
@@ -995,7 +1080,7 @@ main() {
         --notes "Release $VERSION"
     print_info "GitHub release created: https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
 
-    local vsix_asset="${VSCODE_EXT_DIR}/kiss-sorcar.vsix"
+    local vsix_asset="$VSIX_FILE"
     if [[ -f "$vsix_asset" ]]; then
         print_step "Uploading VSIX to GitHub release..."
         gh release upload "$TAG_NAME" "$vsix_asset" --repo ksenxx/kiss_ai
