@@ -68,7 +68,7 @@ To install only the KISS Sorcar extension, open Visual Studio Code, search for *
 To run KISS Sorcar in a Docker container (exposes a VS Code interface in the host machine's browser):
 
 ```bash
-~/kiss_ai/sorcar-docker
+~/.kiss/kiss_ai/sorcar-docker
 ```
 
 ## Next Steps

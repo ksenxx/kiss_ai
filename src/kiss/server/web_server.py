@@ -678,7 +678,11 @@ class _HeadAwareServerConnection(ServerConnection):
 
 _OPEN_FILE_MAX_BYTES = 2_000_000
 
-_KISS_AI_ROOT = Path.home() / "kiss_ai"
+# The curl installer (scripts/install.sh) clones the public repo into
+# ~/.kiss/kiss_ai; the Update button runs the install.sh of that clone.  Kept
+# literal (not $KISS_HOME-relative) to match the installer and the extension's
+# ``kissAiRoot()`` in ``installerPath.js`` exactly.
+_KISS_AI_ROOT = Path.home() / ".kiss" / "kiss_ai"
 
 
 def _find_install_script(root: Path) -> Path | None:
@@ -4255,7 +4259,7 @@ class RemoteAccessServer:
         os.kill(os.getpid(), signal.SIGTERM)
 
     async def _handle_run_update(self, conn_id: str = "") -> None:
-        """Run ``~/kiss_ai/install.sh`` to update KISS Sorcar.
+        """Run ``~/.kiss/kiss_ai/install.sh`` to update KISS Sorcar.
 
         Server-side twin of the VS Code extension's
         ``SorcarSidebarView._runUpdate()``: the extension locates the
