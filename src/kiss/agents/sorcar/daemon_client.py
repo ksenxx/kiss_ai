@@ -354,6 +354,31 @@ def run(
                 def get_append_to_system_prompt() -> str: ...
                 def get_append_to_prompt() -> str: ...
 
+            The script may also define two hook getters with no
+            corresponding parameter on this function (a callable
+            cannot travel the wire, so the hooks exist ONLY as
+            agent-script getters)::
+
+                def get_llm_call_hook() -> Callable | None: ...
+                def get_tool_call_hook() -> Callable | None: ...
+
+            Each returns a callable — ``llm_call_hook`` and
+            ``tool_call_hook`` respectively — (or ``None`` for "no
+            hook") that the daemon passes to the underlying
+            :meth:`kiss.core.kiss_agent.KISSAgent.run` of every
+            task-executor sub-session of the task's agent (internal
+            helper sessions, e.g. the failed-session trajectory
+            summarizer, are not hooked).  Per that method's contract,
+            ``llm_call_hook(new_messages)`` is called before every LLM
+            call and its return value replaces the new messages about
+            to be sent, and ``tool_call_hook(name, args)`` is called
+            before every tool call — the tool executes only when the
+            hook returns ``"OK"``; any other returned string is given
+            to the model as the tool's result instead.  Like every
+            getter, they execute **in the daemon process**; the hooks
+            apply to the task's own agent, not to sub-agents it spawns
+            via ``run_parallel``.
+
             The ``get_X()`` functions are never serialized by the
             client — they run **in the daemon process**, exactly like a
             tools file's ``get_tools()``.  ``get_tools()`` here returns
