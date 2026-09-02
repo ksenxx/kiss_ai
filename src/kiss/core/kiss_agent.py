@@ -105,8 +105,13 @@ class KISSAgent(Base):
         super().__init__(name)
         self.pre_step_hook: Callable[..., None] | None = None
         self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
+        self.llm_call_hook: (
+            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
+        ) = None
+        self.tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None
         self.context_tokens_used = 0
         self.budget_check_hook: Callable[[], None] | None = None
+        self._llm_hook_conversation_index = 0
         self._reset_progress_trackers()
 
     def _reset(
@@ -154,6 +159,7 @@ class KISSAgent(Base):
         self.step_count = 0
         self.total_tokens_used = 0
         self.context_tokens_used = 0
+        self._llm_hook_conversation_index = 0
         self.budget_used = 0.0
         self.run_start_timestamp = int(time.time())
         self._reset_progress_trackers()
@@ -211,6 +217,10 @@ class KISSAgent(Base):
         verbose: bool | None = None,
         attachments: list[Attachment] | None = None,
         print_prompts: bool = True,
+        llm_call_hook: (
+            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
+        ) = None,
+        tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -242,10 +252,30 @@ class KISSAgent(Base):
                 summarizer in RelentlessAgent) pass False so their internal
                 prompts never surface as user-visible "prompt" events in a
                 shared printer's event stream. Default is True.
+            llm_call_hook (Callable | None): Optional hook called before every
+                ``generate_and_process_with_tools`` LLM call with the list of
+                new messages (those added to the conversation since the
+                previous LLM call) about to be sent to the LLM. Its return
+                value — a possibly modified list of messages — replaces those
+                new messages in the conversation before the call is made.
+                Default is None (no hook).
+            tool_call_hook (Callable | None): Optional hook called before every
+                tool call with the tool's name and its arguments dict. If it
+                returns the string ``"OK"``, the tool executes as usual; any
+                other returned string suppresses the tool execution and is
+                returned to the model as the tool's result instead. The hook
+                runs before (and its rejection takes precedence over) the
+                framework's :attr:`tool_call_guard`; an ``"OK"`` verdict does
+                not override a guard block. A
+                stagnation-triggered implicit finish also consults the hook
+                (with ``("finish", {})``) and is suppressed unless the hook
+                returns ``"OK"``. Default is None (no hook).
 
         Returns:
             str: The result of the agent's task.
         """
+        self.llm_call_hook = llm_call_hook
+        self.tool_call_hook = tool_call_hook
         try:
             if system_prompt:
                 model_config = dict(model_config) if model_config else {}
@@ -476,9 +506,22 @@ class KISSAgent(Base):
 
         if self.pre_step_hook is not None:
             self.pre_step_hook(self.model)
+        if self.llm_call_hook is not None:
+            hook_start = self._llm_hook_conversation_index
+            modified_messages = self.llm_call_hook(
+                list(self.model.conversation[hook_start:])
+            )
+            self.model.conversation[hook_start:] = list(modified_messages)
+        # Advance the boundary BEFORE the call so a raising call (retryable
+        # provider error, refusal, fallback swap) never re-presents
+        # already-hooked messages to the hook on the next attempt ...
+        self._llm_hook_conversation_index = len(self.model.conversation)
         function_calls, response_text, response = self.model.generate_and_process_with_tools(
             self.function_map, tools_schema=self._cached_tools_schema
         )
+        # ... and again AFTER it returns, so the assistant turn the call
+        # appended is not treated as a "new" message on the next call.
+        self._llm_hook_conversation_index = len(self.model.conversation)
         if response_text and response_text.strip():
             self._last_response_text = response_text
         self._update_tokens_and_budget_from_response(response)
@@ -532,7 +575,15 @@ class KISSAgent(Base):
 
         for fc in function_calls:
             blocked: str | None = None
-            if self.tool_call_guard is not None:
+            # The hook is called before EVERY tool call (its contract), so it
+            # runs first; a non-"OK" verdict is the result the model sees.
+            # An "OK" verdict means "no objection", not "must execute": the
+            # framework's tool_call_guard may still block the call.
+            if self.tool_call_hook is not None:
+                hook_verdict = self.tool_call_hook(fc["name"], _call_args(fc))
+                if hook_verdict != "OK":
+                    blocked = hook_verdict
+            if blocked is None and self.tool_call_guard is not None:
                 blocked = self.tool_call_guard(fc["name"], _call_args(fc))
             if blocked is not None:
                 turn_had_blocked_call = True
@@ -590,8 +641,16 @@ class KISSAgent(Base):
 
         self.model.add_function_results_to_conversation_and_return(function_results)
 
-        if self._stagnant_call_turns >= STAGNANT_TURNS_FINISH and (
-            self.tool_call_guard is None or self.tool_call_guard("finish", {}) is None
+        if (
+            self._stagnant_call_turns >= STAGNANT_TURNS_FINISH
+            and (
+                self.tool_call_guard is None
+                or self.tool_call_guard("finish", {}) is None
+            )
+            and (
+                self.tool_call_hook is None
+                or self.tool_call_hook("finish", {}) == "OK"
+            )
         ):
             logger.info(
                 "Implicit finish: agent=%s step=%d repeated identical tool "

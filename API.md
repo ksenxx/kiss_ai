@@ -22,7 +22,7 @@
 
 **Constructor:** `KISSAgent(name: str) -> None`
 
-- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, system_prompt: str = '', tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None, print_prompts: bool = True) -> str`
+- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, system_prompt: str = '', tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None, print_prompts: bool = True, llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None, tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None) -> str`
   - `model_name`: The name of the model to use for the agent.
   - `prompt_template`: The prompt template for the agent.
   - `arguments`: The arguments to be substituted into the prompt template. Default is None.
@@ -36,6 +36,8 @@
   - `verbose`: Whether to print output to console. Default is None (verbose enabled).
   - `attachments`: Optional file attachments (images, PDFs) to include in the initial prompt. Default is None.
   - `print_prompts`: Whether to print the system prompt and task prompt to the printer. Internal helper agents (e.g. the summarizer in RelentlessAgent) pass False so their internal prompts never surface as user-visible "prompt" events in a shared printer's event stream. Default is True.
+  - `llm_call_hook`: Optional hook called before every ``generate_and_process_with_tools`` LLM call with the list of new messages (those added to the conversation since the previous LLM call) about to be sent to the LLM. Its return value — a possibly modified list of messages — replaces those new messages in the conversation before the call is made. Default is None (no hook).
+  - `tool_call_hook`: Optional hook called before every tool call with the tool's name and its arguments dict. If it returns the string ``"OK"``, the tool executes as usual; any other returned string suppresses the tool execution and is returned to the model as the tool's result instead. The hook runs before (and its rejection takes precedence over) the framework's :attr:`tool_call_guard`; an ``"OK"`` verdict does not override a guard block. A stagnation-triggered implicit finish also consults the hook (with ``("finish", {})``) and is suppressed unless the hook returns ``"OK"``. Default is None (no hook).
   - **Returns:** str: The result of the agent's task.
 
 - **finish** — The agent must call this function with the final answer to the task.<br/>`finish(result: str) -> str`
