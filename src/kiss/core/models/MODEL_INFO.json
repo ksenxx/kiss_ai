@@ -187,8 +187,8 @@
   },
   "Qwen/Qwen3.8-2.4T-A95B": {
     "context_length": 500000,
-    "input_price_per_1M": 2.5,
-    "output_price_per_1M": 6.25,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 6.0,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -800,15 +800,6 @@
     "emb": false,
     "gen": true
   },
-  "gemini-3.1-flash-live-preview": {
-    "context_length": 131072,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
-    "fc": false,
-    "emb": true,
-    "gen": false,
-    "comment": "NEW: needs pricing"
-  },
   "gemini-3.1-flash-tts-preview": {
     "context_length": 8192,
     "input_price_per_1M": 0.0,
@@ -875,6 +866,15 @@
     "output_price_per_1M": 1.875,
     "fc": true,
     "emb": false,
+    "gen": true,
+    "comment": "NEW"
+  },
+  "gemini-3.8-flash": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": true,
     "gen": true,
     "comment": "NEW"
   },
@@ -2660,8 +2660,8 @@
   },
   "openrouter/deepseek/deepseek-chat-v3.1": {
     "context_length": 163840,
-    "input_price_per_1M": 0.55,
-    "output_price_per_1M": 1.65,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 0.95,
     "fc": false,
     "emb": false,
     "gen": false
@@ -2716,8 +2716,8 @@
   },
   "openrouter/deepseek/deepseek-v4-flash": {
     "context_length": 500000,
-    "input_price_per_1M": 0.075,
-    "output_price_per_1M": 0.15,
+    "input_price_per_1M": 0.086,
+    "output_price_per_1M": 0.171,
     "fc": true,
     "emb": false,
     "gen": true
@@ -2742,8 +2742,8 @@
   },
   "openrouter/deepseek/deepseek-v4-pro": {
     "context_length": 500000,
-    "input_price_per_1M": 1.6,
-    "output_price_per_1M": 3.2,
+    "input_price_per_1M": 1.031,
+    "output_price_per_1M": 2.062,
     "fc": false,
     "emb": false,
     "gen": true
@@ -2913,6 +2913,15 @@
     "comment": "NEW"
   },
   "openrouter/google/gemini-3.7-flash": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW"
+  },
+  "openrouter/google/gemini-3.8-flash": {
     "context_length": 500000,
     "input_price_per_1M": 0.75,
     "output_price_per_1M": 3.75,
@@ -3521,8 +3530,8 @@
   },
   "openrouter/nvidia/nemotron-3-ultra-550b-a55b": {
     "context_length": 262144,
-    "input_price_per_1M": 0.5,
-    "output_price_per_1M": 2.2,
+    "input_price_per_1M": 0.625,
+    "output_price_per_1M": 3.125,
     "fc": true,
     "emb": false,
     "gen": true
@@ -5109,8 +5118,8 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 500000,
-    "input_price_per_1M": 1.19,
-    "output_price_per_1M": 3.74,
+    "input_price_per_1M": 0.966,
+    "output_price_per_1M": 3.036,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -5118,8 +5127,8 @@
   },
   "openrouter/z-ai/glm-5.2-high": {
     "context_length": 500000,
-    "input_price_per_1M": 1.19,
-    "output_price_per_1M": 3.74,
+    "input_price_per_1M": 0.966,
+    "output_price_per_1M": 3.036,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -5128,8 +5137,8 @@
   },
   "openrouter/z-ai/glm-5.2-max": {
     "context_length": 500000,
-    "input_price_per_1M": 1.19,
-    "output_price_per_1M": 3.74,
+    "input_price_per_1M": 0.966,
+    "output_price_per_1M": 3.036,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -5198,7 +5207,7 @@
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
     "context_length": 500000,
     "input_price_per_1M": 0.05,
-    "output_price_per_1M": 0.1,
+    "output_price_per_1M": 0.16,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -5294,10 +5303,19 @@
     "gen": true,
     "comment": "NEW"
   },
+  "openrouter/~z-ai/glm-flash-latest": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.075,
+    "output_price_per_1M": 0.25,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW"
+  },
   "openrouter/~z-ai/glm-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 1.17,
-    "output_price_per_1M": 3.96,
+    "input_price_per_1M": 1.15,
+    "output_price_per_1M": 3.5,
     "fc": true,
     "emb": false,
     "gen": true,
