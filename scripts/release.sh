@@ -16,17 +16,16 @@
 #    a no-op when that history is already clean
 # 3. Check if origin is ahead of kiss_ai repo
 # 4. If ahead, bump version in _version.py, README.md, SYSTEM.md, package.json, package-lock.json
-# 5. Download official Claude Code skills (bundled into the extension)
-# 6. Build VS Code extension (.vsix) so it's included in the commit
-# 7. Commit changes with "Version bumped" (includes vsix)
-# 8. Push to origin
-# 9. Push to kiss_ai repo (excluding paths listed in scripts/exclude.json)
+# 5. Build VS Code extension (.vsix) so it's included in the commit
+# 6. Commit changes with "Version bumped" (includes vsix)
+# 7. Push to origin
+# 8. Push to kiss_ai repo (excluding paths listed in scripts/exclude.json)
 #    and tag with version
-# 10. Create GitHub release and upload VSIX asset
-# 11. Publish to PyPI
-# 12. Publish VS Code extension to marketplace
-# 13. Install extension into local VS Code and Cursor IDE (if installed)
-# 14. Restore stashed changes
+# 9. Create GitHub release and upload VSIX asset
+# 10. Publish to PyPI
+# 11. Publish VS Code extension to marketplace
+# 12. Install extension into local VS Code and Cursor IDE (if installed)
+# 13. Restore stashed changes
 
 set -e  # Exit on error
 
@@ -776,13 +775,8 @@ build_vscode_extension() {
     # its `prebuild-install` transitive dep, which npm warns is deprecated.
     npm ci --ignore-scripts --no-audit --no-fund --omit=optional
     npm run compile
-    # KISS_BUNDLE_EXTRA_DIRS opts copy-kiss.sh into bundling extra dirs —
-    # here the Claude skills downloaded in Step 5 (a plain source install
-    # via install.sh leaves the variable unset and never touches Claude
-    # skills).  It must cover `npm run package` too: packaging re-runs
-    # copy-kiss.sh via the `vscode:prepublish` script.
-    KISS_BUNDLE_EXTRA_DIRS="src/kiss/agents/claude_skills" npm run copy-kiss
-    KISS_BUNDLE_EXTRA_DIRS="src/kiss/agents/claude_skills" npm run package
+    npm run copy-kiss
+    npm run package
 
     if [[ ! -f "kiss-sorcar.vsix" ]]; then
         print_error "VSIX file not found: kiss-sorcar.vsix"
@@ -957,50 +951,16 @@ main() {
     update_vscode_package_version "$VERSION"
     update_vscode_package_lock_version "$VERSION"
 
-    # Step 5: Download official Claude Code skills (before building extension)
-    print_step "Downloading official Claude Code skills..."
-    CLAUDE_SKILLS_DIR="$(pwd)/src/kiss/agents/claude_skills"
-    if [ -d "$CLAUDE_SKILLS_DIR" ] && [ "$(ls -d "$CLAUDE_SKILLS_DIR"/*/ 2>/dev/null)" ]; then
-        print_info "Claude skills already present — skipping download"
-    else
-        mkdir -p "$CLAUDE_SKILLS_DIR"
-        SKILLS_TMP="$(mktemp -d)"
-        print_info "Cloning anthropics/claude-code plugins..."
-        if git clone --depth 1 --filter=blob:none --sparse \
-            https://github.com/anthropics/claude-code.git "$SKILLS_TMP/claude-code" 2>&1; then
-            cd "$SKILLS_TMP/claude-code"
-            git sparse-checkout set plugins 2>&1
-            for plugin_dir in plugins/*/; do
-                if [ -d "$plugin_dir" ]; then
-                    plugin_name="$(basename "$plugin_dir")"
-                    cp -R "$plugin_dir" "$CLAUDE_SKILLS_DIR/$plugin_name"
-                fi
-            done
-            cd - > /dev/null
-            SKILL_COUNT="$(ls -d "$CLAUDE_SKILLS_DIR"/*/ 2>/dev/null | wc -l | tr -d ' ')"
-            print_info "Installed $SKILL_COUNT Claude skills to $CLAUDE_SKILLS_DIR"
-        else
-            print_warn "Failed to download Claude Code skills"
-        fi
-        rm -rf "$SKILLS_TMP"
-    fi
-
-    # Step 6: Build VS Code extension (before commit so vsix is included)
+    # Step 5: Build VS Code extension (before commit so vsix is included)
     build_vscode_extension
 
-    # Clean up source claude_skills now that they are bundled in the extension
-    if [ -d "$CLAUDE_SKILLS_DIR" ]; then
-        rm -rf "$CLAUDE_SKILLS_DIR"
-        print_info "Cleaned up $CLAUDE_SKILLS_DIR (bundled in extension)"
-    fi
-
-    # Step 7: Commit changes (includes version bump + fresh vsix)
+    # Step 6: Commit changes (includes version bump + fresh vsix)
     print_step "Committing version bump..."
     git add -A
     git commit -m "Version bumped to $VERSION"
     print_info "Committed version bump"
 
-    # Step 8: Pull latest from origin (rebase), then push (with retry)
+    # Step 7: Pull latest from origin (rebase), then push (with retry)
     print_step "Syncing with origin..."
     for attempt in 1 2 3; do
         git pull --rebase origin "$CURRENT_BRANCH"
@@ -1016,7 +976,7 @@ main() {
     done
     print_info "Pushed to origin"
 
-    # Step 9: Push filtered snapshot to kiss_ai repo. The pushed commit is
+    # Step 8: Push filtered snapshot to kiss_ai repo. The pushed commit is
     # parented on the public repo's current main (not on origin's history),
     # so paths listed in scripts/exclude.json are never reachable from any
     # commit in the public repo.
@@ -1027,7 +987,7 @@ main() {
     push_public_snapshot "$PUBLIC_COMMIT" "$TAG_NAME" "$PUBLIC_HEAD"
     print_info "Pushed filtered commit and tag $TAG_NAME to kiss_ai repo"
 
-    # Step 10: Create GitHub release and upload VSIX
+    # Step 9: Create GitHub release and upload VSIX
     print_step "Creating GitHub release..."
     gh release create "$TAG_NAME" \
         --repo ksenxx/kiss_ai \
@@ -1042,17 +1002,17 @@ main() {
         print_info "VSIX uploaded to release"
     fi
 
-    # Step 11: Publish to PyPI
+    # Step 10: Publish to PyPI
     print_step "Publishing to PyPI..."
     publish_to_pypi "$VERSION"
 
-    # Step 12: Publish VS Code extension (already built in step 6)
+    # Step 11: Publish VS Code extension (already built in step 5)
     publish_vscode_extension "$VERSION"
 
-    # Step 13: Install extension into local VS Code and Cursor IDE if available
+    # Step 12: Install extension into local VS Code and Cursor IDE if available
     install_local_extension
 
-    # Step 14: Restore stashed changes
+    # Step 13: Restore stashed changes
     trap - EXIT
     if [[ "$STASHED" == true ]]; then
         print_step "Restoring stashed changes..."
