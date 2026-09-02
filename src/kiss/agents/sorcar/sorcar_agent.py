@@ -1523,6 +1523,10 @@ class SorcarAgent(RelentlessAgent):
         ask_user_question_callback: Callable[[str], str] | None = None,
         base_system_prompt: str = "",
         append_basic_tools: bool = True,
+        llm_call_hook: (
+            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
+        ) = None,
+        tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -1570,6 +1574,22 @@ class SorcarAgent(RelentlessAgent):
                 ``RelentlessAgent.perform_task``) and the caller's
                 *tools* — *web_tools* and *is_parallel* then have no
                 effect, since the tools they toggle are never built.
+            llm_call_hook: Optional hook forwarded to the underlying
+                :meth:`kiss.core.kiss_agent.KISSAgent.run` of every
+                sub-session this agent runs (see that docstring): called
+                before every LLM call with the new messages about to be
+                sent, and its return value replaces them.  Applies to
+                this agent only, not to ``run_parallel`` sub-agents.
+                Defaults to None (no hook).
+            tool_call_hook: Optional hook forwarded to the underlying
+                :meth:`kiss.core.kiss_agent.KISSAgent.run` of every
+                sub-session this agent runs (see that docstring): called
+                before every tool call with the tool's name and
+                arguments; any verdict other than ``"OK"`` suppresses
+                the call and is returned to the model as the tool's
+                result.  Applies to this agent only, not to
+                ``run_parallel`` sub-agents.  Defaults to None (no
+                hook).
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -1629,6 +1649,8 @@ class SorcarAgent(RelentlessAgent):
                 verbose=verbose,
                 tools=tools or [],
                 attachments=attachments,
+                llm_call_hook=llm_call_hook,
+                tool_call_hook=tool_call_hook,
             )
         finally:
             if self.web_use_tool:

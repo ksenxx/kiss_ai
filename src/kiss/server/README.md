@@ -181,6 +181,48 @@ The three parameters without getters:
   per subtask and the text is appended to each subtask's prompt.  The
   appended text becomes part of the recorded prompt in chat history.
 
+### Hook getters (no `run()` parameter)
+
+The script may also define two hook getters with no corresponding
+`sorcar.run()` parameter — a callable cannot be JSON-serialized, so
+the hooks exist ONLY as agent-script getters, evaluated in the daemon
+process:
+
+| Getter function        | Return type          | Staged command field |
+|------------------------|----------------------|----------------------|
+| `get_llm_call_hook()`  | callable or `None`   | `llmCallHook`        |
+| `get_tool_call_hook()` | callable or `None`   | `toolCallHook`       |
+
+The returned functions — `llm_call_hook` and `tool_call_hook` — are
+passed to the underlying `KISSAgent.run()` of every task-executor
+sub-session of the task's agent (internal helper sessions, e.g. the
+failed-session trajectory summarizer, and `run_parallel` sub-agents
+are not hooked).  Per `KISSAgent.run()`'s contract:
+
+- **`llm_call_hook(new_messages)`** — called before every LLM call
+  with the list of new messages (those added to the conversation
+  since the previous LLM call) about to be sent; its return value
+  replaces those messages.
+- **`tool_call_hook(name, args)`** — called before every tool call
+  with the tool's name and arguments dict.  Returning `"OK"` lets the
+  tool execute; any other returned string suppresses the call and is
+  given to the model as the tool's result.
+
+Returning `None` from a getter means "no hook".  Any other
+non-callable return value fails the task with a diagnostic error,
+like every wrong-typed getter.
+
+```python
+# guarded_agent.py
+def tool_call_hook(name, args):
+    if name == "Bash" and "rm -rf" in str(args.get("command", "")):
+        return "Blocked: destructive command"
+    return "OK"
+
+def get_tool_call_hook():
+    return tool_call_hook
+```
+
 
 ## Tools: two contracts
 
