@@ -145,6 +145,12 @@ class DockerManager:
         """
         self.client = docker.from_env()
         self.container: Container | None = None
+        # Serialises open()/close(): guard, shared-dir creation, the
+        # (slow) container start, publication and teardown.  Without it
+        # two concurrent open() calls both passed the "already open"
+        # check while ``container`` was still None and each started a
+        # container and a temp dir; the manager kept only the last one.
+        self._lifecycle_lock = threading.Lock()
 
         self.workdir = workdir
         self.mount_shared_volume = mount_shared_volume
@@ -160,7 +166,37 @@ class DockerManager:
             self.tag = tag
 
     def open(self) -> None:
-        """Pull and load a Docker image, then create and start a container."""
+        """Pull and load a Docker image, then create and start a container.
+
+        Raises:
+            KISSError: If a container is already open on this manager
+                (starting a second one would orphan the first — ``close``
+                only knows the newest container — and leak its shared
+                volume directory), or if the previous container's shared
+                volume directory still cannot be removed (starting anyway
+                would replace the only reference to it).
+        """
+        with self._lifecycle_lock:
+            self._open_locked()
+
+    def _open_locked(self) -> None:
+        """Body of :meth:`open`; the caller holds ``_lifecycle_lock``."""
+        if self.container is not None:
+            raise KISSError(
+                "A container is already open on this DockerManager; "
+                "call close() before open() again."
+            )
+        if self.host_shared_path is not None:
+            # A previous close() could not delete the shared volume
+            # dir (see _remove_shared_volume_dir); retry before a new
+            # one is created so the leftover never becomes untraceable.
+            self._remove_shared_volume_dir()
+            if self.host_shared_path is not None:
+                raise KISSError(
+                    "The previous container's shared volume directory "
+                    f"{self.host_shared_path} could not be removed; "
+                    "delete it and call open() again."
+                )
         image = self.image
         tag = self.tag
         full_image_name = f"{image}:{tag}"
@@ -177,15 +213,24 @@ class DockerManager:
             "stdin_open": True,
             "command": "/bin/bash",
         }
-        if self.mount_shared_volume:  # pragma: no branch
+        if self.mount_shared_volume:
             self.host_shared_path = tempfile.mkdtemp()
-        if self.mount_shared_volume and self.host_shared_path:  # pragma: no branch
             container_kwargs["volumes"] = {
                 self.host_shared_path: {"bind": self.client_shared_path, "mode": "rw"}
             }
         if self.ports:
             container_kwargs["ports"] = {f"{cp}/tcp": hp for cp, hp in self.ports.items()}
-        self.container = self.client.containers.run(full_image_name, **container_kwargs)
+        try:
+            self.container = self.client.containers.run(
+                full_image_name, **container_kwargs,
+            )
+        except BaseException:
+            # The daemon rejected or failed the container: the shared
+            # volume dir created above would otherwise leak, and
+            # ``close()`` (which returns early with no container) would
+            # never remove it.
+            self._remove_shared_volume_dir()
+            raise
         assert self.container is not None
         container_id = self.container.id[:12] if self.container.id else "unknown"
         print(f"Container {container_id} is now running")
@@ -448,10 +493,17 @@ class DockerManager:
         """Stop and remove the Docker container.
 
         Handles cleanup of both the container and any temporary directories
-        created for shared volumes.
+        created for shared volumes — including a directory an earlier
+        ``close()`` failed to delete, which is retried here.
         """
-        if self.container is None:  # pragma: no branch
+        with self._lifecycle_lock:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        """Body of :meth:`close`; the caller holds ``_lifecycle_lock``."""
+        if self.container is None:
             print("No container to close.")
+            self._remove_shared_volume_dir()
             return
 
         container_id = self.container.id[:12] if self.container.id else "unknown"
@@ -470,15 +522,30 @@ class DockerManager:
             print(f"Failed to remove container {container_id}: {e}")
 
         self.container = None
+        self._remove_shared_volume_dir()
+        print("Container closed successfully")
 
-        if self.host_shared_path and os.path.exists(self.host_shared_path):  # pragma: no branch
+    def _remove_shared_volume_dir(self) -> None:
+        """Delete the host side of the shared volume, if one was created.
+
+        Shared by :meth:`close` and the failure path of :meth:`open`.
+        ``host_shared_path`` is cleared only once the directory is gone
+        (deleted here, or already absent): a failed ``rmtree`` keeps the
+        path on the manager so the leak stays traceable and the next
+        :meth:`close` or :meth:`open` retries the removal.  A repeated
+        call with nothing tracked is a no-op.
+        """
+        path = self.host_shared_path
+        if path is None:
+            return
+        if os.path.exists(path):
             try:
-                shutil.rmtree(self.host_shared_path)
+                shutil.rmtree(path)
             except Exception as e:
                 logger.debug("Exception caught", exc_info=True)
-                print(f"Failed to clean up temp directory: {e}")
-
-        print("Container closed successfully")
+                print(f"Failed to clean up temp directory {path}: {e}")
+                return
+        self.host_shared_path = None
 
     def __enter__(self) -> "DockerManager":
         """Context manager entry point.

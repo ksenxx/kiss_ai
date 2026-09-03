@@ -656,9 +656,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     // (left by a disposed webview) would make toggleFocus believe the
     // chat is focused and never focus it.
     this._webviewHasFocus = false;
-    setWebviewNotificationPoster(message =>
-      this._sendToWebview(message as ToWebviewMessage),
-    );
+    setWebviewNotificationPoster(message => this._sendToWebview(message));
     this._disposed = false;
     this._lastSentUrl = '';
 
@@ -1266,21 +1264,25 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'voiceSensitivity': {
+        // audit0902-coverage:start
         if (typeof message.value !== 'number') break;
         this._voiceSensitivity = message.value;
         if (this._voiceWake?.running) {
-          // Wait for the old listener process to exit before spawning
-          // the new one: on exclusive-capture audio backends a listener
-          // started while its predecessor is still dying cannot open
-          // the microphone.
-          const voiceWake = this._voiceWake;
-          await voiceWake.stop();
-          // Restart only if nothing else started or replaced the
-          // service while the old process was exiting.
-          if (this._voiceWake === voiceWake && !voiceWake.running) {
-            voiceWake.start(this._voiceSensitivity);
-          }
+          // Restart the listener with the new sensitivity.  stop() is
+          // asynchronous (on exclusive-capture audio backends the old
+          // process holds the microphone until it has exited) and the
+          // service queues a start() issued during the stop behind it,
+          // so this cannot double-open the mic.  It is deliberately NOT
+          // `await stop(); if (!running) start()`: a voiceToggle
+          // {enabled:false} arriving during that await shares the same
+          // stop promise, and once it settled the check passed and the
+          // handler restarted the listener the user had just switched
+          // off.  A queued start is cancelled by any later stop(), so
+          // the off switch always wins.
+          void this._voiceWake.stop();
+          this._voiceWake.start(this._voiceSensitivity);
         }
+        // audit0902-coverage:end
         break;
       }
 
@@ -1334,6 +1336,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   public runUpdate(): void {
+    // Every click runs the installer; there is deliberately no
+    // per-window "already running" guard here.  Whether another
+    // installer is still running is known only to the cross-process
+    // lock inside install.sh (two windows are two extension hosts, and
+    // the daemon's update endpoint is a third caller), and the loser
+    // prints "another KISS update is already running (pid N)" in this
+    // terminal itself.  A guard keyed on the terminal's lifetime wrongly
+    // refused every click after a finished update until the shell was
+    // closed.
+    // audit0902-coverage:start
     const scriptPath = findInstallScript();
     if (!scriptPath) {
       showErrorNotification(
@@ -1348,9 +1360,33 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       name: 'KISS Sorcar Update',
       cwd: path.dirname(scriptPath),
     });
+    // audit0902-coverage:end
     terminal.show();
     const escScript = scriptPath.replace(/'/g, "'\\''");
     const escDir = path.dirname(scriptPath).replace(/'/g, "'\\''");
+    // audit0902-coverage:start
+    // scripts/install.sh (the curl bootstrap) syncs the clone with origin
+    // and hands over to ./install.sh -- exactly this preflight -- but
+    // holds a cross-process lock for all of it, so two windows (or a
+    // window and the daemon's update endpoint) cannot reset / uv sync /
+    // restart the same tree at once: the loser prints "another KISS
+    // update is already running (pid N)" and exits 1.  KISS_NONINTERACTIVE
+    // is what ./install.sh reads in place of --non-interactive.  A clone
+    // that predates the lock (no scripts/install.sh) gets the unlocked
+    // preflight below.
+    const bootstrap = path.join(
+      path.dirname(scriptPath),
+      'scripts',
+      'install.sh',
+    );
+    if (fs.existsSync(bootstrap)) {
+      const escBootstrap = bootstrap.replace(/'/g, "'\\''");
+      terminal.sendText(
+        `cd '${escDir}'; KISS_NONINTERACTIVE=1 bash '${escBootstrap}'`,
+      );
+      return;
+    }
+    // audit0902-coverage:end
     const preflight = [
       `cd '${escDir}'`,
       "echo '>>> Pre-flight: synchronizing repo with origin before install.sh...'",

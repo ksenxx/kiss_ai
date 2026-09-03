@@ -187,9 +187,29 @@ class TestMigrationVsConcurrentDuplicateWriter(_MigrationRaceBase):
         )
         proc.start()
         try:
-            # Let the hammer land some pre-migration duplicates so the
-            # migration demonstrably races live inserts.
-            time.sleep(0.3)
+            # Wait until the hammer has demonstrably landed at least one
+            # pre-migration duplicate so the migration really races live
+            # inserts.  (A fixed 0.3s sleep flaked under parallel-suite
+            # load: the child process had not scheduled its first INSERT
+            # yet and the test's `inserted > 0` assertion failed.)
+            raw = sqlite3.connect(th._DB_PATH, timeout=30)
+            try:
+                deadline = time.monotonic() + 30
+                while True:
+                    (landed,) = raw.execute(
+                        "SELECT COUNT(*) FROM events "
+                        "WHERE task_id = ? AND event_json = ?",
+                        (self.task_id, '{"type": "hammer"}'),
+                    ).fetchone()
+                    if landed > 0:
+                        break
+                    self.assertLess(
+                        time.monotonic(), deadline,
+                        "hammer never landed a pre-migration insert",
+                    )
+                    time.sleep(0.01)
+            finally:
+                raw.close()
             th._get_db()  # runs _init_tables → repair + index, atomically
         finally:
             stop_file.write_text("stop")

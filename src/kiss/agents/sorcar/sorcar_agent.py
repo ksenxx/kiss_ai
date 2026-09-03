@@ -379,6 +379,7 @@ def _collect_unfinished_usage(
     futures: list[Future[str]],
     sub_agents: list[Any],
     sub_usage: list[tuple[float, int, int]],
+    lock: threading.Lock,
 ) -> None:
     """Fill in the spend of children that never got to report it.
 
@@ -388,28 +389,39 @@ def _collect_unfinished_usage(
     from the parent task's totals.  Reading the live figures off the
     child's agent recovers everything it had spent up to this instant —
     without waiting for it, which is the whole point of abandoning it.
-    A live read of a still-running child can lag its true spend slightly
-    (it may land mid-handoff between executor sessions), which is why a
-    child that finishes in the meantime keeps its own final figure.
+
+    Every slot update — the worker's final write in its ``finally`` and
+    this read-modify-write — happens under *lock*, so the two can no
+    longer interleave: before, a child that published its final figure
+    and completed between this function's read and its write had that
+    figure overwritten by the older live read, and, its future now
+    being done, it was not registered as abandoned either — the
+    difference was never banked.  The component-wise maximum remains
+    for a child that has already published but whose future is not yet
+    done: a live read can lag its true spend slightly (mid-handoff
+    between executor sessions), so a slot is only ever raised, never
+    lowered.
 
     Args:
         futures: One future per fanned-out sub-agent, in task order.
         sub_agents: The children's agents, in the same order; entries are
             ``None`` for children that never started.
-        sub_usage: Per-child ``(cost, tokens, steps)`` slots, updated in
+        sub_usage: Per-child ``(cost, tokens, steps)`` slots, raised in
             place for unfinished children only.
+        lock: The lock the workers hold for their own final slot write.
     """
     for idx, future in enumerate(futures):
         agent = sub_agents[idx]
         if future.done() or agent is None:
             continue
-        live = _live_agent_usage(agent)
-        # A worker writes its own slot BEFORE its future completes, so a
-        # future that finished while this live read was in flight has
-        # already published a strictly better figure: keep it.
-        if future.done():
-            continue
-        sub_usage[idx] = live
+        with lock:
+            live = _live_agent_usage(agent)
+            current = sub_usage[idx]
+            sub_usage[idx] = (
+                max(current[0], live[0]),
+                max(current[1], live[1]),
+                max(current[2], live[2]),
+            )
 
 
 class _AbandonedSubagent:
@@ -1244,6 +1256,18 @@ class SorcarAgent(RelentlessAgent):
                 change (or a "no change" message when the requested
                 model is already active).
             """
+            from kiss.core.models.model_info import (
+                model_runs_task_to_completion,
+            )
+
+            if getattr(self, "docker_image", None) and model_runs_task_to_completion(
+                model_name
+            ):
+                return (
+                    f"Cannot switch to {model_name}: it is a CLI agent "
+                    "that runs natively on the host, which would bypass "
+                    "this task's docker_image isolation. Pick an API model."
+                )
             target = getattr(self, "_current_executor", None) or self
             old_model = getattr(target, "model", None)
             if old_model is None:
@@ -1898,6 +1922,10 @@ def run_tasks_parallel(
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
     sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
+    # Held for every slot write: the workers' final figures and the
+    # parent's live refresh of abandoned children must not interleave
+    # (see _collect_unfinished_usage).
+    sub_usage_lock = threading.Lock()
     # Published as soon as each child exists so an abandoned child's
     # spend can still be read (see _collect_unfinished_usage).
     sub_agents: list[Any] = [None] * len(tasks)
@@ -1980,7 +2008,8 @@ def run_tasks_parallel(
             # _live_agent_usage (not _agent_usage): an interrupted child
             # never folds its in-flight executor session's spend into the
             # agent totals, so the folded-only read would undercount it.
-            sub_usage[idx] = _live_agent_usage(agent)
+            with sub_usage_lock:
+                sub_usage[idx] = _live_agent_usage(agent)
             if printer is not None:
                 # Notify every tab watching the sub-agent: its own
                 # synthetic tab plus any other tabs subscribed to the
@@ -2029,7 +2058,7 @@ def run_tasks_parallel(
         # Fill totals_out even when a worker propagates an interrupt, and
         # read the live figures of any child that never got to report its
         # own, so no completed sibling's spend is lost.
-        _collect_unfinished_usage(futures, sub_agents, sub_usage)
+        _collect_unfinished_usage(futures, sub_agents, sub_usage, sub_usage_lock)
         if abandoned:
             # The abandoned threads keep running inside ``work_dir`` and
             # keep spending: hand them to the parent so it can refuse to

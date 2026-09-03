@@ -9,7 +9,7 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as https from 'https';
 import * as crypto from 'crypto';
-import {exec, execSync, execFileSync, spawn} from 'child_process';
+import {exec, execFile, execSync, execFileSync, spawn} from 'child_process';
 import {findKissProject, findUvPath} from './kissPaths';
 import {
   probeDaemonHealth,
@@ -361,7 +361,7 @@ async function runFinalization(
   const apiKeysReady = await ensureApiKeys();
 
   if (progress) progress.report({message: 'Checking remote password...'});
-  await ensureRemotePassword();
+  await ensureRemotePassword(uvPath, kissProjectPath);
 
   return apiKeysReady;
 }
@@ -2028,15 +2028,77 @@ function readKissConfig(): Record<string, unknown> {
   return {};
 }
 
-function writeKissConfig(cfg: Record<string, unknown>): void {
-  fs.mkdirSync(LOG_DIR, {recursive: true});
-  const target = path.join(LOG_DIR, 'config.json');
-  const tmp = path.join(
-    LOG_DIR,
-    `.config.json.${process.pid}.${Date.now()}.tmp`,
-  );
-  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n');
-  fs.renameSync(tmp, target);
+// Runs inside the kiss venv: save_config() merges the update read from
+// stdin into config.json under the daemon's fcntl lock (.config.lock).
+const SAVE_CONFIG_PY =
+  'import json, sys; from kiss.core.vscode_config import save_config; ' +
+  'save_config(json.load(sys.stdin))';
+const SAVE_CONFIG_TIMEOUT_MS = 60_000;
+
+/**
+ * Merge `update` into `$KISS_HOME/config.json`.
+ *
+ * The daemon is the single writer of config.json: its
+ * `vscode_config.save_config` merges under an `fcntl.flock` on
+ * `.config.lock`.  Node has no flock, so instead of emulating the lock
+ * the extension hands the update to that writer through `uv run python`
+ * (the payload travels on stdin, never argv, so a password never shows
+ * up in `ps`).  An unlocked read-modify-replace here raced the daemon's
+ * own saves and lost either the password or the daemon's settings, so
+ * there is deliberately no direct-write fallback: when the writer is
+ * unavailable the save fails and config.json is left untouched.
+ *
+ * The child runs asynchronously (execFile) so a slow `uv run` never
+ * freezes the extension host; it is killed after
+ * {@link SAVE_CONFIG_TIMEOUT_MS}.
+ *
+ * @param update Keys to merge into config.json.
+ * @param uvPath Path of the uv binary, or null when uv was not found.
+ * @param kissProjectPath Root of the kiss checkout whose venv runs Python.
+ * @returns Resolves once save_config has written the file; rejects with
+ *   the reason (uv missing, spawn error, or the exit code and stderr).
+ */
+export function saveKissConfig(
+  update: Record<string, unknown>,
+  uvPath: string | null,
+  kissProjectPath: string,
+): Promise<void> {
+  // audit0902-coverage:start
+  if (!uvPath) {
+    log('saveKissConfig: uv not found — cannot save config.json');
+    return Promise.reject(new Error('uv not found'));
+  }
+  return new Promise<void>((resolve, reject) => {
+    const child = execFile(
+      uvPath,
+      ['run', 'python', '-c', SAVE_CONFIG_PY],
+      {
+        cwd: kissProjectPath,
+        env: {...process.env, KISS_HOME: LOG_DIR},
+        timeout: SAVE_CONFIG_TIMEOUT_MS,
+      },
+      (err, _stdout, stderr) => {
+        if (!err) {
+          resolve();
+          return;
+        }
+        const code = (err as {code?: number | string}).code;
+        const reason =
+          typeof code === 'number' ? `exited with code ${code}` : err.message;
+        const detail = stderr ? String(stderr).trim() : '';
+        log(
+          `saveKissConfig: Python save_config failed: ${reason}` +
+            (detail ? `\n${detail}` : ''),
+        );
+        reject(new Error(reason + (detail ? `: ${detail}` : '')));
+      },
+    );
+    // A spawn failure (ENOENT, EACCES) is delivered to the callback as
+    // well; the stdin write is guarded so a dead pipe cannot throw here.
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(JSON.stringify(update));
+  });
+  // audit0902-coverage:end
 }
 
 function getStoredRemotePassword(): string {
@@ -2048,7 +2110,22 @@ function getStoredRemotePassword(): string {
   return '';
 }
 
-async function ensureRemotePassword(): Promise<void> {
+/**
+ * Prompt for the remote-access password when config.json has none and
+ * save it through {@link saveKissConfig}.  Runs after the daemon restart
+ * in runFinalization, so `uvPath`/`kissProjectPath` point at a usable
+ * venv; exported so the e2e tests can drive the prompt end to end.  When
+ * the save fails the password is left unsaved and the user is pointed at
+ * the settings panel's Remote password field (saved by the daemon).
+ *
+ * @param uvPath Path of the uv binary, or null when uv was not found.
+ * @param kissProjectPath Root of the kiss checkout whose venv runs Python.
+ */
+export async function ensureRemotePassword(
+  uvPath: string | null,
+  kissProjectPath: string,
+): Promise<void> {
+  // audit0902-coverage:start
   if (getStoredRemotePassword()) {
     log('ensureRemotePassword: password already set — skipping prompt');
     return;
@@ -2082,8 +2159,22 @@ async function ensureRemotePassword(): Promise<void> {
     return;
   }
 
-  const cfg = readKissConfig();
-  cfg['remote_password'] = password.trim();
-  writeKissConfig(cfg);
+  try {
+    await saveKissConfig(
+      {remote_password: password.trim()},
+      uvPath,
+      kissProjectPath,
+    );
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    log(`ensureRemotePassword: saving the password failed: ${reason}`);
+    showErrorNotification(
+      'KISS Sorcar: could not save the remote access password ' +
+        `(${reason}). Set it in the KISS Sorcar settings panel ` +
+        '(Remote password field) once the daemon is running.',
+    );
+    return;
+  }
   log(`Remote access password saved to ${path.join(LOG_DIR, 'config.json')}`);
+  // audit0902-coverage:end
 }
