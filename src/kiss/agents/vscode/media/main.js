@@ -6610,6 +6610,7 @@
           !!ev.available,
           ev.latest || '',
           ev.current || '',
+          !!ev.snoozed,
         );
         break;
       case 'followup_suggestion': {
@@ -7957,9 +7958,11 @@
     '<line x1="12" y1="15" x2="12" y2="3"/>' +
     '</svg>';
 
-  function renderUpdateAvailable(available, latest, current) {
+  function renderUpdateAvailable(available, latest, current, snoozed) {
+    // A "Remind me later" snooze silences the sticky toast but keeps
+    // the passive settings-button badge visible.
     renderUpdateAvailableBadge(available, latest, current);
-    renderUpdateAvailableNotification(available, latest, current);
+    renderUpdateAvailableNotification(available && !snoozed, latest, current);
   }
 
   function renderUpdateAvailableBadge(available, latest, current) {
@@ -8005,6 +8008,16 @@
           svg: UPDATE_DOWNLOAD_SVG,
           onClick: () => {
             api.runUpdate();
+          },
+        },
+        {
+          label: 'Remind me later',
+          ariaLabel: 'Snooze this update notification for 24 hours',
+          onClick: () => {
+            // The daemon records the snooze in the update-check cache
+            // shared with the extension host and rebroadcasts, so the
+            // toast disappears from every window for 24 hours.
+            api.snoozeUpdate({latest: latest});
           },
         },
       ],

@@ -277,6 +277,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("autocommitAction"),
     ApiCommand("auth", required=("password",), handler="drop"),
     ApiCommand("runUpdate", handler="run_update"),
+    ApiCommand("snoozeUpdate", handler="snooze_update"),
     ApiCommand("serverReset", handler="server_reset"),
     ApiCommand(
         "voiceTranscribe", required=("audio",), handler="voice_transcribe"
@@ -496,6 +497,8 @@ class ServerBackend(Protocol):
     async def _send_welcome_info(self) -> None: ...
 
     async def _handle_run_update(self, conn_id: str = "") -> None: ...
+
+    async def _handle_snooze_update(self, latest: str = "") -> None: ...
 
     async def _handle_server_reset(self, conn_id: str = "") -> None: ...
 
@@ -1162,6 +1165,25 @@ class ServerApi:
                 notifications reach only the requesting window.
         """
         await self._backend._handle_run_update(ctx.conn_state["conn_id"])
+
+    async def snooze_update(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Snooze the update notification for 24 hours.
+
+        Services the "Remind me later" action of the update toast in
+        both frontends: records the snooze in the update-check cache
+        shared with the VS Code extension and rebroadcasts the
+        ``update_available`` state so every client's toast disappears.
+
+        Args:
+            cmd: The ``snoozeUpdate`` command; its optional ``latest``
+                field names the release being snoozed.
+            ctx: The transport context of the current call (unused —
+                the resulting rebroadcast must reach every window).
+        """
+        latest = cmd.get("latest")
+        await self._backend._handle_snooze_update(
+            latest if isinstance(latest, str) else "",
+        )
 
     async def server_reset(
         self, cmd: dict[str, Any], ctx: ApiContext,
