@@ -59,9 +59,23 @@ the daemon and could bind a LATER dispatch's workspace when its
 channel tools load.  The daemon's stop path force-interrupts a
 non-cooperating task after ~1 s, so confirmation normally arrives
 quickly; this grace bounds the wait against a wedged daemon, after
-which the ``TimeoutError`` is raised anyway (the stop stays
+which :class:`StopUnconfirmedTimeoutError` is raised (the stop stays
 best-effort at that point).
 """
+
+
+class StopUnconfirmedTimeoutError(TimeoutError):
+    """Timeout whose ``stop_on_timeout`` stop was sent but never confirmed.
+
+    Raised by :func:`run` instead of the plain :class:`TimeoutError`
+    when the :data:`_STOP_CONFIRM_GRACE_SECONDS` wait for the stopped
+    task's terminal ``status running=false`` expires without an
+    answer: the ``stop`` was sent, but the daemon never confirmed the
+    task is dead, so the stop stays best-effort and the task may still
+    be running (and spending) on the daemon.  Callers that report the
+    timeout onward — the ``run_agent`` dispatch — must not claim the
+    task was stopped.
+    """
 
 _NO_DEADLINE_WAKE_SECONDS = 10.0
 """Socket read wake-up interval for a ``timeout=None`` wait.
@@ -487,8 +501,9 @@ def run(
             a ``stop`` for the task and keeps reading until the task's
             terminal status confirms it is dead (waiting up to
             :data:`_STOP_CONFIRM_GRACE_SECONDS`; on a wedged daemon
-            the ``TimeoutError`` is raised unconfirmed, the stop then
-            staying best-effort) before raising the ``TimeoutError``.
+            :class:`StopUnconfirmedTimeoutError` is raised instead,
+            the stop then staying best-effort) before raising the
+            ``TimeoutError``.
             ``True`` is for callers that must not let the task outlive
             the wait, e.g. the ``run_agent`` channel dispatch, whose
             process-global workspace reservation is released as soon
@@ -524,6 +539,12 @@ def run(
             unless *stop_on_timeout* is true, in which case the task
             is first stopped and its terminal status awaited (see the
             parameter's documentation).
+        StopUnconfirmedTimeoutError: When *stop_on_timeout* is true
+            and the stop was sent but the daemon never confirmed the
+            task's death within :data:`_STOP_CONFIRM_GRACE_SECONDS` —
+            the task may still be running.  A subclass of
+            ``TimeoutError``, so a plain ``except TimeoutError`` still
+            catches it.
 
     Every other abort of the wait — most importantly the
     ``KeyboardInterrupt`` injected when the CALLING task is stopped
@@ -658,6 +679,13 @@ def run(
                                     f"timed-out task: {send_exc}"
                                 ) from send_exc
                             continue
+                        if stopping:
+                            # The confirmation grace expired without a
+                            # terminal status: the stop was sent but
+                            # never answered, so the task may still be
+                            # running — the caller must not be told it
+                            # was stopped.
+                            raise StopUnconfirmedTimeoutError(timeout_msg)
                         raise TimeoutError(timeout_msg)
                     sock.settimeout(remaining)
                 try:
@@ -705,12 +733,19 @@ def run(
             elif etype == "status":
                 if event.get("running"):
                     started = True
+                elif stopping:
+                    # The terminal status confirms the
+                    # stopped-on-timeout task is dead; the run still
+                    # timed out.  ``started`` is deliberately not
+                    # required here: a stop can interrupt the task
+                    # during its setup, BEFORE the initial
+                    # ``running=true`` was ever broadcast, while the
+                    # daemon's ``finally`` still broadcasts the
+                    # terminal ``running=false`` (see
+                    # ``task_runner._run_task``) — that is a confirmed
+                    # stop, not an unconfirmed one.
+                    raise TimeoutError(timeout_msg)
                 elif started:
-                    if stopping:
-                        # The terminal status confirms the
-                        # stopped-on-timeout task is dead; the run
-                        # still timed out.
-                        raise TimeoutError(timeout_msg)
                     return _to_task_result(result_event, chat_id, task_id)
     except BaseException as exc:
         aborted = exc

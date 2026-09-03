@@ -204,15 +204,20 @@ class _StopConfirmingDaemon:
     """A UDS daemon stand-in that confirms a ``stop`` with terminal status.
 
     Accepts one connection, reads the ``run`` command, sends ``status
-    running=true``, then never finishes the task: it only records the
-    client's further commands and, on receiving ``stop``, replies —
-    after ``confirm_delay`` seconds — with ``status running=false``,
-    the shape of a live daemon stopping a task.
+    running=true`` (unless ``initial_running`` is false, modelling a
+    task stopped during setup before that broadcast), then never
+    finishes the task: it only records the client's further commands
+    and, on receiving ``stop``, replies — after ``confirm_delay``
+    seconds — with ``status running=false``, the shape of a live
+    daemon stopping a task.
     """
 
-    def __init__(self, confirm_delay: float = 0.0) -> None:
+    def __init__(
+        self, confirm_delay: float = 0.0, initial_running: bool = True,
+    ) -> None:
         """Bind a UNIX-domain listener in a fresh temp dir."""
         self.confirm_delay = confirm_delay
+        self.initial_running = initial_running
         self.commands: list[dict[str, Any]] = []
         self.run_cmd: dict[str, Any] | None = None
         self._dir = Path(tempfile.mkdtemp(prefix="kiss_dispatch_timeout_"))
@@ -245,7 +250,8 @@ class _StopConfirmingDaemon:
                 except OSError:
                     pass
 
-            send({"type": "status", "running": True, "tabId": tab_id})
+            if self.initial_running:
+                send({"type": "status", "running": True, "tabId": tab_id})
             while True:
                 try:
                     line = reader.readline()
@@ -441,6 +447,38 @@ def test_run_agent_tool_times_out_and_stops_the_task(
         daemon.close()
 
 
+def test_run_agent_tool_reports_unconfirmed_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A never-confirmed stop yields the "may still be running" error.
+
+    End-to-end through the real tool (path mode) against a silent
+    daemon stand-in: the ``stop`` sent on timeout is never answered,
+    so once the (shrunk) confirmation grace expires the tool must NOT
+    claim the task "was stopped" — it must say the task may still be
+    running so the caller does not assume the work was cancelled.
+    """
+    monkeypatch.setattr(daemon_client, "_STOP_CONFIRM_GRACE_SECONDS", 0.3)
+    sock_dir = Path(tempfile.mkdtemp(prefix="kiss_dispatch_timeout_"))
+    path = sock_dir / "daemon.sock"
+    daemon = _RecordingDaemon(path, mode="silent")
+    monkeypatch.setenv("KISS_SORCAR_SOCK", str(path))
+    script = tmp_path / "helper.py"
+    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    try:
+        out = make_run_agent_tool(str(tmp_path))(
+            str(script), "never finishes", timeout="0.5",
+        )
+        assert "did not finish within 0.5s" in out
+        assert "MAY STILL BE RUNNING" in out
+        assert "was stopped" not in out
+        assert daemon.wait_for_command("stop")
+        assert daemon.wait_for_command("closeTab")
+    finally:
+        daemon.close()
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
 @pytest.mark.parametrize("stop_on_timeout", [False, True])
 def test_client_timeout_stop_cascade_is_opt_in(
     stop_on_timeout: bool,
@@ -460,11 +498,14 @@ def test_client_timeout_stop_cascade_is_opt_in(
     daemon = _StopConfirmingDaemon(confirm_delay=0.5)
     try:
         begin = time.monotonic()
-        with pytest.raises(TimeoutError, match="did not finish"):
+        with pytest.raises(TimeoutError, match="did not finish") as excinfo:
             daemon_client.run(
                 "never finishes", sock_path=daemon.sock_path, timeout=0.3,
                 stop_on_timeout=stop_on_timeout,
             )
+        assert not isinstance(
+            excinfo.value, daemon_client.StopUnconfirmedTimeoutError,
+        ), "a confirmed (or never-attempted) stop must raise the plain error"
         elapsed = time.monotonic() - begin
         assert daemon.wait_for_command("closeTab")
         stopped = any(c.get("type") == "stop" for c in daemon.commands)
@@ -485,8 +526,10 @@ def test_stop_confirmation_wait_is_bounded(
     The confirmation wait is bounded by
     ``_STOP_CONFIRM_GRACE_SECONDS`` (20 s in production, shrunk here):
     on a silent daemon the ``stop`` is sent but never answered, and
-    the client must still raise the ``TimeoutError`` once the grace
-    expires, the stop staying best-effort.
+    once the grace expires the client must still raise — with
+    ``StopUnconfirmedTimeoutError``, not the plain ``TimeoutError`` of
+    a confirmed stop, because the stop stayed best-effort and the task
+    may still be running.
     """
     monkeypatch.setattr(daemon_client, "_STOP_CONFIRM_GRACE_SECONDS", 0.3)
     sock_dir = Path(tempfile.mkdtemp(prefix="kiss_dispatch_timeout_"))
@@ -494,7 +537,9 @@ def test_stop_confirmation_wait_is_bounded(
     daemon = _RecordingDaemon(path, mode="silent")
     try:
         begin = time.monotonic()
-        with pytest.raises(TimeoutError, match="did not finish"):
+        with pytest.raises(
+            daemon_client.StopUnconfirmedTimeoutError, match="did not finish",
+        ):
             daemon_client.run(
                 "never finishes", sock_path=path, timeout=0.3,
                 stop_on_timeout=True,
@@ -505,6 +550,40 @@ def test_stop_confirmation_wait_is_bounded(
     finally:
         daemon.close()
         shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+def test_stop_confirmed_before_initial_running_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop confirmed without a prior ``running=true`` is confirmed.
+
+    The daemon's stop watchdog can interrupt a task during its setup,
+    BEFORE the initial ``running=true`` broadcast, while the daemon's
+    ``finally`` still broadcasts the terminal ``running=false``
+    (``task_runner._run_task``).  The client must accept that terminal
+    status as stop confirmation — raising the plain ``TimeoutError``
+    promptly — instead of ignoring it, wedging until the grace
+    expires, and misreporting the stop as unconfirmed.
+    """
+    monkeypatch.setattr(daemon_client, "_STOP_CONFIRM_GRACE_SECONDS", 5.0)
+    daemon = _StopConfirmingDaemon(initial_running=False)
+    try:
+        begin = time.monotonic()
+        with pytest.raises(TimeoutError, match="did not finish") as excinfo:
+            daemon_client.run(
+                "never finishes", sock_path=daemon.sock_path, timeout=0.3,
+                stop_on_timeout=True,
+            )
+        assert not isinstance(
+            excinfo.value, daemon_client.StopUnconfirmedTimeoutError,
+        ), "a daemon-confirmed stop must not be reported as unconfirmed"
+        assert time.monotonic() - begin < 3, (
+            "the client ignored the confirmation and waited out the grace"
+        )
+        assert daemon.wait_for_command("stop")
+        assert daemon.wait_for_command("closeTab")
+    finally:
+        daemon.close()
 
 
 def test_empty_timeout_applies_the_default_constant(
