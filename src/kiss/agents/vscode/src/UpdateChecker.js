@@ -173,15 +173,26 @@ function readCache(cachePath) {
   }
 }
 
+// audit0902-coverage:start
 function writeCache(cachePath, data) {
+  // Every window writes this file at activation.  The temp name must be
+  // unique per writer (pid + timestamp temp file, then rename): with one
+  // shared `<cache>.tmp`, a second window truncates the first one's temp
+  // file before it is renamed and the cache ends up empty -- unparsable,
+  // so the cooldown is lost.
+  const tmp = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
   try {
     fs.mkdirSync(path.dirname(cachePath), {recursive: true});
-    const tmp = cachePath + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(data));
     fs.renameSync(tmp, cachePath);
   } catch {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+    }
   }
 }
+// audit0902-coverage:end
 
 async function checkForExtensionUpdate(opts) {
   const o = opts || {};

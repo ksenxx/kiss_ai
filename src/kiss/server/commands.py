@@ -30,6 +30,7 @@ from kiss.agents.sorcar.persistence import (
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.tab_registry import OpenTabOutcome
+from kiss.server.task_runner import _client_task_id_of
 
 if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
@@ -253,7 +254,9 @@ class _CommandsMixin:
         def _broadcast_tabs_state(self) -> None: ...
 
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
-        def _stop_task(self, tab_id: str = "") -> None: ...
+        def _stop_task(
+            self, tab_id: str = "", run_token: str = "",
+        ) -> None: ...
         def _find_viewer_task_states(
             self, viewer_tab_id: str,
         ) -> list[AgentState]: ...
@@ -452,6 +455,7 @@ class _CommandsMixin:
                     stop_event=threading.Event(),
                 )
                 state.user_answer_queue = queue.Queue(maxsize=1)
+                state.client_run_token = _client_task_id_of(cmd)
                 if prev is not None:
                     # Carry the previous task's agent (it may hold a
                     # pending worktree) over to the new run's state.
@@ -507,8 +511,19 @@ class _CommandsMixin:
             raise
 
     def _cmd_stop(self, cmd: dict[str, Any]) -> None:
-        """Stop a running task."""
-        self._stop_task(cmd.get("tabId", ""))
+        """Stop a running task.
+
+        An optional ``taskId`` — the client-minted per-submission run
+        token, sent by ``daemon_client.run``'s abort-cascade stop —
+        restricts the stop to the run it belongs to: a synthetic
+        ``api-…`` tab can be reused by a NEWER run after the original
+        finishes, and a late tab-only stop would kill that innocent
+        run.  UI stops send no ``taskId`` and behave as before.
+        """
+        self._stop_task(
+            cmd.get("tabId", ""),
+            run_token=_client_task_id_of(cmd),
+        )
 
     def _cmd_get_models(self, cmd: dict[str, Any]) -> None:
         """Send available models list to the requesting connection only."""
@@ -1276,7 +1291,6 @@ class _CommandsMixin:
                 if (
                     isinstance(key_name, str)
                     and isinstance(key_value, str)
-                    and key_value
                 ):
                     save_api_key_to_shell(key_name, key_value)
 

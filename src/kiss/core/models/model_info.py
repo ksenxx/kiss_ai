@@ -167,7 +167,9 @@ def _read_my_models() -> dict[str, dict[str, Any]]:
     read.  Returns an empty dict when:
 
     * The file is missing AND cannot be seeded (read-only FS).
-    * The file is unreadable or contains malformed JSON.
+    * The file is unreadable, is not valid UTF-8, or contains malformed
+      JSON (``UnicodeDecodeError`` and ``json.JSONDecodeError`` are both
+      ``ValueError`` subclasses).
     * The top-level value is not a JSON object.
 
     Filters out any key starting with ``_`` (documentation / inert
@@ -176,12 +178,9 @@ def _read_my_models() -> dict[str, dict[str, Any]]:
     """
     _seed_my_models_file()
     try:
-        text = USER_MY_MODELS_PATH.read_text(encoding="utf-8")
-    except OSError:
-        return {}
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError:
+        raw = json.loads(USER_MY_MODELS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.debug("Ignoring unreadable or corrupt %s", USER_MY_MODELS_PATH, exc_info=True)
         return {}
     if not isinstance(raw, dict):
         return {}
@@ -792,6 +791,41 @@ def _strip_provider_prefix(model_name: str) -> str:
     return model_name
 
 
+def _lookup_model_info(model_name: str) -> ModelInfo | None:
+    """Return the catalog entry for *model_name*, or ``None`` when unknown.
+
+    The one lookup rule shared by :func:`calculate_cost`,
+    :func:`get_fallback_model` and :func:`get_max_context_length`: the
+    name is tried as given, then in its harbor-stripped form (see
+    :func:`_strip_provider_prefix`), so callers may pass either.
+
+    Args:
+        model_name: Name of the model (with or without provider prefix).
+
+    Returns:
+        The matching :class:`ModelInfo`, or ``None``.
+    """
+    return MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+
+
+def model_runs_task_to_completion(model_name: str) -> bool:
+    """Whether *model_name* names a CLI agent that runs a whole task itself.
+
+    ``cc/*`` (Claude Code) and ``codex/*`` (Codex) models are full coding
+    agents: an agentic :class:`~kiss.core.kiss_agent.KISSAgent` hands them
+    the entire task in one invocation instead of driving a turn-by-turn
+    KISS tool loop, and their native tools run directly on the host (so
+    they cannot honor ``docker_image`` isolation).
+
+    Args:
+        model_name: Full model name including any provider prefix.
+
+    Returns:
+        True for ``cc/*`` and ``codex/*`` model names.
+    """
+    return model_name.startswith(("cc/", "codex/"))
+
+
 def model(
     model_name: str,
     model_config: dict[str, Any] | None = None,
@@ -866,7 +900,7 @@ def model(
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-    if model_name.startswith("codex/") or model_name.startswith("cc/"):
+    if model_runs_task_to_completion(model_name):
         class_name = "CodexModel" if model_name.startswith("codex/") else "ClaudeCodeModel"
         cls = _load_model_class(class_name, f"{class_name} could not be loaded.")
         return cls(  # type: ignore[no-any-return]
@@ -1113,7 +1147,7 @@ def calculate_cost(
     Raises:
         KISSError: If positive usage is reported for a model without pricing.
     """
-    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+    info = _lookup_model_info(model_name)
     total_tokens = (
         num_input_tokens
         + num_output_tokens
@@ -1195,7 +1229,7 @@ def get_fallback_model(model_name: str) -> str | None:
         ``MY_MODELS.json``) via the ``"fallback"`` key, or ``None`` when
         no fallback is registered or the model is unknown.
     """
-    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+    info = _lookup_model_info(model_name)
     return info.fallback if info is not None else None
 
 
@@ -1207,7 +1241,7 @@ def get_max_context_length(model_name: str) -> int:
     Returns:
         int: Maximum context length in tokens.
     """
-    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+    info = _lookup_model_info(model_name)
     if info is None:
         raise KISSError(f"Model '{model_name}' not found in MODEL_INFO")
     return info.context_length

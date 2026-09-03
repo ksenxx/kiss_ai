@@ -25,9 +25,12 @@ Safety properties:
   (same ``kiss/wt-*`` branch naming, same ``.kiss-worktrees/``
   directory), so a spare orphaned by a crashed process is cleaned up
   by the existing reclaim pass like any other clean leftover worktree.
-* Live spares are protected from reclaim by
+* Live spares are protected from THIS process's reclaim by
   :func:`spare_branches`, which callers union into the reclaim
-  exclusion set (see ``WorktreeSorcarAgent._live_worktree_branches``).
+  exclusion set (see ``WorktreeSorcarAgent._live_worktree_branches``),
+  and from OTHER processes' reclaim by the owner pid that
+  :meth:`GitWorktreeOps.create` stamps on every new worktree branch
+  (the reclaim pass skips branches whose owner is still alive).
 * All pool state is in-process; consumers re-validate that the spare's
   branch and directory still exist before using it and fall back to
   the plain inline ``git worktree add`` path on any failure.
@@ -79,6 +82,21 @@ _prewarming: set[str] = set()
 # :func:`prewarm_async`; joined by :func:`discard_all` so an in-flight
 # refill cannot publish a spare after the sweep.
 _refill_threads: dict[str, threading.Thread] = {}
+# Pool generation.  :func:`discard_all` advances it when it starts and
+# again when it finishes; a refill captures it when it starts and
+# publishes its spare only if it is unchanged.  This is what makes
+# ``discard_all`` final: a refill scheduled after its thread snapshot
+# (so never joined), or a snapshotted one that outlived the bounded
+# join, cannot publish a spare into a pool the caller believes empty —
+# the spare is removed instead.
+_generation = 0
+# True while :func:`discard_all` is between its spare snapshot and its
+# final generation bump.  A refill that started after the first bump
+# (so its captured generation still matches) but reaches its
+# publication point during that sweep would otherwise publish a spare
+# the sweep never saw; the publication check requires this to be
+# False as well.
+_discarding = False
 _pool_lock = threading.Lock()
 
 
@@ -174,23 +192,12 @@ def take_spare(repo: Path) -> tuple[str, Path] | None:
             branch,
         )
         return None
-    ignored = GitWorktreeOps.list_ignored_files(wt_dir)
-    if (
-        GitWorktreeOps.has_uncommitted_changes(wt_dir)
-        or ignored is None
-        or ignored
-        or not GitWorktreeOps._branch_is_expendable(repo, branch)
-    ):
+    if GitWorktreeOps.spare_has_content(repo, branch, wt_dir):
         # A spare is never written to, so content in it means an
         # external writer put something there.  Consuming it would
         # destroy that content (`reset --hard` + `git clean -fdq`),
         # which contradicts the preservation policy the reclaim pass
-        # applies to the very same situation.  ``ignored is None``
-        # means git could not ENUMERATE the ignored files — fail
-        # closed and treat that exactly like "has content" (the same
-        # semantics ``rescue_ignored_files`` and the reclaim spare
-        # probe apply), because handing out a spare whose contents
-        # cannot be verified could destroy foreign data.  Leave the
+        # applies to the very same situation (same probe).  Leave the
         # directory for the reclaim pass to preserve; create inline
         # instead.
         logger.warning(
@@ -209,11 +216,22 @@ def discard_all() -> None:
 
     Joins the in-flight background refill threads first (bounded
     wait), so a refill that is still creating its worktree cannot
-    publish a new spare right after the sweep.  Best-effort cleanup
-    hook for tests and embedders; a spare that cannot be removed is
-    left for the reclaim pass to collect.
+    publish a new spare right after the sweep.  Refills this cannot
+    join — scheduled after the thread snapshot, or still running when
+    the bounded join gives up — are fenced off by the pool generation
+    (see :data:`_generation`): advanced here before the snapshot and
+    once more on return, it makes every refill started before this
+    call returns drop its spare instead of publishing it — together
+    with the :data:`_discarding` gate, raised for the whole call, which
+    also stops a refill started after the first bump from publishing
+    while the sweep is still running.  Best-effort
+    cleanup hook for tests and embedders; a spare that cannot be
+    removed is left for the reclaim pass to collect.
     """
+    global _discarding, _generation
     with _pool_lock:
+        _generation += 1
+        _discarding = True
         threads = list(_refill_threads.values())
         _refill_threads.clear()
     for thread in threads:
@@ -227,23 +245,11 @@ def discard_all() -> None:
             # Same guard the reclaim pass applies to orphaned spares:
             # a spare is never written to, so content in it means an
             # external writer put something there — preserve it for
-            # the reclaim pass to inspect rather than destroy it.
-            # ``list_ignored_files`` returning ``None`` means git
-            # could not enumerate the ignored files; fail closed and
-            # preserve too, since destroying the worktree could
-            # delete content that was never verified absent.  A
+            # the reclaim pass to inspect rather than destroy it.  A
             # spare whose directory is already gone is plumbing only
             # and is always cleaned up.
             if wt_dir.is_dir():
-                ignored = GitWorktreeOps.list_ignored_files(wt_dir)
-                if (
-                    GitWorktreeOps.has_uncommitted_changes(wt_dir)
-                    or ignored is None
-                    or ignored
-                    or not GitWorktreeOps._branch_is_expendable(
-                        repo, branch,
-                    )
-                ):
+                if GitWorktreeOps.spare_has_content(repo, branch, wt_dir):
                     logger.warning(
                         "Pooled spare worktree %s (branch '%s') has "
                         "unexpected content; preserving instead of "
@@ -256,6 +262,9 @@ def discard_all() -> None:
             logger.warning(
                 "Failed to discard pooled spare %s", wt_dir, exc_info=True,
             )
+    with _pool_lock:
+        _generation += 1
+        _discarding = False
 
 
 def prewarm(
@@ -290,6 +299,7 @@ def prewarm(
         if key in _prewarming:
             return False
         _prewarming.add(key)
+        generation = _generation
     try:
         with repo_lock(repo):
             if exclude_branches_fn is not None:
@@ -334,8 +344,22 @@ def prewarm(
             # differences.
             GitWorktreeOps.reset_worktree_to(wt_dir, "HEAD")
             with _pool_lock:
-                _spares[key] = (branch, wt_dir)
-            return True
+                if generation == _generation and not _discarding:
+                    _spares[key] = (branch, wt_dir)
+                    return True
+            # discard_all ran (or is running) since this refill started:
+            # the pool it would publish into has been declared empty,
+            # so the spare is removed rather than leaked past the sweep.
+            # ``_discarding`` covers the refill that started after the
+            # first generation bump and would otherwise publish while
+            # the sweep is still running.
+            logger.info(
+                "Dropping spare worktree %s for %s: the pool was "
+                "discarded while it was being created",
+                wt_dir, repo,
+            )
+            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+            return False
     except Exception:  # pragma: no cover — unexpected git failure
         logger.warning(
             "Worktree-pool prewarm failed for %s", repo, exc_info=True,

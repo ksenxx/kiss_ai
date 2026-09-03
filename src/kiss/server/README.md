@@ -126,9 +126,10 @@ on the daemon.
 
 ## Overridable parameters
 
-Every parameter of `sorcar.run()` except `timeout`, `sock_path`, and
-`extension_agent_path` itself has a corresponding `get_X()` getter the
-extension agent may define.  The table below lists them all.
+Every parameter of `sorcar.run()` except `timeout`, `stop_on_timeout`,
+`sock_path`, `scope_work_dir`, and `extension_agent_path` itself has a
+corresponding `get_X()` getter the extension agent may define.  The
+table below lists them all.
 
 | Getter function              | Return type                     | `run()` default           | Wire field          |
 |------------------------------|---------------------------------|---------------------------|---------------------|
@@ -151,12 +152,18 @@ extension agent may define.  The table below lists them all.
 When a getter is absent, the caller's value is used (which is the
 `run()` default when the caller did not pass one).
 
-The three parameters without getters:
+The five parameters without getters:
 
-- **`timeout`** — bounds the *client's* local wait; the daemon never
-  sees it.
+- **`timeout`** — bounds the *client's* local wait (`None` waits
+  indefinitely); the daemon never sees it.
+- **`stop_on_timeout`** — whether a `timeout` expiry also stops the
+  task, awaiting the stop's confirmation (default `False`: the task
+  keeps running); a client-side choice the script must not override.
 - **`sock_path`** — selects which daemon to connect to; the script
   already runs on that daemon.
+- **`scope_work_dir`** — the CALLING client's tab-bar visibility
+  scope (wire field `tabScopeWorkDir`), which a dispatched script
+  must not be able to repoint at another workspace.
 - **`extension_agent_path`** — the script cannot override its own path.
 
 ### Getter semantics
@@ -586,6 +593,7 @@ def run(
     prompt: str,
     *,
     work_dir: str = "",
+    scope_work_dir: str = "",
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -600,7 +608,8 @@ def run(
     append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
-    timeout: float = 3600.0,
+    timeout: float | None = 3600.0,
+    stop_on_timeout: bool = False,
     sock_path: str | Path | None = None,
 ) -> TaskResult
 ```

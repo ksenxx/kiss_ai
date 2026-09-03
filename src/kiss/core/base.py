@@ -52,6 +52,7 @@ class Base:
     messages: list[dict[str, Any]]
     function_map: dict[str, Any]
     run_start_timestamp: int
+    _trajectory_stamp: int
     budget_used: float
     total_tokens_used: int
     step_count: int
@@ -72,6 +73,12 @@ class Base:
         self.messages: list[dict[str, Any]] = []
         self.function_map = {}
         self.run_start_timestamp = 0
+        # Filename component of the trajectory path.  It is NOT the run
+        # start time: ``run_start_timestamp`` must stay the real wall
+        # clock (``run_end_timestamp`` is compared against it), while the
+        # path must be distinct for every run of this instance even when
+        # two runs start within the same second.
+        self._trajectory_stamp = 0
         self.budget_used = 0.0
         self.total_tokens_used = 0
         self.step_count = 0
@@ -161,12 +168,16 @@ class Base:
     def get_trajectory_path(self) -> Path:
         """Return the path where this agent's trajectory is/will be saved.
 
+        The trailing integer is ``_trajectory_stamp``: whole seconds at the
+        start of the run, bumped past the previous run's stamp when two
+        runs of this instance start within the same second.
+
         Returns:
             Path: The file path for the trajectory YAML file.
         """
         folder_path = Path(config_module.artifact_dir) / "trajectories"
         name_safe = self.name.replace(" ", "_").replace("/", "_")
-        return folder_path / f"trajectory_{name_safe}_{self.id}_{self.run_start_timestamp}.yaml"
+        return folder_path / f"trajectory_{name_safe}_{self.id}_{self._trajectory_stamp}.yaml"
 
     def _add_message(self, role: str, content: Any, timestamp: int | None = None) -> None:
         """Add a message to the history.

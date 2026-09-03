@@ -53,6 +53,12 @@ MAX_CONSECUTIVE_NO_TOOL_CALLS = 2
 # after STAGNANT_TURNS_FINISH the agent treats the run as an implicit finish.
 STAGNANT_TURNS_REMINDER = 3
 STAGNANT_TURNS_FINISH = 6
+# Default stall timeout (seconds of output silence) for a run-to-completion
+# model executing a whole task in one CLI invocation.  The per-turn default
+# (300 s, see CLITextModel._cli_turn) is too short for a full agentic run,
+# where a single long native command (a build, a test suite) can be silent
+# for many minutes.  model_config["timeout"] still overrides it.
+CLI_TASK_TIMEOUT_SECONDS = 3600
 CONTEXT_LIMIT_FRACTION = 0.9
 _CONTEXT_OVERFLOW_PHRASES = (
     "exceeds the context window",
@@ -129,6 +135,34 @@ class KISSAgent(Base):
         self.print_prompts = print_prompts
         self.verbose = verbose if verbose is not None else True
         self.set_printer(printer, verbose=self.verbose)
+        # Per-run state is reset BEFORE the model is built.  ``model()``
+        # raises for an unknown model name, and ``run()`` saves the
+        # trajectory from its ``finally``: with the previous run's
+        # ``run_start_timestamp`` and messages still in place, that save
+        # would land on the previous run's file and overwrite it.
+        self.is_agentic = is_agentic
+        self.max_steps = max_steps if max_steps is not None else 10000
+        self.max_budget = max_budget if max_budget is not None else 10.0
+        self.function_map: dict[str, Callable[..., Any]] = {}
+        self._cached_tools_schema: list[dict[str, Any]] | None = None
+        self.messages: list[dict[str, Any]] = []
+        self.step_count = 0
+        self.total_tokens_used = 0
+        self.context_tokens_used = 0
+        self._llm_hook_conversation_index = 0
+        self.budget_used = 0.0
+        # ``run_start_timestamp`` is the real wall clock: the saved record
+        # pairs it with ``run_end_timestamp``.  The trajectory FILENAME is
+        # keyed by (name, id, _trajectory_stamp) in whole seconds; two runs
+        # of one instance started in the same second would share a path
+        # and the later save would destroy the earlier record, so the
+        # stamp strictly increases per run while keeping the same format.
+        self.run_start_timestamp = int(time.time())
+        self._trajectory_stamp = max(self.run_start_timestamp, self._trajectory_stamp + 1)
+        self._reset_progress_trackers()
+        self._model_config: dict[str, Any] | None = model_config
+        self._fallback_used = False
+
         token_callback = self.printer.token_callback if self.printer else None
         thinking_callback = self.printer.thinking_callback if self.printer else None
 
@@ -150,21 +184,6 @@ class KISSAgent(Base):
                 token_callback=token_callback,
                 thinking_callback=thinking_callback,
             )
-        self.is_agentic = is_agentic
-        self.max_steps = max_steps if max_steps is not None else 10000
-        self.max_budget = max_budget if max_budget is not None else 10.0
-        self.function_map: dict[str, Callable[..., Any]] = {}
-        self._cached_tools_schema: list[dict[str, Any]] | None = None
-        self.messages: list[dict[str, Any]] = []
-        self.step_count = 0
-        self.total_tokens_used = 0
-        self.context_tokens_used = 0
-        self._llm_hook_conversation_index = 0
-        self.budget_used = 0.0
-        self.run_start_timestamp = int(time.time())
-        self._reset_progress_trackers()
-        self._model_config: dict[str, Any] | None = model_config
-        self._fallback_used = False
 
     def _reset_progress_trackers(self) -> None:
         """Clear the text-only-turn and stagnant-turn counters and last text.
@@ -225,6 +244,14 @@ class KISSAgent(Base):
         """
         Runs the agent's main ReAct loop to solve the task.
 
+        Run-to-completion models (``cc/*``, ``codex/*`` — see
+        ``Model.runs_task_to_completion``) skip the ReAct loop entirely:
+        the whole task, with *system_prompt* appended after
+        ``CLI_SYSTEM_PROMPT_HEADER``, is handed to the CLI agent in one
+        ``generate()`` call and its final output is returned (wrapped in
+        the registered ``finish`` contract).  *tools* are registered but
+        never exposed to such a model; it uses its own native tools.
+
         Args:
             model_name (str): The name of the model to use for the agent.
             prompt_template (str): The prompt template for the agent.
@@ -266,10 +293,10 @@ class KISSAgent(Base):
                 returned to the model as the tool's result instead. The hook
                 runs before (and its rejection takes precedence over) the
                 framework's :attr:`tool_call_guard`; an ``"OK"`` verdict does
-                not override a guard block. A
-                stagnation-triggered implicit finish also consults the hook
-                (with ``("finish", {})``) and is suppressed unless the hook
-                returns ``"OK"``. Default is None (no hook).
+                not override a guard block. An implicit finish (text-only
+                turns or stagnant identical tool calls) also consults the
+                hook (with ``("finish", {})``) and is suppressed unless the
+                hook returns ``"OK"``. Default is None (no hook).
 
         Returns:
             str: The result of the agent's task.
@@ -330,18 +357,29 @@ class KISSAgent(Base):
         self._add_functions(tools)
         self._cached_tools_schema = self.model._build_openai_tools_schema(self.function_map)
 
-    def _run_non_agentic(self) -> str:
-        """Run a single generation without tools.
+    def _generate_once(self) -> str:
+        """Run one model generation with token/budget accounting and transcript.
+
+        Shared by :meth:`_run_non_agentic` and
+        :meth:`_run_task_to_completion`, which differ only in how the
+        generated text becomes the run's result.
 
         Returns:
             str: The generated response text from the model.
         """
         start_timestamp = int(time.time())
-        self.step_count = 1
+        self.step_count += 1
 
         try:
             response_text, response = self.model.generate()
         except Exception as e:
+            # A run that failed mid-stream may still have observed
+            # billable usage (e.g. Claude Code's per-message deltas);
+            # account it before propagating so a timed-out whole-task run
+            # does not erase its known spend.
+            partial = self.model.take_partial_usage_response()
+            if partial is not None:
+                self._update_tokens_and_budget_from_response(partial)
             if _is_context_overflow_error(e):
                 raise ContextWindowExceededError(
                     f"Agent {self.name} exceeded the model's context window: {e}"
@@ -352,15 +390,106 @@ class KISSAgent(Base):
         self._add_message(
             "model", response_text + "\n```text\n" + usage_info_str + "\n```\n", start_timestamp
         )
-        if response_text and self.printer:
+        return str(response_text)
+
+    def _print_result(self, result: str) -> None:
+        """Emit *result* as the run's terminal ``result`` printer event."""
+        if result and self.printer:
             self.printer.print(
-                response_text,
+                result,
                 type="result",
                 step_count=self.step_count,
                 total_tokens=self.total_tokens_used,
                 cost=f"${self.budget_used:.4f}",
             )
-        return str(response_text)
+
+    def _run_non_agentic(self) -> str:
+        """Run a single generation without tools.
+
+        Returns:
+            str: The generated response text from the model.
+        """
+        response_text = self._generate_once()
+        self._print_result(response_text)
+        return response_text
+
+    def _run_task_to_completion(self) -> str:
+        """Hand the whole task to a run-to-completion model in one shot.
+
+        CLI-backed models (``cc/*``, ``codex/*``) are full coding agents
+        with their own native tools, so instead of the turn-by-turn KISS
+        tool loop the task is sent in a single ``generate()`` call — the
+        system prompt rides inside the prompt, appended to the task after
+        ``CLI_SYSTEM_PROMPT_HEADER`` (see ``CLITextModel._build_prompt``).
+        KISS tools are not exposed to the CLI; its final message becomes
+        the run's result, wrapped in the registered ``finish`` tool's
+        output contract when that tool follows the structured
+        ``summary_in_html`` signature (callers like RelentlessAgent and
+        ChatSorcarAgent parse the result as YAML).
+
+        Also reached when a tool (Sorcar's ``set_model``) swaps the live
+        model to a CLI agent mid-run: the conversation so far is then
+        flattened into the prompt as a ``[User]/[Assistant]/[Tool Result]``
+        transcript (see ``CLITextModel._build_prompt``), so the CLI
+        continues from the accumulated context.
+
+        Returns:
+            str: The task result in the registered finish contract.
+        """
+        if "timeout" not in self.model.model_config:
+            # A copy, not setdefault: the model may hold the caller's own
+            # config dict by reference, and callers rely on their configs
+            # never being mutated.
+            self.model.model_config = {
+                **self.model.model_config,
+                "timeout": CLI_TASK_TIMEOUT_SECONDS,
+            }
+        response_text = self._generate_once()
+        result = self._wrap_in_finish_contract(response_text)
+        self._print_result(result)
+        return result
+
+    def _wrap_in_finish_contract(self, text: str) -> str:
+        """Return *text* in the registered ``finish`` tool's output contract.
+
+        When the registered ``finish`` follows the structured
+        :func:`kiss.core.utils.finish` signature (has a ``summary_in_html``
+        parameter), *text* is wrapped as a successful, non-continuing
+        result so YAML-parsing callers keep working; otherwise *text* is
+        returned unchanged (the built-in ``finish(result)`` contract is
+        plain text).
+
+        Args:
+            text: The model's final output for the task.
+
+        Returns:
+            str: *text* in the registered finish contract.
+        """
+        finish_fn, params = self._registered_finish_and_params()
+        if "summary_in_html" in params:
+            assert finish_fn is not None
+            return str(finish_fn(success=True, is_continue=False, summary_in_html=text))
+        return text
+
+    def _registered_finish_and_params(
+        self,
+    ) -> tuple[Callable[..., Any] | None, set[str]]:
+        """Return the registered ``finish`` tool and its parameter names.
+
+        Returns:
+            tuple: ``(finish_fn, params)`` where *finish_fn* is the
+            registered ``finish`` callable (or ``None``) and *params* is
+            the set of its parameter names (empty when absent or when the
+            signature cannot be inspected).
+        """
+        finish_fn = self.function_map.get("finish")
+        params: set[str] = set()
+        if finish_fn is not None:
+            try:
+                params = set(inspect.signature(finish_fn).parameters)
+            except (TypeError, ValueError):  # pragma: no cover — exotic callable
+                params = set()
+        return finish_fn, params
 
     def _try_switch_to_fallback(
         self, reason: str = "a non-retryable error"
@@ -430,6 +559,12 @@ class KISSAgent(Base):
         # correct even if steps are ever counted from outside the loop,
         # and leaves exactly one message for "out of steps".
         while self.step_count < self.max_steps:
+            # Checked every iteration, not just before the loop: a tool
+            # (Sorcar's set_model) can swap the live model mid-run, and a
+            # switch INTO a CLI agent must hand it the remaining task in
+            # one shot rather than resume turn-by-turn tool prompting.
+            if self.model.runs_task_to_completion:
+                return self._run_task_to_completion()
             self.step_count += 1
             self._check_limits()
             try:
@@ -556,7 +691,21 @@ class KISSAgent(Base):
                         f"the model adapter. Try a different model or "
                         f"restart the task."
                     )
-                return str(response_text)
+                if self._implicit_finish_allowed():
+                    logger.info(
+                        "Implicit finish: agent=%s step=%d text-only response "
+                        "for %d consecutive turns",
+                        self.name,
+                        self.step_count,
+                        self._consecutive_no_tool_calls,
+                    )
+                    return self._implicit_finish_result(
+                        f"The model replied with text but no tool call for "
+                        f"{self._consecutive_no_tool_calls} consecutive turns "
+                        f"without calling finish.",
+                        success=True,
+                        is_continue=False,
+                    )
             retry_msg = (
                 "**Your response MUST have at least one function call. "
                 "Your response has 0 function calls. If you have completed "
@@ -641,17 +790,7 @@ class KISSAgent(Base):
 
         self.model.add_function_results_to_conversation_and_return(function_results)
 
-        if (
-            self._stagnant_call_turns >= STAGNANT_TURNS_FINISH
-            and (
-                self.tool_call_guard is None
-                or self.tool_call_guard("finish", {}) is None
-            )
-            and (
-                self.tool_call_hook is None
-                or self.tool_call_hook("finish", {}) == "OK"
-            )
-        ):
+        if self._stagnant_call_turns >= STAGNANT_TURNS_FINISH and self._implicit_finish_allowed():
             logger.info(
                 "Implicit finish: agent=%s step=%d repeated identical tool "
                 "call(s) with identical results for %d consecutive turns",
@@ -659,7 +798,13 @@ class KISSAgent(Base):
                 self.step_count,
                 self._stagnant_call_turns,
             )
-            return self._implicit_finish_result()
+            return self._implicit_finish_result(
+                f"The session stalled: the model repeated the identical tool "
+                f"call(s) with identical results for {self._stagnant_call_turns} "
+                f"consecutive turns without calling finish.",
+                success=False,
+                is_continue=True,
+            )
         if self._stagnant_call_turns >= STAGNANT_TURNS_REMINDER:
             reminder = (
                 f"**You have repeated the identical tool call(s) with "
@@ -674,40 +819,59 @@ class KISSAgent(Base):
             self._add_message("user", reminder)
         return None
 
-    def _implicit_finish_result(self) -> str:
-        """Build the result for a stagnation-triggered implicit finish.
+    def _implicit_finish_allowed(self) -> bool:
+        """Return whether an implicit finish may end the run right now.
+
+        Both implicit-finish nets — text-only turns and stagnant identical
+        tool calls — stand in for a ``finish`` call the model never made,
+        so they face the same two vetoes a real ``finish`` call would: the
+        framework's :attr:`tool_call_guard` (Sorcar blocks ``finish``
+        while a user follow-up is queued, so finishing anyway would drop
+        the follow-up) and the caller's :attr:`tool_call_hook` (anything
+        but ``"OK"`` suppresses the finish).  Both are consulted with
+        ``("finish", {})`` in the order a real call uses: the hook runs
+        first and, when it rejects, the guard is not consulted at all.
+
+        Returns:
+            bool: ``True`` when neither the hook nor the guard objects.
+        """
+        if self.tool_call_hook is not None and self.tool_call_hook("finish", {}) != "OK":
+            return False
+        return self.tool_call_guard is None or self.tool_call_guard("finish", {}) is None
+
+    def _implicit_finish_result(self, explanation: str, *, success: bool, is_continue: bool) -> str:
+        """Build the result for an implicit finish.
 
         Preserves the registered ``finish`` tool's output contract: callers
         like RelentlessAgent register the structured
         :func:`kiss.core.utils.finish` and parse the result as YAML, so
         returning raw status text would silently drop the
-        success/is_continue metadata (and could pass a stalled run off as
-        a success).  For that contract the session ends as
-        ``success=False, is_continue=True`` — an incomplete session the
-        caller may resume — with the stall explained in the summary.  The
-        built-in ``finish(result)`` contract (plain text) gets the model's
-        last status text, matching the existing text-only implicit finish.
+        success/is_continue metadata.  For that contract the caller states
+        the outcome: the text-only net is terminal (``success=True,
+        is_continue=False`` — the text IS the answer, so RelentlessAgent
+        must not resume a model that only ever talks), the stagnation net
+        is resumable (``success=False, is_continue=True``).  *explanation*
+        and the model's last status text form the summary.  The built-in
+        ``finish(result)`` contract (plain text) gets the model's last
+        status text.
+
+        Args:
+            explanation: Why the run is being finished implicitly (which
+                net fired and for how many turns).
+            success: ``success`` value for the structured contract.
+            is_continue: ``is_continue`` value for the structured contract.
 
         Returns:
             str: The implicit result in the registered finish contract.
         """
-        explanation = (
-            f"The session stalled: the model repeated the identical tool "
-            f"call(s) with identical results for {self._stagnant_call_turns} "
-            f"consecutive turns without calling finish."
-        )
         text = self._last_response_text.strip()
-        finish_fn = self.function_map.get("finish")
-        params: set[str] = set()
-        if finish_fn is not None:
-            try:
-                params = set(inspect.signature(finish_fn).parameters)
-            except (TypeError, ValueError):  # pragma: no cover — exotic callable
-                params = set()
+        finish_fn, params = self._registered_finish_and_params()
         if "summary_in_html" in params:
             summary = explanation + (f" Last status from the model: {text}" if text else "")
             assert finish_fn is not None
-            return str(finish_fn(success=False, is_continue=True, summary_in_html=summary))
+            return str(
+                finish_fn(success=success, is_continue=is_continue, summary_in_html=summary)
+            )
         return text or explanation
 
     def _execute_tool(

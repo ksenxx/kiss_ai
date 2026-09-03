@@ -4,9 +4,14 @@
 // add your name here
 
 import * as vscode from 'vscode';
+import {ToWebviewMessage} from './types';
 
 type Severity = 'info' | 'warning' | 'error';
-type NotificationPost = (message: Record<string, unknown>) => void;
+// The toast protocol is part of ToWebviewMessage, so a field renamed here
+// and not in media/main.js (or vice versa) fails to compile instead of
+// silently rendering an empty toast.
+type NotificationMessage = Extract<ToWebviewMessage, {type: 'notification'}>;
+type NotificationPost = (message: NotificationMessage) => void;
 
 let poster: NotificationPost | undefined;
 let nextId = 1;
