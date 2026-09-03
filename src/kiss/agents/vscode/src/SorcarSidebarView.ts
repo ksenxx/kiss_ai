@@ -1364,6 +1364,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     terminal.show();
     const escScript = scriptPath.replace(/'/g, "'\\''");
     const escDir = path.dirname(scriptPath).replace(/'/g, "'\\''");
+    // Pin KISS_HOME to the value THIS extension host resolved: install.sh
+    // writes the .extension-updated marker into $KISS_HOME, and the reload
+    // watcher (extension.ts) watches the extension host's $KISS_HOME.  The
+    // terminal's shell startup files could export a different KISS_HOME,
+    // and then the marker would land where no watcher looks — the update
+    // installs but this window never reloads.
+    const escKissHome = kissHomeDir().replace(/'/g, "'\\''");
     // audit0902-coverage:start
     // scripts/install.sh (the curl bootstrap) syncs the clone with origin
     // and hands over to ./install.sh -- exactly this preflight -- but
@@ -1382,7 +1389,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     if (fs.existsSync(bootstrap)) {
       const escBootstrap = bootstrap.replace(/'/g, "'\\''");
       terminal.sendText(
-        `cd '${escDir}'; KISS_NONINTERACTIVE=1 bash '${escBootstrap}'`,
+        `cd '${escDir}'; KISS_HOME='${escKissHome}' KISS_NONINTERACTIVE=1 ` +
+          `bash '${escBootstrap}'`,
       );
       return;
     }
@@ -1398,7 +1406,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // would otherwise ask its [Y/n] upgrade questions in this terminal
       // and skip the setsid detachment that protects the install from the
       // terminal-disposal ^C during step [5/5].
-      `bash '${escScript}' --non-interactive`,
+      `KISS_HOME='${escKissHome}' bash '${escScript}' --non-interactive`,
     ].join('; ');
     terminal.sendText(preflight);
   }
