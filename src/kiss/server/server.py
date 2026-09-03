@@ -384,6 +384,32 @@ class VSCodeServer(
         self._last_active_file: dict[str, str] = {}
         self._last_active_content: dict[str, str] = {}
 
+    def use_private_tab_registry(self, path: Path) -> None:
+        """Own a private tab registry at *path* instead of the canonical one.
+
+        The constructor binds every server to ``KISS_HOME/tabs.json``,
+        the registry all clients mirror.  That file has exactly ONE
+        owner — a registry loads it once and publishes its complete
+        in-memory list on every mutation, so a second live registry on
+        the same file overwrites the first one's tabs with its stale
+        snapshot.  An EMBEDDED server that shares the KISS home with
+        the canonical daemon (the channel launcher's private-UDS
+        daemon, ``_kiss_web_launcher._ensure_api_server``) therefore
+        keeps its transient tabs in a registry of its own.
+
+        Call before serving any client.  The chat views rebound from
+        the canonical registry in the constructor are replaced by
+        *path*'s, so a run on this server never continues a canonical
+        tab's chat.
+
+        Args:
+            path: The JSON file backing this server's registry (a
+                fresh or launcher-private location, never the
+                canonical daemon's ``tabs.json``).
+        """
+        self.tab_registry = TabRegistry(path)
+        self._tab_chat_views = dict(self.tab_registry.bindings())
+
     @staticmethod
     def _run_orphan_sweep(still_running: set[str], boot_ts: float) -> None:
         """Run the orphan-task recovery sweep (background thread body).
@@ -1013,7 +1039,10 @@ class VSCodeServer(
         When the tab has a pending worktree (no active task / merge),
         the worktree is released (just like starting a new task
         would) before removing the tab, so the worktree branch and
-        directory are not orphaned.
+        directory are not orphaned.  The state is claimed
+        (``is_merging``) for that disposal and unregistered only
+        afterwards — see :meth:`_teardown_tab_resources` for why the
+        order matters.
 
         Args:
             tab_id: The frontend tab identifier being dropped.
@@ -1024,11 +1053,12 @@ class VSCodeServer(
             is_subagent_tab = (
                 state is not None and state.is_subagent
             ) or "__sub_" in tab_id
-            if state is not None and state.busy():
+            if state is not None:
                 state.frontend_closed = True
-                busy = True
-            elif state is not None:
-                agent_state.unregister(state.task_id, state)
+                if state.busy():
+                    busy = True
+                else:
+                    state.is_merging = True
         # Sub-agent tabs are not in the registry, so their close
         # cannot mirror via ``tabs_state``: broadcast a canonical
         # close event instead.  Every client removes the tab, so a
@@ -1079,7 +1109,7 @@ class VSCodeServer(
                 return
             if state.busy():
                 return
-            agent_state.unregister(state.task_id, state)
+            state.is_merging = True
         self._teardown_tab_resources(tab_id, state)
 
     def _teardown_tab_resources(
@@ -1091,7 +1121,25 @@ class VSCodeServer(
 
         Shared cleanup tail used by both the immediate (:meth:`_close_tab`)
         and the deferred (:meth:`_dispose_if_closed`) disposal paths.
-        Caller must have already unregistered *state*.
+        The caller must have claimed *state* for this disposal by
+        setting ``is_merging`` under ``_state_lock`` (so a concurrent
+        close or lifecycle transition sees it busy and defers instead
+        of retiring the same worktree twice); the claim is released
+        and the state unregistered here.
+
+        The worktree is retired BEFORE the state leaves the registry.
+        ``JsonPrinter.live_worktree_branches`` — the reclaim exclusion
+        set every other task in this process builds — only sees
+        registered states, and ``reclaim_orphaned_worktrees`` exempts
+        this process's own pid from the owner protection, so an
+        unregistered agent's worktree is fair game for the next
+        reclaim.  When the retire keeps the worktree but cannot make
+        that decision durable (:meth:`WorktreeSorcarAgent.retire_for_disposal`
+        returns False: the ``kiss-preserve`` marker could not be
+        written), the state therefore stays registered — closed,
+        idle, still naming the branch — until a later disposal attempt
+        (another close, a chat rebind displacing the tab, the next
+        ``_dispose_if_closed``) writes the marker and drops it.
 
         Retiring the worktree here can strand work — a rejected
         pre-commit hook leaves the changes in the worktree directory,
@@ -1103,21 +1151,31 @@ class VSCodeServer(
 
         Args:
             tab_id: The frontend tab identifier being disposed.
-            state: The unregistered agent state, or ``None`` when the
-                tab never ran a task (e.g. ``closeTab`` for an
-                unknown id).
+            state: The claimed agent state, or ``None`` when the tab
+                never ran a task (e.g. ``closeTab`` for an unknown
+                id).
         """
         if state is not None:
-            try:
-                wt_agent = state.agent
-                if wt_agent is not None and getattr(wt_agent, "_wt_pending", False):
-                    if getattr(wt_agent, "_pending_review", False):
-                        wt_agent._preserve_pending_worktree_for_review()
-                    else:
-                        wt_agent._release_worktree()
+            wt_agent = state.agent
+            claim_retained = False
+            if wt_agent is not None and getattr(wt_agent, "_wt_pending", False):
+                try:
+                    claim_retained = not wt_agent.retire_for_disposal()
                     wt_agent._flush_warnings(self.printer)
-            except Exception:
-                logger.debug("Worktree release on tab close failed", exc_info=True)
+                except Exception:  # pragma: no cover — git/printer failure
+                    logger.debug("Worktree release on tab close failed", exc_info=True)
+                    claim_retained = bool(getattr(wt_agent, "_wt_pending", False))
+            with self._state_lock:
+                state.is_merging = False
+                if claim_retained:
+                    logger.warning(
+                        "Tab %s closed but its worktree's keep-for-review "
+                        "decision is not durable yet; keeping its state "
+                        "registered so the worktree stays protected",
+                        tab_id,
+                    )
+                else:
+                    agent_state.unregister(state.task_id, state)
         self._printer_cleanup_tab(tab_id)
         with self._state_lock:
             self._tab_chat_views.pop(tab_id, None)

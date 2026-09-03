@@ -46,6 +46,10 @@ def _anthropic_auth_error(msg: str = "invalid x-api-key") -> AnthropicAuthError:
 
 
 class _RetryableErrorModel:
+    # Mirrors Model.runs_task_to_completion: the agentic loop consults it
+    # every iteration to route CLI-agent models to the one-shot path.
+    runs_task_to_completion = False
+
     def __init__(self, failures: int) -> None:
         self.failures = failures
         self.calls = 0

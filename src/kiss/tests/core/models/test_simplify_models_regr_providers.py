@@ -47,7 +47,11 @@ from kiss.core.models.gemini_model import (
     _media_block_to_part,
     _tool_result_response_dict,
 )
-from kiss.core.models.model import Attachment, encode_binary_attachment
+from kiss.core.models.model import (
+    CLI_SYSTEM_PROMPT_HEADER,
+    Attachment,
+    encode_binary_attachment,
+)
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\nfakepngdata"
@@ -696,13 +700,15 @@ class TestCodexModel:
         m.conversation.append({"role": "assistant", "content": "a1"})
         m.conversation.append({"role": "tool", "content": "t1"})
         assert m._build_prompt() == (
-            "[System]: SYS\n\n[User]: q1\n\n[Assistant]: a1\n\n[Tool Result]: t1"
+            "[User]: q1\n\n[Assistant]: a1\n\n[Tool Result]: t1"
+            + CLI_SYSTEM_PROMPT_HEADER
+            + "SYS"
         )
 
     def test_build_prompt_single_turn_with_system(self) -> None:
         m = CodexModel("codex/gpt-5-codex", model_config={"system_instruction": "SYS"})
         m.initialize("q1")
-        assert m._build_prompt() == "[System]: SYS\n\n[User]: q1"
+        assert m._build_prompt() == "q1" + CLI_SYSTEM_PROMPT_HEADER + "SYS"
 
     def test_find_in_candidate_paths(self, tmp_path) -> None:
         exe = tmp_path / "codex"

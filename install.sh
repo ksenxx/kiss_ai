@@ -233,6 +233,62 @@ fi
 # masked and the container ended up shipping the stale committed VSIX.
 set -eo pipefail
 
+# ---------------------------------------------------------------------------
+# Cross-process update lock — the same lock as scripts/install.sh.
+#
+# Two installers on one checkout (the kiss-web daemon's update endpoint runs
+# this script directly with --non-interactive, the VS Code Update button in
+# another window runs it too) race each other's git reset, npm build and
+# extension install.  scripts/install.sh already holds the lock for its
+# whole lifetime and exports KISS_UPDATE_LOCK_HELD=1 before handing over to
+# this script; callers that run this script directly get the same
+# protection here.
+#
+# The lock is a kernel advisory lock (flock(2)) on $HOME/.kiss/.update.lock
+# -- $HOME, not $KISS_HOME, because the resources it protects (this
+# checkout under ~/.kiss/kiss_ai, the global extension install) follow
+# $HOME.  Bash keeps the file open on fd 9 for its whole lifetime; perl
+# (already required by the re-exec above; flock(1) is not on macOS) locks
+# that very open file description, so the lock persists after perl exits
+# and the kernel drops it when this process dies, however it dies -- no
+# EXIT trap, no stale lock to break.  The pid in the file only feeds the
+# refusal message.  fd 9 must not leak into long-lived children (VS Code,
+# anything a build step leaves behind): every launch line below closes it
+# with ``9>&-``.
+#
+# Placement matters: this block sits AFTER the new-session re-exec above, so
+# the lock is taken (and its pid recorded) by the detached bash that does
+# the work — the parent ``exec``s perl and never reaches this line — and
+# after ``set -eo pipefail`` because the tests that exercise the re-exec
+# block paste everything up to that line into a harness run under the
+# real ``$HOME``, which must never take a real lock.
+# ---------------------------------------------------------------------------
+# BEGIN: kiss-update-lock
+_kiss_lock_file="$HOME/.kiss/.update.lock"
+
+acquire_update_lock() {
+    local holder attempt
+    mkdir -p "$HOME/.kiss"
+    exec 9>>"$_kiss_lock_file"
+    if ! perl -e 'use Fcntl qw(:flock); open(my $f, ">&=", 9) or exit 2; exit(flock($f, LOCK_EX | LOCK_NB) ? 0 : 1)'; then
+        # The winner writes its pid right after locking; give it a moment.
+        for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            holder=$(cat "$_kiss_lock_file" 2>/dev/null || true)
+            [ -n "$holder" ] && break
+            sleep 0.05
+        done
+        echo "another KISS update is already running (pid ${holder:-unknown}); exiting." >&2
+        exit 1
+    fi
+    echo "$$" > "$_kiss_lock_file"
+    export KISS_UPDATE_LOCK_HELD=1
+}
+
+if [ -z "${KISS_UPDATE_LOCK_HELD:-}" ]; then
+    acquire_update_lock
+fi
+# END: kiss-update-lock
+
 # Capture the user's working directory *before* any `cd` so that VS Code can
 # later be launched with this directory as the workspace root.  The agents
 # spawned inside VS Code default their PWD to the workspace root (see
@@ -379,7 +435,7 @@ run_with_heartbeat() {
     # them, which was the actual root cause of the
     # "Copying source files..." abort.  The install.sh-level trap above
     # remains the only way to actually stop the build (double-Ctrl+C).
-    ( trap '' INT TERM; exec "$@" ) &
+    ( trap '' INT TERM; exec "$@" ) 9>&- &
     local cmd_pid=$!
     CURRENT_CMD_PID=$cmd_pid
     # Heartbeat loop runs in its own subshell so a failing ``sleep`` (rare)
@@ -397,7 +453,7 @@ run_with_heartbeat() {
                 printf "   … %s still running (%ds elapsed)\n" "$label" "$elapsed"
             fi
         done
-    ) &
+    ) 9>&- &
     local hb_pid=$!
     # Use ``+e`` so a non-zero exit from the wrapped command is returned to
     # the caller instead of aborting the whole script — callers (e.g. the
@@ -752,11 +808,11 @@ launch_vscode() {
     # spawned inside the editor inherit it as their PWD.
     case "$OS" in
         Darwin)
-            if open -a "Visual Studio Code" "$USER_PWD" >/dev/null 2>&1; then
+            if open -a "Visual Studio Code" "$USER_PWD" >/dev/null 2>&1 9>&-; then
                 echo "Launched VS Code via 'open -a' with workspace $USER_PWD."
                 return 0
             fi
-            if [ -d "/Applications/Visual Studio Code.app" ] && open -a "/Applications/Visual Studio Code.app" "$USER_PWD" >/dev/null 2>&1; then
+            if [ -d "/Applications/Visual Studio Code.app" ] && open -a "/Applications/Visual Studio Code.app" "$USER_PWD" >/dev/null 2>&1 9>&-; then
                 echo "Launched VS Code from /Applications with workspace $USER_PWD."
                 return 0
             fi
@@ -770,7 +826,7 @@ launch_vscode() {
                 "/snap/bin/code" \
                 "/usr/share/code/code"; do
                 if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-                    (nohup "$candidate" "$USER_PWD" >/dev/null 2>&1 &)
+                    (nohup "$candidate" "$USER_PWD" >/dev/null 2>&1 9>&- &)
                     echo "Launched VS Code from $candidate with workspace $USER_PWD."
                     return 0
                 fi
@@ -779,7 +835,7 @@ launch_vscode() {
     esac
 
     if find_code_cli && [ -n "$CODE_CLI" ]; then
-        (nohup "$CODE_CLI" "$USER_PWD" >/dev/null 2>&1 &)
+        (nohup "$CODE_CLI" "$USER_PWD" >/dev/null 2>&1 9>&- &)
         echo "Launched VS Code from $CODE_CLI with workspace $USER_PWD."
         return 0
     fi
@@ -852,6 +908,88 @@ install_repo_script_launcher() {
     } > "$BIN_DIR/$name"
     chmod +x "$BIN_DIR/$name"
     echo "   Installed $BIN_DIR/$name -> $target"
+}
+
+# Keep the freshly built ``kiss-sorcar.vsix`` from dirtying git, in both
+# kinds of checkout this script runs in ($1 = repo root):
+#
+# * Public ``kiss_ai`` clones: every release commit deliberately SHIPS the
+#   prebuilt VSIX as a tracked file (``tree_with_vsix`` in scripts/release.sh)
+#   so docker/code-server installs work without npm.  The build step above
+#   just overwrote that tracked file, so without countermeasures ``git
+#   status`` reports it modified and the auto-commit / worktree flows would
+#   commit the multi-MB binary on every task.  Remedy: put HEAD's copy back
+#   into BOTH the index and the working tree (``git checkout HEAD --``).
+#   By the time this guard runs the freshly built VSIX has already been
+#   installed into VS Code, so replacing it on disk with the release copy
+#   loses nothing — manual ``code --install-extension`` retries and
+#   docker-startup.sh then use the release-shipped bytes, and the repo is
+#   left byte-for-byte clean so the Update button's later ``git stash`` /
+#   ``git reset --hard @{upstream}`` preflight and ``git worktree add``
+#   never trip over a dirty or skip-worktree-pinned entry.  A single
+#   checkout also self-heals every broken index state this file can get
+#   into: a staged modification, a staged ``git rm --cached`` deletion
+#   (the old error message told users to run exactly that), and unmerged
+#   stages left by a conflicted ``git stash pop``.  Failures here only
+#   leave the file dirty for the preflight stash to handle, so they warn
+#   instead of aborting an otherwise finished install.
+#
+# * The development repo, where no commit contains the VSIX (it is matched
+#   by ``*.vsix`` in .gitignore): the file being tracked can only mean an
+#   accidental ``git add -f``, which the auto-commit flow would turn into a
+#   committed binary.  That remains a hard error (exit 1) telling the user
+#   how to untrack it.  The locally built VSIX stays untracked on disk for
+#   ``code --install-extension`` retries and docker-startup.sh.
+guard_vsix_tracking() {
+    local project_dir="$1"
+    local vsix_rel="src/kiss/agents/vscode/kiss-sorcar.vsix"
+    if git -C "$project_dir" rev-parse --verify --quiet "HEAD:$vsix_rel" >/dev/null; then
+        # Public kiss_ai clone: the release ships the VSIX tracked, by design.
+        # Clear any stale skip-worktree pin first: a pinned entry whose blob
+        # changes upstream makes ``git reset --hard @{upstream}`` fail with
+        # "Entry ... not uptodate", bricking every later update.
+        git -C "$project_dir" update-index --no-skip-worktree -- "$vsix_rel" 2>/dev/null || true
+        # Rewrite the index entry to HEAD's mode+blob via --index-info: the
+        # mode-0 line drops every stage of the path (a plain entry, a staged
+        # modification or deletion, and unmerged stages 1-3 alike), then the
+        # stage-0 line re-registers HEAD's blob.  ``git checkout HEAD --`` is
+        # NOT equivalent: it silently skips an unmerged entry whose stage-2
+        # blob already matches HEAD.
+        local mode blob zero
+        read -r mode _ blob _ < <(git -C "$project_dir" ls-tree HEAD -- "$vsix_rel") || true
+        zero="${blob//?/0}"
+        printf '0 %s\t%s\n%s %s 0\t%s\n' "$zero" "$vsix_rel" "$mode" "$blob" "$vsix_rel" |
+            git -C "$project_dir" update-index --index-info 2>/dev/null || true
+        # Write the release blob back to the working tree over the local
+        # rebuild.
+        git -C "$project_dir" checkout-index -q -f -- "$vsix_rel" 2>/dev/null || true
+        # Verify the result instead of trusting the exit codes above: only a
+        # path that is byte-for-byte clean keeps later ``git stash`` /
+        # ``git reset --hard`` preflights and worktree flows working.  The
+        # ``ls-files -v`` check must report a plain tracked entry ("H", not a
+        # skip-worktree "S"): a surviving pin hides a dirty file from ``git
+        # status`` while still bricking the next ``reset --hard``, and it
+        # also makes this verification fail honestly when the status command
+        # itself errors out (an empty capture alone would look clean).
+        local dirty
+        if dirty=$(git -C "$project_dir" status --porcelain -- "$vsix_rel" 2>/dev/null) &&
+            [ -z "$dirty" ] &&
+            [ "$(git -C "$project_dir" ls-files -v -- "$vsix_rel" 2>/dev/null)" = "H $vsix_rel" ]; then
+            echo "   Restored release-shipped $vsix_rel in git index and working tree"
+            echo "   (the freshly built VSIX was already installed into VS Code)."
+        else
+            echo "   WARNING: could not restore $vsix_rel from HEAD; the locally" >&2
+            echo "   rebuilt VSIX may show up as a git modification." >&2
+        fi
+        return 0
+    fi
+    if ! git -C "$project_dir" ls-files --error-unmatch "$vsix_rel" &>/dev/null; then
+        return 0  # untracked (development repo, healthy state) — nothing to do
+    fi
+    echo "   ERROR: $vsix_rel is tracked by git but must remain ignored." >&2
+    echo "   Run: git -C \"$project_dir\" rm --cached \"$vsix_rel\"" >&2
+    echo "   and ensure \`*.vsix\` stays in .gitignore." >&2
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -1034,6 +1172,9 @@ update_repo() {
         echo "   Repository is dirty — stashing local changes..."
         if git -C "$PROJECT_DIR" stash push --include-untracked -m "install.sh auto-stash"; then
             STASHED_CHANGES=1
+            # The update lock (see the kiss-update-lock block) is a
+            # kernel lock the process's death releases, so this may be
+            # the script's only EXIT trap.
             trap restore_stashed_changes EXIT
         else
             echo "   WARNING: git stash failed; continuing without pulling."
@@ -1097,7 +1238,8 @@ update_repo() {
 # dead pipe — SIGPIPE, script killed with rc=141 and an empty log,
 # defeating the trap fix above.  Ignored dispositions survive exec, so
 # tee inherits SIG_IGN and keeps draining until bash exits and closes
-# the pipe.
+# the pipe.  tee inherits the update-lock fd 9 as well, harmlessly: its
+# lifetime ends with the pipe, i.e. with this shell.
 exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
 
 {
@@ -1314,26 +1456,18 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     echo "         Follow progress with:"
     echo "             tail -f \"$LOG_FILE\""
     echo "         Completion is marked by the line: === Source bootstrap complete ==="
-    if ! "$CODE_CLI" --install-extension "$VSIX" --force 2>&1; then
+    if ! "$CODE_CLI" --install-extension "$VSIX" --force 2>&1 9>&-; then
         echo "   ERROR: '$CODE_CLI --install-extension' failed; the update was not applied."
         exit 1
     fi
     echo "   Extension installed into VS Code"
-    # ``kiss-sorcar.vsix`` is a build artifact and MUST NOT be committed
-    # to git — it is ~2 MB of binary that bloats the history and is
-    # rebuilt deterministically by the ``npm run package`` step above.
-    # The file is matched by ``*.vsix`` in the repo's ``.gitignore`` so
-    # ``git status`` never lists it and the auto-commit / ``git add .``
-    # flows cannot pick it up.  We deliberately do NOT delete the VSIX
-    # here so that subsequent ``code --install-extension`` invocations
-    # (e.g. a manual retry) can reuse the freshly built artifact without
-    # rebuilding it.  As a defence-in-depth check, refuse to continue if
-    # the VSIX has somehow become tracked again (e.g. a ``git add -f``
-    # by mistake) — that would cause the worktree flow to commit it.
-    if git -C "$PROJECT_DIR" ls-files --error-unmatch "$VSIX" &>/dev/null; then
-        echo "   ERROR: $VSIX is tracked by git but must remain ignored." >&2
-        echo "   Run: git -C \"$PROJECT_DIR\" rm --cached \"$VSIX\"" >&2
-        echo "   and ensure ``*.vsix`` stays in .gitignore." >&2
+    # Keep the freshly built VSIX from dirtying git (see guard_vsix_tracking
+    # for the full rationale).  Public kiss_ai clones ship the VSIX as a
+    # tracked file in every release commit, so "tracked" is a healthy state
+    # there and the guard restores HEAD's copy instead of failing; in the
+    # development repo a tracked VSIX means an accidental ``git add -f``
+    # and remains a hard error.
+    if ! guard_vsix_tracking "$PROJECT_DIR"; then
         exit 1
     fi
 

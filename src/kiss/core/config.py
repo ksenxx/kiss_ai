@@ -153,8 +153,10 @@ class Config(BaseModel):
             "default for channel-agent command-line runs (and kept in sync from "
             "the VS Code settings; daemon-launched tasks read max_budget from "
             "the VS Code config directly); KISSAgent and RelentlessAgent do NOT "
-            "consult this field — they use their own defaults (10.0 and 200.0 "
-            "USD respectively) unless max_budget is passed to run() explicitly."
+            "consult this field — they use their own defaults (10.0 USD and "
+            "kiss.agents.sorcar.relentless_agent.DEFAULT_MAX_BUDGET, 200.0 USD, "
+            "respectively; that is a different constant from this module's "
+            "DEFAULT_MAX_BUDGET) unless max_budget is passed to run() explicitly."
         ),
     )
 

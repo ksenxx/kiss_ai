@@ -27,6 +27,7 @@ from kiss.core.kiss_error import (
     KISSError,
 )
 from kiss.core.models.model import Attachment
+from kiss.core.models.model_info import model_runs_task_to_completion
 from kiss.core.printer import Printer
 from kiss.core.utils import _coerce_bool as _str_to_bool
 from kiss.core.utils import finish, substitute_prompt_args
@@ -337,6 +338,25 @@ class RelentlessAgent(Base):
         )
         return TASK_SETTINGS_HEADER + lines
 
+    def _executor_model_config(self) -> dict[str, Any]:
+        """Return the model config for a sub-agent, carrying the work dir.
+
+        A copy of :attr:`model_config` with ``work_dir`` defaulted to this
+        agent's work directory.  ``work_dir`` is a framework-only config
+        key: CLI-backed run-to-completion models (``cc/*``, ``codex/*``)
+        launch their subprocess with it as the cwd — otherwise the CLI's
+        native tools would act on the daemon's cwd instead of the task's
+        (possibly worktree-redirected) work tree — and API adapters ignore
+        it.  Sorcar's ``set_model`` copies the live model's config on a
+        switch, so the work dir survives mid-run model changes.
+
+        Returns:
+            dict: The per-executor model config.
+        """
+        config: dict[str, Any] = dict(self.model_config or {})
+        config.setdefault("work_dir", self.work_dir)
+        return config
+
     def perform_task(
         self,
         tools: list[Callable[..., Any]],
@@ -376,7 +396,12 @@ class RelentlessAgent(Base):
         important_instructions += self._task_settings_section()
         sorcar_md = config_module.kiss_home() / "SORCAR.md"
         if sorcar_md.is_file():
-            important_instructions += "\n" + sorcar_md.read_text()
+            # User-authored: a cp1252 byte from a Windows editor must
+            # not abort every task before its first model call (the
+            # same tolerance ``skills.parse_frontmatter`` gives SKILL.md).
+            important_instructions += "\n" + sorcar_md.read_text(
+                encoding="utf-8", errors="replace",
+            )
         system_prompt = self.system_prompt + important_instructions
         for session in range(self.max_sub_sessions):
             remaining_budget = self.max_budget - self.budget_used
@@ -417,7 +442,7 @@ class RelentlessAgent(Base):
                     tools=all_tools,
                     max_steps=self.max_steps,
                     max_budget=remaining_budget,
-                    model_config=self.model_config,
+                    model_config=self._executor_model_config(),
                     printer=self.printer,
                     verbose=self.verbose,
                     attachments=attachments if session == 0 else None,
@@ -573,7 +598,7 @@ class RelentlessAgent(Base):
                     },
                     max_steps=self.max_steps,
                     max_budget=summarizer_budget,
-                    model_config=self.model_config,
+                    model_config=self._executor_model_config(),
                     printer=self.printer,
                     verbose=self.verbose,
                     print_prompts=False,
@@ -719,6 +744,18 @@ class RelentlessAgent(Base):
         self.tool_call_hook = tool_call_hook
         args = arguments or {}
         self.task_description = substitute_prompt_args(prompt_template, args)
+
+        if self.docker_image and model_runs_task_to_completion(self.model_name):
+            # A run-to-completion CLI agent executes its native tools
+            # directly on the host, so the container the caller asked for
+            # would be silently bypassed — refuse rather than break the
+            # isolation contract.
+            raise KISSError(
+                f"Model {self.model_name} is a CLI agent that runs natively on "
+                f"the host and cannot honor docker_image="
+                f"{self.docker_image!r} isolation. Use an API model with "
+                f"docker_image, or drop docker_image for CLI models."
+            )
 
         if self.docker_image:
             from kiss.agents.sorcar.docker_manager import DockerManager

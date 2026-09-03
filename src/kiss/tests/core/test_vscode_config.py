@@ -296,6 +296,134 @@ class TestApiKeyShell:
         assert os.environ["ANTHROPIC_API_KEY"] == "ant-key"
 
 
+class TestApiKeyDelete:
+    """An empty value passed to ``save_api_key_to_shell`` deletes the key."""
+
+    def test_delete_removes_zsh_line_env_and_config(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Delete removes the export line, os.environ, and DEFAULT_CONFIG."""
+        from kiss.core import config as config_module
+
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        save_api_key_to_shell("GEMINI_API_KEY", "gem-key-del")
+        rc = Path.home() / ".zshrc"
+        assert "gem-key-del" in rc.read_text()
+
+        save_api_key_to_shell("GEMINI_API_KEY", "")
+        content = rc.read_text()
+        assert "gem-key-del" not in content
+        assert "GEMINI_API_KEY" not in content
+        assert "GEMINI_API_KEY" not in os.environ
+        assert config_module.DEFAULT_CONFIG.GEMINI_API_KEY == ""
+
+    def test_delete_removes_fish_line(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("SHELL", "/usr/bin/fish")
+        save_api_key_to_shell("OPENAI_API_KEY", "fish-key-del")
+        rc = Path.home() / ".config" / "fish" / "config.fish"
+        assert "fish-key-del" in rc.read_text()
+
+        save_api_key_to_shell("OPENAI_API_KEY", "")
+        assert "OPENAI_API_KEY" not in rc.read_text()
+        assert "OPENAI_API_KEY" not in os.environ
+
+    def test_delete_matches_whitespace_variant_lines(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A hand-written ``export<TAB>KEY=...`` line is also removed.
+
+        A literal-prefix match would leave the line behind, so a fresh
+        shell would silently restore the key the panel just deleted.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        rc = Path.home() / ".zshrc"
+        rc.write_text("export\tOPENAI_API_KEY=tab-separated\n# keep me\n")
+        save_api_key_to_shell("OPENAI_API_KEY", "")
+        content = rc.read_text()
+        assert "OPENAI_API_KEY" not in content
+        assert "# keep me" in content
+
+    def test_replace_matches_whitespace_variant_lines(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Save replaces a ``export<TAB>KEY=...`` line instead of duplicating."""
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        rc = Path.home() / ".zshrc"
+        rc.write_text("export\tOPENAI_API_KEY=tab-old\n")
+        save_api_key_to_shell("OPENAI_API_KEY", "new-val")
+        content = rc.read_text()
+        assert "tab-old" not in content
+        assert content.count("OPENAI_API_KEY") == 1
+        assert f"export OPENAI_API_KEY={shlex.quote('new-val')}" in content
+
+    def test_delete_preserves_prefixed_key_names(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Deleting KEY never touches KEY_EXTRA (POSIX and fish)."""
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        rc = Path.home() / ".zshrc"
+        rc.write_text(
+            "export GEMINI_API_KEY=short\n"
+            "export GEMINI_API_KEY_EXTRA=longer\n",
+        )
+        save_api_key_to_shell("GEMINI_API_KEY", "")
+        assert rc.read_text() == "export GEMINI_API_KEY_EXTRA=longer\n"
+
+        monkeypatch.setenv("SHELL", "/usr/bin/fish")
+        fish_rc = Path.home() / ".config" / "fish" / "config.fish"
+        fish_rc.parent.mkdir(parents=True, exist_ok=True)
+        fish_rc.write_text(
+            "set -gx GEMINI_API_KEY short\n"
+            "set -gx GEMINI_API_KEY_EXTRA longer\n",
+        )
+        save_api_key_to_shell("GEMINI_API_KEY", "")
+        assert fish_rc.read_text() == "set -gx GEMINI_API_KEY_EXTRA longer\n"
+
+    def test_delete_missing_rc_creates_no_rc(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Deleting with no RC file present must not create one."""
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("TOGETHER_API_KEY", "from-elsewhere")
+        rc = Path.home() / ".zshrc"
+        assert not rc.exists()
+        save_api_key_to_shell("TOGETHER_API_KEY", "")
+        assert not rc.exists()
+        assert "TOGETHER_API_KEY" not in os.environ
+
+    def test_delete_no_matching_line_keeps_rc_intact(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No-match delete leaves the RC byte-identical, env still popped."""
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("ZAI_API_KEY", "env-only")
+        rc = Path.home() / ".zshrc"
+        rc.write_text("# unrelated\nexport OTHER_VAR=1\n")
+        save_api_key_to_shell("ZAI_API_KEY", "")
+        assert rc.read_text() == "# unrelated\nexport OTHER_VAR=1\n"
+        assert "ZAI_API_KEY" not in os.environ
+
+    def test_multiline_value_refused(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A value with an embedded newline is refused outright.
+
+        ``shlex.quote`` would write a valid multiline assignment, but
+        the line-oriented replace/delete would later remove only its
+        first physical line and corrupt the RC with an unterminated
+        quote — so the save never happens.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        rc = Path.home() / ".zshrc"
+        rc.write_text("# untouched\n")
+        save_api_key_to_shell("MOONSHOT_API_KEY", "line1\nline2")
+        assert rc.read_text() == "# untouched\n"
+        assert "MOONSHOT_API_KEY" not in os.environ
+
+
 class TestApplyConfig:
     """Test config application to runtime."""
 

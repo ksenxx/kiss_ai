@@ -52,14 +52,13 @@ class TestApiKeySetupAndDeletion:
 
         monkeypatch.setattr(config_module, "DEFAULT_CONFIG", config_module.DEFAULT_CONFIG)
 
-    def test_delete_key_by_saving_empty(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Saving an empty key via config panel skips writing to RC.
+    def test_delete_key_by_saving_empty(self) -> None:
+        """Saving an empty key via the config panel deletes it everywhere.
 
-        The VSCodeServer saveConfig handler skips empty keys, so
-        after the key is removed from the env and not written to RC,
-        it is effectively deleted.
+        The VSCodeServer saveConfig handler forwards empty values to
+        ``save_api_key_to_shell``, which treats them as a delete: the
+        ``export`` line is removed from the shell RC file and the
+        variable is dropped from ``os.environ``.
         """
         from kiss.server.server import VSCodeServer
 
@@ -74,10 +73,12 @@ class TestApiKeySetupAndDeletion:
         rc = Path.home() / ".zshrc"
         assert "ant-key-to-delete" in rc.read_text()
 
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         server._handle_command({
             "type": "saveConfig",
             "config": {"max_budget": 100},
             "apiKeys": {"ANTHROPIC_API_KEY": ""},
         })
         assert os.environ.get("ANTHROPIC_API_KEY") is None
+        content = rc.read_text()
+        assert "ant-key-to-delete" not in content
+        assert "ANTHROPIC_API_KEY" not in content

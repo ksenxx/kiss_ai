@@ -80,11 +80,17 @@ def _plant_orphan_worktree(repo: Path, branch: str) -> Path:
 
     Simulates a Sorcar process killed mid-task: the worktree is
     registered, ``kiss-original`` config is saved, and one staged
-    file awaits reclaim.  No owner pid is recorded, so any process
-    may reclaim it.
+    file awaits reclaim.  The owner pid ``create`` stamps (this live
+    test process) is removed so the worktree looks like one left
+    behind by a dead process and any process may reclaim it.
     """
     wt_dir = repo / ".kiss-worktrees" / branch.replace("/", "_")
     assert GitWorktreeOps.create(repo, branch, wt_dir)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "--unset",
+         f"branch.{branch}.kiss-owner-pid"],
+        capture_output=True, check=True,
+    )
     assert GitWorktreeOps.save_original_branch(repo, branch, "main")
     (wt_dir / "orphan_output.txt").write_text("the orphan's work\n")
     GitWorktreeOps.stage_all(wt_dir)

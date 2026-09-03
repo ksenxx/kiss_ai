@@ -22,14 +22,11 @@ from pathlib import Path
 from typing import Any
 
 try:
-    import fcntl
-except ImportError:  # pragma: no cover — Windows has no fcntl
-    fcntl = None  # type: ignore[assignment]
-try:
     import msvcrt  # type: ignore[import-not-found]
 except ImportError:  # POSIX has no msvcrt
     msvcrt = None  # type: ignore[assignment]
 
+from kiss.agents.sorcar._concurrency import _fcntl as fcntl
 from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SLUG_PREFIX,
     _WORKTREE_SUBDIR,

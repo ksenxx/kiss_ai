@@ -76,11 +76,12 @@ PARAM_FIELDS: tuple[tuple[str, str], ...] = (
 
 Each entry maps a :func:`kiss.server.sorcar.run` parameter name (the
 ``X`` of the agent script's optional ``get_X()`` getter) to the ``run``
-command wire field it overrides.  ``timeout`` and ``sock_path`` are
-absent by design: they are client-transport parameters — the script
-only runs on the daemon that ``sock_path`` selects, and ``timeout``
-bounds the client's local wait — so a daemon-side getter could never
-take effect.  ``scope_work_dir`` (wire field ``tabScopeWorkDir``) is
+command wire field it overrides.  ``timeout``, ``stop_on_timeout``,
+and ``sock_path`` are absent by design: they are client-transport
+parameters — the script only runs on the daemon that ``sock_path``
+selects, ``timeout`` bounds the client's local wait, and
+``stop_on_timeout`` picks the client's timeout behavior — so a
+daemon-side getter could never take effect.  ``scope_work_dir`` (wire field ``tabScopeWorkDir``) is
 absent by design too: it is the CALLING client's tab-bar visibility
 scope, which the dispatched script must not be able to repoint at
 another workspace — and its absence here is what lets the scope

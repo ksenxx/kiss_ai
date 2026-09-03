@@ -185,6 +185,27 @@ def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _read_stored_config(cfg_path: Path) -> dict[str, Any]:
+    """Return the JSON object stored in *cfg_path*, or ``{}`` if unusable.
+
+    The single reader behind :func:`load_config` and :func:`save_config`,
+    so both agree on what "unreadable" means: a missing file, an
+    ``OSError``, or any ``ValueError`` from decoding — invalid JSON
+    (``json.JSONDecodeError``) and invalid UTF-8 (``UnicodeDecodeError``)
+    alike.  The file is user-editable, so both kinds of junk happen; a
+    top-level value that is not a JSON object is ignored too.
+    """
+    if not cfg_path.exists():
+        return {}
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            stored = json.load(f)
+    except (ValueError, OSError):
+        logger.debug("Failed to read config %s", cfg_path, exc_info=True)
+        return {}
+    return stored if isinstance(stored, dict) else {}
+
+
 def load_config() -> dict[str, Any]:
     """Load configuration from ``~/.kiss/config.json``.
 
@@ -194,15 +215,7 @@ def load_config() -> dict[str, Any]:
     value cannot break downstream consumers.
     """
     result = dict(DEFAULTS)
-    cfg_path = _config_path()
-    if cfg_path.exists():
-        try:
-            with open(cfg_path, encoding="utf-8") as f:
-                stored = json.load(f)
-            if isinstance(stored, dict):
-                result.update(stored)
-        except (json.JSONDecodeError, OSError):
-            logger.debug("Failed to read config", exc_info=True)
+    result.update(_read_stored_config(_config_path()))
     return sanitize_config(result)
 
 
@@ -237,15 +250,7 @@ def save_config(data: dict[str, Any]) -> None:
     ):
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
-            existing: dict[str, Any] = {}
-            if cfg_path.exists():
-                try:
-                    with open(cfg_path, encoding="utf-8") as f:
-                        stored = json.load(f)
-                    if isinstance(stored, dict):
-                        existing = stored
-                except (json.JSONDecodeError, OSError):
-                    pass
+            existing = _read_stored_config(cfg_path)
             for k, v in data.items():
                 if k not in API_KEY_ENV_VARS:
                     existing[k] = v
@@ -321,11 +326,48 @@ def _shell_rc_path(shell: str) -> Path:
     return Path.home() / ".bashrc"
 
 
+def _rc_line_sets_key(line: str, shell: str, key_name: str) -> bool:
+    """Return True if the RC *line* assigns the variable *key_name*.
+
+    Recognizes the canonical lines this module writes (``export KEY=…``
+    for POSIX shells, ``set -gx KEY …`` for fish) plus valid
+    horizontal-whitespace variants a user may have hand-written, such
+    as ``export<TAB>KEY=…``.  A literal-prefix match would skip such a
+    line, so a delete would leave it behind and a fresh shell would
+    silently restore the key the settings panel just removed.  The
+    trailing ``=`` (POSIX) / whitespace (fish) anchors the match so
+    ``KEY`` never matches ``KEY_EXTRA``.
+
+    Args:
+        line: One physical line of the RC file.
+        shell: One of ``'zsh'``, ``'bash'``, ``'fish'``.
+        key_name: Environment variable name to look for.
+    """
+    if shell == "fish":
+        pattern = rf"\s*set\s+-gx\s+{re.escape(key_name)}(\s|$)"
+    else:
+        pattern = rf"\s*export\s+{re.escape(key_name)}="
+    return re.match(pattern, line) is not None
+
+
 def save_api_key_to_shell(key_name: str, key_value: str) -> None:
     """Write an ``export KEY=value`` line to the user's shell RC file.
 
     If the key already exists in the file, the existing line is replaced.
     Otherwise the new export is appended.
+
+    An **empty** ``key_value`` means *delete*: every line assigning the
+    key is removed from the RC file, the variable is dropped from
+    ``os.environ``, and the config singleton is refreshed — so clearing
+    an API-key field in the settings panel genuinely unsets the key
+    instead of merely skipping the save.
+
+    Values containing newlines are refused.  ``shlex.quote`` would
+    write a *valid multiline* quoted assignment, but every edit here is
+    line-oriented: a later replace or delete would rewrite only the
+    first physical line and leave the RC file syntactically broken
+    (an unterminated quote).  Real API keys are single-line, so the
+    safe contract is to reject the value outright.
 
     Also sets the key in the current process environment and refreshes
     the :data:`kiss.core.config.DEFAULT_CONFIG` singleton so subsequent
@@ -360,19 +402,51 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
             "Refusing to save API key with invalid name %r", key_name,
         )
         return
+    if "\n" in key_value or "\r" in key_value:
+        logger.warning(
+            "Refusing to save API key %s with an embedded newline", key_name,
+        )
+        return
     shell = _get_user_shell()
     rc = _shell_rc_path(shell)
     rc.parent.mkdir(parents=True, exist_ok=True)
+    rc_lock = rc.with_name(rc.name + ".kiss.lock")
+
+    # Empty value means delete: remove the assignment line and unset the
+    # variable.  The runtime mutation (os.environ + _refresh_config)
+    # stays INSIDE ``_config_lock`` in both branches so a concurrent
+    # saver of the same key cannot interleave between the RC edit and
+    # the environment update and leave the two disagreeing.
+    if not key_value:
+        with (
+            _config_lock,
+            open(rc_lock, "w", encoding="utf-8") as lock_file,
+        ):
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                if rc.exists():
+                    old_lines = rc.read_text(encoding="utf-8").splitlines(
+                        keepends=True,
+                    )
+                    kept_lines = [
+                        line
+                        for line in old_lines
+                        if not _rc_line_sets_key(line, shell, key_name)
+                    ]
+                    if len(kept_lines) != len(old_lines):
+                        _atomic_write_text_secure(rc, "".join(kept_lines))
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+            os.environ.pop(key_name, None)
+            _refresh_config()
+        return
 
     quoted = shlex.quote(key_value)
     if shell == "fish":
         export_line = f"set -gx {key_name} {quoted}"
-        pattern = f"set -gx {key_name} "
     else:
         export_line = f"export {key_name}={quoted}"
-        pattern = f"export {key_name}="
 
-    rc_lock = rc.with_name(rc.name + ".kiss.lock")
     with (
         _config_lock,
         open(rc_lock, "w", encoding="utf-8") as lock_file,
@@ -385,7 +459,7 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
                 lines = rc.read_text(encoding="utf-8").splitlines(keepends=True)
                 new_lines: list[str] = []
                 for line in lines:
-                    if line.strip().startswith(pattern):
+                    if _rc_line_sets_key(line, shell, key_name):
                         new_lines.append(export_line + "\n")
                         replaced = True
                     else:
@@ -400,9 +474,8 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
             _atomic_write_text_secure(rc, "".join(lines))
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
-
-    os.environ[key_name] = key_value
-    _refresh_config()
+        os.environ[key_name] = key_value
+        _refresh_config()
 
 
 def _atomic_write_text_secure(target: Path, content: str) -> None:

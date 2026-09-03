@@ -36,7 +36,7 @@ install_git() {
         brew install git
       elif command -v xcode-select &> /dev/null; then
         # xcode-select --install opens a GUI dialog to install Command Line Tools (which include git)
-        xcode-select --install 2> /dev/null || true
+        xcode-select --install 2> /dev/null 9>&- || true
         echo "A GUI dialog should have appeared to install the Xcode Command Line Tools."
         echo "After it finishes, re-run this script."
       else
@@ -76,6 +76,59 @@ install_git() {
   esac
   have_working_git
 }
+
+# ---------------------------------------------------------------------------
+# Cross-process update lock.
+#
+# Two installers on one ~/.kiss/kiss_ai tree -- the Update button in two
+# VS Code windows, or a window and the kiss-web daemon's update endpoint --
+# race each other's git reset, uv sync and daemon restart.  The lock is a
+# kernel advisory lock (flock(2)) on $HOME/.kiss/.update.lock: the tree it
+# protects (~/.kiss/kiss_ai, the global extension install) follows $HOME,
+# so the lock does too, deliberately NOT $KISS_HOME.
+#
+# Bash keeps the lock file open on fd 9 for its whole lifetime, including
+# the ./install.sh it hands over to at the end; perl (a hard dependency of
+# ./install.sh, shipped by macOS and Linux -- flock(1) is not on macOS)
+# takes the lock on that very open file description, so it persists after
+# perl exits and the kernel releases it when this process dies, however it
+# dies.  There is no stale state to recover, hence nothing to break.  The
+# pid in the file is informational (for the refusal message).
+#
+# fd 9 must not leak into long-lived children (the daemon ./install.sh
+# restarts, VS Code): every launch line closes it with ``9>&-``, and the
+# handover to ./install.sh below does too -- KISS_UPDATE_LOCK_HELD=1 tells
+# that nested run an ancestor already holds the lock, so it neither locks
+# again nor is refused.
+# ---------------------------------------------------------------------------
+KISS_UPDATE_LOCK_FILE="$HOME/.kiss/.update.lock"
+
+acquire_update_lock() {
+  local holder attempt
+  mkdir -p "$HOME/.kiss"
+  exec 9>>"$KISS_UPDATE_LOCK_FILE"
+  if ! perl -e 'use Fcntl qw(:flock); open(my $f, ">&=", 9) or exit 2; exit(flock($f, LOCK_EX | LOCK_NB) ? 0 : 1)'; then
+    # The winner writes its pid right after locking; give it a moment.
+    for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      holder=$(cat "$KISS_UPDATE_LOCK_FILE" 2>/dev/null || true)
+      [ -n "$holder" ] && break
+      sleep 0.05
+    done
+    echo "another KISS update is already running (pid ${holder:-unknown}); exiting." >&2
+    exit 1
+  fi
+  echo "$$" > "$KISS_UPDATE_LOCK_FILE"
+  # A stray INT/TERM must not drop the lock while ./install.sh is still
+  # running underneath: bash runs the trap (and exits) only once its
+  # foreground child has returned.
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  export KISS_UPDATE_LOCK_HELD=1
+}
+
+if [ -z "${KISS_UPDATE_LOCK_HELD:-}" ]; then
+  acquire_update_lock
+fi
 
 install_git || true
 
@@ -121,4 +174,4 @@ else
   fi
 fi
 cd ~/.kiss/kiss_ai
-./install.sh
+./install.sh 9>&-

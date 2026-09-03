@@ -5,15 +5,15 @@
 """Persisted task metrics must apply the same ``step_count`` fallback
 as the failure ``result`` banner.
 
-``_subtask_metric_deltas`` (used by the per-subtask failure broadcasts)
-falls back to the agent's ``step_count`` when the ``total_steps`` delta
-is 0 — RelentlessAgent-derived agents accumulate completed steps into
-``total_steps`` and leave ``step_count`` at 0, while plain agents do
-the opposite.  The PERSISTED metrics paths (the task-level cleanup
-``finally`` in ``_run_task_inner`` and ``_persist_subtask_row``)
-must use the same fallback, so a failed task run by a plain agent
-records the same step count in its ``task_history`` row as the
-failure banner shows.
+``_subtask_metrics`` (used by the per-subtask failure broadcasts)
+reads the run's raw per-run counters and falls back to the agent's
+``step_count`` when ``total_steps`` is 0 — RelentlessAgent-derived
+agents accumulate completed steps into ``total_steps`` and leave
+``step_count`` at 0, while plain agents do the opposite.  The
+PERSISTED metrics paths (the task-level cleanup ``finally`` in
+``_run_task_inner`` and ``_persist_subtask_row``) must use the same
+fallback, so a failed task run by a plain agent records the same step
+count in its ``task_history`` row as the failure banner shows.
 
 This test drives the real ``VSCodeServer._run_task`` end-to-end with a
 real agent whose ``run`` bumps only ``step_count`` (leaving
