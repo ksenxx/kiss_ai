@@ -280,6 +280,16 @@ function testLockedBootstrapIsPreferred() {
       /bash '[^']*\/install\.sh' --non-interactive$/.test(legacyCmd),
     `old clone must keep the preflight + install.sh: ${legacyCmd}`,
   );
+  // install.sh writes the .extension-updated marker into $KISS_HOME and
+  // extension.ts watches the extension host's $KISS_HOME; the command must
+  // pin that value so a shell rc exporting a different KISS_HOME cannot
+  // send the marker where no watcher looks.
+  assert.ok(
+    /KISS_HOME='[^']*' bash '[^']*\/install\.sh' --non-interactive$/.test(
+      legacyCmd,
+    ),
+    `legacy preflight must pin the extension host's KISS_HOME: ${legacyCmd}`,
+  );
   legacy.view.dispose();
 
   // With scripts/install.sh: one command, the locked bootstrap, and no
@@ -299,6 +309,10 @@ function testLockedBootstrapIsPreferred() {
     assert.ok(
       cmd.includes(`KISS_NONINTERACTIVE=1 bash '${bootstrap}'`),
       `terminal must run the locked bootstrap non-interactively: ${cmd}`,
+    );
+    assert.ok(
+      /KISS_HOME='[^']*' KISS_NONINTERACTIVE=1 bash /.test(cmd),
+      `bootstrap must pin the extension host's KISS_HOME: ${cmd}`,
     );
     assert.strictEqual(
       terminals[terminals.length - 1].cwd,
