@@ -13,9 +13,9 @@ F1  ``_MergeFlowMixin._present_pending_worktree`` must claim the tab
     branch the tree is already on.
 F13 ``diff_merge._scan_files`` must enforce its 5000-entry cap for
     directory entries too, not only in the files loop.
-F20 ``vscode_config.source_shell_env`` must not import a forged API key
-    from a multi-line environment-variable value (line-based ``env``
-    parsing); it must use NUL-separated ``env -0`` records.
+F20 the ``vscode_config`` key migration must not import a forged API
+    key from a multi-line environment-variable value (line-based
+    ``env`` parsing); it must use NUL-separated ``env -0`` records.
 
 All tests use real git repos / real directories / a real shell in
 ``tmp_path`` and call the production functions directly.  No mocks,

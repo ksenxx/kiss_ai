@@ -34,7 +34,7 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.vscode_config import (
     API_KEY_ENV_VARS,
     load_config,
-    save_api_key_to_shell,
+    save_api_key,
     save_config,
 )
 
@@ -43,7 +43,7 @@ from kiss.core.vscode_config import (
 def _restore_default_config():
     """Restore the DEFAULT_CONFIG binding after every test.
 
-    ``save_config``/``save_api_key_to_shell`` trigger
+    ``save_config``/``save_api_key`` trigger
     ``vscode_config._refresh_config`` which rebinds
     ``kiss.core.config.DEFAULT_CONFIG`` from the (test-redirected)
     config file; without restoration the rebound object leaks into
@@ -289,35 +289,38 @@ class TestApiKeySetupAndDeletion:
 
         monkeypatch.setattr(config_module, "DEFAULT_CONFIG", config_module.DEFAULT_CONFIG)
 
-    def test_save_api_key_sets_env_and_rc(self) -> None:
-        """Saving a key writes to RC file AND sets os.environ."""
-        save_api_key_to_shell("GEMINI_API_KEY", "gem-test-123")
+    def test_save_api_key_sets_env_and_store(self) -> None:
+        """Saving a key writes the canonical store AND sets os.environ."""
+        from kiss.core.vscode_config import api_keys_env_path
+
+        save_api_key("GEMINI_API_KEY", "gem-test-123")
         assert os.environ["GEMINI_API_KEY"] == "gem-test-123"
-        rc = Path.home() / ".zshrc"
         assert (
             f"export GEMINI_API_KEY={shlex.quote('gem-test-123')}"
-            in rc.read_text()
+            in api_keys_env_path().read_text()
         )
 
-    def test_overwrite_key_replaces_in_rc(self) -> None:
+    def test_overwrite_key_replaces_in_store(self) -> None:
         """Saving a new value for an existing key replaces the old one."""
-        save_api_key_to_shell("OPENAI_API_KEY", "old-val")
-        save_api_key_to_shell("OPENAI_API_KEY", "new-val")
-        rc = Path.home() / ".zshrc"
-        content = rc.read_text()
+        from kiss.core.vscode_config import api_keys_env_path
+
+        save_api_key("OPENAI_API_KEY", "old-val")
+        save_api_key("OPENAI_API_KEY", "new-val")
+        content = api_keys_env_path().read_text()
         assert "old-val" not in content
         assert f"export OPENAI_API_KEY={shlex.quote('new-val')}" in content
         assert os.environ["OPENAI_API_KEY"] == "new-val"
 
     def test_multiple_keys_independent(self) -> None:
         """Saving/deleting one key doesn't affect others."""
-        save_api_key_to_shell("GEMINI_API_KEY", "gem-val")
-        save_api_key_to_shell("OPENAI_API_KEY", "oai-val")
-        rc = Path.home() / ".zshrc"
-        content = rc.read_text()
+        from kiss.core.vscode_config import api_keys_env_path
+
+        save_api_key("GEMINI_API_KEY", "gem-val")
+        save_api_key("OPENAI_API_KEY", "oai-val")
+        content = api_keys_env_path().read_text()
         assert "gem-val" in content
         assert "oai-val" in content
-        save_api_key_to_shell("GEMINI_API_KEY", "gem-new")
-        content = rc.read_text()
+        save_api_key("GEMINI_API_KEY", "gem-new")
+        content = api_keys_env_path().read_text()
         assert "gem-new" in content
         assert "oai-val" in content

@@ -93,7 +93,6 @@ class InstallApiKeysTest(unittest.TestCase):
         self.kiss = self.home / ".kiss"
         self.kiss.mkdir()
         (self.kiss / "api_keys.env").write_text("export FOO_API_KEY=secret\n")
-        (self.kiss / "api_keys.systemd.env").write_text("FOO_API_KEY=secret\n")
         self.rc = self.home / ".bashrc"
         self.env = {**os.environ, "HOME": str(self.home)}
 
@@ -150,8 +149,8 @@ class InstallApiKeysTest(unittest.TestCase):
 
         self.assertFalse((self.home / ".bashrc.sorcar-new").exists())
         self.assertFalse((self.home / ".bashrc.sorcar-tmp").exists())
-        for name in ("api_keys.env", "api_keys.systemd.env"):
-            self.assertEqual((self.kiss / name).stat().st_mode & 0o077, 0)
+        self.assertEqual(
+            (self.kiss / "api_keys.env").stat().st_mode & 0o077, 0)
 
     def test_the_permissions_of_the_bashrc_are_preserved(self) -> None:
         """The rewrite goes through a copy, which must not change the mode."""

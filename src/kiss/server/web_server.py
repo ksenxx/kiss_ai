@@ -90,9 +90,9 @@ from kiss.core.config import kiss_home
 from kiss.core.models.model_info import get_default_model
 from kiss.core.vscode_config import (
     apply_config_to_env,
+    load_api_keys,
     load_config,
     save_config,
-    source_shell_env,
 )
 from kiss.server import sorcar as sorcar_api
 from kiss.server.json_printer import (
@@ -3716,7 +3716,7 @@ class RemoteAccessServer:
         ntfy_base_url: str = _NTFY_BASE_URL,
         uds_owner_wait_s: float = 30.0,
     ) -> None:
-        source_shell_env()
+        load_api_keys()
         # ``saveConfig`` was the only caller of apply_config_to_env, so
         # a freshly started daemon kept the DECLARED default budget
         # until the user happened to open and close the settings panel.
