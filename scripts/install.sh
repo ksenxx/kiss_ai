@@ -118,11 +118,16 @@ acquire_update_lock() {
     exit 1
   fi
   echo "$$" > "$KISS_UPDATE_LOCK_FILE"
-  # A stray INT/TERM must not drop the lock while ./install.sh is still
-  # running underneath: bash runs the trap (and exits) only once its
-  # foreground child has returned.
+  # A stray INT/TERM/HUP must not drop the lock while ./install.sh is
+  # still running underneath: bash runs the trap (and exits) only once
+  # its foreground child has returned.  HUP matters most: VS Code
+  # disposing the Update terminal delivers SIGHUP to this bash while the
+  # detached installer (the root install.sh's new-session re-exec, whose
+  # perl parent waits for it) keeps running — without the trap the lock
+  # died with this process and a second updater could start mid-install.
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  trap 'exit 129' HUP
   export KISS_UPDATE_LOCK_HELD=1
 }
 
@@ -138,14 +143,39 @@ if [ -d ~/.kiss/kiss_ai ]; then
   if [ -d ~/.kiss/kiss_ai/.git ]; then
     cd ~/.kiss/kiss_ai
     # Try a fast-forward pull; if the branch diverged (e.g. upstream was
-    # force-pushed), stash any local edits and reset hard to upstream so the
-    # bootstrap doesn't abort.  The main ./install.sh below will restore the
-    # stash via its own helpers if it can.
+    # force-pushed), stash any local edits and reset hard to upstream.  The
+    # stash is popped back at the very end of this script, AFTER the
+    # ./install.sh handover — ./install.sh knows nothing about this stash,
+    # so restoring it is this script's job or the edits silently vanish
+    # into ``git stash list``, and popping only after the install keeps the
+    # build running on a pristine tree.
     if ! git pull --ff-only; then
       echo "git pull --ff-only failed; attempting to reset to upstream..."
-      git stash push --include-untracked -m "scripts/install.sh auto-stash" || true
-      git fetch --tags --prune origin || true
-      if git rev-parse --abbrev-ref '@{upstream}' &>/dev/null; then
+      # A stale rebuilt kiss-sorcar.vsix must never enter the stash: the
+      # release ships that path tracked, so popping the stash back over a
+      # new release's copy conflicts and leaves unmerged stages that brick
+      # later updates.  Restoring HEAD's copy is lossless — ./install.sh
+      # rebuilds it anyway.
+      git checkout HEAD -- src/kiss/agents/vscode/kiss-sorcar.vsix 2>/dev/null || true
+      _kiss_stashed=
+      _kiss_stash_failed=
+      if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        if git stash push --include-untracked -m "scripts/install.sh auto-stash"; then
+          _kiss_stashed=1
+        else
+          _kiss_stash_failed=1
+        fi
+      fi
+      # The reset is destructive, so it runs only when it is provably safe
+      # and meaningful: local edits secured (or none), a FRESH fetch
+      # succeeded (an offline reset would rewind to a stale cached
+      # upstream, discarding local commits for nothing), and an upstream
+      # actually exists.
+      if [ -n "$_kiss_stash_failed" ]; then
+        echo "WARNING: could not stash local changes; skipping the reset to keep them safe."
+      elif ! git fetch --tags --prune origin; then
+        echo "WARNING: git fetch failed (offline?); continuing with the current checkout."
+      elif git rev-parse --abbrev-ref '@{upstream}' &>/dev/null; then
         git reset --hard '@{upstream}' \
           || echo "WARNING: reset to upstream failed; continuing with current checkout."
       else
@@ -174,4 +204,13 @@ else
   fi
 fi
 cd ~/.kiss/kiss_ai
-./install.sh 9>&-
+_kiss_install_rc=0
+./install.sh 9>&- || _kiss_install_rc=$?
+# Restore the local edits stashed by the diverged-pull recovery above,
+# now that the install ran on a pristine tree.  A conflicted pop keeps the
+# stash, so nothing is ever lost — the user resolves at leisure.
+if [ -n "${_kiss_stashed:-}" ]; then
+  git stash pop \
+    || echo "WARNING: could not restore stashed local edits; they remain in 'git stash list'." >&2
+fi
+exit "$_kiss_install_rc"

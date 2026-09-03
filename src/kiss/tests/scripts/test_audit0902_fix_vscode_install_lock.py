@@ -299,6 +299,193 @@ class InstallLockTest(unittest.TestCase):
         self.assertEqual(first.returncode, 143, out)
         self.assertTrue(_lock_is_free(self.lock_file), "lock survived SIGTERM")
 
+    def test_sighup_keeps_the_lock_until_the_installer_chain_exits(self) -> None:
+        # Review 2026-09-03: VS Code disposing the Update terminal delivers
+        # SIGHUP to the bootstrap while the detached installer keeps
+        # running (the root install.sh re-execs into a new session and its
+        # perl parent waits for it).  Without a HUP trap the bootstrap died
+        # instantly, fd 9 closed, and a second updater could enter
+        # mid-install.  Like INT/TERM, bash must defer the trap until its
+        # foreground child (the installer chain) returns.
+        first = self._start()
+        self._wait_for(lambda: self._count("started") == 1, "first installer")
+        first.send_signal(signal.SIGHUP)
+        refused = self._run()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn(REFUSED, refused.stdout + refused.stderr)
+        self.assertFalse(
+            _lock_is_free(self.lock_file),
+            "SIGHUP (terminal disposal) released the lock while the "
+            "installer was still running",
+        )
+        self.assertEqual(self._count("started"), 1, "a second installer entered after SIGHUP")
+        self.release.write_text("")
+        out, _ = first.communicate(timeout=60)
+        self.assertEqual(first.returncode, 129, out)
+        self.assertTrue(_lock_is_free(self.lock_file), "lock survived SIGHUP")
+
+    def test_diverged_pull_restores_stashed_edits_and_updates(self) -> None:
+        # Review 2026-09-03: on a diverged upstream the bootstrap stashed
+        # local edits and reset to upstream, but nothing ever popped the
+        # stash (the comment claimed ./install.sh would; it cannot know
+        # about it), so an Update-button run silently removed the user's
+        # local edits from the working tree.  A stale rebuilt VSIX must
+        # also never enter that stash, or popping it over a new release's
+        # copy conflicts and bricks later updates.
+        vsix_rel = Path("src/kiss/agents/vscode/kiss-sorcar.vsix")
+        seed = self.tmp / "seed"
+        origin = self.tmp / "origin.git"
+        clone = self.home / ".kiss" / "kiss_ai"
+        (seed / vsix_rel.parent).mkdir(parents=True)
+        (seed / vsix_rel).write_bytes(b"release-vsix-v1")
+        (seed / "data.txt").write_text("upstream v1\n")
+        _git("add", str(vsix_rel), "data.txt", cwd=seed, env=self.env)
+        _git("commit", "-q", "-m", "v1", cwd=seed, env=self.env)
+        _git("push", "-q", str(origin), "main", cwd=seed, env=self.env)
+        _git("pull", "-q", "--ff-only", cwd=clone, env=self.env)
+        # Upstream rewrites history (release retag): ff-pull must fail.
+        (seed / vsix_rel).write_bytes(b"release-vsix-v2")
+        _git("add", str(vsix_rel), cwd=seed, env=self.env)
+        _git("commit", "-q", "--amend", "--no-edit", cwd=seed, env=self.env)
+        _git("push", "-q", "--force", str(origin), "main", cwd=seed, env=self.env)
+        # Local state: an edited tracked file, an untracked note, and a
+        # stale locally rebuilt VSIX.
+        (clone / "data.txt").write_text("my local edit\n")
+        (clone / "notes.txt").write_text("untracked local notes\n")
+        (clone / vsix_rel).write_bytes(b"stale-rebuilt-vsix")
+
+        self.release.write_text("")
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self._count("started"), 1, "the installer never ran")
+
+        def git_out(*args: str) -> str:
+            return subprocess.run(
+                ["git", "-C", str(clone), *args],
+                env=self.env, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+
+        origin_tip = subprocess.run(
+            ["git", "-C", str(origin), "rev-parse", "main"],
+            env=self.env, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(git_out("rev-parse", "HEAD"), origin_tip, "clone not updated")
+        self.assertEqual(
+            (clone / "data.txt").read_text(), "my local edit\n",
+            "the bootstrap lost the user's local edit "
+            f"(stash list: {git_out('stash', 'list')!r})",
+        )
+        self.assertEqual((clone / "notes.txt").read_text(), "untracked local notes\n")
+        self.assertEqual(
+            (clone / vsix_rel).read_bytes(), b"release-vsix-v2",
+            "the stale rebuilt VSIX was not replaced by the release copy",
+        )
+        self.assertEqual(git_out("ls-files", "-u"), "", "unmerged entries left behind")
+        self.assertEqual(git_out("stash", "list"), "", "a stash entry was left behind")
+
+    def test_offline_pull_failure_never_resets_to_stale_upstream(self) -> None:
+        # Review 2026-09-03: every failed ``git pull --ff-only`` used to be
+        # treated as divergence — with the origin unreachable, the bootstrap
+        # reset --hard to the STALE cached upstream, silently discarding
+        # local commits.  The reset must be gated on a successful FRESH
+        # fetch; offline, the checkout is left exactly as it was.
+        clone = self.home / ".kiss" / "kiss_ai"
+        (clone / "local-work.txt").write_text("committed local work\n")
+        _git("add", "local-work.txt", cwd=clone, env=self.env)
+        _git("commit", "-q", "-m", "local commit ahead of upstream", cwd=clone, env=self.env)
+        local_tip = subprocess.run(
+            ["git", "-C", str(clone), "rev-parse", "HEAD"],
+            env=self.env, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        shutil.rmtree(self.tmp / "origin.git")  # origin now unreachable
+
+        self.release.write_text("")
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self._count("started"), 1, "the installer never ran")
+        self.assertIn("git fetch failed", result.stdout + result.stderr)
+        final_tip = subprocess.run(
+            ["git", "-C", str(clone), "rev-parse", "HEAD"],
+            env=self.env, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(
+            final_tip, local_tip,
+            "an offline run reset the checkout to the stale cached upstream, "
+            "discarding the local commit",
+        )
+        self.assertTrue((clone / "local-work.txt").exists())
+
+    def test_failed_stash_skips_the_destructive_reset(self) -> None:
+        # Review 2026-09-03: when local changes cannot be stashed (an
+        # unmerged index from an earlier conflicted pop makes ``git stash
+        # push`` fail with "needs merge"), ``git reset --hard`` would
+        # destroy them.  The reset must be skipped, keeping the user's
+        # state for manual resolution.
+        clone = self.home / ".kiss" / "kiss_ai"
+
+        def blob(data: bytes) -> str:
+            return subprocess.run(
+                ["git", "-C", str(clone), "hash-object", "-w", "--stdin"],
+                input=data, env=self.env, capture_output=True, check=True,
+            ).stdout.decode().strip()
+
+        base, ours, theirs = blob(b"base\n"), blob(b"ours\n"), blob(b"theirs\n")
+        index_info = (
+            f"100644 {base} 1\tconflict.txt\n"
+            f"100644 {ours} 2\tconflict.txt\n"
+            f"100644 {theirs} 3\tconflict.txt\n"
+        )
+        subprocess.run(
+            ["git", "-C", str(clone), "update-index", "--index-info"],
+            input=index_info.encode(), env=self.env, capture_output=True, check=True,
+        )
+        (clone / "conflict.txt").write_text("ours\n")
+
+        self.release.write_text("")
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self._count("started"), 1, "the installer never ran")
+        self.assertIn(
+            "skipping the reset", result.stdout + result.stderr,
+            "a failed stash must skip the destructive reset",
+        )
+        self.assertEqual(
+            (clone / "conflict.txt").read_text(), "ours\n",
+            "the reset ran anyway and destroyed the unstashable local state",
+        )
+
+    def test_conflicting_local_edit_survives_in_stash_after_pop_fails(self) -> None:
+        # The end-of-run ``git stash pop`` can conflict when a local edit
+        # collides with what upstream changed.  The run still succeeds,
+        # a warning points at the stash, and the edit is recoverable.
+        seed = self.tmp / "seed"
+        origin = self.tmp / "origin.git"
+        clone = self.home / ".kiss" / "kiss_ai"
+        (seed / "data.txt").write_text("upstream v1\n")
+        _git("add", "data.txt", cwd=seed, env=self.env)
+        _git("commit", "-q", "-m", "v1", cwd=seed, env=self.env)
+        _git("push", "-q", str(origin), "main", cwd=seed, env=self.env)
+        _git("pull", "-q", "--ff-only", cwd=clone, env=self.env)
+        (seed / "data.txt").write_text("upstream v2\n")
+        _git("add", "data.txt", cwd=seed, env=self.env)
+        _git("commit", "-q", "--amend", "--no-edit", cwd=seed, env=self.env)
+        _git("push", "-q", "--force", str(origin), "main", cwd=seed, env=self.env)
+        (clone / "data.txt").write_text("my conflicting local edit\n")
+
+        self.release.write_text("")
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self._count("started"), 1, "the installer never ran")
+        self.assertIn("could not restore stashed local edits", result.stdout + result.stderr)
+        stash_list = subprocess.run(
+            ["git", "-C", str(clone), "stash", "list"],
+            env=self.env, capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertIn(
+            "scripts/install.sh auto-stash", stash_list,
+            "the conflicted pop must keep the stash so the edit is recoverable",
+        )
+
     def test_failure_under_set_e_releases_the_lock(self) -> None:
         self.release.write_text("")
         result = self._run({"KISS_TEST_STUB_EXIT": "7"})
