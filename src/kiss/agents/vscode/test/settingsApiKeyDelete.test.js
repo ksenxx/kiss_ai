@@ -6,8 +6,8 @@
 // End-to-end (JSDOM) tests for deleting an API key from the settings
 // panel.
 //
-// The daemon's ``save_api_key_to_shell`` treats an EMPTY value as a
-// delete: the ``export`` line is removed from the shell RC.  For that
+// The daemon's ``save_api_key`` treats an EMPTY value as a delete: the
+// ``export`` line is removed from the canonical key store.  For that
 // to ever happen the client must actually serialize the empty string --
 // and it must do so ONLY for a field the user explicitly cleared.  The
 // ``saveConfig`` payload is merged by the daemon, so an untouched empty

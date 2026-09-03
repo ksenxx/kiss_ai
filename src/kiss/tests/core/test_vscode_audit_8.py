@@ -51,8 +51,8 @@ class TestAPIKeyEnvVarsType:
         result = vscode_config.get_current_api_keys()
         assert result == {"A": "val_a", "B": ""}
 
-    def test_source_shell_env_works_with_frozenset(self) -> None:
-        """Verify source_shell_env membership check works with frozenset."""
+    def test_loader_membership_check_works_with_frozenset(self) -> None:
+        """Verify the key-migration membership check works with frozenset."""
         from kiss.core.vscode_config import API_KEY_ENV_VARS
 
         assert "GEMINI_API_KEY" in API_KEY_ENV_VARS

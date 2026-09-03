@@ -56,10 +56,12 @@ class TestApiKeySetupAndDeletion:
         """Saving an empty key via the config panel deletes it everywhere.
 
         The VSCodeServer saveConfig handler forwards empty values to
-        ``save_api_key_to_shell``, which treats them as a delete: the
-        ``export`` line is removed from the shell RC file and the
-        variable is dropped from ``os.environ``.
+        ``save_api_key``, which treats them as a delete: the ``export``
+        line is removed from the canonical key store and the variable is
+        dropped from ``os.environ`` — so the key stays gone across the
+        next daemon start too.
         """
+        from kiss.core.vscode_config import api_keys_env_path, load_api_keys
         from kiss.server.server import VSCodeServer
 
         server = VSCodeServer()
@@ -70,8 +72,8 @@ class TestApiKeySetupAndDeletion:
             "apiKeys": {"ANTHROPIC_API_KEY": "ant-key-to-delete"},
         })
         assert os.environ["ANTHROPIC_API_KEY"] == "ant-key-to-delete"
-        rc = Path.home() / ".zshrc"
-        assert "ant-key-to-delete" in rc.read_text()
+        store = api_keys_env_path()
+        assert "ant-key-to-delete" in store.read_text()
 
         server._handle_command({
             "type": "saveConfig",
@@ -79,6 +81,10 @@ class TestApiKeySetupAndDeletion:
             "apiKeys": {"ANTHROPIC_API_KEY": ""},
         })
         assert os.environ.get("ANTHROPIC_API_KEY") is None
-        content = rc.read_text()
+        content = store.read_text()
         assert "ant-key-to-delete" not in content
         assert "ANTHROPIC_API_KEY" not in content
+
+        # The delete must survive what a daemon restart would do.
+        load_api_keys()
+        assert os.environ.get("ANTHROPIC_API_KEY") is None

@@ -398,11 +398,22 @@ def _isolated_shared_config() -> Iterator[None]:
         for name in override_names
         if name in module_dict
     }
-    shared_config = Path(_test_kiss_home) / "config.json"
-    try:
-        saved_content = shared_config.read_bytes()
-    except OSError:
-        saved_content = None
+    # api_keys.env is the canonical API-key store, written by
+    # ``save_api_key`` and the legacy-RC key migration inside
+    # ``load_api_keys``.  Like ``config.json`` it lives in the
+    # session-shared ``KISS_HOME``, so a test that saves or migrates a
+    # key without redirecting ``CONFIG_DIR`` would otherwise leak that
+    # key into every later test's loads.
+    shared_files = (
+        Path(_test_kiss_home) / "config.json",
+        Path(_test_kiss_home) / "api_keys.env",
+    )
+    saved_contents: dict[Path, bytes | None] = {}
+    for shared in shared_files:
+        try:
+            saved_contents[shared] = shared.read_bytes()
+        except OSError:
+            saved_contents[shared] = None
     yield
     for name in override_names:
         if name in saved_overrides:
@@ -410,13 +421,14 @@ def _isolated_shared_config() -> Iterator[None]:
         elif name in module_dict:
             delattr(vscode_config, name)
     _drop_redundant_config_overrides()
-    try:
-        if saved_content is None:
-            shared_config.unlink(missing_ok=True)
-        else:
-            shared_config.write_bytes(saved_content)
-    except OSError:
-        pass
+    for shared, saved_content in saved_contents.items():
+        try:
+            if saved_content is None:
+                shared.unlink(missing_ok=True)
+            else:
+                shared.write_bytes(saved_content)
+        except OSError:
+            pass
 
 
 @pytest.fixture(autouse=True)

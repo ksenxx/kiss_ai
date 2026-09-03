@@ -11121,8 +11121,8 @@
       const v = el(id).value.trim();
       // An empty box is a DELETION only when the user explicitly
       // cleared it (the field is in settingsEditedFields): the daemon
-      // removes a key sent with an empty value from the shell RC (see
-      // ``save_api_key_to_shell``). Untouched empty boxes stay omitted
+      // removes a key sent with an empty value from the canonical key
+      // store (see ``save_api_key``). Untouched empty boxes stay omitted
       // so this merge-style payload never wipes keys that were never
       // shown here or were just saved by another window.
       if (v || settingsEditedFields.has(id)) apiKeys[k] = v;
