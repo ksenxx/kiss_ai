@@ -93,7 +93,10 @@ per-call value overrides it.  When the wait times out, the tool
 returns an error string and the sub-task is STOPPED
 (:func:`kiss.agents.sorcar.daemon_client.run` is called with
 ``stop_on_timeout=True``, which also awaits the stop's
-terminal-status confirmation before returning): a channel sub-task
+terminal-status confirmation before returning; if a wedged daemon
+never confirms it within the bounded grace, the error string says the
+task may still be running instead of claiming it was stopped): a
+channel sub-task
 must not outlive its workspace reservation — the process-global
 workspace is released the moment the dispatch returns, so a surviving
 sub-task could bind another account's credentials when its channel
@@ -314,6 +317,14 @@ def _dispatch(
             timeout=timeout,
             stop_on_timeout=True,
             sock_path=_daemon_sock_path(),
+        )
+    except daemon_client.StopUnconfirmedTimeoutError:
+        return (
+            f"Error: the {name} agent task did not finish within "
+            f"{timeout:g}s; a stop was requested but the daemon never "
+            f"confirmed it, so the task MAY STILL BE RUNNING (and "
+            f"spending) on the daemon. Check what it already did "
+            f"before retrying with a larger `timeout` argument."
         )
     except TimeoutError:
         return (
@@ -603,10 +614,12 @@ def make_run_agent_tool(
                 as a number string; empty uses the default of 300
                 seconds.  Pass a larger value for tasks expected to
                 run long.  On timeout this call STOPS the task and
-                returns an error string; work the task completed
-                before the stop (side effects, spend) is not reported
-                back here, so check what it already did before
-                retrying with a larger timeout.
+                returns an error string (which says the task may
+                still be running in the rare case the daemon never
+                confirms the stop); work the task completed before
+                the stop (side effects, spend) is not reported back
+                here, so check what it already did before retrying
+                with a larger timeout.
 
         Returns:
             The sub-task's YAML result ("success" and "summary" keys),
