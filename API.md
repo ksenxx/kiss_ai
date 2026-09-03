@@ -294,6 +294,10 @@
   - `cmd`: The ``runUpdate`` command (unused).
   - `ctx`: The transport context of the current call; supplies the requesting ``conn_id`` so acknowledgement notifications reach only the requesting window.
 
+- **snooze_update** — Snooze the update notification for 24 hours. Services the "Remind me later" action of the update toast in both frontends: records the snooze in the update-check cache shared with the VS Code extension and rebroadcasts the ``update_available`` state so every client's toast disappears.<br/>`async snooze_update(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``snoozeUpdate`` command; its optional ``latest`` field names the release being snoozed.
+  - `ctx`: The transport context of the current call (unused — the resulting rebroadcast must reach every window).
+
 - **server_reset** — Restart the kiss-web daemon at the user's request.<br/>`async server_reset(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``serverReset`` command (unused).
   - `ctx`: The transport context of the current call; supplies the requesting ``conn_id`` so acknowledgement notifications reach only the requesting window.

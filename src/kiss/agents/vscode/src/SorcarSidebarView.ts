@@ -226,6 +226,11 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // chat, which the webview assembles into the page it then sends
   // back via `shareChat`.
   shareChatTasks: ['tabId', 'chatId'],
+  // "Remind me later" on the webview's update toast: the daemon owns
+  // the update_available broadcast, records the 24h snooze in the
+  // update-check cache shared with this extension host, and
+  // rebroadcasts so every window's toast disappears.
+  snoozeUpdate: ['latest'],
 };
 
 export class SorcarSidebarView implements vscode.WebviewViewProvider {

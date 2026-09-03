@@ -110,6 +110,7 @@ export type FromWebviewMessage =
     }
   | {type: 'sizeReport'; innerWidth: number; screenWidth: number}
   | {type: 'runUpdate'}
+  | {type: 'snoozeUpdate'; latest?: string}
   | {type: 'serverReset'}
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
@@ -403,11 +404,14 @@ type ToWebviewMessageBody =
   // Daemon: `openTab` was refused (tab limit); `text` explains why.
   | {type: 'openTabRejected'; text: string}
   // Daemon: cached PyPI check result for the Update button/badge.
+  // `snoozed` marks an active "Remind me later" snooze: the webview
+  // keeps the badge but suppresses the sticky toast.
   | {
       type: 'update_available';
       available: boolean;
       latest: string;
       current: string;
+      snoozed?: boolean;
     }
   // The window's workspace folder changed; the webview re-scopes its
   // workspace-filtered surfaces (tab bar, history) to this directory.
@@ -496,7 +500,8 @@ export interface AgentCommand {
     | 'saveConfig'
     | 'serverReset'
     | 'shareChat'
-    | 'shareChatTasks';
+    | 'shareChatTasks'
+    | 'snoozeUpdate';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -524,6 +529,7 @@ export interface AgentCommand {
   apiKeys?: Record<string, string>;
   isFavorite?: boolean;
   title?: string;
+  latest?: string;
   restoredTabs?: Array<{
     tabId: string;
     chatId: string;

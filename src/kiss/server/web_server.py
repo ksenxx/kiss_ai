@@ -3000,6 +3000,86 @@ def _fetch_latest_version() -> str | None:
     return version.strip()
 
 
+_UPDATE_SNOOZE_MS = 24 * 60 * 60 * 1000
+
+
+def _update_check_cache_path() -> Path:
+    """Return the update-check cache path shared with the extension.
+
+    The VS Code extension host's ``UpdateChecker.js`` keeps its fetch
+    cooldown and the "Remind me later" snooze in this file; the daemon
+    reads and writes the SAME file so one snooze silences every update
+    popup — the extension host's native notification, the sidebar
+    webview toast, and the remote webapp toast.
+    """
+    return _kiss_home_dir() / ".update-check.json"
+
+
+def _read_update_check_cache() -> dict[str, Any]:
+    """Return the parsed update-check cache, ``{}`` when unreadable."""
+    try:
+        data = json.loads(
+            _update_check_cache_path().read_text(encoding="utf-8"),
+        )
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _is_update_snoozed(latest: str) -> bool:
+    """Return True while a "Remind me later" snooze covers *latest*.
+
+    Mirrors ``isSnoozeActive`` in the extension's ``UpdateChecker.js``:
+    the snooze holds until it expires, but a release NEWER than the
+    snoozed one breaks through (``_compare_versions`` returns 0 for an
+    unparseable ``snoozedLatest``, so a version-less snooze suppresses
+    everything until expiry).
+    """
+    cache = _read_update_check_cache()
+    until_ms = cache.get("snoozeUntilMs")
+    if not isinstance(until_ms, (int, float)) or until_ms <= 0:
+        return False
+    if time.time() * 1000 >= until_ms:
+        return False
+    snoozed = cache.get("snoozedLatest")
+    return _compare_versions(latest, snoozed if isinstance(snoozed, str) else "") <= 0
+
+
+def _record_update_snooze(latest: str) -> None:
+    """Merge a 24h snooze for release *latest* into the shared cache.
+
+    Preserves the extension's ``lastCheckMs``/``lastLatest`` cooldown
+    fields and writes atomically via a unique temp file + rename (the
+    extension host may rewrite the same file concurrently; matching
+    its ``writeCache`` protocol keeps the file parseable).  Twin of
+    ``snoozeUpdateNotification`` in ``UpdateChecker.js``.
+    """
+    cache = _read_update_check_cache()
+    last_check = cache.get("lastCheckMs")
+    last_latest = cache.get("lastLatest")
+    payload = {
+        "lastCheckMs": last_check if isinstance(last_check, (int, float)) else 0,
+        "lastLatest": last_latest if isinstance(last_latest, str) else "",
+        "snoozeUntilMs": int(time.time() * 1000) + _UPDATE_SNOOZE_MS,
+        "snoozedLatest": latest
+        or (last_latest if isinstance(last_latest, str) else ""),
+    }
+    cache_path = _update_check_cache_path()
+    tmp = cache_path.with_name(
+        f"{cache_path.name}.{os.getpid()}.{time.time_ns()}.tmp",
+    )
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(cache_path)
+    except Exception:
+        logger.debug("Failed to record update snooze", exc_info=True)
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+
+
 _WS_SHIM_JS = r"""
 // WebSocket shim for the remote webapp: provides acquireVsCodeApi()
 // so the extension's media/main.js + media/api.js run unmodified in a
@@ -5103,12 +5183,31 @@ class RemoteAccessServer:
             return
         current = await asyncio.to_thread(_read_version)
         available = bool(current) and _compare_versions(latest, current) > 0
+        snoozed = available and await asyncio.to_thread(
+            _is_update_snoozed, latest,
+        )
         self._printer.broadcast({
             "type": "update_available",
             "available": available,
             "latest": latest,
             "current": current,
+            "snoozed": snoozed,
         })
+
+    async def _handle_snooze_update(self, latest: str = "") -> None:
+        """Record a 24h "Remind me later" snooze and rebroadcast.
+
+        Writes the snooze into the ``.update-check.json`` cache shared
+        with the VS Code extension (file I/O off-thread, M10), then
+        rebroadcasts ``update_available`` with ``snoozed: true`` so
+        every connected client drops its sticky update toast at once.
+
+        Args:
+            latest: The release version being snoozed ("" falls back
+                to the cache's last known latest version).
+        """
+        await asyncio.to_thread(_record_update_snooze, latest)
+        await self._broadcast_update_available()
 
     async def _post_url_if_changed(self) -> None:
         """Post :attr:`_active_url` to the ntfy message board once.
