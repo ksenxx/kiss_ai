@@ -15,7 +15,7 @@ Covers, over REAL objects (no mocks, patches, or fakes):
   within the (env-overridden) timeout, leave no temp files behind, and
   release the flock.  A companion test downloads a real zip from a
   local server to prove the chunked-copy replacement still works.
-* D2: ``vscode_config.source_shell_env`` gated the env dump on the RC
+* D2: the ``vscode_config`` RC-key migration gated the env dump on the RC
   file's exit status in the bash/zsh branch (``source rc && { env… }``)
   — an RC whose LAST command exits nonzero (e.g. a failing ``which`` or
   a false ``[ -f x ] && …`` test) silently imported ZERO keys, while

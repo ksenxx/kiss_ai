@@ -20,7 +20,7 @@ from kiss.core import config as config_module
 from kiss.core.vscode_config import (
     DEFAULTS,
     apply_config_to_env,
-    save_api_key_to_shell,
+    save_api_key,
 )
 
 
@@ -57,17 +57,23 @@ class TestApplyConfigBooleanBudget:
 
 
 class TestSaveApiKeyNameValidation:
-    """Only valid env-var identifiers may reach the shell RC file."""
+    """Only valid env-var identifiers may reach the key store."""
 
     @pytest.fixture(autouse=True)
     def fake_home(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> Generator[Path]:
-        """Point ``HOME``/``SHELL`` at a scratch dir so the real RC is safe."""
+        """Point ``HOME``/``SHELL``/key store at a scratch dir."""
+        import kiss.core.vscode_config as _vc
+
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("SHELL", "/bin/bash")
+        monkeypatch.setitem(vars(_vc), "CONFIG_DIR", tmp_path / ".kiss")
+        monkeypatch.setitem(
+            vars(_vc), "CONFIG_PATH", tmp_path / ".kiss" / "config.json",
+        )
         monkeypatch.setenv("OPENAI_API_KEY", "sentinel-original")
-        # ``save_api_key_to_shell`` updates the DEFAULT_CONFIG singleton IN
+        # ``save_api_key`` updates the DEFAULT_CONFIG singleton IN
         # PLACE, so rebinding the module attribute to the saved reference
         # would restore nothing (the leaked ``sk-valid`` key then fails any
         # later live-API test in the same process).  Snapshot and restore
@@ -84,7 +90,7 @@ class TestSaveApiKeyNameValidation:
     ) -> None:
         """A name embedding a newline must not write commands to the RC."""
         evil = "OPENAI_API_KEY\ntouch " + str(fake_home / "pwned") + "\n#"
-        save_api_key_to_shell(evil, "sk-x")
+        save_api_key(evil, "sk-x")
         rc = fake_home / ".bashrc"
         assert not rc.exists(), rc.read_text()
         assert evil not in os.environ
@@ -92,20 +98,25 @@ class TestSaveApiKeyNameValidation:
     def test_metacharacter_name_rejected(self, fake_home: Path) -> None:
         """Shell metacharacters in the name must never reach the RC."""
         for evil in ("FOO$(touch pwned)", "FOO; rm -rf ~", "FOO BAR", ""):
-            save_api_key_to_shell(evil, "sk-x")
+            save_api_key(evil, "sk-x")
         assert not (fake_home / ".bashrc").exists()
 
     def test_equals_name_does_not_raise(self, fake_home: Path) -> None:
         """A name containing ``=`` must not raise out of the handler."""
-        save_api_key_to_shell("A=B", "sk-x")
+        save_api_key("A=B", "sk-x")
         assert not (fake_home / ".bashrc").exists()
 
     def test_valid_name_still_written_and_exported(
         self, fake_home: Path,
     ) -> None:
         """The legitimate save path keeps working after the fix."""
-        save_api_key_to_shell("OPENAI_API_KEY", "sk-valid")
+        from kiss.core.vscode_config import api_keys_env_path
+
+        save_api_key("OPENAI_API_KEY", "sk-valid")
+        store = api_keys_env_path()
+        assert store.exists()
+        assert "export OPENAI_API_KEY=sk-valid" in store.read_text()
         rc = fake_home / ".bashrc"
-        assert rc.exists()
-        assert "export OPENAI_API_KEY=sk-valid" in rc.read_text()
+        if rc.exists():
+            assert "sk-valid" not in rc.read_text()
         assert os.environ["OPENAI_API_KEY"] == "sk-valid"

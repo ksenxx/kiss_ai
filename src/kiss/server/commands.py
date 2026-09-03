@@ -1253,7 +1253,7 @@ class _CommandsMixin:
             apply_config_to_env,
             load_config,
             sanitize_config,
-            save_api_key_to_shell,
+            save_api_key,
             save_config,
         )
 
@@ -1276,14 +1276,14 @@ class _CommandsMixin:
             if new_work_dir:
                 self._apply_new_work_dir(new_work_dir)
 
-            # Persist API keys INSIDE ``_save_config_lock``.  Each
-            # ``save_api_key_to_shell`` does an unlocked
-            # read-modify-atomic-replace of the same shell RC file, so two
-            # concurrent ``saveConfig`` calls saving different keys could
-            # both read the old file and then replace it independently,
-            # silently losing the first key.  Serializing the writes under
-            # the same lock that already guards config.json closes the
-            # lost-update window.
+            # Persist API keys INSIDE ``_save_config_lock``: each
+            # ``save_api_key`` edits the canonical key store and the
+            # shell RC, and serializing the writes under the same lock
+            # that already guards config.json keeps two concurrent
+            # ``saveConfig`` calls from interleaving.  An empty value
+            # deletes the key from every store (canonical file, legacy
+            # systemd mirror, shell RC) — that is the settings panel's
+            # delete path.
             api_keys = cmd.get("apiKeys", {})
             if not isinstance(api_keys, dict):
                 api_keys = {}
@@ -1292,7 +1292,7 @@ class _CommandsMixin:
                     isinstance(key_name, str)
                     and isinstance(key_value, str)
                 ):
-                    save_api_key_to_shell(key_name, key_value)
+                    save_api_key(key_name, key_value)
 
         conn_id = cmd.get("connId", "")
         self._get_models(conn_id)
