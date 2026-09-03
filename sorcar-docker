@@ -36,10 +36,13 @@ for arg in "$@"; do
             if [[ -n "$PORT" ]]; then
                 printf '\033[0;31m[ERR]\033[0m  Only one PORT may be given (got %s and %s)\nUsage: %s [PORT] [--rebuild]\n' "$PORT" "$arg" "$0" >&2; exit 1
             fi
-            if ! [[ "$arg" =~ ^[0-9]+$ ]] || (( arg < 1 || arg > 65535 )); then
+            # {1,5}-digit cap prevents 64-bit wraparound; 10# forces decimal
+            # (otherwise "08" is invalid octal, and the failed arithmetic in
+            # an if-condition does not exit under set -e, bypassing the check).
+            if ! [[ "$arg" =~ ^[0-9]{1,5}$ ]] || (( 10#$arg < 1 || 10#$arg > 65535 )); then
                 printf '\033[0;31m[ERR]\033[0m  Invalid port: %s (expected 1-65535)\nUsage: %s [PORT] [--rebuild]\n' "$arg" "$0" >&2; exit 1
             fi
-            PORT="$arg" ;;
+            PORT="$(( 10#$arg ))" ;;
     esac
 done
 PORT="${PORT:-8080}"
