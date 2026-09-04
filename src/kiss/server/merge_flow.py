@@ -1384,30 +1384,44 @@ class _MergeFlowMixin:
             Dict with ``success`` bool and ``message`` string.
         """
         internal = internal or already_claimed
-        state = agent_state.find_by_tab(tab_id)
-        if state is None or not state.use_worktree:
-            return {"success": False, "message": "Worktree mode is not enabled"}
-        wt_agent = state.agent
-        if wt_agent is None or not wt_agent._wt_pending:
-            return {
-                "success": False,
-                "message": "No pending worktree changes to act on",
-            }
-        wt = wt_agent
-        verb = {
-            "merge": "merging",
-            "discard": "discarding",
-            "nothing": "detaching",
-        }.get(action)
-        if verb is None:
-            return {"success": False, "message": f"Unknown action: {action}"}
-        repo_root = wt._repo_root
-        if repo_root is None:
-            return {
-                "success": False,
-                "message": "No pending worktree changes to act on",
-            }
+        # The state is resolved, inspected and claimed in ONE locked
+        # section.  Resolving it first and locking later let a
+        # ``closeTab`` (``_drop_tab_state``: unregister + release the
+        # worktree) or a new ``run`` (``_cmd_run``: replace the state,
+        # carrying the agent) slip into the gap; the busy check then
+        # ran against an object no longer in the registry, the claim
+        # landed on it, and ``wt.merge()`` proceeded concurrently with
+        # the other path's disposal of the same worktree.
         with self._state_lock:
+            state = agent_state.find_by_tab(tab_id)
+            if state is None or not state.use_worktree:
+                return {
+                    "success": False,
+                    "message": "Worktree mode is not enabled",
+                }
+            wt_agent = state.agent
+            if wt_agent is None or not wt_agent._wt_pending:
+                return {
+                    "success": False,
+                    "message": "No pending worktree changes to act on",
+                }
+            wt = wt_agent
+            verb = {
+                "merge": "merging",
+                "discard": "discarding",
+                "nothing": "detaching",
+            }.get(action)
+            if verb is None:
+                return {
+                    "success": False,
+                    "message": f"Unknown action: {action}",
+                }
+            repo_root = wt._repo_root
+            if repo_root is None:
+                return {
+                    "success": False,
+                    "message": "No pending worktree changes to act on",
+                }
             if not internal:
                 busy = self._check_worktree_busy(state, verb, repo_root, wt._wt_dir)
                 if busy:

@@ -17,7 +17,7 @@ from kiss.core.models.model_info import (
     calculate_cost,
     model,
 )
-from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+from kiss.core.models.openai_compatible_model import OpenAICompatibleBase
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 from kiss.tests.conftest import (
     requires_anthropic_api_key,
@@ -81,7 +81,10 @@ class TestModelConfigBaseUrlOverride:
                 "api_key": api_key,
             },
         )
-        assert isinstance(m, OpenAICompatibleModel)
+        # gpt-4.1-mini carries the live-verified catalog use_responses_api
+        # flag and the override IS the registered OpenAI endpoint, so the
+        # factory builds the v2 Responses adapter here.
+        assert isinstance(m, OpenAICompatibleBase)
         m.initialize("Reply with exactly the word OK and nothing else.")
         text, _ = m.generate()
         assert isinstance(text, str)

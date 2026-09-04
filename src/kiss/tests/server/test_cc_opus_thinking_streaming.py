@@ -23,7 +23,6 @@ from kiss.server.json_printer import JsonPrinter
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 from kiss.tests.core.models.test_cc_opus_thinking_streaming import (  # noqa: F401
     _build_fake_popen_class,
-    _FakeStdin,
     _FakeStdout,
     _make_stream_events_with_text_deltas,
 )

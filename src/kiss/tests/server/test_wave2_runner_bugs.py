@@ -125,30 +125,15 @@ class _ScriptedAgent(WorktreeSorcarAgent):
         )
 
 
-class _NoFollowupServer(VSCodeServer):
-    """Server whose async followup generation records instead of
-    dispatching a background LLM call."""
-
-    def __init__(self, printer: JsonPrinter) -> None:
-        super().__init__(printer=printer)
-        self.followups: list[tuple[str, str, str | None]] = []
-
-    def _generate_followup_async(
-        self, task: str, result: str, task_id: str | None,
-    ) -> None:
-        """Record the followup request instead of calling an LLM."""
-        self.followups.append((task, result, task_id))
-
-
 def _run_scripted_task(
     tmp_path: Path, tab_id: str, prompt: str,
-) -> tuple[_NoFollowupServer, _CapturePrinter, _ScriptedAgent]:
+) -> tuple[VSCodeServer, _CapturePrinter, _ScriptedAgent]:
     """Run *prompt* through the real ``_run_task`` with a scripted agent."""
     models = get_available_models()
     if not models:
         pytest.skip("no models configured in this environment")
     printer = _CapturePrinter()
-    server = _NoFollowupServer(printer)
+    server = VSCodeServer(printer)
     agent = _ScriptedAgent("Sorcar VS Code")
     state = AgentState(
         f"pre-{tab_id}", agent=agent, tab_id=tab_id, server_owned=True,
@@ -203,9 +188,7 @@ def test_f2_every_subtask_row_gets_result_and_extra(tmp_path: Path) -> None:
 def test_f2_single_task_persistence_unchanged(tmp_path: Path) -> None:
     tab_id = "w2f2s-tab"
     try:
-        server, _, _ = _run_scripted_task(
-            tmp_path, tab_id, "w2f2 single gamma",
-        )
+        _run_scripted_task(tmp_path, tab_id, "w2f2 single gamma")
         rows = _fetch_rows(["w2f2 single gamma"])
         (result, start_ts, end_ts, tokens, cost) = rows["w2f2 single gamma"]
         assert result == "done w2f2 single gamma"
@@ -213,7 +196,6 @@ def test_f2_single_task_persistence_unchanged(tmp_path: Path) -> None:
         assert end_ts >= start_ts
         assert tokens == 100
         assert cost == pytest.approx(0.25)
-        assert len(server.followups) == 1
     finally:
         _pop_states(f"pre-{tab_id}")
 
@@ -228,7 +210,7 @@ def test_f6_task_cleanup_leaves_fallback_bash_state_alone(
         if not models:
             pytest.skip("no models configured in this environment")
         printer = _CapturePrinter()
-        server = _NoFollowupServer(printer)
+        server = VSCodeServer(printer)
         fallback = _BashState()
         fallback.generation = 7
         fallback.buffer.append("pending task-less output")

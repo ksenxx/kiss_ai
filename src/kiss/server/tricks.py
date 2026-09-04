@@ -43,6 +43,12 @@ from kiss.server.user_assets import ensure_user_asset_from_default
 
 _SENTENCE_BOUNDARY = re.compile(r"[.!?]\s+")
 
+# CommonMark §2.4 backslash escapes: only ASCII punctuation may be
+# escaped.  Byte-for-byte the character class of ``unescapeMarkdown``
+# in ``SorcarTab.ts``, so the two parsers can never disagree on which
+# ``\X`` sequences are decoration and which are literal text.
+_MARKDOWN_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>|~\"'$%&,/:;=?@^])")
+
 MY_INJECTION_DEFAULT_BODY = (
     "Write end-to-end 100% coverage tests for the feature first."
     "  Then implement the feature."
@@ -54,8 +60,13 @@ DEFAULT_MY_INJECTION = "## Trick\n\n" + MY_INJECTION_DEFAULT_BODY + "\n"
 def _parse_trick_sections(text: str) -> list[str]:
     """Return the body of every ``## Trick`` section in *text*.
 
-    Bodies are trimmed; empty bodies are skipped.  Mirrors the
-    TypeScript ``readMarkdownSections`` parser used by ``SorcarTab.ts``.
+    Bodies are trimmed and backslash-unescaped (``mdformat`` writes
+    ``<<x>>`` as ``\\<<x>>`` and ``snake_case`` as ``snake\\_case``;
+    the trick the author wrote is what every surface must show);
+    empty bodies are skipped.  Mirrors the TypeScript
+    ``readMarkdownSections`` parser used by ``SorcarTab.ts`` — the VS
+    Code webview's Trick panel — so the remote webapp's panel and the
+    daemon's ghost-text ``trick`` completions offer the same text.
     """
     tricks: list[str] = []
     sections = re.split(r"^##\s+", text, flags=re.MULTILINE)
@@ -63,7 +74,7 @@ def _parse_trick_sections(text: str) -> list[str]:
         lines = section.splitlines()
         if not lines or lines[0].strip() != "Trick":
             continue
-        body = "\n".join(lines[1:]).strip()
+        body = _MARKDOWN_ESCAPE.sub(r"\1", "\n".join(lines[1:]).strip())
         if body:
             tricks.append(body)
     return tricks

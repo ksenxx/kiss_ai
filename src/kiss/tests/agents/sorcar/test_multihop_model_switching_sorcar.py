@@ -53,7 +53,10 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.gemini_model import GeminiModel
 from kiss.core.models.model_info import model as model_factory
-from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+from kiss.core.models.openai_compatible_model import (
+    OpenAICompatibleBase,
+    OpenAICompatibleModel,
+)
 from kiss.tests.conftest import (
     requires_anthropic_api_key,
     requires_gemini_api_key,
@@ -64,6 +67,22 @@ from kiss.tests.core.models.test_multihop_model_switching import (
     _run_tool_turn,
     reveal_secret,
 )
+
+
+def _expected_transport_class(name: str) -> type[OpenAICompatibleBase]:
+    """Return the adapter class the factory must build for *name*.
+
+    Catalog entries carrying the live-verified ``use_responses_api`` flag
+    are built as the v2 Responses adapter; everything else stays on the
+    Chat Completions v1 adapter.
+    """
+    from kiss.core.models.model_info import MODEL_INFO
+    from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
+
+    info = MODEL_INFO.get(name)
+    if info is not None and info.use_responses_api is True:
+        return OpenAICompatibleModel2
+    return OpenAICompatibleModel
 
 
 def _find_tool(tools: list, name: str) -> Any:
@@ -151,7 +170,7 @@ class TestSorcarSetModelMultiHopLive:
         agent._cached_tools_schema = agent.model._build_openai_tools_schema(
             agent.function_map
         )
-        assert isinstance(agent.model, OpenAICompatibleModel)
+        assert isinstance(agent.model, _expected_transport_class("gpt-4o"))
         _run_tool_turn(
             agent.model,
             "Call the reveal_secret tool with index 1, then state the "
@@ -160,7 +179,7 @@ class TestSorcarSetModelMultiHopLive:
         )
 
         self._switch(agent, set_model, "gpt-5.5")
-        assert isinstance(agent.model, OpenAICompatibleModel)
+        assert isinstance(agent.model, _expected_transport_class("gpt-5.5"))
         assert agent.model.base_url.startswith("https://api.openai.com")
         assert (agent.model.model_config or {}).get("reasoning_effort") == "high"
         _run_tool_turn(
@@ -192,7 +211,7 @@ class TestSorcarSetModelMultiHopLive:
         )
 
         self._switch(agent, set_model, "gpt-5.5")
-        assert isinstance(agent.model, OpenAICompatibleModel)
+        assert isinstance(agent.model, _expected_transport_class("gpt-5.5"))
         _run_tool_turn(
             agent.model,
             "Call the reveal_secret tool with index 1 one more time to "

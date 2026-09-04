@@ -5,10 +5,11 @@
 # add your name here
 # Launch KISS Sorcar in a Docker container (code-server in the browser).
 #
-# Usage:  ./sorcar-docker [PORT]
+# Usage:  ./sorcar-docker [PORT] [--rebuild]
 #
 # Flow:
-#   1. Build the Docker image (kiss-sorcar) from ./Dockerfile.
+#   1. Reuse the existing Docker image (kiss-sorcar) if present; otherwise
+#      build it from ./Dockerfile. Pass --rebuild to force a fresh build.
 #   2. Transfer git credentials (GH_TOKEN) to the container.
 #   3. Container clones https://github.com/ksenxx/kiss to /home/kiss.
 #   4. Container runs /home/kiss/install.sh (Python env, Playwright, extension).
@@ -25,7 +26,26 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PORT="${1:-8080}"
+PORT=""
+REBUILD=0
+for arg in "$@"; do
+    case "$arg" in
+        --rebuild) REBUILD=1 ;;
+        -*) printf '\033[0;31m[ERR]\033[0m  Unknown option: %s\nUsage: %s [PORT] [--rebuild]\n' "$arg" "$0" >&2; exit 1 ;;
+        *)
+            if [[ -n "$PORT" ]]; then
+                printf '\033[0;31m[ERR]\033[0m  Only one PORT may be given (got %s and %s)\nUsage: %s [PORT] [--rebuild]\n' "$PORT" "$arg" "$0" >&2; exit 1
+            fi
+            # {1,5}-digit cap prevents 64-bit wraparound; 10# forces decimal
+            # (otherwise "08" is invalid octal, and the failed arithmetic in
+            # an if-condition does not exit under set -e, bypassing the check).
+            if ! [[ "$arg" =~ ^[0-9]{1,5}$ ]] || (( 10#$arg < 1 || 10#$arg > 65535 )); then
+                printf '\033[0;31m[ERR]\033[0m  Invalid port: %s (expected 1-65535)\nUsage: %s [PORT] [--rebuild]\n' "$arg" "$0" >&2; exit 1
+            fi
+            PORT="$(( 10#$arg ))" ;;
+    esac
+done
+PORT="${PORT:-8080}"
 IMAGE="kiss-sorcar"
 CONTAINER="kiss-sorcar"
 URL="http://localhost:${PORT}"
@@ -59,10 +79,14 @@ fi
 info "GitHub token acquired"
 
 # ---------------------------------------------------------------------------
-# 3. Build Docker image
+# 3. Build Docker image (reuse the existing one unless --rebuild is given)
 # ---------------------------------------------------------------------------
-step "Building Docker image '$IMAGE'..."
-docker build -t "$IMAGE" "$SCRIPT_DIR" 2>&1
+if (( ! REBUILD )) && docker image inspect "$IMAGE" &>/dev/null; then
+    info "Reusing existing image '$IMAGE' (pass --rebuild to build a fresh one)"
+else
+    step "Building Docker image '$IMAGE'..."
+    docker build -t "$IMAGE" "$SCRIPT_DIR" 2>&1
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Remove old container

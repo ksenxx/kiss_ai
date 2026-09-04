@@ -70,7 +70,40 @@ from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
-DISPATCH_TIMEOUT_SECONDS = 900.0
+WORKSPACE_WAIT_TIMEOUT_SECONDS = 900.0
+"""Bound on the wait for a conflicting channel workspace to free up.
+
+Bounds ONLY the pre-dispatch :func:`~kiss.agents.sorcar.channel_workspace.enter_workspace`
+wait for a concurrent channel dispatch that holds a DIFFERENT
+workspace, and is further capped by the call's ``timeout`` when that
+is smaller.  The wait for the dispatched sub-task itself is bounded
+separately, by the ``run_agent`` tool's ``timeout`` parameter
+(default :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`), so a channel call
+that hits both waits can take up to twice the ``timeout`` (capped at
+``timeout`` + this constant) — plus, on timeout, the client's bounded
+stop-confirmation grace (``daemon_client._STOP_CONFIRM_GRACE_SECONDS``,
+20 s) — before returning.
+"""
+
+DEFAULT_DISPATCH_TIMEOUT_SECONDS = 300.0
+"""Default bound on the wait for a dispatched sub-task's result.
+
+Used when the ``run_agent`` tool's ``timeout`` argument is empty; a
+per-call value overrides it.  When the wait times out, the tool
+returns an error string and the sub-task is STOPPED
+(:func:`kiss.agents.sorcar.daemon_client.run` is called with
+``stop_on_timeout=True``, which also awaits the stop's
+terminal-status confirmation before returning; if a wedged daemon
+never confirms it within the bounded grace, the error string says the
+task may still be running instead of claiming it was stopped): a
+channel sub-task
+must not outlive its workspace reservation — the process-global
+workspace is released the moment the dispatch returns, so a surviving
+sub-task could bind another account's credentials when its channel
+tools load — and a surviving path/cron sub-task would keep spending
+invisibly.  Work the sub-task completed before the stop (side
+effects, spend) is not reported back to the calling task.
+"""
 
 _NON_CHANNEL_MODULES = frozenset({"a2a_agent", "openai_compat_agent"})
 """Modules matching ``*_agent.py`` that are not user-facing channels.
@@ -231,6 +264,7 @@ def _dispatch(
     work_dir: str,
     model_name: str,
     budget: float | None,
+    timeout: float,
     parent_agent: Any = None,
     scope_work_dir: str = "",
 ) -> str:
@@ -252,6 +286,9 @@ def _dispatch(
             default (an agent script's ``get_model()`` still wins).
         budget: Per-task USD budget override; ``None`` for the daemon
             default.
+        timeout: Maximum seconds to wait for the sub-task's result.
+            On timeout the sub-task is stopped and an error string is
+            returned (see :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`).
         parent_agent: The agent calling ``run_agent``, when there is
             one: the sub-task's cost/tokens/steps are folded into its
             task accounting (see :func:`_attribute_dispatch_usage`).
@@ -277,15 +314,25 @@ def _dispatch(
             scope_work_dir=scope_work_dir,
             model=model_name,
             max_budget=budget,
-            timeout=DISPATCH_TIMEOUT_SECONDS,
+            timeout=timeout,
+            stop_on_timeout=True,
             sock_path=_daemon_sock_path(),
         )
-    except TimeoutError:
-        # The sub-task keeps running (and spending) on the daemon; its
-        # spend is unknown here and stays on its own history row only.
+    except daemon_client.StopUnconfirmedTimeoutError:
         return (
-            f"The {name} agent task did not finish within "
-            f"{DISPATCH_TIMEOUT_SECONDS:.0f}s; it keeps running on the daemon."
+            f"Error: the {name} agent task did not finish within "
+            f"{timeout:g}s; a stop was requested but the daemon never "
+            f"confirmed it, so the task MAY STILL BE RUNNING (and "
+            f"spending) on the daemon. Check what it already did "
+            f"before retrying with a larger `timeout` argument."
+        )
+    except TimeoutError:
+        return (
+            f"Error: the {name} agent task did not finish within "
+            f"{timeout:g}s and was stopped; work it completed before "
+            f"the stop (side effects, spend) is not reported here. "
+            f"Check what it already did before retrying with a larger "
+            f"`timeout` argument."
         )
     except Exception as e:
         logger.warning("agent dispatch failed", exc_info=True)
@@ -304,6 +351,7 @@ def _run_agent(
     workspace: str,
     model_name: str,
     max_budget: str,
+    timeout: str,
     parent_agent: Any = None,
 ) -> str:
     """Run a channel agent or an agent script on a task immediately.
@@ -327,6 +375,12 @@ def _run_agent(
             default.
         max_budget: Per-task USD budget override as a number string;
             empty for the daemon default.
+        timeout: Maximum seconds to wait for the sub-task's result, as
+            a number string; empty for the default
+            :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS` (300).  On
+            timeout the sub-task is stopped and an error string is
+            returned.  It also caps the channel-mode workspace wait
+            (see :data:`WORKSPACE_WAIT_TIMEOUT_SECONDS`).
         parent_agent: The agent calling ``run_agent``, when there is
             one; the sub-task's spend is folded into its task
             accounting (see :func:`_attribute_dispatch_usage`).
@@ -346,6 +400,18 @@ def _run_agent(
             f"Error: max_budget must be a positive finite number, "
             f"got {max_budget!r}."
         )
+    try:
+        wait = (
+            float(timeout) if timeout.strip()
+            else DEFAULT_DISPATCH_TIMEOUT_SECONDS
+        )
+    except ValueError:
+        return f"Error: timeout must be a number of seconds, got {timeout!r}."
+    if not math.isfinite(wait) or wait <= 0:
+        return (
+            f"Error: timeout must be a positive finite number of seconds, "
+            f"got {timeout!r}."
+        )
     requested = agent.strip()
     if requested.endswith(".py") or "/" in requested or "\\" in requested:
         # Path mode: any agent-script file.  The task is passed through
@@ -362,7 +428,7 @@ def _run_agent(
             return f"Error: {e}"
         work_dir = parent_work_dir or str(kiss_home() / "agent_work")
         return _dispatch(Path(agent_path).stem, task, agent_path,
-                         work_dir, model_name, budget, parent_agent,
+                         work_dir, model_name, budget, wait, parent_agent,
                          scope_work_dir=parent_work_dir)
     # Forgiving lookup: "Home Assistant", "phone control", and
     # "nextcloud-talk" all resolve — spelling variants differ only in
@@ -380,7 +446,7 @@ def _run_agent(
         return _dispatch(
             "cron", cron_agent.CRON_DISPATCH_PREAMBLE + task,
             str(cron_agent.__file__), cron_agent.get_work_dir(),
-            model_name, budget, parent_agent,
+            model_name, budget, wait, parent_agent,
             scope_work_dir=parent_work_dir,
         )
     channels = available_channels()
@@ -430,17 +496,20 @@ def _run_agent(
     # workspace DIFFERS from a running one's blocks here instead of
     # overwriting the exported value mid-flight (which would hand the
     # running session the wrong account's credentials); the wait is
-    # bounded by how long a conflicting dispatch can hold it.
-    if not enter_workspace(workspace, timeout=DISPATCH_TIMEOUT_SECONDS):
+    # bounded — by the call's own timeout, and by
+    # WORKSPACE_WAIT_TIMEOUT_SECONDS for very large timeouts — so a
+    # conflicting dispatch cannot hang this one forever.
+    workspace_wait = min(wait, WORKSPACE_WAIT_TIMEOUT_SECONDS)
+    if not enter_workspace(workspace, timeout=workspace_wait):
         return (
             f"Error: workspace {workspace!r} could not be activated for "
-            f"the {channel} agent within {DISPATCH_TIMEOUT_SECONDS:.0f}s "
+            f"the {channel} agent within {workspace_wait:g}s "
             f"because a concurrent channel task is still using a "
             f"different workspace; retry when it finishes."
         )
     try:
         return _dispatch(channel, prompt, str(module.__file__),
-                         work_dir, model_name, budget, parent_agent,
+                         work_dir, model_name, budget, wait, parent_agent,
                          scope_work_dir=parent_work_dir)
     finally:
         exit_workspace(workspace)
@@ -476,9 +545,12 @@ def make_run_agent_tool(
         workspace: str = "default",
         model_name: str = "",
         max_budget: str = "",
+        timeout: str = "",
     ) -> str:
         """Run an agent — a channel agent or any agent script — on a task now.
 
+        DO NOT CREATE AN AGENT JUST TO RUN THE `run_agent` tool.  Use
+        `run_parallel` tool instead.
         Use this tool RIGHT AWAY — as the first action, without
         exploring any source code — whenever the task is to act on an
         external messaging service, mailbox, or device channel:
@@ -508,7 +580,13 @@ def make_run_agent_tool(
         with the standard worktree/auto-commit lifecycle) unless the
         script's ``get_work_dir()`` says otherwise; a channel agent's
         session runs in the channels' shared ``~/.kiss/channel_work``.
-        This call blocks until the task finishes (up to 15 minutes).
+        This call blocks until the task finishes or the ``timeout``
+        (default 300 seconds) expires, whichever comes first; a
+        timed-out call spends up to 20 further seconds confirming the
+        stop, and a channel dispatch queued behind a concurrent
+        channel task holding a different workspace may additionally
+        wait up to ``timeout`` (capped at 900 s) for that workspace
+        before the sub-task starts.
 
         Args:
             agent: WHICH agent to run — an installed channel name,
@@ -532,14 +610,25 @@ def make_run_agent_tool(
                 still wins.
             max_budget: Per-task USD budget override as a number
                 string; empty uses the daemon default.
+            timeout: Maximum seconds to wait for the task to finish,
+                as a number string; empty uses the default of 300
+                seconds.  Pass a larger value for tasks expected to
+                run long.  On timeout this call STOPS the task and
+                returns an error string (which says the task may
+                still be running in the rare case the daemon never
+                confirms the stop); work the task completed before
+                the stop (side effects, spend) is not reported back
+                here, so check what it already did before retrying
+                with a larger timeout.
 
         Returns:
             The sub-task's YAML result ("success" and "summary" keys),
-            or an error message naming the available channels.
+            an error message naming the available channels, or a
+            timeout error message when the task outlived ``timeout``.
         """
         return _run_agent(
             work_dir, agent, task, workspace, model_name, max_budget,
-            parent_agent,
+            timeout, parent_agent,
         )
 
     run_agent.__doc__ = (run_agent.__doc__ or "").replace(

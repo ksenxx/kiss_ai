@@ -615,6 +615,11 @@ write_exclude reports
 echo "code" > app.py
 mkdir reports
 echo "<html>x</html>" > reports/x.html
+# create_public_commit adds the built extension to the public snapshot; like the
+# real repo, the scratch origin gitignores it so "git add -A" never commits it.
+echo "*.vsix" > .gitignore
+mkdir -p "$(dirname "$VSIX_FILE")"
+printf 'PK fake vsix' > "$VSIX_FILE"
 git add -A
 git commit -q -m "c1 code and report"
 git push -q "$PUBLIC_REMOTE" main
@@ -633,6 +638,12 @@ push_public_snapshot "$PUBLIC_COMMIT" v1.0.0 "$PARENT" > /dev/null ||
 [[ "$(git -C "$PUB" cat-file -t refs/tags/v1.0.0)" == "tag" ]] ||
     fail "release tag missing or not annotated"
 [[ -z "$(commits_containing "$PUB" reports)" ]] || fail "release push published excluded paths"
+[[ "$(git -C "$PUB" show "main:$VSIX_FILE")" == "PK fake vsix" ]] ||
+    fail "release push did not publish the built vsix"
+# Only origin's own branch: --all would also walk the mirrored public refs.
+for c in $(git rev-list HEAD); do
+    git cat-file -e "$c:$VSIX_FILE" 2>/dev/null && fail "vsix was committed to origin ($c)"
+done
 pass "release snapshot and its tag are published in one atomic push"
 
 # Re-using a published tag for different content must be refused, not moved.

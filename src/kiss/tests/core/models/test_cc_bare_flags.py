@@ -16,6 +16,7 @@ invocation self-contained.
 import unittest
 
 from kiss.core.models.claude_code_model import ClaudeCodeModel
+from kiss.core.models.model import CLI_SYSTEM_PROMPT_HEADER
 
 
 class TestClaudeCodeAgenticFlags(unittest.TestCase):
@@ -42,15 +43,20 @@ class TestClaudeCodeAgenticFlags(unittest.TestCase):
         idx = args.index("--model")
         self.assertEqual(args[idx + 1], "sonnet")
 
-    def test_flags_present_with_system_instruction(self) -> None:
-        """Agentic flags survive even when a system prompt is configured."""
+    def test_system_instruction_rides_in_prompt_not_cli_args(self) -> None:
+        """The system prompt is appended to the task prompt after
+        ``CLI_SYSTEM_PROMPT_HEADER``, never passed as ``--system-prompt``
+        (the CLI keeps its own native system prompt)."""
         m = ClaudeCodeModel("cc/opus", model_config={"system_instruction": "be brief"})
         args = m._build_cli_args()
         self.assertIn("--disable-slash-commands", args)
         self.assertIn("--dangerously-skip-permissions", args)
-        self.assertIn("--system-prompt", args)
-        idx = args.index("--system-prompt")
-        self.assertEqual(args[idx + 1], "be brief")
+        self.assertNotIn("--system-prompt", args)
+        m.initialize("do the task")
+        self.assertEqual(
+            m._build_prompt(),
+            "do the task" + CLI_SYSTEM_PROMPT_HEADER + "be brief",
+        )
 
 
 if __name__ == "__main__":

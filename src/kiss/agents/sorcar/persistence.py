@@ -426,6 +426,32 @@ _thread_local = threading.local()
 _db_generation: int = 0
 
 
+def _close_cached_thread_conn() -> sqlite3.Connection | None:
+    """Close and forget the CALLING thread's cached connection.
+
+    Single teardown used by :func:`_close_db` and
+    :func:`_close_thread_db` (previously duplicated in both, where the
+    two copies could drift): closes the thread-local connection
+    (best-effort) and resets every thread-local cache field so the
+    thread's next ``_get_db()`` reconnects from scratch.
+
+    Returns:
+        The connection that was cached (now closed), or ``None`` when
+        the thread had none.
+    """
+    tl_conn: sqlite3.Connection | None = getattr(_thread_local, "conn", None)
+    if tl_conn is not None:
+        try:
+            tl_conn.close()
+        except Exception:
+            pass
+    _thread_local.conn = None
+    _thread_local.gen = -1
+    _thread_local.path = None
+    _thread_local.file_id = None
+    return tl_conn
+
+
 def _close_db() -> None:
     """Close the calling thread's connection and invalidate cached handles.
 
@@ -437,16 +463,7 @@ def _close_db() -> None:
     global _db_conn, _db_generation
     _stop_event_writer()
     _db_generation += 1
-    tl_conn: sqlite3.Connection | None = getattr(_thread_local, "conn", None)
-    if tl_conn is not None:
-        try:
-            tl_conn.close()
-        except Exception:
-            pass
-    _thread_local.conn = None
-    _thread_local.gen = -1
-    _thread_local.path = None
-    _thread_local.file_id = None
+    _close_cached_thread_conn()
     _db_conn = None
 
 
@@ -461,18 +478,9 @@ def _close_thread_db() -> None:
     an open connection for the life of the process.
     """
     global _db_conn
-    tl_conn: sqlite3.Connection | None = getattr(_thread_local, "conn", None)
-    if tl_conn is not None:
-        try:
-            tl_conn.close()
-        except Exception:
-            pass
-        if _db_conn is tl_conn:
-            _db_conn = None
-    _thread_local.conn = None
-    _thread_local.gen = -1
-    _thread_local.path = None
-    _thread_local.file_id = None
+    tl_conn = _close_cached_thread_conn()
+    if tl_conn is not None and _db_conn is tl_conn:
+        _db_conn = None
 
 
 _HISTORY_SELECT = (
@@ -2531,8 +2539,8 @@ def _append_chat_event(
         task: Fallback task description string for legacy callers.
         origin_db_path: Database path *task_id* was resolved against
             (see :func:`_queue_chat_event`).  Late asynchronous
-            callers (e.g. the follow-up suggestion thread) pass the
-            path captured when the task completed so the event is
+            callers pass the path captured when the task completed
+            so the event is
             dropped — instead of attached to an unrelated task with
             the same row id — if the active database has changed.
     """

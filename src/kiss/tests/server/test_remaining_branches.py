@@ -68,12 +68,6 @@ class TestHelpersBranches:
         result = clip_autocomplete_suggestion("hello", "hello world")
         assert result == "hello world"
 
-    def test_generate_followup_text_failure(self) -> None:
-        """generate_followup_text returns empty string on LLM failure (lines 104-106)."""
-        from kiss.server.helpers import generate_followup_text
-        result = generate_followup_text("task", "result", "nonexistent-model-xyz")
-        assert result == ""
-
 
 class TestVSCodeServerBranches:
     """Cover remaining branches in server.py."""

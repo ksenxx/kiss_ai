@@ -30,6 +30,7 @@ from kiss.agents.sorcar.persistence import (
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.tab_registry import OpenTabOutcome
+from kiss.server.task_runner import _client_task_id_of
 
 if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
@@ -234,6 +235,7 @@ class _CommandsMixin:
         printer: JsonPrinter
         work_dir: str
         _state_lock: threading.RLock
+        _shutdown_stopping: bool
         _default_model: str
         _complete_seq: int
         _complete_seq_latest: dict[str, int]
@@ -253,7 +255,9 @@ class _CommandsMixin:
         def _broadcast_tabs_state(self) -> None: ...
 
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
-        def _stop_task(self, tab_id: str = "") -> None: ...
+        def _stop_task(
+            self, tab_id: str = "", run_token: str = "",
+        ) -> None: ...
         def _find_viewer_task_states(
             self, viewer_tab_id: str,
         ) -> list[AgentState]: ...
@@ -452,6 +456,7 @@ class _CommandsMixin:
                     stop_event=threading.Event(),
                 )
                 state.user_answer_queue = queue.Queue(maxsize=1)
+                state.client_run_token = _client_task_id_of(cmd)
                 if prev is not None:
                     # Carry the previous task's agent (it may hold a
                     # pending worktree) over to the new run's state.
@@ -469,6 +474,9 @@ class _CommandsMixin:
                     tab_id, inject_prompt, inject_task,
                 )
             return
+        # ``thread`` and ``state`` are created together above, so a
+        # non-None thread guarantees the state.
+        assert state is not None
         try:
             # Register + title + bind the tab in the shared registry
             # BEFORE the ``clear`` broadcast so every client has the
@@ -497,7 +505,27 @@ class _CommandsMixin:
                 "chat_id": chat_id,
                 "tabId": tab_id,
             })
-            thread.start()
+            # Start/cancel handshake (audit0903 F1/F2): a ``stop`` or
+            # the graceful-shutdown sweep can land while the registry
+            # write and the ``clear`` broadcast above hold the
+            # pre-start window open.  The decision to start is taken
+            # atomically under ``_state_lock`` — the same lock
+            # ``_stop_task`` and ``_stop_active_agent_tasks`` flag
+            # under — so a swept or stopped run can never call
+            # ``thread.start()`` afterwards.  Before this handshake
+            # the shutdown sweep crashed joining the unstarted thread
+            # and the run then executed its untrusted setup with no
+            # watchdog, and an accepted pre-start stop relied on a
+            # watchdog that gives up waiting for the start after 30 s.
+            with self._state_lock:
+                if self._shutdown_stopping:
+                    state.interrupted_by_shutdown = True
+                pre_cancelled = state.interrupted_by_shutdown or (
+                    state.stop_event is not None
+                    and state.stop_event.is_set()
+                )
+                if not pre_cancelled:
+                    thread.start()
         except BaseException:
             with self._state_lock:
                 if state is not None and state.task_thread is thread:
@@ -505,10 +533,30 @@ class _CommandsMixin:
                     state.stop_event = None
                     state.user_answer_queue = None
             raise
+        if pre_cancelled:
+            # Route the never-started run through the normal terminal
+            # cancellation — ``_cancel_outcome`` labelling, ``result``
+            # and ``status`` broadcasts, state cleanup — WITHOUT
+            # executing any user setup: ``_run_task`` raises the
+            # cancelling ``KeyboardInterrupt`` at its top when it sees
+            # the marker, right here on the dispatch thread.
+            cmd["_pre_cancelled"] = True
+            self._run_task(cmd)
 
     def _cmd_stop(self, cmd: dict[str, Any]) -> None:
-        """Stop a running task."""
-        self._stop_task(cmd.get("tabId", ""))
+        """Stop a running task.
+
+        An optional ``taskId`` — the client-minted per-submission run
+        token, sent by ``daemon_client.run``'s abort-cascade stop —
+        restricts the stop to the run it belongs to: a synthetic
+        ``api-…`` tab can be reused by a NEWER run after the original
+        finishes, and a late tab-only stop would kill that innocent
+        run.  UI stops send no ``taskId`` and behave as before.
+        """
+        self._stop_task(
+            cmd.get("tabId", ""),
+            run_token=_client_task_id_of(cmd),
+        )
 
     def _cmd_get_models(self, cmd: dict[str, Any]) -> None:
         """Send available models list to the requesting connection only."""
@@ -1238,7 +1286,7 @@ class _CommandsMixin:
             apply_config_to_env,
             load_config,
             sanitize_config,
-            save_api_key_to_shell,
+            save_api_key,
             save_config,
         )
 
@@ -1261,14 +1309,14 @@ class _CommandsMixin:
             if new_work_dir:
                 self._apply_new_work_dir(new_work_dir)
 
-            # Persist API keys INSIDE ``_save_config_lock``.  Each
-            # ``save_api_key_to_shell`` does an unlocked
-            # read-modify-atomic-replace of the same shell RC file, so two
-            # concurrent ``saveConfig`` calls saving different keys could
-            # both read the old file and then replace it independently,
-            # silently losing the first key.  Serializing the writes under
-            # the same lock that already guards config.json closes the
-            # lost-update window.
+            # Persist API keys INSIDE ``_save_config_lock``: each
+            # ``save_api_key`` edits the canonical key store and the
+            # shell RC, and serializing the writes under the same lock
+            # that already guards config.json keeps two concurrent
+            # ``saveConfig`` calls from interleaving.  An empty value
+            # deletes the key from every store (canonical file, legacy
+            # systemd mirror, shell RC) — that is the settings panel's
+            # delete path.
             api_keys = cmd.get("apiKeys", {})
             if not isinstance(api_keys, dict):
                 api_keys = {}
@@ -1276,9 +1324,8 @@ class _CommandsMixin:
                 if (
                     isinstance(key_name, str)
                     and isinstance(key_value, str)
-                    and key_value
                 ):
-                    save_api_key_to_shell(key_name, key_value)
+                    save_api_key(key_name, key_value)
 
         conn_id = cmd.get("connId", "")
         self._get_models(conn_id)

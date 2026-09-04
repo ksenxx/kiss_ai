@@ -148,7 +148,10 @@ class TestMultiHopModelSwitchingLive:
     def test_five_hop_chain_is_lossless(self) -> None:
         """Every hop tool-calls on the accumulated mixed-format history and
         the final model recalls all secrets from all previous hops."""
-        m1 = model("gpt-4o")
+        # Hop 1 must be the V1 Chat Completions transport (the chain
+        # deliberately starts on chat); gpt-4o's catalog default is now
+        # the v2 Responses adapter, so v1 is requested explicitly.
+        m1 = model("gpt-4o", model_config={"use_responses_api": False})
         assert isinstance(m1, OpenAICompatibleModel)
         m1.initialize(
             "We will play a memory game across this conversation. "

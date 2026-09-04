@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.9.0-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.9.2-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -61,7 +61,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 631 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 634 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -165,7 +165,7 @@ print(result.text, result.success, result.cost, result.tokens, result.steps)
 follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-`run()` accepts keyword options mirroring the chat interface — `model`, `work_dir`, `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config` (custom endpoint/headers), `web_tools`, `is_parallel`, `timeout`, `sock_path` (daemon socket override) — plus options to customize the agent itself:
+`run()` accepts keyword options mirroring the chat interface — `model`, `work_dir`, `scope_work_dir` (workspace directory the task's tab is scoped to, when different from the execution `work_dir`), `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config` (custom endpoint/headers), `web_tools`, `is_parallel`, `timeout`, `sock_path` (daemon socket override) — plus options to customize the agent itself:
 
 - `tools="/path/to/my_tools.py"` — a Python file whose `get_tools()` function returns the functions the daemon registers as extra agent tools. The functions are never serialized: only the path travels over the socket, and the daemon imports the file, calls `get_tools()`, and runs the tools in its own process.
 - `system_prompt` — replace the default system prompt for the run (and its sub-agents); `append_to_system_prompt` / `append_to_prompt` — append text to the system prompt or task prompt instead of replacing them.
@@ -193,7 +193,7 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-KISS Sorcar ships a catalog of **631 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **634 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -203,15 +203,15 @@ KISS Sorcar ships a catalog of **631 models** across **9 provider categories**, 
 | Together AI | 91 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 351 |
+| OpenRouter | 356 |
 | Claude Code CLI (`cc/*`) | 14 |
-| Codex CLI (`codex/*`) | 11 |
+| Codex CLI (`codex/*`) | 9 |
 
 Current catalog capability totals:
 
-- **610** generation-capable models
-- **452** function-calling-capable models
-- **12** embedding models
+- **614** generation-capable models
+- **455** function-calling-capable models
+- **11** embedding models
 
 Full model list:
 
@@ -330,6 +330,7 @@ Full model list:
 <summary><strong>Anthropic (14)</strong></summary>
 
 - `claude-fable-5`
+- `claude-fable-5-1`
 - `claude-haiku-4-5`
 - `claude-haiku-4-5-20251001`
 - `claude-opus-4-5`
@@ -348,17 +349,12 @@ Full model list:
 <details>
 <summary><strong>Gemini / Google (27)</strong></summary>
 
-- `gemini-2.0-flash`
-- `gemini-2.0-flash-001`
-- `gemini-2.0-flash-lite`
-- `gemini-2.0-flash-lite-001`
 - `gemini-2.5-flash`
 - `gemini-2.5-flash-image`
 - `gemini-2.5-flash-lite`
 - `gemini-2.5-pro`
 - `gemini-3-flash-preview`
 - `gemini-3-pro-image`
-- `gemini-3-pro-preview`
 - `gemini-3.1-flash-image`
 - `gemini-3.1-flash-lite`
 - `gemini-3.1-flash-lite-image`
@@ -367,10 +363,15 @@ Full model list:
 - `gemini-3.1-pro-preview`
 - `gemini-3.5-flash`
 - `gemini-3.5-flash-lite`
+- `gemini-3.5-transcribe`
+- `gemini-3.5-transcribe-live`
 - `gemini-3.6-flash`
+- `gemini-3.7-flash`
+- `gemini-3.8-flash`
 - `gemini-embedding-001`
 - `gemini-embedding-2`
 - `gemini-embedding-2-preview`
+- `gemini-omni-1.1-flash`
 - `gemini-omni-flash-preview`
 - `google/gemma-2-27b-it`
 - `google/gemma-3n-E4B-it`
@@ -404,6 +405,8 @@ Full model list:
 - `Qwen/Qwen3.6-Plus`
 - `Qwen/Qwen3.7-Max`
 - `Qwen/Qwen3.7-Plus`
+- `Qwen/Qwen3.8-2.4T-A95B`
+- `Qwen/Qwen3.8-Flash`
 - `arcee-ai/trinity-mini`
 - `deepcogito/cogito-v1-preview-llama-70B`
 - `deepcogito/cogito-v1-preview-llama-70B-Turbo`
@@ -421,6 +424,7 @@ Full model list:
 - `deepseek-ai/DeepSeek-V3.1`
 - `deepseek-ai/DeepSeek-V4-Flash-0731`
 - `deepseek-ai/DeepSeek-V4-Pro`
+- `deepseek-ai/DeepSeek-V4-Pro-0813`
 - `deepseek-ai/deepseek-coder-33b-instruct`
 - `essentialai/rnj-1-instruct`
 - `intfloat/multilingual-e5-large-instruct`
@@ -467,6 +471,8 @@ Full model list:
 - `zai-org/GLM-5.2`
 - `zai-org/GLM-5.2-high`
 - `zai-org/GLM-5.2-max`
+- `zai-org/GLM-5.3`
+- `zai-org/GLM-5.3-Flash`
 
 </details>
 
@@ -501,14 +507,12 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (351)</strong></summary>
+<summary><strong>OpenRouter (356)</strong></summary>
 
-- `openrouter/ai21/jamba-large-1.7`
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
 - `openrouter/aion-labs/aion-3.0-mini`
 - `openrouter/aion-labs/aion-rp-llama-3.1-8b`
-- `openrouter/allenai/olmo-3-32b-think`
 - `openrouter/amazon/nova-2-lite-v1`
 - `openrouter/amazon/nova-lite-v1`
 - `openrouter/amazon/nova-micro-v1`
@@ -518,26 +522,25 @@ Full model list:
 - `openrouter/anthropic/claude-3-haiku`
 - `openrouter/anthropic/claude-3.7-sonnet:thinking`
 - `openrouter/anthropic/claude-fable-5`
+- `openrouter/anthropic/claude-fable-5.1`
 - `openrouter/anthropic/claude-haiku-4.5`
 - `openrouter/anthropic/claude-opus-4`
 - `openrouter/anthropic/claude-opus-4.1`
 - `openrouter/anthropic/claude-opus-4.5`
 - `openrouter/anthropic/claude-opus-4.6`
 - `openrouter/anthropic/claude-opus-4.7`
-- `openrouter/anthropic/claude-opus-4.7-fast`
 - `openrouter/anthropic/claude-opus-4.8`
-- `openrouter/anthropic/claude-opus-4.8-fast`
 - `openrouter/anthropic/claude-opus-5`
-- `openrouter/anthropic/claude-opus-5-fast`
 - `openrouter/anthropic/claude-sonnet-4`
 - `openrouter/anthropic/claude-sonnet-4.5`
 - `openrouter/anthropic/claude-sonnet-4.6`
 - `openrouter/anthropic/claude-sonnet-5`
 - `openrouter/arcee-ai/trinity-large-thinking`
-- `openrouter/arcee-ai/virtuoso-large`
 - `openrouter/baidu/ernie-4.5-vl-424b-a47b`
 - `openrouter/bytedance-seed/seed-1.6`
 - `openrouter/bytedance-seed/seed-1.6-flash`
+- `openrouter/bytedance-seed/seed-2-1-turbo`
+- `openrouter/bytedance-seed/seed-2.0-code`
 - `openrouter/bytedance-seed/seed-2.0-lite`
 - `openrouter/bytedance-seed/seed-2.0-mini`
 - `openrouter/bytedance/ui-tars-1.5-7b`
@@ -546,7 +549,6 @@ Full model list:
 - `openrouter/cohere/command-r-08-2024`
 - `openrouter/cohere/command-r-plus-08-2024`
 - `openrouter/cohere/command-r7b-12-2024`
-- `openrouter/deepcogito/cogito-v2.1-671b`
 - `openrouter/deepseek/deepseek-chat`
 - `openrouter/deepseek/deepseek-chat-v3-0324`
 - `openrouter/deepseek/deepseek-chat-v3.1`
@@ -558,7 +560,9 @@ Full model list:
 - `openrouter/deepseek/deepseek-v3.2-exp`
 - `openrouter/deepseek/deepseek-v4-flash`
 - `openrouter/deepseek/deepseek-v4-flash-0731`
+- `openrouter/deepseek/deepseek-v4-flash-vision-exp`
 - `openrouter/deepseek/deepseek-v4-pro`
+- `openrouter/deepseek/deepseek-v4-pro-0813`
 - `openrouter/google/gemini-2.5-flash`
 - `openrouter/google/gemini-2.5-flash-image`
 - `openrouter/google/gemini-2.5-flash-lite`
@@ -578,11 +582,12 @@ Full model list:
 - `openrouter/google/gemini-3.5-flash`
 - `openrouter/google/gemini-3.5-flash-lite`
 - `openrouter/google/gemini-3.6-flash`
+- `openrouter/google/gemini-3.7-flash`
+- `openrouter/google/gemini-3.8-flash`
 - `openrouter/google/gemma-2-27b-it`
 - `openrouter/google/gemma-3-12b-it`
 - `openrouter/google/gemma-3-27b-it`
 - `openrouter/google/gemma-3-4b-it`
-- `openrouter/google/gemma-3n-e4b-it`
 - `openrouter/google/gemma-4-26b-a4b-it`
 - `openrouter/google/gemma-4-31b-it`
 - `openrouter/google/lyria-3-clip-preview`
@@ -590,12 +595,10 @@ Full model list:
 - `openrouter/gryphe/mythomax-l2-13b`
 - `openrouter/ibm-granite/granite-4.0-h-micro`
 - `openrouter/ibm-granite/granite-4.1-8b`
+- `openrouter/ibm-granite/granite-4.2-8b`
 - `openrouter/inception/mercury-2`
-- `openrouter/inclusionai/ling-2.6-1t`
-- `openrouter/inclusionai/ling-2.6-flash`
+- `openrouter/inception/mercury-2.5-preview`
 - `openrouter/inclusionai/ling-3.0-flash`
-- `openrouter/inclusionai/ring-2.6-1t`
-- `openrouter/kwaipilot/kat-coder-air-v2.5`
 - `openrouter/kwaipilot/kat-coder-pro-v2`
 - `openrouter/kwaipilot/kat-coder-pro-v2.5`
 - `openrouter/mancer/weaver`
@@ -608,11 +611,14 @@ Full model list:
 - `openrouter/meta-llama/llama-4-maverick`
 - `openrouter/meta-llama/llama-4-scout`
 - `openrouter/meta-llama/llama-guard-4-12b`
+- `openrouter/meta/muse-glimmer-30b`
 - `openrouter/meta/muse-spark-1.1`
 - `openrouter/meta/muse-spark-1.2`
+- `openrouter/meta/muse-spark-1.3`
 - `openrouter/microsoft/phi-4`
 - `openrouter/microsoft/wizardlm-2-8x22b`
 - `openrouter/mistralai/codestral-2508`
+- `openrouter/mistralai/devstral-2512`
 - `openrouter/mistralai/ministral-14b-2512`
 - `openrouter/mistralai/ministral-3b-2512`
 - `openrouter/mistralai/ministral-8b-2512`
@@ -651,6 +657,7 @@ Full model list:
 - `openrouter/nvidia/nemotron-3-nano-30b-a3b`
 - `openrouter/nvidia/nemotron-3-super-120b-a12b`
 - `openrouter/nvidia/nemotron-3-ultra-550b-a55b`
+- `openrouter/nvidia/nemotron-3.5-lightning`
 - `openrouter/openai/gpt-3.5-turbo`
 - `openrouter/openai/gpt-3.5-turbo-0613`
 - `openrouter/openai/gpt-3.5-turbo-16k`
@@ -676,7 +683,6 @@ Full model list:
 - `openrouter/openai/gpt-5.1`
 - `openrouter/openai/gpt-5.2`
 - `openrouter/openai/gpt-5.2-chat`
-- `openrouter/openai/gpt-5.3-chat`
 - `openrouter/openai/gpt-5.4`
 - `openrouter/openai/gpt-5.4-image-2`
 - `openrouter/openai/gpt-5.4-mini`
@@ -780,6 +786,9 @@ Full model list:
 - `openrouter/qwen/qwen3.7-flash`
 - `openrouter/qwen/qwen3.7-max`
 - `openrouter/qwen/qwen3.7-plus`
+- `openrouter/qwen/qwen3.8-2.4t-a95b`
+- `openrouter/qwen/qwen3.8-27b`
+- `openrouter/qwen/qwen3.8-flash`
 - `openrouter/qwen/qwen3.8-max`
 - `openrouter/rekaai/reka-edge`
 - `openrouter/rekaai/reka-flash-3`
@@ -792,16 +801,20 @@ Full model list:
 - `openrouter/stepfun/step-3.5-flash`
 - `openrouter/stepfun/step-3.7-flash`
 - `openrouter/tencent/hunyuan-a13b-instruct`
+- `openrouter/tencent/hy-mt2-1.8b`
+- `openrouter/tencent/hy-mt2-30b-a3b`
+- `openrouter/tencent/hy-mt2-7b`
 - `openrouter/tencent/hy3`
 - `openrouter/tencent/hy3-preview`
+- `openrouter/tencent/hy4-preview`
 - `openrouter/thedrummer/cydonia-24b-v4.1`
-- `openrouter/thedrummer/rocinante-12b`
 - `openrouter/thedrummer/skyfall-36b-v2`
 - `openrouter/thedrummer/unslopnemo-12b`
 - `openrouter/thinkingmachines/inkling`
 - `openrouter/thinkingmachines/inkling-small`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-pro-3`
+- `openrouter/upstage/solar-pro4`
 - `openrouter/writer/palmyra-x5`
 - `openrouter/x-ai/grok-4.20`
 - `openrouter/x-ai/grok-4.20-multi-agent`
@@ -813,6 +826,7 @@ Full model list:
 - `openrouter/x-ai/grok-4.5-high`
 - `openrouter/x-ai/grok-4.5-low`
 - `openrouter/x-ai/grok-4.5-medium`
+- `openrouter/x-ai/grok-4.6`
 - `openrouter/x-ai/grok-build-0.1`
 - `openrouter/xiaomi/mimo-v2.5`
 - `openrouter/xiaomi/mimo-v2.5-pro`
@@ -829,6 +843,8 @@ Full model list:
 - `openrouter/z-ai/glm-5.2`
 - `openrouter/z-ai/glm-5.2-high`
 - `openrouter/z-ai/glm-5.2-max`
+- `openrouter/z-ai/glm-5.3`
+- `openrouter/z-ai/glm-5.3-flash`
 - `openrouter/z-ai/glm-5v-turbo`
 - `openrouter/~anthropic/claude-fable-latest`
 - `openrouter/~anthropic/claude-haiku-latest`
@@ -845,6 +861,8 @@ Full model list:
 - `openrouter/~openai/gpt-latest-xhigh`
 - `openrouter/~openai/gpt-mini-latest`
 - `openrouter/~x-ai/grok-latest`
+- `openrouter/~z-ai/glm-flash-latest`
+- `openrouter/~z-ai/glm-latest`
 
 </details>
 
@@ -852,6 +870,7 @@ Full model list:
 <summary><strong>Claude Code CLI (cc/*) (14)</strong></summary>
 
 - `cc/claude-fable-5`
+- `cc/claude-fable-5-1`
 - `cc/claude-haiku-4-5-20251001`
 - `cc/claude-opus-4-5-20251101`
 - `cc/claude-opus-4-6`
@@ -868,11 +887,10 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Codex CLI (codex/*) (11)</strong></summary>
+<summary><strong>Codex CLI (codex/*) (9)</strong></summary>
 
 - `codex/codex-auto-review`
 - `codex/default`
-- `codex/gpt-5.2`
 - `codex/gpt-5.4`
 - `codex/gpt-5.4-mini`
 - `codex/gpt-5.5`

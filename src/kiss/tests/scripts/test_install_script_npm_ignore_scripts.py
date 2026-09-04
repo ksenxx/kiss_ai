@@ -8,7 +8,7 @@ install scripts.
 
 Background — the bug
 ====================
-Clicking the settings Update button runs ``~/kiss_ai/install.sh`` in an
+Clicking the settings Update button runs ``~/.kiss/kiss_ai/install.sh`` in an
 integrated terminal.  Step ``[5/6] Building VS Code extension...`` ran a
 plain ``npm ci``, which executes every dependency lifecycle (install /
 postinstall) script.  The extension's lockfile contains exactly two packages

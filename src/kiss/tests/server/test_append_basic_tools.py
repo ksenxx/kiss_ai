@@ -197,7 +197,10 @@ class DaemonRunApiHarness(unittest.TestCase):
                 the session, the call's ``arguments`` (the
                 task-executor calls carry ``task_description``, the
                 failure-path trajectory summarizer carries
-                ``trajectory_path``), and the call's ``system_prompt``.
+                ``trajectory_path``), the call's ``system_prompt``,
+                and the ``llm_call_hook`` / ``tool_call_hook``
+                callables handed to the session (``None`` when the
+                run carries no agent-script hook).
             fail_first_executor: When True, the FIRST task-executor
                 session raises a retryable :class:`KISSError` after
                 two steps, driving ``RelentlessAgent.perform_task``
@@ -226,6 +229,8 @@ class DaemonRunApiHarness(unittest.TestCase):
                 ],
                 "arguments": arguments,
                 "system_prompt": str(kwargs.get("system_prompt") or ""),
+                "llm_call_hook": kwargs.get("llm_call_hook"),
+                "tool_call_hook": kwargs.get("tool_call_hook"),
             })
             self_agent.total_tokens_used = 1
             self_agent.budget_used = 0.0001

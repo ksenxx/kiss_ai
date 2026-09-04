@@ -11,6 +11,7 @@ import logging
 import os
 import platform
 import socket
+import threading
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from kiss.core.kiss_error import (
     KISSError,
 )
 from kiss.core.models.model import Attachment
+from kiss.core.models.model_info import model_runs_task_to_completion
 from kiss.core.printer import Printer
 from kiss.core.utils import _coerce_bool as _str_to_bool
 from kiss.core.utils import finish, substitute_prompt_args
@@ -220,6 +222,25 @@ class RelentlessAgent(Base):
 
     work_dir: str = ""
 
+    def __init__(self, name: str) -> None:
+        """Initialize the agent and its usage-counter lock.
+
+        Args:
+            name: The name identifier for the agent.
+        """
+        super().__init__(name)
+        # Serializes every read-modify-write of the cumulative usage
+        # counters (``budget_used``, ``total_tokens_used``,
+        # ``total_steps``).  The writers run on different threads of
+        # the SAME agent: the agent thread (:meth:`_accumulate_usage`
+        # at session end, ``_attribute_sub_usage`` when a fan-out or a
+        # ``talk`` synthesis banks its spend) and server threads
+        # (``reclaim_abandoned_subagents`` from worktree cleanup /
+        # teardown / discard).  Without one lock over all of them, two
+        # concurrent read-modify-writes interleave and one side's
+        # increment silently vanishes from the task's accounting.
+        self._usage_lock: threading.Lock = threading.Lock()
+
     def _reset(
         self,
         model_name: str | None,
@@ -254,13 +275,25 @@ class RelentlessAgent(Base):
         self.model_config: dict[str, Any] | None = None
         self.pre_step_hook: Callable[..., None] | None = None
         self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
+        self.llm_call_hook: (
+            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
+        ) = None
+        self.tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None
         self.set_printer(printer, verbose=verbose)
 
     def _accumulate_usage(self, agent: Base) -> None:
-        """Fold a sub-agent's budget, tokens and steps into the running totals."""
-        self.budget_used += agent.budget_used
-        self.total_tokens_used += agent.total_tokens_used
-        self.total_steps += agent.step_count
+        """Fold a sub-agent's budget, tokens and steps into the running totals.
+
+        Held under ``_usage_lock``: a server-thread reclaim
+        (``reclaim_abandoned_subagents``) can bank an abandoned child's
+        spend into the same counters while a session ends on the agent
+        thread, and an unserialized read-modify-write would lose one
+        side's increment.
+        """
+        with self._usage_lock:
+            self.budget_used += agent.budget_used
+            self.total_tokens_used += agent.total_tokens_used
+            self.total_steps += agent.step_count
 
     def _check_total_budget(self) -> None:
         """Raise :class:`KISSError` when the task's cumulative spend exceeds max_budget.
@@ -333,6 +366,25 @@ class RelentlessAgent(Base):
         )
         return TASK_SETTINGS_HEADER + lines
 
+    def _executor_model_config(self) -> dict[str, Any]:
+        """Return the model config for a sub-agent, carrying the work dir.
+
+        A copy of :attr:`model_config` with ``work_dir`` defaulted to this
+        agent's work directory.  ``work_dir`` is a framework-only config
+        key: CLI-backed run-to-completion models (``cc/*``, ``codex/*``)
+        launch their subprocess with it as the cwd — otherwise the CLI's
+        native tools would act on the daemon's cwd instead of the task's
+        (possibly worktree-redirected) work tree — and API adapters ignore
+        it.  Sorcar's ``set_model`` copies the live model's config on a
+        switch, so the work dir survives mid-run model changes.
+
+        Returns:
+            dict: The per-executor model config.
+        """
+        config: dict[str, Any] = dict(self.model_config or {})
+        config.setdefault("work_dir", self.work_dir)
+        return config
+
     def perform_task(
         self,
         tools: list[Callable[..., Any]],
@@ -372,7 +424,12 @@ class RelentlessAgent(Base):
         important_instructions += self._task_settings_section()
         sorcar_md = config_module.kiss_home() / "SORCAR.md"
         if sorcar_md.is_file():
-            important_instructions += "\n" + sorcar_md.read_text()
+            # User-authored: a cp1252 byte from a Windows editor must
+            # not abort every task before its first model call (the
+            # same tolerance ``skills.parse_frontmatter`` gives SKILL.md).
+            important_instructions += "\n" + sorcar_md.read_text(
+                encoding="utf-8", errors="replace",
+            )
         system_prompt = self.system_prompt + important_instructions
         for session in range(self.max_sub_sessions):
             remaining_budget = self.max_budget - self.budget_used
@@ -397,6 +454,8 @@ class RelentlessAgent(Base):
             executor = KISSAgent(f"{self.name} Session-{session}")
             executor.pre_step_hook = getattr(self, "pre_step_hook", None)
             executor.tool_call_guard = getattr(self, "tool_call_guard", None)
+            llm_call_hook = getattr(self, "llm_call_hook", None)
+            tool_call_hook = getattr(self, "tool_call_hook", None)
             executor.budget_check_hook = self._check_total_budget
             self._current_executor = executor
             try:
@@ -411,10 +470,12 @@ class RelentlessAgent(Base):
                     tools=all_tools,
                     max_steps=self.max_steps,
                     max_budget=remaining_budget,
-                    model_config=self.model_config,
+                    model_config=self._executor_model_config(),
                     printer=self.printer,
                     verbose=self.verbose,
                     attachments=attachments if session == 0 else None,
+                    llm_call_hook=llm_call_hook,
+                    tool_call_hook=tool_call_hook,
                 )
             except BudgetExceededError:
                 self._current_executor = None
@@ -565,7 +626,7 @@ class RelentlessAgent(Base):
                     },
                     max_steps=self.max_steps,
                     max_budget=summarizer_budget,
-                    model_config=self.model_config,
+                    model_config=self._executor_model_config(),
                     printer=self.printer,
                     verbose=self.verbose,
                     print_prompts=False,
@@ -655,6 +716,10 @@ class RelentlessAgent(Base):
         verbose: bool | None = None,
         tools: list[Callable[..., Any]] | None = None,
         attachments: list[Attachment] | None = None,
+        llm_call_hook: (
+            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
+        ) = None,
+        tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
     ) -> str:
         """Run the agent with the provided tools.
 
@@ -675,6 +740,18 @@ class RelentlessAgent(Base):
             verbose: Whether to print output to console. Defaults to True.
             tools: List of callable tools available to the agent during execution.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
+            llm_call_hook: Optional hook installed on every per-session
+                executor :class:`KISSAgent` (see
+                :meth:`kiss.core.kiss_agent.KISSAgent.run`): called before
+                every LLM call with the new messages about to be sent, and
+                its return value replaces them.  Defaults to None (no hook).
+            tool_call_hook: Optional hook installed on every per-session
+                executor :class:`KISSAgent` (see
+                :meth:`kiss.core.kiss_agent.KISSAgent.run`): called before
+                every tool call with the tool's name and arguments; any
+                verdict other than ``"OK"`` suppresses the call and is
+                returned to the model as the tool's result.  Defaults to
+                None (no hook).
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -691,8 +768,22 @@ class RelentlessAgent(Base):
         )
         self.system_prompt = system_prompt
         self.model_config = model_config
+        self.llm_call_hook = llm_call_hook
+        self.tool_call_hook = tool_call_hook
         args = arguments or {}
         self.task_description = substitute_prompt_args(prompt_template, args)
+
+        if self.docker_image and model_runs_task_to_completion(self.model_name):
+            # A run-to-completion CLI agent executes its native tools
+            # directly on the host, so the container the caller asked for
+            # would be silently bypassed — refuse rather than break the
+            # isolation contract.
+            raise KISSError(
+                f"Model {self.model_name} is a CLI agent that runs natively on "
+                f"the host and cannot honor docker_image="
+                f"{self.docker_image!r} isolation. Use an API model with "
+                f"docker_image, or drop docker_image for CLI models."
+            )
 
         if self.docker_image:
             from kiss.agents.sorcar.docker_manager import DockerManager
