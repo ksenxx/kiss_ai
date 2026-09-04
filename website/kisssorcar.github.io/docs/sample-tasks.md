@@ -15,14 +15,16 @@ Can you change the step <<specify step>> as follows: <<whatever way you want to 
 ## Messaging
 
 ```text
-Can you authenticate me with the <<workspace name>> workspace on Slack using the Slack agent?
+Can you authenticate me with the <<workspace name>> workspace on Slack?
 ```
 
 ```text
-Can you create a cron job with a name prefixed with "kiss-" which will check every 3 seconds
-if there are the latest unanswered messages from /<<user name>> in the channel sorcar using the
-Slack agent, then it will run the messages as tasks one-by-one in the order of arrival and
-respond with the result suitably formatted for Slack.
+Can you authenticate me with Gmail?
+```
+
+```text
+Can you check my gmail every hour and ping me on slack if there is any important email that
+needs my immediate attention?
 ```
 
 ```text
@@ -31,11 +33,6 @@ Can you authenticate me with the iMessage agent?
 
 ```text
 Can you send "Hello from Sorcar!" to 1-800-772-1213?
-```
-
-```text
-Can you authenticate me with Gmail using the Gmail agent? Use the user's default browser to
-prompt the user to log in and obtain the authentication token.
 ```
 
 ## Fact-Checking & Security Review
@@ -118,10 +115,6 @@ an HTML report with diagrams and illustrations in ./reports and open it in the u
 browser. Do NOT STOP until you cannot improve the accuracy and recall after three consecutive
 rollouts. Use gpt-5.6-sol model (not codex) for a thorough review of the work done at every
 step by the other model.
-```
-
-```text
-Can you run gepa.py on hotpotqa using gpt-4o-mini as both models?
 ```
 
 See also [Prompt Tricks](prompt-tricks.md) and [Tips](tips.md).
