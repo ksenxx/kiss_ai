@@ -13,8 +13,9 @@ lock in the behaviours that previously diverged between the two:
   backend ``run`` command (the extension's ``_startTask`` always did;
   the web server used to drop it).
 * ``runUpdate`` must locate and run ``~/.kiss/kiss_ai/install.sh`` exactly
-  like the extension's ``_runUpdate()`` / ``installerPath.js`` — and
-  must never surface as an "Unknown command" error broadcast.
+  like the extension's ``runUpdate()`` / ``installerPath.js`` — falling
+  back to the curl bootstrap when the script is missing — and must
+  never surface as an "Unknown command" error broadcast.
 * ``sizeReport`` (the webview's reply to the extension-only
   ``measureSize`` request) must be silently ignored, like the other
   VS Code-only webview messages.
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import tempfile
 import threading
@@ -138,25 +140,59 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             ):
                 raise AssertionError(f"Unknown-command error broadcast: {ev}")
 
-    async def test_run_update_missing_script_reports_extension_error(
+    async def test_run_update_missing_script_runs_curl_bootstrap(
         self,
     ) -> None:
-        """``runUpdate`` with no install.sh mirrors the extension's error.
+        """``runUpdate`` with no install.sh runs the curl bootstrap.
 
-        The extension shows ``Cannot update KISS Sorcar: install.sh not
-        found in ~/.kiss/kiss_ai.``; the web server must broadcast the same
-        wording as an ``error`` event — NOT the previous
-        ``Unknown command: runUpdate`` broadcast.
+        Mirrors the extension: a machine without
+        ``~/.kiss/kiss_ai/install.sh`` (the extension was installed from
+        a .vsix, or the clone was deleted) must bootstrap via the public
+        ``scripts/install.sh`` instead of refusing with "install.sh not
+        found".  ``$KISS_UPDATE_BOOTSTRAP_URL`` points at a ``file://``
+        URL here (curl accepts those), so the server's real
+        ``curl | bash`` pipeline runs end to end.
         """
+        marker = Path(self.tmpdir) / "bootstrap-ran.marker"
+        fake = Path(self.tmpdir) / "fake-bootstrap.sh"
+        fake.write_text(
+            "#!/bin/bash\n"
+            f"echo \"nonint=$KISS_NONINTERACTIVE\" > '{marker}'\n"
+            "echo bootstrap-done\n",
+        )
+        saved_url = os.environ.get("KISS_UPDATE_BOOTSTRAP_URL")
+        os.environ["KISS_UPDATE_BOOTSTRAP_URL"] = f"file://{fake}"
+        if saved_url is None:
+            self.addCleanup(
+                os.environ.pop, "KISS_UPDATE_BOOTSTRAP_URL", None,
+            )
+        else:
+            self.addCleanup(
+                os.environ.__setitem__,
+                "KISS_UPDATE_BOOTSTRAP_URL",
+                saved_url,
+            )
         reader, writer = await self._connect()
         try:
             await self._send(writer, {"type": "runUpdate"})
-            err, seen = await self._drain_until(reader, "error")
-            self._assert_no_unknown_command(seen[:-1])
-            text = str(err.get("text", ""))
-            self.assertIn("Cannot update KISS Sorcar", text)
-            self.assertIn("install.sh not found", text)
-            self.assertIn(str(self.install_root), text)
+            notice, seen = await self._drain_until(reader, "notice")
+            self._assert_no_unknown_command(seen)
+            self.assertIn(
+                "An update of KISS Sorcar is getting installed",
+                str(notice.get("text", "")),
+            )
+            for _ in range(100):
+                if marker.is_file():
+                    break
+                await asyncio.sleep(0.05)
+            self.assertTrue(marker.is_file(), "curl bootstrap did not run")
+            self.assertEqual(marker.read_text().strip(), "nonint=1")
+            log = self.server._update_log_path
+            for _ in range(100):
+                if log.is_file() and "bootstrap-done" in log.read_text():
+                    break
+                await asyncio.sleep(0.05)
+            self.assertIn("bootstrap-done", log.read_text())
         finally:
             writer.close()
             try:
