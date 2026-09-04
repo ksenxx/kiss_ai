@@ -37,7 +37,7 @@ class TestD2SourceShellEnvRcExitStatus:
         monkeypatch.setenv("SHELL", "/bin/bash")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-        vc.source_shell_env()
+        vc.load_api_keys()
 
         assert os.environ.get("OPENAI_API_KEY") == "wave3-d2-imported"
 
@@ -55,7 +55,7 @@ class TestD2SourceShellEnvRcExitStatus:
         monkeypatch.setenv("SHELL", "/bin/bash")
         monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
 
-        vc.source_shell_env()
+        vc.load_api_keys()
 
         assert os.environ.get("TOGETHER_API_KEY") == "wave3-d2-happy"
 

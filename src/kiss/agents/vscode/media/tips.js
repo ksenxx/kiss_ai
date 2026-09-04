@@ -147,20 +147,38 @@
     return Promise.resolve(copyViaExecCommand(text));
   }
 
+  // tipsflash0903-coverage:start
+  // The revert timer lives on the button and is restarted on every
+  // copy: a bare setTimeout let a rapid second click's "Copied!" be
+  // wiped early by the first click's stale timer.
   function flashCopyResult(btn, ok) {
     btn.textContent = ok ? 'Copied!' : 'Failed';
-    setTimeout(() => {
+    if (btn._kissFlashTimer) clearTimeout(btn._kissFlashTimer);
+    btn._kissFlashTimer = setTimeout(() => {
+      btn._kissFlashTimer = null;
       btn.textContent = 'Copy';
     }, 1500);
   }
+  // tipsflash0903-coverage:end
 
   function onCopyClick(event) {
     const btn = event.currentTarget;
     const code = btn.parentElement.querySelector('pre code');
     const text = code ? code.textContent : '';
+    // tipsflash0903-coverage:start
+    // Async clipboard writes can settle out of order: without an
+    // ownership check, a rapid first click failing AFTER a second
+    // click succeeded replaced the latest "Copied!" with "Failed" and
+    // restarted the revert timer from the stale operation.  Each click
+    // takes a new per-button generation; only the completion that
+    // still owns the latest generation may update the label.
+    const gen = (btn._kissCopyGen || 0) + 1;
+    btn._kissCopyGen = gen;
     copyTextToClipboard(text).then(ok => {
+      if (btn._kissCopyGen !== gen) return;
       flashCopyResult(btn, ok);
     });
+    // tipsflash0903-coverage:end
   }
 
   class KissTipsPanel extends HTMLElement {

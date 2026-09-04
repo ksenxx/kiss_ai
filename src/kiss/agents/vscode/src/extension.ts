@@ -14,7 +14,10 @@ import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
 import {findKissProject} from './kissPaths';
 import {kissHomeDir, sorcarSockPath} from './userAssets';
 import {resetTipsOnExtensionUpdate} from './SorcarTab';
-import {checkForExtensionUpdate} from './UpdateChecker';
+import {
+  checkForExtensionUpdate,
+  snoozeUpdateNotification,
+} from './UpdateChecker';
 import {
   showErrorNotification,
   showInformationNotification,
@@ -442,9 +445,12 @@ export function activate(context: vscode.ExtensionContext): void {
         `KISS Sorcar: a new release (${latest}) is available. ` +
           `You are on ${current}.`,
         'Update now',
+        'Remind me later',
       ).then(action => {
         if (action === 'Update now') {
           sidebarView?.runUpdate();
+        } else if (action === 'Remind me later') {
+          snoozeUpdateNotification({latest});
         }
       });
     },

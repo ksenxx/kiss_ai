@@ -31,6 +31,7 @@ from openai.types.responses import response_create_params
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
     FRAMEWORK_ONLY_CONFIG_KEYS,
+    TOOL_RESULT_ATTACHMENT_NOTE,
     Attachment,
     ThinkingCallback,
     TokenCallback,
@@ -2380,10 +2381,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             parts = self._attachments_to_content_parts(sentinel_attachments)
             if parts:
                 parts.append(
-                    {
-                        "type": "input_text",
-                        "text": "[attachments from previous tool result(s)]",
-                    }
+                    {"type": "input_text", "text": TOOL_RESULT_ATTACHMENT_NOTE}
                 )
                 self.conversation.append({"role": "user", "content": parts})
 

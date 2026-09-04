@@ -62,6 +62,7 @@ class TestFuzzSaveApiKeyRoundTripBash(unittest.TestCase):
         self._refresh_patch.start()
         self._env_patch = mock.patch.dict(os.environ,
                                           {"HOME": str(self.home),
+                                           "KISS_HOME": str(self.home / ".kiss"),
                                            "SHELL": f"/bin/{self.SHELL}"})
         self._env_patch.start()
         self._marker = Path(tempfile.gettempdir()) / f"fuzz-pwned-{os.getpid()}"
@@ -78,7 +79,7 @@ class TestFuzzSaveApiKeyRoundTripBash(unittest.TestCase):
         self._tmp.cleanup()
 
     def _round_trip(self, value: str) -> str:
-        self._vc.save_api_key_to_shell("OPENAI_API_KEY", value)
+        self._vc.save_api_key("OPENAI_API_KEY", value)
         rc = self.home / self.RC_NAME
         proc = subprocess.run(
             [self.SHELL, "-c",
@@ -127,7 +128,7 @@ class TestFuzzSaveApiKeyRoundTripZsh(TestFuzzSaveApiKeyRoundTripBash):
 
 
 class TestFuzzSourceShellEnvPaths(unittest.TestCase):
-    """``source_shell_env`` shell-quotes the RC path so a HOME containing
+    """The key migration shell-quotes the RC path so a HOME containing
     metacharacters cannot inject commands into the sourced shell."""
 
     def setUp(self) -> None:
@@ -164,14 +165,14 @@ class TestFuzzSourceShellEnvPaths(unittest.TestCase):
             with mock.patch.object(vc, "_shell_rc_path", lambda s: rc), \
                     mock.patch.object(vc, "_get_user_shell", lambda: "bash"), \
                     mock.patch.object(vc, "_refresh_config", lambda: None):
-                vc.source_shell_env()
+                vc.load_api_keys()
             self.assertFalse(self._marker.exists(),
-                             f"source_shell_env injected for path {sub}")
+                             f"key migration injected for path {sub}")
 
 
 @unittest.skipIf(sys.platform == "win32", "POSIX chmod test")
 class TestFuzzRcModeUnderRandomUmasks(unittest.TestCase):
-    """Under any umask, the resulting RC file must be 0600."""
+    """Under any umask, the key store and hooked RC must be 0600."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -186,7 +187,9 @@ class TestFuzzRcModeUnderRandomUmasks(unittest.TestCase):
         self._orig_umask = os.umask(0o000)
         self._env_patch = mock.patch.dict(
             os.environ,
-            {"HOME": str(self.home), "SHELL": "/bin/bash"})
+            {"HOME": str(self.home),
+             "KISS_HOME": str(self.home / ".kiss"),
+             "SHELL": "/bin/bash"})
         self._env_patch.start()
 
     def tearDown(self) -> None:
@@ -196,26 +199,28 @@ class TestFuzzRcModeUnderRandomUmasks(unittest.TestCase):
         self._env_patch.stop()
         self._tmp.cleanup()
 
-    def test_rc_mode_0600_under_each_umask(self) -> None:
+    def test_store_mode_0600_under_each_umask(self) -> None:
         rng = random.Random(0xC0DE)
         rc = self.home / ".bashrc"
+        store = self.home / ".kiss" / "api_keys.env"
         for umask in [0o000, 0o022, 0o027, 0o077, 0o002, 0o007]:
             os.umask(umask)
             value = "secret-" + "".join(
                 rng.choice(string.ascii_letters) for _ in range(20))
-            self._vc.save_api_key_to_shell("OPENAI_API_KEY", value)
-            mode = stat.S_IMODE(rc.stat().st_mode)
-            self.assertEqual(
-                mode, 0o600,
-                f"umask={oct(umask)} → RC mode {oct(mode)} "
-                "(expected 0o600)")
+            self._vc.save_api_key("OPENAI_API_KEY", value)
+            for f in (store, rc):
+                mode = stat.S_IMODE(f.stat().st_mode)
+                self.assertEqual(
+                    mode, 0o600,
+                    f"umask={oct(umask)} → {f.name} mode {oct(mode)} "
+                    "(expected 0o600)")
 
 
 @unittest.skipIf(sys.platform == "win32",
                  "POSIX shells required for round-trip fuzzing")
 class TestKnownInjectionCorpus(unittest.TestCase):
     """A curated corpus of injection payloads against
-    ``save_api_key_to_shell``.  Each must round-trip and never fire."""
+    ``save_api_key``.  Each must round-trip and never fire."""
 
     def setUp(self) -> None:
         if not shutil.which("bash"):
@@ -231,7 +236,9 @@ class TestKnownInjectionCorpus(unittest.TestCase):
         self._refresh_patch.start()
         self._env_patch = mock.patch.dict(
             os.environ,
-            {"HOME": str(self.home), "SHELL": "/bin/bash"})
+            {"HOME": str(self.home),
+             "KISS_HOME": str(self.home / ".kiss"),
+             "SHELL": "/bin/bash"})
         self._env_patch.start()
         self._marker = (Path(tempfile.gettempdir())
                         / f"corpus-pwned-{os.getpid()}")
@@ -268,7 +275,7 @@ class TestKnownInjectionCorpus(unittest.TestCase):
         ]
         for p in payloads:
             with self.subTest(payload=p):
-                self._vc.save_api_key_to_shell("OPENAI_API_KEY", p)
+                self._vc.save_api_key("OPENAI_API_KEY", p)
                 rc = self.home / ".bashrc"
                 proc = subprocess.run(
                     ["bash", "-c",

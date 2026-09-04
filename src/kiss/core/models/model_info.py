@@ -46,6 +46,7 @@ class ModelInfo:
         audio_input_price_per_million: float | None = None,
         audio_output_price_per_million: float | None = None,
         alias_of: str | None = None,
+        use_responses_api: bool | None = None,
     ):
         self.context_length = context_length
         self.input_price_per_1M = input_price_per_million
@@ -63,6 +64,7 @@ class ModelInfo:
         self.extended_thinking = extended_thinking
         self.adaptive_thinking = adaptive_thinking
         self.alias_of = alias_of
+        self.use_responses_api = use_responses_api
 
 
 PACKAGE_MODEL_INFO_PATH = Path(__file__).parent / "MODEL_INFO.json"
@@ -88,6 +90,8 @@ MY_MODELS_DEFAULT_CONTENT = json.dumps(
             "  emb      (bool, default false) embedding model",
             "  gen      (bool, default true)  text generation supported",
             "  thinking (str,  optional)      reasoning_effort cap, e.g. 'xhigh'",
+            "  use_responses_api (bool, optional) route via the OpenAI v2",
+            "      Responses API (/v1/responses) instead of Chat Completions",
             "",
             "To activate the example below, remove the leading '_example/'",
             "from its key and adjust the values.",
@@ -167,7 +171,9 @@ def _read_my_models() -> dict[str, dict[str, Any]]:
     read.  Returns an empty dict when:
 
     * The file is missing AND cannot be seeded (read-only FS).
-    * The file is unreadable or contains malformed JSON.
+    * The file is unreadable, is not valid UTF-8, or contains malformed
+      JSON (``UnicodeDecodeError`` and ``json.JSONDecodeError`` are both
+      ``ValueError`` subclasses).
     * The top-level value is not a JSON object.
 
     Filters out any key starting with ``_`` (documentation / inert
@@ -176,12 +182,9 @@ def _read_my_models() -> dict[str, dict[str, Any]]:
     """
     _seed_my_models_file()
     try:
-        text = USER_MY_MODELS_PATH.read_text(encoding="utf-8")
-    except OSError:
-        return {}
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError:
+        raw = json.loads(USER_MY_MODELS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.debug("Ignoring unreadable or corrupt %s", USER_MY_MODELS_PATH, exc_info=True)
         return {}
     if not isinstance(raw, dict):
         return {}
@@ -222,6 +225,12 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
       instead of ``{"type": "enabled", "budget_tokens": ...}``.
       ``None`` defers to
       :func:`kiss.core.models.anthropic_model._uses_adaptive_thinking`.
+    * ``use_responses_api`` — tri-state transport choice for
+      OpenAI-compatible models.  ``True`` makes the :func:`model` factory
+      build an ``OpenAICompatibleModel2`` (the ``/v1/responses`` v2
+      transport, live-verified by ``scripts/update_responses_api_support``),
+      ``False`` or ``None`` keeps the Chat Completions v1 transport.  A
+      caller's ``model_config["use_responses_api"]`` always overrides it.
     """
     return ModelInfo(
         context_length=entry["context_length"],
@@ -240,6 +249,7 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
         audio_input_price_per_million=entry.get("audio_input_price_per_1M"),
         audio_output_price_per_million=entry.get("audio_output_price_per_1M"),
         alias_of=entry.get("alias_of"),
+        use_responses_api=entry.get("use_responses_api"),
     )
 
 
@@ -290,17 +300,53 @@ def _read_model_info_json(path: Path) -> dict[str, Any]:
     raise KISSError(f"Could not read the model catalog at {path}: {last}") from last
 
 
+def _sync_alias_transport_flags(
+    raw: dict[str, Any], user_keys: set[str]
+) -> None:
+    """Mirror a user-overridden base's ``use_responses_api`` onto its aliases.
+
+    Generated ``-{level}`` thinking aliases ship with a copy of their
+    base's transport flag.  When ``MY_MODELS.json`` overrides only the
+    base entry, the bundled alias copies would otherwise keep the old
+    verdict and silently bypass the user's transport choice whenever an
+    alias name is selected.  Aliases the user overrode explicitly are
+    left untouched (explicit wins).
+
+    Args:
+        raw: The merged catalog mapping, mutated in place.
+        user_keys: Catalog keys that came from ``MY_MODELS.json``.
+    """
+    for name, entry in raw.items():
+        if name in user_keys or not isinstance(entry, dict):
+            continue
+        base_name = entry.get("alias_of")
+        if not base_name or base_name not in user_keys:
+            continue
+        base = raw.get(base_name)
+        if not isinstance(base, dict):
+            continue
+        flag = base.get("use_responses_api")
+        if flag is None:
+            entry.pop("use_responses_api", None)
+        else:
+            entry["use_responses_api"] = flag
+
+
 def _load_model_info() -> dict[str, ModelInfo]:
     """Load ``MODEL_INFO`` from JSON, applying cache-pricing defaults.
 
     The bundled :data:`PACKAGE_MODEL_INFO_PATH` is the source of truth
     for shipped models.  ``~/.kiss/MY_MODELS.json`` (auto-seeded on
     first read) is then merged on top: matching keys override the
-    bundled entry, and brand-new keys are added.
+    bundled entry, and brand-new keys are added.  Generated thinking
+    aliases of a user-overridden base then re-mirror the base's
+    ``use_responses_api`` flag (see :func:`_sync_alias_transport_flags`).
     """
     raw = _read_model_info_json(PACKAGE_MODEL_INFO_PATH)
-    for name, entry in _read_my_models().items():
+    user_entries = _read_my_models()
+    for name, entry in user_entries.items():
         raw[name] = entry
+    _sync_alias_transport_flags(raw, set(user_entries))
     return {name: _build_model_info_entry(entry) for name, entry in raw.items()}
 
 
@@ -529,9 +575,29 @@ def _openai_compatible(
     model_config: dict[str, Any] | None,
     token_callback: TokenCallback | None,
     thinking_callback: ThinkingCallback | None = None,
+    use_responses_api: bool = False,
 ) -> Model:
+    """Build the OpenAI-compatible adapter for one factory-routed model.
+
+    Args:
+        model_name: The model id (possibly carrying an ``openrouter/`` prefix).
+        base_url: The vendor's OpenAI-compatible API root.
+        api_key: Bearer token for the endpoint.
+        model_config: Optional model parameters, forwarded verbatim.
+        token_callback: Called with each streamed text token.
+        thinking_callback: Called when a thinking block starts/ends.
+        use_responses_api: When True, build ``OpenAICompatibleModel2`` — the
+            v2 transport that sends every request to ``/v1/responses`` —
+            instead of the Chat Completions v1 adapter.
+
+    Returns:
+        The constructed model adapter.
+
+    Raises:
+        KISSError: If the OpenAI SDK is not installed.
+    """
     cls = _load_model_class(
-        "OpenAICompatibleModel",
+        "OpenAICompatibleModel2" if use_responses_api else "OpenAICompatibleModel",
         "OpenAI SDK not installed. Install 'openai' to use this model.",
     )
     return cls(  # type: ignore[no-any-return]
@@ -792,6 +858,94 @@ def _strip_provider_prefix(model_name: str) -> str:
     return model_name
 
 
+def _lookup_model_info(model_name: str) -> ModelInfo | None:
+    """Return the catalog entry for *model_name*, or ``None`` when unknown.
+
+    The one lookup rule shared by :func:`calculate_cost`,
+    :func:`get_fallback_model` and :func:`get_max_context_length`: the
+    name is tried as given, then in its harbor-stripped form (see
+    :func:`_strip_provider_prefix`), so callers may pass either.
+
+    Args:
+        model_name: Name of the model (with or without provider prefix).
+
+    Returns:
+        The matching :class:`ModelInfo`, or ``None``.
+    """
+    return MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+
+
+def model_runs_task_to_completion(model_name: str) -> bool:
+    """Whether *model_name* names a CLI agent that runs a whole task itself.
+
+    ``cc/*`` (Claude Code) and ``codex/*`` (Codex) models are full coding
+    agents: an agentic :class:`~kiss.core.kiss_agent.KISSAgent` hands them
+    the entire task in one invocation instead of driving a turn-by-turn
+    KISS tool loop, and their native tools run directly on the host (so
+    they cannot honor ``docker_image`` isolation).
+
+    Args:
+        model_name: Full model name including any provider prefix.
+
+    Returns:
+        True for ``cc/*`` and ``codex/*`` model names.
+    """
+    return model_name.startswith(("cc/", "codex/"))
+
+
+def _wants_responses_api(
+    model_name: str, model_config: dict[str, Any] | None
+) -> bool:
+    """Decide whether the factory should build the v2 (Responses API) adapter.
+
+    The caller's ``model_config["use_responses_api"]`` wins in either
+    direction when present.  Otherwise the decision is the model's catalog
+    ``use_responses_api`` flag, written by
+    ``scripts/update_responses_api_support.py`` only after the model passed a
+    live probe through ``/v1/responses`` (plain generation, plus a tool
+    round-trip for function-calling models).  Generated ``-{level}`` thinking
+    aliases carry the flag themselves (the alias entry mirrors its base), so
+    a plain catalog lookup suffices.
+
+    Args:
+        model_name: Model name after harbor-prefix stripping.
+        model_config: The caller-supplied model configuration, if any.
+
+    Returns:
+        True when the model should be built as ``OpenAICompatibleModel2``.
+    """
+    if model_config is not None:
+        flag = model_config.get("use_responses_api")
+        if flag is not None:
+            return bool(flag)
+    info = _lookup_model_info(model_name)
+    return info is not None and info.use_responses_api is True
+
+
+def _registered_provider_for_exact_base_url(
+    base_url: str,
+) -> OpenAICompatibleProvider | None:
+    """Return the vendor whose default endpoint IS *base_url* exactly.
+
+    Exact match (modulo a trailing slash), not the substring match of
+    :func:`openai_compatible_provider_for_base_url`: a wire-test capture
+    server whose URL merely embeds a vendor host as a path segment is a
+    custom gateway with unknown ``/v1/responses`` support, and must not
+    inherit the catalog's live-verified transport flag.
+
+    Args:
+        base_url: The ``model_config["base_url"]`` override.
+
+    Returns:
+        The matching provider, or None for custom gateways.
+    """
+    normalized = base_url.rstrip("/")
+    for provider in OPENAI_COMPATIBLE_PROVIDERS:
+        if normalized == provider.base_url.rstrip("/"):
+            return provider
+    return None
+
+
 def model(
     model_name: str,
     model_config: dict[str, Any] | None = None,
@@ -806,8 +960,17 @@ def model(
             ``openai/gpt-5.4``, ``anthropic/claude-opus-4-6``) — the
             redundant provider prefix is stripped automatically.
         model_config: Optional dictionary of model configuration parameters.
-            If it contains "base_url", routing is bypassed and an OpenAICompatibleModel
-            is built with that base_url and optional "api_key".
+            If it contains "base_url", routing is bypassed and an
+            OpenAI-compatible adapter is built with that base_url and
+            optional "api_key".
+            "use_responses_api" selects the transport for OpenAI-compatible
+            models: True builds the v2 Responses-API adapter
+            (OpenAICompatibleModel2), False forces the Chat Completions v1
+            adapter, and when absent the model's catalog ``use_responses_api``
+            flag (live-verified by ``scripts/update_responses_api_support``)
+            decides — for a "base_url" override the catalog flag is honored
+            only when the URL is exactly a registered vendor's default
+            endpoint (custom gateways stay on v1).
         token_callback: Optional callback invoked with each streamed text token.
         thinking_callback: Optional callback invoked with ``True`` when a
             thinking block starts and ``False`` when it ends.
@@ -823,6 +986,23 @@ def model(
         base_url = model_config["base_url"]
         api_key = model_config.get("api_key", "")
         filtered = {k: v for k, v in model_config.items() if k not in ("base_url", "api_key")}
+        # An explicit config flag always decides the transport.  The
+        # catalog's live-verified flag applies only when the override IS
+        # the default endpoint of the SAME vendor the model name routes to
+        # (e.g. a model switch that carries the provider base_url along to
+        # preserve a per-task API key) — the probe verified that exact
+        # model/endpoint pair.  Any other endpoint (a custom gateway, or a
+        # different vendor's default URL) has unverified /v1/responses
+        # support for this model and stays on the v1 adapter.
+        use_v2 = model_config.get("use_responses_api")
+        if use_v2 is None:
+            endpoint_provider = _registered_provider_for_exact_base_url(base_url)
+            use_v2 = (
+                endpoint_provider is not None
+                and endpoint_provider
+                is _match_openai_compatible_provider(model_name)
+                and _wants_responses_api(model_name, None)
+            )
         return _openai_compatible(
             model_name,
             base_url,
@@ -830,6 +1010,7 @@ def model(
             filtered or None,
             token_callback,
             thinking_callback,
+            use_responses_api=bool(use_v2),
         )
     keys = config_module.DEFAULT_CONFIG
     provider = _match_openai_compatible_provider(model_name)
@@ -841,6 +1022,7 @@ def model(
             model_config,
             token_callback,
             thinking_callback,
+            use_responses_api=_wants_responses_api(model_name, model_config),
         )
     if model_name.startswith("gemini-"):
         cls = _load_model_class(
@@ -866,7 +1048,7 @@ def model(
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-    if model_name.startswith("codex/") or model_name.startswith("cc/"):
+    if model_runs_task_to_completion(model_name):
         class_name = "CodexModel" if model_name.startswith("codex/") else "ClaudeCodeModel"
         cls = _load_model_class(class_name, f"{class_name} could not be loaded.")
         return cls(  # type: ignore[no-any-return]
@@ -1113,7 +1295,7 @@ def calculate_cost(
     Raises:
         KISSError: If positive usage is reported for a model without pricing.
     """
-    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+    info = _lookup_model_info(model_name)
     total_tokens = (
         num_input_tokens
         + num_output_tokens
@@ -1195,7 +1377,7 @@ def get_fallback_model(model_name: str) -> str | None:
         ``MY_MODELS.json``) via the ``"fallback"`` key, or ``None`` when
         no fallback is registered or the model is unknown.
     """
-    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+    info = _lookup_model_info(model_name)
     return info.fallback if info is not None else None
 
 
@@ -1207,7 +1389,7 @@ def get_max_context_length(model_name: str) -> int:
     Returns:
         int: Maximum context length in tokens.
     """
-    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+    info = _lookup_model_info(model_name)
     if info is None:
         raise KISSError(f"Model '{model_name}' not found in MODEL_INFO")
     return info.context_length

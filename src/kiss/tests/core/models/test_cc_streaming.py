@@ -13,6 +13,7 @@ Reproduces and verifies fixes for:
 """
 
 import json
+import os
 import subprocess
 from typing import Any
 
@@ -497,7 +498,7 @@ class TestThinkingInToolMode:
         class FakePopen:
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 self.returncode = 0
-                self.stdin = _FakeStdin()
+                self.stdin = open(os.devnull, "wb")
                 self.stdout = _FakeStdout(stream_data)
                 self.stderr = _FakeStdout("")
                 self._terminated = False
@@ -513,13 +514,6 @@ class TestThinkingInToolMode:
 
             def kill(self) -> None:
                 self._terminated = True
-
-        class _FakeStdin:
-            def write(self, s: str) -> None:
-                pass
-
-            def close(self) -> None:
-                pass
 
         class _FakeStdout:
             def __init__(self, data: str) -> None:

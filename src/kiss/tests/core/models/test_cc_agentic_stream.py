@@ -325,24 +325,24 @@ class TestNoDrainAfterKissToolCallStop:
 class TestKissToolsPromptNote:
     """The not-native clarification must reach the CLI and never leak."""
 
-    def test_note_reaches_system_prompt_arg_and_is_restored(self) -> None:
-        """During a tool-bearing turn the ``--system-prompt`` CLI argument
-        carries the warning that KISS tools are not native tools; the
-        model_config is restored afterwards."""
+    def test_note_reaches_prompt_and_is_restored(self) -> None:
+        """During a tool-bearing turn the prompt sent on stdin carries the
+        warning that KISS tools are not native tools (appended to the task
+        after ``CLI_SYSTEM_PROMPT_HEADER``, never as a ``--system-prompt``
+        argument); the model_config is restored afterwards."""
+        import pathlib
         import subprocess
+        import tempfile
         from typing import Any
 
         captured_args: list[list[str]] = []
+        # The prompt writer works at the file-descriptor level
+        # (fileno()/os.write), so capture stdin in a real file.
+        stdin_capture = tempfile.NamedTemporaryFile(delete=False)
+        stdin_capture.close()
         stream_data = json.dumps(
             {"type": "result", "result": "ok", "usage": {}}
         ) + "\n"
-
-        class _FakeStdin:
-            def write(self, s: str) -> None:
-                pass
-
-            def close(self) -> None:
-                pass
 
         class _FakeStdout:
             def __init__(self, data: str) -> None:
@@ -369,15 +369,17 @@ class TestKissToolsPromptNote:
             def __init__(self, args: list[str], *a: Any, **kw: Any) -> None:
                 captured_args.append(list(args))
                 self.returncode = 0
-                self.stdin = _FakeStdin()
+                self.stdin = open(stdin_capture.name, "wb")
                 self.stdout = _FakeStdout(stream_data)
                 self.stderr = _FakeStdout("")
 
             def wait(self, timeout: float | None = None) -> int:
                 return 0
 
-            def poll(self) -> int:
-                return 0
+            def poll(self) -> int | None:
+                # None ("still running") so the prompt writer does not
+                # bail out before writing the prompt.
+                return None
 
             def terminate(self) -> None:
                 pass
@@ -396,10 +398,11 @@ class TestKissToolsPromptNote:
 
         assert captured_args, "CLI was never invoked"
         args = captured_args[0]
-        idx = args.index("--system-prompt")
-        system_prompt = args[idx + 1]
-        assert "NOT part of your native tool set" in system_prompt
-        assert "finish" in system_prompt
+        assert "--system-prompt" not in args
+        prompt = pathlib.Path(stdin_capture.name).read_text()
+        assert "# You new system prompt follows:" in prompt
+        assert "NOT part of your native tool set" in prompt
+        assert "finish" in prompt
         # Restored: the note must not leak into subsequent plain turns.
         assert "system_instruction" not in m.model_config
 

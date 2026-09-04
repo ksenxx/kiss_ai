@@ -226,6 +226,11 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // chat, which the webview assembles into the page it then sends
   // back via `shareChat`.
   shareChatTasks: ['tabId', 'chatId'],
+  // "Remind me later" on the webview's update toast: the daemon owns
+  // the update_available broadcast, records the 24h snooze in the
+  // update-check cache shared with this extension host, and
+  // rebroadcasts so every window's toast disappears.
+  snoozeUpdate: ['latest'],
 };
 
 export class SorcarSidebarView implements vscode.WebviewViewProvider {
@@ -243,6 +248,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   private _voiceWake: VoiceWakeService | undefined;
   private _voiceSensitivity: number | undefined;
+  // The user's last voiceToggle choice.  `_voiceWake.running` cannot
+  // stand in for it: a stopped listener keeps counting as running while
+  // it is dying (it holds the exclusive microphone until its exit event
+  // fires), so "running" conflates "the user wants voice on" with "the
+  // process has not exited yet".  Restart decisions — sensitivity
+  // changes, hide/show suspension — follow this intent, never the
+  // physical process state; otherwise a sensitivity value or a hide
+  // arriving during that dying window turned the mic back ON after the
+  // user had switched it off.
+  private _voiceEnabled: boolean = false;
   private _voiceWakeSuspendedByHide: boolean = false;
 
   private _onCommitMessage = new vscode.EventEmitter<{
@@ -656,9 +671,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     // (left by a disposed webview) would make toggleFocus believe the
     // chat is focused and never focus it.
     this._webviewHasFocus = false;
-    setWebviewNotificationPoster(message =>
-      this._sendToWebview(message as ToWebviewMessage),
-    );
+    setWebviewNotificationPoster(message => this._sendToWebview(message));
     this._disposed = false;
     this._lastSentUrl = '';
 
@@ -689,16 +702,22 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
     const visibilitySub = webviewView.onDidChangeVisibility(() => {
       if (this._view !== webviewView) return;
+      // audit0903-coverage:start
       if (webviewView.visible) {
         this._getApi().getInputHistory();
         if (this._voiceWakeSuspendedByHide) {
           this._voiceWakeSuspendedByHide = false;
           this._voiceWake?.start(this._voiceSensitivity);
         }
-      } else if (this._voiceWake?.running) {
+      } else if (this._voiceEnabled && this._voiceWake?.running) {
+        // Gate on the user's intent as well: `running` alone stays true
+        // while a listener the user just switched OFF is still dying,
+        // and latching the suspend flag for it made the next show
+        // restart it.
         this._voiceWakeSuspendedByHide = true;
         void this._voiceWake.stop();
       }
+      // audit0903-coverage:end
     });
     this._viewSubs.push(visibilitySub);
 
@@ -714,7 +733,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           this._webviewHasFocus = false;
           setWebviewNotificationPoster(undefined);
           this._voiceWakeSuspendedByHide = false;
+          // Voice stays off until the next webview toggles it back on:
+          // without this a fresh webview's first voiceSensitivity would
+          // start the microphone before any voiceToggle.
+          // audit0903-coverage:start
+          this._voiceEnabled = false;
           void this._voiceWake?.stop();
+          // audit0903-coverage:end
         }
         this._resolveAllWorktreeActions();
       }),
@@ -1241,9 +1266,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (typeof message.sensitivity === 'number') {
           this._voiceSensitivity = message.sensitivity;
         }
+        // audit0903-coverage:start
         this._voiceWakeSuspendedByHide = false;
-        if (message.enabled) this._voiceWake.start(this._voiceSensitivity);
+        this._voiceEnabled = !!message.enabled;
+        if (this._voiceEnabled) this._voiceWake.start(this._voiceSensitivity);
         else void this._voiceWake.stop();
+        // audit0903-coverage:end
         break;
       }
 
@@ -1266,21 +1294,37 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'voiceSensitivity': {
+        // audit0902-coverage:start
+        // audit0903-coverage:start
         if (typeof message.value !== 'number') break;
         this._voiceSensitivity = message.value;
-        if (this._voiceWake?.running) {
-          // Wait for the old listener process to exit before spawning
-          // the new one: on exclusive-capture audio backends a listener
-          // started while its predecessor is still dying cannot open
-          // the microphone.
-          const voiceWake = this._voiceWake;
-          await voiceWake.stop();
-          // Restart only if nothing else started or replaced the
-          // service while the old process was exiting.
-          if (this._voiceWake === voiceWake && !voiceWake.running) {
-            voiceWake.start(this._voiceSensitivity);
-          }
+        // Restart only when the user wants voice on AND the view is not
+        // hidden.  The gate is _voiceEnabled, not _voiceWake.running: a
+        // listener the user just switched off still counts as running
+        // while it dies, and a running check here restarted it.  While
+        // suspended by hide the value is only recorded; the show handler
+        // starts the listener with it.
+        if (
+          this._voiceWake &&
+          this._voiceEnabled &&
+          !this._voiceWakeSuspendedByHide
+        ) {
+          // Restart the listener with the new sensitivity.  stop() is
+          // asynchronous (on exclusive-capture audio backends the old
+          // process holds the microphone until it has exited) and the
+          // service queues a start() issued during the stop behind it,
+          // so this cannot double-open the mic.  It is deliberately NOT
+          // `await stop(); if (!running) start()`: a voiceToggle
+          // {enabled:false} arriving during that await shares the same
+          // stop promise, and once it settled the check passed and the
+          // handler restarted the listener the user had just switched
+          // off.  A queued start is cancelled by any later stop(), so
+          // the off switch always wins.
+          void this._voiceWake.stop();
+          this._voiceWake.start(this._voiceSensitivity);
         }
+        // audit0903-coverage:end
+        // audit0902-coverage:end
         break;
       }
 
@@ -1334,6 +1378,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   public runUpdate(): void {
+    // Every click runs the installer; there is deliberately no
+    // per-window "already running" guard here.  Whether another
+    // installer is still running is known only to the cross-process
+    // lock inside install.sh (two windows are two extension hosts, and
+    // the daemon's update endpoint is a third caller), and the loser
+    // prints "another KISS update is already running (pid N)" in this
+    // terminal itself.  A guard keyed on the terminal's lifetime wrongly
+    // refused every click after a finished update until the shell was
+    // closed.
+    // audit0902-coverage:start
     const scriptPath = findInstallScript();
     if (!scriptPath) {
       showErrorNotification(
@@ -1348,9 +1402,41 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       name: 'KISS Sorcar Update',
       cwd: path.dirname(scriptPath),
     });
+    // audit0902-coverage:end
     terminal.show();
     const escScript = scriptPath.replace(/'/g, "'\\''");
     const escDir = path.dirname(scriptPath).replace(/'/g, "'\\''");
+    // Pin KISS_HOME to the value THIS extension host resolved: install.sh
+    // writes the .extension-updated marker into $KISS_HOME, and the reload
+    // watcher (extension.ts) watches the extension host's $KISS_HOME.  The
+    // terminal's shell startup files could export a different KISS_HOME,
+    // and then the marker would land where no watcher looks — the update
+    // installs but this window never reloads.
+    const escKissHome = kissHomeDir().replace(/'/g, "'\\''");
+    // audit0902-coverage:start
+    // scripts/install.sh (the curl bootstrap) syncs the clone with origin
+    // and hands over to ./install.sh -- exactly this preflight -- but
+    // holds a cross-process lock for all of it, so two windows (or a
+    // window and the daemon's update endpoint) cannot reset / uv sync /
+    // restart the same tree at once: the loser prints "another KISS
+    // update is already running (pid N)" and exits 1.  KISS_NONINTERACTIVE
+    // is what ./install.sh reads in place of --non-interactive.  A clone
+    // that predates the lock (no scripts/install.sh) gets the unlocked
+    // preflight below.
+    const bootstrap = path.join(
+      path.dirname(scriptPath),
+      'scripts',
+      'install.sh',
+    );
+    if (fs.existsSync(bootstrap)) {
+      const escBootstrap = bootstrap.replace(/'/g, "'\\''");
+      terminal.sendText(
+        `cd '${escDir}'; KISS_HOME='${escKissHome}' KISS_NONINTERACTIVE=1 ` +
+          `bash '${escBootstrap}'`,
+      );
+      return;
+    }
+    // audit0902-coverage:end
     const preflight = [
       `cd '${escDir}'`,
       "echo '>>> Pre-flight: synchronizing repo with origin before install.sh...'",
@@ -1358,7 +1444,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       '_kiss_stashed=; if [ -n "$(git status --porcelain 2>/dev/null)" ]; then git stash push --include-untracked -m \'kiss-update-preflight\' >/dev/null 2>&1 && _kiss_stashed=1 || _kiss_stashed=; fi',
       "git reset --hard '@{upstream}' 2>/dev/null || git reset --hard origin/HEAD 2>/dev/null || true",
       'if [ -n "$_kiss_stashed" ]; then git stash pop >/dev/null 2>&1 || true; fi',
-      `bash '${escScript}'`,
+      // --non-interactive: the Update button is automation.  install.sh
+      // would otherwise ask its [Y/n] upgrade questions in this terminal
+      // and skip the setsid detachment that protects the install from the
+      // terminal-disposal ^C during step [5/5].
+      `KISS_HOME='${escKissHome}' bash '${escScript}' --non-interactive`,
     ].join('; ');
     terminal.sendText(preflight);
   }
@@ -1639,7 +1729,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._view = undefined;
     setWebviewNotificationPoster(undefined);
     this._voiceWakeSuspendedByHide = false;
+    // audit0903-coverage:start
+    this._voiceEnabled = false;
     this._voiceWake?.dispose();
+    // audit0903-coverage:end
     this._voiceWake = undefined;
     if (this._urlFileWatchTimer) {
       clearInterval(this._urlFileWatchTimer);

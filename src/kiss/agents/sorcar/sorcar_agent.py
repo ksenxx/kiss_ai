@@ -379,6 +379,7 @@ def _collect_unfinished_usage(
     futures: list[Future[str]],
     sub_agents: list[Any],
     sub_usage: list[tuple[float, int, int]],
+    lock: threading.Lock,
 ) -> None:
     """Fill in the spend of children that never got to report it.
 
@@ -388,28 +389,39 @@ def _collect_unfinished_usage(
     from the parent task's totals.  Reading the live figures off the
     child's agent recovers everything it had spent up to this instant —
     without waiting for it, which is the whole point of abandoning it.
-    A live read of a still-running child can lag its true spend slightly
-    (it may land mid-handoff between executor sessions), which is why a
-    child that finishes in the meantime keeps its own final figure.
+
+    Every slot update — the worker's final write in its ``finally`` and
+    this read-modify-write — happens under *lock*, so the two can no
+    longer interleave: before, a child that published its final figure
+    and completed between this function's read and its write had that
+    figure overwritten by the older live read, and, its future now
+    being done, it was not registered as abandoned either — the
+    difference was never banked.  The component-wise maximum remains
+    for a child that has already published but whose future is not yet
+    done: a live read can lag its true spend slightly (mid-handoff
+    between executor sessions), so a slot is only ever raised, never
+    lowered.
 
     Args:
         futures: One future per fanned-out sub-agent, in task order.
         sub_agents: The children's agents, in the same order; entries are
             ``None`` for children that never started.
-        sub_usage: Per-child ``(cost, tokens, steps)`` slots, updated in
+        sub_usage: Per-child ``(cost, tokens, steps)`` slots, raised in
             place for unfinished children only.
+        lock: The lock the workers hold for their own final slot write.
     """
     for idx, future in enumerate(futures):
         agent = sub_agents[idx]
         if future.done() or agent is None:
             continue
-        live = _live_agent_usage(agent)
-        # A worker writes its own slot BEFORE its future completes, so a
-        # future that finished while this live read was in flight has
-        # already published a strictly better figure: keep it.
-        if future.done():
-            continue
-        sub_usage[idx] = live
+        with lock:
+            live = _live_agent_usage(agent)
+            current = sub_usage[idx]
+            sub_usage[idx] = (
+                max(current[0], live[0]),
+                max(current[1], live[1]),
+                max(current[2], live[2]),
+            )
 
 
 class _AbandonedSubagent:
@@ -507,22 +519,42 @@ def _register_abandoned(
             )
 
 
+def _executor_usage(agent: Any) -> tuple[float, int, int]:
+    """Return the in-flight executor session's ``(budget, tokens, steps)``.
+
+    :class:`~kiss.agents.sorcar.relentless_agent.RelentlessAgent` folds a
+    session executor's spend into the agent's totals only when the
+    session ends, so mid-session the live spend is visible only on
+    ``agent._current_executor``.  The single reader of that executor's
+    counters — :func:`_live_agent_usage` and
+    :meth:`_LiveUsageMonitor._emit` used to carry drifting copies (the
+    executor's step counter is ``step_count``, not ``total_steps``, an
+    easy copy to get wrong).
+
+    Args:
+        agent: The agent whose live executor to read.
+
+    Returns:
+        The executor's spend, or ``(0.0, 0, 0)`` when no session is in
+        flight.
+    """
+    executor = getattr(agent, "_current_executor", None)
+    if executor is None:
+        return 0.0, 0, 0
+    return (
+        float(getattr(executor, "budget_used", 0.0) or 0.0),
+        int(getattr(executor, "total_tokens_used", 0) or 0),
+        int(getattr(executor, "step_count", 0) or 0),
+    )
+
+
 def _live_agent_usage(agent: Any) -> tuple[float, int, int]:
     """Return live ``(budget, tokens, steps)`` for *agent*, including its
-    in-flight executor session.
-
-    :class:`~kiss.agents.sorcar.relentless_agent.RelentlessAgent` folds a session
-    executor's spend into the agent's totals only when the session ends,
-    so mid-session the live spend is visible only on
-    ``agent._current_executor``.
+    in-flight executor session (see :func:`_executor_usage`).
     """
     budget, tokens, steps = _agent_usage(agent)
-    executor = getattr(agent, "_current_executor", None)
-    if executor is not None:
-        budget += float(getattr(executor, "budget_used", 0.0) or 0.0)
-        tokens += int(getattr(executor, "total_tokens_used", 0) or 0)
-        steps += int(getattr(executor, "step_count", 0) or 0)
-    return budget, tokens, steps
+    live_budget, live_tokens, live_steps = _executor_usage(agent)
+    return budget + live_budget, tokens + live_tokens, steps + live_steps
 
 
 class _LiveUsageMonitor:
@@ -607,13 +639,10 @@ class _LiveUsageMonitor:
 
     def _emit(self) -> None:
         """Broadcast a parent-task ``usage_info`` when the totals changed."""
-        executor = getattr(self._parent, "_current_executor", None)
-        if executor is not None:
-            budget = float(getattr(executor, "budget_used", 0.0) or 0.0)
-            tokens = int(getattr(executor, "total_tokens_used", 0) or 0)
-            steps = int(getattr(executor, "step_count", 0) or 0)
-        else:
-            budget, tokens, steps = 0.0, 0, 0
+        # Only the parent's LIVE executor session, never its folded
+        # totals: the printer adds the parent's cumulative offsets to
+        # every raw usage_info it renders.
+        budget, tokens, steps = _executor_usage(self._parent)
         with self._agents_lock:
             agents = list(self._agents)
         for sub in agents:
@@ -661,19 +690,34 @@ def _attribute_sub_usage(agent: Any, budget: float, tokens: int, steps: int) -> 
     so the live status line in the current sub-session reflects the
     additional spend immediately (the offsets are otherwise
     snapshotted only at session start).
+
+    The whole read-modify-write runs under the agent's ``_usage_lock``
+    (see :meth:`RelentlessAgent.__init__`): this function is called
+    concurrently by the agent thread (a fan-out's ``finally``, a
+    ``talk`` synthesis bank) and by server threads
+    (:meth:`SorcarAgent.reclaim_abandoned_subagents` from worktree
+    cleanup / teardown / discard), and unserialized increments lost
+    updates.  ``reclaim_abandoned_subagents`` calls this while holding
+    ``_abandoned_lock``, so the (fixed) lock order is
+    ``_abandoned_lock`` → ``_usage_lock``; nothing acquires them in
+    the opposite order.  A minimal agent-shaped object without the
+    lock attribute gets a throwaway lock (no cross-thread protection,
+    but such objects are single-threaded by construction).
     """
-    agent.budget_used = float(getattr(agent, "budget_used", 0.0) or 0.0) + budget
-    agent.total_tokens_used = (
-        int(getattr(agent, "total_tokens_used", 0) or 0) + tokens
-    )
-    agent.total_steps = int(getattr(agent, "total_steps", 0) or 0) + steps
-    if agent.printer is not None:
-        try:
-            agent.printer.budget_offset = agent.budget_used
-            agent.printer.tokens_offset = agent.total_tokens_used
-            agent.printer.steps_offset = agent.total_steps
-        except Exception:
-            pass
+    lock = getattr(agent, "_usage_lock", None) or threading.Lock()
+    with lock:
+        agent.budget_used = float(getattr(agent, "budget_used", 0.0) or 0.0) + budget
+        agent.total_tokens_used = (
+            int(getattr(agent, "total_tokens_used", 0) or 0) + tokens
+        )
+        agent.total_steps = int(getattr(agent, "total_steps", 0) or 0) + steps
+        if agent.printer is not None:
+            try:
+                agent.printer.budget_offset = agent.budget_used
+                agent.printer.tokens_offset = agent.total_tokens_used
+                agent.printer.steps_offset = agent.total_steps
+            except Exception:
+                pass
 
 
 def _attribute_tts_usage(agent: Any, usage: dict[str, Any]) -> None:
@@ -1244,6 +1288,18 @@ class SorcarAgent(RelentlessAgent):
                 change (or a "no change" message when the requested
                 model is already active).
             """
+            from kiss.core.models.model_info import (
+                model_runs_task_to_completion,
+            )
+
+            if getattr(self, "docker_image", None) and model_runs_task_to_completion(
+                model_name
+            ):
+                return (
+                    f"Cannot switch to {model_name}: it is a CLI agent "
+                    "that runs natively on the host, which would bypass "
+                    "this task's docker_image isolation. Pick an API model."
+                )
             target = getattr(self, "_current_executor", None) or self
             old_model = getattr(target, "model", None)
             if old_model is None:
@@ -1523,6 +1579,10 @@ class SorcarAgent(RelentlessAgent):
         ask_user_question_callback: Callable[[str], str] | None = None,
         base_system_prompt: str = "",
         append_basic_tools: bool = True,
+        llm_call_hook: (
+            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
+        ) = None,
+        tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -1570,6 +1630,22 @@ class SorcarAgent(RelentlessAgent):
                 ``RelentlessAgent.perform_task``) and the caller's
                 *tools* — *web_tools* and *is_parallel* then have no
                 effect, since the tools they toggle are never built.
+            llm_call_hook: Optional hook forwarded to the underlying
+                :meth:`kiss.core.kiss_agent.KISSAgent.run` of every
+                sub-session this agent runs (see that docstring): called
+                before every LLM call with the new messages about to be
+                sent, and its return value replaces them.  Applies to
+                this agent only, not to ``run_parallel`` sub-agents.
+                Defaults to None (no hook).
+            tool_call_hook: Optional hook forwarded to the underlying
+                :meth:`kiss.core.kiss_agent.KISSAgent.run` of every
+                sub-session this agent runs (see that docstring): called
+                before every tool call with the tool's name and
+                arguments; any verdict other than ``"OK"`` suppresses
+                the call and is returned to the model as the tool's
+                result.  Applies to this agent only, not to
+                ``run_parallel`` sub-agents.  Defaults to None (no
+                hook).
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -1629,6 +1705,8 @@ class SorcarAgent(RelentlessAgent):
                 verbose=verbose,
                 tools=tools or [],
                 attachments=attachments,
+                llm_call_hook=llm_call_hook,
+                tool_call_hook=tool_call_hook,
             )
         finally:
             if self.web_use_tool:
@@ -1876,6 +1954,10 @@ def run_tasks_parallel(
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
     sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
+    # Held for every slot write: the workers' final figures and the
+    # parent's live refresh of abandoned children must not interleave
+    # (see _collect_unfinished_usage).
+    sub_usage_lock = threading.Lock()
     # Published as soon as each child exists so an abandoned child's
     # spend can still be read (see _collect_unfinished_usage).
     sub_agents: list[Any] = [None] * len(tasks)
@@ -1958,7 +2040,8 @@ def run_tasks_parallel(
             # _live_agent_usage (not _agent_usage): an interrupted child
             # never folds its in-flight executor session's spend into the
             # agent totals, so the folded-only read would undercount it.
-            sub_usage[idx] = _live_agent_usage(agent)
+            with sub_usage_lock:
+                sub_usage[idx] = _live_agent_usage(agent)
             if printer is not None:
                 # Notify every tab watching the sub-agent: its own
                 # synthetic tab plus any other tabs subscribed to the
@@ -2007,14 +2090,32 @@ def run_tasks_parallel(
         # Fill totals_out even when a worker propagates an interrupt, and
         # read the live figures of any child that never got to report its
         # own, so no completed sibling's spend is lost.
-        _collect_unfinished_usage(futures, sub_agents, sub_usage)
-        if abandoned:
-            # The abandoned threads keep running inside ``work_dir`` and
-            # keep spending: hand them to the parent so it can refuse to
-            # delete that directory and can bank the rest of their spend.
-            _register_abandoned(parent_agent, futures, sub_agents, sub_usage)
-        if totals_out is not None:
-            totals_out["budget_used"] = sum(u[0] for u in sub_usage)
-            totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)
-            totals_out["total_steps"] = sum(u[2] for u in sub_usage)
+        _collect_unfinished_usage(futures, sub_agents, sub_usage, sub_usage_lock)
+        # Registration and the totals summation happen under ONE hold of
+        # the slot lock: an abandoned worker that unwound in the
+        # meantime publishes its FINAL slot value under the same lock,
+        # and a publish landing between the two used to make the parent
+        # bank the final figure while the registered ``counted``
+        # baseline kept the older one — the next reclaim then banked
+        # the difference a second time.  Under one hold, the figure
+        # summed into ``totals_out`` for a registered child is exactly
+        # its ``counted`` baseline, so banked-now plus reclaimed-later
+        # is the child's spend exactly once.
+        with sub_usage_lock:
+            if abandoned:
+                # The abandoned threads keep running inside ``work_dir``
+                # and keep spending: hand them to the parent so it can
+                # refuse to delete that directory and can bank the rest
+                # of their spend.
+                _register_abandoned(parent_agent, futures, sub_agents, sub_usage)
+            # Test hook (no-op in production): widens the window between
+            # the registration above and the summation below so
+            # concurrency tests can prove a worker's final publish
+            # cannot land between them
+            # (see test_audit0903_fanout_bank_register_race).
+            _race_delay()
+            if totals_out is not None:
+                totals_out["budget_used"] = sum(u[0] for u in sub_usage)
+                totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)
+                totals_out["total_steps"] = sum(u[2] for u in sub_usage)
     return results

@@ -49,7 +49,7 @@ from kiss.core.printer import parse_result_yaml
 from kiss.server import agent_state
 from kiss.server.agent_file import AgentFileError, apply_agent_overrides
 from kiss.server.agent_state import AgentState
-from kiss.server.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter, stamp_event_ts
 from kiss.server.tools_file import load_tools_file
 
 logger = logging.getLogger(__name__)
@@ -89,11 +89,60 @@ def inject_keyboard_interrupt(tid: int) -> int:
     return rc
 
 
+def wait_for_thread_start(
+    thread: threading.Thread,
+    still_owns: Callable[[], bool] | None = None,
+    deadline: float | None = None,
+) -> bool:
+    """Wait until *thread* has actually started, or ownership is lost.
+
+    ``Thread.join`` raises ``RuntimeError`` on a thread that has not
+    started, and ``_cmd_run`` keeps a registered worker unstarted
+    while it writes the tab registry and broadcasts ``clear``.  Both
+    stop enforcers — the Stop watchdog (:meth:`_force_stop_thread`)
+    and the graceful-shutdown sweep
+    (``RemoteAccessServer._stop_active_agent_tasks``) — wait through
+    this shared primitive before joining or injecting (audit0903 F1).
+
+    With ``_cmd_run``'s start/cancel handshake, a run whose stop or
+    shutdown was flagged before its atomic pre-start check never
+    starts at all: it is routed through terminal cancellation, whose
+    cleanup clears ``state.task_thread`` — dropping ownership and
+    ending this wait.
+
+    Args:
+        thread: The worker thread captured at stop/shutdown time.
+        still_owns: Ownership guard evaluated under
+            :data:`agent_state.STATE_LOCK` while waiting; ``False``
+            ends the wait (the run was pre-cancelled, finished or
+            replaced).
+        deadline: Optional ``time.monotonic()`` deadline after which
+            the wait gives up.  With the handshake in place the
+            give-up is harmless: an accepted stop is still honored by
+            ``_cmd_run`` itself, which never starts the thread.
+
+    Returns:
+        ``True`` when the thread started; ``False`` when ownership
+        dropped or *deadline* passed first.
+    """
+    while thread.ident is None:
+        if still_owns is not None:
+            with agent_state.STATE_LOCK:
+                if not still_owns():
+                    return False
+        if (
+            deadline is not None and time.monotonic() > deadline
+        ):  # pragma: no cover — reachable only by stalling start() past the deadline
+            return False
+        time.sleep(0.01)
+    return True
+
+
 def _state_owns_thread(
     state: AgentState,
     thread: threading.Thread,
 ) -> bool:
-    """True while *state* is still registered and still runs *thread*.
+    """True while *state* still runs *thread* AND has not acknowledged a stop.
 
     Ownership guard for :meth:`_TaskRunnerMixin._force_stop_thread`'s
     asynchronous ``KeyboardInterrupt`` injection.  Callers evaluate it
@@ -102,16 +151,81 @@ def _state_owns_thread(
     same lock when a run finishes, so a ``False`` here reliably means
     the stop target already finished and *thread* must not be touched.
 
+    A thread that is alive is not necessarily still ignoring the
+    stop: once the runner has caught the first interrupt and turned it
+    into the stopped result (:meth:`_TaskRunnerMixin._cancel_outcome`
+    raises :attr:`AgentState.stop_acknowledged`), the thread is
+    persisting the row — SQLite's busy timeout alone allows a 30 s
+    wait —, presenting the worktree and broadcasting.  Injecting again
+    there aborted that cleanup ("Cleanup interrupted"), so an
+    acknowledged stop also answers ``False``.
+
     Args:
         state: The state object resolved at ``_stop_task`` time.
         thread: The task thread captured at ``_stop_task`` time.
 
     Returns:
-        ``True`` when the registry entry is unchanged and still owns
-        *thread*; ``False`` otherwise.
+        ``True`` when the registry entry is unchanged, still owns
+        *thread* and has not yet acknowledged the stop; ``False``
+        otherwise.
     """
     current = agent_state.agent_states.get(state.task_id)
-    return current is not None and current is state and current.task_thread is thread
+    return (
+        current is not None
+        and current is state
+        and current.task_thread is thread
+        and not current.stop_acknowledged
+    )
+
+
+def _stop_interrupt_wrapped(exc: BaseException, state: AgentState) -> bool:
+    """True when *exc* wraps the run-cancelling ``KeyboardInterrupt``.
+
+    The untrusted-code loaders (:func:`apply_agent_overrides`,
+    :func:`load_tools_file`) execute caller-supplied Python on the
+    task thread and convert EVERY raise — ``BaseException`` included —
+    into their diagnostic error type.  The asynchronous
+    ``KeyboardInterrupt`` the Stop watchdog (or the shutdown path)
+    injects while such a getter runs therefore surfaced as an
+    ``AgentFileError``/``ToolsFileError``: the run was reported
+    ``"Task failed: ... KeyboardInterrupt"`` instead of stopped, and
+    with :meth:`_TaskRunnerMixin._cancel_outcome` never called the
+    stop stayed unacknowledged, so the watchdog's retry could land a
+    second interrupt in the result broadcasting.
+
+    A cancellation is recognised by BOTH halves, so neither kind of
+    event is mislabelled:
+
+    * a stop was actually requested on *state* — its stop event is
+      set, or the shutdown flag is raised — AND
+    * a ``KeyboardInterrupt`` sits in *exc*'s cause/context chain.
+
+    A user script that raises ``KeyboardInterrupt`` on its own, with
+    no stop pending, stays a task error (the loaders' documented
+    contract); a script failure that merely coincides with a pending
+    stop is reported as the stop the user asked for.
+
+    Args:
+        exc: The exception a run step raised.
+        state: The run's registered agent state.
+
+    Returns:
+        ``True`` when the run should be treated as cancelled.
+    """
+    with agent_state.STATE_LOCK:
+        stop_requested = state.interrupted_by_shutdown or (
+            state.stop_event is not None and state.stop_event.is_set()
+        )
+    if not stop_requested:
+        return False
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        if isinstance(cur, KeyboardInterrupt):
+            return True
+        seen.add(id(cur))
+        cur = cur.__cause__ or cur.__context__
+    return False
 
 
 def build_task_extra_payload(
@@ -398,6 +512,60 @@ def _wt_merge_on_repo(state: AgentState, repo: Path | None) -> bool:
         return True
 
 
+def _zero_usage_counters(agent: Any) -> None:
+    """Zero *agent*'s usage counters before one of its runs.
+
+    ``RelentlessAgent.run`` zeroes ``budget_used`` /
+    ``total_tokens_used`` / ``total_steps`` in its ``_reset`` before it
+    does anything else, so the counters read once ``run()`` returns or
+    raises are that run's OWN usage.  The runner used to subtract a
+    baseline captured before the call instead — a baseline the reset
+    had already discarded — which recorded every subtask after the
+    first (and every run on an agent reused from the tab's previous
+    task) as ``max(0, own - previous)``.  Zeroing here as well covers
+    the runs that never reach ``_reset`` (a worktree setup or
+    tools-file failure on a reused agent), whose failure banner would
+    otherwise carry the previous run's numbers.
+
+    Args:
+        agent: The agent about to run; attributes are set outright,
+            so an agent that has not run yet is handled too.
+    """
+    agent.total_tokens_used = 0
+    agent.budget_used = 0.0
+    agent.total_steps = 0
+    agent.step_count = 0
+
+
+def _subtask_metrics(agent: object) -> tuple[int, float, int]:
+    """Return a finished run's ``(tokens, cost, steps)`` usage.
+
+    Reads the counters ``RelentlessAgent.run`` zeroes at its start (see
+    :func:`_zero_usage_counters`), so the values are the run's own.
+    Every read is defensive (``getattr`` with a zero default) so a
+    nulled agent yields zeros.
+
+    RelentlessAgent-derived agents accumulate completed steps into
+    ``total_steps`` and leave ``step_count`` at 0; plain agents do the
+    opposite.  The step count therefore falls back to ``step_count``
+    when ``total_steps`` is 0.
+
+    Args:
+        agent: The (possibly ``None``) agent to read counters from.
+
+    Returns:
+        ``(tokens, cost, steps)``; used for the persisted ``extra``
+        payload and the failure ``result`` banner alike, so the two
+        can never disagree.
+    """
+    tokens = int(getattr(agent, "total_tokens_used", 0) or 0)
+    cost = float(getattr(agent, "budget_used", 0.0) or 0.0)
+    steps = int(getattr(agent, "total_steps", 0) or 0) or int(
+        getattr(agent, "step_count", 0) or 0,
+    )
+    return tokens, cost, steps
+
+
 _STOP_SENTINEL: object = object()
 
 
@@ -460,12 +628,6 @@ class _TaskRunnerMixin:
         ) -> None: ...
         def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]: ...
         def _extract_result_summary(self) -> str: ...
-        def _generate_followup_async(
-            self,
-            task: str,
-            result: str,
-            task_id: str | None,
-        ) -> None: ...
         def _refresh_files_after_task(self, work_dir: str = "") -> None: ...
 
     def _run_task(self, cmd: dict[str, Any]) -> None:
@@ -488,6 +650,16 @@ class _TaskRunnerMixin:
         state: AgentState | None = None
         client_task_id = ""
         try:
+            if cmd.pop("_pre_cancelled", False):
+                # ``_cmd_run`` observed an accepted stop / shutdown
+                # sweep before ``thread.start()`` (audit0903 F1/F2):
+                # the worker thread was never started, and this call
+                # runs on the dispatch thread purely to route the run
+                # through the normal cancellation handlers below — no
+                # user setup (agent-script getters, tools files) may
+                # execute.
+                client_task_id = _client_task_id_of(cmd)
+                raise KeyboardInterrupt("run cancelled before start")
             # Agent-script overrides (wire field ``agentPath``) rewrite the
             # run command's parameter fields, so they run FIRST — before
             # any field is read, including the ``chatId`` that
@@ -573,27 +745,73 @@ class _TaskRunnerMixin:
                 raise agent_file_error
             self._run_task_inner(cmd)
         except BaseException as exc:
-            logger.warning(
-                "Task setup failed: tab_id=%s error=%s",
-                tab_id,
-                exc,
-                exc_info=True,
-            )
-            if isinstance(exc, KeyboardInterrupt):
-                setup_fail_text = "Task stopped by user"
+            if state is None:
+                # The raise landed before the state resolution in the
+                # try (an interrupt in the override step); resolving is
+                # idempotent for a registered run.
+                with suppress(BaseException):
+                    state = self._resolve_run_state(cmd)
+            if state is not None and (
+                isinstance(exc, KeyboardInterrupt)
+                or _stop_interrupt_wrapped(exc, state)
+            ):
+                # A cancellation that landed before ``_run_task_inner``'s
+                # own handlers (setup, or the inner prologue) — as the
+                # bare ``KeyboardInterrupt``, or wrapped into the
+                # agent-script loader's ``AgentFileError`` when the
+                # injection hit inside a getter.  It goes
+                # through the SAME helper as the inner sites, FIRST:
+                # ``_cancel_outcome`` acknowledges the stop, and until
+                # it has, the Stop watchdog keeps re-injecting into
+                # whatever this thread does next — including the
+                # logging and broadcasting below, which can block.  It
+                # also labels a shutdown as a shutdown.
+                setup_fail_text, _ = self._cancel_outcome(state)
+                logger.info(
+                    "%s during setup: tab_id=%s", setup_fail_text, tab_id,
+                )
             else:
+                logger.warning(
+                    "Task setup failed: tab_id=%s error=%s",
+                    tab_id,
+                    exc,
+                    exc_info=True,
+                )
                 setup_fail_text = f"Task failed: {type(exc).__name__}: {exc}"
-            self.printer.broadcast(
-                {
-                    "type": "result",
-                    "text": setup_fail_text,
-                    "success": False,
-                    "total_tokens": 0,
-                    "cost": "$0.0000",
-                    "step_count": 0,
-                    "tabId": tab_id,
-                }
-            )
+            setup_result: dict[str, Any] = {
+                "type": "result",
+                "text": setup_fail_text,
+                "success": False,
+                "total_tokens": 0,
+                "cost": "$0.0000",
+                "step_count": 0,
+                "tabId": tab_id,
+            }
+            # pragma-no-branch: the false arm needs a state that is
+            # still ``None`` here — ``_resolve_run_state`` above
+            # registers one whenever it is missing and only fails if
+            # the registry itself is broken — or an ``AgentState``
+            # with an empty ``task_id``, which the constructor cannot
+            # produce through ``_cmd_run``/``_resolve_run_state``.
+            if state is not None and state.task_id:  # pragma: no branch
+                # Record the early failure under the run's (possibly
+                # provisional) task id: the run died before
+                # ``ChatSorcarAgent.run`` started its recording, and a
+                # tabId-only result is transport-only — a viewer that
+                # attached inside the end-of-run race window would
+                # receive only status booleans and an empty transcript
+                # (audit0903 F4).  The recording is dropped after the
+                # same linger the subscriber map gets.
+                setup_result["taskId"] = state.task_id
+                self.printer.ensure_recording_for_task(state.task_id)
+                cleanup_timer = threading.Timer(
+                    300.0,
+                    self.printer.cleanup_task,
+                    args=(state.task_id,),
+                )
+                cleanup_timer.daemon = True
+                cleanup_timer.start()
+            self.printer.broadcast(setup_result)
         finally:
             if state is None:
                 # The interrupt (or an override crash) landed before
@@ -617,6 +835,7 @@ class _TaskRunnerMixin:
                     state.is_running_non_wt = False
                     state.non_wt_repo_root = None
                     state.interrupted_by_shutdown = False
+                    state.stop_acknowledged = False
                     task_id_for_end = state.task_id
                     # Ownership is decided by the agent alone: it is
                     # kept exactly while it still holds a worktree.
@@ -709,6 +928,14 @@ class _TaskRunnerMixin:
         for viewer_tab_id in self.printer._fanout_targets(task_id):
             if viewer_tab_id == launcher_tab_id:
                 continue
+            # Guard AND broadcast under one ``_state_lock`` hold
+            # (audit0903 F3): with the lock released in between,
+            # ``_cmd_run`` could install a newer busy run on the
+            # viewer tab after the check passed and this unqualified
+            # ``running=False`` would kill that run's spinner.
+            # Serialized against the installation, the stale event is
+            # either suppressed here or provably precedes the newer
+            # run's own ``running=True``.
             with self._state_lock:
                 viewer_state = agent_state.find_by_tab(viewer_tab_id)
                 # ``busy()``, not ``is_task_active`` (C-RC1): the
@@ -723,15 +950,15 @@ class _TaskRunnerMixin:
                     and viewer_state.task_id != task_key
                 ):
                     continue
-            payload: dict[str, Any] = {
-                "type": "status",
-                "running": False,
-                "tabId": viewer_tab_id,
-            }
-            if client_task_id:
-                payload["taskId"] = client_task_id
-            self.printer.broadcast(payload)
-            self._restore_user_model_pick(viewer_tab_id)
+                payload: dict[str, Any] = {
+                    "type": "status",
+                    "running": False,
+                    "tabId": viewer_tab_id,
+                }
+                if client_task_id:
+                    payload["taskId"] = client_task_id
+                self.printer.broadcast(payload)
+                self._restore_user_model_pick(viewer_tab_id)
 
     def _broadcast_early_prompts(
         self,
@@ -1035,11 +1262,14 @@ class _TaskRunnerMixin:
             prompt[:200],
         )
         result_summary = "Agent Failed Abruptly"
+        # The agent's own ``finish(suggested_next_task=...)`` proposal;
+        # empty on every failure path, so no bar is shown.
+        suggested_next_task = ""
         task_end_event: dict[str, Any] | None = None
         sub_start_ms = start_ms
-        sub_tokens_base = int(getattr(agent, "total_tokens_used", 0) or 0)
-        sub_cost_base = float(getattr(agent, "budget_used", 0.0) or 0.0)
-        sub_steps_base = int(getattr(agent, "total_steps", 0) or 0)
+        # A failure before the first ``agent.run`` (tools file, config)
+        # must not report the previous run's usage of a reused agent.
+        _zero_usage_counters(agent)
         agent_returned: str = ""
         task_history_id: str | None = None
         # Changed-path records (and history ids) of EARLIER sequential
@@ -1085,6 +1315,21 @@ class _TaskRunnerMixin:
                 if isinstance(_raw_model_config, dict)
                 else None
             )
+            # Agent-script hooks (``get_llm_call_hook`` /
+            # ``get_tool_call_hook``), staged onto the command dict by
+            # ``apply_agent_overrides``.  Guarded with ``callable``:
+            # the fields never travel the wire as callables, so a
+            # (buggy or malicious) client that sends them as JSON
+            # values must not crash the executor — anything
+            # non-callable means "no hook".
+            _raw_llm_hook = cmd.get("llmCallHook")
+            _llm_call_hook = (
+                _raw_llm_hook if callable(_raw_llm_hook) else None
+            )
+            _raw_tool_hook = cmd.get("toolCallHook")
+            _tool_call_hook = (
+                _raw_tool_hook if callable(_raw_tool_hook) else None
+            )
 
             on_task_id_allocated = partial(
                 self._on_run_task_id_allocated,
@@ -1104,17 +1349,17 @@ class _TaskRunnerMixin:
             for subtask_index, task_prompt in enumerate(subtasks):
                 state.last_user_prompt = task_prompt
                 state.last_result_summary = ""
+                # Reset per subtask: a later subtask that fails must not
+                # publish an earlier subtask's suggestion.
+                suggested_next_task = ""
                 if subtask_index > 0:
                     sub_start_ms = int(time.time() * 1000)
-                sub_tokens_base = int(
-                    getattr(agent, "total_tokens_used", 0) or 0,
-                )
-                sub_cost_base = float(
-                    getattr(agent, "budget_used", 0.0) or 0.0,
-                )
-                sub_steps_base = int(
-                    getattr(agent, "total_steps", 0) or 0,
-                )
+                # Each subtask's row and failure banner carry that
+                # subtask's OWN usage: ``agent.run`` zeroes the
+                # counters in its ``_reset`` anyway, and zeroing here
+                # too keeps a run that fails before ``_reset`` from
+                # reporting the previous subtask's numbers.
+                _zero_usage_counters(agent)
                 subtask_failed = False
                 subtask_exc: BaseException | None = None
                 try:
@@ -1156,6 +1401,8 @@ class _TaskRunnerMixin:
                         # — exactly the ``appendToSystemPrompt``
                         # contract.
                         system_prompt=append_to_system_prompt,
+                        llm_call_hook=_llm_call_hook,
+                        tool_call_hook=_tool_call_hook,
                         _skip_persistence=True,
                         _on_task_id_allocated=on_task_id_allocated,
                     )
@@ -1164,6 +1411,9 @@ class _TaskRunnerMixin:
                         result_summary = str(_run_parsed["summary"])
                     else:
                         result_summary = self._extract_result_summary() or "No summary available"
+                    suggested_next_task = str(
+                        (_run_parsed or {}).get("suggested_next_task") or "",
+                    ).strip()
                     task_end_event = {"type": "task_done"}
                     logger.info(
                         "Agent returned: tab_id=%s task_id=%s summary=%r",
@@ -1213,9 +1463,6 @@ class _TaskRunnerMixin:
                             result_summary=result_summary,
                             task_history_id=task_history_id,
                             tab_id=tab_id,
-                            sub_tokens_base=sub_tokens_base,
-                            sub_cost_base=sub_cost_base,
-                            sub_steps_base=sub_steps_base,
                         )
                     break
                 if subtask_index < len(subtasks) - 1:
@@ -1237,13 +1484,16 @@ class _TaskRunnerMixin:
                         work_dir=work_dir,
                         use_worktree=use_worktree,
                         sub_start_ms=sub_start_ms,
-                        sub_tokens_base=sub_tokens_base,
-                        sub_cost_base=sub_cost_base,
-                        sub_steps_base=sub_steps_base,
                     )
         except BaseException as _outer_exc:
             if result_summary == "Agent Failed Abruptly":
-                if isinstance(_outer_exc, KeyboardInterrupt):
+                # ``_stop_interrupt_wrapped``: a stop injected while
+                # the tools-file loader ran caller code surfaces here
+                # as a ``ToolsFileError`` wrapping the interrupt — a
+                # cancellation, not a task error.
+                if isinstance(
+                    _outer_exc, KeyboardInterrupt,
+                ) or _stop_interrupt_wrapped(_outer_exc, state):
                     result_summary, _cancel_event = self._cancel_outcome(state)
                     task_end_event = task_end_event or _cancel_event
                 else:
@@ -1261,9 +1511,6 @@ class _TaskRunnerMixin:
                 result_summary=result_summary,
                 task_history_id=task_history_id,
                 tab_id=tab_id,
-                sub_tokens_base=sub_tokens_base,
-                sub_cost_base=sub_cost_base,
-                sub_steps_base=sub_steps_base,
             )
         finally:
             end_event_broadcast = False
@@ -1333,9 +1580,6 @@ class _TaskRunnerMixin:
                     work_dir=work_dir,
                     use_worktree=use_worktree,
                     sub_start_ms=sub_start_ms,
-                    sub_tokens_base=sub_tokens_base,
-                    sub_cost_base=sub_cost_base,
-                    sub_steps_base=sub_steps_base,
                     end_event=task_end_event,
                     end_ms=end_ms,
                     cleanup=False,
@@ -1422,21 +1666,27 @@ class _TaskRunnerMixin:
                 )
                 hist_id = task_history_id
                 if hist_id is not None:
-                    # S3-08: drop the printer's persist-agent BEFORE
-                    # starting the follow-up thread, so the follow-up
-                    # broadcast is never auto-persisted and the explicit
-                    # ``_append_chat_event`` inside the follow-up thread
-                    # is the single, scheduling-independent persistence
-                    # path.  ``cleanup_task`` keeps the subscriber set
-                    # alive for a linger period, so the broadcast still
-                    # fans out to the originating tab.
+                    if suggested_next_task:
+                        # The agent proposed the follow-up itself via
+                        # ``finish(suggested_next_task=...)``.  The
+                        # transient broadcast (one ``tabId``-stamped copy
+                        # per watching tab) is never auto-persisted, so
+                        # the explicit ``_append_chat_event`` below is
+                        # the single persistence path (S3-08) and the
+                        # replayed transcript shows the bar exactly once.
+                        followup_event: dict[str, Any] = {
+                            "type": "followup_suggestion",
+                            "text": suggested_next_task,
+                        }
+                        stamp_event_ts(followup_event)
+                        self.printer.broadcast_transient(
+                            followup_event, task_id=hist_id, tab_id=tab_id,
+                        )
+                        _append_chat_event(
+                            dict(followup_event), task_id=hist_id, task=prompt,
+                        )
                     self.printer.cleanup_task(hist_id)
                     task_history_id = None
-                    self._generate_followup_async(
-                        prompt,
-                        result_summary,
-                        hist_id,
-                    )
             except BaseException:  # pragma: no cover — cleanup interrupted
                 logger.debug("Cleanup interrupted", exc_info=True)
                 # Only emit the terminal event if the normal path did
@@ -1494,9 +1744,6 @@ class _TaskRunnerMixin:
         work_dir: str,
         use_worktree: bool,
         sub_start_ms: int,
-        sub_tokens_base: int,
-        sub_cost_base: float,
-        sub_steps_base: int,
         end_event: dict[str, Any] | None = None,
         end_ms: int | None = None,
         cleanup: bool = True,
@@ -1508,8 +1755,8 @@ class _TaskRunnerMixin:
         per subtask and each run allocates its OWN ``task_history``
         row (with ``_skip_persistence=True`` suppressing the agent's
         internal result save).  Persists the end event, result
-        summary, and the ``extra`` payload with per-subtask metric
-        deltas and timestamps, then broadcasts ``tasks_updated``.
+        summary, and the ``extra`` payload with the subtask's own
+        metrics and timestamps, then broadcasts ``tasks_updated``.
 
         The task-level cleanup ``finally`` in :meth:`_run_task_inner`
         shares this body for the LAST subtask's row (C-R2), with
@@ -1531,9 +1778,6 @@ class _TaskRunnerMixin:
             work_dir: Working directory the task ran from.
             use_worktree: Whether the task ran inside a worktree.
             sub_start_ms: The subtask's start timestamp (ms epoch).
-            sub_tokens_base: Agent token counter before the subtask.
-            sub_cost_base: Agent budget counter before the subtask.
-            sub_steps_base: Agent step counter before the subtask.
             end_event: The chat end event to append; defaults to
                 ``{"type": "task_done"}`` (a non-final subtask only
                 gets here when it succeeded).
@@ -1561,20 +1805,15 @@ class _TaskRunnerMixin:
                 task_id=task_id,
                 task=task_prompt,
             )
-            tokens_delta, cost_delta, steps_delta = self._subtask_metric_deltas(
-                state.agent,
-                sub_tokens_base,
-                sub_cost_base,
-                sub_steps_base,
-            )
+            tokens, cost, steps = _subtask_metrics(state.agent)
             _save_task_extra(
                 build_task_extra_payload(
                     model=model,
                     work_dir=work_dir,
                     version=__version__,
-                    tokens=tokens_delta,
-                    cost=round(cost_delta, 6),
-                    steps=steps_delta,
+                    tokens=tokens,
+                    cost=round(cost, 6),
+                    steps=steps,
                     is_parallel=state.use_parallel,
                     is_worktree=use_worktree,
                     auto_commit_mode=state.auto_commit_mode,
@@ -1603,53 +1842,6 @@ class _TaskRunnerMixin:
                 exc_info=True,
             )
 
-    @staticmethod
-    def _subtask_metric_deltas(
-        agent: object,
-        tokens_base: int,
-        cost_base: float,
-        steps_base: int,
-    ) -> tuple[int, float, int]:
-        """Return a subtask's ``(tokens, cost, steps)`` consumption deltas.
-
-        The agent's ``total_tokens_used`` / ``budget_used`` /
-        ``total_steps`` counters are CUMULATIVE — the agent object is
-        reused across tasks on the same tab when a worktree is left
-        pending — so per-subtask figures (used by the failure ``result``
-        broadcasts, mirroring the W2-F2 delta arithmetic of the
-        persisted ``extra`` payload) must subtract the baselines
-        captured just before the subtask's ``run``.  All reads are
-        defensive (``getattr`` with a zero default) so a nulled agent
-        yields zero deltas via the ``max`` clamps.
-
-        RelentlessAgent-derived agents accumulate completed steps into
-        ``total_steps`` and leave ``step_count`` at 0; plain agents do
-        the opposite.  The steps delta therefore falls back to
-        ``step_count`` when the ``total_steps`` delta is 0.
-
-        Args:
-            agent: The (possibly ``None``) agent to read counters from.
-            tokens_base: ``total_tokens_used`` before the subtask ran.
-            cost_base: ``budget_used`` before the subtask ran.
-            steps_base: ``total_steps`` before the subtask ran.
-
-        Returns:
-            ``(tokens_delta, cost_delta, steps_delta)`` clamped at 0.
-        """
-        tokens = max(
-            0,
-            int(getattr(agent, "total_tokens_used", 0) or 0) - tokens_base,
-        )
-        cost = max(
-            0.0,
-            float(getattr(agent, "budget_used", 0.0) or 0.0) - cost_base,
-        )
-        steps = max(
-            0,
-            int(getattr(agent, "total_steps", 0) or 0) - steps_base,
-        ) or int(getattr(agent, "step_count", 0) or 0)
-        return tokens, cost, steps
-
     def _broadcast_failure_result(
         self,
         *,
@@ -1657,15 +1849,12 @@ class _TaskRunnerMixin:
         result_summary: str,
         task_history_id: str | None,
         tab_id: str,
-        sub_tokens_base: int,
-        sub_cost_base: float,
-        sub_steps_base: int,
     ) -> None:
         """Broadcast a failed run's terminal ``result`` event.
 
         Single shared body (C-R3) of the per-subtask failure path and
         the outer catch-all in :meth:`_run_task_inner`.  Metrics are
-        the failed subtask's own consumption deltas.  The event is
+        the failed subtask's own usage.  The event is
         addressed by task id when one was allocated — so it reaches
         every viewer tab subscribed to the task — and falls back to
         the launcher tab id otherwise.
@@ -1676,23 +1865,15 @@ class _TaskRunnerMixin:
             task_history_id: The failed run's ``task_history`` row id,
                 or ``None``/empty when none was allocated.
             tab_id: The launcher tab, used when no task id exists.
-            sub_tokens_base: ``total_tokens_used`` before the subtask.
-            sub_cost_base: ``budget_used`` before the subtask.
-            sub_steps_base: ``total_steps`` before the subtask.
         """
-        tokens_delta, cost_delta, steps_delta = self._subtask_metric_deltas(
-            agent,
-            sub_tokens_base,
-            sub_cost_base,
-            sub_steps_base,
-        )
+        tokens, cost, steps = _subtask_metrics(agent)
         failure_result: dict[str, Any] = {
             "type": "result",
             "text": result_summary,
             "success": False,
-            "total_tokens": tokens_delta,
-            "cost": f"${cost_delta:.4f}",
-            "step_count": steps_delta,
+            "total_tokens": tokens,
+            "cost": f"${cost:.4f}",
+            "step_count": steps,
         }
         if task_history_id:
             failure_result["taskId"] = str(task_history_id)
@@ -1724,6 +1905,12 @@ class _TaskRunnerMixin:
         mislabelling where a server restart was reported to the user as
         "Task stopped by user".
 
+        Calling this IS the acknowledgement of the cancellation: it
+        raises :attr:`AgentState.stop_acknowledged` so the Stop
+        watchdog (:meth:`_force_stop_thread`, via
+        :func:`_state_owns_thread`) stops re-injecting into a thread
+        that is now performing the run's legitimate cleanup.
+
         Args:
             state: The running agent state whose task was cancelled.
 
@@ -1731,6 +1918,8 @@ class _TaskRunnerMixin:
             ``(result_summary, task_end_event)`` — the persisted result
             string and the lifecycle end-event dict.
         """
+        with agent_state.STATE_LOCK:
+            state.stop_acknowledged = True
         if state.interrupted_by_shutdown:
             return (
                 "Task interrupted by server restart/shutdown",
@@ -1813,7 +2002,7 @@ class _TaskRunnerMixin:
                 viewer_status["taskId"] = client_task_id
             self.printer.broadcast(viewer_status)
 
-    def _stop_task(self, tab_id: str = "") -> None:
+    def _stop_task(self, tab_id: str = "", run_token: str = "") -> None:
         """Signal the agent to stop.
 
         Sets the cooperative stop event and, if the task thread doesn't
@@ -1834,6 +2023,15 @@ class _TaskRunnerMixin:
                 call is a no-op — a missing ``tabId`` at this layer
                 indicates a frontend bug that should not silently
                 stop every tab's task.
+            run_token: When non-empty, the stop only applies if the
+                resolved owner state was created by the ``run``
+                command carrying this client-minted ``taskId``
+                (``AgentState.client_run_token``).  Used by the abort
+                cascade of ``daemon_client.run`` so a stop that
+                arrives late — after its own run finished and a NEWER
+                run reused the same synthetic ``api-…`` tab — is
+                rejected instead of killing the innocent new run.
+                Empty (UI stops) preserves the tab-only behavior.
         """
         if not tab_id:
             logger.warning("Stop requested without a tabId; ignoring")
@@ -1842,23 +2040,41 @@ class _TaskRunnerMixin:
             owner_state = agent_state.find_by_tab(tab_id)
             if owner_state is not None and owner_state.stop_event is None:
                 owner_state = None
+            if owner_state is not None and run_token and (
+                owner_state.client_run_token != run_token
+            ):
+                # The tab's current run is not the one this stop was
+                # minted for: the original run already finished and
+                # the tab was reused.  Nothing to stop.
+                owner_state = None
             if owner_state is None:
                 # The tab does not own a running task itself; it may be
                 # a viewer subscribed to one.  Resolve through the
                 # printer's per-task subscriber map.
                 for candidate in self._find_viewer_task_states(tab_id):
-                    alive = (
-                        candidate.task_thread is not None
-                        and candidate.task_thread.is_alive()
-                    )
-                    if candidate.stop_event is not None or alive:
+                    if run_token and candidate.client_run_token != run_token:
+                        # Token-qualified stops must never leak onto a
+                        # different run through the subscriber map.
+                        continue
+                    if candidate.stop_event is not None or candidate.thread_alive():
                         owner_state = candidate
                         break
             stop_event = owner_state.stop_event if owner_state is not None else None
             task_thread = owner_state.task_thread if owner_state is not None else None
             owner_task_id = owner_state.task_id if owner_state is not None else ""
 
-        thread_alive = task_thread is not None and task_thread.is_alive()
+        # Ident-aware liveness, matching ``AgentState.thread_alive()``
+        # (S3-05 / C-R4): ``_cmd_run`` installs and registers the
+        # worker thread, then writes the tab registry and broadcasts
+        # ``clear`` BEFORE ``thread.start()``.  A stop processed in
+        # that window (daemon_client's stop-on-timeout / abort-cascade
+        # frames) used to see ``is_alive() == False`` and arm no
+        # watchdog — leaving nothing to enforce the stop against the
+        # run's untrusted setup code (agent-script getters, tools
+        # files), which never checks the cooperative event.
+        thread_alive = task_thread is not None and (
+            task_thread.ident is None or task_thread.is_alive()
+        )
         if stop_event is None and not thread_alive:
             # A stop the server cannot route used to vanish behind a
             # disabled logger.debug, so a mis-targeted click looked
@@ -1957,7 +2173,9 @@ class _TaskRunnerMixin:
         Waits 1 second for the cooperative stop-event mechanism to work.
         If the thread is still alive, raises ``KeyboardInterrupt``
         asynchronously in it.  Retries once after 5 seconds in case the
-        first exception was swallowed or the thread was in C code.
+        first exception was swallowed or the thread was in C code — but
+        only while *still_owns* still holds, which it no longer does
+        once the runner has acknowledged the stop and is cleaning up.
 
         Args:
             task_thread: The thread running the task being stopped.
@@ -1973,6 +2191,23 @@ class _TaskRunnerMixin:
                 lock when a run finishes, making the check+inject pair
                 race-free.
         """
+        # A stop can land between ``_cmd_run`` registering the worker
+        # thread and ``thread.start()`` (the registry disk write and
+        # the ``clear`` broadcast run in between).  ``Thread.join``
+        # raises on a thread that has not started, so the watchdog
+        # WAITS for the start instead of crashing (or, before the
+        # ident-aware ``_stop_task`` check, never being armed at all).
+        # Ownership is re-checked while waiting: ``_cmd_run``'s
+        # pre-start handshake routes a stopped run through terminal
+        # cancellation without starting it (clearing
+        # ``state.task_thread``), and a ``thread.start()`` that raised
+        # clears it too (``_cmd_run``'s except) — both drop ownership
+        # and end the wait.  The 30 s give-up is a backstop only: the
+        # handshake honors the accepted stop even when it fires.
+        if not wait_for_thread_start(
+            task_thread, still_owns, deadline=time.monotonic() + 30.0,
+        ):
+            return
         task_thread.join(timeout=1)
         for _ in range(2):  # pragma: no branch — thread always dies within 2 attempts
             if not task_thread.is_alive():

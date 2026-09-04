@@ -449,9 +449,11 @@
   // undecodable HEIC on a browser without HEIC support, an unreadable file).
   // Rendered next to the file chips so a failed attachment is never silent.
   let attachErrors = [];
-  // Set while a send is parked waiting for an attachment to finish converting,
-  // so repeated Enter presses cannot submit the same prompt twice.
-  let awaitingAttachments = false;
+  // While a send is parked waiting for an attachment to finish converting,
+  // `tab.awaitingAttachments` is set on the tab that submitted, so repeated
+  // Enter presses cannot submit the same prompt twice.  It lives on the tab,
+  // like the attachments themselves: a wait in one tab must not swallow the
+  // Enter of another.
   let _deferHighlight = false;
   let acIdx = -1;
 
@@ -784,11 +786,28 @@
     // commit/merge actions to a chat this user cannot see.
     const reported = getTab(reportedChatTabId);
     if (reported && !isTabHidden(reported)) return;
+    reportChatTab(chatTabIdForHost());
+  }
+
+  // readychat-coverage:start
+  /**
+   * The id of the visible CHAT tab that represents this window to the
+   * host right now, or '' when no visible chat tab exists.
+   *
+   * The active tab when it is a visible chat; the owning chat of an
+   * active content tab (a file view keeps the editor with the
+   * conversation that produced it); otherwise any visible chat tab.
+   * Shared by every path that (re)announces the on-screen chat --
+   * closing tabs, re-scoping the workspace, and the `ready` sent
+   * after a daemon outage -- so none of them can name a content tab.
+   *
+   * @returns {string} A chat tab id, or ''.
+   */
+  function chatTabIdForHost() {
     const active = getTab(activeTabId);
     let chat =
       active && !active.isContentTab && !isTabHidden(active) ? active : null;
     if (!chat && active && active.isContentTab && active.ownerTabId) {
-      // A content tab on screen keeps the editor with its owning chat.
       const ownerTab = getTab(active.ownerTabId);
       if (ownerTab && !ownerTab.isContentTab && !isTabHidden(ownerTab)) {
         chat = ownerTab;
@@ -797,8 +816,9 @@
     if (!chat) {
       chat = tabs.find(t => !t.isContentTab && !isTabHidden(t)) || null;
     }
-    reportChatTab(chat ? chat.id : '');
+    return chat ? chat.id : '';
   }
+  // readychat-coverage:end
 
   function restoreTab(tab) {
     hideContentArea();
@@ -6590,6 +6610,7 @@
           !!ev.available,
           ev.latest || '',
           ev.current || '',
+          !!ev.snoozed,
         );
         break;
       case 'followup_suggestion': {
@@ -6616,6 +6637,13 @@
         const teTabId = ev.tabId || activeTabId;
         const teTab = getTab(teTabId);
         dropStaleMainTreeBar(teTabId);
+        // faildot-coverage:start
+        // The replay REPLACES the tab's transcript, so the status dot
+        // must describe the replayed task: its own failed `result`
+        // re-raises the flag (streamEnd), a successful one leaves it
+        // down. Mirrors the reset `clear` does when a task starts.
+        if (teTab) teTab.lastTaskFailed = false;
+        // faildot-coverage:end
         if (ev.chat_id && teTab) {
           teTab.backendChatId = ev.chat_id;
           if (!teTab.workDir && configWorkDir) {
@@ -6987,8 +7015,15 @@
           const bgWrTab = getTab(ev.tabId);
           if (bgWrTab) {
             // Keep the Merge / Discard bar on a retryable failure
-            // (deferred discard) — same rule as the foreground path.
-            if (!ev.retryable) bgWrTab.worktreeBarEl = null;
+            // (deferred discard) and re-arm its buttons — same rule
+            // as the foreground path (handleWorktreeResult).
+            // retrybar-coverage:start
+            if (ev.retryable) {
+              setActionBarBtnsDisabled(bgWrTab.worktreeBarEl, false);
+            } else {
+              bgWrTab.worktreeBarEl = null;
+            }
+            // retrybar-coverage:end
             clearActionProgress(bgWrTab.outputFragment);
             if (bgWrTab.outputFragment && !isSilentDiscardMessage(ev)) {
               const cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
@@ -7040,25 +7075,26 @@
         handleAutocommitResult(ev);
         break;
       case 'task_done': {
+        // donelabel-coverage:start
+        // The daemon stamps the task's own span on the event. Without
+        // it, the elapsed time is measured from the start the FINISHED
+        // tab recorded -- the module-level t0 is the visible tab's
+        // clock, which is another task's when the event names a
+        // background tab.
         let doneT0 = t0;
-        if (!doneT0 && ev.tabId !== undefined) {
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const rt = getTab(ev.tabId);
-          if (rt) doneT0 = rt.t0;
+          doneT0 = rt ? rt.t0 : null;
         }
-        const ms =
-          ev.startTs > 0 && ev.endTs > 0
-            ? ev.endTs - ev.startTs
-            : Date.now() - (doneT0 || Date.now());
-        const el = Math.max(0, Math.floor(ms / 1000));
-        const em = Math.floor(el / 60);
+        const doneNow = Date.now();
+        const doneLabel =
+          ev.startTs && ev.endTs && ev.endTs >= ev.startTs
+            ? doneLabelFor(ev.startTs, ev.endTs)
+            : doneLabelFor(doneT0 || doneNow, doneNow);
+        // donelabel-coverage:end
         markTabDone(ev.tabId, ev.success === false);
         clearActionProgressForTab(ev.tabId);
-        setReady(
-          'Done (' + (em > 0 ? em + 'm ' : '') + (el % 60) + 's)',
-          ev.tabId,
-          ev.startTs,
-          ev.endTs,
-        );
+        setReady(doneLabel, ev.tabId, ev.startTs, ev.endTs);
         focusFinishedTab(ev.tabId);
         // report-coverage:start
         openReadyReportTabs(ev.tabId);
@@ -7460,12 +7496,29 @@
     }
   }
 
+  // faildot-coverage:start
+  /**
+   * Record that *tabId*'s task ended, and whether the end was a failure.
+   *
+   * `failed` is the TERMINAL event's own verdict (task_error, stopped,
+   * interrupted).  A plain `task_done` carries none -- the daemon puts
+   * `success` on the preceding `result` event, which streamEnd already
+   * recorded on the tab -- so a false here means "no verdict", never
+   * "succeeded", and must not clear the result's failure.  The flag
+   * starts each task afresh: `clear` resets it when a task starts and
+   * `task_events` when a tab replays another task.
+   *
+   * @param {string|undefined} tabId The tab whose task ended;
+   *     undefined means the visible tab.
+   * @param {boolean} failed True when the terminal event is a failure.
+   */
   function markTabDone(tabId, failed) {
     const tid = tabId !== undefined ? tabId : activeTabId;
     const tab = getTab(tid);
     if (tab) {
       tab.hasRunTask = true;
-      tab.lastTaskFailed = !!failed;
+      if (failed) tab.lastTaskFailed = true;
+      // faildot-coverage:end
       // A question can only be answered while its task is alive. The server
       // sends `askUserDone` only for an accepted answer, so a task that ends
       // with a question outstanding must retire it here. Only THIS task
@@ -7815,12 +7868,23 @@
    *
    * @param {boolean} ok Whether the daemon saved the shared page.
    */
+  // shareflash0903-coverage:start
+  // One tracked timer: a bare setTimeout let an earlier flash's stale
+  // timer end a later flash early, and adding the new class without
+  // removing the old one could leave ok and err stacked.
+  let shareFlashTimer = null;
   function flashShareBtn(ok) {
     if (!shareBtn) return;
     const cls = ok ? 'share-ok' : 'share-err';
+    if (shareFlashTimer) clearTimeout(shareFlashTimer);
+    shareBtn.classList.remove('share-ok', 'share-err');
     shareBtn.classList.add(cls);
-    setTimeout(() => shareBtn.classList.remove(cls), 2000);
+    shareFlashTimer = setTimeout(() => {
+      shareFlashTimer = null;
+      shareBtn.classList.remove(cls);
+    }, 2000);
   }
+  // shareflash0903-coverage:end
   // share-coverage:end
 
   function _buildRemoteUrlBar(displayUrl, isNtfy) {
@@ -7847,15 +7911,23 @@
     const checkSvg =
       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
     copyBtn.innerHTML = copySvg;
+    // urlflash0903-coverage:start
+    // The icon-revert timer is tracked per button and restarted on
+    // every copy, or a rapid second click's check mark would be
+    // reverted early by the first click's stale timer.
+    let urlFlashTimer = null;
     copyBtn.addEventListener('click', e => {
       e.preventDefault();
       navigator.clipboard.writeText(displayUrl).then(() => {
         copyBtn.innerHTML = checkSvg;
-        setTimeout(() => {
+        if (urlFlashTimer) clearTimeout(urlFlashTimer);
+        urlFlashTimer = setTimeout(() => {
+          urlFlashTimer = null;
           copyBtn.innerHTML = copySvg;
         }, 1500);
       });
     });
+    // urlflash0903-coverage:end
     row.appendChild(link);
     row.appendChild(copyBtn);
     wrapper.appendChild(label);
@@ -7905,9 +7977,11 @@
     '<line x1="12" y1="15" x2="12" y2="3"/>' +
     '</svg>';
 
-  function renderUpdateAvailable(available, latest, current) {
+  function renderUpdateAvailable(available, latest, current, snoozed) {
+    // A "Remind me later" snooze silences the sticky toast but keeps
+    // the passive settings-button badge visible.
     renderUpdateAvailableBadge(available, latest, current);
-    renderUpdateAvailableNotification(available, latest, current);
+    renderUpdateAvailableNotification(available && !snoozed, latest, current);
   }
 
   function renderUpdateAvailableBadge(available, latest, current) {
@@ -7953,6 +8027,16 @@
           svg: UPDATE_DOWNLOAD_SVG,
           onClick: () => {
             api.runUpdate();
+          },
+        },
+        {
+          label: 'Remind me later',
+          ariaLabel: 'Snooze this update notification for 24 hours',
+          onClick: () => {
+            // The daemon records the snooze in the update-check cache
+            // shared with the extension host and rebroadcasts, so the
+            // toast disappears from every window for 24 hours.
+            api.snoozeUpdate({latest: latest});
           },
         },
       ],
@@ -8124,7 +8208,7 @@
       const btn = mkEl('button', 'wt-btn ' + b.cls);
       btn.textContent = b.text;
       btn.addEventListener('click', () => {
-        disableActionBarBtns(bar);
+        setActionBarBtnsDisabled(bar, true);
         api.send(b.msg());
       });
       btns.appendChild(btn);
@@ -8133,12 +8217,27 @@
     return bar;
   }
 
-  function disableActionBarBtns(bar) {
+  // retrybar-coverage:start
+  /**
+   * Disarm or re-arm every button of an action bar.
+   *
+   * A click disarms the bar while its action is in flight (the daemon
+   * drops duplicate requests, so a still-live button would look dead).
+   * A RETRYABLE failure -- a deferred discard, a "Do nothing" whose
+   * marker write failed -- keeps the bar so the user can retry, and
+   * that only means anything if the buttons are live again.
+   *
+   * @param {Element|null} bar The `.wt-bar`, attached or parked on a
+   *     background tab; null is a no-op.
+   * @param {boolean} disabled True to disarm, false to re-arm.
+   */
+  function setActionBarBtnsDisabled(bar, disabled) {
     if (!bar) return;
     bar.querySelectorAll('.wt-btn').forEach(b => {
-      b.disabled = true;
+      b.disabled = disabled;
     });
   }
+  // retrybar-coverage:end
 
   function detachActionBar(bar) {
     if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
@@ -8374,8 +8473,13 @@
     // A retryable failure (deferred discard: a sub-agent is still
     // writing into the worktree, or its ignored output could not be
     // rescued) keeps the Merge / Discard bar — clearing it would strip
-    // the only retry controls while the message says "retry".
-    if (!ev.retryable) clearWorktreeBar();
+    // the only retry controls while the message says "retry" — and
+    // re-arms its buttons, which the click that sent the action
+    // disarmed.
+    // retrybar-coverage:start
+    if (ev.retryable) setActionBarBtnsDisabled(worktreeBar, false);
+    else clearWorktreeBar();
+    // retrybar-coverage:end
     clearActionProgress(O);
     if (isSilentDiscardMessage(ev)) {
       return;
@@ -8416,12 +8520,16 @@
   // transcript of their own — a result addressed to one would render
   // into the hidden shared output and be destroyed on the next tab
   // switch.  Commit on behalf of the chat tab the host currently
-  // considers active instead.
+  // considers active instead; when there is none ('' -- every visible
+  // chat is gone or belongs to another workspace) there is nothing to
+  // commit for, and the caller must not send.
+  // readychat-coverage:start
   function autocommitTargetTabId() {
     const active = getTab(activeTabId);
     if (active && !active.isContentTab) return activeTabId;
-    return reportedChatTabId || activeTabId;
+    return reportedChatTabId;
   }
+  // readychat-coverage:end
 
   // The `ready` announcement: hands the daemon this client's legacy
   // locally-persisted tabs exactly once (adopted only into an empty
@@ -8456,9 +8564,15 @@
     // `ready` seeds the host's active chat tab exactly like an
     // `activeTabChanged` would, so the local mirror has to start out
     // agreeing with it — otherwise the first real change looks like a
-    // no-op and is never sent.
-    api.ready({tabId: activeTabId, restoredTabs: collectRestoredTabs()});
-    reportedChatTabId = activeTabId;
+    // no-op and is never sent. Like every other announcement it names
+    // a visible CHAT tab: a re-`ready` after a daemon outage may run
+    // while a content tab is on screen, and that tab must not become
+    // the chat the host commits or toasts against.
+    // readychat-coverage:start
+    const chatTabId = chatTabIdForHost();
+    api.ready({tabId: chatTabId, restoredTabs: collectRestoredTabs()});
+    reportedChatTabId = chatTabId;
+    // readychat-coverage:end
   }
 
   function init() {
@@ -8680,6 +8794,19 @@
         e.stopPropagation();
         if (autocommitBtn.disabled) return;
         const commitTabId = autocommitTargetTabId();
+        // readychat-coverage:start
+        if (!commitTabId) {
+          // A toast, not a transcript banner: with a content tab on
+          // screen the shared #output is hidden.
+          showNotification({
+            severity: 'warning',
+            message:
+              'Git Commit needs a chat tab: no chat tab is open in this ' +
+              'window, so there is no conversation to commit for.',
+          });
+          return;
+        }
+        // readychat-coverage:end
         setAutocommitInFlight(true);
         // Close the drawer so the transcript's autocommit_progress /
         // autocommit_done lines are visible instead of hidden behind
@@ -9541,6 +9668,27 @@
     return results.every(ok => ok);
   }
 
+  // composerreset0903-coverage:start
+  /**
+   * Clear the composer after a prompt has been handed off: empty the
+   * textarea, drop pending attachments and their errors, and reset the
+   * ghost/history cursors.  The one copy both sendMessage() paths (the
+   * append-to-running-task path and the fresh submit) share, so the
+   * two can never drift apart again.
+   */
+  function resetComposerAfterSend() {
+    inp.value = '';
+    inp.style.height = 'auto';
+    attachments = [];
+    attachErrors = [];
+    updateInputDisabled();
+    renderFileChips();
+    clearGhost();
+    histIdx = -1;
+    if (inputClearBtn) inputClearBtn.style.display = 'none';
+  }
+  // composerreset0903-coverage:end
+
   async function sendMessage() {
     let prompt = inp.value.trim();
     if (!prompt) return;
@@ -9550,21 +9698,23 @@
     // With nothing to wait for, no await runs and the send stays synchronous:
     // callers rely on the message being posted before they return.
     if (hasPendingAttachments()) {
-      // Only the first waiting caller may proceed, or a burst of Enters would
-      // submit the same prompt several times.
-      if (awaitingAttachments) return;
-      const tabAtEntry = activeTabId;
-      awaitingAttachments = true;
+      // attachlatch-coverage:start
+      // Only the first waiting caller of THIS tab may proceed, or a burst
+      // of Enters would submit the same prompt several times.
+      const waitTab = getTab(activeTabId);
+      if (waitTab.awaitingAttachments) return;
+      waitTab.awaitingAttachments = true;
       let ready = false;
       try {
         ready = await attachmentsReady();
       } finally {
-        awaitingAttachments = false;
+        waitTab.awaitingAttachments = false;
       }
       // A conversion that failed leaves its error chip in place: sending the
       // prompt without the photo is exactly the silent loss to avoid.  A tab
       // switch means this submission no longer matches what the user sees.
-      if (!ready || activeTabId !== tabAtEntry) return;
+      if (!ready || activeTabId !== waitTab.id) return;
+      // attachlatch-coverage:end
       // The composer may have been edited during the wait.
       prompt = inp.value.trim();
       if (!prompt) return;
@@ -9577,15 +9727,7 @@
 
     if (isRunning) {
       api.appendUserMessage({prompt: prompt, tabId: activeTabId});
-      inp.value = '';
-      inp.style.height = 'auto';
-      attachments = [];
-      attachErrors = [];
-      updateInputDisabled();
-      renderFileChips();
-      clearGhost();
-      histIdx = -1;
-      if (inputClearBtn) inputClearBtn.style.display = 'none';
+      resetComposerAfterSend();
       return;
     }
 
@@ -9617,15 +9759,7 @@
       if (!curTab.currentTaskId) curTab.pendingTaskId = 'pending:' + curTab.id;
       // tableak-coverage:end
     }
-    inp.value = '';
-    inp.style.height = 'auto';
-    attachments = [];
-    attachErrors = [];
-    updateInputDisabled();
-    renderFileChips();
-    clearGhost();
-    histIdx = -1;
-    if (inputClearBtn) inputClearBtn.style.display = 'none';
+    resetComposerAfterSend();
   }
 
   function ensureAskElementsForTab(tab) {
@@ -9981,23 +10115,29 @@
     btn.type = 'button';
     btn.className = 'sidebar-item-copy';
     btn.setAttribute('aria-label', 'Copy task to clipboard');
-    wireCopyButton(btn, text, false, false);
+    wireCopyButton(btn, text, false);
     return btn;
   }
 
-  function wireCopyButton(btn, text, retryFallback, resetFlashTimer) {
+  function wireCopyButton(btn, text, retryFallback) {
     btn.innerHTML = PANEL_COPY_SVG;
 
-    let flashTimer = 0;
+    // sidebarflash0903-coverage:start
+    // Every caller restarts the flash timer: the old resetFlashTimer
+    // flag left the sidebar copy buttons with a stale timer that cut
+    // a rapid second click's flash short.
+    let flashTimer = null;
     const flash = () => {
       btn.innerHTML = PANEL_CHECK_SVG;
       btn.classList.add('copied');
-      if (resetFlashTimer) clearTimeout(flashTimer);
+      if (flashTimer) clearTimeout(flashTimer);
       flashTimer = setTimeout(() => {
+        flashTimer = null;
         btn.innerHTML = PANEL_COPY_SVG;
         btn.classList.remove('copied');
       }, 1500);
     };
+    // sidebarflash0903-coverage:end
 
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -10019,7 +10159,7 @@
     btn.className = 'ids-copy-btn ids-copy-' + kind;
     btn.dataset.tooltip = 'Copy ' + kind + ' id';
     btn.setAttribute('aria-label', 'Copy ' + kind + ' id to clipboard');
-    wireCopyButton(btn, idText, true, true);
+    wireCopyButton(btn, idText, true);
     return btn;
   }
 
@@ -11006,9 +11146,16 @@
       'MOONSHOT_API_KEY',
     ];
     keyIds.forEach(k => {
-      if (!want('cfg-key-' + k)) return;
-      const v = el('cfg-key-' + k).value.trim();
-      if (v) apiKeys[k] = v;
+      const id = 'cfg-key-' + k;
+      if (!want(id)) return;
+      const v = el(id).value.trim();
+      // An empty box is a DELETION only when the user explicitly
+      // cleared it (the field is in settingsEditedFields): the daemon
+      // removes a key sent with an empty value from the canonical key
+      // store (see ``save_api_key``). Untouched empty boxes stay omitted
+      // so this merge-style payload never wipes keys that were never
+      // shown here or were just saved by another window.
+      if (v || settingsEditedFields.has(id)) apiKeys[k] = v;
     });
     return {config: cfg, apiKeys};
   }

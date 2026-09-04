@@ -21,6 +21,7 @@ from typing import Any
 import docker
 from docker.models.containers import Container  # type: ignore[assignment]
 
+from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.useful_tools import _truncate_output
 from kiss.core.kiss_error import KISSError
 
@@ -145,6 +146,12 @@ class DockerManager:
         """
         self.client = docker.from_env()
         self.container: Container | None = None
+        # Serialises open()/close(): guard, shared-dir creation, the
+        # (slow) container start, publication and teardown.  Without it
+        # two concurrent open() calls both passed the "already open"
+        # check while ``container`` was still None and each started a
+        # container and a temp dir; the manager kept only the last one.
+        self._lifecycle_lock = threading.Lock()
 
         self.workdir = workdir
         self.mount_shared_volume = mount_shared_volume
@@ -160,7 +167,37 @@ class DockerManager:
             self.tag = tag
 
     def open(self) -> None:
-        """Pull and load a Docker image, then create and start a container."""
+        """Pull and load a Docker image, then create and start a container.
+
+        Raises:
+            KISSError: If a container is already open on this manager
+                (starting a second one would orphan the first — ``close``
+                only knows the newest container — and leak its shared
+                volume directory), or if the previous container's shared
+                volume directory still cannot be removed (starting anyway
+                would replace the only reference to it).
+        """
+        with self._lifecycle_lock:
+            self._open_locked()
+
+    def _open_locked(self) -> None:
+        """Body of :meth:`open`; the caller holds ``_lifecycle_lock``."""
+        if self.container is not None:
+            raise KISSError(
+                "A container is already open on this DockerManager; "
+                "call close() before open() again."
+            )
+        if self.host_shared_path is not None:
+            # A previous close() could not delete the shared volume
+            # dir (see _remove_shared_volume_dir); retry before a new
+            # one is created so the leftover never becomes untraceable.
+            self._remove_shared_volume_dir()
+            if self.host_shared_path is not None:
+                raise KISSError(
+                    "The previous container's shared volume directory "
+                    f"{self.host_shared_path} could not be removed; "
+                    "delete it and call open() again."
+                )
         image = self.image
         tag = self.tag
         full_image_name = f"{image}:{tag}"
@@ -177,15 +214,24 @@ class DockerManager:
             "stdin_open": True,
             "command": "/bin/bash",
         }
-        if self.mount_shared_volume:  # pragma: no branch
+        if self.mount_shared_volume:
             self.host_shared_path = tempfile.mkdtemp()
-        if self.mount_shared_volume and self.host_shared_path:  # pragma: no branch
             container_kwargs["volumes"] = {
                 self.host_shared_path: {"bind": self.client_shared_path, "mode": "rw"}
             }
         if self.ports:
             container_kwargs["ports"] = {f"{cp}/tcp": hp for cp, hp in self.ports.items()}
-        self.container = self.client.containers.run(full_image_name, **container_kwargs)
+        try:
+            self.container = self.client.containers.run(
+                full_image_name, **container_kwargs,
+            )
+        except BaseException:
+            # The daemon rejected or failed the container: the shared
+            # volume dir created above would otherwise leak, and
+            # ``close()`` (which returns early with no container) would
+            # never remove it.
+            self._remove_shared_volume_dir()
+            raise
         assert self.container is not None
         container_id = self.container.id[:12] if self.container.id else "unknown"
         print(f"Container {container_id} is now running")
@@ -209,13 +255,25 @@ class DockerManager:
         Returns:
             The output of the command, including stdout, stderr, and exit code
         """
-        if self.container is None:  # pragma: no branch
+        # ONE snapshot of the container reference: ``close()`` (under
+        # the lifecycle lock, which command paths deliberately do not
+        # take — a running command must not block a teardown) nulls
+        # ``self.container``, and a second read after the guard below
+        # turned the orderly KISSError refusal into an AttributeError.
+        container = self.container
+        if container is None:
             raise KISSError("No container is open. Please call open() first.")
+        # Test hook (no-op in production): widens the window between
+        # the guard above and the uses of the snapshot below so the
+        # close() race is deterministic under KISS_RACE_DELAY.
+        _race_delay()
 
         print(f"{description}")
 
         if self.stream_callback:
-            return self._bash_streaming(command, timeout_seconds, max_output_chars)
+            return self._bash_streaming(
+                container, command, timeout_seconds, max_output_chars,
+            )
 
         result_holder: dict[str, Any] = {}
         error_holder: dict[str, BaseException] = {}
@@ -237,27 +295,21 @@ class DockerManager:
         # ``exec_start`` at all, or the caller sees the commitment and
         # hands the exec to a reaper that kills it once it has started.
         token = uuid.uuid4().hex
-        container_id = self.container.id
+        container_id = container.id
         state_lock = threading.Lock()
         state = {"cancelled": False, "start_committed": False}
 
         def run_exec() -> None:
             try:
-                resp = self.client.api.exec_create(
-                    container_id,
-                    f"/bin/bash -c {shlex.quote(command)}",
-                    stdout=True,
-                    stderr=True,
-                    workdir=self.workdir,
-                    environment={_EXEC_TOKEN_VAR: token},
+                result_holder["exec_id"] = self._tagged_exec_create(
+                    container_id, command, token,
                 )
-                result_holder["exec_id"] = resp["Id"]
                 with state_lock:
                     if state["cancelled"]:
                         return
                     state["start_committed"] = True
                 result_holder["output"] = self.client.api.exec_start(
-                    resp["Id"], demux=True,
+                    result_holder["exec_id"], demux=True,
                 )
             except BaseException as exc:
                 error_holder["error"] = exc
@@ -293,8 +345,42 @@ class DockerManager:
             _with_exit_code(output, exit_code), max_output_chars,
         )
 
+    def _tagged_exec_create(
+        self, container_id: str | None, command: str, token: str,
+    ) -> str:
+        """Create a token-tagged bash exec and return its id.
+
+        Single builder for both :meth:`Bash` paths so the exec options
+        (shell wrapping, captured streams, ``workdir``, the
+        :data:`_EXEC_TOKEN_VAR` tag that :meth:`_kill_exec` matches on)
+        cannot drift between them.
+
+        Args:
+            container_id: Id of the container to run the exec in
+                (``Container.id`` is typed optional; docker-py resolves
+                it exactly as before this helper existed).
+            command: The bash command to execute.
+            token: The unique tag to plant in the exec's environment.
+
+        Returns:
+            The docker exec id.
+        """
+        resp = self.client.api.exec_create(
+            container_id,
+            f"/bin/bash -c {shlex.quote(command)}",
+            stdout=True,
+            stderr=True,
+            workdir=self.workdir,
+            environment={_EXEC_TOKEN_VAR: token},
+        )
+        return str(resp["Id"])
+
     def _bash_streaming(
-        self, command: str, timeout_seconds: float, max_output_chars: int,
+        self,
+        container: Container,
+        command: str,
+        timeout_seconds: float,
+        max_output_chars: int,
     ) -> str:
         """Run *command*, streaming its output, and return the full result.
 
@@ -304,6 +390,10 @@ class DockerManager:
         task via thread-local state.
 
         Args:
+            container: The caller's snapshot of the open container —
+                passed in (not re-read from ``self.container``) so a
+                concurrent ``close()`` cannot null the attribute
+                between :meth:`Bash`'s guard and this method's use.
             command: The bash command to execute.
             timeout_seconds: Maximum time to wait before treating the
                 command as hung; the container-side process is killed.
@@ -312,18 +402,9 @@ class DockerManager:
         Returns:
             The command's output, or the timeout error.
         """
-        assert self.container is not None
         assert self.stream_callback is not None
         token = uuid.uuid4().hex
-        exec_resp = self.client.api.exec_create(
-            self.container.id,
-            f"/bin/bash -c {shlex.quote(command)}",
-            stdout=True,
-            stderr=True,
-            workdir=self.workdir,
-            environment={_EXEC_TOKEN_VAR: token},
-        )
-        exec_id = exec_resp["Id"]
+        exec_id = self._tagged_exec_create(container.id, command, token)
         output_gen = self.client.api.exec_start(exec_id, stream=True, demux=True)
         out_queue: queue.Queue[tuple[bool, str] | None] = queue.Queue()
         threading.Thread(
@@ -411,7 +492,14 @@ class DockerManager:
         Args:
             token: The unique tag given to the exec's environment.
         """
-        assert self.container is not None
+        # Snapshot: the reaper's poll loop and the streaming timeout
+        # path both call this without the lifecycle lock, so a
+        # concurrent close() can null ``self.container`` after their
+        # own liveness checks.  A closed container took the tagged
+        # process tree with it — nothing is left to kill.
+        container = self.container
+        if container is None:
+            return
         script = (
             "for d in /proc/[0-9]*; do\n"
             '  env=$(tr "\\0" "\\n" < "$d/environ" 2>/dev/null)\n'
@@ -421,7 +509,7 @@ class DockerManager:
             "done"
         )
         try:
-            self.container.exec_run(["/bin/sh", "-c", script])
+            container.exec_run(["/bin/sh", "-c", script])
         except Exception:  # pragma: no cover — container already gone
             logger.debug("could not kill timed-out exec", exc_info=True)
 
@@ -434,13 +522,18 @@ class DockerManager:
         Returns:
             The host port mapped to the container port, or None if not mapped.
         """
-        if self.container is None:  # pragma: no branch
+        # One snapshot, same reason as in Bash: a concurrent close()
+        # nulling ``self.container`` between the guard and the reload
+        # must yield the KISSError refusal, never an AttributeError.
+        container = self.container
+        if container is None:
             raise KISSError("No container is open. Please call open() first.")
+        _race_delay()  # test hook: widens the guard-to-use window
 
-        self.container.reload()
-        port_bindings = self.container.attrs.get("NetworkSettings", {}).get("Ports", {})
+        container.reload()
+        port_bindings = container.attrs.get("NetworkSettings", {}).get("Ports", {})
         port_key = f"{container_port}/tcp"
-        if port_key in port_bindings and port_bindings[port_key]:  # pragma: no branch
+        if port_key in port_bindings and port_bindings[port_key]:
             return int(port_bindings[port_key][0]["HostPort"])
         return None
 
@@ -448,10 +541,17 @@ class DockerManager:
         """Stop and remove the Docker container.
 
         Handles cleanup of both the container and any temporary directories
-        created for shared volumes.
+        created for shared volumes — including a directory an earlier
+        ``close()`` failed to delete, which is retried here.
         """
-        if self.container is None:  # pragma: no branch
+        with self._lifecycle_lock:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        """Body of :meth:`close`; the caller holds ``_lifecycle_lock``."""
+        if self.container is None:
             print("No container to close.")
+            self._remove_shared_volume_dir()
             return
 
         container_id = self.container.id[:12] if self.container.id else "unknown"
@@ -470,15 +570,30 @@ class DockerManager:
             print(f"Failed to remove container {container_id}: {e}")
 
         self.container = None
+        self._remove_shared_volume_dir()
+        print("Container closed successfully")
 
-        if self.host_shared_path and os.path.exists(self.host_shared_path):  # pragma: no branch
+    def _remove_shared_volume_dir(self) -> None:
+        """Delete the host side of the shared volume, if one was created.
+
+        Shared by :meth:`close` and the failure path of :meth:`open`.
+        ``host_shared_path`` is cleared only once the directory is gone
+        (deleted here, or already absent): a failed ``rmtree`` keeps the
+        path on the manager so the leak stays traceable and the next
+        :meth:`close` or :meth:`open` retries the removal.  A repeated
+        call with nothing tracked is a no-op.
+        """
+        path = self.host_shared_path
+        if path is None:
+            return
+        if os.path.exists(path):
             try:
-                shutil.rmtree(self.host_shared_path)
+                shutil.rmtree(path)
             except Exception as e:
                 logger.debug("Exception caught", exc_info=True)
-                print(f"Failed to clean up temp directory: {e}")
-
-        print("Container closed successfully")
+                print(f"Failed to clean up temp directory {path}: {e}")
+                return
+        self.host_shared_path = None
 
     def __enter__(self) -> "DockerManager":
         """Context manager entry point.
