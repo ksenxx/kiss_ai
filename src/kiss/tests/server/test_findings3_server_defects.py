@@ -380,8 +380,8 @@ class TestAuthRateLimitRace(IsolatedAsyncioTestCase):
 class TestConcurrentApiKeySave(unittest.TestCase):
     """S3-10: concurrent API-key saves must not lose an update.
 
-    Each ``save_api_key_to_shell`` read-modify-atomic-replaces the same
-    shell RC file.  The fix serializes those writes under the shared
+    Each ``save_api_key`` read-modify-atomic-replaces the same
+    canonical key store.  The fix serializes those writes under the shared
     ``_CommandsMixin._save_config_lock`` (as ``saveConfig`` now does).
     This test drives many real threads through that same lock and
     asserts every distinct key survives — the unserialized version drops
@@ -410,7 +410,7 @@ class TestConcurrentApiKeySave(unittest.TestCase):
 
     def test_all_keys_persist_under_the_lock(self) -> None:
         """Twenty threads saving distinct keys must all persist."""
-        from kiss.core.vscode_config import save_api_key_to_shell
+        from kiss.core.vscode_config import api_keys_env_path, save_api_key
         from kiss.server.commands import _CommandsMixin
 
         key_names = [f"KISS_TEST_KEY_{i}" for i in range(20)]
@@ -419,7 +419,7 @@ class TestConcurrentApiKeySave(unittest.TestCase):
         def worker(name: str) -> None:
             barrier.wait()
             with _CommandsMixin._save_config_lock:
-                save_api_key_to_shell(name, f"val-{name}")
+                save_api_key(name, f"val-{name}")
 
         threads = [
             threading.Thread(target=worker, args=(n,)) for n in key_names
@@ -430,10 +430,10 @@ class TestConcurrentApiKeySave(unittest.TestCase):
             t.join(20)
             self.assertFalse(t.is_alive())
 
-        rc_text = (Path(self._home) / ".bashrc").read_text()
+        store_text = api_keys_env_path().read_text()
         for name in key_names:
             self.assertIn(
-                f"export {name}=", rc_text,
+                f"export {name}=", store_text,
                 f"{name} was lost — concurrent RC writes were not "
                 f"serialized",
             )

@@ -12,7 +12,7 @@ Background — the bug
 ====================
 A user clicked the VS Code "Update" button.  ``runUpdate()`` in
 ``SorcarSidebarView.ts`` opened a VS Code integrated terminal and
-``sendText``'d ``bash '/Users/ksen/kiss_ai/install.sh'``.  The script
+``sendText``'d ``bash '/Users/ksen/.kiss/kiss_ai/install.sh'``.  The script
 ran through Xcode CLT / Homebrew / git / node / VS Code CLI / Claude
 skills, then died in the middle of the TypeScript compile::
 

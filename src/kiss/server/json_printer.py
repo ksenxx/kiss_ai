@@ -937,8 +937,8 @@ class JsonPrinter(Printer):
         ``system_output`` for the task can be broadcast.
 
         The subscriber set is preserved for ``subscriber_linger_seconds``
-        so any post-task broadcasts (e.g. the async
-        ``followup_suggestion``) still fan out to the originating tab.
+        so a broadcast that lands just after the task ends still fans
+        out to the originating tab.
         Expired sets are pruned opportunistically (no timer thread per
         task) by every subscriber-map operation — previously they were
         kept for the tab's whole lifetime, leaking one entry per
@@ -1103,6 +1103,28 @@ class JsonPrinter(Printer):
             return
         with self._lock:
             self._recordings[key] = []
+
+    def ensure_recording_for_task(self, task_id: Any) -> None:
+        """Make sure an event recording exists for *task_id*.
+
+        Unlike :meth:`start_recording` this is keyed explicitly (no
+        thread-local binding needed) and never clears an existing
+        recording.  Used by the task runner for a run that fails in
+        SETUP — before ``ChatSorcarAgent.run`` ever started the run's
+        recording — so its terminal ``result`` can be recorded under
+        the run's (possibly provisional) task id and replayed to a
+        viewer that attached inside the end-of-run race window
+        (audit0903 F4).
+
+        Args:
+            task_id: The task identifier (``task_history.id`` int, its
+                string form, or a provisional client/registry id).
+        """
+        key = self._coerce_task_id(task_id)
+        if not key:
+            return
+        with self._lock:
+            self._recordings.setdefault(key, [])
 
     @staticmethod
     def _filter_and_coalesce(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:

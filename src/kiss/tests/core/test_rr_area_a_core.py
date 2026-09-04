@@ -14,9 +14,9 @@ Covers:
   ``sanitize_config``; every junk shape (bool, non-numeric string,
   NaN/Infinity) must still fall back to the default budget and every
   sane shape must still be applied.
-* A-RC2 — ``save_api_key_to_shell`` takes the shared config flock around
-  its read-modify-replace of the shell RC file, so concurrent savers in
-  separate processes cannot lose each other's keys.
+* A-RC2 — ``save_api_key`` takes an fcntl flock around its
+  read-modify-replace of the canonical key store, so concurrent savers
+  in separate processes cannot lose each other's keys.
 """
 
 from __future__ import annotations
@@ -135,17 +135,17 @@ class TestApplyConfigToEnv:
 
 _SAVER_SCRIPT = """
 import sys
-from kiss.core.vscode_config import save_api_key_to_shell
+from kiss.core.vscode_config import save_api_key
 
 key_name, key_value = sys.argv[1], sys.argv[2]
-save_api_key_to_shell(key_name, key_value)
+save_api_key(key_name, key_value)
 """
 
 
 class TestSaveApiKeyToShellCrossProcessRace:
     """A-RC2: concurrent RC savers must not lose each other's keys.
 
-    Before the fix, ``save_api_key_to_shell`` read the RC file, edited
+    Before the fix, ``save_api_key`` read the RC file, edited
     the lines in memory, and atomically replaced the file with no
     cross-process guard: two processes that read the same snapshot
     each published a file missing the other's export line.  The fix
@@ -161,7 +161,7 @@ class TestSaveApiKeyToShellCrossProcessRace:
     def test_concurrent_process_savers_all_keys_survive(
         self, tmp_path: Path,
     ) -> None:
-        """Every concurrently saved key ends up in the RC file."""
+        """Every concurrently saved key ends up in the key store."""
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         env = {
@@ -186,27 +186,26 @@ class TestSaveApiKeyToShellCrossProcessRace:
                 _, stderr = proc.communicate(timeout=120)
                 assert proc.returncode == 0, stderr.decode()
 
-            rc_text = (fake_home / ".bashrc").read_text(encoding="utf-8")
+            store_text = (fake_home / ".kiss" / "api_keys.env").read_text(
+                encoding="utf-8",
+            )
             for key in keys:
-                assert f"export {key}=v{round_no}-{key}" in rc_text, (
+                assert f"export {key}=v{round_no}-{key}" in store_text, (
                     f"round {round_no}: key {key} was lost by a concurrent saver"
                 )
             # Replacement, not accumulation: exactly one line per key.
             for key in keys:
-                assert rc_text.count(f"export {key}=") == 1
+                assert store_text.count(f"export {key}=") == 1
 
-    def test_savers_with_different_kiss_homes_share_one_rc_lock(
+    def test_savers_with_different_kiss_homes_keep_their_own_stores(
         self, tmp_path: Path,
     ) -> None:
-        """Two daemons with distinct KISS_HOMEs edit one RC without losses.
+        """Daemons with distinct KISS_HOMEs persist into distinct stores.
 
-        The RC file is selected from ``$HOME``, so daemons that share a
-        HOME but run with different ``KISS_HOME`` values write the SAME
-        file.  Before the fix each of them flocked its own
-        ``<KISS_HOME>/.config.lock``, which excluded nobody: both read
-        one RC snapshot and the later atomic replace erased the earlier
-        writer's export line.  The lock is now a sidecar keyed to the RC
-        itself, so the KISS_HOME value must not matter.
+        Each ``KISS_HOME`` owns one canonical ``api_keys.env``; savers
+        running side by side for one user must each land their key in
+        their own store, and the shared ``$HOME`` RC (which they may
+        both scrub) must not make any saver fail.
         """
         fake_home = tmp_path / "home"
         fake_home.mkdir()
@@ -233,16 +232,17 @@ class TestSaveApiKeyToShellCrossProcessRace:
                 _, stderr = proc.communicate(timeout=120)
                 assert proc.returncode == 0, stderr.decode()
 
-            rc_text = (fake_home / ".bashrc").read_text(encoding="utf-8")
-            for key in keys:
-                assert f"export {key}=kh{round_no}-{key}" in rc_text, (
-                    f"round {round_no}: key {key} was lost by a saver "
-                    "holding a different KISS_HOME's lock"
+            for index, key in enumerate(keys):
+                store_text = (
+                    fake_home / f".kiss-{index}" / "api_keys.env"
+                ).read_text(encoding="utf-8")
+                assert f"export {key}=kh{round_no}-{key}" in store_text, (
+                    f"round {round_no}: key {key} missing from its own store"
                 )
-                assert rc_text.count(f"export {key}=") == 1
+                assert store_text.count(f"export {key}=") == 1
 
-    def test_rc_file_stays_private(self, tmp_path: Path) -> None:
-        """The RC file holding keys is written with mode 0600."""
+    def test_store_and_rc_stay_private(self, tmp_path: Path) -> None:
+        """The key store and the hooked RC are written with mode 0600."""
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         env = {
@@ -259,6 +259,8 @@ class TestSaveApiKeyToShellCrossProcessRace:
             check=False,
         )
         assert done.returncode == 0, done.stderr.decode()
+        store = fake_home / ".kiss" / "api_keys.env"
+        assert (store.stat().st_mode & 0o077) == 0
         assert ((fake_home / ".bashrc").stat().st_mode & 0o077) == 0
 
     def test_in_process_threads_all_keys_survive(
@@ -281,7 +283,7 @@ class TestSaveApiKeyToShellCrossProcessRace:
 
         threads = [
             threading.Thread(
-                target=vscode_config.save_api_key_to_shell, args=(key, f"tv-{key}"),
+                target=vscode_config.save_api_key, args=(key, f"tv-{key}"),
             )
             for key in keys
         ]
@@ -290,6 +292,8 @@ class TestSaveApiKeyToShellCrossProcessRace:
         for thread in threads:
             thread.join(timeout=60)
 
-        rc_text = (fake_home / ".bashrc").read_text(encoding="utf-8")
+        store_text = (fake_home / ".kiss" / "api_keys.env").read_text(
+            encoding="utf-8",
+        )
         for key in keys:
-            assert f"export {key}=tv-{key}" in rc_text
+            assert f"export {key}=tv-{key}" in store_text

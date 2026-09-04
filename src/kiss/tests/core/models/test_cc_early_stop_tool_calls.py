@@ -12,18 +12,11 @@ response that simulates the entire agentic loop.
 """
 
 import json
+import os
 import subprocess
 from typing import Any
 
 from kiss.core.models.claude_code_model import ClaudeCodeModel, _find_consecutive_tool_calls_end
-
-
-class _FakeStdin:
-    def write(self, s: str) -> None:
-        pass
-
-    def close(self) -> None:
-        pass
 
 
 class _FakeStdout:
@@ -56,7 +49,7 @@ def _build_fake_popen_class(events: list[dict[str, Any]]) -> type:
     class FakePopen:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             self.returncode = 0
-            self.stdin = _FakeStdin()
+            self.stdin = open(os.devnull, "wb")
             self.stdout = _FakeStdout(stream_data)
             self.stderr = _FakeStdout("")
             self._terminated = False

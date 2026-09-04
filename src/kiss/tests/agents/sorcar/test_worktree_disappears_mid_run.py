@@ -166,7 +166,12 @@ def test_worktree_disappears_mid_run_bash_falls_back(tmp_path, monkeypatch):
         f"Bash reported a non-existent cwd: {bash_out!r}"
     )
 
-    assert ".kiss-worktrees" not in str(pwd_path.resolve()), pwd_path
+    # The fallback must land in the parent repo root itself.  Comparing
+    # against ``repo`` (rather than asserting ``.kiss-worktrees`` is
+    # absent from the string) keeps the check valid when the test
+    # suite itself runs from inside a kiss worktree, where ``tmp_path``
+    # is nested under an outer ``.kiss-worktrees/kiss_wt-*`` directory.
+    assert pwd_path.resolve() == repo.resolve(), pwd_path
 
     payload = yaml.safe_load(result)
     assert isinstance(payload, dict), result

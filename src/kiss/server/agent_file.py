@@ -76,16 +76,36 @@ PARAM_FIELDS: tuple[tuple[str, str], ...] = (
 
 Each entry maps a :func:`kiss.server.sorcar.run` parameter name (the
 ``X`` of the agent script's optional ``get_X()`` getter) to the ``run``
-command wire field it overrides.  ``timeout`` and ``sock_path`` are
-absent by design: they are client-transport parameters — the script
-only runs on the daemon that ``sock_path`` selects, and ``timeout``
-bounds the client's local wait — so a daemon-side getter could never
-take effect.  ``scope_work_dir`` (wire field ``tabScopeWorkDir``) is
+command wire field it overrides.  ``timeout``, ``stop_on_timeout``,
+and ``sock_path`` are absent by design: they are client-transport
+parameters — the script only runs on the daemon that ``sock_path``
+selects, ``timeout`` bounds the client's local wait, and
+``stop_on_timeout`` picks the client's timeout behavior — so a
+daemon-side getter could never take effect.  ``scope_work_dir`` (wire field ``tabScopeWorkDir``) is
 absent by design too: it is the CALLING client's tab-bar visibility
 scope, which the dispatched script must not be able to repoint at
 another workspace — and its absence here is what lets the scope
 survive a ``get_work_dir()`` override (the ``workDir`` re-pin in
 ``_run_task`` touches only the execution directory).
+"""
+
+HOOK_FIELDS: tuple[tuple[str, str], ...] = (
+    ("llm_call_hook", "llmCallHook"),
+    ("tool_call_hook", "toolCallHook"),
+)
+"""Agent-script-only hook getters, as ``(param, command_field)`` pairs.
+
+Each entry maps an agent-script getter name (``get_llm_call_hook`` /
+``get_tool_call_hook``) to the run-command field its returned callable
+is staged into.  Unlike :data:`PARAM_FIELDS` these are NOT
+:func:`kiss.server.sorcar.run` parameters and their fields are never
+sent on the wire — a callable cannot be serialized, so the hooks exist
+ONLY as agent-script getters, evaluated in the daemon process.  The
+task runner forwards the staged callables to the underlying
+:meth:`kiss.core.kiss_agent.KISSAgent.run` as its ``llm_call_hook`` /
+``tool_call_hook`` arguments (see that docstring for the hooks'
+semantics: ``llm_call_hook`` may rewrite the new messages before every
+LLM call, ``tool_call_hook`` may veto every tool call).
 """
 
 
@@ -108,7 +128,8 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
             each parameter accepts exactly the types its
             :func:`kiss.server.sorcar.run` docstring documents
             (``prompt`` additionally must be non-empty, ``max_budget``
-            finite).
+            finite); the :data:`HOOK_FIELDS` getters must return a
+            callable or ``None``.
     """
     ok = True
     expected = ""
@@ -165,6 +186,9 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
     elif param == "web_tools":
         ok = value is None or isinstance(value, bool)
         expected = "a bool or None"
+    elif param in ("llm_call_hook", "tool_call_hook"):
+        ok = value is None or callable(value)
+        expected = "a callable or None"
     if not ok:
         raise AgentFileError(
             f"get_{param}() of agent script {raw_path!r} must return "
@@ -191,6 +215,14 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
     ``get_tools()`` returning a *list* of tool callables instead (the
     tools-file contract) makes the agent script its own tools file:
     the script's path is written to ``toolsFile``.
+
+    The script may additionally define ``get_llm_call_hook()`` and
+    ``get_tool_call_hook()`` (:data:`HOOK_FIELDS`), each returning a
+    callable (or ``None``) that the task runner passes to the
+    underlying :meth:`kiss.core.kiss_agent.KISSAgent.run` as its
+    ``llm_call_hook`` / ``tool_call_hook`` argument.  Their staged
+    fields (``llmCallHook`` / ``toolCallHook``) live only on the
+    daemon-side command dict — callables are never wire-serialized.
 
     The getters run in the daemon process on the task's worker thread,
     like a tools file's ``get_tools()``, and the file is re-imported
@@ -226,7 +258,7 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
     # overridden command — e.g. an earlier successful ``get_chat_id()``
     # surviving a later getter's failure.
     staged: dict[str, Any] = {}
-    for param, field in PARAM_FIELDS:
+    for param, field in PARAM_FIELDS + HOOK_FIELDS:
         getter_name = f"get_{param}"
         # Membership (not ``.get() is None``) decides absence: a
         # DEFINED ``get_X = None`` is a broken getter, not a missing

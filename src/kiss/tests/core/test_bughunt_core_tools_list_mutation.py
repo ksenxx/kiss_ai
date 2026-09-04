@@ -12,8 +12,8 @@ present and registered the FIRST agent's bound ``finish`` method instead
 of its own.
 
 The test drives a full end-to-end ``run()`` through a real subprocess —
-a fake ``claude`` CLI on PATH that returns a ``finish`` tool call — and
-asserts the caller's list is unchanged afterwards.
+a fake ``claude`` CLI on PATH whose run-to-completion output is the final
+text ``done`` — and asserts the caller's list is unchanged afterwards.
 """
 
 import json
@@ -28,23 +28,12 @@ _EVENTS = [
         "type": "assistant",
         "message": {
             "id": "m1",
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "tool_calls": [
-                                {"name": "finish", "arguments": {"result": "done"}}
-                            ]
-                        }
-                    ),
-                }
-            ],
+            "content": [{"type": "text", "text": "done"}],
         },
     },
     {
         "type": "result",
-        "result": "",
+        "result": "done",
         "usage": {"input_tokens": 10, "output_tokens": 5},
     },
 ]
@@ -76,7 +65,7 @@ def test_run_does_not_mutate_caller_tools_list(
     agent = KISSAgent("bughunt-tools-mutation")
     result = agent.run(
         model_name="cc/opus",
-        prompt_template="Call finish with 'done'.",
+        prompt_template="Reply with exactly 'done'.",
         tools=shared_tools,
         max_steps=3,
         verbose=False,
@@ -89,7 +78,7 @@ def test_run_does_not_mutate_caller_tools_list(
     agent2 = KISSAgent("bughunt-tools-mutation-2")
     result2 = agent2.run(
         model_name="cc/opus",
-        prompt_template="Call finish with 'done'.",
+        prompt_template="Reply with exactly 'done'.",
         tools=shared_tools,
         max_steps=3,
         verbose=False,

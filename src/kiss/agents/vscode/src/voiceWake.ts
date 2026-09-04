@@ -184,10 +184,20 @@ export class VoiceWakeService {
     });
 
     proc.on('error', (err: Error) => {
-      if (this._proc === proc) {
-        this._proc = undefined;
+      // audit0902-coverage:start
+      // A child that never spawned (uv missing / not executable) ends
+      // here instead of in 'exit'.  Like 'exit', a stop the user asked
+      // for is a clean "off", not a listener error.
+      if (this._proc !== proc) return;
+      this._proc = undefined;
+      const requested = this._stopRequestedFor === proc;
+      if (requested) this._stopRequestedFor = undefined;
+      if (requested) {
+        this._onState(false);
+      } else {
         this._onState(false, `voice listener error: ${err.message}`);
       }
+      // audit0902-coverage:end
     });
 
     proc.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
@@ -219,7 +229,9 @@ export class VoiceWakeService {
    * — so even fire-and-forget callers cannot double-open the mic.
    * Resolves immediately when no listener is running; a process that
    * ignores SIGTERM is SIGKILLed after 5s as an escalation, but the
-   * promise still resolves only from the exit event itself.
+   * promise still resolves only from the exit event itself.  A child
+   * that never spawned (no pid) is not signalled at all; the promise
+   * then settles on its 'error' event, the only end such a child has.
    *
    * @returns A promise that resolves once the child process has exited.
    */
@@ -232,54 +244,72 @@ export class VoiceWakeService {
     }
     if (this._stopping) return this._stopping;
     this._stopRequestedFor = proc;
+    // audit0902-coverage:start
+    const pid = proc.pid;
     let exited: Promise<void> = Promise.resolve();
-    if (proc.exitCode === null && proc.signalCode === null) {
+    if (typeof pid !== 'number') {
+      // The child never spawned (uv missing or not executable).  Node
+      // reports that through an asynchronous 'error' event and such a
+      // child emits no 'exit' at all, so waiting for 'exit' here would
+      // leave _stopping pending for ever and queue every later start()
+      // behind it.  There is also nothing to signal: proc.kill() on a
+      // pid-less child hands libuv an unset pid.  The 'error' has not
+      // fired yet -- its handler in start() clears _proc, and _proc is
+      // still this child -- so settle on it.
       exited = new Promise<void>(resolve => {
-        // SIGKILL is an escalation only: resolution comes solely from
-        // the exit event, never from the timer, so the promise cannot
-        // claim the child is gone while it still holds the microphone.
-        const killTimer = setTimeout(() => {
-          try {
-            if (typeof proc.pid === 'number' && process.platform !== 'win32') {
-              process.kill(-proc.pid, 'SIGKILL');
-            } else {
-              proc.kill('SIGKILL');
-            }
-          } catch {
-            try {
-              proc.kill('SIGKILL');
-            } catch {}
-          }
-        }, 5000);
-        proc.once('exit', () => {
-          clearTimeout(killTimer);
-          resolve();
-        });
+        proc.once('error', () => resolve());
       });
-    }
-    try {
-      if (typeof proc.pid === 'number') {
+      // audit0902-coverage:end
+    } else {
+      if (proc.exitCode === null && proc.signalCode === null) {
+        exited = new Promise<void>(resolve => {
+          // SIGKILL is an escalation only: resolution comes solely from
+          // the exit event, never from the timer, so the promise cannot
+          // claim the child is gone while it still holds the microphone.
+          const killTimer = setTimeout(() => {
+            try {
+              if (process.platform !== 'win32') {
+                process.kill(-pid, 'SIGKILL');
+              } else {
+                proc.kill('SIGKILL');
+              }
+            } catch {
+              try {
+                proc.kill('SIGKILL');
+              } catch {}
+            }
+          }, 5000);
+          proc.once('exit', () => {
+            clearTimeout(killTimer);
+            resolve();
+          });
+        });
+      }
+      try {
         if (process.platform === 'win32') {
           const result = spawnSync(
             'taskkill',
-            ['/PID', String(proc.pid), '/T', '/F'],
+            ['/PID', String(pid), '/T', '/F'],
             {stdio: 'ignore', windowsHide: true},
           );
           if (result.error || result.status !== 0) proc.kill();
         } else {
-          process.kill(-proc.pid, 'SIGTERM');
+          process.kill(-pid, 'SIGTERM');
         }
-      } else {
-        proc.kill();
+      } catch {
+        try {
+          proc.kill();
+        } catch {}
       }
-    } catch {
-      try {
-        proc.kill();
-      } catch {}
     }
     this._onState(false);
     const settled: Promise<void> = exited.then(() => {
+      // audit0902-coverage:start
       if (this._proc === proc) this._proc = undefined;
+      // Every start() issued while this stop was in flight was queued,
+      // so the only stop that can have been requested is this one.
+      this._stopRequestedFor = undefined;
+      // audit0902-coverage:end
       if (this._stopping === settled) this._stopping = undefined;
       const queued = this._queuedStart;
       if (queued) {

@@ -126,9 +126,10 @@ on the daemon.
 
 ## Overridable parameters
 
-Every parameter of `sorcar.run()` except `timeout`, `sock_path`, and
-`extension_agent_path` itself has a corresponding `get_X()` getter the
-extension agent may define.  The table below lists them all.
+Every parameter of `sorcar.run()` except `timeout`, `stop_on_timeout`,
+`sock_path`, `scope_work_dir`, and `extension_agent_path` itself has a
+corresponding `get_X()` getter the extension agent may define.  The
+table below lists them all.
 
 | Getter function              | Return type                     | `run()` default           | Wire field          |
 |------------------------------|---------------------------------|---------------------------|---------------------|
@@ -151,12 +152,18 @@ extension agent may define.  The table below lists them all.
 When a getter is absent, the caller's value is used (which is the
 `run()` default when the caller did not pass one).
 
-The three parameters without getters:
+The five parameters without getters:
 
-- **`timeout`** — bounds the *client's* local wait; the daemon never
-  sees it.
+- **`timeout`** — bounds the *client's* local wait (`None` waits
+  indefinitely); the daemon never sees it.
+- **`stop_on_timeout`** — whether a `timeout` expiry also stops the
+  task, awaiting the stop's confirmation (default `False`: the task
+  keeps running); a client-side choice the script must not override.
 - **`sock_path`** — selects which daemon to connect to; the script
   already runs on that daemon.
+- **`scope_work_dir`** — the CALLING client's tab-bar visibility
+  scope (wire field `tabScopeWorkDir`), which a dispatched script
+  must not be able to repoint at another workspace.
 - **`extension_agent_path`** — the script cannot override its own path.
 
 ### Getter semantics
@@ -180,6 +187,48 @@ The three parameters without getters:
   executed task prompt.  A multi-`<task>` prompt runs the agent once
   per subtask and the text is appended to each subtask's prompt.  The
   appended text becomes part of the recorded prompt in chat history.
+
+### Hook getters (no `run()` parameter)
+
+The script may also define two hook getters with no corresponding
+`sorcar.run()` parameter — a callable cannot be JSON-serialized, so
+the hooks exist ONLY as agent-script getters, evaluated in the daemon
+process:
+
+| Getter function        | Return type          | Staged command field |
+|------------------------|----------------------|----------------------|
+| `get_llm_call_hook()`  | callable or `None`   | `llmCallHook`        |
+| `get_tool_call_hook()` | callable or `None`   | `toolCallHook`       |
+
+The returned functions — `llm_call_hook` and `tool_call_hook` — are
+passed to the underlying `KISSAgent.run()` of every task-executor
+sub-session of the task's agent (internal helper sessions, e.g. the
+failed-session trajectory summarizer, and `run_parallel` sub-agents
+are not hooked).  Per `KISSAgent.run()`'s contract:
+
+- **`llm_call_hook(new_messages)`** — called before every LLM call
+  with the list of new messages (those added to the conversation
+  since the previous LLM call) about to be sent; its return value
+  replaces those messages.
+- **`tool_call_hook(name, args)`** — called before every tool call
+  with the tool's name and arguments dict.  Returning `"OK"` lets the
+  tool execute; any other returned string suppresses the call and is
+  given to the model as the tool's result.
+
+Returning `None` from a getter means "no hook".  Any other
+non-callable return value fails the task with a diagnostic error,
+like every wrong-typed getter.
+
+```python
+# guarded_agent.py
+def tool_call_hook(name, args):
+    if name == "Bash" and "rm -rf" in str(args.get("command", "")):
+        return "Blocked: destructive command"
+    return "OK"
+
+def get_tool_call_hook():
+    return tool_call_hook
+```
 
 
 ## Tools: two contracts
@@ -544,6 +593,7 @@ def run(
     prompt: str,
     *,
     work_dir: str = "",
+    scope_work_dir: str = "",
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -558,7 +608,8 @@ def run(
     append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
-    timeout: float = 3600.0,
+    timeout: float | None = 3600.0,
+    stop_on_timeout: bool = False,
     sock_path: str | Path | None = None,
 ) -> TaskResult
 ```

@@ -74,7 +74,9 @@ export KISS_CODE_CLI=code-server
 # binds port 8080, racing the entrypoint's code-server — whichever loses dies
 # with EADDRINUSE and crashes the container.
 export KISS_SKIP_LAUNCH=1
-bash "$REPO_DIR/install.sh"
+# --non-interactive: a container started with `docker run -it` has a terminal,
+# and install.sh would otherwise stop at its [Y/n] upgrade questions.
+bash "$REPO_DIR/install.sh" --non-interactive
 info "install.sh completed"
 
 # ---------------------------------------------------------------------------

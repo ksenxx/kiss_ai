@@ -30,6 +30,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar._concurrency import pid_alive as _pid_alive
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.useful_tools import (
     _absolutize,
@@ -49,6 +50,20 @@ _ACCOUNTS_GOOGLE_URL_RE = re.compile(r"^https?://accounts\.google\.com/")
 # page, so it is rewritten to the equivalent headed token.
 _HEADLESS_UA_TOKEN = "HeadlessChrome"
 _HEADED_UA_TOKEN = "Chrome"
+
+# Upper bound for every read of page state (title, text, aria snapshot).
+# A page whose main thread is stuck (a script spinning forever, a
+# renderer that never answers after a timed-out ``goto``) must surface as
+# a tool error, never as a tool call that hangs the whole task.
+_PAGE_READ_TIMEOUT_MS = 10000
+
+# Deadline for raw input operations (keyboard.press/type, mouse.move/wheel)
+# that have no Playwright timeout parameter.  A page event handler that
+# wedges the renderer in response to our own input (e.g. a ``keydown``
+# listener entering ``while(true)``) passes the pre-input liveness probe
+# and then blocks the input call forever; a watchdog kills Chromium at
+# this deadline so the pending call raises instead of hanging the task.
+_INPUT_WATCHDOG_SECS = _PAGE_READ_TIMEOUT_MS / 1000 + 5.0
 
 
 def _abort_route(route: Any) -> None:
@@ -117,25 +132,6 @@ _NAME_RE = re.compile(r'"((?:\\.|[^"\\])*)"')
 _NAME_UNESCAPE_RE = re.compile(r'\\(["\\])')
 
 _SCROLL_DELTA = {"down": (0, 300), "up": (0, -300), "right": (300, 0), "left": (-300, 0)}
-
-
-def _pid_alive(pid: int) -> bool:
-    """Return True iff the OS process *pid* currently exists.
-
-    Args:
-        pid: Process id to probe with a null signal.
-
-    Returns:
-        True when the process exists (even if owned by another user),
-        False when it does not.
-    """
-    try:
-        os.kill(pid, 0)
-        return True
-    except PermissionError:  # pragma: no cover — foreign-owned process
-        return True
-    except OSError:
-        return False
 
 
 _CLOSE_WATCHDOG_SECS = 15.0
@@ -231,23 +227,68 @@ def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
     )
 
 
-def _watchdog_kill(pid: int, identity: str | None) -> None:  # pragma: no cover
-    """Watchdog timer body: kill a Chromium whose graceful close hung.
+def _killable_live_pid(pid: int | None) -> bool:
+    """Return whether *pid* names a live process a watchdog may target.
+
+    The shared arming guard of the graceful-close watchdog
+    (:meth:`WebUseTool._close_browser_only`) and the raw-input watchdog
+    (:meth:`WebUseTool._input_hang_watchdog`); the two previously
+    duplicated it inverted, a drift hazard for a predicate whose
+    failure mode is signalling the wrong process.  Refuses ``None``
+    and non-positive pids (``0``/negatives address process groups) and
+    this process's own pid, and requires the process to still exist.
+
+    Args:
+        pid: The recorded browser pid, or ``None`` when none was
+            captured.
+
+    Returns:
+        True when a watchdog may be armed against *pid*.
+    """
+    return (
+        pid is not None and pid > 0 and pid != os.getpid() and _pid_alive(pid)
+    )
+
+
+def _watchdog_kill(
+    pid: int,
+    identity: str | None,
+    operation: str = "graceful browser close",
+    deadline_secs: float = _CLOSE_WATCHDOG_SECS,
+) -> None:
+    """Watchdog timer body: kill a Chromium whose driver call hung.
 
     Killing the browser process also unwedges the hung driver call (the
-    driver observes the browser exit and completes/raises the close).
+    driver observes the browser exit and completes/raises the call).
 
     Args:
         pid: Browser process id recorded at launch.
         identity: Identity string recorded at PID capture time.
+        operation: Human-readable name of the hung operation, for the log.
+        deadline_secs: The deadline that expired, for the log.
     """
     logger.warning(
-        "Graceful browser close is hung after %.0fs; killing Chromium "
-        "(pid %d) directly",
-        _CLOSE_WATCHDOG_SECS,
+        "%s is hung after %.0fs; killing Chromium (pid %d) directly",
+        operation,
+        deadline_secs,
         pid,
     )
     _terminate_pid_escalating(pid, identity)
+
+
+class _TimerGuard:
+    """Context manager that starts a ``threading.Timer`` on enter and cancels it on exit."""
+
+    def __init__(self, timer: threading.Timer) -> None:
+        self._timer = timer
+
+    def __enter__(self) -> None:
+        """Start the guarded timer."""
+        self._timer.start()
+
+    def __exit__(self, *exc: object) -> None:
+        """Cancel the timer (a no-op if it already fired)."""
+        self._timer.cancel()
 
 
 def _rmtree_logged(path: str) -> None:
@@ -485,12 +526,8 @@ class WebUseTool:
         identity = self._browser_identity
         watchdog: threading.Timer | None = None
         if (
-            (self._context is not None or self._browser is not None)
-            and pid is not None
-            and pid > 0
-            and pid != os.getpid()
-            and _pid_alive(pid)
-        ):
+            self._context is not None or self._browser is not None
+        ) and _killable_live_pid(pid):
             watchdog = threading.Timer(
                 _CLOSE_WATCHDOG_SECS, _watchdog_kill, args=(pid, identity),
             )
@@ -803,10 +840,94 @@ class WebUseTool:
         except Exception:  # pragma: no cover — evaluate on a fresh page rarely fails
             logger.debug("Could not mask the headless user agent", exc_info=True)
 
+    @staticmethod
+    def _page_title(page: Any) -> str:
+        """Return *page*'s title without hanging on an unresponsive renderer.
+
+        Playwright's ``Page.title()`` accepts no timeout: it waits for the
+        frame's execution context to answer, which never happens while the
+        renderer main thread is busy (e.g. a page script that spins forever
+        after ``goto`` timed out on ``domcontentloaded``). That froze a
+        task inside ``get_page_content`` indefinitely.
+        ``Locator.evaluate(timeout=...)`` is not a fix either: its timeout
+        bounds only element-handle resolution, so a page that shadows
+        ``document.title`` with a never-returning getter hangs the
+        evaluation phase forever.  ``wait_for_function``'s timeout is
+        enforced by the driver-side progress controller for the whole
+        operation — it raises ``TimeoutError`` on schedule even while the
+        renderer is wedged inside the evaluated expression.  The title is
+        wrapped in a list so an empty title is still truthy and resolves
+        immediately; ``polling=100`` (not the default ``raf``) so
+        throttled background tabs still answer.  Works for SVG and other
+        non-HTML documents (``document.title`` is defined for them).  The
+        follow-up ``json_value()`` has no timeout, but it only runs after
+        the renderer answered the same expression an instant earlier.
+        A hostile getter still leaves the renderer spinning after the
+        bounded error (its loop never exits); ``close_browser()`` is the
+        agent's escape hatch, exactly as for any other wedged page.
+        """
+        handle = page.wait_for_function(
+            "() => [document.title]", timeout=_PAGE_READ_TIMEOUT_MS, polling=100
+        )
+        return str(handle.json_value()[0])
+
+    def _require_responsive_renderer(self) -> None:
+        """Raise ``TimeoutError`` unless the page's renderer answers promptly.
+
+        ``keyboard.press``/``keyboard.type``, ``mouse.move``/``mouse.wheel``
+        and ``Locator.count`` have no timeout parameter and block for as
+        long as the renderer stays silent. Call this right before them so
+        an already-unresponsive page turns into a fast, clean tool error
+        (browser kept alive) instead of a tool call that never returns.
+        The probe cannot bound the input call itself — a page whose event
+        handler wedges the renderer in response to our input passes the
+        probe first — so the callers also wrap the input in
+        :meth:`_input_hang_watchdog`.
+        """
+        self._page.wait_for_function(
+            "() => 1", timeout=_PAGE_READ_TIMEOUT_MS, polling=100
+        )
+
+    def _input_hang_watchdog(self, deadline_secs: float = _INPUT_WATCHDOG_SECS) -> Any:
+        """Kill Chromium if the guarded raw input call outlives *deadline_secs*.
+
+        Raw input operations (``keyboard.press``/``type``,
+        ``mouse.move``/``wheel``) carry no timeout in the Playwright
+        protocol, so a page event handler that enters ``while(true)`` on
+        ``keydown``/``mousemove``/``wheel`` blocks them forever — after the
+        pre-input liveness probe already passed.  Killing the browser
+        process unwedges the pending driver call (it raises), the tool
+        returns its documented error string, and the next tool call
+        relaunches a fresh browser via ``_ensure_browser``.  A page in
+        that state is permanently wedged, so losing the session is the
+        correct recovery, exactly like the graceful-close watchdog.
+
+        Args:
+            deadline_secs: Seconds the guarded block may run before the
+                watchdog fires.  Callers whose legitimate duration scales
+                with input size (``type_text`` delay, ``scroll`` steps)
+                pass a proportionally larger deadline.
+
+        Returns:
+            A ``threading.Timer``-cancelling context manager guarding the
+            ``with`` block.
+        """
+        pid = self._browser_pid
+        identity = self._browser_identity
+        if not _killable_live_pid(pid):
+            return nullcontext()
+        timer = threading.Timer(
+            deadline_secs,
+            _watchdog_kill,
+            args=(pid, identity, "Raw browser input", deadline_secs),
+        )
+        timer.daemon = True
+        return _TimerGuard(timer)
+
     def _get_ax_tree(self, max_chars: int = 50000) -> str:
         self._ensure_browser()
-        header = f"Page: {self._page.title()}\nURL: {self._page.url}\n\n"
-        snapshot = self._page.locator("body").aria_snapshot()
+        header = f"Page: {self._page_title(self._page)}\nURL: {self._page.url}\n\n"
+        snapshot = self._page.locator("body").aria_snapshot(timeout=_PAGE_READ_TIMEOUT_MS)
         if not snapshot:
             self._elements = []
             return header + "(empty page)"
@@ -835,7 +956,7 @@ class WebUseTool:
     def _resolve_locator(self, element_id: int) -> Any:
         element_id = int(element_id)
         if element_id < 1 or element_id > len(self._elements):
-            snapshot = self._page.locator("body").aria_snapshot()
+            snapshot = self._page.locator("body").aria_snapshot(timeout=_PAGE_READ_TIMEOUT_MS)
             if snapshot:
                 _, self._elements = _number_interactive_elements(snapshot)
             if element_id < 1 or element_id > len(self._elements):
@@ -852,7 +973,9 @@ class WebUseTool:
             # role in snapshot order.
             locator = self._page.get_by_role(role)
             occurrence = int(entry.get("role_occurrence", "0"))
-        n = locator.count()
+        self._require_responsive_renderer()
+        with self._input_hang_watchdog():
+            n = locator.count()
         if n == 0:  # pragma: no cover — race between snapshot and DOM
             raise ValueError(f"Element with ID {element_id} not found on page.")
         if n == 1:
@@ -903,10 +1026,19 @@ class WebUseTool:
         try:
             pages = self._context.pages
             if url == "tab:list":
+                from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
                 lines = [f"Open tabs ({len(pages)}):"]
                 for i, page in enumerate(pages):
                     suffix = " (active)" if page == self._page else ""
-                    lines.append(f"  [{i}] {page.title()} - {page.url}{suffix}")
+                    try:
+                        title = self._page_title(page)
+                    except PlaywrightTimeoutError:
+                        # One unresponsive tab must not make the whole
+                        # listing fail; the agent needs it to switch away.
+                        logger.debug("Exception caught", exc_info=True)
+                        title = "(unresponsive)"
+                    lines.append(f"  [{i}] {title} - {page.url}{suffix}")
                 return "\n".join(lines)
             if url.startswith("tab:"):
                 idx = int(url[4:])
@@ -974,11 +1106,16 @@ class WebUseTool:
             locator = self._resolve_locator(element_id)
             select_all = "Meta+a" if sys.platform == "darwin" else "Control+a"
             locator.click()
-            self._page.keyboard.press(select_all)
-            self._page.keyboard.press("Backspace")
-            self._page.keyboard.type(text, delay=50)
+            # keyboard.type spends delay=50ms per character legitimately,
+            # so the deadline scales with the text length.
+            deadline = _INPUT_WATCHDOG_SECS + 0.05 * len(text)
+            with self._input_hang_watchdog(deadline):
+                self._page.keyboard.press(select_all)
+                self._page.keyboard.press("Backspace")
+                self._page.keyboard.type(text, delay=50)
+                if press_enter:
+                    self._page.keyboard.press("Enter")
             if press_enter:
-                self._page.keyboard.press("Enter")
                 self._page.wait_for_timeout(500)
                 self._wait_for_stable()
             return self._get_ax_tree()
@@ -999,7 +1136,9 @@ class WebUseTool:
         if err is not None:
             return err
         try:
-            self._page.keyboard.press(key)
+            self._require_responsive_renderer()
+            with self._input_hang_watchdog():
+                self._page.keyboard.press(key)
             self._page.wait_for_timeout(300)
             return self._get_ax_tree()
         except Exception as e:
@@ -1022,13 +1161,18 @@ class WebUseTool:
         try:
             dx, dy = _SCROLL_DELTA.get(direction, (0, 300))
             vw, vh = self.viewport[0] // 2, self.viewport[1] // 2
-            self._page.mouse.move(vw, vh)
-            for _ in range(amount):
-                self._page.mouse.wheel(dx, dy)
-                self._page.wait_for_timeout(100)
+            self._require_responsive_renderer()
+            # Each wheel step waits 100ms legitimately, so the deadline
+            # scales with the step count.
+            deadline = _INPUT_WATCHDOG_SECS + 0.1 * max(int(amount), 0)
+            with self._input_hang_watchdog(deadline):
+                self._page.mouse.move(vw, vh)
+                for _ in range(amount):
+                    self._page.mouse.wheel(dx, dy)
+                    self._page.wait_for_timeout(100)
             self._page.wait_for_timeout(300)
             return self._get_ax_tree()
-        except Exception as e:  # pragma: no cover — Playwright scroll rarely fails
+        except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error scrolling {direction}: {e}"
 
@@ -1086,12 +1230,12 @@ class WebUseTool:
             return err
         try:
             if text_only:
-                title = self._page.title()
+                title = self._page_title(self._page)
                 url = self._page.url
-                body = self._page.inner_text("body")
+                body = self._page.inner_text("body", timeout=_PAGE_READ_TIMEOUT_MS)
                 return f"Page: {title}\nURL: {url}\n\n{body}"
             return self._get_ax_tree()
-        except Exception as e:  # pragma: no cover — Playwright get content rarely fails
+        except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error getting page content: {e}"
 
