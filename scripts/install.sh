@@ -211,6 +211,34 @@ else
   fi
 fi
 cd ~/.kiss/kiss_ai
+# The checkout can exist while its root install.sh is missing or not a
+# regular file (deleted locally, or a stray directory took its name): a
+# clean ``git pull --ff-only`` above is a no-op that restores neither, and
+# the handover below would then run a script that is not there.  Restore it
+# from HEAD when git can, otherwise reclone the tree from scratch.
+if [ ! -f install.sh ]; then
+  if [ -d .git ] && have_working_git; then
+    echo "install.sh missing from the checkout; restoring it from git HEAD..."
+    rm -rf install.sh
+    git checkout HEAD -- install.sh 2>/dev/null || true
+  fi
+  if [ ! -f install.sh ]; then
+    echo "install.sh still missing; recloning ~/.kiss/kiss_ai..."
+    cd ~/.kiss
+    rm -rf kiss_ai
+    if have_working_git; then
+      git clone https://github.com/ksenxx/kiss_ai.git ~/.kiss/kiss_ai
+    else
+      curl -L -o main.zip https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
+      unzip main.zip
+      rm main.zip
+      mv kiss_ai-main ~/.kiss/kiss_ai
+    fi
+    cd ~/.kiss/kiss_ai
+    # The reclone discarded the tree the stash belonged to.
+    _kiss_stashed=
+  fi
+fi
 _kiss_install_rc=0
 ./install.sh 9>&- || _kiss_install_rc=$?
 # Restore the local edits stashed by the diverged-pull recovery above,
