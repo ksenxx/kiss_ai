@@ -5,6 +5,7 @@
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 function isPathInside(target: string, root: string): boolean {
@@ -183,7 +184,7 @@ import {buildChatHtml, readSampleTasks} from './SorcarTab';
 import {VoiceWakeService} from './voiceWake';
 import {kissHomeDir} from './userAssets';
 import {playVoiceAckClip} from './voiceAckPlayer';
-import {findInstallScript, kissAiRoot} from './installerPath';
+import {bootstrapInstallUrl, findInstallScript} from './installerPath';
 import {
   FromWebviewMessage,
   ToWebviewMessage,
@@ -1389,15 +1390,31 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     // closed.
     // audit0902-coverage:start
     const scriptPath = findInstallScript();
-    if (!scriptPath) {
-      showErrorNotification(
-        `Cannot update KISS Sorcar: install.sh not found in ${kissAiRoot()}.`,
-      );
-      return;
-    }
     showInformationNotification(
       'An update of KISS Sorcar is getting installed…',
     );
+    if (!scriptPath) {
+      // No ~/.kiss/kiss_ai clone with an install.sh on this machine (the
+      // extension was installed from a .vsix, or the clone was deleted).
+      // Run the public curl bootstrap instead of refusing: it clones the
+      // repo into ~/.kiss/kiss_ai (kissAiRoot()) and hands over to its
+      // install.sh, holding the same cross-process update lock.  The URL
+      // travels via the environment (like KISS_HOME below) so no shell
+      // quoting of it is ever needed inside the bash -c string.
+      const bootTerminal = vscode.window.createTerminal({
+        name: 'KISS Sorcar Update',
+        cwd: os.homedir(),
+      });
+      bootTerminal.show();
+      const escHome = kissHomeDir().replace(/'/g, "'\\''");
+      const escUrl = bootstrapInstallUrl().replace(/'/g, "'\\''");
+      bootTerminal.sendText(
+        `KISS_HOME='${escHome}' KISS_NONINTERACTIVE=1 ` +
+          `KISS_BOOTSTRAP_URL='${escUrl}' bash -c ` +
+          `'set -o pipefail; curl -fsSL "$KISS_BOOTSTRAP_URL" | bash'`,
+      );
+      return;
+    }
     const terminal = vscode.window.createTerminal({
       name: 'KISS Sorcar Update',
       cwd: path.dirname(scriptPath),
