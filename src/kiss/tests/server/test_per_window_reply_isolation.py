@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import socket
 import ssl
@@ -335,12 +336,28 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
         """Clicking Update in window A must not pop banners in window B.
 
         Covers both acknowledgement paths of ``runUpdate``: the
-        ``error`` banner when ``install.sh`` is missing and the
-        ``notice`` banner when the updater is started.
+        ``error`` banner when the updater fails (here: no install.sh,
+        and the curl bootstrap fallback exits non-zero because its
+        ``file://`` URL points at a missing file) and the ``notice``
+        banner when the updater is started.
         """
         install_root = Path(self.tmpdir) / "kiss_ai"
         self.server._install_root = install_root
         self.server._update_log_path = Path(self.tmpdir) / "update.log"
+        saved_url = os.environ.get("KISS_UPDATE_BOOTSTRAP_URL")
+        os.environ["KISS_UPDATE_BOOTSTRAP_URL"] = (
+            f"file://{Path(self.tmpdir) / 'no-such-bootstrap.sh'}"
+        )
+        if saved_url is None:
+            self.addCleanup(
+                os.environ.pop, "KISS_UPDATE_BOOTSTRAP_URL", None,
+            )
+        else:
+            self.addCleanup(
+                os.environ.__setitem__,
+                "KISS_UPDATE_BOOTSTRAP_URL",
+                saved_url,
+            )
 
         reader_a, writer_a = await self._connect()
         reader_b, writer_b = await self._connect()
@@ -364,7 +381,7 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
 
         await self._send(writer_a, {"type": "runUpdate"})
         err = await self._drain_until(reader_a, _has_type("error"))
-        self.assertIn("install.sh not found", str(err.get("text", "")))
+        self.assertIn("KISS Sorcar update failed", str(err.get("text", "")))
         self.assertNotIn("connId", err)
         await _assert_no_banner_on_b()
 
