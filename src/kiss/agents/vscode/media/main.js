@@ -7868,12 +7868,23 @@
    *
    * @param {boolean} ok Whether the daemon saved the shared page.
    */
+  // shareflash0903-coverage:start
+  // One tracked timer: a bare setTimeout let an earlier flash's stale
+  // timer end a later flash early, and adding the new class without
+  // removing the old one could leave ok and err stacked.
+  let shareFlashTimer = null;
   function flashShareBtn(ok) {
     if (!shareBtn) return;
     const cls = ok ? 'share-ok' : 'share-err';
+    if (shareFlashTimer) clearTimeout(shareFlashTimer);
+    shareBtn.classList.remove('share-ok', 'share-err');
     shareBtn.classList.add(cls);
-    setTimeout(() => shareBtn.classList.remove(cls), 2000);
+    shareFlashTimer = setTimeout(() => {
+      shareFlashTimer = null;
+      shareBtn.classList.remove(cls);
+    }, 2000);
   }
+  // shareflash0903-coverage:end
   // share-coverage:end
 
   function _buildRemoteUrlBar(displayUrl, isNtfy) {
@@ -7900,15 +7911,23 @@
     const checkSvg =
       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
     copyBtn.innerHTML = copySvg;
+    // urlflash0903-coverage:start
+    // The icon-revert timer is tracked per button and restarted on
+    // every copy, or a rapid second click's check mark would be
+    // reverted early by the first click's stale timer.
+    let urlFlashTimer = null;
     copyBtn.addEventListener('click', e => {
       e.preventDefault();
       navigator.clipboard.writeText(displayUrl).then(() => {
         copyBtn.innerHTML = checkSvg;
-        setTimeout(() => {
+        if (urlFlashTimer) clearTimeout(urlFlashTimer);
+        urlFlashTimer = setTimeout(() => {
+          urlFlashTimer = null;
           copyBtn.innerHTML = copySvg;
         }, 1500);
       });
     });
+    // urlflash0903-coverage:end
     row.appendChild(link);
     row.appendChild(copyBtn);
     wrapper.appendChild(label);
@@ -9649,6 +9668,27 @@
     return results.every(ok => ok);
   }
 
+  // composerreset0903-coverage:start
+  /**
+   * Clear the composer after a prompt has been handed off: empty the
+   * textarea, drop pending attachments and their errors, and reset the
+   * ghost/history cursors.  The one copy both sendMessage() paths (the
+   * append-to-running-task path and the fresh submit) share, so the
+   * two can never drift apart again.
+   */
+  function resetComposerAfterSend() {
+    inp.value = '';
+    inp.style.height = 'auto';
+    attachments = [];
+    attachErrors = [];
+    updateInputDisabled();
+    renderFileChips();
+    clearGhost();
+    histIdx = -1;
+    if (inputClearBtn) inputClearBtn.style.display = 'none';
+  }
+  // composerreset0903-coverage:end
+
   async function sendMessage() {
     let prompt = inp.value.trim();
     if (!prompt) return;
@@ -9687,15 +9727,7 @@
 
     if (isRunning) {
       api.appendUserMessage({prompt: prompt, tabId: activeTabId});
-      inp.value = '';
-      inp.style.height = 'auto';
-      attachments = [];
-      attachErrors = [];
-      updateInputDisabled();
-      renderFileChips();
-      clearGhost();
-      histIdx = -1;
-      if (inputClearBtn) inputClearBtn.style.display = 'none';
+      resetComposerAfterSend();
       return;
     }
 
@@ -9727,15 +9759,7 @@
       if (!curTab.currentTaskId) curTab.pendingTaskId = 'pending:' + curTab.id;
       // tableak-coverage:end
     }
-    inp.value = '';
-    inp.style.height = 'auto';
-    attachments = [];
-    attachErrors = [];
-    updateInputDisabled();
-    renderFileChips();
-    clearGhost();
-    histIdx = -1;
-    if (inputClearBtn) inputClearBtn.style.display = 'none';
+    resetComposerAfterSend();
   }
 
   function ensureAskElementsForTab(tab) {
@@ -10091,23 +10115,29 @@
     btn.type = 'button';
     btn.className = 'sidebar-item-copy';
     btn.setAttribute('aria-label', 'Copy task to clipboard');
-    wireCopyButton(btn, text, false, false);
+    wireCopyButton(btn, text, false);
     return btn;
   }
 
-  function wireCopyButton(btn, text, retryFallback, resetFlashTimer) {
+  function wireCopyButton(btn, text, retryFallback) {
     btn.innerHTML = PANEL_COPY_SVG;
 
-    let flashTimer = 0;
+    // sidebarflash0903-coverage:start
+    // Every caller restarts the flash timer: the old resetFlashTimer
+    // flag left the sidebar copy buttons with a stale timer that cut
+    // a rapid second click's flash short.
+    let flashTimer = null;
     const flash = () => {
       btn.innerHTML = PANEL_CHECK_SVG;
       btn.classList.add('copied');
-      if (resetFlashTimer) clearTimeout(flashTimer);
+      if (flashTimer) clearTimeout(flashTimer);
       flashTimer = setTimeout(() => {
+        flashTimer = null;
         btn.innerHTML = PANEL_COPY_SVG;
         btn.classList.remove('copied');
       }, 1500);
     };
+    // sidebarflash0903-coverage:end
 
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -10129,7 +10159,7 @@
     btn.className = 'ids-copy-btn ids-copy-' + kind;
     btn.dataset.tooltip = 'Copy ' + kind + ' id';
     btn.setAttribute('aria-label', 'Copy ' + kind + ' id to clipboard');
-    wireCopyButton(btn, idText, true, true);
+    wireCopyButton(btn, idText, true);
     return btn;
   }
 

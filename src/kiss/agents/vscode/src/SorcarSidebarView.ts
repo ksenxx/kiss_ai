@@ -248,6 +248,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   private _voiceWake: VoiceWakeService | undefined;
   private _voiceSensitivity: number | undefined;
+  // The user's last voiceToggle choice.  `_voiceWake.running` cannot
+  // stand in for it: a stopped listener keeps counting as running while
+  // it is dying (it holds the exclusive microphone until its exit event
+  // fires), so "running" conflates "the user wants voice on" with "the
+  // process has not exited yet".  Restart decisions — sensitivity
+  // changes, hide/show suspension — follow this intent, never the
+  // physical process state; otherwise a sensitivity value or a hide
+  // arriving during that dying window turned the mic back ON after the
+  // user had switched it off.
+  private _voiceEnabled: boolean = false;
   private _voiceWakeSuspendedByHide: boolean = false;
 
   private _onCommitMessage = new vscode.EventEmitter<{
@@ -692,16 +702,22 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
     const visibilitySub = webviewView.onDidChangeVisibility(() => {
       if (this._view !== webviewView) return;
+      // audit0903-coverage:start
       if (webviewView.visible) {
         this._getApi().getInputHistory();
         if (this._voiceWakeSuspendedByHide) {
           this._voiceWakeSuspendedByHide = false;
           this._voiceWake?.start(this._voiceSensitivity);
         }
-      } else if (this._voiceWake?.running) {
+      } else if (this._voiceEnabled && this._voiceWake?.running) {
+        // Gate on the user's intent as well: `running` alone stays true
+        // while a listener the user just switched OFF is still dying,
+        // and latching the suspend flag for it made the next show
+        // restart it.
         this._voiceWakeSuspendedByHide = true;
         void this._voiceWake.stop();
       }
+      // audit0903-coverage:end
     });
     this._viewSubs.push(visibilitySub);
 
@@ -717,7 +733,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           this._webviewHasFocus = false;
           setWebviewNotificationPoster(undefined);
           this._voiceWakeSuspendedByHide = false;
+          // Voice stays off until the next webview toggles it back on:
+          // without this a fresh webview's first voiceSensitivity would
+          // start the microphone before any voiceToggle.
+          // audit0903-coverage:start
+          this._voiceEnabled = false;
           void this._voiceWake?.stop();
+          // audit0903-coverage:end
         }
         this._resolveAllWorktreeActions();
       }),
@@ -1244,9 +1266,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (typeof message.sensitivity === 'number') {
           this._voiceSensitivity = message.sensitivity;
         }
+        // audit0903-coverage:start
         this._voiceWakeSuspendedByHide = false;
-        if (message.enabled) this._voiceWake.start(this._voiceSensitivity);
+        this._voiceEnabled = !!message.enabled;
+        if (this._voiceEnabled) this._voiceWake.start(this._voiceSensitivity);
         else void this._voiceWake.stop();
+        // audit0903-coverage:end
         break;
       }
 
@@ -1270,9 +1295,20 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'voiceSensitivity': {
         // audit0902-coverage:start
+        // audit0903-coverage:start
         if (typeof message.value !== 'number') break;
         this._voiceSensitivity = message.value;
-        if (this._voiceWake?.running) {
+        // Restart only when the user wants voice on AND the view is not
+        // hidden.  The gate is _voiceEnabled, not _voiceWake.running: a
+        // listener the user just switched off still counts as running
+        // while it dies, and a running check here restarted it.  While
+        // suspended by hide the value is only recorded; the show handler
+        // starts the listener with it.
+        if (
+          this._voiceWake &&
+          this._voiceEnabled &&
+          !this._voiceWakeSuspendedByHide
+        ) {
           // Restart the listener with the new sensitivity.  stop() is
           // asynchronous (on exclusive-capture audio backends the old
           // process holds the microphone until it has exited) and the
@@ -1287,6 +1323,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           void this._voiceWake.stop();
           this._voiceWake.start(this._voiceSensitivity);
         }
+        // audit0903-coverage:end
         // audit0902-coverage:end
         break;
       }
@@ -1692,7 +1729,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._view = undefined;
     setWebviewNotificationPoster(undefined);
     this._voiceWakeSuspendedByHide = false;
+    // audit0903-coverage:start
+    this._voiceEnabled = false;
     this._voiceWake?.dispose();
+    // audit0903-coverage:end
     this._voiceWake = undefined;
     if (this._urlFileWatchTimer) {
       clearInterval(this._urlFileWatchTimer);

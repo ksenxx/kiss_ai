@@ -472,15 +472,6 @@
     "emb": false,
     "gen": true
   },
-  "codex/gpt-5.2": {
-    "context_length": 400000,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "comment": "NEW"
-  },
   "codex/gpt-5.4": {
     "context_length": 500000,
     "input_price_per_1M": 0.0,
@@ -533,24 +524,6 @@
     "comment": "NEW"
   },
   "codex/gpt-6-astra": {
-    "context_length": 400000,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "comment": "NEW"
-  },
-  "codex/gpt-daybreak-blue-latest": {
-    "context_length": 400000,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "comment": "NEW"
-  },
-  "codex/gpt-daybreak-red-latest": {
     "context_length": 400000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,

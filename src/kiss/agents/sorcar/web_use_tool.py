@@ -227,6 +227,29 @@ def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
     )
 
 
+def _killable_live_pid(pid: int | None) -> bool:
+    """Return whether *pid* names a live process a watchdog may target.
+
+    The shared arming guard of the graceful-close watchdog
+    (:meth:`WebUseTool._close_browser_only`) and the raw-input watchdog
+    (:meth:`WebUseTool._input_hang_watchdog`); the two previously
+    duplicated it inverted, a drift hazard for a predicate whose
+    failure mode is signalling the wrong process.  Refuses ``None``
+    and non-positive pids (``0``/negatives address process groups) and
+    this process's own pid, and requires the process to still exist.
+
+    Args:
+        pid: The recorded browser pid, or ``None`` when none was
+            captured.
+
+    Returns:
+        True when a watchdog may be armed against *pid*.
+    """
+    return (
+        pid is not None and pid > 0 and pid != os.getpid() and _pid_alive(pid)
+    )
+
+
 def _watchdog_kill(
     pid: int,
     identity: str | None,
@@ -503,12 +526,8 @@ class WebUseTool:
         identity = self._browser_identity
         watchdog: threading.Timer | None = None
         if (
-            (self._context is not None or self._browser is not None)
-            and pid is not None
-            and pid > 0
-            and pid != os.getpid()
-            and _pid_alive(pid)
-        ):
+            self._context is not None or self._browser is not None
+        ) and _killable_live_pid(pid):
             watchdog = threading.Timer(
                 _CLOSE_WATCHDOG_SECS, _watchdog_kill, args=(pid, identity),
             )
@@ -895,7 +914,7 @@ class WebUseTool:
         """
         pid = self._browser_pid
         identity = self._browser_identity
-        if pid is None or pid <= 0 or pid == os.getpid() or not _pid_alive(pid):
+        if not _killable_live_pid(pid):
             return nullcontext()
         timer = threading.Timer(
             deadline_secs,

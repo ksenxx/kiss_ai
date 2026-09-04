@@ -11,6 +11,7 @@ import logging
 import os
 import platform
 import socket
+import threading
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -221,6 +222,25 @@ class RelentlessAgent(Base):
 
     work_dir: str = ""
 
+    def __init__(self, name: str) -> None:
+        """Initialize the agent and its usage-counter lock.
+
+        Args:
+            name: The name identifier for the agent.
+        """
+        super().__init__(name)
+        # Serializes every read-modify-write of the cumulative usage
+        # counters (``budget_used``, ``total_tokens_used``,
+        # ``total_steps``).  The writers run on different threads of
+        # the SAME agent: the agent thread (:meth:`_accumulate_usage`
+        # at session end, ``_attribute_sub_usage`` when a fan-out or a
+        # ``talk`` synthesis banks its spend) and server threads
+        # (``reclaim_abandoned_subagents`` from worktree cleanup /
+        # teardown / discard).  Without one lock over all of them, two
+        # concurrent read-modify-writes interleave and one side's
+        # increment silently vanishes from the task's accounting.
+        self._usage_lock: threading.Lock = threading.Lock()
+
     def _reset(
         self,
         model_name: str | None,
@@ -262,10 +282,18 @@ class RelentlessAgent(Base):
         self.set_printer(printer, verbose=verbose)
 
     def _accumulate_usage(self, agent: Base) -> None:
-        """Fold a sub-agent's budget, tokens and steps into the running totals."""
-        self.budget_used += agent.budget_used
-        self.total_tokens_used += agent.total_tokens_used
-        self.total_steps += agent.step_count
+        """Fold a sub-agent's budget, tokens and steps into the running totals.
+
+        Held under ``_usage_lock``: a server-thread reclaim
+        (``reclaim_abandoned_subagents``) can bank an abandoned child's
+        spend into the same counters while a session ends on the agent
+        thread, and an unserialized read-modify-write would lose one
+        side's increment.
+        """
+        with self._usage_lock:
+            self.budget_used += agent.budget_used
+            self.total_tokens_used += agent.total_tokens_used
+            self.total_steps += agent.step_count
 
     def _check_total_budget(self) -> None:
         """Raise :class:`KISSError` when the task's cumulative spend exceeds max_budget.

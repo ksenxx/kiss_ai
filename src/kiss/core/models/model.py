@@ -22,7 +22,6 @@ import mimetypes
 import os
 import queue
 import re
-import select
 import subprocess
 import threading
 import time
@@ -1661,12 +1660,22 @@ class _CLIProcess:
         caller from the child's exit status.
 
         The pipe is written through its raw descriptor in non-blocking
-        mode, one ``select``-guarded ``os.write`` at a time, re-checking
-        the cancel flag, the child's exit and the turn deadline between
-        writes.  A blocking buffered ``write()`` could be cancelled by
-        nothing short of the reader going away — and a grandchild that
-        inherited the pipe never reads it — which pinned this thread and
-        the descriptor for as long as that grandchild lived.
+        mode, one ``os.write`` at a time, re-checking the cancel flag,
+        the child's exit and the turn deadline between writes.  A
+        blocking buffered ``write()`` could be cancelled by nothing
+        short of the reader going away — and a grandchild that inherited
+        the pipe never reads it — which pinned this thread and the
+        descriptor for as long as that grandchild lived.  NO ``select``
+        readiness API guards the writes: ``select.select`` raises
+        ``ValueError`` for any descriptor >= ``FD_SETSIZE`` (1024),
+        which a long-running daemon with many concurrent tasks exceeds
+        routinely, and ``select.poll`` does not exist on native Windows
+        — either failure mode ends with the "child exited" handler below
+        (or the thread dying outside it) silently sending the child an
+        empty prompt.  Instead, a full pipe surfaces as
+        ``BlockingIOError`` (or, on Windows pipes, a zero-byte write),
+        and the writer waits up to :data:`_STOP_POLL_SECONDS` on the
+        cancel event — waking early on cancellation — before retrying.
         """
         stdin = self._proc.stdin
         assert stdin is not None
@@ -1681,16 +1690,20 @@ class _CLIProcess:
                     or time.monotonic() >= self._deadline
                 ):
                     break
-                if not select.select([], [fd], [], _STOP_POLL_SECONDS)[1]:
-                    continue
                 try:
-                    view = view[os.write(fd, view) :]
-                except BlockingIOError:  # pragma: no cover
-                    # Not reachable on Linux/macOS: the kernel reports the
-                    # pipe writable only when at least one byte fits, and
-                    # nothing else writes to it.  Kept so an EAGAIN could
-                    # never be mistaken for the "child exited" OSError.
+                    written = os.write(fd, view)
+                except BlockingIOError:
+                    self._writer_cancel.wait(_STOP_POLL_SECONDS)
                     continue
+                if written == 0:  # pragma: no cover
+                    # Not reachable on POSIX: a non-blocking pipe write
+                    # either transfers at least one byte or raises
+                    # BlockingIOError.  Windows pipes can report a full
+                    # buffer as a zero-byte write instead; treat it the
+                    # same so the loop never spins hot or stalls.
+                    self._writer_cancel.wait(_STOP_POLL_SECONDS)
+                    continue
+                view = view[written:]
         except (OSError, ValueError):
             logger.debug("%s exited before reading its prompt", self._label)
         finally:

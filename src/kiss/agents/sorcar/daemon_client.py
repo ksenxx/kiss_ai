@@ -72,9 +72,12 @@ class StopUnconfirmedTimeoutError(TimeoutError):
     task's terminal ``status running=false`` expires without an
     answer: the ``stop`` was sent, but the daemon never confirmed the
     task is dead, so the stop stays best-effort and the task may still
-    be running (and spending) on the daemon.  Callers that report the
-    timeout onward — the ``run_agent`` dispatch — must not claim the
-    task was stopped.
+    be running (and spending) on the daemon.  Raised even when a
+    SUCCESSFUL ``result`` event was received — the result is emitted
+    before the daemon's persistence/auto-commit/cleanup stages, so
+    without the terminal status the task may still be touching the
+    workspace.  Callers that report the timeout onward — the
+    ``run_agent`` dispatch — must not claim the task was stopped.
     """
 
 _NO_DEADLINE_WAKE_SECONDS = 10.0
@@ -289,6 +292,49 @@ def resolve_agent_path(agent_path: str | None) -> str:
         "agent_path must be a string path to a Python file, got {type}: {value}",
         "agent script",
         allow_path=False,
+    )
+
+
+def _frame_limit_error() -> ConnectionError:
+    """Return the error for a daemon frame exceeding the client cap.
+
+    Shared by :func:`run`'s two detection sites — the no-newline
+    accumulation check and the extracted-line length check — so the
+    two cannot drift apart.  Reads :data:`_MAX_LINE_BYTES` at call
+    time (tests shrink it).
+    """
+    return ConnectionError(
+        "The sorcar daemon sent an event frame larger "
+        f"than the {_MAX_LINE_BYTES}-byte client limit"
+    )
+
+
+def _send_stop(sock: socket.socket, tab_id: str, run_token: str) -> None:
+    """Send the daemon a run-token-guarded ``stop`` for *tab_id*.
+
+    Shared by :func:`run`'s stop-on-timeout path and the abort-cascade
+    in its ``finally`` block: both stops MUST carry the run token (so
+    the daemon's ``_stop_task`` guard rejects the stop when the tab
+    was reused by a newer run), and a drifted duplicate would desync
+    that guarantee.  The 5-second send bound keeps a wedged daemon
+    from blocking the caller.
+
+    Args:
+        sock: The connected daemon socket.
+        tab_id: The run's synthetic tab id.
+        run_token: The client-minted per-submission run token.
+
+    Raises:
+        OSError: When the stop could not be written to the socket
+            (including a send timeout).
+    """
+    sock.settimeout(5.0)
+    sock.sendall(
+        json.dumps({
+            "type": "stop",
+            "tabId": tab_id,
+            "taskId": run_token,
+        }).encode("utf-8") + b"\n",
     )
 
 
@@ -509,6 +555,19 @@ def run(
             process-global workspace reservation is released as soon
             as the call returns: a surviving sub-task could bind
             another account's credentials when its channel tools load.
+            When the task finished ON ITS OWN — a SUCCESSFUL terminal
+            ``result`` AND the terminal status raced the stop onto the
+            wire — the completed :class:`TaskResult` is returned
+            instead of a ``TimeoutError`` that would discard the
+            finished work (only natural completions carry ``success:
+            true``; every daemon stop/cancel/failure path broadcasts
+            ``success: false``).  A successful result WITHOUT the
+            terminal status never settles the wait: the daemon's
+            persistence / auto-commit / worktree cleanup still run
+            after the result is emitted, so only the terminal status
+            proves the task is dead, and the grace expiring with just
+            the result in hand raises
+            :class:`StopUnconfirmedTimeoutError` all the same.
         sock_path: Daemon UDS path override (defaults to
             ``$KISS_SORCAR_SOCK`` or ``$KISS_HOME/sorcar.sock``).
 
@@ -631,10 +690,7 @@ def run(
                     # discard a possibly terminal ``result`` event and
                     # misreport the task as failed — fail loudly
                     # instead.
-                    raise ConnectionError(
-                        "The sorcar daemon sent an event frame larger "
-                        f"than the {_MAX_LINE_BYTES}-byte client limit"
-                    )
+                    raise _frame_limit_error()
                 if deadline is None:
                     # No deadline: wake periodically so an injected
                     # abort (see _NO_DEADLINE_WAKE_SECONDS) can be
@@ -656,14 +712,7 @@ def run(
                                 + _STOP_CONFIRM_GRACE_SECONDS
                             )
                             try:
-                                sock.settimeout(5.0)
-                                sock.sendall(
-                                    json.dumps({
-                                        "type": "stop",
-                                        "tabId": tab_id,
-                                        "taskId": run_token,
-                                    }).encode("utf-8") + b"\n",
-                                )
+                                _send_stop(sock, tab_id, run_token)
                             except OSError as send_exc:
                                 # The stop could not even be sent, so
                                 # the task was neither stopped nor
@@ -684,7 +733,22 @@ def run(
                             # terminal status: the stop was sent but
                             # never answered, so the task may still be
                             # running — the caller must not be told it
-                            # was stopped.
+                            # was stopped.  Even a stored SUCCESSFUL
+                            # result is no proof the task is dead: the
+                            # agent emits it BEFORE the daemon's
+                            # persistence / auto-commit / worktree
+                            # cleanup stages run, and a stop can still
+                            # take effect during those stages, so
+                            # returning the result here would let the
+                            # caller (``run_agent``) release its
+                            # workspace reservation while the task is
+                            # still touching the workspace.  Only the
+                            # terminal ``status running=false`` —
+                            # broadcast by the outermost ``finally`` of
+                            # ``task_runner._run_task`` — proves the
+                            # task thread exited (see the
+                            # terminal-status branch below, the one
+                            # place a stored result may be returned).
                             raise StopUnconfirmedTimeoutError(timeout_msg)
                         raise TimeoutError(timeout_msg)
                     sock.settimeout(remaining)
@@ -710,10 +774,7 @@ def run(
                 # never saw the overflow — the frame (newline included,
                 # length ``newline_at + 1``) is over the limit all the
                 # same.
-                raise ConnectionError(
-                    "The sorcar daemon sent an event frame larger "
-                    f"than the {_MAX_LINE_BYTES}-byte client limit"
-                )
+                raise _frame_limit_error()
             line = bytes(recv_buf[: newline_at + 1])
             del recv_buf[: newline_at + 1]
             scanned = 0
@@ -734,6 +795,21 @@ def run(
                 if event.get("running"):
                     started = True
                 elif stopping:
+                    if result_event is not None and result_event.get("success"):
+                        # The task finished ON ITS OWN while the client
+                        # was declaring the timeout: its successful
+                        # result and terminal status were already on
+                        # the wire when the stop was sent (the daemon's
+                        # run-token-guarded stop is a no-op for a
+                        # finished run).  Every daemon-side stop /
+                        # cancel / failure path broadcasts its terminal
+                        # ``result`` with ``success: false``
+                        # (``task_runner._broadcast_failure_result``),
+                        # so a successful result can only be a natural
+                        # completion — return it instead of discarding
+                        # the completed work behind a ``TimeoutError``
+                        # that falsely claims the task "was stopped".
+                        return _to_task_result(result_event, chat_id, task_id)
                     # The terminal status confirms the
                     # stopped-on-timeout task is dead; the run still
                     # timed out.  ``started`` is deliberately not
@@ -768,14 +844,7 @@ def run(
             # rejects the stop if the tab was already reused by a
             # newer run (see ``_stop_task``'s run_token guard).
             try:
-                sock.settimeout(5.0)
-                sock.sendall(
-                    json.dumps({
-                        "type": "stop",
-                        "tabId": tab_id,
-                        "taskId": run_token,
-                    }).encode("utf-8") + b"\n",
-                )
+                _send_stop(sock, tab_id, run_token)
             except OSError:
                 pass
         # The synthetic tab is this client's alone, and a disconnect no

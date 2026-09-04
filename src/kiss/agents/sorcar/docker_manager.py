@@ -21,6 +21,7 @@ from typing import Any
 import docker
 from docker.models.containers import Container  # type: ignore[assignment]
 
+from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.useful_tools import _truncate_output
 from kiss.core.kiss_error import KISSError
 
@@ -254,13 +255,25 @@ class DockerManager:
         Returns:
             The output of the command, including stdout, stderr, and exit code
         """
-        if self.container is None:  # pragma: no branch
+        # ONE snapshot of the container reference: ``close()`` (under
+        # the lifecycle lock, which command paths deliberately do not
+        # take — a running command must not block a teardown) nulls
+        # ``self.container``, and a second read after the guard below
+        # turned the orderly KISSError refusal into an AttributeError.
+        container = self.container
+        if container is None:
             raise KISSError("No container is open. Please call open() first.")
+        # Test hook (no-op in production): widens the window between
+        # the guard above and the uses of the snapshot below so the
+        # close() race is deterministic under KISS_RACE_DELAY.
+        _race_delay()
 
         print(f"{description}")
 
         if self.stream_callback:
-            return self._bash_streaming(command, timeout_seconds, max_output_chars)
+            return self._bash_streaming(
+                container, command, timeout_seconds, max_output_chars,
+            )
 
         result_holder: dict[str, Any] = {}
         error_holder: dict[str, BaseException] = {}
@@ -282,27 +295,21 @@ class DockerManager:
         # ``exec_start`` at all, or the caller sees the commitment and
         # hands the exec to a reaper that kills it once it has started.
         token = uuid.uuid4().hex
-        container_id = self.container.id
+        container_id = container.id
         state_lock = threading.Lock()
         state = {"cancelled": False, "start_committed": False}
 
         def run_exec() -> None:
             try:
-                resp = self.client.api.exec_create(
-                    container_id,
-                    f"/bin/bash -c {shlex.quote(command)}",
-                    stdout=True,
-                    stderr=True,
-                    workdir=self.workdir,
-                    environment={_EXEC_TOKEN_VAR: token},
+                result_holder["exec_id"] = self._tagged_exec_create(
+                    container_id, command, token,
                 )
-                result_holder["exec_id"] = resp["Id"]
                 with state_lock:
                     if state["cancelled"]:
                         return
                     state["start_committed"] = True
                 result_holder["output"] = self.client.api.exec_start(
-                    resp["Id"], demux=True,
+                    result_holder["exec_id"], demux=True,
                 )
             except BaseException as exc:
                 error_holder["error"] = exc
@@ -338,8 +345,42 @@ class DockerManager:
             _with_exit_code(output, exit_code), max_output_chars,
         )
 
+    def _tagged_exec_create(
+        self, container_id: str | None, command: str, token: str,
+    ) -> str:
+        """Create a token-tagged bash exec and return its id.
+
+        Single builder for both :meth:`Bash` paths so the exec options
+        (shell wrapping, captured streams, ``workdir``, the
+        :data:`_EXEC_TOKEN_VAR` tag that :meth:`_kill_exec` matches on)
+        cannot drift between them.
+
+        Args:
+            container_id: Id of the container to run the exec in
+                (``Container.id`` is typed optional; docker-py resolves
+                it exactly as before this helper existed).
+            command: The bash command to execute.
+            token: The unique tag to plant in the exec's environment.
+
+        Returns:
+            The docker exec id.
+        """
+        resp = self.client.api.exec_create(
+            container_id,
+            f"/bin/bash -c {shlex.quote(command)}",
+            stdout=True,
+            stderr=True,
+            workdir=self.workdir,
+            environment={_EXEC_TOKEN_VAR: token},
+        )
+        return str(resp["Id"])
+
     def _bash_streaming(
-        self, command: str, timeout_seconds: float, max_output_chars: int,
+        self,
+        container: Container,
+        command: str,
+        timeout_seconds: float,
+        max_output_chars: int,
     ) -> str:
         """Run *command*, streaming its output, and return the full result.
 
@@ -349,6 +390,10 @@ class DockerManager:
         task via thread-local state.
 
         Args:
+            container: The caller's snapshot of the open container —
+                passed in (not re-read from ``self.container``) so a
+                concurrent ``close()`` cannot null the attribute
+                between :meth:`Bash`'s guard and this method's use.
             command: The bash command to execute.
             timeout_seconds: Maximum time to wait before treating the
                 command as hung; the container-side process is killed.
@@ -357,18 +402,9 @@ class DockerManager:
         Returns:
             The command's output, or the timeout error.
         """
-        assert self.container is not None
         assert self.stream_callback is not None
         token = uuid.uuid4().hex
-        exec_resp = self.client.api.exec_create(
-            self.container.id,
-            f"/bin/bash -c {shlex.quote(command)}",
-            stdout=True,
-            stderr=True,
-            workdir=self.workdir,
-            environment={_EXEC_TOKEN_VAR: token},
-        )
-        exec_id = exec_resp["Id"]
+        exec_id = self._tagged_exec_create(container.id, command, token)
         output_gen = self.client.api.exec_start(exec_id, stream=True, demux=True)
         out_queue: queue.Queue[tuple[bool, str] | None] = queue.Queue()
         threading.Thread(
@@ -456,7 +492,14 @@ class DockerManager:
         Args:
             token: The unique tag given to the exec's environment.
         """
-        assert self.container is not None
+        # Snapshot: the reaper's poll loop and the streaming timeout
+        # path both call this without the lifecycle lock, so a
+        # concurrent close() can null ``self.container`` after their
+        # own liveness checks.  A closed container took the tagged
+        # process tree with it — nothing is left to kill.
+        container = self.container
+        if container is None:
+            return
         script = (
             "for d in /proc/[0-9]*; do\n"
             '  env=$(tr "\\0" "\\n" < "$d/environ" 2>/dev/null)\n'
@@ -466,7 +509,7 @@ class DockerManager:
             "done"
         )
         try:
-            self.container.exec_run(["/bin/sh", "-c", script])
+            container.exec_run(["/bin/sh", "-c", script])
         except Exception:  # pragma: no cover — container already gone
             logger.debug("could not kill timed-out exec", exc_info=True)
 
@@ -479,13 +522,18 @@ class DockerManager:
         Returns:
             The host port mapped to the container port, or None if not mapped.
         """
-        if self.container is None:  # pragma: no branch
+        # One snapshot, same reason as in Bash: a concurrent close()
+        # nulling ``self.container`` between the guard and the reload
+        # must yield the KISSError refusal, never an AttributeError.
+        container = self.container
+        if container is None:
             raise KISSError("No container is open. Please call open() first.")
+        _race_delay()  # test hook: widens the guard-to-use window
 
-        self.container.reload()
-        port_bindings = self.container.attrs.get("NetworkSettings", {}).get("Ports", {})
+        container.reload()
+        port_bindings = container.attrs.get("NetworkSettings", {}).get("Ports", {})
         port_key = f"{container_port}/tcp"
-        if port_key in port_bindings and port_bindings[port_key]:  # pragma: no branch
+        if port_key in port_bindings and port_bindings[port_key]:
             return int(port_bindings[port_key][0]["HostPort"])
         return None
 

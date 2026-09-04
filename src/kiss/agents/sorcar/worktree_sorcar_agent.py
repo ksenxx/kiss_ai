@@ -1506,35 +1506,22 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
 
         self._flush_warnings(printer)
-        if wt_work_dir is None:
-            try:
-                return super().run(
-                    prompt_template=prompt_template, **kwargs
+        if wt_work_dir is not None:
+            if printer and hasattr(printer, "broadcast"):
+                printer.broadcast(
+                    {
+                        "type": "worktree_created",
+                        "worktreeDir": str(self._wt_dir),
+                        "worktreeWorkDir": str(wt_work_dir),
+                        "branch": self._wt_branch,
+                    }
                 )
-            except KISSError:
-                raise
-            except Exception as exc:
-                return str(
-                    yaml.dump(
-                        {
-                            "success": False,
-                            "summary": f"Task failed with error: {exc}",
-                        }
-                    )
-                )
+            kwargs["work_dir"] = str(wt_work_dir)
 
-        if printer and hasattr(printer, "broadcast"):
-            printer.broadcast(
-                {
-                    "type": "worktree_created",
-                    "worktreeDir": str(self._wt_dir),
-                    "worktreeWorkDir": str(wt_work_dir),
-                    "branch": self._wt_branch,
-                }
-            )
-
-        kwargs["work_dir"] = str(wt_work_dir)
-
+        # ONE wrapping block for both the worktree path and the direct
+        # fallback: the two paths used to carry byte-identical copies,
+        # and duplicated wrapping logic drifts (a fix landing in one
+        # copy silently misses the other).
         try:
             return super().run(prompt_template=prompt_template, **kwargs)
         except KISSError:

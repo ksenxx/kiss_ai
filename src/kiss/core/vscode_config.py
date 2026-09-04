@@ -880,30 +880,42 @@ def load_api_keys() -> None:
     ``api_keys.systemd.env`` mirror of an old deploy is retired here
     too: a code-only upgrade (``git pull`` + service restart, no fresh
     deploy and no settings change) must also converge on one key file.
+
+    The snapshot (reading the store), the ``os.environ`` import, and
+    ``_refresh_config()`` all run under :data:`_config_lock` — the same
+    lock :func:`save_api_key` holds for its file → environment → config
+    critical section.  Without it, a save completing between this
+    function's file read and its environment import was silently
+    reverted: the store kept the new value while ``os.environ`` and
+    ``DEFAULT_CONFIG`` were overwritten with the stale snapshot (and a
+    just-deleted key was resurrected).  The lock must span the snapshot
+    itself, not just the import: a snapshot taken before the save but
+    applied after it is exactly the lost update.
     """
     _migrate_legacy_rc_keys()
     _remove_systemd_mirror()
-    env_path = api_keys_env_path()
-    try:
-        text = env_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        text = ""
-    except OSError:
-        logger.warning("Failed to read %s", env_path, exc_info=True)
-        text = ""
-    for line in text.splitlines():
-        parsed = _parse_env_assignment(line)
-        if parsed is None:
-            continue
+    with _config_lock:
+        env_path = api_keys_env_path()
         try:
-            os.environ[parsed[0]] = parsed[1]
-        except ValueError:
-            # A hand-edited (or historically poisoned) line whose value
-            # embeds a NUL: os.environ refuses it.  One junk line must
-            # not abort daemon startup and drop every following key.
-            logger.warning("Skipping unusable %s line for %s",
-                           env_path.name, parsed[0])
-    _refresh_config()
+            text = env_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = ""
+        except OSError:
+            logger.warning("Failed to read %s", env_path, exc_info=True)
+            text = ""
+        for line in text.splitlines():
+            parsed = _parse_env_assignment(line)
+            if parsed is None:
+                continue
+            try:
+                os.environ[parsed[0]] = parsed[1]
+            except ValueError:
+                # A hand-edited (or historically poisoned) line whose value
+                # embeds a NUL: os.environ refuses it.  One junk line must
+                # not abort daemon startup and drop every following key.
+                logger.warning("Skipping unusable %s line for %s",
+                               env_path.name, parsed[0])
+        _refresh_config()
 
 
 _MIGRATION_TIMEOUT_S = 5.0

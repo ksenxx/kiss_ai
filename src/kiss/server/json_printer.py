@@ -1104,6 +1104,28 @@ class JsonPrinter(Printer):
         with self._lock:
             self._recordings[key] = []
 
+    def ensure_recording_for_task(self, task_id: Any) -> None:
+        """Make sure an event recording exists for *task_id*.
+
+        Unlike :meth:`start_recording` this is keyed explicitly (no
+        thread-local binding needed) and never clears an existing
+        recording.  Used by the task runner for a run that fails in
+        SETUP — before ``ChatSorcarAgent.run`` ever started the run's
+        recording — so its terminal ``result`` can be recorded under
+        the run's (possibly provisional) task id and replayed to a
+        viewer that attached inside the end-of-run race window
+        (audit0903 F4).
+
+        Args:
+            task_id: The task identifier (``task_history.id`` int, its
+                string form, or a provisional client/registry id).
+        """
+        key = self._coerce_task_id(task_id)
+        if not key:
+            return
+        with self._lock:
+            self._recordings.setdefault(key, [])
+
     @staticmethod
     def _filter_and_coalesce(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Filter to display events and merge consecutive deltas.

@@ -89,6 +89,55 @@ def inject_keyboard_interrupt(tid: int) -> int:
     return rc
 
 
+def wait_for_thread_start(
+    thread: threading.Thread,
+    still_owns: Callable[[], bool] | None = None,
+    deadline: float | None = None,
+) -> bool:
+    """Wait until *thread* has actually started, or ownership is lost.
+
+    ``Thread.join`` raises ``RuntimeError`` on a thread that has not
+    started, and ``_cmd_run`` keeps a registered worker unstarted
+    while it writes the tab registry and broadcasts ``clear``.  Both
+    stop enforcers — the Stop watchdog (:meth:`_force_stop_thread`)
+    and the graceful-shutdown sweep
+    (``RemoteAccessServer._stop_active_agent_tasks``) — wait through
+    this shared primitive before joining or injecting (audit0903 F1).
+
+    With ``_cmd_run``'s start/cancel handshake, a run whose stop or
+    shutdown was flagged before its atomic pre-start check never
+    starts at all: it is routed through terminal cancellation, whose
+    cleanup clears ``state.task_thread`` — dropping ownership and
+    ending this wait.
+
+    Args:
+        thread: The worker thread captured at stop/shutdown time.
+        still_owns: Ownership guard evaluated under
+            :data:`agent_state.STATE_LOCK` while waiting; ``False``
+            ends the wait (the run was pre-cancelled, finished or
+            replaced).
+        deadline: Optional ``time.monotonic()`` deadline after which
+            the wait gives up.  With the handshake in place the
+            give-up is harmless: an accepted stop is still honored by
+            ``_cmd_run`` itself, which never starts the thread.
+
+    Returns:
+        ``True`` when the thread started; ``False`` when ownership
+        dropped or *deadline* passed first.
+    """
+    while thread.ident is None:
+        if still_owns is not None:
+            with agent_state.STATE_LOCK:
+                if not still_owns():
+                    return False
+        if (
+            deadline is not None and time.monotonic() > deadline
+        ):  # pragma: no cover — reachable only by stalling start() past the deadline
+            return False
+        time.sleep(0.01)
+    return True
+
+
 def _state_owns_thread(
     state: AgentState,
     thread: threading.Thread,
@@ -127,6 +176,56 @@ def _state_owns_thread(
         and current.task_thread is thread
         and not current.stop_acknowledged
     )
+
+
+def _stop_interrupt_wrapped(exc: BaseException, state: AgentState) -> bool:
+    """True when *exc* wraps the run-cancelling ``KeyboardInterrupt``.
+
+    The untrusted-code loaders (:func:`apply_agent_overrides`,
+    :func:`load_tools_file`) execute caller-supplied Python on the
+    task thread and convert EVERY raise — ``BaseException`` included —
+    into their diagnostic error type.  The asynchronous
+    ``KeyboardInterrupt`` the Stop watchdog (or the shutdown path)
+    injects while such a getter runs therefore surfaced as an
+    ``AgentFileError``/``ToolsFileError``: the run was reported
+    ``"Task failed: ... KeyboardInterrupt"`` instead of stopped, and
+    with :meth:`_TaskRunnerMixin._cancel_outcome` never called the
+    stop stayed unacknowledged, so the watchdog's retry could land a
+    second interrupt in the result broadcasting.
+
+    A cancellation is recognised by BOTH halves, so neither kind of
+    event is mislabelled:
+
+    * a stop was actually requested on *state* — its stop event is
+      set, or the shutdown flag is raised — AND
+    * a ``KeyboardInterrupt`` sits in *exc*'s cause/context chain.
+
+    A user script that raises ``KeyboardInterrupt`` on its own, with
+    no stop pending, stays a task error (the loaders' documented
+    contract); a script failure that merely coincides with a pending
+    stop is reported as the stop the user asked for.
+
+    Args:
+        exc: The exception a run step raised.
+        state: The run's registered agent state.
+
+    Returns:
+        ``True`` when the run should be treated as cancelled.
+    """
+    with agent_state.STATE_LOCK:
+        stop_requested = state.interrupted_by_shutdown or (
+            state.stop_event is not None and state.stop_event.is_set()
+        )
+    if not stop_requested:
+        return False
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        if isinstance(cur, KeyboardInterrupt):
+            return True
+        seen.add(id(cur))
+        cur = cur.__cause__ or cur.__context__
+    return False
 
 
 def build_task_extra_payload(
@@ -551,6 +650,16 @@ class _TaskRunnerMixin:
         state: AgentState | None = None
         client_task_id = ""
         try:
+            if cmd.pop("_pre_cancelled", False):
+                # ``_cmd_run`` observed an accepted stop / shutdown
+                # sweep before ``thread.start()`` (audit0903 F1/F2):
+                # the worker thread was never started, and this call
+                # runs on the dispatch thread purely to route the run
+                # through the normal cancellation handlers below — no
+                # user setup (agent-script getters, tools files) may
+                # execute.
+                client_task_id = _client_task_id_of(cmd)
+                raise KeyboardInterrupt("run cancelled before start")
             # Agent-script overrides (wire field ``agentPath``) rewrite the
             # run command's parameter fields, so they run FIRST — before
             # any field is read, including the ``chatId`` that
@@ -636,18 +745,27 @@ class _TaskRunnerMixin:
                 raise agent_file_error
             self._run_task_inner(cmd)
         except BaseException as exc:
-            if isinstance(exc, KeyboardInterrupt):
+            if state is None:
+                # The raise landed before the state resolution in the
+                # try (an interrupt in the override step); resolving is
+                # idempotent for a registered run.
+                with suppress(BaseException):
+                    state = self._resolve_run_state(cmd)
+            if state is not None and (
+                isinstance(exc, KeyboardInterrupt)
+                or _stop_interrupt_wrapped(exc, state)
+            ):
                 # A cancellation that landed before ``_run_task_inner``'s
-                # own handlers (setup, or the inner prologue).  It goes
+                # own handlers (setup, or the inner prologue) — as the
+                # bare ``KeyboardInterrupt``, or wrapped into the
+                # agent-script loader's ``AgentFileError`` when the
+                # injection hit inside a getter.  It goes
                 # through the SAME helper as the inner sites, FIRST:
                 # ``_cancel_outcome`` acknowledges the stop, and until
                 # it has, the Stop watchdog keeps re-injecting into
                 # whatever this thread does next — including the
                 # logging and broadcasting below, which can block.  It
-                # also labels a shutdown as a shutdown.  The state may
-                # still be unresolved (interrupt in the override step);
-                # resolving is idempotent for a registered run.
-                state = self._resolve_run_state(cmd)
+                # also labels a shutdown as a shutdown.
                 setup_fail_text, _ = self._cancel_outcome(state)
                 logger.info(
                     "%s during setup: tab_id=%s", setup_fail_text, tab_id,
@@ -660,17 +778,40 @@ class _TaskRunnerMixin:
                     exc_info=True,
                 )
                 setup_fail_text = f"Task failed: {type(exc).__name__}: {exc}"
-            self.printer.broadcast(
-                {
-                    "type": "result",
-                    "text": setup_fail_text,
-                    "success": False,
-                    "total_tokens": 0,
-                    "cost": "$0.0000",
-                    "step_count": 0,
-                    "tabId": tab_id,
-                }
-            )
+            setup_result: dict[str, Any] = {
+                "type": "result",
+                "text": setup_fail_text,
+                "success": False,
+                "total_tokens": 0,
+                "cost": "$0.0000",
+                "step_count": 0,
+                "tabId": tab_id,
+            }
+            # pragma-no-branch: the false arm needs a state that is
+            # still ``None`` here — ``_resolve_run_state`` above
+            # registers one whenever it is missing and only fails if
+            # the registry itself is broken — or an ``AgentState``
+            # with an empty ``task_id``, which the constructor cannot
+            # produce through ``_cmd_run``/``_resolve_run_state``.
+            if state is not None and state.task_id:  # pragma: no branch
+                # Record the early failure under the run's (possibly
+                # provisional) task id: the run died before
+                # ``ChatSorcarAgent.run`` started its recording, and a
+                # tabId-only result is transport-only — a viewer that
+                # attached inside the end-of-run race window would
+                # receive only status booleans and an empty transcript
+                # (audit0903 F4).  The recording is dropped after the
+                # same linger the subscriber map gets.
+                setup_result["taskId"] = state.task_id
+                self.printer.ensure_recording_for_task(state.task_id)
+                cleanup_timer = threading.Timer(
+                    300.0,
+                    self.printer.cleanup_task,
+                    args=(state.task_id,),
+                )
+                cleanup_timer.daemon = True
+                cleanup_timer.start()
+            self.printer.broadcast(setup_result)
         finally:
             if state is None:
                 # The interrupt (or an override crash) landed before
@@ -787,6 +928,14 @@ class _TaskRunnerMixin:
         for viewer_tab_id in self.printer._fanout_targets(task_id):
             if viewer_tab_id == launcher_tab_id:
                 continue
+            # Guard AND broadcast under one ``_state_lock`` hold
+            # (audit0903 F3): with the lock released in between,
+            # ``_cmd_run`` could install a newer busy run on the
+            # viewer tab after the check passed and this unqualified
+            # ``running=False`` would kill that run's spinner.
+            # Serialized against the installation, the stale event is
+            # either suppressed here or provably precedes the newer
+            # run's own ``running=True``.
             with self._state_lock:
                 viewer_state = agent_state.find_by_tab(viewer_tab_id)
                 # ``busy()``, not ``is_task_active`` (C-RC1): the
@@ -801,15 +950,15 @@ class _TaskRunnerMixin:
                     and viewer_state.task_id != task_key
                 ):
                     continue
-            payload: dict[str, Any] = {
-                "type": "status",
-                "running": False,
-                "tabId": viewer_tab_id,
-            }
-            if client_task_id:
-                payload["taskId"] = client_task_id
-            self.printer.broadcast(payload)
-            self._restore_user_model_pick(viewer_tab_id)
+                payload: dict[str, Any] = {
+                    "type": "status",
+                    "running": False,
+                    "tabId": viewer_tab_id,
+                }
+                if client_task_id:
+                    payload["taskId"] = client_task_id
+                self.printer.broadcast(payload)
+                self._restore_user_model_pick(viewer_tab_id)
 
     def _broadcast_early_prompts(
         self,
@@ -1338,7 +1487,13 @@ class _TaskRunnerMixin:
                     )
         except BaseException as _outer_exc:
             if result_summary == "Agent Failed Abruptly":
-                if isinstance(_outer_exc, KeyboardInterrupt):
+                # ``_stop_interrupt_wrapped``: a stop injected while
+                # the tools-file loader ran caller code surfaces here
+                # as a ``ToolsFileError`` wrapping the interrupt — a
+                # cancellation, not a task error.
+                if isinstance(
+                    _outer_exc, KeyboardInterrupt,
+                ) or _stop_interrupt_wrapped(_outer_exc, state):
                     result_summary, _cancel_event = self._cancel_outcome(state)
                     task_end_event = task_end_event or _cancel_event
                 else:
@@ -1901,18 +2056,25 @@ class _TaskRunnerMixin:
                         # Token-qualified stops must never leak onto a
                         # different run through the subscriber map.
                         continue
-                    alive = (
-                        candidate.task_thread is not None
-                        and candidate.task_thread.is_alive()
-                    )
-                    if candidate.stop_event is not None or alive:
+                    if candidate.stop_event is not None or candidate.thread_alive():
                         owner_state = candidate
                         break
             stop_event = owner_state.stop_event if owner_state is not None else None
             task_thread = owner_state.task_thread if owner_state is not None else None
             owner_task_id = owner_state.task_id if owner_state is not None else ""
 
-        thread_alive = task_thread is not None and task_thread.is_alive()
+        # Ident-aware liveness, matching ``AgentState.thread_alive()``
+        # (S3-05 / C-R4): ``_cmd_run`` installs and registers the
+        # worker thread, then writes the tab registry and broadcasts
+        # ``clear`` BEFORE ``thread.start()``.  A stop processed in
+        # that window (daemon_client's stop-on-timeout / abort-cascade
+        # frames) used to see ``is_alive() == False`` and arm no
+        # watchdog — leaving nothing to enforce the stop against the
+        # run's untrusted setup code (agent-script getters, tools
+        # files), which never checks the cooperative event.
+        thread_alive = task_thread is not None and (
+            task_thread.ident is None or task_thread.is_alive()
+        )
         if stop_event is None and not thread_alive:
             # A stop the server cannot route used to vanish behind a
             # disabled logger.debug, so a mis-targeted click looked
@@ -2029,6 +2191,23 @@ class _TaskRunnerMixin:
                 lock when a run finishes, making the check+inject pair
                 race-free.
         """
+        # A stop can land between ``_cmd_run`` registering the worker
+        # thread and ``thread.start()`` (the registry disk write and
+        # the ``clear`` broadcast run in between).  ``Thread.join``
+        # raises on a thread that has not started, so the watchdog
+        # WAITS for the start instead of crashing (or, before the
+        # ident-aware ``_stop_task`` check, never being armed at all).
+        # Ownership is re-checked while waiting: ``_cmd_run``'s
+        # pre-start handshake routes a stopped run through terminal
+        # cancellation without starting it (clearing
+        # ``state.task_thread``), and a ``thread.start()`` that raised
+        # clears it too (``_cmd_run``'s except) — both drop ownership
+        # and end the wait.  The 30 s give-up is a backstop only: the
+        # handshake honors the accepted stop even when it fires.
+        if not wait_for_thread_start(
+            task_thread, still_owns, deadline=time.monotonic() + 30.0,
+        ):
+            return
         task_thread.join(timeout=1)
         for _ in range(2):  # pragma: no branch — thread always dies within 2 attempts
             if not task_thread.is_alive():

@@ -374,6 +374,13 @@ class VSCodeServer(
         persisted = _load_last_model()
         self._default_model = persisted or os.environ.get("KISS_MODEL", "") or get_default_model()
         self._state_lock = agent_state.STATE_LOCK
+        # Raised (under ``_state_lock``) by the graceful-shutdown
+        # sweep (``RemoteAccessServer._stop_active_agent_tasks``):
+        # from then on ``_cmd_run``'s pre-start handshake cancels new
+        # runs instead of starting their worker threads, so no run
+        # can start AFTER the sweep and execute untrusted setup with
+        # no watchdog (audit0903 F1).
+        self._shutdown_stopping: bool = False
         self._complete_seq: int = 0
         self._complete_seq_latest: dict[str, int] = {}
         self._complete_queue: (
@@ -1265,38 +1272,39 @@ class VSCodeServer(
             result = _load_latest_chat_events_by_chat_id(chat_id)
         if not result:
             self._printer_cleanup_tab(tab_id)
-            rebound_running = self._reattach_running_chat(
+            rebound_state = self._attach_viewer_to_running_chat(
                 chat_id,
                 tab_id,
                 task_id=task_id,
                 is_subagent=False,
             )
-            if rebound_running:
+            if rebound_state is not None:
                 start_ts = self._live_task_start_ms(task_id, chat_id)
-                self.printer.broadcast(
-                    {
-                        "type": "status",
-                        "running": True,
-                        "tabId": tab_id,
-                        "startTs": start_ts,
-                    }
+                self._broadcast_viewer_running(tab_id, rebound_state, start_ts)
+                # The task runs but has no history row yet: the live
+                # in-memory recording is the only copy of what it has
+                # already broadcast (the events table is written
+                # asynchronously).  Snapshot by the LIVE state's task
+                # id — the caller's *task_id* is None for a plain chat
+                # resume, and a pre-history-row run's recording (e.g.
+                # its setup-failure result) is keyed by the
+                # provisional id the state carries (audit0903 F4).
+                live_events = self.printer.peek_recording_for_task(
+                    rebound_state.task_id,
                 )
+                events_payload: dict[str, Any] = {
+                    "type": "task_events",
+                    "task": "",
+                    "task_id": task_id,
+                    "chat_id": chat_id,
+                    "extra": "",
+                    "tabId": tab_id,
+                }
                 self.printer.broadcast(
-                    {
-                        "type": "task_events",
-                        # The task runs but has no history row yet: the
-                        # live in-memory recording is the only copy of
-                        # what it has already broadcast (the events
-                        # table is written asynchronously).
-                        "events": self.printer.peek_recording_for_task(
-                            task_id,
-                        ),
-                        "task": "",
-                        "task_id": task_id,
-                        "chat_id": chat_id,
-                        "extra": "",
-                        "tabId": tab_id,
-                    }
+                    {**events_payload, "events": live_events},
+                )
+                self._finalize_viewer_attach(
+                    tab_id, rebound_state, live_events, events_payload,
                 )
             with self._state_lock:
                 state = agent_state.find_by_tab(tab_id)
@@ -1330,13 +1338,13 @@ class VSCodeServer(
 
         rebound_task_id = _coerce_id(result.get("task_id") if result else None)
         self._printer_cleanup_tab(tab_id)
-        rebound_running = self._reattach_running_chat(
+        rebound_state = self._attach_viewer_to_running_chat(
             chat_id,
             tab_id,
             task_id=rebound_task_id,
             is_subagent=subagent_info is not None,
         )
-        if rebound_running:
+        if rebound_state is not None:
             # The task is still running, so the events table lags
             # behind it: display events reach the database through an
             # asynchronous writer, and a tab resumed moments after the
@@ -1402,7 +1410,7 @@ class VSCodeServer(
                 }
             )
 
-        if rebound_running:
+        if rebound_state is not None:
             start_ts_for_resume = 0
             if isinstance(extra_raw, dict):
                 try:
@@ -1414,27 +1422,25 @@ class VSCodeServer(
                     rebound_task_id,
                     chat_id,
                 )
-            self.printer.broadcast(
-                {
-                    "type": "status",
-                    "running": True,
-                    "tabId": tab_id,
-                    "startTs": start_ts_for_resume,
-                }
+            self._broadcast_viewer_running(
+                tab_id, rebound_state, start_ts_for_resume,
             )
-        self.printer.broadcast(
-            {
-                "type": "task_events",
-                "events": with_task_settings_event(
-                    _coalesced_replay_events(result["events"]), result,
-                ),
-                "task": result["task"],
-                "task_id": result.get("task_id"),
-                "chat_id": chat_id,
-                "extra": _extra_for_replay(result.get("extra", "")),
-                "tabId": tab_id,
-            }
+        replayed_events = with_task_settings_event(
+            _coalesced_replay_events(result["events"]), result,
         )
+        replay_payload: dict[str, Any] = {
+            "type": "task_events",
+            "task": result["task"],
+            "task_id": result.get("task_id"),
+            "chat_id": chat_id,
+            "extra": _extra_for_replay(result.get("extra", "")),
+            "tabId": tab_id,
+        }
+        self.printer.broadcast({**replay_payload, "events": replayed_events})
+        if rebound_state is not None:
+            self._finalize_viewer_attach(
+                tab_id, rebound_state, replayed_events, replay_payload,
+            )
         self._emit_pending_ask(tab_id)
         self._emit_pending_worktree(tab_id)
 
@@ -1691,6 +1697,44 @@ class VSCodeServer(
         task_id: str | None = None,
         is_subagent: bool = False,
     ) -> bool:
+        """Boolean facade over :meth:`_attach_viewer_to_running_chat`.
+
+        Kept for the callers (and tests) that only need to know
+        WHETHER a live task was attached; ``_replay_session`` uses the
+        state-returning method directly because its post-broadcast
+        liveness re-check needs the state object itself.
+
+        Args:
+            chat_id: The chat id of the task the user clicked in
+                history.
+            new_tab_id: The freshly allocated frontend tab id.
+            task_id: When provided, only states whose task id equals
+                this are eligible.
+            is_subagent: Skip the chat-id fallback pass (sub-agent
+                views must match by task id alone).
+
+        Returns:
+            ``True`` when a matching live agent exists and
+            *new_tab_id* is now subscribed to its event stream.
+        """
+        return (
+            self._attach_viewer_to_running_chat(
+                chat_id,
+                new_tab_id,
+                task_id=task_id,
+                is_subagent=is_subagent,
+            )
+            is not None
+        )
+
+    def _attach_viewer_to_running_chat(
+        self,
+        chat_id: str,
+        new_tab_id: str,
+        *,
+        task_id: str | None = None,
+        is_subagent: bool = False,
+    ) -> AgentState | None:
         """Subscribe *new_tab_id* to a still-running agent state
         so its live agent's events ALSO flow to the newly opened tab —
         without stealing the stream from the original client.
@@ -1738,14 +1782,18 @@ class VSCodeServer(
                 the parent (which shares ``chat_id``).
 
         Returns:
-            ``True`` when a matching live agent exists and
-            *new_tab_id* is now subscribed to its event stream;
-            ``False`` when no matching live agent exists.
+            The live source state *new_tab_id* is now subscribed to,
+            or ``None`` when no matching live agent exists.  Callers
+            that broadcast an optimistic ``status running=true`` for
+            the attach re-check THIS object's liveness afterwards
+            (:meth:`_broadcast_viewer_running`) — the object survives
+            the printer bridge's mid-run re-keying, which a task-id
+            lookup would not.
         """
         if not new_tab_id:
-            return False
+            return None
         if task_id is None and not chat_id:
-            return False
+            return None
         with self._state_lock:
             source: AgentState | None = None
             if task_id is not None:
@@ -1767,10 +1815,153 @@ class VSCodeServer(
                         source = t
                         break
             if source is None:
-                return False
+                return None
             source_task_id = source.task_id
         self.printer.subscribe_tab(source_task_id, new_tab_id)
-        return True
+        return source
+
+    def _viewer_owns_other_busy_run(
+        self,
+        tab_id: str,
+        source: AgentState,
+    ) -> bool:
+        """True when *tab_id* currently owns a busy run other than *source*.
+
+        Guard for the viewer-attach status broadcasts (audit0903 F3):
+        a replay can be delayed past the point where the user starts a
+        NEW run on the very tab that was attaching, and status events
+        are not generation-qualified at the frontend — a stale
+        ``running=true`` would overwrite the newer run's timer with
+        the old task's ``startTs``, and a stale ``running=false``
+        would kill its spinner/Stop button.  Must be called under
+        ``_state_lock`` so the check is serialized against
+        ``_cmd_run``'s state installation.
+
+        Args:
+            tab_id: The viewer tab about to receive a status event.
+            source: The (old) task state the status event is about.
+
+        Returns:
+            ``True`` when the tab's current state is a different busy
+            run — the status event must then be suppressed.
+        """
+        viewer_state = agent_state.find_by_tab(tab_id)
+        return (
+            viewer_state is not None
+            and viewer_state is not source
+            and viewer_state.busy()
+        )
+
+    def _broadcast_viewer_running(
+        self,
+        tab_id: str,
+        source: AgentState,
+        start_ts: int,
+    ) -> None:
+        """Flip *tab_id* to running for the task it just attached to.
+
+        Emitted optimistically right after
+        :meth:`_attach_viewer_to_running_chat`.  The check-and-
+        broadcast pair runs under ``_state_lock`` so it is serialized
+        against ``_cmd_run`` installing a NEWER run on the same tab
+        (audit0903 F3): once the tab owns a different busy run, this
+        stale ``running=true`` — whose ``startTs`` is the OLD task's —
+        is suppressed instead of overwriting the newer run's timer; a
+        newer install that lands after this broadcast emits its own
+        ``running=true`` afterwards and wins.
+
+        The source-died correction lives in
+        :meth:`_finalize_viewer_attach`, which ``_replay_session``
+        calls AFTER delivering the transcript, so an attached viewer
+        never ends on a bare status boolean (audit0903 F4).
+
+        Args:
+            tab_id: The viewer tab that just attached.
+            source: The live state returned by
+                :meth:`_attach_viewer_to_running_chat`.
+            start_ts: The task's start timestamp (ms epoch, 0 when
+                unknown), echoed on the ``running=true`` broadcast.
+        """
+        with self._state_lock:
+            if self._viewer_owns_other_busy_run(tab_id, source):
+                return
+            self.printer.broadcast(
+                {
+                    "type": "status",
+                    "running": True,
+                    "tabId": tab_id,
+                    "startTs": start_ts,
+                }
+            )
+
+    def _finalize_viewer_attach(
+        self,
+        tab_id: str,
+        source: AgentState,
+        replayed_events: list[dict[str, Any]],
+        events_payload: dict[str, Any],
+    ) -> None:
+        """Correct *tab_id*'s status when *source* died during the attach.
+
+        ``_replay_session`` resolves the live task under
+        ``_state_lock``, subscribes the viewer and replays the
+        transcript — with the lock released between the steps.  The
+        task can finish inside that window: its end-of-run fan-out
+        (``_TaskRunnerMixin._broadcast_status_end_to_viewers``) reads
+        the subscriber map BEFORE the subscription lands, so nothing
+        would ever send this tab ``running=false`` and its spinner
+        (and follow-up input routed as ``appendUserMessage`` against a
+        finished task) would survive the dead task forever.
+
+        Called AFTER the replay's ``task_events`` broadcast, this
+        re-checks the source OBJECT under the lock (the printer bridge
+        re-keys states mid-run, so a key lookup could misread a live
+        task as finished) and corrects the viewer.  When the
+        transcript it just replayed predates the death — no terminal
+        ``result`` event in it — the live recording is re-snapshot and
+        re-broadcast first, so the terminal result reaches the viewer
+        BEFORE the corrective ``running=false`` and the viewer never
+        ends with only status booleans (audit0903 F4).  An end that
+        commits after this re-check necessarily runs with the
+        subscription already registered, so the normal fan-out
+        delivers both the result and the terminal status.
+
+        Both the snapshot and the correction are suppressed when the
+        tab meanwhile owns a DIFFERENT busy run (audit0903 F3): the
+        newer run's own lifecycle broadcasts are authoritative for
+        the tab.
+
+        Args:
+            tab_id: The viewer tab that attached.
+            source: The state the viewer attached to.
+            replayed_events: The events the replay just delivered.
+            events_payload: The replay's ``task_events`` payload minus
+                ``events`` — reused verbatim for the corrective
+                terminal snapshot so both broadcasts describe the same
+                task/chat/tab.
+        """
+        with self._state_lock:
+            if source.is_task_active or source.thread_alive():
+                return
+            if self._viewer_owns_other_busy_run(tab_id, source):
+                return
+            if not any(
+                ev.get("type") == "result" for ev in replayed_events
+            ):
+                events = self.printer.peek_recording_for_task(
+                    source.task_id,
+                )
+                if any(ev.get("type") == "result" for ev in events):
+                    self.printer.broadcast(
+                        {**events_payload, "events": events},
+                    )
+            self.printer.broadcast(
+                {
+                    "type": "status",
+                    "running": False,
+                    "tabId": tab_id,
+                }
+            )
 
     def _extract_result_summary(self) -> str:
         """Extract result summary from the current recording."""
