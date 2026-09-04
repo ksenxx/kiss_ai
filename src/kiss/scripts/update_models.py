@@ -265,10 +265,12 @@ def fetch_anthropic(verbose: bool = False) -> dict[str, dict]:
         return {}
     if verbose:  # pragma: no branch
         print("  Fetching Anthropic models...")
-    data = api_get(
-        "https://api.anthropic.com/v1/models",
-        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
-    )
+    headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+    workspace_id = os.getenv("ANTHROPIC_WORKSPACE_ID", "").strip()
+    if workspace_id:  # pragma: no branch
+        # Required when the key is identity-linked; harmless otherwise.
+        headers["anthropic-workspace-id"] = workspace_id
+    data = api_get("https://api.anthropic.com/v1/models", headers=headers)
     models: dict[str, dict] = {}
     for m in data.get("data", []):  # pragma: no branch
         model_id = m.get("id", "")

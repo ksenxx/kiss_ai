@@ -1762,15 +1762,23 @@ function getShellRcPath(): string {
 
 function validateAnthropicKey(key: string): Promise<boolean> {
   return new Promise(resolve => {
+    const headers: Record<string, string> = {
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+    };
+    // An identity-linked API key is rejected (400) unless the request
+    // names the workspace it acts in, so a valid key would fail this
+    // probe without the header.
+    const workspaceId = (process.env.ANTHROPIC_WORKSPACE_ID || '').trim();
+    if (workspaceId) {
+      headers['anthropic-workspace-id'] = workspaceId;
+    }
     const req = https.request(
       {
         hostname: 'api.anthropic.com',
         path: '/v1/models',
         method: 'GET',
-        headers: {
-          'x-api-key': key,
-          'anthropic-version': '2023-06-01',
-        },
+        headers,
         timeout: 15000,
       },
       res => {
@@ -1948,19 +1956,7 @@ async function promptForApiKey(
   }
 }
 
-function loadApiKeysFromShellRc(): void {
-  const rcPath = getShellRcPath();
-  const content = readShellRc(rcPath);
-  if (!content) return;
-
-  const isPs1 = rcPath.endsWith('.ps1');
-  const isFish = rcPath.endsWith('config.fish');
-  const pattern = isPs1
-    ? /^\s*\$env:(\w+)\s*=\s*(.+)$/gm
-    : isFish
-      ? /^\s*set\s+-gx\s+(\w+)\s+(.+)$/gm
-      : /^\s*export\s+(\w+)=(.+)$/gm;
-
+function importEnvAssignments(content: string, pattern: RegExp): void {
   let match;
   while ((match = pattern.exec(content)) !== null) {
     const name = match[1];
@@ -1975,6 +1971,31 @@ function loadApiKeysFromShellRc(): void {
       process.env[name] = value;
     }
   }
+}
+
+function loadApiKeysFromShellRc(): void {
+  // The canonical key store first: $KISS_HOME/api_keys.env is where the
+  // settings panel and ./rsorcar persist keys (bash `export KEY=value`
+  // syntax), and save_api_key scrubs assignments out of the shell RC, so
+  // a key saved through the panel exists ONLY here.  Already-set process
+  // environment variables always win.
+  const canonical = readShellRc(path.join(kissHomeDir(), 'api_keys.env'));
+  if (canonical) {
+    importEnvAssignments(canonical, /^\s*export\s+(\w+)=(.+)$/gm);
+  }
+
+  const rcPath = getShellRcPath();
+  const content = readShellRc(rcPath);
+  if (!content) return;
+
+  const isPs1 = rcPath.endsWith('.ps1');
+  const isFish = rcPath.endsWith('config.fish');
+  const pattern = isPs1
+    ? /^\s*\$env:(\w+)\s*=\s*(.+)$/gm
+    : isFish
+      ? /^\s*set\s+-gx\s+(\w+)\s+(.+)$/gm
+      : /^\s*export\s+(\w+)=(.+)$/gm;
+  importEnvAssignments(content, pattern);
 }
 
 // Prompt-then-save of an API key is a read-modify-write of the shell rc

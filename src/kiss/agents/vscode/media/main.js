@@ -8744,6 +8744,7 @@
       'cfg-key-GEMINI_API_KEY',
       'cfg-key-OPENAI_API_KEY',
       'cfg-key-ANTHROPIC_API_KEY',
+      'cfg-key-ANTHROPIC_WORKSPACE_ID',
       'cfg-key-TOGETHER_API_KEY',
       'cfg-key-OPENROUTER_API_KEY',
       'cfg-key-ZAI_API_KEY',
@@ -10975,6 +10976,10 @@
     const inp = document.getElementById(inputId);
     const proto = document.getElementById('cfg-remote-password-toggle');
     if (!inp || !proto) return;
+    // The workspace id is an identifier, not a key; the toggle's
+    // accessible name must say what it actually reveals.
+    const noun =
+      inputId === 'cfg-key-ANTHROPIC_WORKSPACE_ID' ? 'workspace ID' : 'API key';
     inp.type = 'password';
     inp.setAttribute('autocomplete', 'off');
     const wrap = document.createElement('div');
@@ -10984,14 +10989,14 @@
     const btn = proto.cloneNode(true);
     btn.id = inputId + '-toggle';
     btn.setAttribute('aria-pressed', 'false');
-    btn.setAttribute('aria-label', 'Show API key');
-    btn.setAttribute('title', 'Show API key');
+    btn.setAttribute('aria-label', 'Show ' + noun);
+    btn.setAttribute('title', 'Show ' + noun);
     const eye = btn.querySelector('.icon-eye');
     const eyeOff = btn.querySelector('.icon-eye-off');
     if (eye) eye.style.display = '';
     if (eyeOff) eyeOff.style.display = 'none';
     wrap.appendChild(btn);
-    setupPasswordToggle(btn.id, inputId, 'API key');
+    setupPasswordToggle(btn.id, inputId, noun);
   }
 
   let configFormPopulated = false;
@@ -11076,6 +11081,7 @@
       'GEMINI_API_KEY',
       'OPENAI_API_KEY',
       'ANTHROPIC_API_KEY',
+      'ANTHROPIC_WORKSPACE_ID',
       'TOGETHER_API_KEY',
       'OPENROUTER_API_KEY',
       'ZAI_API_KEY',
@@ -11140,6 +11146,7 @@
       'GEMINI_API_KEY',
       'OPENAI_API_KEY',
       'ANTHROPIC_API_KEY',
+      'ANTHROPIC_WORKSPACE_ID',
       'TOGETHER_API_KEY',
       'OPENROUTER_API_KEY',
       'ZAI_API_KEY',
