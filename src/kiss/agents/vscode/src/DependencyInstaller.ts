@@ -1147,7 +1147,119 @@ function computeKissWebFingerprint(
   }
 }
 
-function installCliScript(kissProjectPath: string, uvPath: string): void {
+/**
+ * Follow *target*'s symlink chain by hand when `realpathSync` cannot.
+ *
+ * A DANGLING dotfile symlink (`.bashrc -> dotfiles/bashrc` whose target
+ * is not checked out yet) makes `fs.realpathSync` throw, and renaming
+ * over the link would silently turn it into a regular file.  Walking
+ * `readlinkSync` — a relative link resolved against its containing
+ * directory — finds the missing referent so the atomic write can create
+ * it, exactly like the plain `fs.writeFileSync` this replaced used to.
+ * The walk is bounded: on a link loop it gives up on a node in the
+ * cycle, which the rename then replaces (the old code threw ELOOP; a
+ * loop is broken garbage either way).
+ *
+ * @param target Path whose links to follow.
+ * @returns The first non-symlink path in the chain (it may not exist).
+ */
+function resolveSymlinkTargetSync(target: string): string {
+  // audit0903-coverage:start
+  let current = target;
+  for (let depth = 0; depth < 32; depth += 1) {
+    let link: string;
+    try {
+      // Throws EINVAL for a regular file, ENOENT for a missing one.
+      link = fs.readlinkSync(current);
+    } catch {
+      return current;
+    }
+    current = path.resolve(path.dirname(current), link);
+  }
+  return current;
+  // audit0903-coverage:end
+}
+
+/**
+ * Replace *target* with *content* atomically.
+ *
+ * `fs.writeFileSync(target, ...)` truncates the file before writing, so
+ * a concurrent reader — a shell `exec`ing `~/.local/bin/sorcar`, a new
+ * terminal sourcing the shell rc — can observe an empty or partial
+ * file.  This writes a uniquely named temp file in the target's
+ * directory and `rename(2)`s it into place, so every reader sees either
+ * the old or the new content, whole.
+ *
+ * A symlinked target (dotfile-managed shell rc) is resolved first —
+ * through `realpath`, or link by link when the chain dangles — so the
+ * rename replaces (or creates) the file the link points at, never the
+ * link itself; the existing file's permission bits are preserved unless
+ * *mode* overrides them.
+ *
+ * @param target Path of the file to replace (created when missing).
+ * @param content The full new file content.
+ * @param mode Permission bits for the result; defaults to the existing
+ *   file's bits, or the process umask default for a new file.
+ */
+export function writeFileAtomicSync(
+  target: string,
+  content: string,
+  mode?: number,
+): void {
+  // audit0903-coverage:start
+  let resolved: string;
+  try {
+    resolved = fs.realpathSync(target);
+  } catch {
+    resolved = resolveSymlinkTargetSync(target);
+  }
+  if (mode === undefined) {
+    try {
+      mode = fs.statSync(resolved).mode & 0o777;
+    } catch {}
+  }
+  const tmp = path.join(
+    path.dirname(resolved),
+    `.${path.basename(resolved)}.${process.pid}.${Date.now()}.` +
+      `${Math.random().toString(36).slice(2)}.tmp`,
+  );
+  // The whole temp lifecycle is guarded: a write that fails AFTER
+  // creating the temp (the EFBIG/ENOSPC class leaves a partial file)
+  // must clean up exactly like a failed chmod or rename.
+  let renamed = false;
+  try {
+    fs.writeFileSync(tmp, content);
+    if (mode !== undefined) fs.chmodSync(tmp, mode);
+    fs.renameSync(tmp, resolved);
+    renamed = true;
+  } finally {
+    if (!renamed) {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        // The write failed before the temp existed: nothing to clean.
+      }
+    }
+  }
+  // audit0903-coverage:end
+}
+
+/**
+ * Install the `sorcar` CLI wrapper into `~/.local/bin`.
+ *
+ * The wrapper is an executable other processes run at any moment, so it
+ * is replaced atomically (see {@link writeFileAtomicSync}) — the old
+ * truncate-then-write left a window in which a user's shell `exec`ed an
+ * empty or truncated script.  Exported so the e2e tests can hammer it
+ * from concurrent processes.
+ *
+ * @param kissProjectPath Root of the kiss checkout the wrapper targets.
+ * @param uvPath The uv binary the wrapper runs (made absolute here).
+ */
+export function installCliScript(
+  kissProjectPath: string,
+  uvPath: string,
+): void {
   if (!HOME_DIR) return;
 
   const binDir = path.join(HOME_DIR, '.local', 'bin');
@@ -1180,15 +1292,17 @@ function installCliScript(kissProjectPath: string, uvPath: string): void {
         'REM Installed by KISS Sorcar VS Code extension\r\n' +
         'set "KISS_WORKDIR=%CD%"\r\n' +
         `"${absUvPath}" run --directory "${kissProjectPath}" sorcar %*\r\n`;
-      fs.writeFileSync(cmdPath, script);
+      writeFileAtomicSync(cmdPath, script);
     } else {
+      // audit0903-coverage:start
       const scriptPath = path.join(binDir, 'sorcar');
       const script =
         '#!/bin/bash\n' +
         '# Installed by KISS Sorcar VS Code extension\n' +
         'export KISS_WORKDIR="$PWD"\n' +
         `exec "${absUvPath}" run --directory "${kissProjectPath}" sorcar "$@"\n`;
-      fs.writeFileSync(scriptPath, script, {mode: 0o755});
+      writeFileAtomicSync(scriptPath, script, 0o755);
+      // audit0903-coverage:end
     }
   } catch (err) {
     log(
@@ -1682,11 +1796,26 @@ function readShellRc(rcPath: string): string {
   }
 }
 
-function writeShellRc(rcPath: string, content: string): void {
+/**
+ * Write the user's shell rc file atomically.
+ *
+ * The rc file is sourced by every new shell, so a truncate-then-write
+ * (`fs.writeFileSync`) risked a just-opened terminal sourcing an empty
+ * or partial rc — dropping the user's PATH and API keys for that
+ * session.  {@link writeFileAtomicSync} also preserves a symlinked rc
+ * (dotfile repos) and its permission bits.  Exported so the e2e tests
+ * can hammer it from concurrent processes.
+ *
+ * @param rcPath Path of the shell rc file.
+ * @param content The full new rc content (newline-terminated here).
+ */
+export function writeShellRc(rcPath: string, content: string): void {
+  // audit0903-coverage:start
   if (content.length > 0 && !content.endsWith('\n')) {
     content += '\n';
   }
-  fs.writeFileSync(rcPath, content);
+  writeFileAtomicSync(rcPath, content);
+  // audit0903-coverage:end
 }
 
 function addToShellRc(rcPath: string, envName: string, value: string): void {
@@ -2110,6 +2239,187 @@ function getStoredRemotePassword(): string {
   return '';
 }
 
+// The remote-password prompt is one-shot cross-window UI state, exactly
+// like the API-key prompts: without a lock two windows finalizing
+// together both showed the input box, the user typed two passwords, and
+// the saves raced last-write-wins through save_config.  The lock is an
+// exclusively created pid+token file like the daemon-restart lock, but
+// with a PROMPT-specific lifecycle: a password box can legitimately sit
+// open for many minutes, so a LIVE holder is never evicted by age; a
+// holder that DIED mid-prompt is detected by pid and taken over within
+// seconds; and a finished holder records a terminal outcome (saved /
+// skipped / failed) next to the lock so a waiter can tell a deliberate
+// Esc from a crash without ever stacking a second prompt on the user.
+const REMOTE_PASSWORD_LOCK_FILE = path.join(LOG_DIR, '.remote-password.lock');
+// How long a window without the lock waits for the prompting window
+// before giving up (a prompt can sit open for minutes).
+const REMOTE_PASSWORD_LOCK_WAIT_MS = 600_000;
+// How often a waiter re-checks the holder (liveness and outcome).
+const REMOTE_PASSWORD_POLL_MS = 1000;
+// An unreadable lock younger than this is assumed to be one caught
+// mid-write and is honoured as live.
+const PROMPT_LOCK_UNREADABLE_STALE_MS = 120_000;
+
+type RemotePasswordOutcome = 'saved' | 'skipped' | 'failed';
+
+/**
+ * Read the terminal outcome the last prompt holder recorded, if any.
+ *
+ * @param lockFile Path of the prompt lock; the outcome lives beside it.
+ * @returns The token-stamped outcome, or null when there is none or it
+ *     is unreadable / not in the current format.
+ */
+function readPromptOutcome(
+  lockFile: string,
+): {token: string; outcome: RemotePasswordOutcome} | null {
+  // audit0903-coverage:start
+  try {
+    const raw = fs.readFileSync(`${lockFile}.outcome`, 'utf-8');
+    const data: unknown = JSON.parse(raw);
+    const {token, outcome} = data as {token?: unknown; outcome?: unknown};
+    if (typeof token !== 'string' || !token) return null;
+    if (outcome !== 'saved' && outcome !== 'skipped' && outcome !== 'failed') {
+      return null;
+    }
+    return {token, outcome};
+  } catch {
+    return null;
+  }
+  // audit0903-coverage:end
+}
+
+/**
+ * One waiter poll round: how does the prompt holder's session stand?
+ *
+ * A dead or stale-unreadable lock is removed here (read-verify-unlink,
+ * the same small accepted race as breakAbandonedRestartLock) so that a
+ * 'contend' caller can immediately try the exclusive create.
+ *
+ * An outcome binds only a caller that actually WAITED on its session
+ * (*honorOutcome*): a fresh activation finding a leftover outcome from
+ * some past session must still prompt, exactly as it always did after
+ * a normally released skip — the record exists so a waiter never turns
+ * the holder's deliberate Esc into a second prompt.
+ *
+ * @param lockFile Path of the prompt lock.
+ * @param honorOutcome Whether this caller waited on the current
+ *     holder's session and must respect its recorded outcome.
+ * @returns 'settled' when the session this caller waited on ended with
+ *     a recorded outcome (a deliberate save / skip / failure — never
+ *     re-prompt), 'contend' when the lock is free or its owner died
+ *     mid-prompt (the caller should try to take it), 'wait' while a
+ *     live holder prompts.
+ */
+function checkPromptHolder(
+  lockFile: string,
+  honorOutcome: boolean,
+): 'settled' | 'contend' | 'wait' {
+  // audit0903-coverage:start
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(lockFile);
+  } catch {
+    // No lock: the holder we waited on finished (its outcome is
+    // recorded), or this is a fresh start.
+    return honorOutcome && readPromptOutcome(lockFile) ? 'settled' : 'contend';
+  }
+  const owner = readRestartLockOwner(lockFile);
+  if (!owner) {
+    // Unreadable: honour it while young (a lock caught mid-write),
+    // treat it as abandoned once stale.
+    if (Date.now() - st.mtimeMs < PROMPT_LOCK_UNREADABLE_STALE_MS) {
+      return 'wait';
+    }
+    log('breaking unreadable remote-password prompt lock');
+    try {
+      fs.unlinkSync(lockFile);
+    } catch {}
+    return 'contend';
+  }
+  if (!processIsAlive(owner.pid)) {
+    const outcome = readPromptOutcome(lockFile);
+    if (honorOutcome && outcome && outcome.token === owner.token) {
+      // The holder we waited on finished (outcome recorded) and died
+      // before its unlink: honour the result, just clean the lock up.
+      log('remote-password prompt holder finished and exited — cleaning up');
+      try {
+        fs.unlinkSync(lockFile);
+      } catch {}
+      return 'settled';
+    }
+    log(`remote-password prompt holder pid ${owner.pid} died — taking over`);
+    try {
+      fs.unlinkSync(lockFile);
+    } catch {}
+    return 'contend';
+  }
+  // A live holder is NEVER evicted by age: a prompt may stay open
+  // longer than any timeout we could pick.
+  return 'wait';
+  // audit0903-coverage:end
+}
+
+interface RemotePasswordPromptHold {
+  /** Record the terminal outcome, then release the lock. */
+  finish: (outcome: RemotePasswordOutcome) => void;
+}
+
+/**
+ * Take the cross-window remote-password prompt lock.
+ *
+ * A single exclusive create: breaking dead or stale locks is
+ * {@link checkPromptHolder}'s job, so a loser here simply keeps
+ * waiting.
+ *
+ * @param lockFile Path of the lock file.
+ * @returns A hold whose finish() records the prompt's outcome and
+ *     releases the lock, or null when another window holds it.
+ */
+function acquireRemotePasswordPromptLock(
+  lockFile: string,
+): RemotePasswordPromptHold | null {
+  // audit0903-coverage:start
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    fs.mkdirSync(path.dirname(lockFile), {recursive: true});
+    const fd = fs.openSync(lockFile, 'wx');
+    try {
+      fs.writeSync(fd, JSON.stringify({pid: process.pid, token}));
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    // Another window created the lock between our poll and this open,
+    // or the directory is unwritable: wait like any other loser.
+    return null;
+  }
+  // A new prompt session begins: a leftover outcome belongs to an OLDER
+  // session and must not be mistaken for this one's result.
+  try {
+    fs.unlinkSync(`${lockFile}.outcome`);
+  } catch {}
+  return {
+    finish: (outcome: RemotePasswordOutcome) => {
+      try {
+        // Atomic, so a waiter polling the file never reads a torn
+        // record; written BEFORE the release so no gap exists in which
+        // the lock is gone but the outcome not yet visible.
+        writeFileAtomicSync(
+          `${lockFile}.outcome`,
+          JSON.stringify({token, outcome}),
+        );
+      } catch (err) {
+        log(
+          'remote-password outcome not recorded: ' +
+            `${err instanceof Error ? err.message : err}`,
+        );
+      }
+      releaseDaemonRestartLock(lockFile, token);
+    },
+  };
+  // audit0903-coverage:end
+}
+
 /**
  * Prompt for the remote-access password when config.json has none and
  * save it through {@link saveKissConfig}.  Runs after the daemon restart
@@ -2118,14 +2428,30 @@ function getStoredRemotePassword(): string {
  * the save fails the password is left unsaved and the user is pointed at
  * the settings panel's Remote password field (saved by the daemon).
  *
+ * The prompt is guarded by a cross-window lock: two windows finalizing
+ * together would otherwise both prompt and the two saves would race
+ * last-write-wins.  The window without the lock waits for the holder
+ * and then respects its recorded outcome (saved, deliberately skipped
+ * or failed) instead of stacking a second prompt on the user; a holder
+ * that DIES mid-prompt is taken over within seconds.
+ *
  * @param uvPath Path of the uv binary, or null when uv was not found.
  * @param kissProjectPath Root of the kiss checkout whose venv runs Python.
+ * @param lockFile Path of the cross-window prompt lock (overridable for
+ *   tests).
+ * @param waitMs How long to wait for another window's open prompt
+ *   before giving up (overridable for tests).
+ * @param pollMs Interval between holder liveness checks (overridable
+ *   for tests).
  */
 export async function ensureRemotePassword(
   uvPath: string | null,
   kissProjectPath: string,
+  lockFile: string = REMOTE_PASSWORD_LOCK_FILE,
+  waitMs: number = REMOTE_PASSWORD_LOCK_WAIT_MS,
+  pollMs: number = REMOTE_PASSWORD_POLL_MS,
 ): Promise<void> {
-  // audit0902-coverage:start
+  // audit0903-coverage:start
   if (getStoredRemotePassword()) {
     log('ensureRemotePassword: password already set — skipping prompt');
     return;
@@ -2139,6 +2465,73 @@ export async function ensureRemotePassword(
   if (getStoredRemotePassword()) {
     log('ensureRemotePassword: password found on retry — skipping prompt');
     return;
+  }
+
+  const deadline = Date.now() + waitMs;
+  let waitLogged = false;
+  // True once this call has observed another window's session (a live
+  // or unreadable lock, or a lost exclusive create): only then does a
+  // recorded outcome bind us.
+  let observedHolder = false;
+  for (;;) {
+    const verdict = checkPromptHolder(lockFile, observedHolder);
+    if (verdict === 'settled') {
+      // The holder saved a password, or the user deliberately skipped
+      // (or the save failed and was reported); every recorded outcome
+      // stands — never double-prompt.
+      log('ensureRemotePassword: another window finished the prompt');
+      return;
+    }
+    if (verdict === 'contend') {
+      const hold = acquireRemotePasswordPromptLock(lockFile);
+      if (hold) {
+        let outcome: RemotePasswordOutcome = 'failed';
+        try {
+          outcome = await ensureRemotePasswordLocked(uvPath, kissProjectPath);
+        } finally {
+          hold.finish(outcome);
+        }
+        return;
+      }
+      // Lost the exclusive create: a holder exists right now.
+      observedHolder = true;
+    } else {
+      observedHolder = true;
+    }
+    if (Date.now() >= deadline) {
+      log('ensureRemotePassword: gave up waiting for the prompting window');
+      return;
+    }
+    if (!waitLogged) {
+      log('ensureRemotePassword: another window is prompting — waiting');
+      waitLogged = true;
+    }
+    await new Promise(resolve => setTimeout(resolve, pollMs));
+  }
+  // audit0903-coverage:end
+}
+
+/**
+ * The prompt-and-save body of {@link ensureRemotePassword}, run while
+ * holding the cross-window prompt lock.
+ *
+ * @param uvPath Path of the uv binary, or null when uv was not found.
+ * @param kissProjectPath Root of the kiss checkout whose venv runs Python.
+ * @returns The terminal outcome the holder records beside the lock.
+ */
+async function ensureRemotePasswordLocked(
+  uvPath: string | null,
+  kissProjectPath: string,
+): Promise<RemotePasswordOutcome> {
+  // audit0903-coverage:start
+  // Re-check under the lock: a previous holder (or a takeover) may have
+  // saved a password between our pre-lock read and the lock creation.
+  if (getStoredRemotePassword()) {
+    log(
+      'ensureRemotePassword: password saved while acquiring the lock — ' +
+        'skipping prompt',
+    );
+    return 'saved';
   }
 
   log('ensureRemotePassword: password still empty — prompting user');
@@ -2156,7 +2549,7 @@ export async function ensureRemotePassword(
       'KISS Sorcar: You can set the remote access password later in the ' +
         'KISS Sorcar settings panel (Remote password field).',
     );
-    return;
+    return 'skipped';
   }
 
   try {
@@ -2173,8 +2566,9 @@ export async function ensureRemotePassword(
         `(${reason}). Set it in the KISS Sorcar settings panel ` +
         '(Remote password field) once the daemon is running.',
     );
-    return;
+    return 'failed';
   }
   log(`Remote access password saved to ${path.join(LOG_DIR, 'config.json')}`);
-  // audit0902-coverage:end
+  return 'saved';
+  // audit0903-coverage:end
 }

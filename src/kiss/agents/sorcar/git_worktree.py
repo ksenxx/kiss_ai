@@ -377,6 +377,16 @@ _RESCUE_SKIP_COMPONENTS = frozenset({
     ".DS_Store",
 })
 
+# Repo-local (info/exclude) ignore pattern covering every collision
+# sibling the rescue can generate — ``<stem>.kiss-rescued-<ns><ext>``
+# and ``<name>.kiss-rescued-<ns>`` alike.  Extension preservation alone
+# cannot keep every original rule matching (``model.tar.gz`` →
+# ``model.tar.kiss-rescued-<ns>.gz`` no longer matches ``*.tar.gz``,
+# and no sibling of ``.env`` can match the exact-name ``.env`` rule),
+# so this pattern is the actual keep-it-ignored guarantee (see
+# :meth:`GitWorktreeOps.rescue_ignored_files`).
+_RESCUE_EXCLUDE_PATTERN = "*.kiss-rescued-*"
+
 
 def _same_path(left: Path, right: Path) -> bool:
     """Return True when both paths denote the same directory.
@@ -1632,8 +1642,17 @@ class GitWorktreeOps:
           existing destination's bytes already equal the worktree's,
           nothing is lost and the file is skipped; when they differ,
           the worktree's version is landed NEXT TO it under a
-          ``<name>.kiss-rescued-<ns>`` sibling name so neither copy is
-          lost.
+          ``<stem>.kiss-rescued-<ns><ext>`` sibling name so neither copy is
+          lost.  Because a sibling name can stop matching the ignore
+          rule that covered the original (compound suffixes, exact
+          names), a :data:`_RESCUE_EXCLUDE_PATTERN` entry is appended
+          (idempotently) to the destination's local
+          ``info/exclude`` BEFORE anything is landed, so no sibling
+          can ever be swept up by a later ``git add -A``.  When that
+          exclusion cannot be written, the rescue still proceeds
+          (preserving the only copy outranks ignore hygiene) and each
+          landed sibling is verified with ``git check-ignore``,
+          warning about any that are no longer ignored.
         * Landing is atomic: the source is hard-linked into place
           (``os.link`` fails on an existing path and never follows a
           symlink), so a racing main-tree writer can neither be
@@ -1673,12 +1692,21 @@ class GitWorktreeOps:
                 wt_dir,
             )
             return (0, False)
+        candidates = [
+            rel for rel in ignored
+            if not any(
+                p in _RESCUE_SKIP_COMPONENTS for p in Path(rel).parts
+            )
+        ]
+        # The exclusion must be in place BEFORE anything lands: a
+        # collision sibling is auto-commit bait from the instant it
+        # exists (see _RESCUE_EXCLUDE_PATTERN).
+        exclude_ok = not candidates or (
+            GitWorktreeOps._ensure_rescue_sibling_excluded(repo)
+        )
         rescued = 0
         ok = True
-        for rel in ignored:
-            parts = Path(rel).parts
-            if any(p in _RESCUE_SKIP_COMPONENTS for p in parts):
-                continue
+        for rel in candidates:
             src = wt_dir / rel
             dst = repo / rel
             try:
@@ -1690,8 +1718,11 @@ class GitWorktreeOps:
                     )
                     ok = False
                     continue
-                if GitWorktreeOps._land_rescued_file(src, dst):
+                landed = GitWorktreeOps._land_rescued_file(src, dst)
+                if landed is not None:
                     rescued += 1
+                    if not exclude_ok and ".kiss-rescued-" in landed.name:
+                        GitWorktreeOps._warn_unignored_sibling(repo, landed)
             except OSError:
                 logger.warning(
                     "Failed to rescue ignored file %s into %s",
@@ -1704,6 +1735,73 @@ class GitWorktreeOps:
                 rescued, wt_dir, repo,
             )
         return (rescued, ok)
+
+    @staticmethod
+    def _ensure_rescue_sibling_excluded(repo: Path) -> bool:
+        """Install the local ignore rule for rescue-sibling names in *repo*.
+
+        Appends :data:`_RESCUE_EXCLUDE_PATTERN` (idempotently, under
+        the per-repo and file locks of ``_append_info_line``) to the
+        destination repository's ``<git_common_dir>/info/exclude`` —
+        the same file ``git rev-parse --git-path info/exclude``
+        resolves to, correct for linked worktrees and submodules whose
+        ``.git`` is a file, and never a tracked file of the user's
+        repo.  The rescue only ever lands files git IGNORES, so every
+        collision sibling must stay ignored too, or the next
+        auto-commit's ``git add -A`` would commit it as a tracked
+        artifact; this pattern is that guarantee, since
+        extension-preserving sibling naming alone cannot keep
+        compound-suffix (``*.tar.gz``) or exact-name (``.env``) rules
+        matching.
+
+        Args:
+            repo: The rescue destination repository root.
+
+        Returns:
+            True when the pattern is present (just installed or
+            already there); False when it could not be written — the
+            caller then falls back to verifying each landed sibling
+            with ``git check-ignore``.
+        """
+        try:
+            GitWorktreeOps._append_info_line(
+                repo, "exclude", _RESCUE_EXCLUDE_PATTERN,
+            )
+            return True
+        except OSError:
+            logger.warning(
+                "Cannot install the %s rescue-sibling exclusion in "
+                "%s's info/exclude; falling back to per-file "
+                "check-ignore verification",
+                _RESCUE_EXCLUDE_PATTERN, repo, exc_info=True,
+            )
+            return False
+
+    @staticmethod
+    def _warn_unignored_sibling(repo: Path, landed: Path) -> None:
+        """Warn when the landed collision sibling *landed* is not ignored.
+
+        Only reached when the :data:`_RESCUE_EXCLUDE_PATTERN`
+        exclusion could not be written: the sibling then relies solely
+        on its preserved extension matching the original ignore rule,
+        which holds for simple suffixes (``*.log``) but fails for
+        compound suffixes (``*.tar.gz``) and exact names (``.env``).
+        The rescue still proceeds either way — preserving the only
+        copy of task output outranks ignore hygiene — but an unignored
+        sibling is auto-commit bait, so it must at least be reported.
+
+        Args:
+            repo: The rescue destination repository root.
+            landed: The just-landed ``.kiss-rescued-`` sibling path.
+        """
+        check = _git("check-ignore", "-q", "--", str(landed), cwd=repo)
+        if check.returncode == 0:
+            return
+        logger.warning(
+            "Rescued sibling %s is NOT git-ignored (the rescue "
+            "exclusion could not be installed); a later `git add -A` "
+            "may commit it", landed,
+        )
 
     @staticmethod
     def _rescue_dst_contained(dst: Path, repo: Path) -> bool:
@@ -1736,7 +1834,7 @@ class GitWorktreeOps:
             return False
 
     @staticmethod
-    def _land_rescued_file(src: Path, dst: Path) -> bool:
+    def _land_rescued_file(src: Path, dst: Path) -> Path | None:
         """Place *src* at *dst* without overwriting or following links.
 
         Symlink sources are recreated with ``os.symlink`` (atomic,
@@ -1746,15 +1844,16 @@ class GitWorktreeOps:
         exclusive-create copy is used.  An existing destination with
         identical bytes counts as already safe; one with different
         bytes gets the worktree's version landed under a
-        ``<name>.kiss-rescued-<ns>`` sibling so neither copy is lost.
+        ``<stem>.kiss-rescued-<ns><ext>`` sibling so neither copy is lost.
 
         Args:
             src: The worktree file to preserve.
             dst: The main-repo destination path.
 
         Returns:
-            True when a new file was landed, False when the file was
-            already safe (identical or non-file source).
+            The path the file was landed at (*dst* itself or a
+            collision sibling), or None when the file was already safe
+            (identical or non-file source) and nothing was landed.
 
         Raises:
             OSError: When the file could not be landed at all (the
@@ -1769,30 +1868,31 @@ class GitWorktreeOps:
                     dst.is_symlink()
                     and os.readlink(dst) == os.readlink(src)
                 ):
-                    return False
+                    return None
                 dst = GitWorktreeOps._rescued_sibling(dst)
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
             os.symlink(os.readlink(src), dst)
-            return True
+            return dst
         if not src.is_file():
-            return False
+            return None
         if dst.is_symlink() or dst.exists():
             if dst.is_file() and not dst.is_symlink() and filecmp.cmp(
                 str(src), str(dst), shallow=False,
             ):
-                return False
+                return None
             dst = GitWorktreeOps._rescued_sibling(dst)
         else:
             dst.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.link(src, dst)
-            return True
+            return dst
         except FileExistsError:
             # A racing writer created dst between the check and the
             # link; its file wins, ours lands beside it.
-            os.link(src, GitWorktreeOps._rescued_sibling(dst))
-            return True
+            sibling = GitWorktreeOps._rescued_sibling(dst)
+            os.link(src, sibling)
+            return sibling
         except OSError:
             # Filesystem without hard-link support: exclusive-create
             # copy (never follows a symlink, never overwrites).
@@ -1806,17 +1906,32 @@ class GitWorktreeOps:
                 dst.unlink(missing_ok=True)
                 raise
             shutil.copystat(str(src), str(dst))
-            return True
+            return dst
 
     @staticmethod
     def _rescued_sibling(dst: Path) -> Path:
-        """Return a unique ``<name>.kiss-rescued-<ns>`` sibling of *dst*.
+        """Return a unique ``<stem>.kiss-rescued-<ns><ext>`` sibling of *dst*.
 
         Used when *dst* already exists with different content: the
         user's file keeps its name, the worktree's version is
         preserved beside it instead of being silently dropped.
+
+        The marker goes BEFORE the extension (``app.log`` becomes
+        ``app.kiss-rescued-<ns>.log``) so non-git tooling keyed on the
+        extension — and single-suffix ``.gitignore`` rules like
+        ``*.log`` — still recognize the sibling.  Extensionless names
+        (``.env``, ``README``) keep the old ``<name>.kiss-rescued-<ns>``
+        shape.  Naming alone is NOT what keeps the sibling ignored:
+        compound-suffix (``*.tar.gz``) and exact-name (``.env``) rules
+        cannot survive any rename, so
+        :meth:`_ensure_rescue_sibling_excluded` installs the
+        :data:`_RESCUE_EXCLUDE_PATTERN` local exclusion — matching
+        every shape produced here — before the rescue lands anything.
         """
-        return dst.with_name(f"{dst.name}.kiss-rescued-{time.time_ns()}")
+        return dst.with_name(
+            f"{dst.name.removesuffix(dst.suffix)}"
+            f".kiss-rescued-{time.time_ns()}{dst.suffix}"
+        )
 
     @staticmethod
     def clean_untracked(wt_dir: Path) -> bool:

@@ -1718,6 +1718,29 @@ def _snapshot_active_tabs() -> list[str]:
     return active_tabs
 
 
+def _shutdown_state_owns_thread(state: Any, thread: threading.Thread) -> bool:
+    """True while the swept *state* still owns its unstarted *thread*.
+
+    Ownership guard for the graceful-shutdown sweep's pre-start wait
+    (:func:`kiss.server.task_runner.wait_for_thread_start`), evaluated
+    under ``agent_state.STATE_LOCK``.  Unlike the Stop watchdog's
+    :func:`~kiss.server.task_runner._state_owns_thread` it must NOT
+    treat an acknowledged stop as lost ownership: ``_cmd_run``'s
+    pre-cancel path acknowledges the stop first and only then clears
+    ``state.task_thread``, and the sweep may only stop waiting once
+    the thread can no longer be started (audit0903 F1).
+
+    Args:
+        state: The :class:`~kiss.server.agent_state.AgentState`
+            selected by the sweep.
+        thread: The worker thread captured with it.
+
+    Returns:
+        ``True`` while ``state.task_thread`` is still *thread*.
+    """
+    return state.task_thread is thread
+
+
 def _rss_mb() -> float:
     """Return this process's peak RSS in megabytes, or ``-1.0`` on failure.
 
@@ -7039,11 +7062,24 @@ class RemoteAccessServer:
                 for all active worker threads to unwind.
         """
         from kiss.server import agent_state
-        from kiss.server.task_runner import inject_keyboard_interrupt
+        from kiss.server.agent_state import AgentState
+        from kiss.server.task_runner import (
+            inject_keyboard_interrupt,
+            wait_for_thread_start,
+        )
 
-        active: list[tuple[str, threading.Event | None, threading.Thread]] = []
+        active: list[
+            tuple[str, AgentState, threading.Event | None, threading.Thread]
+        ] = []
         active_task_history_ids: set[str] = set()
         with agent_state.STATE_LOCK:
+            # New runs observed after this point pre-cancel instead of
+            # starting: ``_cmd_run``'s start/cancel handshake checks
+            # this flag — and each swept state's
+            # ``interrupted_by_shutdown`` below — under this same lock
+            # immediately before ``thread.start()``, so no run can
+            # start AFTER this sweep (audit0903 F1).
+            self._vscode_server._shutdown_stopping = True
             for task_id, state in agent_state.agent_states.items():
                 thread = state.task_thread
                 # Liveness is AgentState.busy(), not is_task_active
@@ -7054,7 +7090,7 @@ class RemoteAccessServer:
                 # stranded at the abrupt-failure sentinel (F08-2).
                 if thread is not None and state.busy():
                     state.interrupted_by_shutdown = True
-                    active.append((task_id, state.stop_event, thread))
+                    active.append((task_id, state, state.stop_event, thread))
                     active_task_history_ids.add(task_id)
 
         if not active:
@@ -7076,15 +7112,27 @@ class RemoteAccessServer:
         logger.warning(
             "Shutdown: stopping %d in-flight agent task(s) before exit: %s",
             len(active),
-            ", ".join(tab_id for tab_id, _, _ in active),
+            ", ".join(tab_id for tab_id, _, _, _ in active),
         )
 
-        for _tab_id, stop_event, _thread in active:
+        for _tab_id, _state, stop_event, _thread in active:
             if stop_event is not None:
                 stop_event.set()
 
         deadline = time.monotonic() + timeout
-        for tab_id, _stop_event, thread in active:
+        for tab_id, state, _stop_event, thread in active:
+            # A worker registered by ``_cmd_run`` but not yet started
+            # cannot be joined (``Thread.join`` raises before start).
+            # Wait for the start — or for ``_cmd_run``'s pre-start
+            # handshake to cancel the run, whose terminal cleanup
+            # clears ``state.task_thread`` and drops ownership — via
+            # the same primitive the Stop watchdog uses (audit0903 F1).
+            if not wait_for_thread_start(
+                thread,
+                partial(_shutdown_state_owns_thread, state, thread),
+                deadline=deadline,
+            ):
+                continue
             remaining = max(0.0, deadline - time.monotonic())
             thread.join(timeout=min(1.0, remaining))
             if thread.is_alive():

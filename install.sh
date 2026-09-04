@@ -1206,8 +1206,14 @@ update_repo() {
     # fail HERE, loudly — the stash below would otherwise hide the staged
     # binary from the step [5/5] guard and the EXIT-trap pop would restore
     # it after that guard passed, silently bypassing the hard error.
-    if ! guard_vsix_tracking "$PROJECT_DIR" >/dev/null 2>&1; then
-        guard_vsix_tracking "$PROJECT_DIR" || exit 1
+    # One run only: the output is captured and re-emitted on failure
+    # (success stays quiet here — step [5/5]'s own guard call reports the
+    # restoration), instead of a silenced probe plus a loud re-run that
+    # repeated every git operation of the guard.
+    local _kiss_guard_out
+    if ! _kiss_guard_out=$(guard_vsix_tracking "$PROJECT_DIR" 2>&1); then
+        printf '%s\n' "$_kiss_guard_out" >&2
+        exit 1
     fi
     if [ -n "$(git -C "$PROJECT_DIR" status --porcelain)" ]; then
         echo "   Repository is dirty — stashing local changes..."

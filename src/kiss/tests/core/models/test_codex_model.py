@@ -18,6 +18,7 @@ from kiss.core.models.codex_model import (
 )
 from kiss.core.models.model import CLI_SYSTEM_PROMPT_HEADER
 from kiss.core.models.model_info import MODEL_INFO, model
+from kiss.scripts.update_models import SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 
 _has_codex = shutil.which("codex") is not None
@@ -39,11 +40,13 @@ _CODEX_MODEL_NAMES = (
 
 # Slugs rejected by the Codex CLI when authenticated with a ChatGPT
 # subscription (HTTP 400: "not supported when using Codex with a ChatGPT
-# account"), verified live on 2026-09-02. They must stay out of the catalog.
-_SUBSCRIPTION_INCOMPATIBLE_NAMES = (
-    "codex/gpt-5.2",
-    "codex/gpt-daybreak-blue-latest",
-    "codex/gpt-daybreak-red-latest",
+# account"), verified live on 2026-09-02. They must stay out of the
+# catalog. Derived from the updater's exclusion set so the two cannot
+# drift (a refresh once resurrected them when this list was standalone).
+_SUBSCRIPTION_INCOMPATIBLE_NAMES = tuple(
+    sorted(
+        f"codex/{slug}" for slug in SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS
+    )
 )
 
 
