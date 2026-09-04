@@ -54,11 +54,55 @@ class TestFinishParameterRenamedToSummaryInHtml:
 
     def test_signature_has_summary_in_html(self) -> None:
         params = list(inspect.signature(finish).parameters)
-        assert params == ["success", "is_continue", "summary_in_html"]
+        assert params == [
+            "success",
+            "is_continue",
+            "summary_in_html",
+            "suggested_next_task",
+        ]
 
     def test_keyword_call_uses_new_name(self) -> None:
         parsed = yaml.safe_load(finish(True, summary_in_html="<p>done</p>"))
         assert parsed["summary"] == "<p>done</p>"
+
+
+class TestFinishSuggestedNextTask:
+    """``finish``'s 4th parameter carries the agent's own follow-up proposal.
+
+    The suggestion replaces the separate follow-up LLM call the server
+    used to make, so it must travel inside the result YAML itself.
+    """
+
+    def test_suggestion_is_emitted_as_yaml_key(self) -> None:
+        parsed = yaml.safe_load(
+            finish(True, summary_in_html="<p>done</p>", suggested_next_task="Add tests"),
+        )
+        assert parsed == {
+            "success": True,
+            "is_continue": False,
+            "summary": "<p>done</p>",
+            "suggested_next_task": "Add tests",
+        }
+
+    def test_suggestion_is_stripped(self) -> None:
+        parsed = yaml.safe_load(
+            finish(True, False, "<p>x</p>", suggested_next_task="  Run the suite \n"),
+        )
+        assert parsed["suggested_next_task"] == "Run the suite"
+
+    def test_empty_suggestion_omits_key(self) -> None:
+        for empty in ("", "   ", None):
+            parsed = yaml.safe_load(
+                finish(True, summary_in_html="<p>x</p>", suggested_next_task=empty),  # type: ignore[arg-type]
+            )
+            assert "suggested_next_task" not in parsed, repr(empty)
+            assert list(parsed) == ["success", "is_continue", "summary"]
+
+    def test_non_string_suggestion_is_coerced(self) -> None:
+        parsed = yaml.safe_load(
+            finish(True, summary_in_html="<p>x</p>", suggested_next_task=42),  # type: ignore[arg-type]
+        )
+        assert parsed["suggested_next_task"] == "42"
 
 
 class TestFinishAlwaysEmitsHtml:
@@ -218,3 +262,11 @@ class TestConsoleResultPanelRendersHtml:
         assert "Status: FAILED" in out
         assert "nope" in out
         assert "<p>" not in out
+
+    def test_suggested_next_task_is_shown(self) -> None:
+        out = self._render("<p>done</p>", suggested_next_task="Add a regression test")
+        assert "Suggested next: Add a regression test" in out
+
+    def test_no_suggestion_line_without_suggestion(self) -> None:
+        out = self._render("<p>done</p>")
+        assert "Suggested next" not in out

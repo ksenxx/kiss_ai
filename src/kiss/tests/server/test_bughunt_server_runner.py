@@ -42,7 +42,6 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as _persistence
 import kiss.server.merge_flow as _merge_flow_module
-import kiss.server.server as _server_module
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
@@ -78,7 +77,6 @@ class _BugHuntBase(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
         self._orig_gen = _merge_flow_module.generate_commit_message_from_diff
-        self._orig_followup = _server_module.generate_followup_text
 
         def fake_commit_msg(
             diff_text: str,
@@ -87,13 +85,9 @@ class _BugHuntBase(unittest.TestCase):
         ) -> str:
             return "test: bughunt autocommit"
 
-        def fake_followup(task: str, result: str, model: str) -> str:
-            return ""
-
         _merge_flow_module.generate_commit_message_from_diff = (  # type: ignore[assignment]
             fake_commit_msg
         )
-        _server_module.generate_followup_text = fake_followup  # type: ignore[assignment]
 
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
@@ -101,7 +95,6 @@ class _BugHuntBase(unittest.TestCase):
     def tearDown(self) -> None:
         self._parent_class.run = self._original_run
         _merge_flow_module.generate_commit_message_from_diff = self._orig_gen
-        _server_module.generate_followup_text = self._orig_followup
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)

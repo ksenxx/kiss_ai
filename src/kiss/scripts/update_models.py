@@ -6,6 +6,13 @@
 """Fetch latest model pricing/context from vendor APIs, test new models,
 and update MODEL_INFO.json.
 
+Capability testing covers generation, embeddings, function calling, the
+highest accepted ``reasoning_effort`` level, and OpenAI v2 (Responses API)
+support: every tested model is live-probed through ``/v1/responses`` (see
+``update_responses_api_support.probe_responses_support``) and gets
+``"use_responses_api": true`` only when the probe passes, which makes the
+``model()`` factory build it on the v2 transport.
+
 The script writes the source-of-truth ``src/kiss/core/models/MODEL_INFO.json``
 in the repo, and nothing else: there is deliberately no user-local
 ``~/.kiss/MODEL_INFO.json`` copy to keep in sync, and
@@ -336,6 +343,7 @@ def get_current_model_info() -> dict[str, dict]:
             "gen": info.is_generation_supported,
             "thinking": info.thinking,
             "alias_of": info.alias_of,
+            "use_responses_api": info.use_responses_api,
         }
         for name, info in MODEL_INFO.items()
     }
@@ -729,6 +737,62 @@ def detect_thinking_level(model_name: str) -> str | None:
     return None
 
 
+_ALLOWED_ARITHMETIC_NODES = (
+    "Expression",
+    "BinOp",
+    "UnaryOp",
+    "Constant",
+    "Add",
+    "Sub",
+    "Mult",
+    "Div",
+    "FloorDiv",
+    "Mod",
+    "USub",
+    "UAdd",
+)
+# ``**`` is deliberately NOT allowed: a hostile expression like
+# ``9**9**9**9`` would pin the CPU and exhaust memory before any
+# whitelist of node types could help.
+
+
+def safe_arithmetic(expression: str) -> str:
+    """Evaluate a plain arithmetic expression without executing code.
+
+    Capability probes hand this to live third-party models as a
+    ``calculator`` tool, so the argument is **attacker-controlled**: a
+    model can return ``__import__('os').system(...)`` as the expression.
+    A bare ``eval`` would execute it with the developer's privileges.
+    This evaluator therefore parses the expression with :mod:`ast` and
+    accepts only numeric literals combined with ``+ - * / // %`` and
+    unary sign — anything else (names, calls, attributes, subscripts,
+    strings, and ``**``, which enables CPU/memory exhaustion) is rejected.
+
+    Args:
+        expression: A math expression string like ``'25*4'``.
+
+    Returns:
+        The numeric result as a string, or ``"error"`` when the
+        expression is not plain arithmetic (a probe only needs the happy
+        path; models that send garbage simply get an error result back).
+    """
+    import ast
+
+    try:
+        tree = ast.parse(expression, mode="eval")
+        for node in ast.walk(tree):
+            if type(node).__name__ not in _ALLOWED_ARITHMETIC_NODES:
+                return "error"
+            if isinstance(node, ast.Constant) and not isinstance(
+                node.value, (int, float)
+            ):
+                return "error"
+        return str(eval(compile(tree, "<arithmetic>", "eval"), {"__builtins__": {}}))
+    except Exception:
+        logger.debug("Exception caught", exc_info=True)
+        return "error"
+
+
 def test_function_calling(model_name: str) -> bool:
     from kiss.core.models.model_info import model as create_model
 
@@ -738,11 +802,7 @@ def test_function_calling(model_name: str) -> bool:
         Args:
             expression: A math expression string like '2+3'.
         """
-        try:
-            return str(eval(expression))
-        except Exception:
-            logger.debug("Exception caught", exc_info=True)
-            return "error"
+        return safe_arithmetic(expression)
 
     try:
         m = create_model(model_name, token_callback=_noop_token_callback)
@@ -755,6 +815,34 @@ def test_function_calling(model_name: str) -> bool:
     except Exception:
         logger.debug("Exception caught", exc_info=True)
         return False
+
+
+def test_responses_api(model_name: str, fc: bool) -> bool | None:
+    """Live-probe whether *model_name* works over the OpenAI v2 Responses API.
+
+    Delegates to ``update_responses_api_support.probe_responses_support``
+    (lazy import — that module imports helpers from this one): a plain
+    streaming generation through ``/v1/responses``, plus a full tool
+    round-trip when *fc* is true.  Models without an OpenAI-compatible
+    endpoint (Anthropic/Gemini native, CLIs) report a definitive ``False``,
+    keeping them on the Chat Completions v1 adapter.
+
+    Args:
+        model_name: The model name (with any routing prefix).
+        fc: Whether the model supports function calling.
+
+    Returns:
+        True when every applicable probe passed, False when the endpoint
+        definitively rejected the model, and ``None`` when nothing could
+        be verified (missing vendor key, exhausted transient endpoint
+        errors) — callers must not flip a stored flag on ``None``.
+    """
+    from kiss.scripts.update_responses_api_support import probe_responses_support
+
+    result = probe_responses_support(model_name, fc=fc)
+    if not result.conclusive:
+        return None
+    return result.supported
 
 
 def test_model_capabilities(
@@ -782,6 +870,15 @@ def test_model_capabilities(
         time.sleep(0.5)
     else:
         results["thinking"] = None
+
+    if results["gen"]:  # pragma: no branch
+        results["use_responses_api"] = test_responses_api(model_name, results["fc"])
+        time.sleep(0.5)
+    else:
+        # The generation probe itself failed (endpoint outage, missing
+        # key, deprecated model): nothing was verified either way, so the
+        # verdict is inconclusive rather than a negative.
+        results["use_responses_api"] = None
 
     if verbose:  # pragma: no branch
         flags = " ".join(
@@ -827,8 +924,13 @@ def find_deprecated_models(
         if name.endswith(_XHIGH_SUFFIX) or current[name].get("alias_of"):
             continue
         if name.startswith("codex/"):  # pragma: no branch
-            if codex_slugs and name != "codex/default":
-                slug = name.removeprefix("codex/")
+            slug = name.removeprefix("codex/")
+            if slug in SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS:
+                deprecated.append({
+                    "name": name,
+                    "reason": "rejected by Codex CLI on ChatGPT subscriptions",
+                })
+            elif codex_slugs and name != "codex/default":
                 if slug not in codex_slugs:
                     deprecated.append({"name": name, "reason": "not in Codex CLI models.json"})
             continue
@@ -965,6 +1067,22 @@ _CODEX_MODELS_JSON_URL = (
     "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json"
 )
 
+SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS = frozenset({
+    "gpt-5.2",
+    "gpt-daybreak-blue-latest",
+    "gpt-daybreak-red-latest",
+})
+"""Codex CLI slugs rejected under a ChatGPT subscription.
+
+Verified live on 2026-09-02: the Codex CLI returns HTTP 400 ("not
+supported when using Codex with a ChatGPT account") for these slugs
+even though the upstream ``models.json`` lists them.  They must stay
+out of ``MODEL_INFO.json``: ``_add_codex_candidates`` never adds them
+and :func:`find_deprecated_models` flags existing entries.  The
+``test_codex_model.py`` guard test imports this set, so there is a
+single source of truth.
+"""
+
 
 def fetch_codex_supported_slugs(verbose: bool = False) -> set[str]:
     """Fetch the list of model slugs the Codex CLI actually supports.
@@ -1000,6 +1118,9 @@ def _add_codex_candidates(
     Only models whose slug appears in the official Codex CLI ``models.json``
     are added. This avoids adding models that the Codex CLI rejects at
     runtime (e.g. ``gpt-5.5-pro`` is not supported with a ChatGPT account).
+    Slugs in :data:`SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS` are skipped even
+    when the upstream ``models.json`` lists them: they were verified live to
+    fail on ChatGPT subscriptions.
 
     Context length is taken from the matching OpenRouter entry when
     available, falling back to 400000 (the default for codex/* models).
@@ -1007,6 +1128,8 @@ def _add_codex_candidates(
     ChatGPT subscription.
     """
     for slug in codex_slugs:  # pragma: no branch
+        if slug in SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS:
+            continue
         codex_name = f"codex/{slug}"
         if codex_name in current:  # pragma: no branch
             continue
@@ -1323,12 +1446,14 @@ def _build_entry(
     gen: bool = True,
     thinking: str | None = None,
     comment: str = "",
+    use_responses_api: bool = False,
 ) -> dict[str, Any]:
     """Build a MODEL_INFO.json entry dict for one model.
 
-    Optional fields (``thinking``, ``comment``) are only included when set
-    so the on-disk JSON stays compact and reviewable; required fields
-    (``context_length``, prices, ``fc``/``emb``/``gen``) are always present.
+    Optional fields (``thinking``, ``comment``, ``use_responses_api``) are
+    only included when set so the on-disk JSON stays compact and
+    reviewable; required fields (``context_length``, prices,
+    ``fc``/``emb``/``gen``) are always present.
 
     Args:
         ctx: Maximum context length in tokens.
@@ -1340,6 +1465,8 @@ def _build_entry(
         thinking: Highest ``reasoning_effort`` level the model accepts.
         comment: Free-form annotation (e.g. ``"NEW"`` /
             ``"NEW: needs pricing"``). Omitted when empty.
+        use_responses_api: Whether the model passed the live OpenAI v2
+            (``/v1/responses``) probe and should use that transport.
 
     Returns:
         A dict suitable for serialization to MODEL_INFO.json.
@@ -1356,6 +1483,8 @@ def _build_entry(
         entry["thinking"] = thinking
     if comment:  # pragma: no branch
         entry["comment"] = comment
+    if use_responses_api:
+        entry["use_responses_api"] = True
     return entry
 
 
@@ -1640,8 +1769,9 @@ def apply_updates_to_file(
     Args:
         updates: ``[{"name": str, "changes": {field: value, ...}}]``.
             ``changes`` may target ``context_length``, ``input_price_per_1M``,
-            ``output_price_per_1M``, ``fc``, ``emb``, ``gen``, ``thinking``.
-            A ``thinking`` value of ``None`` removes the field.
+            ``output_price_per_1M``, ``fc``, ``emb``, ``gen``, ``thinking``,
+            ``use_responses_api``.  A ``thinking`` value of ``None`` and a
+            falsy ``use_responses_api`` value remove their field.
         new_models: Each entry must carry at minimum ``name``,
             ``context_length``, ``input_price_per_1M``, ``output_price_per_1M``.
             Optional flags: ``fc`` (default True), ``emb`` (False),
@@ -1680,11 +1810,14 @@ def apply_updates_to_file(
             emb=cur.get("emb", False),
             gen=cur.get("gen", True),
             thinking=cur.get("thinking"),
+            use_responses_api=bool(cur.get("use_responses_api")),
         )
         changes = upd["changes"]
         for field, value in changes.items():  # pragma: no branch
             if field == "thinking" and value is None:  # pragma: no branch
                 entry.pop("thinking", None)
+            elif field == "use_responses_api" and not value:
+                entry.pop("use_responses_api", None)
             else:
                 entry[field] = value
         if entry.get("comment") == "NEW: needs pricing" and entry["input_price_per_1M"] > 0:
@@ -1709,6 +1842,7 @@ def apply_updates_to_file(
             gen=nm.get("gen", True),
             thinking=nm.get("thinking"),
             comment=comment,
+            use_responses_api=nm.get("use_responses_api", False),
         )
         _write_entry_with_thinking_split(data, nm["name"], entry)
         added += 1
@@ -1970,6 +2104,9 @@ def main() -> None:
             nm["emb"] = caps["emb"]
             nm["fc"] = caps["fc"]
             nm["thinking"] = caps["thinking"]
+            # A brand-new entry is flagged only on a verified pass; an
+            # inconclusive (None) verdict stays on Chat Completions.
+            nm["use_responses_api"] = bool(caps.get("use_responses_api"))
             if not caps["gen"] and not caps["emb"]:  # pragma: no branch
                 nm["_skip"] = True
         new_models = [nm for nm in new_models if not nm.get("_skip")]
@@ -1981,6 +2118,9 @@ def main() -> None:
             nm["gen"] = not nm.get("is_embedding", False)
             nm["emb"] = nm.get("is_embedding", False)
             nm["thinking"] = None
+            # Unverified: the v2 transport flag is only ever written after
+            # a live probe, so --skip-test models stay on Chat Completions.
+            nm["use_responses_api"] = False
     else:
         print("\n[5/6] No new models to test")
 
@@ -1998,7 +2138,13 @@ def main() -> None:
             if stored_thinking == "high" and sibling_thinking == top_level:
                 stored_thinking = top_level
             thinking_changed = caps["thinking"] != stored_thinking
-            if not (fc_changed or thinking_changed):  # pragma: no branch
+            responses_verdict = caps.get("use_responses_api")
+            # None means the probe never ran or died on transient endpoint
+            # errors — a stored flag must survive an unexecuted probe.
+            responses_changed = responses_verdict is not None and bool(
+                responses_verdict
+            ) != bool(cur.get("use_responses_api"))
+            if not (fc_changed or thinking_changed or responses_changed):
                 continue
             existing = update_by_name.get(name)
             if existing is None:  # pragma: no branch
@@ -2012,6 +2158,13 @@ def main() -> None:
                 existing["changes"]["thinking"] = caps["thinking"]
                 print(
                     f"    {name}: thinking changed {cur.get('thinking')!r} -> {caps['thinking']!r}"
+                )
+            if responses_changed:
+                existing["changes"]["use_responses_api"] = bool(responses_verdict)
+                print(
+                    f"    {name}: use_responses_api changed "
+                    f"{bool(cur.get('use_responses_api'))} -> "
+                    f"{bool(responses_verdict)}"
                 )
 
     print("\n[6/6] Applying changes...")

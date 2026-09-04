@@ -83,15 +83,16 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
 from kiss.agents.sorcar import cron_agent
+from kiss.agents.sorcar._concurrency import pid_alive as _is_pid_alive
 from kiss.agents.sorcar.persistence import _load_all_chat_events_by_chat_id
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.models.model_info import get_default_model
 from kiss.core.vscode_config import (
     apply_config_to_env,
+    load_api_keys,
     load_config,
     save_config,
-    source_shell_env,
 )
 from kiss.server import sorcar as sorcar_api
 from kiss.server.json_printer import (
@@ -678,7 +679,11 @@ class _HeadAwareServerConnection(ServerConnection):
 
 _OPEN_FILE_MAX_BYTES = 2_000_000
 
-_KISS_AI_ROOT = Path.home() / "kiss_ai"
+# The curl installer (scripts/install.sh) clones the public repo into
+# ~/.kiss/kiss_ai; the Update button runs the install.sh of that clone.  Kept
+# literal (not $KISS_HOME-relative) to match the installer and the extension's
+# ``kissAiRoot()`` in ``installerPath.js`` exactly.
+_KISS_AI_ROOT = Path.home() / ".kiss" / "kiss_ai"
 
 
 def _find_install_script(root: Path) -> Path | None:
@@ -863,28 +868,6 @@ def _cloudflared_launch_prefix(cgroup: str | None = None) -> list[str]:
     if shutil.which("systemd-run") is None:
         return []
     return list(_SYSTEMD_RUN_SCOPE_PREFIX)
-
-
-def _is_pid_alive(pid: int) -> bool:
-    """Return True iff a process with *pid* currently exists.
-
-    Uses ``os.kill(pid, 0)`` which sends signal 0 (no-op) and either
-    succeeds (process exists and we have permission), raises
-    :class:`ProcessLookupError` (process is gone — return False),
-    or raises :class:`PermissionError` (process exists but is owned
-    by another user — still alive, so return True).
-    """
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
 
 
 def _save_cloudflared_pidfile(
@@ -1733,6 +1716,29 @@ def _snapshot_active_tabs() -> list[str]:
                 exc_info=True,
             )
     return active_tabs
+
+
+def _shutdown_state_owns_thread(state: Any, thread: threading.Thread) -> bool:
+    """True while the swept *state* still owns its unstarted *thread*.
+
+    Ownership guard for the graceful-shutdown sweep's pre-start wait
+    (:func:`kiss.server.task_runner.wait_for_thread_start`), evaluated
+    under ``agent_state.STATE_LOCK``.  Unlike the Stop watchdog's
+    :func:`~kiss.server.task_runner._state_owns_thread` it must NOT
+    treat an acknowledged stop as lost ownership: ``_cmd_run``'s
+    pre-cancel path acknowledges the stop first and only then clears
+    ``state.task_thread``, and the sweep may only stop waiting once
+    the thread can no longer be started (audit0903 F1).
+
+    Args:
+        state: The :class:`~kiss.server.agent_state.AgentState`
+            selected by the sweep.
+        thread: The worker thread captured with it.
+
+    Returns:
+        ``True`` while ``state.task_thread`` is still *thread*.
+    """
+    return state.task_thread is thread
 
 
 def _rss_mb() -> float:
@@ -3017,6 +3023,86 @@ def _fetch_latest_version() -> str | None:
     return version.strip()
 
 
+_UPDATE_SNOOZE_MS = 24 * 60 * 60 * 1000
+
+
+def _update_check_cache_path() -> Path:
+    """Return the update-check cache path shared with the extension.
+
+    The VS Code extension host's ``UpdateChecker.js`` keeps its fetch
+    cooldown and the "Remind me later" snooze in this file; the daemon
+    reads and writes the SAME file so one snooze silences every update
+    popup — the extension host's native notification, the sidebar
+    webview toast, and the remote webapp toast.
+    """
+    return _kiss_home_dir() / ".update-check.json"
+
+
+def _read_update_check_cache() -> dict[str, Any]:
+    """Return the parsed update-check cache, ``{}`` when unreadable."""
+    try:
+        data = json.loads(
+            _update_check_cache_path().read_text(encoding="utf-8"),
+        )
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _is_update_snoozed(latest: str) -> bool:
+    """Return True while a "Remind me later" snooze covers *latest*.
+
+    Mirrors ``isSnoozeActive`` in the extension's ``UpdateChecker.js``:
+    the snooze holds until it expires, but a release NEWER than the
+    snoozed one breaks through (``_compare_versions`` returns 0 for an
+    unparseable ``snoozedLatest``, so a version-less snooze suppresses
+    everything until expiry).
+    """
+    cache = _read_update_check_cache()
+    until_ms = cache.get("snoozeUntilMs")
+    if not isinstance(until_ms, (int, float)) or until_ms <= 0:
+        return False
+    if time.time() * 1000 >= until_ms:
+        return False
+    snoozed = cache.get("snoozedLatest")
+    return _compare_versions(latest, snoozed if isinstance(snoozed, str) else "") <= 0
+
+
+def _record_update_snooze(latest: str) -> None:
+    """Merge a 24h snooze for release *latest* into the shared cache.
+
+    Preserves the extension's ``lastCheckMs``/``lastLatest`` cooldown
+    fields and writes atomically via a unique temp file + rename (the
+    extension host may rewrite the same file concurrently; matching
+    its ``writeCache`` protocol keeps the file parseable).  Twin of
+    ``snoozeUpdateNotification`` in ``UpdateChecker.js``.
+    """
+    cache = _read_update_check_cache()
+    last_check = cache.get("lastCheckMs")
+    last_latest = cache.get("lastLatest")
+    payload = {
+        "lastCheckMs": last_check if isinstance(last_check, (int, float)) else 0,
+        "lastLatest": last_latest if isinstance(last_latest, str) else "",
+        "snoozeUntilMs": int(time.time() * 1000) + _UPDATE_SNOOZE_MS,
+        "snoozedLatest": latest
+        or (last_latest if isinstance(last_latest, str) else ""),
+    }
+    cache_path = _update_check_cache_path()
+    tmp = cache_path.with_name(
+        f"{cache_path.name}.{os.getpid()}.{time.time_ns()}.tmp",
+    )
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(cache_path)
+    except Exception:
+        logger.debug("Failed to record update snooze", exc_info=True)
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+
+
 _WS_SHIM_JS = r"""
 // WebSocket shim for the remote webapp: provides acquireVsCodeApi()
 // so the extension's media/main.js + media/api.js run unmodified in a
@@ -3257,6 +3343,17 @@ _WS_SHIM_JS = r"""
     // Nulling the handlers and closing the old socket here makes the
     // replacement atomic from the rest of the shim's perspective.
     if (_ws) {
+      // Nulling ``onclose`` below also discards the latch it would
+      // have taken: when the wake-up listeners win the race against
+      // the dead socket's queued ``onclose`` (the common mobile Safari
+      // case), an authenticated session is being replaced right here,
+      // so record the loss now — otherwise the new socket's
+      // ``auth_ok`` would skip the reload and leave the page on stale
+      // pre-restart state.
+      if (_authenticated) {
+        _hadAuthThenClosed = true;
+        _setReconnectingFlag(true);
+      }
       try {
         _ws.onopen = null;
         _ws.onmessage = null;
@@ -3642,7 +3739,7 @@ class RemoteAccessServer:
         ntfy_base_url: str = _NTFY_BASE_URL,
         uds_owner_wait_s: float = 30.0,
     ) -> None:
-        source_shell_env()
+        load_api_keys()
         # ``saveConfig`` was the only caller of apply_config_to_env, so
         # a freshly started daemon kept the DECLARED default budget
         # until the user happened to open and close the settings panel.
@@ -3676,7 +3773,6 @@ class RemoteAccessServer:
         self._server_api = sorcar_api.ServerApi(self)
         self._voice_wake = VoiceWakeController()
 
-        self._html_bytes = _build_html().encode("utf-8")
         self._tunnel_proc: subprocess.Popen[str] | None = None
         self._tunnel_metrics_port: int | None = None
         self._tunnel_unhealthy_ticks = 0
@@ -3712,6 +3808,7 @@ class RemoteAccessServer:
         self._update_log_path: Path = _kiss_home_dir() / "update.log"
         self._update_proc: subprocess.Popen[bytes] | None = None
         self._update_starting = False
+        self._update_watch_task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._uds_inode: int | None = None
 
@@ -3763,7 +3860,17 @@ class RemoteAccessServer:
         request_path = urlsplit(request.path).path
         path = unquote(request_path)
         if path in ("", "/"):
-            return _http_response(200, "text/html; charset=utf-8", self._html_bytes)
+            # Rendered per page load (off-thread: it reads the
+            # template, TIPS.md and the trick files), never cached
+            # for the daemon's lifetime — the page embeds
+            # ``window.__TRICKS__``, and a list frozen at startup made
+            # the Inject panel disagree with the daemon's own
+            # ghost-text completions (which re-read the files) as
+            # soon as the user edited ``MY_INJECTION.md``.
+            html_page = await asyncio.to_thread(_build_html)
+            return _http_response(
+                200, "text/html; charset=utf-8", html_page.encode("utf-8"),
+            )
         if path == "/ws":
             return None
         if path in ("/trajectories", "/trajectories/"):
@@ -4169,15 +4276,16 @@ class RemoteAccessServer:
         """
         flag_path = self._server_reset_flag_path()
         try:
-            flag_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = flag_path.with_suffix(flag_path.suffix + ".tmp")
-            tmp.write_text(
+            # Shared atomic writer (pid/thread-unique temp + replace):
+            # a hand-rolled fixed ``.tmp`` sibling let a concurrent
+            # writer truncate the temp inode the first writer had
+            # already renamed onto the flag, exposing an empty flag.
+            _atomic_write_text(
+                flag_path,
                 json.dumps(
                     {"requested_at": time.time(), "conn_id": conn_id},
                 ),
-                encoding="utf-8",
             )
-            os.replace(tmp, flag_path)
         except OSError:
             logger.debug(
                 "Could not write server-reset pending flag at %s",
@@ -4188,24 +4296,44 @@ class RemoteAccessServer:
         """Schedule the post-restart broadcast iff a pending flag exists.
 
         Called once from :meth:`_setup_server` after the WSS / UDS
-        listeners are bound and the watchdog tasks are armed.  When
-        the flag file written by :meth:`_write_server_reset_flag`
-        in the previous daemon instance is found, it is removed
-        eagerly (so the toast fires at most once per user-initiated
-        reset, even if the daemon restarts again before the timer
-        runs) and a delayed callback is queued to broadcast the
-        "Server restart complete" notification.
+        listeners are bound and the watchdog tasks are armed.  The
+        flag file written by :meth:`_write_server_reset_flag` in the
+        previous daemon instance is CLAIMED first — atomically renamed
+        to a pid-unique sibling, so the toast fires at most once per
+        user-initiated reset even if the daemon restarts again before
+        the timer runs — then its content is checked to be the JSON
+        object the writer produces, and only then is the delayed
+        "Server restart complete" broadcast queued.  A marker that
+        cannot be claimed (unlinkable, or a directory sitting at the
+        path) or that holds anything else is never announced: doing
+        so used to re-announce a "completed restart" on every start.
         """
         flag_path = self._server_reset_flag_path()
-        if not flag_path.exists():
+        if not flag_path.is_file():
             return
+        claimed = flag_path.with_name(
+            f"{flag_path.name}.claimed-{os.getpid()}-{uuid.uuid4().hex[:8]}",
+        )
         try:
-            flag_path.unlink()
+            os.replace(flag_path, claimed)
         except OSError:
             logger.debug(
-                "Could not remove server-reset pending flag at %s",
+                "Could not claim server-reset pending flag at %s",
                 flag_path, exc_info=True,
             )
+            return
+        try:
+            marker = json.loads(claimed.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            marker = None
+        finally:
+            claimed.unlink(missing_ok=True)
+        if not isinstance(marker, dict):
+            logger.debug(
+                "Ignoring malformed server-reset pending flag at %s",
+                flag_path,
+            )
+            return
         loop = self._loop
         assert loop is not None
         loop.call_later(
@@ -4255,7 +4383,7 @@ class RemoteAccessServer:
         os.kill(os.getpid(), signal.SIGTERM)
 
     async def _handle_run_update(self, conn_id: str = "") -> None:
-        """Run ``~/kiss_ai/install.sh`` to update KISS Sorcar.
+        """Run ``~/.kiss/kiss_ai/install.sh`` to update KISS Sorcar.
 
         Server-side twin of the VS Code extension's
         ``SorcarSidebarView._runUpdate()``: the extension locates the
@@ -4273,6 +4401,13 @@ class RemoteAccessServer:
         the extension's twin shows its messages only in the clicking
         window, and clicking Update in one browser window must not
         pop a banner in every sibling window.
+
+        The installer's exit is watched by :meth:`_watch_update_exit`
+        so a failure — above all ``install.sh`` losing its
+        cross-process update lock to another installer and exiting 1
+        with ``another KISS update is already running (pid N)`` — is
+        reported to the same window instead of leaving it believing
+        an update is under way.
 
         Args:
             conn_id: Requesting connection id (``""`` to broadcast).
@@ -4315,20 +4450,26 @@ class RemoteAccessServer:
                 f"(output: {self._update_log_path})"
             ),
         }, conn_id)
-        await loop.run_in_executor(
+        spawned = await loop.run_in_executor(
             None, self._spawn_update_script, script, conn_id,
         )
+        if spawned is not None:
+            self._update_watch_task = asyncio.create_task(
+                self._watch_update_exit(*spawned, conn_id),
+            )
 
-    def _spawn_update_script(self, script: Path, conn_id: str = "") -> None:
+    def _spawn_update_script(
+        self, script: Path, conn_id: str = "",
+    ) -> tuple[subprocess.Popen[bytes], int] | None:
         """Start ``install.sh`` detached, logging to the update log.
 
         Runs in the executor so file I/O and process spawn never block
         the event loop.  ``start_new_session=True`` keeps the updater
         alive when ``install.sh`` restarts this very daemon.
-        ``stdin=DEVNULL`` detaches the script from the daemon's stdin so
-        its interactive prompts (e.g. the git-upgrade question) fall
-        back to their non-interactive defaults instead of failing a
-        ``read`` on a dead descriptor.  Failures are emitted as
+        ``--non-interactive`` makes the script answer its ``[Y/n]``
+        upgrade questions with their defaults (it would anyway, having
+        no terminal to ask on), and ``stdin=DEVNULL`` detaches it from
+        the daemon's stdin.  Failures are emitted as
         ``error`` events instead of raised, stamped with the
         requesting connection's ``connId`` (when non-empty) so only
         the window that clicked "Update" renders the error banner.
@@ -4336,25 +4477,68 @@ class RemoteAccessServer:
         Args:
             script: Absolute path of the ``install.sh`` to execute.
             conn_id: Requesting connection id (``""`` to broadcast).
+
+        Returns:
+            The started process and the update log's size at that
+            moment (the start of this run's output), or ``None`` when
+            the spawn failed.
         """
         try:
             self._update_log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._update_log_path, "ab") as log:
+                log_offset = log.tell()
                 self._update_proc = subprocess.Popen(
-                    ["bash", str(script)],
+                    ["bash", str(script), "--non-interactive"],
                     cwd=str(script.parent),
                     stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
                 )
+                return self._update_proc, log_offset
         except OSError as exc:
             self._broadcast_to_conn({
                 "type": "error",
                 "text": f"Failed to start KISS Sorcar update: {exc}",
             }, conn_id)
+            return None
         finally:
             self._update_starting = False
+
+    async def _watch_update_exit(
+        self, proc: subprocess.Popen[bytes], log_offset: int, conn_id: str,
+    ) -> None:
+        """Report a failed installer to the window that started it.
+
+        Polls the detached installer (no executor thread is tied up for
+        the minutes an install takes, and the daemon it may restart
+        never waits on it) and, on a non-zero exit, sends the
+        requesting connection an ``error``: the installer's own
+        refusal line when this run's slice of the update log holds one
+        (``install.sh`` lost the cross-process update lock to another
+        installer), otherwise a generic failure pointing at the log.
+        A clean exit reports nothing more.
+
+        Args:
+            proc: The installer started by :meth:`_spawn_update_script`.
+            log_offset: Size of the update log when *proc* started,
+                i.e. where this run's output begins.
+            conn_id: Requesting connection id (``""`` to broadcast).
+        """
+        while proc.poll() is None:
+            await asyncio.sleep(0.2)
+        if proc.returncode == 0:
+            return
+        try:
+            output = self._update_log_path.read_bytes()[log_offset:]
+        except OSError:
+            output = b""
+        text = f"KISS Sorcar update failed (exit {proc.returncode}), see {self._update_log_path}"
+        for line in output.decode("utf-8", errors="replace").splitlines():
+            if "another KISS update is already running" in line:
+                text = f"KISS Sorcar update: {line.strip()}"
+                break
+        self._broadcast_to_conn({"type": "error", "text": text}, conn_id)
 
     def _identify_voice_speaker(self, pcm: bytes) -> int | None:
         """Return the stable speaker number for an utterance's PCM.
@@ -4596,6 +4780,35 @@ class RemoteAccessServer:
         """
         await self._voice_wake.stop(conn_id)
 
+    @staticmethod
+    def _cmd_str(cmd: dict[str, Any], key: str) -> str:
+        """Return ``cmd[key]`` when it is a string, else ``""``.
+
+        Client commands are untrusted JSON: every file-oriented
+        handler (``openFile``, ``shareChat``, ``shareChatTasks``,
+        ``checkPaths``, ``ready``) must blank a non-string ``tabId`` /
+        ``title`` / ``chatId`` rather than let it flow into path or
+        reply construction.  One helper instead of one copy per
+        handler.
+        """
+        value = cmd.get(key, "")
+        return value if isinstance(value, str) else ""
+
+    def _cmd_work_dir(self, cmd: dict[str, Any]) -> str:
+        """Return the command's ``workDir``, else the daemon work dir.
+
+        The per-connection ``workDir`` stamped by
+        :meth:`kiss.server.sorcar.ServerApi.dispatch` wins; a missing,
+        empty or non-string value falls back to the backend's current
+        work dir and then this server's own.  Shared by the file
+        handlers so relative paths resolve identically everywhere.
+        """
+        return (
+            self._cmd_str(cmd, "workDir")
+            or self._vscode_server.work_dir
+            or self.work_dir
+        )
+
     def _resolve_tab_file(
         self, raw_path: str, work_dir: str, tab_id: str,
     ) -> Path | None:
@@ -4671,15 +4884,11 @@ class RemoteAccessServer:
                 ``workDir``, ``tabId``, ``line``).
             endpoint: The requesting WSS connection.
         """
-        raw_path = cmd.get("path", "")
-        if not isinstance(raw_path, str) or not raw_path:
+        raw_path = self._cmd_str(cmd, "path")
+        if not raw_path:
             return
-        work_dir = cmd.get("workDir", "")
-        if not isinstance(work_dir, str) or not work_dir:
-            work_dir = self._vscode_server.work_dir or self.work_dir
-        tab_id = cmd.get("tabId", "")
-        if not isinstance(tab_id, str):
-            tab_id = ""
+        work_dir = self._cmd_work_dir(cmd)
+        tab_id = self._cmd_str(cmd, "tabId")
 
         def _read_file() -> dict[str, Any]:
             reply: dict[str, Any] = {
@@ -4745,17 +4954,11 @@ class RemoteAccessServer:
                 ``html``, optional ``title``, ``workDir``, ``tabId``).
             endpoint: The requesting connection (WSS or UDS).
         """
-        tab_id = cmd.get("tabId", "")
-        if not isinstance(tab_id, str):
-            tab_id = ""
+        tab_id = self._cmd_str(cmd, "tabId")
         chat_id = cmd.get("chatId", "")
         body_html = cmd.get("html", "")
-        title = cmd.get("title", "")
-        if not isinstance(title, str):
-            title = ""
-        work_dir = cmd.get("workDir", "")
-        if not isinstance(work_dir, str) or not work_dir:
-            work_dir = self._vscode_server.work_dir or self.work_dir
+        title = self._cmd_str(cmd, "title")
+        work_dir = self._cmd_work_dir(cmd)
 
         def _write_page() -> dict[str, Any]:
             reply: dict[str, Any] = {
@@ -4832,14 +5035,8 @@ class RemoteAccessServer:
                 optional ``tabId``).
             endpoint: The requesting connection (WSS or UDS).
         """
-        tab_id = cmd.get("tabId", "")
-        if not isinstance(tab_id, str):
-            tab_id = ""
-        chat_id = cmd.get("chatId", "")
-        if not isinstance(chat_id, str):
-            chat_id = ""
-        tab_id = tab_id[:_SHARE_TASKS_MAX_ID_CHARS]
-        chat_id = chat_id[:_SHARE_TASKS_MAX_ID_CHARS]
+        tab_id = self._cmd_str(cmd, "tabId")[:_SHARE_TASKS_MAX_ID_CHARS]
+        chat_id = self._cmd_str(cmd, "chatId")[:_SHARE_TASKS_MAX_ID_CHARS]
 
         def _load_tasks() -> dict[str, Any]:
             reply: dict[str, Any] = {
@@ -4912,15 +5109,9 @@ class RemoteAccessServer:
         raw_paths = cmd.get("paths")
         if not isinstance(raw_paths, list):
             raw_paths = []
-        raw_work_dir = cmd.get("workDir", "")
-        if not isinstance(raw_work_dir, str):
-            raw_work_dir = ""
-        work_dir = raw_work_dir
-        if not work_dir:
-            work_dir = self._vscode_server.work_dir or self.work_dir
-        tab_id = cmd.get("tabId", "")
-        if not isinstance(tab_id, str):
-            tab_id = ""
+        raw_work_dir = self._cmd_str(cmd, "workDir")
+        work_dir = self._cmd_work_dir(cmd)
+        tab_id = self._cmd_str(cmd, "tabId")
 
         def _check_paths() -> dict[str, bool]:
             results: dict[str, bool] = {}
@@ -5015,12 +5206,31 @@ class RemoteAccessServer:
             return
         current = await asyncio.to_thread(_read_version)
         available = bool(current) and _compare_versions(latest, current) > 0
+        snoozed = available and await asyncio.to_thread(
+            _is_update_snoozed, latest,
+        )
         self._printer.broadcast({
             "type": "update_available",
             "available": available,
             "latest": latest,
             "current": current,
+            "snoozed": snoozed,
         })
+
+    async def _handle_snooze_update(self, latest: str = "") -> None:
+        """Record a 24h "Remind me later" snooze and rebroadcast.
+
+        Writes the snooze into the ``.update-check.json`` cache shared
+        with the VS Code extension (file I/O off-thread, M10), then
+        rebroadcasts ``update_available`` with ``snoozed: true`` so
+        every connected client drops its sticky update toast at once.
+
+        Args:
+            latest: The release version being snoozed ("" falls back
+                to the cache's last known latest version).
+        """
+        await asyncio.to_thread(_record_update_snooze, latest)
+        await self._broadcast_update_available()
 
     async def _post_url_if_changed(self) -> None:
         """Post :attr:`_active_url` to the ntfy message board once.
@@ -5210,9 +5420,7 @@ class RemoteAccessServer:
                 :meth:`kiss.server.sorcar.ServerApi.dispatch`).
             websocket: The client connection (for direct replies).
         """
-        tab_id = cmd.get("tabId", "")
-        if not isinstance(tab_id, str):
-            tab_id = ""
+        tab_id = self._cmd_str(cmd, "tabId")
         conn_id = cmd.get("connId", "")
         work_dir = cmd.get("workDir", "")
         for init_cmd in ("getModels", "getInputHistory", "getConfig"):
@@ -6854,11 +7062,24 @@ class RemoteAccessServer:
                 for all active worker threads to unwind.
         """
         from kiss.server import agent_state
-        from kiss.server.task_runner import inject_keyboard_interrupt
+        from kiss.server.agent_state import AgentState
+        from kiss.server.task_runner import (
+            inject_keyboard_interrupt,
+            wait_for_thread_start,
+        )
 
-        active: list[tuple[str, threading.Event | None, threading.Thread]] = []
+        active: list[
+            tuple[str, AgentState, threading.Event | None, threading.Thread]
+        ] = []
         active_task_history_ids: set[str] = set()
         with agent_state.STATE_LOCK:
+            # New runs observed after this point pre-cancel instead of
+            # starting: ``_cmd_run``'s start/cancel handshake checks
+            # this flag — and each swept state's
+            # ``interrupted_by_shutdown`` below — under this same lock
+            # immediately before ``thread.start()``, so no run can
+            # start AFTER this sweep (audit0903 F1).
+            self._vscode_server._shutdown_stopping = True
             for task_id, state in agent_state.agent_states.items():
                 thread = state.task_thread
                 # Liveness is AgentState.busy(), not is_task_active
@@ -6869,7 +7090,7 @@ class RemoteAccessServer:
                 # stranded at the abrupt-failure sentinel (F08-2).
                 if thread is not None and state.busy():
                     state.interrupted_by_shutdown = True
-                    active.append((task_id, state.stop_event, thread))
+                    active.append((task_id, state, state.stop_event, thread))
                     active_task_history_ids.add(task_id)
 
         if not active:
@@ -6891,15 +7112,27 @@ class RemoteAccessServer:
         logger.warning(
             "Shutdown: stopping %d in-flight agent task(s) before exit: %s",
             len(active),
-            ", ".join(tab_id for tab_id, _, _ in active),
+            ", ".join(tab_id for tab_id, _, _, _ in active),
         )
 
-        for _tab_id, stop_event, _thread in active:
+        for _tab_id, _state, stop_event, _thread in active:
             if stop_event is not None:
                 stop_event.set()
 
         deadline = time.monotonic() + timeout
-        for tab_id, _stop_event, thread in active:
+        for tab_id, state, _stop_event, thread in active:
+            # A worker registered by ``_cmd_run`` but not yet started
+            # cannot be joined (``Thread.join`` raises before start).
+            # Wait for the start — or for ``_cmd_run``'s pre-start
+            # handshake to cancel the run, whose terminal cleanup
+            # clears ``state.task_thread`` and drops ownership — via
+            # the same primitive the Stop watchdog uses (audit0903 F1).
+            if not wait_for_thread_start(
+                thread,
+                partial(_shutdown_state_owns_thread, state, thread),
+                deadline=deadline,
+            ):
+                continue
             remaining = max(0.0, deadline - time.monotonic())
             thread.join(timeout=min(1.0, remaining))
             if thread.is_alive():
@@ -7057,6 +7290,8 @@ class RemoteAccessServer:
             self._watchdog_task = None
             await _cancel_task(self._version_check_task)
             self._version_check_task = None
+            await _cancel_task(self._update_watch_task)
+            self._update_watch_task = None
             if self._ws_server is not None:
                 self._ws_server.close()
                 try:

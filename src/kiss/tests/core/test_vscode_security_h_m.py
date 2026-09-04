@@ -22,13 +22,23 @@ from unittest import mock
 
 @unittest.skipIf(sys.platform == "win32", "POSIX-only file permissions test")
 class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
-    """``save_api_key_to_shell`` writes RC with mode 0600 and shell-quotes value."""
+    """``save_api_key`` writes 0600 files and shell-quotes the value.
+
+    The key itself lives in the canonical ``$KISS_HOME/api_keys.env``;
+    the RC only gains a hook that sources it, so sourcing the RC must
+    still round-trip every value exactly.
+    """
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
         self._home_patch = mock.patch.dict(
-            os.environ, {"HOME": str(self.home), "SHELL": "/bin/bash"},
+            os.environ,
+            {
+                "HOME": str(self.home),
+                "KISS_HOME": str(self.home / ".kiss"),
+                "SHELL": "/bin/bash",
+            },
         )
         self._home_patch.start()
         from kiss.core import vscode_config as vc
@@ -45,9 +55,12 @@ class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
         self._home_patch.stop()
         self._tmp.cleanup()
 
-    def test_rc_file_is_mode_0600_after_write(self) -> None:
-        """RC file must be created with 0600 permissions, not 0644."""
-        self._vc.save_api_key_to_shell("OPENAI_API_KEY", "sk-secret-12345")
+    def test_store_and_rc_are_mode_0600_after_write(self) -> None:
+        """Key store and hooked RC must be created 0600, not 0644."""
+        self._vc.save_api_key("OPENAI_API_KEY", "sk-secret-12345")
+        store = self.home / ".kiss" / "api_keys.env"
+        self.assertTrue(store.exists())
+        self.assertEqual(stat.S_IMODE(store.stat().st_mode), 0o600)
         rc = self.home / ".bashrc"
         self.assertTrue(rc.exists())
         mode = stat.S_IMODE(rc.stat().st_mode)
@@ -56,8 +69,8 @@ class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
 
     def test_rc_file_mode_preserved_when_overwriting_existing_key(self) -> None:
         """A pre-existing entry update keeps file mode at 0600 (or stricter)."""
-        self._vc.save_api_key_to_shell("OPENAI_API_KEY", "old-key")
-        self._vc.save_api_key_to_shell("OPENAI_API_KEY", "new-key")
+        self._vc.save_api_key("OPENAI_API_KEY", "old-key")
+        self._vc.save_api_key("OPENAI_API_KEY", "new-key")
         rc = self.home / ".bashrc"
         mode = stat.S_IMODE(rc.stat().st_mode)
         self.assertFalse(mode & 0o077,
@@ -66,7 +79,7 @@ class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
     def test_value_with_double_quote_is_quoted_safely(self) -> None:
         """A key value containing `"` must not break out of its quotes."""
         evil = 'a"b$IFS$(echo pwned > /tmp/h3-pwned)c'
-        self._vc.save_api_key_to_shell("OPENAI_API_KEY", evil)
+        self._vc.save_api_key("OPENAI_API_KEY", evil)
         rc_text = (self.home / ".bashrc").read_text()
         proc = subprocess.run(
             ["bash", "-c", f"source '{self.home / '.bashrc'}' && printf '%s' \"$OPENAI_API_KEY\""],
@@ -81,7 +94,7 @@ class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
     def test_value_with_backslash_round_trips(self) -> None:
         """A key value with backslashes must round-trip exactly."""
         evil = "a\\b\\$\\\"c"
-        self._vc.save_api_key_to_shell("ANTHROPIC_API_KEY", evil)
+        self._vc.save_api_key("ANTHROPIC_API_KEY", evil)
         proc = subprocess.run(
             ["bash", "-c",
              f"source '{self.home / '.bashrc'}' && "
@@ -93,7 +106,7 @@ class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
 
 
 class TestH3PropertyFuzz(unittest.TestCase):
-    """Fuzz arbitrary key values through ``save_api_key_to_shell`` and
+    """Fuzz arbitrary key values through ``save_api_key`` and
     require round-trip equality after sourcing the RC."""
 
     def setUp(self) -> None:
@@ -107,7 +120,12 @@ class TestH3PropertyFuzz(unittest.TestCase):
         self._refresh_patch = mock.patch.object(vc, "_refresh_config", lambda: None)
         self._refresh_patch.start()
         self._home_patch = mock.patch.dict(
-            os.environ, {"HOME": str(self.home), "SHELL": "/bin/bash"},
+            os.environ,
+            {
+                "HOME": str(self.home),
+                "KISS_HOME": str(self.home / ".kiss"),
+                "SHELL": "/bin/bash",
+            },
         )
         self._home_patch.start()
 
@@ -118,7 +136,7 @@ class TestH3PropertyFuzz(unittest.TestCase):
         self._tmp.cleanup()
 
     def _round_trip(self, value: str) -> str:
-        self._vc.save_api_key_to_shell("OPENAI_API_KEY", value)
+        self._vc.save_api_key("OPENAI_API_KEY", value)
         proc = subprocess.run(
             ["bash", "-c",
              f"source '{self.home / '.bashrc'}' && printf '%s' \"$OPENAI_API_KEY\""],

@@ -22,15 +22,17 @@ import kiss.core.vscode_config as vscode_config
 from kiss.core.vscode_config import (
     API_KEY_ENV_VARS,
     DEFAULTS,
+    RC_HOOK_BEGIN,
     _get_user_shell,
     _resolve_shell_path,
     _shell_rc_path,
+    api_keys_env_path,
     apply_config_to_env,
     get_custom_model_entry,
+    load_api_keys,
     load_config,
-    save_api_key_to_shell,
+    save_api_key,
     save_config,
-    source_shell_env,
 )
 
 
@@ -45,7 +47,7 @@ def _isolate_config(
     real ``_shell_rc_path`` is used, reading ``Path.home()`` (which
     respects the monkeypatched HOME env var).
 
-    Also snapshots all API key env vars so that ``save_api_key_to_shell``
+    Also snapshots all API key env vars so that ``save_api_key``
     (which writes directly to ``os.environ``) does not leak test values
     into later tests.
     """
@@ -80,8 +82,8 @@ def _installed_posix_shell() -> str:
     Prefers ``zsh`` to keep exercising the historical default, but
     falls back to ``bash`` (present on every Linux/macOS CI box) so the
     end-to-end sourcing tests still run for real — instead of failing —
-    on machines without zsh.  ``source_shell_env`` treats both shells
-    identically (same ``source rc; env`` pipeline).
+    on machines without zsh.  The legacy-key migration treats both
+    shells identically (same ``source rc; env`` pipeline).
     """
     for shell in ("zsh", "bash"):
         if _resolve_shell_path(shell) is not None:
@@ -183,69 +185,113 @@ class TestLoadSaveConfig:
         assert load_config() == DEFAULTS
 
 
-class TestApiKeyShell:
-    """Test saving API keys to shell RC files."""
+class TestApiKeySave:
+    """Saving stores the key in the canonical file — and nowhere else."""
 
-    def test_save_key_to_zshrc(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_save_key_writes_canonical_store(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        save_api_key_to_shell("GEMINI_API_KEY", "test-key-123")
-        rc = Path.home() / ".zshrc"
-        content = rc.read_text()
+        save_api_key("GEMINI_API_KEY", "test-key-123")
+        content = api_keys_env_path().read_text()
         assert (
             f"export GEMINI_API_KEY={shlex.quote('test-key-123')}" in content
         )
         assert os.environ["GEMINI_API_KEY"] == "test-key-123"
 
-    def test_save_key_to_bashrc(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_save_key_installs_rc_hook_not_a_copy(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The RC gets the sourcing hook, never a second copy of the key."""
         monkeypatch.setenv("SHELL", "/bin/bash")
-        save_api_key_to_shell("OPENAI_API_KEY", "sk-test")
+        save_api_key("OPENAI_API_KEY", "sk-test")
         rc = Path.home() / ".bashrc"
         content = rc.read_text()
-        assert f"export OPENAI_API_KEY={shlex.quote('sk-test')}" in content
+        assert "sk-test" not in content
+        assert "OPENAI_API_KEY" not in content
+        assert RC_HOOK_BEGIN in content
+        assert '. "$HOME/.kiss/api_keys.env"' in content
 
-    def test_save_key_to_fish(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SHELL", "/usr/bin/fish")
-        save_api_key_to_shell("ANTHROPIC_API_KEY", "ant-key")
-        rc = Path.home() / ".config" / "fish" / "config.fish"
-        content = rc.read_text()
-        assert "set -gx ANTHROPIC_API_KEY ant-key" in content
-
-    def test_replace_existing_key_zsh(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_save_key_rc_hook_installed_once(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Repeated saves append exactly one hook block."""
         monkeypatch.setenv("SHELL", "/bin/zsh")
+        save_api_key("GEMINI_API_KEY", "one")
+        save_api_key("OPENAI_API_KEY", "two")
         rc = Path.home() / ".zshrc"
-        rc.write_text('export GEMINI_API_KEY="old-key"\n# other stuff\n')
-        save_api_key_to_shell("GEMINI_API_KEY", "new-key")
-        content = rc.read_text()
+        assert rc.read_text().count(RC_HOOK_BEGIN) == 1
+
+    def test_save_key_fish_gets_no_hook(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """fish cannot source a bash-syntax file, so no hook is written."""
+        monkeypatch.setenv("SHELL", "/usr/bin/fish")
+        save_api_key("ANTHROPIC_API_KEY", "ant-key")
+        content = api_keys_env_path().read_text()
+        assert "export ANTHROPIC_API_KEY=ant-key" in content
+        rc = Path.home() / ".config" / "fish" / "config.fish"
+        assert not rc.exists()
+        assert os.environ["ANTHROPIC_API_KEY"] == "ant-key"
+
+    def test_replace_existing_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A key already in the canonical store is replaced in place."""
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        env_file = api_keys_env_path()
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text(
+            'export GEMINI_API_KEY="old-key"\n# other stuff\n',
+        )
+        save_api_key("GEMINI_API_KEY", "new-key")
+        content = env_file.read_text()
         assert f"export GEMINI_API_KEY={shlex.quote('new-key')}" in content
         assert "old-key" not in content
         assert "# other stuff" in content
+        assert content.count("GEMINI_API_KEY") == 1
 
-    def test_replace_existing_key_fish(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_save_scrubs_legacy_rc_assignment(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An ``export KEY=…`` line a previous release wrote is removed.
+
+        Left in place, an RC line sourced after the hook would shadow
+        the canonical value in every interactive shell.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        rc = Path.home() / ".zshrc"
+        rc.write_text('export GEMINI_API_KEY="old-key"\n# other stuff\n')
+        save_api_key("GEMINI_API_KEY", "new-key")
+        content = rc.read_text()
+        assert "old-key" not in content
+        assert "# other stuff" in content
+        assert RC_HOOK_BEGIN in content
+
+    def test_save_scrubs_legacy_fish_assignment(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         monkeypatch.setenv("SHELL", "/usr/bin/fish")
         rc = Path.home() / ".config" / "fish" / "config.fish"
         rc.parent.mkdir(parents=True, exist_ok=True)
         rc.write_text("set -gx OPENAI_API_KEY old-fish-key\n# fish comment\n")
-        save_api_key_to_shell("OPENAI_API_KEY", "new-fish-key")
+        save_api_key("OPENAI_API_KEY", "new-fish-key")
         content = rc.read_text()
-        assert "set -gx OPENAI_API_KEY new-fish-key" in content
         assert "old-fish-key" not in content
         assert "# fish comment" in content
+        assert (
+            "export OPENAI_API_KEY=new-fish-key"
+            in api_keys_env_path().read_text()
+        )
 
-    def test_save_key_empty_rc_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """RC file exists but is empty."""
+    def test_save_key_no_trailing_newline(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A store lacking a final newline is not corrupted by an append."""
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        rc = Path.home() / ".zshrc"
-        rc.write_text("")
-        save_api_key_to_shell("OPENAI_API_KEY", "key123")
-        content = rc.read_text()
-        assert f"export OPENAI_API_KEY={shlex.quote('key123')}" in content
-
-    def test_save_key_no_trailing_newline(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SHELL", "/bin/zsh")
-        rc = Path.home() / ".zshrc"
-        rc.write_text("# no trailing newline")
-        save_api_key_to_shell("OPENAI_API_KEY", "test-key")
-        content = rc.read_text()
+        env_file = api_keys_env_path()
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text("# no trailing newline")
+        save_api_key("OPENAI_API_KEY", "test-key")
+        content = env_file.read_text()
         assert "# no trailing newline\n" in content
         assert f"export OPENAI_API_KEY={shlex.quote('test-key')}" in content
 
@@ -253,8 +299,17 @@ class TestApiKeyShell:
         """Key is set in os.environ immediately."""
         monkeypatch.setenv("SHELL", "/bin/zsh")
         monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
-        save_api_key_to_shell("TOGETHER_API_KEY", "tok-val")
+        save_api_key("TOGETHER_API_KEY", "tok-val")
         assert os.environ["TOGETHER_API_KEY"] == "tok-val"
+
+    def test_store_file_is_owner_only(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The canonical store holds every key, so it must be mode 0600."""
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        save_api_key("GEMINI_API_KEY", "secret")
+        mode = api_keys_env_path().stat().st_mode & 0o777
+        assert mode == 0o600
 
     def test_save_key_refreshes_default_config(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -274,26 +329,187 @@ class TestApiKeyShell:
         previous_budget = config_module.DEFAULT_CONFIG.max_budget
         config_module.DEFAULT_CONFIG.max_budget = 5.0
         try:
-            save_api_key_to_shell("ZAI_API_KEY", "z-key")
+            save_api_key("ZAI_API_KEY", "z-key")
             assert config_module.DEFAULT_CONFIG.ZAI_API_KEY == "z-key"
             assert config_module.DEFAULT_CONFIG.max_budget == 5.0
         finally:
             config_module.DEFAULT_CONFIG.max_budget = previous_budget
 
     def test_multiple_keys_sequential(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Multiple keys saved sequentially all appear in RC file."""
+        """Multiple keys saved sequentially all appear in the store."""
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        save_api_key_to_shell("GEMINI_API_KEY", "gem-key")
-        save_api_key_to_shell("OPENAI_API_KEY", "oai-key")
-        save_api_key_to_shell("ANTHROPIC_API_KEY", "ant-key")
-        rc = Path.home() / ".zshrc"
-        content = rc.read_text()
+        save_api_key("GEMINI_API_KEY", "gem-key")
+        save_api_key("OPENAI_API_KEY", "oai-key")
+        save_api_key("ANTHROPIC_API_KEY", "ant-key")
+        content = api_keys_env_path().read_text()
         assert f"export GEMINI_API_KEY={shlex.quote('gem-key')}" in content
         assert f"export OPENAI_API_KEY={shlex.quote('oai-key')}" in content
         assert f"export ANTHROPIC_API_KEY={shlex.quote('ant-key')}" in content
         assert os.environ["GEMINI_API_KEY"] == "gem-key"
         assert os.environ["OPENAI_API_KEY"] == "oai-key"
         assert os.environ["ANTHROPIC_API_KEY"] == "ant-key"
+
+
+class TestApiKeyDelete:
+    """An empty value passed to ``save_api_key`` deletes the key."""
+
+    def test_delete_removes_store_line_env_and_config(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Delete removes the export line, os.environ, and DEFAULT_CONFIG."""
+        from kiss.core import config as config_module
+
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        save_api_key("GEMINI_API_KEY", "gem-key-del")
+        env_file = api_keys_env_path()
+        assert "gem-key-del" in env_file.read_text()
+
+        save_api_key("GEMINI_API_KEY", "")
+        content = env_file.read_text()
+        assert "gem-key-del" not in content
+        assert "GEMINI_API_KEY" not in content
+        assert "GEMINI_API_KEY" not in os.environ
+        assert config_module.DEFAULT_CONFIG.GEMINI_API_KEY == ""
+
+    def test_delete_survives_reload(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A deleted key stays deleted across the next daemon start.
+
+        This is the settings-panel delete bug: the old scheme removed
+        the key only from the shell RC, so the copy in the deploy-time
+        env files resurrected it at the next (service) restart.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        save_api_key("GEMINI_API_KEY", "doomed")
+        save_api_key("GEMINI_API_KEY", "")
+        load_api_keys()
+        assert "GEMINI_API_KEY" not in os.environ
+
+    def test_delete_removes_legacy_systemd_mirror(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A stale ``api_keys.systemd.env`` of an old deploy is deleted.
+
+        The old unit's ``EnvironmentFile=-`` tolerates the missing file,
+        and nothing is left that could re-inject the deleted key.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        env_file = api_keys_env_path()
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        mirror = env_file.with_name("api_keys.systemd.env")
+        mirror.write_text('OPENAI_API_KEY="stale"\n')
+        save_api_key("OPENAI_API_KEY", "")
+        assert not mirror.exists()
+
+    def test_delete_removes_legacy_fish_line(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("SHELL", "/usr/bin/fish")
+        rc = Path.home() / ".config" / "fish" / "config.fish"
+        rc.parent.mkdir(parents=True, exist_ok=True)
+        rc.write_text("set -gx OPENAI_API_KEY fish-key-del\n")
+        monkeypatch.setenv("OPENAI_API_KEY", "fish-key-del")
+        save_api_key("OPENAI_API_KEY", "")
+        assert "OPENAI_API_KEY" not in rc.read_text()
+        assert "OPENAI_API_KEY" not in os.environ
+
+    def test_delete_matches_whitespace_variant_lines(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A hand-written ``export<TAB>KEY=...`` line is also removed.
+
+        A literal-prefix match would leave the line behind, so a fresh
+        shell would silently restore the key the panel just deleted.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        rc = Path.home() / ".zshrc"
+        rc.write_text("export\tOPENAI_API_KEY=tab-separated\n# keep me\n")
+        save_api_key("OPENAI_API_KEY", "")
+        content = rc.read_text()
+        assert "OPENAI_API_KEY" not in content
+        assert "# keep me" in content
+
+    def test_save_scrubs_whitespace_variant_rc_lines(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Save also scrubs a hand-written ``export<TAB>KEY=...`` RC line."""
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        rc = Path.home() / ".zshrc"
+        rc.write_text("export\tOPENAI_API_KEY=tab-old\n")
+        save_api_key("OPENAI_API_KEY", "new-val")
+        content = rc.read_text()
+        assert "tab-old" not in content
+        assert "OPENAI_API_KEY" not in content
+        assert (
+            f"export OPENAI_API_KEY={shlex.quote('new-val')}"
+            in api_keys_env_path().read_text()
+        )
+
+    def test_delete_preserves_prefixed_key_names(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Deleting KEY never touches KEY_EXTRA (POSIX and fish)."""
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        rc = Path.home() / ".zshrc"
+        rc.write_text(
+            "export GEMINI_API_KEY=short\n"
+            "export GEMINI_API_KEY_EXTRA=longer\n",
+        )
+        save_api_key("GEMINI_API_KEY", "")
+        assert rc.read_text() == "export GEMINI_API_KEY_EXTRA=longer\n"
+
+        monkeypatch.setenv("SHELL", "/usr/bin/fish")
+        fish_rc = Path.home() / ".config" / "fish" / "config.fish"
+        fish_rc.parent.mkdir(parents=True, exist_ok=True)
+        fish_rc.write_text(
+            "set -gx GEMINI_API_KEY short\n"
+            "set -gx GEMINI_API_KEY_EXTRA longer\n",
+        )
+        save_api_key("GEMINI_API_KEY", "")
+        assert fish_rc.read_text() == "set -gx GEMINI_API_KEY_EXTRA longer\n"
+
+    def test_delete_missing_rc_creates_no_rc(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Deleting with no RC file present must not create one."""
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("TOGETHER_API_KEY", "from-elsewhere")
+        rc = Path.home() / ".zshrc"
+        assert not rc.exists()
+        save_api_key("TOGETHER_API_KEY", "")
+        assert not rc.exists()
+        assert "TOGETHER_API_KEY" not in os.environ
+
+    def test_delete_no_matching_line_keeps_rc_intact(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No-match delete leaves the RC byte-identical, env still popped."""
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("ZAI_API_KEY", "env-only")
+        rc = Path.home() / ".zshrc"
+        rc.write_text("# unrelated\nexport OTHER_VAR=1\n")
+        save_api_key("ZAI_API_KEY", "")
+        assert rc.read_text() == "# unrelated\nexport OTHER_VAR=1\n"
+        assert "ZAI_API_KEY" not in os.environ
+
+    def test_multiline_value_refused(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A value with an embedded newline is refused outright.
+
+        ``shlex.quote`` would write a valid multiline assignment, but
+        the line-oriented replace/delete would later remove only its
+        first physical line and corrupt the RC with an unterminated
+        quote — so the save never happens.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        rc = Path.home() / ".zshrc"
+        rc.write_text("# untouched\n")
+        save_api_key("MOONSHOT_API_KEY", "line1\nline2")
+        assert rc.read_text() == "# untouched\n"
+        assert "MOONSHOT_API_KEY" not in os.environ
 
 
 class TestApplyConfig:
@@ -423,52 +639,130 @@ class TestShellRcPath:
         assert _shell_rc_path("fish") == Path.home() / ".config" / "fish" / "config.fish"
 
 
-class TestSourceShellEnv:
-    """Test sourcing shell env vars."""
+class TestLoadApiKeys:
+    """The deterministic loader plus the one-way legacy-RC migration."""
 
-    def test_source_picks_up_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        shell = _installed_posix_shell()
-        rc = _shell_rc_path(shell)
-        rc.write_text('export GEMINI_API_KEY="sourced-key"\n')
-        monkeypatch.setenv("SHELL", f"/bin/{shell}")
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        source_shell_env()
-        assert os.environ.get("GEMINI_API_KEY") == "sourced-key"
-
-    def test_source_no_rc_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """No RC file — should not crash."""
-        monkeypatch.setenv("SHELL", "/bin/zsh")
-        source_shell_env()
-
-    def test_source_env_output_with_non_api_keys(
+    def test_load_from_canonical_store(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Subprocess output includes lines without = and non-API-key vars.
+        """Loading is a pure parse of the file — no shell involved."""
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        env_file = api_keys_env_path()
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text('export GEMINI_API_KEY="stored-key"\n')
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        load_api_keys()
+        assert os.environ.get("GEMINI_API_KEY") == "stored-key"
 
-        This covers the branch where ``"=" not in line`` and where
-        ``k not in API_KEY_ENV_VARS``.
+    def test_load_no_file_no_rc(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Neither a store nor an RC — should not crash."""
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        load_api_keys()
+
+    def test_load_imports_non_model_tokens(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Every assignment loads, not only the settings-panel key names.
+
+        Deploys ship channel tokens (``GH_TOKEN``-style) in the same
+        file; on the remote these used to reach the daemon only through
+        the systemd ``EnvironmentFile=``, which the loader replaces.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.delenv("KISS_TEST_CHANNEL_TOKEN", raising=False)
+        env_file = api_keys_env_path()
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text(
+            "export KISS_TEST_CHANNEL_TOKEN=tok-1\n"
+            "# a comment\n"
+            "not an assignment\n",
+        )
+        load_api_keys()
+        assert os.environ.get("KISS_TEST_CHANNEL_TOKEN") == "tok-1"
+        del os.environ["KISS_TEST_CHANNEL_TOKEN"]
+
+    def test_load_skips_shell_only_and_expansion_lines(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RC-distilled ``PATH=…:$PATH``-style lines never load.
+
+        The file may come from an ``./rsorcar`` distillation of a shell
+        RC; importing an unexpanded ``$PATH`` verbatim would corrupt the
+        daemon environment.  A fully single-quoted ``$`` value (what
+        ``shlex.quote`` writes) is a literal and does load.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.delenv("KISS_TEST_DOLLAR", raising=False)
+        monkeypatch.delenv("KISS_TEST_EXPAND", raising=False)
+        old_path = os.environ["PATH"]
+        env_file = api_keys_env_path()
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text(
+            "export PATH=/evil:$PATH\n"
+            "export KISS_TEST_EXPAND=$OTHER\n"
+            "export KISS_TEST_DOLLAR='lit-$eral'\n",
+        )
+        load_api_keys()
+        assert os.environ["PATH"] == old_path
+        assert "KISS_TEST_EXPAND" not in os.environ
+        assert os.environ.get("KISS_TEST_DOLLAR") == "lit-$eral"
+        del os.environ["KISS_TEST_DOLLAR"]
+
+    def test_migrates_legacy_rc_key_into_store(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A key only in the RC (old scheme) is imported and persisted."""
+        shell = _installed_posix_shell()
+        rc = _shell_rc_path(shell)
+        rc.write_text('export GEMINI_API_KEY="legacy-key"\n')
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        load_api_keys()
+        assert os.environ.get("GEMINI_API_KEY") == "legacy-key"
+        assert "GEMINI_API_KEY=legacy-key" in api_keys_env_path().read_text()
+
+    def test_migration_never_overwrites_store(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A key present in the store wins over a stale RC line."""
+        shell = _installed_posix_shell()
+        rc = _shell_rc_path(shell)
+        rc.write_text('export GEMINI_API_KEY="stale-rc"\n')
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
+        env_file = api_keys_env_path()
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text("export GEMINI_API_KEY=canonical\n")
+        load_api_keys()
+        assert os.environ.get("GEMINI_API_KEY") == "canonical"
+        assert "stale-rc" not in env_file.read_text()
+
+    def test_migration_ignores_daemon_environment(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only RC-authored values migrate — never ad-hoc process env.
+
+        A key injected as ``KEY=x kiss-web`` must stay ephemeral, so the
+        migration shell runs with a clean environment.
         """
         shell = _installed_posix_shell()
         rc = _shell_rc_path(shell)
-        rc.write_text(
-            'echo "no-equals-line"\n'
-            'export GEMINI_API_KEY="from-source"\n'
-        )
+        rc.write_text("# no keys here\n")
         monkeypatch.setenv("SHELL", f"/bin/{shell}")
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        source_shell_env()
-        assert os.environ.get("GEMINI_API_KEY") == "from-source"
+        monkeypatch.setenv("GEMINI_API_KEY", "ad-hoc-value")
+        load_api_keys()
+        env_file = api_keys_env_path()
+        if env_file.exists():
+            assert "ad-hoc-value" not in env_file.read_text()
+        assert os.environ["GEMINI_API_KEY"] == "ad-hoc-value"
 
-    def test_source_works_with_empty_path(
+    def test_migration_works_with_empty_path(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Sourcing succeeds even when ``PATH`` is empty (e.g. cron env).
+        """Migration succeeds even when ``PATH`` is empty (e.g. cron env).
 
-        Regression: previously ``subprocess.run(["zsh", ...])`` raised
-        ``FileNotFoundError`` because the shell binary could not be
-        located via the bare name lookup.  The fix resolves an absolute
-        path via :func:`_resolve_shell_path` and augments the inner
-        ``PATH`` with standard system locations.
+        The shell binary is resolved via :func:`_resolve_shell_path`
+        fallback locations, and the migration subshell gets a fixed
+        system ``PATH``.
         """
         shell = _installed_posix_shell()
         rc = _shell_rc_path(shell)
@@ -476,17 +770,19 @@ class TestSourceShellEnv:
         monkeypatch.setenv("SHELL", f"/bin/{shell}")
         monkeypatch.setenv("PATH", "")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        source_shell_env()
+        load_api_keys()
         assert os.environ.get("GEMINI_API_KEY") == "empty-path-key"
 
-    def test_source_handles_missing_shell_binary(
+    def test_migration_scans_rc_without_a_shell_binary(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     ) -> None:
-        """When neither ``PATH`` nor fallback paths contain the shell,
-        ``source_shell_env`` logs a warning and returns without raising.
+        """A directly-assigned RC key migrates even with no shell at all.
+
+        The textual scan reads the exact line format the old saver
+        wrote, so a missing shell binary costs nothing for that case.
         """
         rc = Path.home() / ".zshrc"
-        rc.write_text('export GEMINI_API_KEY="never-set"\n')
+        rc.write_text('export GEMINI_API_KEY="text-scanned"\n')
         monkeypatch.setenv("SHELL", "/bin/zsh")
         monkeypatch.setenv("PATH", str(tmp_path))
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
@@ -495,17 +791,98 @@ class TestSourceShellEnv:
             vc, "_SHELL_FALLBACK_PATHS",
             {"zsh": (str(tmp_path / "no-such-zsh"),)},
         )
-        source_shell_env()
+        load_api_keys()
+        assert os.environ.get("GEMINI_API_KEY") == "text-scanned"
+
+    def test_migration_handles_missing_shell_binary(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        """When neither ``PATH`` nor fallback paths contain the shell,
+        the sourcing fallback logs a warning and the loader still runs.
+
+        The key is assigned in a file the RC *sources*, so the textual
+        scan cannot see it and only the (unavailable) shell could.
+        """
+        side = Path.home() / ".zshrc_keys"
+        side.write_text('export GEMINI_API_KEY="never-set"\n')
+        rc = Path.home() / ".zshrc"
+        rc.write_text(f'. "{side}"\n')
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("PATH", str(tmp_path))
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        from kiss.core import vscode_config as vc
+        monkeypatch.setattr(
+            vc, "_SHELL_FALLBACK_PATHS",
+            {"zsh": (str(tmp_path / "no-such-zsh"),)},
+        )
+        load_api_keys()
         assert os.environ.get("GEMINI_API_KEY") is None
 
-    def test_source_fish_shell(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Fish shell sourcing doesn't crash (fish may not be installed)."""
+    def test_load_parses_quoting_edge_cases(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unbalanced quotes, empty values, and multi-word raws load honestly.
+
+        A line ``shlex`` cannot parse (unbalanced quote) keeps its raw
+        text; a multi-word remainder loads its first word (what a shell
+        assigns for ``KEY=two words``); a bare ``KEY=`` loads as empty.
+        None of these may crash the loader or corrupt the rest of the
+        file's imports.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        for name in (
+            "KISS_TEST_UNBALANCED", "KISS_TEST_EMPTY",
+            "KISS_TEST_WORDS", "KISS_TEST_OK",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        env_file = api_keys_env_path()
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text(
+            "export KISS_TEST_UNBALANCED=\"oops\n"
+            "export KISS_TEST_EMPTY=\n"
+            "export KISS_TEST_WORDS=two words\n"
+            "export KISS_TEST_OK='fine'\n",
+        )
+        load_api_keys()
+        assert os.environ.get("KISS_TEST_UNBALANCED") == '"oops'
+        assert os.environ.get("KISS_TEST_EMPTY") == ""
+        assert os.environ.get("KISS_TEST_WORDS") == "two"
+        assert os.environ.get("KISS_TEST_OK") == "fine"
+        for name in (
+            "KISS_TEST_UNBALANCED", "KISS_TEST_EMPTY",
+            "KISS_TEST_WORDS", "KISS_TEST_OK",
+        ):
+            del os.environ[name]
+
+    def test_save_collapses_duplicate_store_lines(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A store holding two lines for one key ends up with exactly one.
+
+        Duplicates arise when an old deploy distilled an RC that
+        assigned the same variable twice; replacing both with two copies
+        of the new line would keep the file growing forever.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        env_file = api_keys_env_path()
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text(
+            "export GEMINI_API_KEY=first\n"
+            "GEMINI_API_KEY=second\n",
+        )
+        save_api_key("GEMINI_API_KEY", "final")
+        content = env_file.read_text()
+        assert content.count("GEMINI_API_KEY") == 1
+        assert "export GEMINI_API_KEY=final" in content
+
+    def test_load_fish_shell(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fish RC migration doesn't crash (fish may not be installed)."""
         fish_dir = Path.home() / ".config" / "fish"
         fish_dir.mkdir(parents=True)
         rc = fish_dir / "config.fish"
         rc.write_text("set -gx OPENAI_API_KEY fish-key\n")
         monkeypatch.setenv("SHELL", "/usr/bin/fish")
-        source_shell_env()
+        load_api_keys()
 
 
 class TestEndToEndFlows:
@@ -524,18 +901,18 @@ class TestEndToEndFlows:
         finally:
             config_module.DEFAULT_CONFIG.max_budget = original
 
-    def test_api_key_save_then_source_flow(
+    def test_api_key_save_then_load_flow(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Save API key → clear env → source env → key is back."""
+        """Save API key → clear env → load (as a daemon start would) → back."""
         monkeypatch.setenv("SHELL", f"/bin/{_installed_posix_shell()}")
-        save_api_key_to_shell("GEMINI_API_KEY", "flow-key")
+        save_api_key("GEMINI_API_KEY", "flow-key")
         assert os.environ["GEMINI_API_KEY"] == "flow-key"
 
         monkeypatch.delenv("GEMINI_API_KEY")
         assert os.environ.get("GEMINI_API_KEY") is None
 
-        source_shell_env()
+        load_api_keys()
         assert os.environ.get("GEMINI_API_KEY") == "flow-key"
 
 
@@ -729,3 +1106,174 @@ class TestRetiredKeys:
         stored = json.loads(path.read_text(encoding="utf-8"))
         assert "demo_mode" not in stored
         assert "demo_mode" not in load_config()
+
+
+class TestReviewRegressions:
+    """Regressions for the reviewed failure scenarios of the key rework."""
+
+    def test_migration_sees_past_debian_interactivity_guard(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An old key appended after the stock non-interactive guard migrates.
+
+        The previous saver appended ``export KEY=…`` to the END of
+        ``.bashrc``; a stock Debian/Ubuntu RC returns near the top for
+        non-interactive shells, so sourcing alone never reaches the key.
+        The textual scan must find it anyway.
+        """
+        rc = Path.home() / ".bashrc"
+        rc.write_text(
+            "case $- in\n"
+            "    *i*) ;;\n"
+            "      *) return;;\n"
+            "esac\n"
+            "export GEMINI_API_KEY=legacy-after-guard\n",
+        )
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        load_api_keys()
+        assert os.environ.get("GEMINI_API_KEY") == "legacy-after-guard"
+        assert "legacy-after-guard" in api_keys_env_path().read_text()
+
+    def test_delete_scrubs_every_shell_rc(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A key deleted under zsh cannot resurrect from a bash RC copy.
+
+        Old releases wrote to whichever shell was current at the time,
+        and users switch shells — deletion must reach all of them or a
+        later daemon start under the other shell re-imports the key.
+        """
+        (Path.home() / ".zshrc").write_text("export GEMINI_API_KEY=zsh-copy\n")
+        (Path.home() / ".bashrc").write_text("export GEMINI_API_KEY=bash-copy\n")
+        fish_rc = Path.home() / ".config" / "fish" / "config.fish"
+        fish_rc.parent.mkdir(parents=True, exist_ok=True)
+        fish_rc.write_text("set -gx GEMINI_API_KEY fish-copy\n")
+        env_file = api_keys_env_path()
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text("export GEMINI_API_KEY=canonical\n")
+        monkeypatch.setenv("GEMINI_API_KEY", "canonical")
+
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        save_api_key("GEMINI_API_KEY", "")
+        for rc in (Path.home() / ".zshrc", Path.home() / ".bashrc", fish_rc):
+            assert "GEMINI_API_KEY" not in rc.read_text(), rc
+
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        load_api_keys()
+        assert "GEMINI_API_KEY" not in os.environ
+        assert "GEMINI_API_KEY" not in env_file.read_text()
+
+    def test_symlinked_rc_edited_in_place(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Editing a dotfiles-managed RC keeps the symlink and the target.
+
+        Atomically replacing the link path itself would disconnect the
+        maintained file — and leave the deleted key inside it.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        real = Path.home() / "dotfiles" / "zshrc"
+        real.parent.mkdir(parents=True, exist_ok=True)
+        real.write_text("export GEMINI_API_KEY=dotfiles-copy\n# mine\n")
+        rc = Path.home() / ".zshrc"
+        rc.symlink_to(real)
+        monkeypatch.setenv("GEMINI_API_KEY", "dotfiles-copy")
+
+        save_api_key("GEMINI_API_KEY", "")
+
+        assert rc.is_symlink()
+        assert rc.resolve() == real.resolve()
+        assert "GEMINI_API_KEY" not in real.read_text()
+        assert "# mine" in real.read_text()
+
+    def test_saved_value_with_apostrophe_and_dollar_round_trips(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``shlex.quote``'s concatenated quoting must load back exactly.
+
+        A value holding both an apostrophe and ``$`` is stored as
+        ``'abc'"'"'def$ghi'``; the loader must read it as the literal it
+        is instead of rejecting it as an expansion line.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        value = "abc'def$ghi"
+        save_api_key("OPENAI_API_KEY", value)
+        monkeypatch.delenv("OPENAI_API_KEY")
+        load_api_keys()
+        assert os.environ.get("OPENAI_API_KEY") == value
+
+    def test_nul_value_refused_and_poisoned_store_still_loads(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A NUL never reaches the store; a poisoned line never kills startup.
+
+        ``os.environ`` raises on NUL, so persisting one first would break
+        the save *and* every later daemon start.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        save_api_key("OPENAI_API_KEY", "abc\x00def")
+        env_file = api_keys_env_path()
+        if env_file.exists():
+            assert "abc" not in env_file.read_text()
+        assert "OPENAI_API_KEY" not in os.environ
+
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text(
+            "export OPENAI_API_KEY='poi\x00soned'\n"
+            "export GEMINI_API_KEY=healthy\n",
+        )
+        load_api_keys()
+        assert os.environ.get("GEMINI_API_KEY") == "healthy"
+        assert "OPENAI_API_KEY" not in os.environ
+
+    def test_code_only_upgrade_retires_systemd_mirror(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A bare daemon restart removes the old deploy's second key file.
+
+        With every model key already canonical, migration edits nothing —
+        the loader itself must retire the mirror, or a git-pull upgrade
+        keeps two key stores (and the old unit keeps injecting the stale
+        one) indefinitely.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        env_file = api_keys_env_path()
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text(
+            "".join(f"export {k}=v-{k}\n" for k in sorted(API_KEY_ENV_VARS)),
+        )
+        mirror = env_file.with_name("api_keys.systemd.env")
+        mirror.write_text("OPENAI_API_KEY=stale\n")
+        load_api_keys()
+        assert not mirror.exists()
+        for k in API_KEY_ENV_VARS:
+            assert os.environ.get(k) == f"v-{k}"
+
+    def test_rc_background_child_cannot_stall_startup(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A background process started by the RC must not block loading.
+
+        The sourcing shell's descendants inherit the output pipe; the
+        migration must kill the whole session on timeout instead of
+        waiting for them.
+        """
+        import time as _time
+
+        shell = _installed_posix_shell()
+        rc = _shell_rc_path(shell)
+        # The key is defined indirectly so the textual scan cannot skip
+        # the sourcing fallback, and a child outlives the shell.
+        side = Path.home() / ".rc_keys"
+        side.write_text("export GEMINI_API_KEY=indirect\n")
+        rc.write_text(f'. "{side}"\nsleep 30 &\n')
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setattr(vscode_config, "_MIGRATION_TIMEOUT_S", 0.5)
+        start = _time.monotonic()
+        load_api_keys()
+        elapsed = _time.monotonic() - start
+        assert elapsed < 5.0, f"load_api_keys blocked for {elapsed:.1f}s"

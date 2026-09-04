@@ -26,7 +26,7 @@ from kiss.core.models.model import (
     TokenCallback,
     responses_items_to_chat_messages,
 )
-from kiss.core.models.stream_abort import stop_aware_events
+from kiss.core.models.stream_abort import stall_error, stop_aware_events
 
 logger = logging.getLogger(__name__)
 
@@ -771,10 +771,9 @@ class GeminiModel(Model):
                 self._stream_parts(chunk_parts)
                 parts.extend(chunk_parts)
         except httpx.TimeoutException as e:
-            raise TimeoutError(
-                f"Gemini stream stalled: no data for "
-                f"{self._stream_stall_timeout}s (stream_stall_timeout)"
-            ) from e
+            # The byte-level clock fired first; report it in the same
+            # words as the event-level watchdog would have.
+            raise stall_error(self._stream_stall_timeout) from e
         finally:
             events.close()
             self._close_thinking_if_open()

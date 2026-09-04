@@ -110,6 +110,7 @@ export type FromWebviewMessage =
     }
   | {type: 'sizeReport'; innerWidth: number; screenWidth: number}
   | {type: 'runUpdate'}
+  | {type: 'snoozeUpdate'; latest?: string}
   | {type: 'serverReset'}
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
@@ -175,6 +176,16 @@ type ToWebviewMessageBody =
       results: Record<string, boolean>;
       workDir?: string;
     }
+  | {
+      // Reply to `openFile` (web_server.py _handle_open_file), sent only
+      // to the requesting connection: `content` on success, `error`
+      // otherwise; `tabId` echoes the request's (possibly '').
+      type: 'fileContent';
+      path: string;
+      name: string;
+      content?: string;
+      error?: string;
+    }
   | {type: 'share_done'; ok: boolean; path?: string; error?: string}
   | {
       type: 'share_tasks';
@@ -212,13 +223,37 @@ type ToWebviewMessageBody =
       audioMime?: string;
       muted?: boolean;
     }
-  | {type: 'clear'; chat_id?: number}
+  // chat_id is the chat's uuid string (task_runner.py re-announces the
+  // overridden chat and clears viewer tabs with it).
+  | {type: 'clear'; chat_id?: string}
   | {type: 'showWelcome'}
   | {type: 'clearChat'}
-  | {type: 'task_done'}
-  | {type: 'task_error'; text: string}
-  | {type: 'task_stopped'}
-  | {type: 'task_interrupted'}
+  // The four task-end events are one Python broadcast
+  // (task_runner.py: {**task_end_event, tabId, startTs, endTs}); the
+  // webview derives the per-tab "Done in …" label from the timestamps.
+  | {type: 'task_done'; startTs?: number; endTs?: number}
+  | {type: 'task_error'; text: string; startTs?: number; endTs?: number}
+  | {type: 'task_stopped'; startTs?: number; endTs?: number}
+  | {type: 'task_interrupted'; startTs?: number; endTs?: number}
+  // Emitted once per run (chat_sorcar_agent.py) and synthesised into a
+  // replay (json_printer.py task_settings_event); the static task panel
+  // renders these like a history row.
+  | {
+      type: 'task_settings';
+      settings: {
+        model: string;
+        work_dir: string;
+        is_parallel: boolean;
+        is_worktree: boolean;
+        start_ts?: number;
+        max_budget?: number;
+        chat_id: string;
+        task_id: string;
+        is_subagent: boolean;
+        parent_task_id?: string;
+      };
+      taskId?: string;
+    }
   | {
       type: 'status';
       running: boolean;
@@ -260,7 +295,17 @@ type ToWebviewMessageBody =
   | {type: 'tasks_updated'}
   | {type: 'welcome_suggestions'; suggestions: Array<{text: string}>}
   | {type: 'remote_url'; url: string; ntfyUrl?: string; tunnelActive?: boolean}
-  | {type: 'task_events'; events: unknown[]; task?: string; chat_id?: number}
+  // A session replay (server.py): task_id is the history row id (None
+  // for a task still running without a row), chat_id the chat's uuid
+  // string, extra the row's JSON-encoded extra column ('' when absent).
+  | {
+      type: 'task_events';
+      events: unknown[];
+      task?: string;
+      task_id?: string | null;
+      chat_id?: string;
+      extra?: string;
+    }
   | {type: 'ghost'; suggestion: string; query: string}
   | {type: 'commitMessage'; message: string; error?: string}
   | {type: 'inputHistory'; tasks: string[]}
@@ -293,6 +338,10 @@ type ToWebviewMessageBody =
       success: boolean;
       message: string;
       kept?: boolean;
+      // A failure the user can retry (merge_flow.py: deferred discard
+      // while a sub-agent still holds the worktree): the webview keeps
+      // the Merge / Discard bar instead of stripping it.
+      retryable?: boolean;
     }
   | {
       type: 'main_tree_done';
@@ -323,6 +372,47 @@ type ToWebviewMessageBody =
   | {type: 'triggerStop'}
   | {type: 'measureSize'}
   | {type: 'daemonStatus'; connected: boolean}
+  // A toast rendered by the webview (media/main.js updateNotification).
+  // Posted by the extension host in place of vscode.window.show*Message
+  // (WebviewNotifications.ts) and by the daemon (manual-commit outcome,
+  // server-reset progress).  A stable `id` lets a later message replace
+  // the toast in place; `close` retires it; `progress` marks a spinner
+  // toast whose text is `progressMessage`.
+  | {
+      type: 'notification';
+      id: string;
+      severity?: 'info' | 'warning' | 'error';
+      message?: string;
+      actions?: string[];
+      sticky?: boolean;
+      progress?: boolean;
+      progressMessage?: string;
+      close?: boolean;
+    }
+  // Daemon: a plain informational line for one connection (e.g. "an
+  // update is already running").
+  | {type: 'notice'; text: string}
+  // Daemon: answer to a `complete` command (the input-box ghost /
+  // autocomplete list), scoped to the requesting connection and tab.
+  | {
+      type: 'completions';
+      completions: Array<{type: string; text: string}>;
+      query: string;
+    }
+  // Daemon: a run_parallel sub-agent tab was retired everywhere.
+  | {type: 'closeSubagentTab'; tab_id: string}
+  // Daemon: `openTab` was refused (tab limit); `text` explains why.
+  | {type: 'openTabRejected'; text: string}
+  // Daemon: cached PyPI check result for the Update button/badge.
+  // `snoozed` marks an active "Remind me later" snooze: the webview
+  // keeps the badge but suppresses the sticky toast.
+  | {
+      type: 'update_available';
+      available: boolean;
+      latest: string;
+      current: string;
+      snoozed?: boolean;
+    }
   // The window's workspace folder changed; the webview re-scopes its
   // workspace-filtered surfaces (tab bar, history) to this directory.
   | {type: 'workspaceWorkDir'; workDir: string}
@@ -347,6 +437,9 @@ type ToWebviewMessageBody =
       tab_id?: string;
       parent_tab_id?: string;
       description?: string;
+      // The sub-agent's history-row id (server.py), null when the row
+      // has none; main.js treats null/undefined as ''.
+      task_id?: string | null;
       taskIndex?: number;
       isSubagentTab?: boolean;
       isDone?: boolean;
@@ -407,7 +500,8 @@ export interface AgentCommand {
     | 'saveConfig'
     | 'serverReset'
     | 'shareChat'
-    | 'shareChatTasks';
+    | 'shareChatTasks'
+    | 'snoozeUpdate';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -435,6 +529,7 @@ export interface AgentCommand {
   apiKeys?: Record<string, string>;
   isFavorite?: boolean;
   title?: string;
+  latest?: string;
   restoredTabs?: Array<{
     tabId: string;
     chatId: string;

@@ -70,7 +70,12 @@ script* whose top-level ``get_X()`` functions compute the run's
 parameters on the daemon — e.g. a ``get_model()`` overrides *model*, a
 ``get_prompt()`` overrides *prompt* — while parameters without a getter
 keep the values passed to :func:`run` (see the :func:`run` docstring
-for the script format).
+for the script format).  The script may additionally define
+``get_llm_call_hook()`` / ``get_tool_call_hook()``, returning functions
+``llm_call_hook`` and ``tool_call_hook`` that the daemon passes to the
+underlying :class:`kiss.core.kiss_agent.KISSAgent` (see
+:meth:`~kiss.core.kiss_agent.KISSAgent.run`); these two have no
+:func:`run` parameter, since a callable cannot travel the wire.
 
 The function speaks the daemon's newline-delimited JSON protocol over
 its Unix-domain socket (``$KISS_SORCAR_SOCK``, defaulting to
@@ -272,6 +277,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("autocommitAction"),
     ApiCommand("auth", required=("password",), handler="drop"),
     ApiCommand("runUpdate", handler="run_update"),
+    ApiCommand("snoozeUpdate", handler="snooze_update"),
     ApiCommand("serverReset", handler="server_reset"),
     ApiCommand(
         "voiceTranscribe", required=("audio",), handler="voice_transcribe"
@@ -336,6 +342,17 @@ def validate_command(cmd: Any) -> str | None:
     if missing:
         return f"Invalid {name} command: missing {', '.join(missing)}"
     return None
+
+
+def _usable_work_dir(cmd: dict[str, Any]) -> bool:
+    """Return whether *cmd* carries an explicit, non-empty string ``workDir``.
+
+    Anything else — missing, ``""``, or a non-string such as ``123`` —
+    counts as absent, so :meth:`ServerApi.dispatch` stamps the
+    connection's pinned work dir over it.
+    """
+    work_dir = cmd.get("workDir")
+    return isinstance(work_dir, str) and bool(work_dir)
 
 
 def translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
@@ -481,6 +498,8 @@ class ServerBackend(Protocol):
 
     async def _handle_run_update(self, conn_id: str = "") -> None: ...
 
+    async def _handle_snooze_update(self, latest: str = "") -> None: ...
+
     async def _handle_server_reset(self, conn_id: str = "") -> None: ...
 
     def _client_ip(self, websocket: Any) -> str: ...
@@ -551,22 +570,26 @@ class ServerApi:
 
         1. Silently drops :data:`DROPPED_COMMANDS` (host-consumed
            messages) BEFORE validation so they never surface errors.
-        2. Validates *cmd* against the catalog
+        2. Canonicalises a string ``tabId`` (surrounding whitespace
+           stripped) and writes it back into *cmd*, so the registry,
+           the agent-state registry, the printer and the cleanup
+           tail all key the tab identically.
+        3. Validates *cmd* against the catalog
            (:func:`validate_command`) and answers an invalid command
            with a direct ``error`` event to the sender only.
-        3. Records the command's ``tabId`` in the connection's
+        4. Records the command's ``tabId`` in the connection's
            bookkeeping (:meth:`_record_tab`).
-        4. Stamps the connection's ``conn_id`` as ``connId`` —
+        5. Stamps the connection's ``conn_id`` as ``connId`` —
            overwriting any client-supplied value so it cannot be
            spoofed — which keys the backend's per-connection
            autocomplete state.
-        5. Maintains the per-window work_dir invariant: a
+        6. Maintains the per-window work_dir invariant: a
            ``setWorkDir`` updates the connection's ``work_dir``; every
-           other command lacking an explicit ``workDir`` is stamped
-           with it, so two VS Code windows sharing the daemon can
-           never observe each other's folder through the daemon-global
-           fallback.
-        6. Invokes the :class:`ServerApi` method named by the
+           other command lacking a usable ``workDir`` (missing, empty
+           or not a string) is stamped with it, so two VS Code windows
+           sharing the daemon can never observe each other's folder
+           through the daemon-global fallback.
+        7. Invokes the :class:`ServerApi` method named by the
            command's catalog entry.
 
         Args:
@@ -576,15 +599,22 @@ class ServerApi:
         """
         if cmd.get("type") in DROPPED_COMMANDS:
             return
+        tab_id = cmd.get("tabId", "")
+        if isinstance(tab_id, str):
+            # Canonicalise ONCE, before validation and every handler:
+            # ``TabRegistry`` strips ids it stores and broadcasts, so
+            # a handler keying ``AgentState`` / ``_tab_chat_views`` /
+            # local-UDS counts by the raw string gave one wire tab two
+            # identities, and closing the canonical id leaked the rest.
+            tab_id = tab_id.strip()
+            cmd["tabId"] = tab_id
         error = validate_command(cmd)
         if error:
             reply: dict[str, Any] = {"type": "error", "text": error}
-            raw_tab = cmd.get("tabId")
-            if isinstance(raw_tab, str) and raw_tab:
-                reply["tabId"] = raw_tab
+            if isinstance(tab_id, str) and tab_id:
+                reply["tabId"] = tab_id
             await self._backend._endpoint_send(ctx.endpoint, json.dumps(reply))
             return
-        tab_id = cmd.get("tabId", "")
         if isinstance(tab_id, str) and tab_id:
             self._record_tab(tab_id, ctx)
         cmd["connId"] = ctx.conn_state["conn_id"]
@@ -594,7 +624,11 @@ class ServerApi:
             new_wd = cmd.get("workDir", "")
             if isinstance(new_wd, str) and new_wd:
                 ctx.conn_state["work_dir"] = new_wd
-        elif ctx.conn_state["work_dir"] and not cmd.get("workDir"):
+        elif ctx.conn_state["work_dir"] and not _usable_work_dir(cmd):
+            # A truthy non-string ``workDir`` (``123``, ``["x"]``) is
+            # as absent as a missing one: left in place it would be
+            # blanked by the handler and fall back to the daemon-global
+            # folder — another window's — instead of this window's pin.
             cmd["workDir"] = ctx.conn_state["work_dir"]
         await getattr(self, handler)(cmd, ctx)
 
@@ -1131,6 +1165,25 @@ class ServerApi:
                 notifications reach only the requesting window.
         """
         await self._backend._handle_run_update(ctx.conn_state["conn_id"])
+
+    async def snooze_update(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Snooze the update notification for 24 hours.
+
+        Services the "Remind me later" action of the update toast in
+        both frontends: records the snooze in the update-check cache
+        shared with the VS Code extension and rebroadcasts the
+        ``update_available`` state so every client's toast disappears.
+
+        Args:
+            cmd: The ``snoozeUpdate`` command; its optional ``latest``
+                field names the release being snoozed.
+            ctx: The transport context of the current call (unused —
+                the resulting rebroadcast must reach every window).
+        """
+        latest = cmd.get("latest")
+        await self._backend._handle_snooze_update(
+            latest if isinstance(latest, str) else "",
+        )
 
     async def server_reset(
         self, cmd: dict[str, Any], ctx: ApiContext,

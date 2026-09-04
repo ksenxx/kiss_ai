@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.vscode_config import source_shell_env
+from kiss.core.vscode_config import load_api_keys
 
 
 @pytest.mark.skipif(
@@ -39,15 +39,22 @@ class TestSourceShellEnvMultilineValues:
         monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
         monkeypatch.delenv("INNOCENT", raising=False)
 
-        source_shell_env()
+        load_api_keys()
 
         assert os.environ.get("TOGETHER_API_KEY") == "real-together-key"
         assert os.environ.get("OPENAI_API_KEY") != "forged-by-multiline-value"
 
-    def test_multiline_api_key_value_preserved_fully(
+    def test_multiline_api_key_value_never_truncated(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A legitimate multi-line key value must not be truncated."""
+        """A multi-line RC value migrates fully or not at all.
+
+        The canonical store is line-oriented (the settings panel
+        refuses newlines for the same reason), so a multi-line RC value
+        cannot be represented; the migration skips it whole — importing
+        only its first line would silently hand the daemon a truncated
+        key.
+        """
         home = tmp_path / "home"
         home.mkdir()
         (home / ".bashrc").write_text(
@@ -57,6 +64,7 @@ class TestSourceShellEnvMultilineValues:
         monkeypatch.setenv("SHELL", "/bin/bash")
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
-        source_shell_env()
+        load_api_keys()
 
-        assert os.environ.get("OPENROUTER_API_KEY") == "part1\npart2"
+        assert os.environ.get("OPENROUTER_API_KEY") in (None, "part1\npart2")
+        assert os.environ.get("OPENROUTER_API_KEY") != "part1"

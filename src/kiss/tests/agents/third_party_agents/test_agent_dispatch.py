@@ -11,12 +11,14 @@ and the cron module's daemon-socket default between tests, and to
 capture the daemon submission that a live dispatch would perform).  Branches
 not exercised here, and why they need no doubles-based tests:
 
-- ``run_agent``'s successful and timed-out dispatch paths submit a
-  task to the kiss-web daemon and need a live LLM endpoint
-  (unavailable and non-deterministic in unit tests); the dispatch
-  plumbing up to the daemon socket is covered via the
-  unreachable-daemon path, and the agent-script contract the daemon
-  applies is covered directly through ``apply_agent_overrides``.
+- ``run_agent``'s successful dispatch path submits a task to the
+  kiss-web daemon and needs a live LLM endpoint (unavailable and
+  non-deterministic in unit tests); the dispatch plumbing up to the
+  daemon socket is covered via the unreachable-daemon path (and, with
+  a real daemon stand-in, in
+  ``kiss.tests.agents.sorcar.test_dispatch_timeout``), and the
+  agent-script contract the daemon applies is covered directly
+  through ``apply_agent_overrides``.
 - ``_package_dir``'s package-absent branches would require
   uninstalling ``kiss.agents.third_party_agents`` from the test
   environment.
@@ -188,17 +190,29 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     tool = make_run_agent_tool(str(caller))
 
     # Channel mode: executes in the shared channel_work scratch dir,
-    # but the tab is scoped to the caller's project.
+    # but the tab is scoped to the caller's project.  Every mode also
+    # forwards the parsed dispatch timeout (the 300-s default when the
+    # tool's ``timeout`` argument is empty) and opts in to the
+    # stop-on-timeout cascade — a timed-out channel sub-task must not
+    # outlive its workspace reservation.
     captured.clear()
     tool("ntfy", "say hi")
     assert captured[0]["work_dir"] == str(tmp_path / "channel_work")
     assert captured[0]["scope_work_dir"] == str(caller)
+    assert (
+        captured[0]["timeout"]
+        == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
+    )
+    assert captured[0]["stop_on_timeout"] is True
 
-    # Cron mode: executes in the cron work dir, scoped to the caller.
+    # Cron mode: executes in the cron work dir, scoped to the caller;
+    # an explicit ``timeout`` argument is parsed and forwarded.
     captured.clear()
-    tool("cron", "run 'echo hi' every 5 minutes")
+    tool("cron", "run 'echo hi' every 5 minutes", timeout="42.5")
     assert captured[0]["work_dir"] == cron_agent.get_work_dir()
     assert captured[0]["scope_work_dir"] == str(caller)
+    assert captured[0]["timeout"] == 42.5
+    assert captured[0]["stop_on_timeout"] is True
 
     # Path mode: executes in the caller's project (scope == work_dir).
     script = caller / "helper.py"
@@ -207,6 +221,11 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     tool(str(script), "say hi")
     assert captured[0]["work_dir"] == str(caller)
     assert captured[0]["scope_work_dir"] == str(caller)
+    assert (
+        captured[0]["timeout"]
+        == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
+    )
+    assert captured[0]["stop_on_timeout"] is True
 
 
 def test_cron_dispatch_unreachable_daemon_is_a_clean_error(
@@ -356,7 +375,7 @@ def test_dispatch_uses_launcher_workspace_registry(
     )
 
     monkeypatch.setenv("KISS_CHANNEL_WORKSPACE", "stale-ws")
-    monkeypatch.setattr(agent_dispatch, "DISPATCH_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(agent_dispatch, "WORKSPACE_WAIT_TIMEOUT_SECONDS", 0.2)
     assert _enter_workspace("other-ws")  # a concurrent dispatch is active
     try:
         out = run_agent("ntfy", "say hi", workspace="my-ws")

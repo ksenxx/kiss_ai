@@ -38,6 +38,8 @@ function makeMemento() {
 
 const executedCommands = [];
 const notifications = [];
+const snoozes = [];
+let nextInfoAction = 'Update now';
 const calls = {
   runUpdate: 0,
   updateChecks: 0,
@@ -153,7 +155,7 @@ stubModule(path.join(OUT_DIR, 'kissPaths.js'), {
 stubModule(path.join(OUT_DIR, 'WebviewNotifications.js'), {
   showInformationNotification: (message, ...actions) => {
     notifications.push({kind: 'info', message, actions});
-    return Promise.resolve('Update now');
+    return Promise.resolve(nextInfoAction);
   },
   showWarningNotification: (message, ...actions) => {
     notifications.push({kind: 'warning', message, actions});
@@ -175,6 +177,10 @@ stubModule(path.join(OUT_DIR, 'UpdateChecker.js'), {
       current: '2026.6.31',
       reason: 'update-available',
     };
+  },
+  snoozeUpdateNotification: opts => {
+    snoozes.push(opts);
+    return {snoozeUntilMs: 0, snoozedLatest: opts && opts.latest};
   },
 });
 
@@ -227,7 +233,10 @@ async function runTest() {
     assert.strictEqual(calls.updateChecks, 1);
     assert.strictEqual(calls.runUpdate, 1);
     assert.strictEqual(notifications[0].kind, 'info');
-    assert.deepStrictEqual(notifications[0].actions, ['Update now']);
+    assert.deepStrictEqual(notifications[0].actions, [
+      'Update now',
+      'Remind me later',
+    ]);
     assert.ok(
       notifications[0].message.includes('2099.1.1'),
       'notification must mention the available version',
@@ -237,10 +246,37 @@ async function runTest() {
       [],
       'update notification action must not open a blank terminal instead of running the updater',
     );
+    assert.strictEqual(
+      snoozes.length,
+      0,
+      'Update now must not snooze the notification',
+    );
     console.log('\nAll activation update notification tests passed');
   } finally {
     extension.deactivate();
     disposeContext(ctx);
+  }
+
+  // Second activation: the user clicks "Remind me later" — the snooze
+  // must be recorded with the offered version, and no update must run.
+  nextInfoAction = 'Remind me later';
+  const ctx2 = makeContext();
+  try {
+    extension.activate(ctx2);
+    await waitFor(
+      () => snoozes.length === 1,
+      'clicking Remind me later must record a 24h snooze',
+    );
+    assert.deepStrictEqual(snoozes[0], {latest: '2099.1.1'});
+    assert.strictEqual(
+      calls.runUpdate,
+      1,
+      'Remind me later must not trigger the updater',
+    );
+    console.log('All Remind-me-later activation tests passed');
+  } finally {
+    extension.deactivate();
+    disposeContext(ctx2);
     Module._load = origLoad;
   }
 }

@@ -162,6 +162,10 @@ stubModule(path.join(OUT_DIR, 'reloadGuard.js'), {
 });
 stubModule(path.join(OUT_DIR, 'UpdateChecker.js'), {
   checkForExtensionUpdate: () => Promise.resolve(),
+  // SorcarTab.getVersion() imports this from UpdateChecker; without it the
+  // stub makes every buildChatHtml call throw "readVersionPy is not a
+  // function". An empty string is the real function's no-version fallback.
+  readVersionPy: () => '',
 });
 
 const extension = require(path.join(OUT_DIR, 'extension.js'));

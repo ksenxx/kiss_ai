@@ -106,23 +106,74 @@ export function getTips(): string[] {
 
 export function consumeTipsFirstRun(): boolean {
   const marker = path.join(kissHomeDir(), 'TIPS_SHOWN');
+  // audit0903-coverage:start
   try {
-    if (fs.existsSync(marker)) return false;
     fs.mkdirSync(path.dirname(marker), {recursive: true});
-    fs.writeFileSync(marker, new Date().toISOString() + '\n');
+    // 'wx' claims the marker atomically.  An existsSync-then-write check
+    // raced: two windows activating at once both passed the check before
+    // either wrote, and the one-time tips popup opened in both.  With
+    // 'wx' exactly one writer wins; every other caller (a concurrent
+    // window, a later run, or an unwritable ~/.kiss) lands here in the
+    // catch and stays quiet.
+    fs.writeFileSync(marker, new Date().toISOString() + '\n', {flag: 'wx'});
     return true;
   } catch {
     return false;
   }
+  // audit0903-coverage:end
+}
+
+/**
+ * Read the update stamp the installer wrote into `.extension-updated`.
+ *
+ * @param home The `$KISS_HOME` directory.
+ * @returns The stamp (a UTC timestamp; 'unknown' for an empty marker
+ *     from an interrupted install), or null when there is no marker.
+ */
+function readExtensionUpdateStamp(home: string): string | null {
+  // audit0903-coverage:start
+  try {
+    const raw = fs
+      .readFileSync(path.join(home, '.extension-updated'), 'utf-8')
+      .trim();
+    return raw || 'unknown';
+  } catch {
+    return null;
+  }
+  // audit0903-coverage:end
 }
 
 export function resetTipsOnExtensionUpdate(): void {
   const home = kissHomeDir();
+  // audit0903-coverage:start
   try {
-    if (fs.existsSync(path.join(home, '.extension-updated'))) {
-      fs.rmSync(path.join(home, 'TIPS_SHOWN'), {force: true});
+    const stamp = readExtensionUpdateStamp(home);
+    if (stamp === null) return;
+    // ONE window per update may reset the tips claim.  Every window
+    // that sees `.extension-updated` runs this, and the shared marker
+    // is only unlinked later by asynchronous dependency setup — so an
+    // unconditional remove let window B wipe the TIPS_SHOWN that
+    // window A had just reset AND re-claimed, giving two popups for
+    // one update.  The reset owner is elected by atomically ('wx')
+    // creating a claim file named after the update stamp; losers (and
+    // every later run for the same stamp) fail with EEXIST and leave
+    // the tips claim alone.
+    const claim =
+      '.tips-reset-' + stamp.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64);
+    for (const name of fs.readdirSync(home)) {
+      // Claims of older updates are spent; drop them so the home
+      // directory keeps exactly one.
+      if (name.startsWith('.tips-reset-') && name !== claim) {
+        fs.rmSync(path.join(home, name), {force: true});
+      }
     }
-  } catch {}
+    fs.writeFileSync(path.join(home, claim), stamp + '\n', {flag: 'wx'});
+    fs.rmSync(path.join(home, 'TIPS_SHOWN'), {force: true});
+  } catch {
+    // Lost the election (EEXIST) or the home is unreadable: this
+    // window must not reset, and activation must never break.
+  }
+  // audit0903-coverage:end
 }
 
 export function readSampleTasks(extensionRoot: string): Array<{text: string}> {

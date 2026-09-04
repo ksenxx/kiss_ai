@@ -45,6 +45,7 @@ from __future__ import annotations
 import errno
 import os
 import pty
+import re
 import select
 import subprocess
 import textwrap
@@ -78,8 +79,31 @@ def _extract_step_5_5_block() -> str:
     return src[begin_eol:end_idx]
 
 
-def _build_sandbox(tmp_path: Path) -> tuple[Path, Path]:
+def _extract_guard_function() -> str:
+    """Return ``guard_vsix_tracking()`` verbatim from ``install.sh``.
+
+    The step [5/5] block calls it, so the harness must define it too.
+    The sandbox's ``PROJECT_DIR`` is not a git repository, so the guard
+    takes its no-op path — exactly like a source install run outside a
+    checkout.
+    """
+    src = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    match = re.search(
+        r"^guard_vsix_tracking\(\) \{\n.*?^\}$", src, re.MULTILINE | re.DOTALL
+    )
+    assert match, "guard_vsix_tracking() not found in install.sh"
+    return match.group(0)
+
+
+def _build_sandbox(
+    tmp_path: Path, kiss_home: Path | None = None
+) -> tuple[Path, Path]:
     """Create the sandbox (stubs, fake HOME, project dir, dummy daemon).
+
+    Args:
+        tmp_path: Per-test scratch directory.
+        kiss_home: When given, exported as ``KISS_HOME`` to the harness —
+            the block must then write its markers there, not ``~/.kiss``.
 
     Returns:
         ``(harness_path, log_path)`` — the harness script to run under
@@ -164,6 +188,14 @@ def _build_sandbox(tmp_path: Path) -> tuple[Path, Path]:
     )
 
     block = _extract_step_5_5_block()
+    # The sandbox must own KISS_HOME: either export the test's custom dir
+    # or unset whatever leaked in from the developer's environment, so the
+    # default-path assertions really exercise the $HOME/.kiss fallback.
+    kiss_home_export = (
+        f"export KISS_HOME={kiss_home.as_posix()!r}\n"
+        if kiss_home
+        else "unset KISS_HOME\n"
+    )
     harness = tmp_path / "harness.sh"
     harness.write_text(
         textwrap.dedent(
@@ -172,7 +204,7 @@ def _build_sandbox(tmp_path: Path) -> tuple[Path, Path]:
             set -eo pipefail
             export HOME={home.as_posix()!r}
             export PATH={stubs.as_posix()!r}:"$PATH"
-            CODE_CLI={code_cli.as_posix()!r}
+            {kiss_home_export}CODE_CLI={code_cli.as_posix()!r}
             VSIX={vsix.as_posix()!r}
             PROJECT_DIR={project.as_posix()!r}
             LOG_FILE={log.as_posix()!r}
@@ -184,9 +216,10 @@ def _build_sandbox(tmp_path: Path) -> tuple[Path, Path]:
             # block prints goes through tee to BOTH the terminal (the
             # test's PTY) and the log file.
             exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
-            {{
             """
         )
+        + _extract_guard_function()
+        + "\n{\n"
         + block
         + textwrap.dedent(
             """\
@@ -398,3 +431,37 @@ def test_step_5_5_never_touches_kiss_web(tmp_path: Path) -> None:
             proc.kill()
             proc.wait(timeout=5)
         _kill_dummy_daemon(tmp_path)
+
+
+def test_step_5_5_writes_update_marker_into_kiss_home(tmp_path: Path) -> None:
+    """With ``KISS_HOME`` set, the update marker must land THERE.
+
+    The extension resolves its state directory through ``$KISS_HOME``
+    (``kissHomeDir()`` in userAssets.ts) and watches
+    ``$KISS_HOME/.extension-updated`` to reload the window and finish
+    the update.  A marker written to a hard-coded ``~/.kiss`` instead
+    leaves a custom-``KISS_HOME`` install without its reload signal, so
+    the Update button appears to install nothing.
+    """
+    kiss_home = tmp_path / "custom-kiss-home"
+    harness, log = _build_sandbox(tmp_path, kiss_home=kiss_home)
+    proc, master = _spawn_on_pty(harness)
+    try:
+        out = _read_until(master, _LAST_BLOCK_LINE.encode())
+        rc = proc.wait(timeout=30)
+    finally:
+        os.close(master)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        _kill_dummy_daemon(tmp_path)
+
+    text = out.decode("utf-8", errors="replace")
+    assert rc == 0, f"step [5/5] harness failed rc={rc}:\n{text}"
+    _wait_for_line(log, _COMPLETE_LINE)
+    marker = kiss_home / ".extension-updated"
+    assert marker.exists(), (
+        "the .extension-updated marker was not written into $KISS_HOME — "
+        "the extension watches $KISS_HOME/.extension-updated, so the "
+        "reload that applies the update would never be triggered."
+    )

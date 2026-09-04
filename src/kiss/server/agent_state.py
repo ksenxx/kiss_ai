@@ -71,12 +71,14 @@ class AgentState:
         "is_running_non_wt",
         "non_wt_repo_root",
         "interrupted_by_shutdown",
+        "stop_acknowledged",
         "frontend_closed",
         "use_worktree",
         "use_parallel",
         "auto_commit_mode",
         "last_user_prompt",
         "last_result_summary",
+        "client_run_token",
     )
 
     def __init__(
@@ -125,12 +127,28 @@ class AgentState:
         # repositories are not blocked by it (repo-aware busy guard).
         self.non_wt_repo_root: Path | None = None
         self.interrupted_by_shutdown: bool = False
+        # Raised by the task runner the moment a cancelling
+        # ``KeyboardInterrupt`` has been caught and turned into the
+        # run's stopped result.  From then on the worker thread is
+        # doing legitimate cleanup (persisting the row, presenting the
+        # worktree, broadcasting), so the Stop watchdog must not
+        # inject a second interrupt merely because the thread is still
+        # alive.  Reset with the other per-run flags when the run ends.
+        self.stop_acknowledged: bool = False
         self.frontend_closed: bool = False
         self.use_worktree: bool = True
         self.use_parallel: bool = True
         self.auto_commit_mode: bool = True
         self.last_user_prompt: str = ""
         self.last_result_summary: str = ""
+        # The client-minted per-submission ``taskId`` of the ``run``
+        # command that created this state (``""`` for runs whose
+        # client sent none).  A ``stop`` command carrying a ``taskId``
+        # only stops the state whose token matches: a late cascade
+        # stop from an interrupted ``daemon_client.run`` must never
+        # kill a NEWER run that reused the same synthetic ``api-…``
+        # tab after the original run finished.
+        self.client_run_token: str = ""
 
     @property
     def is_subagent(self) -> bool:

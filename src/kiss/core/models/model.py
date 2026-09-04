@@ -582,6 +582,10 @@ FRAMEWORK_ONLY_CONFIG_KEYS = frozenset(
         # Whether a turn streams follows from whether a token callback is
         # attached, so every adapter sets this itself.
         "stream",
+        # Working directory for CLI-backed agent models (cc/*, codex/*):
+        # their subprocess runs with this cwd so native tools act on the
+        # task's work tree, not the daemon's.  API adapters ignore it.
+        "work_dir",
     }
 )
 
@@ -608,6 +612,11 @@ def accepted_request_params(method: Any) -> frozenset[str]:
 
 class Model(ABC):
     """Abstract base class for LLM provider implementations."""
+
+    # When True, the model is itself a full agent (e.g. a CLI coding agent):
+    # KISSAgent hands it the whole task in ONE generate() call and returns
+    # its final output, instead of driving a turn-by-turn tool loop.
+    runs_task_to_completion = False
 
     def __init__(
         self,
@@ -1039,6 +1048,23 @@ class Model(ABC):
         """
         pass  # pragma: no cover
 
+    def take_partial_usage_response(self) -> Any:
+        """Return (and consume) usage for a generation that raised, if known.
+
+        A ``generate()`` call that fails mid-stream (stall timeout, parse
+        error) may still have observed billable usage before the failure.
+        Adapters that can track it (e.g. Claude Code's per-message
+        ``message_delta`` events) override this to hand the caller a
+        response object suitable for
+        :meth:`extract_input_output_token_counts_from_response`; the base
+        implementation knows of none.  Consuming clears the stored value so
+        the same usage is never counted twice.
+
+        Returns:
+            A response object carrying the partial usage, or ``None``.
+        """
+        return None
+
     @abstractmethod
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Generates an embedding vector for the given text.
@@ -1217,8 +1243,20 @@ class Model(ABC):
         return {"type": "string"}
 
 
+# Separates the task from the appended system prompt in the single prompt
+# sent to a CLI-backed agent (see CLITextModel._build_prompt).
+CLI_SYSTEM_PROMPT_HEADER = "\n\n# You new system prompt follows:\n"
+
+
 class CLITextModel(Model):
     """Base class for the stateless CLI-backed models (Claude Code, Codex).
+
+    Both transports are full coding agents in their own right, so
+    ``runs_task_to_completion`` is True: :class:`~kiss.core.kiss_agent.KISSAgent`
+    hands them the whole task in one ``generate()`` call — with the system
+    prompt appended to the task after :data:`CLI_SYSTEM_PROMPT_HEADER` —
+    and returns their final output, instead of driving a turn-by-turn
+    KISS tool loop.
 
     Both transports flatten the conversation into a single text prompt,
     support tool calling only via the text-based ``tool_calls`` JSON
@@ -1230,10 +1268,35 @@ class CLITextModel(Model):
     _cli_model_name = "CLITextModel"
     _cli_logger = logger
 
+    runs_task_to_completion = True
+
     # Set for the duration of a tool-bearing turn by
     # :class:`_ToolCallFilteredStream`; adapters that can end such a turn
     # early at the first complete ``tool_calls`` block consult it.
     _tool_bearing_turn = False
+
+    def _build_prompt(self) -> str:
+        """Build the single prompt string sent to the CLI.
+
+        A one-message conversation (the normal run-to-completion case) is
+        the task text itself; a multi-turn conversation is flattened into
+        a ``[User]/[Assistant]/[Tool Result]`` transcript.  When
+        ``system_instruction`` is set in ``model_config`` it is appended
+        to the task after :data:`CLI_SYSTEM_PROMPT_HEADER` — the CLIs are
+        agents with their own system prompts, so KISS's system prompt
+        rides inside the task instead of replacing theirs.
+
+        Returns:
+            The assembled prompt string.
+        """
+        if len(self.conversation) == 1:
+            task = flatten_content_to_text(self.conversation[0]["content"])
+        else:
+            task = self._conversation_as_dialogue()
+        system_instruction = self.model_config.get("system_instruction")
+        if system_instruction:
+            return f"{task}{CLI_SYSTEM_PROMPT_HEADER}{system_instruction}"
+        return task
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with an initial user prompt.
@@ -1341,6 +1404,43 @@ class CLITextModel(Model):
         self._invoke_token_callback(text)
         self._invoke_thinking_callback(False)
 
+    @contextlib.contextmanager
+    def _cli_turn(self, args: list[str], label: str) -> Iterator["_CLIProcess"]:
+        """Run one CLI turn: start *args*, bound it, and classify how it ended.
+
+        The turn skeleton both adapters share.  Inside the block the
+        caller sends the prompt, parses the child's stdout and checks its
+        exit status; this wrapper owns the child's lifetime
+        (:class:`_CLIProcess`) and the two ways a turn is cut short:
+
+        * output silence longer than ``model_config["timeout"]`` (300 s by
+          default; KISSAgent raises it to 3600 s for run-to-completion
+          tasks) becomes the retryable :func:`_cli_stall_error`, never a
+          ``KISSError`` that would abort the whole task;
+        * a user Stop propagates as ``KeyboardInterrupt``.
+
+        However the block ends — those two, a parser or callback error
+        that ``KISSAgent`` will retry, or normally — an open thinking
+        block is closed, so the printer never renders the retry, the
+        "stopped" notice or the next turn's answer as reasoning.
+
+        Args:
+            args: The command line to run.
+            label: Human-readable CLI name used in every error message.
+
+        Yields:
+            The running child.
+        """
+        timeout = self.model_config.get("timeout", 300)
+        work_dir = self.model_config.get("work_dir") or None
+        with _CLIProcess(args, label, timeout, cwd=work_dir) as proc:
+            try:
+                yield proc
+            except _StreamReadTimeoutError:
+                raise _cli_stall_error(label, timeout) from None
+            finally:
+                self._close_thinking_if_open()
+
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Not supported — the CLI transports do not provide embeddings.
 
@@ -1371,14 +1471,14 @@ def _cli_stall_error(label: str, timeout: float) -> TimeoutError:
 
     Args:
         label: Human-readable CLI name for the message.
-        timeout: The deadline, in seconds, that the run overran.
+        timeout: Seconds of output silence the run exceeded.
 
     Returns:
         The ``TimeoutError`` for the caller to raise.
     """
     return TimeoutError(
-        f"{label} timed out after {timeout}s without finishing its turn; "
-        f"the process was killed and the step will be retried."
+        f"{label} timed out: it produced no output for {timeout}s and was "
+        f"killed; the run did not finish."
     )
 
 
@@ -1407,7 +1507,14 @@ class _CLIProcess:
     * **the child is always reaped and its pipes released.**  Leaving
       that to ``Popen.__del__`` leaks a zombie and three descriptors per
       timed-out call, which a long-running daemon eventually pays for
-      with ``OSError: [Errno 24] Too many open files``.
+      with ``OSError: [Errno 24] Too many open files``.  The prompt pipe
+      is released by :meth:`close` unconditionally: its writer is a
+      cancellable non-blocking loop, so a grandchild that inherited the
+      pipe and never reads it cannot keep the thread — or the descriptor
+      — alive.  An output pipe is released once its reader has seen EOF;
+      a grandchild that inherited stdout or stderr delays that until it
+      exits (a reader parked in ``read(2)`` cannot be cancelled without
+      closing the descriptor under it).
 
     The reader threads deliberately do nothing but move bytes: parsing
     (and therefore every token/thinking callback) happens on the calling
@@ -1415,18 +1522,27 @@ class _CLIProcess:
     into the next run's printer.
     """
 
-    def __init__(self, args: list[str], label: str, timeout: float) -> None:
+    def __init__(
+        self, args: list[str], label: str, timeout: float, cwd: str | None = None
+    ) -> None:
         """Start *args* and begin draining both of its output pipes.
 
         Args:
             args: The command line to run.
             label: Human-readable CLI name used in error messages.
-            timeout: Seconds the whole turn may take, counted from now.
+            timeout: Seconds of output silence tolerated before the run is
+                aborted.  The deadline is refreshed every time the child
+                produces a line of stdout (see :meth:`lines`), so a busy
+                agentic run is never cut off mid-work while a stalled one
+                is detected within *timeout* seconds.
+            cwd: Working directory for the child, or ``None`` to inherit
+                the caller's.
 
         Raises:
             KISSError: If the executable could not be started.
         """
         self._label = label
+        self._timeout = timeout
         self._deadline = time.monotonic() + timeout
         try:
             self._proc = subprocess.Popen(
@@ -1436,6 +1552,7 @@ class _CLIProcess:
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
+                cwd=cwd,
             )
         except OSError as e:
             raise KISSError(f"Failed to start {label}: {e}") from e
@@ -1445,6 +1562,11 @@ class _CLIProcess:
             self._start_reader(self._drain_stdout, "stdout"),
             self._start_reader(self._drain_stderr, "stderr"),
         )
+        # The stdin writer, once send_prompt() has started it, and the
+        # flag that tells it to give up: close() (and a Stop or deadline
+        # in send_prompt) set the flag, join the thread, then close stdin.
+        self._writer: threading.Thread | None = None
+        self._writer_cancel = threading.Event()
 
     def __enter__(self) -> "_CLIProcess":
         """Return the running process supervisor."""
@@ -1494,7 +1616,12 @@ class _CLIProcess:
 
         A child that exits before reading breaks the pipe mid-write.
         That is swallowed: the caller reports the child's exit status
-        and stderr, which is the failure the user can act on.
+        and stderr, which is the failure the user can act on.  The wait
+        also ends as soon as the child has exited, whether or not the
+        write has: a grandchild that inherited the prompt pipe keeps it
+        from breaking, and the reply the child already wrote must not
+        wait on a prompt nobody will ever read.  A Stop or the deadline
+        cancels the writer before raising, so no thread is left behind.
 
         Args:
             prompt: The complete prompt text.
@@ -1506,46 +1633,99 @@ class _CLIProcess:
         """
         writer = threading.Thread(
             target=self._write_prompt,
-            args=(prompt,),
+            args=(prompt.encode("utf-8"),),
             daemon=True,
             name="cli-stdin-write",
         )
+        self._writer = writer
         writer.start()
         while True:
             remaining = self._deadline - time.monotonic()
             if remaining <= 0:
+                self._writer_cancel.set()
                 raise _StreamReadTimeoutError()
             if stop_signal.stop_requested():
+                self._writer_cancel.set()
                 raise KeyboardInterrupt("Agent stop requested")
             writer.join(timeout=min(remaining, _STOP_POLL_SECONDS))
-            if not writer.is_alive():
+            if not writer.is_alive() or self._proc.poll() is not None:
                 return
 
-    def _write_prompt(self, prompt: str) -> None:
-        """Push the whole prompt into the child's stdin, then close it.
+    def _write_prompt(self, data: bytes) -> None:
+        """Push *data* into the child's stdin, then close it.
 
         Runs on the writer thread, where nothing can be reported: a
         broken or already-closed pipe means the child died or
         :meth:`close` tore the turn down, and both are diagnosed by the
         caller from the child's exit status.
+
+        The pipe is written through its raw descriptor in non-blocking
+        mode, one ``os.write`` at a time, re-checking the cancel flag,
+        the child's exit and the turn deadline between writes.  A
+        blocking buffered ``write()`` could be cancelled by nothing
+        short of the reader going away — and a grandchild that inherited
+        the pipe never reads it — which pinned this thread and the
+        descriptor for as long as that grandchild lived.  NO ``select``
+        readiness API guards the writes: ``select.select`` raises
+        ``ValueError`` for any descriptor >= ``FD_SETSIZE`` (1024),
+        which a long-running daemon with many concurrent tasks exceeds
+        routinely, and ``select.poll`` does not exist on native Windows
+        — either failure mode ends with the "child exited" handler below
+        (or the thread dying outside it) silently sending the child an
+        empty prompt.  Instead, a full pipe surfaces as
+        ``BlockingIOError`` (or, on Windows pipes, a zero-byte write),
+        and the writer waits up to :data:`_STOP_POLL_SECONDS` on the
+        cancel event — waking early on cancellation — before retrying.
         """
         stdin = self._proc.stdin
         assert stdin is not None
+        view = memoryview(data)
         try:
-            stdin.write(prompt)
-            stdin.close()
+            fd = stdin.fileno()
+            os.set_blocking(fd, False)
+            while view:
+                if (
+                    self._writer_cancel.is_set()
+                    or self._proc.poll() is not None
+                    or time.monotonic() >= self._deadline
+                ):
+                    break
+                try:
+                    written = os.write(fd, view)
+                except BlockingIOError:
+                    self._writer_cancel.wait(_STOP_POLL_SECONDS)
+                    continue
+                if written == 0:  # pragma: no cover
+                    # Not reachable on POSIX: a non-blocking pipe write
+                    # either transfers at least one byte or raises
+                    # BlockingIOError.  Windows pipes can report a full
+                    # buffer as a zero-byte write instead; treat it the
+                    # same so the loop never spins hot or stalls.
+                    self._writer_cancel.wait(_STOP_POLL_SECONDS)
+                    continue
+                view = view[written:]
         except (OSError, ValueError):
             logger.debug("%s exited before reading its prompt", self._label)
+        finally:
+            with contextlib.suppress(OSError):
+                stdin.close()
 
     def lines(self) -> Iterator[str]:
         """Yield the child's stdout lines until EOF.
+
+        Each received line pushes the inactivity deadline out by the full
+        configured timeout: the timeout bounds *silence*, not total run
+        time, so a CLI agent productively streaming events for hours is
+        never cut off mid-work while one that stops producing output is
+        detected within ``timeout`` seconds.
 
         Yields:
             One line of stdout at a time.
 
         Raises:
             KeyboardInterrupt: The user pressed Stop.
-            _StreamReadTimeoutError: The turn outlived its deadline.
+            _StreamReadTimeoutError: The child produced no output for
+                ``timeout`` seconds.
         """
         while True:
             remaining = self._deadline - time.monotonic()
@@ -1561,6 +1741,7 @@ class _CLIProcess:
                 continue
             if line is None:
                 return
+            self._deadline = time.monotonic() + self._timeout
             yield line
 
     def _reap(self, grace: float) -> int | None:
@@ -1580,17 +1761,30 @@ class _CLIProcess:
     def wait_for_exit(self) -> int | None:
         """Return the child's exit status, or ``None`` if it is still running.
 
-        Never raises: a CLI that lingers after closing stdout (flushing
-        telemetry, waiting on its own children) must not turn a complete
-        turn into an unclassified ``subprocess.TimeoutExpired``.  The
-        wait is bounded by whatever is left of the run's deadline, so a
-        short configured timeout stays short.
+        A CLI that lingers after closing stdout (flushing telemetry,
+        waiting on its own children) must not turn a complete turn into
+        an unclassified ``subprocess.TimeoutExpired``.  The wait is
+        bounded by whatever is left of the run's deadline, so a short
+        configured timeout stays short, and it polls the stop signal in
+        :data:`_STOP_POLL_SECONDS` slices like :meth:`lines` does: a Stop
+        pressed while the child winds down must not be answered with a
+        successful turn.
 
         Returns:
             The exit status, or ``None`` when the child outlived the wait.
+
+        Raises:
+            KeyboardInterrupt: The user pressed Stop during the wait.
         """
         remaining = max(self._deadline - time.monotonic(), 0.0)
-        return self._reap(min(remaining, _EXIT_GRACE_SECONDS))
+        wait_until = time.monotonic() + min(remaining, _EXIT_GRACE_SECONDS)
+        while True:
+            if stop_signal.stop_requested():
+                raise KeyboardInterrupt("Agent stop requested")
+            slice_ = min(wait_until - time.monotonic(), _STOP_POLL_SECONDS)
+            status = self._reap(max(slice_, 0.0))
+            if status is not None or slice_ <= 0:
+                return status
 
     def stderr_text(self) -> str:
         """Return everything the child wrote to stderr.
@@ -1602,26 +1796,65 @@ class _CLIProcess:
         self._readers[1].join(timeout=_REAP_GRACE_SECONDS)
         return "".join(self._stderr_chunks)
 
+    def raise_for_exit(self) -> None:
+        """Raise when the child ended its turn with a failure status.
+
+        The one exit-status policy of both CLI adapters: a clean exit and
+        a child that is still winding down (see :meth:`wait_for_exit`)
+        are fine; anything else — including death by signal, which is
+        reported as a negative status — means the reply the caller
+        collected is at best truncated and must not be passed off as a
+        finished turn.
+
+        Raises:
+            KISSError: With the exit status and the child's stderr.
+            KeyboardInterrupt: The user pressed Stop while the child was
+                winding down (see :meth:`wait_for_exit`).
+        """
+        status = self.wait_for_exit()
+        if status not in (0, None):
+            raise KISSError(
+                f"{self._label} failed (exit {status}): {self.stderr_text().strip()}"
+            )
+
     def close(self) -> None:
-        """Terminate the child, reap it, and release its pipes."""
+        """Terminate the child, reap it, and release its pipes.
+
+        The prompt pipe is always released: its writer is told to stop,
+        joined (it re-checks the flag every :data:`_STOP_POLL_SECONDS`),
+        and stdin is closed.  An output pipe is closed only once the
+        thread moving bytes through it has finished.  A grandchild that
+        inherited stdout or stderr keeps it open after the child is
+        gone, leaving that reader parked inside ``read(2)`` holding the
+        buffer's lock — closing the pipe from here would then block this
+        thread forever, so such a pipe is left to the abandoned daemon
+        thread until the grandchild exits.
+        """
         proc = self._proc
         if proc.poll() is None:
             proc.terminate()
             if self._reap(_REAP_GRACE_SECONDS) is None:
                 proc.kill()
                 self._reap(_REAP_GRACE_SECONDS)
-        for reader in self._readers:
-            reader.join(timeout=_REAP_GRACE_SECONDS)
-        if any(reader.is_alive() for reader in self._readers):
-            # A grandchild inherited the pipe, so a reader is still
-            # parked inside read(2) holding the buffer's lock: closing
-            # the pipe here would block this thread forever.
-            logger.warning("%s left a reader attached to its output pipes", self._label)
-            return
-        for pipe in (proc.stdin, proc.stdout, proc.stderr):
-            if pipe is not None:
-                with contextlib.suppress(OSError):
-                    pipe.close()
+        self._writer_cancel.set()
+        if self._writer is not None:
+            self._writer.join()
+        assert proc.stdin is not None  # every pipe is subprocess.PIPE
+        with contextlib.suppress(OSError):
+            proc.stdin.close()
+        attached = (
+            (proc.stdout, self._readers[0]),
+            (proc.stderr, self._readers[1]),
+        )
+        for _pipe, thread in attached:
+            thread.join(timeout=_REAP_GRACE_SECONDS)
+        for pipe, thread in attached:
+            if thread.is_alive():
+                logger.warning("%s left %s attached to its pipe", self._label, thread.name)
+                continue
+            assert pipe is not None
+            with contextlib.suppress(OSError):
+                pipe.close()
 
 
 # A complete markdown fence opener (``` plus an optional language tag,
