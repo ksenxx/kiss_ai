@@ -685,6 +685,31 @@ _OPEN_FILE_MAX_BYTES = 2_000_000
 # ``kissAiRoot()`` in ``installerPath.js`` exactly.
 _KISS_AI_ROOT = Path.home() / ".kiss" / "kiss_ai"
 
+# The public curl bootstrap (README's install one-liner).  When
+# ~/.kiss/kiss_ai/install.sh is missing — the extension was installed from a
+# .vsix or the clone was deleted — the Update button falls back to this
+# script, which clones ~/.kiss/kiss_ai and hands over to its install.sh.
+_DEFAULT_BOOTSTRAP_INSTALL_URL = (
+    "https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh"
+)
+
+
+def _bootstrap_install_url() -> str:
+    """Return the URL of the curl bootstrap installer.
+
+    Python twin of ``bootstrapInstallUrl()`` in the extension's
+    ``installerPath.js``: honours ``$KISS_UPDATE_BOOTSTRAP_URL`` (forks,
+    tests — ``curl`` accepts ``file://`` URLs) and otherwise returns the
+    public ``scripts/install.sh`` raw URL from the README.
+
+    Returns:
+        The bootstrap installer URL.
+    """
+    return (
+        os.environ.get("KISS_UPDATE_BOOTSTRAP_URL")
+        or _DEFAULT_BOOTSTRAP_INSTALL_URL
+    )
+
 
 def _find_install_script(root: Path) -> Path | None:
     """Return ``install.sh`` inside *root* if it exists, else ``None``.
@@ -4386,14 +4411,17 @@ class RemoteAccessServer:
         """Run ``~/.kiss/kiss_ai/install.sh`` to update KISS Sorcar.
 
         Server-side twin of the VS Code extension's
-        ``SorcarSidebarView._runUpdate()``: the extension locates the
+        ``SorcarSidebarView.runUpdate()``: the extension locates the
         installer via ``installerPath.js`` and runs it in an integrated
         terminal; the web server locates it via
         :func:`_find_install_script` and runs it as a detached
         subprocess (output appended to ``~/.kiss/update.log``) since a
-        remote browser has no terminal.  Error/info wording matches
-        the extension's ``showErrorMessage``/``showInformationMessage``
-        so both frontends behave the same.
+        remote browser has no terminal.  When the clone's
+        ``install.sh`` is missing, both frontends run the curl
+        bootstrap (:func:`_bootstrap_install_url`) instead, which
+        recreates ``~/.kiss/kiss_ai`` and installs from it.  Info
+        wording matches the extension's
+        ``showInformationMessage`` so both frontends behave the same.
 
         The acknowledgement ``notice`` / ``error`` events are stamped
         with the requesting connection's ``connId`` (when non-empty)
@@ -4430,19 +4458,15 @@ class RemoteAccessServer:
             }, conn_id)
             return
         self._update_starting = True
+        # When the clone (or its install.sh) is missing — the extension
+        # was installed from a .vsix, or ~/.kiss/kiss_ai was deleted —
+        # fall back to the public curl bootstrap, which recreates the
+        # clone and hands over to its install.sh, instead of refusing
+        # with "install.sh not found".  The extension's runUpdate() does
+        # the same in its terminal.
         script = await loop.run_in_executor(
             None, _find_install_script, self._install_root,
         )
-        if script is None:
-            self._update_starting = False
-            self._broadcast_to_conn({
-                "type": "error",
-                "text": (
-                    "Cannot update KISS Sorcar: install.sh not found "
-                    f"in {self._install_root}."
-                ),
-            }, conn_id)
-            return
         self._broadcast_to_conn({
             "type": "notice",
             "text": (
@@ -4459,23 +4483,32 @@ class RemoteAccessServer:
             )
 
     def _spawn_update_script(
-        self, script: Path, conn_id: str = "",
+        self, script: Path | None, conn_id: str = "",
     ) -> tuple[subprocess.Popen[bytes], int] | None:
-        """Start ``install.sh`` detached, logging to the update log.
+        """Start the updater detached, logging to the update log.
+
+        With *script* set, runs that ``install.sh``; with ``None`` (no
+        ``~/.kiss/kiss_ai/install.sh`` on this machine), runs the curl
+        bootstrap from :func:`_bootstrap_install_url`, which clones the
+        repo into ``~/.kiss/kiss_ai`` and hands over to its
+        ``install.sh`` — so Update works even where KISS Sorcar was
+        never curl-installed.
 
         Runs in the executor so file I/O and process spawn never block
         the event loop.  ``start_new_session=True`` keeps the updater
         alive when ``install.sh`` restarts this very daemon.
-        ``--non-interactive`` makes the script answer its ``[Y/n]``
-        upgrade questions with their defaults (it would anyway, having
-        no terminal to ask on), and ``stdin=DEVNULL`` detaches it from
-        the daemon's stdin.  Failures are emitted as
-        ``error`` events instead of raised, stamped with the
-        requesting connection's ``connId`` (when non-empty) so only
-        the window that clicked "Update" renders the error banner.
+        ``--non-interactive`` / ``KISS_NONINTERACTIVE=1`` make the
+        script answer its ``[Y/n]`` upgrade questions with their
+        defaults (it would anyway, having no terminal to ask on), and
+        ``stdin=DEVNULL`` detaches it from the daemon's stdin.
+        Failures are emitted as ``error`` events instead of raised,
+        stamped with the requesting connection's ``connId`` (when
+        non-empty) so only the window that clicked "Update" renders the
+        error banner.
 
         Args:
-            script: Absolute path of the ``install.sh`` to execute.
+            script: Absolute path of the ``install.sh`` to execute, or
+                ``None`` to run the curl bootstrap instead.
             conn_id: Requesting connection id (``""`` to broadcast).
 
         Returns:
@@ -4483,13 +4516,28 @@ class RemoteAccessServer:
             moment (the start of this run's output), or ``None`` when
             the spawn failed.
         """
+        if script is not None:
+            argv = ["bash", str(script), "--non-interactive"]
+            cwd = str(script.parent)
+            env = None
+        else:
+            argv = [
+                "bash", "-c",
+                'set -o pipefail; '
+                'curl -fsSL "$KISS_BOOTSTRAP_URL" | bash',
+            ]
+            cwd = str(Path.home())
+            env = dict(os.environ)
+            env["KISS_BOOTSTRAP_URL"] = _bootstrap_install_url()
+            env["KISS_NONINTERACTIVE"] = "1"
         try:
             self._update_log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._update_log_path, "ab") as log:
                 log_offset = log.tell()
                 self._update_proc = subprocess.Popen(
-                    ["bash", str(script), "--non-interactive"],
-                    cwd=str(script.parent),
+                    argv,
+                    cwd=cwd,
+                    env=env,
                     stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
