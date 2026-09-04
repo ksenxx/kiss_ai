@@ -25,4 +25,17 @@ function findInstallScript(root) {
   }
 }
 
-module.exports = {kissAiRoot, findInstallScript};
+// The public curl bootstrap (the README's install one-liner).  When
+// ~/.kiss/kiss_ai/install.sh is missing — the extension was installed from a
+// .vsix, or the clone was deleted — the Update button falls back to this
+// script, which clones ~/.kiss/kiss_ai and hands over to its install.sh.
+// $KISS_UPDATE_BOOTSTRAP_URL overrides it (forks, tests — curl accepts
+// file:// URLs).  Twin of web_server._bootstrap_install_url().
+const DEFAULT_BOOTSTRAP_INSTALL_URL =
+  'https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh';
+
+function bootstrapInstallUrl() {
+  return process.env.KISS_UPDATE_BOOTSTRAP_URL || DEFAULT_BOOTSTRAP_INSTALL_URL;
+}
+
+module.exports = {kissAiRoot, findInstallScript, bootstrapInstallUrl};
