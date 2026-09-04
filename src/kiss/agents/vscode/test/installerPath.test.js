@@ -10,7 +10,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const {kissAiRoot, findInstallScript} = require('../src/installerPath');
+const {
+  kissAiRoot,
+  findInstallScript,
+  bootstrapInstallUrl,
+} = require('../src/installerPath');
 
 let passed = 0;
 const failures = [];
@@ -99,6 +103,30 @@ test('findInstallScript ignores process.cwd() — workspace-independent', () => 
   } finally {
     process.chdir(origCwd);
     fs.rmSync(workspace, {recursive: true, force: true});
+  }
+});
+
+test('bootstrapInstallUrl defaults to the public scripts/install.sh raw URL', () => {
+  const saved = process.env.KISS_UPDATE_BOOTSTRAP_URL;
+  delete process.env.KISS_UPDATE_BOOTSTRAP_URL;
+  try {
+    assert.strictEqual(
+      bootstrapInstallUrl(),
+      'https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh',
+    );
+  } finally {
+    if (saved !== undefined) process.env.KISS_UPDATE_BOOTSTRAP_URL = saved;
+  }
+});
+
+test('bootstrapInstallUrl honours $KISS_UPDATE_BOOTSTRAP_URL', () => {
+  const saved = process.env.KISS_UPDATE_BOOTSTRAP_URL;
+  process.env.KISS_UPDATE_BOOTSTRAP_URL = 'file:///tmp/fake-install.sh';
+  try {
+    assert.strictEqual(bootstrapInstallUrl(), 'file:///tmp/fake-install.sh');
+  } finally {
+    if (saved === undefined) delete process.env.KISS_UPDATE_BOOTSTRAP_URL;
+    else process.env.KISS_UPDATE_BOOTSTRAP_URL = saved;
   }
 });
 
