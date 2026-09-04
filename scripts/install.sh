@@ -155,7 +155,14 @@ if [ -d ~/.kiss/kiss_ai ]; then
       # release ships that path tracked, so popping the stash back over a
       # new release's copy conflicts and leaves unmerged stages that brick
       # later updates.  Restoring HEAD's copy is lossless — ./install.sh
-      # rebuilds it anyway.
+      # rebuilds it anyway.  Clear any skip-worktree pin FIRST (mirrors
+      # guard_vsix_tracking in the root install.sh): a pin left by an old
+      # installer makes the checkout fail with "pathspec did not match",
+      # hides the stale bytes from the ``git status`` stash decision, and
+      # then fails ``git reset --hard @{upstream}`` with "Entry ... not
+      # uptodate" — the exact bricked clones this fresh curl-fetched
+      # bootstrap exists to recover.
+      git update-index --no-skip-worktree -- src/kiss/agents/vscode/kiss-sorcar.vsix 2>/dev/null || true
       git checkout HEAD -- src/kiss/agents/vscode/kiss-sorcar.vsix 2>/dev/null || true
       _kiss_stashed=
       _kiss_stash_failed=

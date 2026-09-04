@@ -235,6 +235,7 @@ class _CommandsMixin:
         printer: JsonPrinter
         work_dir: str
         _state_lock: threading.RLock
+        _shutdown_stopping: bool
         _default_model: str
         _complete_seq: int
         _complete_seq_latest: dict[str, int]
@@ -473,6 +474,9 @@ class _CommandsMixin:
                     tab_id, inject_prompt, inject_task,
                 )
             return
+        # ``thread`` and ``state`` are created together above, so a
+        # non-None thread guarantees the state.
+        assert state is not None
         try:
             # Register + title + bind the tab in the shared registry
             # BEFORE the ``clear`` broadcast so every client has the
@@ -501,7 +505,27 @@ class _CommandsMixin:
                 "chat_id": chat_id,
                 "tabId": tab_id,
             })
-            thread.start()
+            # Start/cancel handshake (audit0903 F1/F2): a ``stop`` or
+            # the graceful-shutdown sweep can land while the registry
+            # write and the ``clear`` broadcast above hold the
+            # pre-start window open.  The decision to start is taken
+            # atomically under ``_state_lock`` — the same lock
+            # ``_stop_task`` and ``_stop_active_agent_tasks`` flag
+            # under — so a swept or stopped run can never call
+            # ``thread.start()`` afterwards.  Before this handshake
+            # the shutdown sweep crashed joining the unstarted thread
+            # and the run then executed its untrusted setup with no
+            # watchdog, and an accepted pre-start stop relied on a
+            # watchdog that gives up waiting for the start after 30 s.
+            with self._state_lock:
+                if self._shutdown_stopping:
+                    state.interrupted_by_shutdown = True
+                pre_cancelled = state.interrupted_by_shutdown or (
+                    state.stop_event is not None
+                    and state.stop_event.is_set()
+                )
+                if not pre_cancelled:
+                    thread.start()
         except BaseException:
             with self._state_lock:
                 if state is not None and state.task_thread is thread:
@@ -509,6 +533,15 @@ class _CommandsMixin:
                     state.stop_event = None
                     state.user_answer_queue = None
             raise
+        if pre_cancelled:
+            # Route the never-started run through the normal terminal
+            # cancellation — ``_cancel_outcome`` labelling, ``result``
+            # and ``status`` broadcasts, state cleanup — WITHOUT
+            # executing any user setup: ``_run_task`` raises the
+            # cancelling ``KeyboardInterrupt`` at its top when it sees
+            # the marker, right here on the dispatch thread.
+            cmd["_pre_cancelled"] = True
+            self._run_task(cmd)
 
     def _cmd_stop(self, cmd: dict[str, Any]) -> None:
         """Stop a running task.

@@ -571,15 +571,7 @@ class KISSAgent(Base):
                 result = self._execute_step()
                 consecutive_errors = 0
                 if result is not None:
-                    if self.printer:
-                        cost = f"${self.budget_used:.4f}"
-                        self.printer.print(
-                            result,
-                            type="result",
-                            step_count=self.step_count,
-                            total_tokens=self.total_tokens_used,
-                            cost=cost,
-                        )
+                    self._print_result(result)
                     return result
             except KISSError as e:  # pragma: no cover – requires model to fail mid-step
                 logger.debug("Exception caught", exc_info=True)

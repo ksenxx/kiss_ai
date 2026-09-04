@@ -90,13 +90,16 @@ _refill_threads: dict[str, threading.Thread] = {}
 # join, cannot publish a spare into a pool the caller believes empty —
 # the spare is removed instead.
 _generation = 0
-# True while :func:`discard_all` is between its spare snapshot and its
-# final generation bump.  A refill that started after the first bump
-# (so its captured generation still matches) but reaches its
-# publication point during that sweep would otherwise publish a spare
-# the sweep never saw; the publication check requires this to be
-# False as well.
-_discarding = False
+# Number of :func:`discard_all` calls currently between their spare
+# snapshot and their final generation bump.  A refill that started
+# after a discard's first bump (so its captured generation still
+# matches) but reaches its publication point during that sweep would
+# otherwise publish a spare the sweep never saw; the publication check
+# requires this to be zero as well.  A COUNTER, not a boolean: with
+# two overlapping discards a boolean was cleared by the first finisher
+# while the second was still sweeping, so a refill started in between
+# published a spare the second discard returned without ever seeing.
+_active_discards = 0
 _pool_lock = threading.Lock()
 
 
@@ -222,49 +225,55 @@ def discard_all() -> None:
     (see :data:`_generation`): advanced here before the snapshot and
     once more on return, it makes every refill started before this
     call returns drop its spare instead of publishing it — together
-    with the :data:`_discarding` gate, raised for the whole call, which
-    also stops a refill started after the first bump from publishing
-    while the sweep is still running.  Best-effort
+    with the :data:`_active_discards` gate, held for the whole call,
+    which also stops a refill started after the first bump (or after
+    an OVERLAPPING discard_all finished) from publishing while this
+    sweep is still running.  Best-effort
     cleanup hook for tests and embedders; a spare that cannot be
     removed is left for the reclaim pass to collect.
     """
-    global _discarding, _generation
+    global _active_discards, _generation
     with _pool_lock:
         _generation += 1
-        _discarding = True
+        _active_discards += 1
         threads = list(_refill_threads.values())
         _refill_threads.clear()
-    for thread in threads:
-        thread.join(timeout=120)
-    with _pool_lock:
-        spares = dict(_spares)
-        _spares.clear()
-    for key, (branch, wt_dir) in spares.items():
-        repo = Path(key)
-        try:
-            # Same guard the reclaim pass applies to orphaned spares:
-            # a spare is never written to, so content in it means an
-            # external writer put something there — preserve it for
-            # the reclaim pass to inspect rather than destroy it.  A
-            # spare whose directory is already gone is plumbing only
-            # and is always cleaned up.
-            if wt_dir.is_dir():
-                if GitWorktreeOps.spare_has_content(repo, branch, wt_dir):
-                    logger.warning(
-                        "Pooled spare worktree %s (branch '%s') has "
-                        "unexpected content; preserving instead of "
-                        "discarding",
-                        wt_dir, branch,
-                    )
-                    continue
-            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
-        except Exception:  # pragma: no cover — filesystem teardown race
-            logger.warning(
-                "Failed to discard pooled spare %s", wt_dir, exc_info=True,
-            )
-    with _pool_lock:
-        _generation += 1
-        _discarding = False
+    try:
+        for thread in threads:
+            thread.join(timeout=120)
+        with _pool_lock:
+            spares = dict(_spares)
+            _spares.clear()
+        for key, (branch, wt_dir) in spares.items():
+            repo = Path(key)
+            try:
+                # Same guard the reclaim pass applies to orphaned
+                # spares: a spare is never written to, so content in it
+                # means an external writer put something there —
+                # preserve it for the reclaim pass to inspect rather
+                # than destroy it.  A spare whose directory is already
+                # gone is plumbing only and is always cleaned up.
+                if wt_dir.is_dir():
+                    if GitWorktreeOps.spare_has_content(repo, branch, wt_dir):
+                        logger.warning(
+                            "Pooled spare worktree %s (branch '%s') has "
+                            "unexpected content; preserving instead of "
+                            "discarding",
+                            wt_dir, branch,
+                        )
+                        continue
+                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+            except Exception:  # pragma: no cover — filesystem teardown race
+                logger.warning(
+                    "Failed to discard pooled spare %s", wt_dir, exc_info=True,
+                )
+    finally:
+        # Always release the gate — a KeyboardInterrupt landing in the
+        # sweep must not leave the counter raised forever, which would
+        # silently disable every future refill publication.
+        with _pool_lock:
+            _generation += 1
+            _active_discards -= 1
 
 
 def prewarm(
@@ -344,15 +353,16 @@ def prewarm(
             # differences.
             GitWorktreeOps.reset_worktree_to(wt_dir, "HEAD")
             with _pool_lock:
-                if generation == _generation and not _discarding:
+                if generation == _generation and _active_discards == 0:
                     _spares[key] = (branch, wt_dir)
                     return True
             # discard_all ran (or is running) since this refill started:
             # the pool it would publish into has been declared empty,
             # so the spare is removed rather than leaked past the sweep.
-            # ``_discarding`` covers the refill that started after the
-            # first generation bump and would otherwise publish while
-            # the sweep is still running.
+            # ``_active_discards`` covers the refill that started after
+            # the first generation bump — or after an overlapping
+            # discard_all re-stabilised the generation — and would
+            # otherwise publish while a sweep is still running.
             logger.info(
                 "Dropping spare worktree %s for %s: the pool was "
                 "discarded while it was being created",

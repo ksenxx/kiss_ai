@@ -827,8 +827,13 @@ def find_deprecated_models(
         if name.endswith(_XHIGH_SUFFIX) or current[name].get("alias_of"):
             continue
         if name.startswith("codex/"):  # pragma: no branch
-            if codex_slugs and name != "codex/default":
-                slug = name.removeprefix("codex/")
+            slug = name.removeprefix("codex/")
+            if slug in SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS:
+                deprecated.append({
+                    "name": name,
+                    "reason": "rejected by Codex CLI on ChatGPT subscriptions",
+                })
+            elif codex_slugs and name != "codex/default":
                 if slug not in codex_slugs:
                     deprecated.append({"name": name, "reason": "not in Codex CLI models.json"})
             continue
@@ -965,6 +970,22 @@ _CODEX_MODELS_JSON_URL = (
     "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json"
 )
 
+SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS = frozenset({
+    "gpt-5.2",
+    "gpt-daybreak-blue-latest",
+    "gpt-daybreak-red-latest",
+})
+"""Codex CLI slugs rejected under a ChatGPT subscription.
+
+Verified live on 2026-09-02: the Codex CLI returns HTTP 400 ("not
+supported when using Codex with a ChatGPT account") for these slugs
+even though the upstream ``models.json`` lists them.  They must stay
+out of ``MODEL_INFO.json``: ``_add_codex_candidates`` never adds them
+and :func:`find_deprecated_models` flags existing entries.  The
+``test_codex_model.py`` guard test imports this set, so there is a
+single source of truth.
+"""
+
 
 def fetch_codex_supported_slugs(verbose: bool = False) -> set[str]:
     """Fetch the list of model slugs the Codex CLI actually supports.
@@ -1000,6 +1021,9 @@ def _add_codex_candidates(
     Only models whose slug appears in the official Codex CLI ``models.json``
     are added. This avoids adding models that the Codex CLI rejects at
     runtime (e.g. ``gpt-5.5-pro`` is not supported with a ChatGPT account).
+    Slugs in :data:`SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS` are skipped even
+    when the upstream ``models.json`` lists them: they were verified live to
+    fail on ChatGPT subscriptions.
 
     Context length is taken from the matching OpenRouter entry when
     available, falling back to 400000 (the default for codex/* models).
@@ -1007,6 +1031,8 @@ def _add_codex_candidates(
     ChatGPT subscription.
     """
     for slug in codex_slugs:  # pragma: no branch
+        if slug in SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS:
+            continue
         codex_name = f"codex/{slug}"
         if codex_name in current:  # pragma: no branch
             continue

@@ -186,7 +186,13 @@ def test_a_trajectory_saved_late_lands_where_the_first_save_put_it() -> None:
     saved = first_path.read_text(encoding="utf-8")
     assert "written-before" in saved, "the early messages were orphaned"
     assert "written-after" in saved
-    siblings = sorted(first_path.parent.glob(f"*_{agent.id}_*.yaml"))
+    # Scoped to THIS agent's name: a bare ``*_{agent.id}_*`` glob also
+    # matches same-id trajectories left by earlier tests in the same
+    # process (another module's fixture restores Base.agent_counter, so
+    # ids repeat), failing this test on shared-process runs.
+    siblings = sorted(
+        first_path.parent.glob(f"trajectory_f8_lifetime_{agent.id}_*.yaml")
+    )
     assert siblings == [first_path], (
         f"the run left its trajectory in more than one place: {siblings}"
     )
