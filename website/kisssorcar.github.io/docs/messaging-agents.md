@@ -52,12 +52,11 @@ KISS Sorcar also ships a **Govee smart-home CLI** for controlling IoT lights (on
 ## Example Prompts
 
 ```text
-Can you authenticate me with the <<workspace name>> workspace on Slack using the Slack agent?
+Can you authenticate me with the <<workspace name>> workspace on Slack?
 ```
 
 ```text
-Can you authenticate me with Gmail using the Gmail agent? Use the user's default
-browser to prompt the user to log in and obtain the authentication token.
+Can you authenticate me with Gmail?
 ```
 
 ```text
@@ -65,10 +64,8 @@ Can you send "Hello from Sorcar!" to 1-800-772-1213?
 ```
 
 ```text
-Can you create a cron job with a name prefixed with "kiss-" which will check every
-3 seconds if there are the latest unanswered messages from /<<user name>> in the channel
-sorcar using the Slack agent, then it will run the messages as tasks one-by-one in
-the order of arrival and respond with the result suitably formatted for Slack.
+Can you check my gmail every hour and ping me on slack if there is any important
+email that needs my immediate attention?
 ```
 
 See [Sample Tasks](sample-tasks.md) for more ready-to-use prompts.

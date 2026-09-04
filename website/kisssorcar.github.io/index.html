@@ -4,14 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.</title>
-  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 622 models. Works as a VS Code extension, a web/mobile app, and a Python API.">
+  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 634 models. Works as a VS Code extension, a web/mobile app, and a Python API.">
   <link rel="canonical" href="https://kisssorcar.github.io/">
   <link rel="alternate" type="text/markdown" href="https://kisssorcar.github.io/index.html.md" title="This page as Markdown">
   <link rel="llms-txt" type="text/plain" href="https://kisssorcar.github.io/llms.txt" title="LLM-friendly content index">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://kisssorcar.github.io/">
   <meta property="og:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
-  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 622 models.">
+  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 634 models.">
   <meta property="og:image" content="https://kisssorcar.github.io/assets/KISS-Sorcar.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -1952,7 +1952,7 @@
     <h1>Tell it what to do, in any language and give it a concrete goal. It picks the best LLMs, runs on your laptop, and ships the work.</h1>
     <div class="hero-trust" aria-label="At a glance">
       <span><strong>Apache 2.0</strong> · open source</span>
-      <span><strong>622 models</strong> · 9 providers</span>
+      <span><strong>634 models</strong> · 9 providers</span>
       <span><strong>~3,000 lines</strong> of core agents code</span>
     </div>
   </div>
@@ -2082,7 +2082,7 @@
             </tr>
             <tr>
               <th class="cap">Models in bundled catalog</th>
-              <td class="kiss">622 across 9 provider categories</td>
+              <td class="kiss">634 across 9 provider categories</td>
               <td>Claude family only</td>
               <td>Subset chosen by Cursor</td>
             </tr>
@@ -2140,7 +2140,7 @@
   <section id="prompts" class="section-card">
     <span class="num">§ 02 — All you need is a short prompt in KISS Sorcar to do big complex tasks</span>
     <h2>All You Need is a Short Prompt in KISS Sorcar to do Big Complex Tasks.<a href="#prompts" class="anchor">¶</a></h2>
-    <p class="sub" style="font-size:0.88rem; line-height:1.55;">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the VS Code extension or Web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your tasks at <code>~/.kiss/MY_TASK_TEMPLATES.md</code> and your promptlets at <code>~/.kiss/MY_INJECTION.md</code>.</p>
+    <p class="sub" style="font-size:0.88rem; line-height:1.55;">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the VS Code extension or Web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your tasks at <code>~/.kiss/MY_TASK_TEMPLATES.md</code> and customize the tricks at <code>~/.kiss/INJECTIONS.md</code>.</p>
     <div class="section-body">
 
       <div class="prompt-carousel" id="prompt-carousel" aria-roledescription="carousel" aria-label="Sample tasks and promptlet tricks">
@@ -2177,9 +2177,9 @@
             <h3 class="panel-title">Authenticate with a Slack workspace</h3>
             <span class="panel-badge">Task</span>
           </div>
-          <p class="panel-desc">Have Sorcar log you into a Slack workspace using the bundled Slack agent, so it can send and receive messages on your behalf.</p>
+          <p class="panel-desc">Have Sorcar log you into a Slack workspace so it can send and receive messages on your behalf.</p>
           <div class="prompt-body">
-            <pre>Can you authenticate me with the &lt;&lt;workspace name&gt;&gt; workspace on Slack using the Slack agent?</pre>
+            <pre>Can you authenticate me with the &lt;&lt;workspace name&gt;&gt; workspace on Slack?</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2187,18 +2187,31 @@
 
         <article class="inner-card prompt-panel" style="--i:3">
           <div class="panel-head">
-            <h3 class="panel-title">Run a Slack-driven cron job</h3>
+            <h3 class="panel-title">Authenticate with Gmail</h3>
             <span class="panel-badge">Task</span>
           </div>
-          <p class="panel-desc">Spin up a named cron job that polls a Slack channel for the latest unanswered messages, runs them as Sorcar tasks in arrival order, and replies with Slack-formatted results.</p>
+          <p class="panel-desc">Connect Sorcar to your Gmail account; the browser handles consent and Sorcar stores the token locally.</p>
           <div class="prompt-body">
-            <pre>Can you create a cron job with a name prefixed with "kiss-" which will check every 3 seconds if there are the latest unanswered messages from /&lt;&lt;user name&gt;&gt; in the channel sorcar using the Slack agent, then it will run the messages as tasks one-by-one in the order of arrival and respond with the result suitably formatted for Slack.</pre>
+            <pre>Can you authenticate me with Gmail?</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
         <article class="inner-card prompt-panel" style="--i:4">
+          <div class="panel-head">
+            <h3 class="panel-title">Watch Gmail, get pinged on Slack</h3>
+            <span class="panel-badge">Task</span>
+          </div>
+          <p class="panel-desc">A one-sentence scheduled automation: Sorcar checks your Gmail every hour and pings you on Slack whenever an email needs your immediate attention.</p>
+          <div class="prompt-body">
+            <pre>Can you check my gmail every hour and ping me on slack if there is any important email that needs my immediate attention?</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:5">
           <div class="panel-head">
             <h3 class="panel-title">Authenticate with iMessage</h3>
             <span class="panel-badge">Task</span>
@@ -2211,7 +2224,7 @@
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
-        <article class="inner-card prompt-panel" style="--i:5">
+        <article class="inner-card prompt-panel" style="--i:6">
           <div class="panel-head">
             <h3 class="panel-title">Send an SMS to a phone number</h3>
             <span class="panel-badge">Task</span>
@@ -2219,19 +2232,6 @@
           <p class="panel-desc">Dispatch a one-line SMS to any phone number through Sorcar's messaging agents — no scripting required.</p>
           <div class="prompt-body">
             <pre>Can you send "Hello from Sorcar!" to 1-800-772-1213?</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:6">
-          <div class="panel-head">
-            <h3 class="panel-title">Authenticate with Gmail</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">Walk through the OAuth login flow for Gmail using the bundled Gmail agent, with the browser handling consent and Sorcar storing the token locally.</p>
-          <div class="prompt-body">
-            <pre>Can you authenticate me with Gmail using the Gmail agent? Use the user's default browser to prompt the user to log in and obtain the authentication token.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2310,19 +2310,6 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
-        <article class="inner-card prompt-panel" style="--i:11">
-          <div class="panel-head">
-            <h3 class="panel-title">Run GEPA on HotpotQA</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">A one-liner to invoke <code>gepa.py</code> on the HotpotQA dataset with <code>gpt-4o-mini</code> as both the task model and the optimizer.</p>
-          <div class="prompt-body">
-            <pre>Can you run gepa.py on hotpotqa using gpt-4o-mini as both models?</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
         <article class="inner-card prompt-panel" style="--i:0">
           <div class="panel-head">
             <h3 class="panel-title">Pair-program with multi-model review</h3>
@@ -2330,7 +2317,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           </div>
           <p class="panel-desc">Use Claude Fable as the implementer and GPT-5.6 Sol as a read-only reviewer/debugger &mdash; capped at 50% of the task budget and told not to invent new problems &mdash; so missed code, missing wirings, and silent bugs are caught before they ship.</p>
           <div class="prompt-body">
-            <pre>Use 'claude-fable-5' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the model to not invent new problems. Use the model names literally without hallucinating new model names.</pre>
+            <pre>Use 'claude-fable-5' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) with `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the model to not invent new problems. Use the model names literally without hallucinating new model names.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2382,7 +2369,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           </div>
           <p class="panel-desc">Have Sorcar drive your default browser with computer use to complete logins and OAuth flows itself, asking for your help only when it is stuck on a login or CAPTCHA.</p>
           <div class="prompt-body">
-            <pre>You MUST use the user's default browser and computer use to authenticate using claude-fable-5 as the model. Do all the steps on user's behalf and ask user's help ONLY if you are stuck on login or captcha.</pre>
+            <pre>You MUST use the user's default browser and computer use to authenticate using claude-fable-5-1 as the model. Do all the steps on user's behalf and ask user's help ONLY if you are stuck on login or captcha.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2395,7 +2382,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           </div>
           <p class="panel-desc">The same implement-and-review pattern with Kimi K3 as a lower-cost implementer and GPT-5.6 Sol as the read-only reviewer, capped at 50% of the task budget.</p>
           <div class="prompt-body">
-            <pre>Use 'openrouter/moonshotai/kimi-k3' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the model to not invent new problems. Use the model names literally without hallucinating new model names.</pre>
+            <pre>Use 'openrouter/moonshotai/kimi-k3' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) with `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the model to not invent new problems. Use the model names literally without hallucinating new model names.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2403,12 +2390,25 @@ At each step, keep track of the best prompt, which has the maximum number of suc
 
         <article class="inner-card prompt-panel" style="--i:6">
           <div class="panel-head">
+            <h3 class="panel-title">Pair-program with GLM-5.3 + review</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Budget-friendly pair-programming with GLM-5.3 writing the code while GPT-5.6 Sol audits it read-only for missed wiring and silent bugs, within half the task budget.</p>
+          <div class="prompt-body">
+            <pre>Use 'openrouter/z-ai/glm-5.3' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the model to not invent new problems. Use the model names literally without hallucinating new model names.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:7">
+          <div class="panel-head">
             <h3 class="panel-title">Self-improving model routing</h3>
             <span class="panel-badge trick">Trick</span>
           </div>
           <p class="panel-desc">Route each subtask to the best cheap model &mdash; following <code>./ROUTING.md</code> when it exists &mdash; and have Sorcar rewrite the routing strategy after every task so token cost falls without degrading quality.</p>
           <div class="prompt-body">
-            <pre>If ./ROUTING.md exists, use the instructions in the file for model routing. Otherwise, use the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet extensively to figure out which model is best yet cheap for each subtask. Here are some hints, but the internet has better knowledge: claude-fable-5 and openrouter/moonshotai/kimi-k3 — best for SWE work; gpt-5.6-sol — best for reviewing; openrouter/qwen/qwen3.8-max, openrouter/x-ai/grok-4.6, openrouter/z-ai/glm-5.2-max, openrouter/deepseek/deepseek-v4-pro-0813 — for SWE tasks when budget is low; and gpt-5.6-luna and openrouter/deepseek/deepseek-v4-pro-0813 for review when budget is low. Irrespective of whether ./ROUTING.md exists or not, after the task completes, based on your experience in completing the task, create or update the model routing strategy (as text) in ./ROUTING.md that reduces token cost while not degrading the quality of the work.</pre>
+            <pre>If ./ROUTING.md exists, use the instructions in the file for model routing. Otherwise, use the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet extensively to figure out which model is best yet cheap for each subtask. Here are some hints, but the internet has better knowledge: claude-fable-5 and openrouter/moonshotai/kimi-k3 — best for SWE work; gpt-5.6-sol — best for reviewing; openrouter/qwen/qwen3.8-max, openrouter/x-ai/grok-4.6, openrouter/z-ai/glm-5.3, openrouter/deepseek/deepseek-v4-pro-0813 — for SWE tasks when budget is low; and gpt-5.6-luna and openrouter/deepseek/deepseek-v4-pro-0813 for review when budget is low. Irrespective of whether ./ROUTING.md exists or not, after the task completes, based on your experience in completing the task, create or update the model routing strategy (as text) in ./ROUTING.md that reduces token cost while not degrading the quality of the work.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2765,8 +2765,8 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   <div class="section-wrap">
   <section id="models" class="section-card">
     <span class="num">§ 10 — Models Supported</span>
-    <h2>🤖 622 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
-    <p class="sub">KISS Sorcar ships a catalog of <strong>622 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>.</p>
+    <h2>🤖 634 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
+    <p class="sub">KISS Sorcar ships a catalog of <strong>634 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>.</p>
 
     <div class="section-body">
       <div class="grid-2">
@@ -2774,13 +2774,13 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <h3>Provider categories</h3>
           <div style="margin-top:0.5rem;">
             <div class="provider-row"><span class="label">OpenAI</span><span class="count">105</span></div>
-            <div class="provider-row"><span class="label">Anthropic</span><span class="count">13</span></div>
-            <div class="provider-row"><span class="label">Gemini / Google</span><span class="count">25</span></div>
-            <div class="provider-row"><span class="label">Together AI</span><span class="count">88</span></div>
+            <div class="provider-row"><span class="label">Anthropic</span><span class="count">14</span></div>
+            <div class="provider-row"><span class="label">Gemini / Google</span><span class="count">27</span></div>
+            <div class="provider-row"><span class="label">Together AI</span><span class="count">91</span></div>
             <div class="provider-row"><span class="label">Z.AI</span><span class="count">8</span></div>
             <div class="provider-row"><span class="label">Moonshot AI</span><span class="count">10</span></div>
-            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">351</span></div>
-            <div class="provider-row"><span class="label">Claude Code CLI (<code>cc/*</code>)</span><span class="count">13</span></div>
+            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">356</span></div>
+            <div class="provider-row"><span class="label">Claude Code CLI (<code>cc/*</code>)</span><span class="count">14</span></div>
             <div class="provider-row"><span class="label">Codex CLI (<code>codex/*</code>)</span><span class="count">9</span></div>
           </div>
         </div>
@@ -2790,19 +2790,19 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <p>Across all bundled providers, the catalog currently reports:</p>
           <div class="stat-row">
             <div class="stat-pill">
-              <div class="n">603</div>
+              <div class="n">614</div>
               <div class="l">generation-capable models</div>
             </div>
             <div class="stat-pill">
-              <div class="n">444</div>
+              <div class="n">455</div>
               <div class="l">function-calling-capable models</div>
             </div>
             <div class="stat-pill">
-              <div class="n">10</div>
+              <div class="n">11</div>
               <div class="l">embedding models</div>
             </div>
           </div>
-          <p style="margin-top:0.9rem;font-size:0.88rem;">See the <a href="https://github.com/ksenxx/kiss_ai/blob/main/README.md#-models-supported">full per-provider model list</a> in the README, including the <code>cc/*</code> and <code>codex/*</code> namespaces that let KISS Sorcar run on top of the Claude Code and Codex CLIs.</p>
+          <p style="margin-top:0.9rem;font-size:0.88rem;">See the <a href="https://github.com/ksenxx/kiss_ai/blob/main/README.md#models-supported">full per-provider model list</a> in the README, including the <code>cc/*</code> and <code>codex/*</code> namespaces that let KISS Sorcar run on top of the Claude Code and Codex CLIs.</p>
         </div>
       </div>
     </div>
@@ -3577,7 +3577,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
     (function () {
       if (!('IntersectionObserver' in window)) return;
       const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      // Find hero-trust strong elements containing numeric content (e.g. "622 models").
+      // Find hero-trust strong elements containing numeric content (e.g. "634 models").
       const strongs = document.querySelectorAll('.hero-trust strong');
       const items = [];
       strongs.forEach(el => {
