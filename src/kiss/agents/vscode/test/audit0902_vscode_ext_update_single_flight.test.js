@@ -36,6 +36,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const childProcess = require('child_process');
 
 const OUT_SIDEBAR = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
 if (!fs.existsSync(OUT_SIDEBAR)) {
@@ -253,21 +254,73 @@ async function testSecondClickRunsTheInstallerAgain() {
   console.log('  ✓ every Update click runs the locked installer again');
 }
 
-async function testMissingInstallScriptStillErrors() {
+async function testMissingInstallScriptRunsCurlBootstrap() {
+  // Without ~/.kiss/kiss_ai/install.sh (the extension was installed from a
+  // .vsix, or the clone was deleted) the Update button must not refuse with
+  // "install.sh not found": it runs the public curl bootstrap, which clones
+  // the repo and hands over to its install.sh.  The bootstrap URL comes
+  // from $KISS_UPDATE_BOOTSTRAP_URL here (curl accepts file:// URLs), so
+  // the very command the terminal receives is then EXECUTED in a real bash
+  // to prove it works end to end.
   const {view, posted} = makeSidebar();
   fs.rmSync(path.join(installRoot, 'install.sh'));
+  const marker = path.join(tmpHome, 'bootstrap-ran.marker');
+  const fakeBootstrap = path.join(tmpHome, 'fake-bootstrap.sh');
+  fs.writeFileSync(
+    fakeBootstrap,
+    '#!/bin/bash\n' +
+      `echo "home=$KISS_HOME nonint=$KISS_NONINTERACTIVE" > '${marker}'\n`,
+  );
+  const savedBootstrapUrl = process.env.KISS_UPDATE_BOOTSTRAP_URL;
+  process.env.KISS_UPDATE_BOOTSTRAP_URL = `file://${fakeBootstrap}`;
   try {
     const before = terminals.length;
     view.runUpdate();
-    assert.strictEqual(terminals.length, before, 'terminal opened w/o script');
+    assert.strictEqual(
+      terminals.length,
+      before + 1,
+      'missing install.sh must still open an update terminal',
+    );
+    const term = terminals[terminals.length - 1];
+    assert.strictEqual(term.name, 'KISS Sorcar Update');
+    assert.strictEqual(term.cwd, os.homedir());
+    assert.strictEqual(term.shows, 1);
+    assert.strictEqual(term.sent.length, 1);
+    const cmd = term.sent[0];
+    assert.ok(
+      /KISS_HOME='[^']*' KISS_NONINTERACTIVE=1 KISS_BOOTSTRAP_URL='[^']*' bash -c /.test(
+        cmd,
+      ),
+      `bootstrap must pin KISS_HOME and run non-interactively: ${cmd}`,
+    );
+    assert.ok(
+      cmd.includes('curl -fsSL "$KISS_BOOTSTRAP_URL" | bash'),
+      `bootstrap must curl the installer into bash: ${cmd}`,
+    );
     const errs = toasts(posted).filter(m => m.severity === 'error');
-    assert.strictEqual(errs.length, 1);
-    assert.ok(/install\.sh not found/.test(errs[0].message));
+    assert.deepStrictEqual(errs, [], 'bootstrap path must not show errors');
+    const started = toasts(posted).filter(m =>
+      /is getting installed/.test(m.message || ''),
+    );
+    assert.strictEqual(started.length, 1);
+    // Execute the exact terminal command in a real bash: the fake
+    // bootstrap must run with KISS_HOME and KISS_NONINTERACTIVE set.
+    childProcess.execSync(cmd, {shell: '/bin/bash'});
+    assert.ok(fs.existsSync(marker), 'the curl bootstrap did not run');
+    assert.strictEqual(
+      fs.readFileSync(marker, 'utf8').trim(),
+      `home=${path.join(tmpHome, '.kiss')} nonint=1`,
+    );
   } finally {
+    if (savedBootstrapUrl === undefined) {
+      delete process.env.KISS_UPDATE_BOOTSTRAP_URL;
+    } else {
+      process.env.KISS_UPDATE_BOOTSTRAP_URL = savedBootstrapUrl;
+    }
     fs.writeFileSync(path.join(installRoot, 'install.sh'), '#!/bin/sh\n');
     view.dispose();
   }
-  console.log('  ✓ missing install.sh still reports an error');
+  console.log('  ✓ missing install.sh runs the curl bootstrap end to end');
 }
 
 function testLockedBootstrapIsPreferred() {
@@ -329,7 +382,7 @@ function testLockedBootstrapIsPreferred() {
 async function main() {
   try {
     await testSecondClickRunsTheInstallerAgain();
-    await testMissingInstallScriptStillErrors();
+    await testMissingInstallScriptRunsCurlBootstrap();
     testLockedBootstrapIsPreferred();
   } finally {
     fs.rmSync(tmpHome, {recursive: true, force: true});

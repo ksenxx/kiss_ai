@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import tempfile
 import time
@@ -189,12 +190,32 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
                 return msg
         raise AssertionError(f"no {wanted_type!r} event observed")
 
-    async def test_run_update_without_install_script_errors(self) -> None:
-        """runUpdate with no install.sh broadcasts the extension-parity error."""
+    async def test_run_update_without_install_script_bootstraps(self) -> None:
+        """runUpdate with no install.sh runs the curl bootstrap fallback."""
+        marker = Path(self.tmpdir) / "bootstrap-ran.marker"
+        fake = Path(self.tmpdir) / "fake-bootstrap.sh"
+        fake.write_text(f"#!/bin/bash\necho done > '{marker}'\n")
+        saved_url = os.environ.get("KISS_UPDATE_BOOTSTRAP_URL")
+        os.environ["KISS_UPDATE_BOOTSTRAP_URL"] = f"file://{fake}"
+        if saved_url is None:
+            self.addCleanup(
+                os.environ.pop, "KISS_UPDATE_BOOTSTRAP_URL", None,
+            )
+        else:
+            self.addCleanup(
+                os.environ.__setitem__,
+                "KISS_UPDATE_BOOTSTRAP_URL",
+                saved_url,
+            )
         reader, writer = await self._connect_uds()
         await self._send(writer, {"type": "runUpdate"})
-        err = await self._drain_until(reader, "error")
-        self.assertIn("install.sh not found", str(err.get("text")))
+        notice = await self._drain_until(reader, "notice")
+        self.assertIn("update of KISS Sorcar", str(notice.get("text")))
+        for _ in range(200):
+            if marker.exists():
+                break
+            await asyncio.sleep(0.05)
+        self.assertTrue(marker.exists(), "curl bootstrap was not executed")
 
     async def test_run_update_with_install_script_notices_and_runs(self) -> None:
         """runUpdate with a real install.sh emits notice and spawns it."""
