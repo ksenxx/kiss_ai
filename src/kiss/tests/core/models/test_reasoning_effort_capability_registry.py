@@ -113,17 +113,25 @@ class TestFactoryRoutesMatchRegistry:
     }
 
     def test_every_vendor_routes_to_registered_base_url(self) -> None:
-        """A representative model name per vendor routes to its base_url."""
+        """A representative model name per vendor routes to its base_url.
+
+        A catalog-flagged model (``use_responses_api``) is built as the v2
+        Responses adapter; the routing contract under test — every vendor
+        prefix reaches the registered ``base_url`` — is transport-agnostic,
+        so a v1 adapter is forced via the config override.
+        """
         for provider in OPENAI_COMPATIBLE_PROVIDERS:
             name = self._REPRESENTATIVE[provider.name]
-            m = model(name)
+            m = model(name, model_config={"use_responses_api": False})
             assert isinstance(m, OpenAICompatibleModel), (provider.name, name)
             assert m.base_url == provider.base_url, (provider.name, name)
             assert openai_compatible_provider_for_base_url(m.base_url) is provider
 
     def test_excluded_prefixes_route_elsewhere(self) -> None:
         """Registry excludes keep non-OpenAI-compatible names out of the table."""
-        together = model("openai/gpt-oss-20b")
+        together = model(
+            "openai/gpt-oss-20b", model_config={"use_responses_api": False}
+        )
         assert isinstance(together, OpenAICompatibleModel)
         assert together.base_url == "https://api.together.xyz/v1"
 
