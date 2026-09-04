@@ -791,8 +791,11 @@ class AnthropicModel(Model):
 
         ``KISSAgent._run_agentic_loop`` treats ``TimeoutError`` as
         retryable and re-asks the model instead of hanging forever.  An
-        open thinking bracket is closed before raising so the UI does not
-        stay in "thinking" mode across the retry.
+        open thinking bracket is closed on EVERY exit — stop, stall and
+        any other transport failure alike, exactly as the OpenAI and
+        Gemini transports do — because the agentic loop retries a
+        non-``KISSError`` in the same run without resetting the printer,
+        which would otherwise render the retry's answer as "thinking".
 
         Args:
             kwargs: Keyword arguments for the Anthropic API call.
@@ -804,9 +807,27 @@ class AnthropicModel(Model):
             TimeoutError: When the streaming connection delivers no data
                 (or no events) for ``stream_stall_timeout`` seconds.
         """
+        try:
+            return self._stream_message(kwargs)
+        finally:
+            self._close_thinking_if_open()
+
+    def _stream_message(self, kwargs: dict[str, Any]) -> Any:
+        """Run the watched stream behind :meth:`_create_message`.
+
+        The thinking bracket is tracked on the base class's
+        :attr:`Model._thinking_open` (set by ``_invoke_thinking_callback``)
+        rather than on a local flag, so the caller's ``finally`` and the
+        stop/stall paths all close the same bracket.
+
+        Args:
+            kwargs: Keyword arguments for the Anthropic API call.
+
+        Returns:
+            The raw Anthropic response message.
+        """
         watchdog: StreamAbortWatchdog | None = None
         in_thinking = False
-        thinking_started = False
         try:
             with self.client.messages.stream(**kwargs) as stream:
                 watchdog = StreamAbortWatchdog(
@@ -824,25 +845,21 @@ class AnthropicModel(Model):
                             block = getattr(event, "content_block", None)
                             if block and getattr(block, "type", "") == "thinking":
                                 in_thinking = True
-                                thinking_started = False
                         elif event.type == "content_block_delta":
                             delta = event.delta
                             delta_type = getattr(delta, "type", "")
                             if delta_type == "thinking_delta":
                                 text = getattr(delta, "thinking", "")
                                 if text:
-                                    if in_thinking and not thinking_started:
+                                    if in_thinking and not self._thinking_open:
                                         self._invoke_thinking_callback(True)
-                                        thinking_started = True
                                     self._invoke_token_callback(text)
                             elif delta_type == "text_delta":
                                 self._invoke_token_callback(getattr(delta, "text", ""))
                         elif event.type == "content_block_stop":
                             if in_thinking:
                                 in_thinking = False
-                                if thinking_started:
-                                    self._invoke_thinking_callback(False)
-                                    thinking_started = False
+                                self._close_thinking_if_open()
                     # Disarm the watchdog BEFORE reading its flags and
                     # collecting the final message: stop() waits out an
                     # abort already claimed, so afterwards the flags are
@@ -858,27 +875,25 @@ class AnthropicModel(Model):
                     # it as a confusing "incomplete message" error.
                     watchdog.stop()
                     if watchdog.stopped:
-                        raise self._stop_error(thinking_started)
+                        raise self._stop_error()
                     if watchdog.stalled:
-                        raise self._stall_error(thinking_started)
+                        raise self._stall_error()
                     return stream.get_final_message()
                 finally:
                     # Idempotent second stop for the exception paths.
                     watchdog.stop()
         except (httpx.TimeoutException, APITimeoutError) as exc:
             if self._stream_was_stopped(watchdog):
-                raise self._stop_error(thinking_started) from exc
-            raise self._stall_error(thinking_started) from exc
+                raise self._stop_error() from exc
+            raise self._stall_error() from exc
         except TimeoutError:
-            # Already the stall error raised after the loop below; its
-            # thinking bracket is closed, so re-wrapping it would emit a
-            # second thinking_callback(False).
+            # Already the stall error raised after the loop above.
             raise
         except Exception as exc:
             if self._stream_was_stopped(watchdog):
-                raise self._stop_error(thinking_started) from exc
+                raise self._stop_error() from exc
             if watchdog is not None and watchdog.stalled:
-                raise self._stall_error(thinking_started) from exc
+                raise self._stall_error() from exc
             raise
 
     @staticmethod
@@ -904,7 +919,8 @@ class AnthropicModel(Model):
             return True
         return stop_signal.stop_requested()
 
-    def _stop_error(self, thinking_started: bool) -> KeyboardInterrupt:
+    @staticmethod
+    def _stop_error() -> KeyboardInterrupt:
         """Build the stop error for a stream the user aborted.
 
         A user stop must NOT surface as the retryable
@@ -912,21 +928,16 @@ class AnthropicModel(Model):
         re-ask the model and the task would keep running.
         ``KeyboardInterrupt`` is the same signal ``_check_stop`` raises,
         so the whole stack unwinds into the normal "Task stopped by
-        user" path.
-
-        Args:
-            thinking_started: Whether ``thinking_callback(True)`` was
-                emitted without its matching ``False``.
+        user" path.  (The thinking bracket is closed by
+        :meth:`_create_message`'s ``finally``, for every exit alike.)
 
         Returns:
             The ``KeyboardInterrupt`` for the caller to raise.
         """
-        if thinking_started:
-            self._invoke_thinking_callback(False)
         return KeyboardInterrupt("Agent stop requested")
 
-    def _stall_error(self, thinking_started: bool) -> TimeoutError:
-        """Build the retryable stall error, closing any open thinking bracket.
+    def _stall_error(self) -> TimeoutError:
+        """Build the retryable stall error.
 
         The message itself comes from
         :func:`~kiss.core.models.stream_abort.stall_error`, so this
@@ -935,19 +946,9 @@ class AnthropicModel(Model):
         added, because a stall is usually diagnosed from a log line that
         does not say which model was being asked.
 
-        The extra side effect is the closing ``thinking_callback(False)``:
-        a stall can strike mid-thinking, and without it the printer/UI
-        would render everything after the retry as "thinking" forever.
-
-        Args:
-            thinking_started: Whether ``thinking_callback(True)`` was
-                emitted without its matching ``False``.
-
         Returns:
             The ``TimeoutError`` for the caller to raise.
         """
-        if thinking_started:
-            self._invoke_thinking_callback(False)
         return TimeoutError(
             f"Anthropic model {self.model_name}: "
             f"{stall_error(self._stream_stall_timeout)}"

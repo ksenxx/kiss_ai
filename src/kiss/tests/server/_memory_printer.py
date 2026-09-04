@@ -11,7 +11,10 @@ stdout.  The broadcast contract mirrors the production
 :class:`WebPrinter`:
 
 * Events that already carry an explicit ``tabId`` (system events) are
-  emitted verbatim — exactly once, neither recorded nor persisted.
+  emitted verbatim — exactly once — and, mirroring ``WebPrinter``,
+  a ``prompt``/``result`` that ALSO carries a ``taskId`` (e.g. the
+  task runner's recorded setup-failure result) is recorded and
+  persisted under that task with the ``tabId`` stripped.
 * Events without ``tabId`` are task events: ``taskId`` is injected from
   the agent thread's thread-local, the event is recorded under the
   task, and one stamped copy per subscribed tab is appended to
@@ -44,6 +47,11 @@ class MemoryPrinter(JsonPrinter):
                 tab is appended.
         """
         if "tabId" in event:
+            if event.get("type") in ("prompt", "result") and event.get("taskId"):
+                record = {k: v for k, v in event.items() if k != "tabId"}
+                with self._lock:
+                    self._record_event(record)
+                self._persist_event(record)
             self.emitted.append(event)
             return
         event = self._inject_task_id(event)

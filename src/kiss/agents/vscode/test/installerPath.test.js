@@ -27,18 +27,23 @@ function test(name, fn) {
 }
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-installerpath-'));
-const fakeRoot = path.join(tmpHome, 'kiss_ai');
+const fakeRoot = path.join(tmpHome, '.kiss', 'kiss_ai');
 
 function clearFakeRoot() {
   fs.rmSync(fakeRoot, {recursive: true, force: true});
 }
 
-test('kissAiRoot resolves to ~/kiss_ai under the real home directory', () => {
-  assert.strictEqual(kissAiRoot(), path.join(os.homedir(), 'kiss_ai'));
+test('kissAiRoot resolves to ~/.kiss/kiss_ai under the real home directory', () => {
+  assert.strictEqual(kissAiRoot(), path.join(os.homedir(), '.kiss', 'kiss_ai'));
 });
 
 test('kissAiRoot is an absolute path', () => {
   assert.ok(path.isAbsolute(kissAiRoot()));
+});
+
+test('kissAiRoot never resolves to the legacy ~/kiss_ai location', () => {
+  assert.notStrictEqual(kissAiRoot(), path.join(os.homedir(), 'kiss_ai'));
+  assert.strictEqual(path.basename(path.dirname(kissAiRoot())), '.kiss');
 });
 
 test('findInstallScript returns null when the root directory is missing', () => {
@@ -64,13 +69,13 @@ test('findInstallScript returns the absolute install.sh path when present', () =
   assert.ok(fs.statSync(found).isFile());
 });
 
-test('findInstallScript with no argument probes the real ~/kiss_ai root', () => {
+test('findInstallScript with no argument probes the real ~/.kiss/kiss_ai root', () => {
   const realCandidate = path.join(kissAiRoot(), 'install.sh');
   const probed = findInstallScript();
   if (probed === null) {
     assert.ok(
       !fs.existsSync(realCandidate),
-      'probed null but ~/kiss_ai/install.sh exists on disk',
+      'probed null but ~/.kiss/kiss_ai/install.sh exists on disk',
     );
   } else {
     assert.strictEqual(probed, realCandidate);

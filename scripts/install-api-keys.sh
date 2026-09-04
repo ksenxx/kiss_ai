@@ -10,11 +10,12 @@
 # Usage:  ssh user@host 'bash -s' < scripts/install-api-keys.sh
 #         scripts/install-api-keys.sh            (on the machine itself)
 #
-# ~/.kiss/api_keys.env and ~/.kiss/api_keys.systemd.env are put in place by
-# ./sorcar-cloud before this runs; this script only locks their permissions
-# down and adds one line to ~/.bashrc that sources the first of them.  The
-# line lives inside a delimited block, so a second deploy replaces the block
-# instead of appending another copy.
+# ~/.kiss/api_keys.env — the canonical key store every install shares (the
+# kiss-web daemon parses it itself at startup) — is put in place by the deploy
+# before this runs; this script only locks its permissions down and adds one
+# line to ~/.bashrc that sources it, so interactive shells see the keys too.
+# The line lives inside a delimited block, so a second deploy replaces the
+# block instead of appending another copy.
 #
 # ~/.bashrc belongs to whoever uses the machine, so it is edited the careful
 # way:
@@ -39,9 +40,7 @@ KISS_DIR="$HOME/.kiss"
 
 mkdir -p "$KISS_DIR"
 chmod 700 "$KISS_DIR"
-for env_file in "$KISS_DIR/api_keys.env" "$KISS_DIR/api_keys.systemd.env"; do
-    [ -f "$env_file" ] && chmod 600 "$env_file"
-done
+if [ -f "$KISS_DIR/api_keys.env" ]; then chmod 600 "$KISS_DIR/api_keys.env"; fi
 
 touch "$RC"
 # A ~/.bashrc that is a link to a dotfiles repository is edited where it really

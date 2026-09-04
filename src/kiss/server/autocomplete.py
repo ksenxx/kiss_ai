@@ -540,17 +540,17 @@ class _AutocompleteMixin:
 
     def _refresh_file_cache(
         self,
-        then_emit_for_prefix: str | None = None,
+        then_emit_for_prefix: str,
         work_dir: str = "",
         conn_id: str = "",
         tab_id: str = "",
     ) -> None:
         """Refresh the file cache for *work_dir* in a background thread.
 
-        When ``then_emit_for_prefix`` is set, broadcasts a ``files``
-        event ranked for that prefix once the scan finishes.  This lets
-        the only caller (``_get_files``) kick off a non-blocking
-        refresh and still deliver suggestions to the UI.
+        Broadcasts a ``files`` event ranked for ``then_emit_for_prefix``
+        once the scan finishes.  This lets the only caller
+        (``_get_files``) kick off a non-blocking refresh and still
+        deliver suggestions to the UI.
 
         ``work_dir`` selects which directory to scan; an empty value
         defaults to ``self.work_dir`` so existing callers that omit it
@@ -591,21 +591,33 @@ class _AutocompleteMixin:
                     result = existing
                 else:
                     self._file_cache[wd] = result
+            # Rank OUTSIDE the lock (usage is a database read), then
+            # re-verify the token and emit UNDER the lock, removing the
+            # token only after the emission (audit0903 F5).  The old
+            # order — token removed under the lock, emission after
+            # releasing it — let a newer ``getFiles`` from the same
+            # connection (same typed prefix, different work dir) emit
+            # first and this superseded old-workspace list land LAST;
+            # the frontend validates replies only by tab and prefix,
+            # so the picker showed paths from the wrong repository.
+            # Serialized against ``_get_files``'s token installation,
+            # a stale reply is either suppressed here or provably
+            # precedes the newer request's own emission.
+            usage = _load_file_usage()
+            ranked = rank_file_suggestions(
+                result, then_emit_for_prefix, usage,
+            )
+            with self._state_lock:
                 reqs = self._files_request_map()
-                stale = reqs.get(conn_id) is not request_token
-                if not stale:
-                    reqs.pop(conn_id, None)
-            if then_emit_for_prefix is not None and not stale:
-                usage = _load_file_usage()
-                ranked = rank_file_suggestions(
-                    result, then_emit_for_prefix, usage,
-                )
+                if reqs.get(conn_id) is not request_token:
+                    return
                 self._emit_files(
                     ranked,
                     conn_id,
                     prefix=then_emit_for_prefix,
                     tab_id=tab_id,
                 )
+                reqs.pop(conn_id, None)
 
         threading.Thread(target=_do_refresh, daemon=True).start()
 

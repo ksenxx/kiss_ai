@@ -12,7 +12,7 @@ lock in the behaviours that previously diverged between the two:
 * ``submit`` must forward the webview's ``autoCommit`` toggle into the
   backend ``run`` command (the extension's ``_startTask`` always did;
   the web server used to drop it).
-* ``runUpdate`` must locate and run ``~/kiss_ai/install.sh`` exactly
+* ``runUpdate`` must locate and run ``~/.kiss/kiss_ai/install.sh`` exactly
   like the extension's ``_runUpdate()`` / ``installerPath.js`` — and
   must never surface as an "Unknown command" error broadcast.
 * ``sizeReport`` (the webview's reply to the extension-only
@@ -144,7 +144,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         """``runUpdate`` with no install.sh mirrors the extension's error.
 
         The extension shows ``Cannot update KISS Sorcar: install.sh not
-        found in ~/kiss_ai.``; the web server must broadcast the same
+        found in ~/.kiss/kiss_ai.``; the web server must broadcast the same
         wording as an ``error`` event — NOT the previous
         ``Unknown command: runUpdate`` broadcast.
         """

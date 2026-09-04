@@ -91,6 +91,15 @@ def _ensure_api_server() -> str:
                 daemon=True,
             ).start()
             server = RemoteAccessServer(uds_path=sock_path)
+            # This daemon shares the KISS home (database, chats) with
+            # the canonical kiss-web daemon but must not share its tab
+            # registry: ``tabs.json`` tolerates exactly one owner, and
+            # a second one erased the canonical daemon's tabs with its
+            # stale snapshot on every channel run.  The channel tabs
+            # are transient, so they live next to the private socket.
+            server._vscode_server.use_private_tab_registry(
+                Path(sock_dir) / "tabs.json",
+            )
             server._printer._loop = loop
             server._loop = loop
             asyncio.run_coroutine_threadsafe(

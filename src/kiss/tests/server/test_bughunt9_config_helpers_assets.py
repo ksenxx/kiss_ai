@@ -26,7 +26,7 @@
    file.  The seed must be atomic: a reader sees either no file or
    the full default content, never a torn write.
 
-4. ``vscode_config.save_api_key_to_shell`` shell-quoted the key
+4. ``vscode_config.save_api_key`` shell-quoted the key
    *value* (the H3 fix) but interpolated the key *name* verbatim into
    the ``export`` line — and ``_cmd_save_config`` forwards **any**
    string name from an untrusted client payload.  A name containing a

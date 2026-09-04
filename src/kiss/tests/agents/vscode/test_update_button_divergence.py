@@ -180,11 +180,15 @@ def _run_update_repo(local: Path) -> subprocess.CompletedProcess:
     install_text = INSTALL_SH.read_text(encoding="utf-8")
     update_fn = _extract_function(install_text, "update_repo")
     restore_fn = _extract_function(install_text, "restore_stashed_changes")
+    # update_repo normalizes the release VSIX before its dirty check, so
+    # the guard it calls must be defined here too (verbatim, like the rest).
+    guard_fn = _extract_function(install_text, "guard_vsix_tracking")
     harness = textwrap.dedent(
         f"""
         set -eo pipefail
         PROJECT_DIR={local!s}
         STASHED_CHANGES=0
+        {guard_fn}
         {restore_fn}
         {update_fn}
         update_repo

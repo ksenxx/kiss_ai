@@ -165,21 +165,6 @@ class _PreLoopFailTab(AgentState):
         self._prompt_backing = value
 
 
-class _NoFollowupServer(VSCodeServer):
-    """Server whose async followup generation records instead of
-    dispatching a background LLM call."""
-
-    def __init__(self, printer: JsonPrinter) -> None:
-        super().__init__(printer=printer)
-        self.followups: list[tuple[str, str, str | None]] = []
-
-    def _generate_followup_async(
-        self, task: str, result: str, task_id: str | None,
-    ) -> None:
-        """Record the followup request instead of calling an LLM."""
-        self.followups.append((task, result, task_id))
-
-
 def _fetch_metrics(task_text: str) -> tuple[Any, ...] | None:
     """Fetch (result, tokens, cost, steps) for the row with *task_text*."""
     conn = sqlite3.connect(str(persistence._DB_PATH))
@@ -204,7 +189,7 @@ def test_b2_preloop_failure_does_not_inherit_lifetime_metrics(
     warm_prompt = "w3f3-b2 warmup run"
     probe_prompt = "w3f3-b2 preloop-failure probe"
     printer = _RecordingPrinter()
-    server = _NoFollowupServer(printer)
+    server = VSCodeServer(printer)
     tab = _PreLoopFailTab("w3f3-b2-task", tab_id)
     agent_state.register(tab)
     agent = _ScriptedAgent("Sorcar VS Code")
@@ -253,7 +238,7 @@ def test_b2_warm_agent_second_run_still_attributes_own_metrics(
     first_prompt = "w3f3-b2b first run"
     second_prompt = "w3f3-b2b second run"
     printer = _RecordingPrinter()
-    server = _NoFollowupServer(printer)
+    server = VSCodeServer(printer)
     tab = _register_tab_state("w3f3-b2b-task", tab_id)
     agent = _ScriptedAgent("Sorcar VS Code")
     tab.agent = agent

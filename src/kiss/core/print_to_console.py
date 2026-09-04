@@ -170,6 +170,10 @@ class ConsolePrinter(Printer):
             parts.append(Text("Status: FAILED", style="bold red"))
             parts.append(Text(""))
         parts.append(html_to_rich(str(data["summary"])))
+        suggestion = data.get("suggested_next_task")
+        if suggestion:
+            parts.append(Text(""))
+            parts.append(Text(f"Suggested next: {suggestion}", style="bold cyan"))
         return Group(*parts)
 
     def _flush_newline(self) -> None:

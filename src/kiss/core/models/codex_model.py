@@ -13,10 +13,19 @@ Sandbox/approvals are bypassed because KISS is the outer agent and the user
 has already authorized KISS to act on their behalf; running codex in a
 read-only sandbox would prevent any file modifications the user requested.
 
-For agentic use, tool descriptions are injected into the prompt and the
-model's text output is parsed for tool-call JSON — the same approach used
-by :class:`kiss.core.models.claude_code_model.ClaudeCodeModel` and by
-DeepSeek R1 in :mod:`kiss.core.models.openai_compatible_model`.
+Codex is a full coding agent, so ``runs_task_to_completion`` (inherited
+from :class:`~kiss.core.models.model.CLITextModel`) is True:
+:class:`~kiss.core.kiss_agent.KISSAgent` hands it the whole task — with the
+KISS system prompt appended after
+:data:`~kiss.core.models.model.CLI_SYSTEM_PROMPT_HEADER` — in one
+``generate()`` call and returns its final output, instead of driving a
+turn-by-turn KISS tool loop.
+
+For direct (non-KISSAgent) agentic use, tool descriptions can still be
+injected into the prompt and the model's text output parsed for tool-call
+JSON via :meth:`CodexModel.generate_and_process_with_tools` — the same
+approach used by :class:`kiss.core.models.claude_code_model.ClaudeCodeModel`
+and by DeepSeek R1 in :mod:`kiss.core.models.openai_compatible_model`.
 """
 
 import json
@@ -31,12 +40,8 @@ from kiss.core.models.model import (
     CLITextModel,
     ThinkingCallback,
     TokenCallback,
-    _cli_stall_error,
-    _CLIProcess,
     _parse_text_based_tool_calls,
-    _StreamReadTimeoutError,
     _ToolCallFilteredStream,
-    flatten_content_to_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -136,8 +141,9 @@ class CodexModel(CLITextModel):
             model_name: Full model name including ``codex/`` prefix
                 (e.g. ``codex/gpt-5-codex``, ``codex/default``).
             model_config: Optional configuration. Recognised keys:
-                - ``system_instruction`` (str): Prepended to the user prompt
-                  (the Codex CLI has no native system-prompt flag).
+                - ``system_instruction`` (str): Appended to the task prompt
+                  after ``CLI_SYSTEM_PROMPT_HEADER`` (the Codex CLI has no
+                  native system-prompt flag).
                 - ``timeout`` (int): Subprocess timeout in seconds (default 300).
             token_callback: Optional callback invoked with each streamed
                 text token.
@@ -153,26 +159,6 @@ class CodexModel(CLITextModel):
         self._cli_model = (
             model_name[len("codex/"):] if model_name.startswith("codex/") else model_name
         )
-
-    def _build_prompt(self) -> str:
-        """Build a single prompt string from the conversation history.
-
-        The Codex CLI is stateless across invocations, so multi-turn
-        conversations are flattened into a single text block.
-        Tool-result messages (``role == "tool"``) are rendered as
-        ``[Tool Result]: …``.  When ``system_instruction`` is set in
-        ``model_config`` it is prepended as ``[System]: …``.
-
-        Returns:
-            The assembled prompt string.
-        """
-        system_instruction = self.model_config.get("system_instruction")
-        if not system_instruction and len(self.conversation) == 1:
-            return flatten_content_to_text(self.conversation[0]["content"])
-        dialogue = self._conversation_as_dialogue()
-        if system_instruction:
-            return f"[System]: {system_instruction}\n\n{dialogue}"
-        return dialogue
 
     def _build_cli_args(self) -> list[str]:
         """Build the ``codex exec`` CLI argument list.
@@ -214,34 +200,20 @@ class CodexModel(CLITextModel):
             KeyboardInterrupt: If the user stopped the task mid-turn.
         """
         prompt = self._build_prompt()
-        timeout = self.model_config.get("timeout", 300)
         args = self._build_cli_args()
 
-        with _CLIProcess(args, "Codex CLI", timeout) as proc:
-            try:
-                # Inside the handlers: sending the prompt is bounded by
-                # the same deadline and Stop signal as reading the reply.
-                proc.send_prompt(prompt)
-                content, result_json, error_message = self._parse_stream_events(
-                    proc.lines()
-                )
-            except _StreamReadTimeoutError:
-                self._close_thinking_if_open()
-                raise _cli_stall_error("Codex CLI", timeout) from None
-            except KeyboardInterrupt:
-                self._close_thinking_if_open()
-                raise
-            status = proc.wait_for_exit()
+        with self._cli_turn(args, "Codex CLI") as proc:
+            proc.send_prompt(prompt)
+            content, result_json, error_message = self._parse_stream_events(
+                proc.lines()
+            )
             if error_message is not None:
                 stderr = proc.stderr_text().strip()
                 raise KISSError(
                     f"Codex CLI failed: {error_message}"
                     + (f"\nstderr: {stderr}" if stderr else "")
                 )
-            if status not in (0, None):
-                raise KISSError(
-                    f"Codex CLI failed (exit {status}): {proc.stderr_text().strip()}"
-                )
+            proc.raise_for_exit()
 
         self.conversation.append({"role": "assistant", "content": content})
         return content, result_json
@@ -350,10 +322,12 @@ class CodexModel(CLITextModel):
         """Generate with text-based tool calling via the Codex CLI.
 
         Tool descriptions are injected into ``system_instruction`` (which
-        the model prepends to the user prompt).  The model's text output
-        is parsed for JSON ``tool_calls`` blocks, which are returned to
-        the framework for execution.  The CLI is run as a stateless LLM,
-        not as an agent.
+        ``_build_prompt`` appends to the task after
+        ``CLI_SYSTEM_PROMPT_HEADER``).  The model's text output is parsed
+        for JSON ``tool_calls`` blocks, which are returned to the framework
+        for execution.  The CLI itself still runs agentically (sandbox and
+        approvals bypassed), so its own native tools remain available
+        alongside the KISS-level text protocol.
 
         Thinking tokens stream to the callbacks as they arrive; the
         assistant text is held back and re-emitted once the turn ends,

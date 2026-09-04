@@ -110,6 +110,11 @@
     btn.title = 'Copy panel text';
     btn.setAttribute('aria-label', 'Copy panel text');
     btn.innerHTML = PANEL_COPY_SVG;
+    // copyflash0903-coverage:start
+    // The revert timer is tracked per button and restarted on every
+    // copy: a bare setTimeout let a rapid second click's flash be cut
+    // short by the first click's stale timer.
+    let flashTimer = null;
     btn.addEventListener('click', e => {
       e.stopPropagation();
       e.preventDefault();
@@ -117,11 +122,14 @@
       const done = () => {
         btn.innerHTML = PANEL_CHECK_SVG;
         btn.classList.add('copied');
-        setTimeout(() => {
+        if (flashTimer) clearTimeout(flashTimer);
+        flashTimer = setTimeout(() => {
+          flashTimer = null;
           btn.innerHTML = PANEL_COPY_SVG;
           btn.classList.remove('copied');
         }, 1500);
       };
+      // copyflash0903-coverage:end
       const win =
         doc.defaultView || (typeof window !== 'undefined' ? window : null);
       const nav = win ? win.navigator : null;

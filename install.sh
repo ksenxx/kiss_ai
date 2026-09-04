@@ -11,6 +11,14 @@
 # users get the same installation path whether they run this script or install
 # the VSIX directly.
 #
+# Usage: ./install.sh [--non-interactive]
+#
+#   Run from a terminal, the script asks ``[Y/n]`` before installing Homebrew
+#   or upgrading git, uv, Node.js and VS Code.  ``--non-interactive`` (same as
+#   ``KISS_NONINTERACTIVE=1``) answers every question with its default (Yes)
+#   and never touches the terminal; it is also what happens automatically
+#   when there is no terminal to ask on.  See "Interactive mode" below.
+#
 # Log saved to ~/.kiss/install.log
 #
 # ---------------------------------------------------------------------------
@@ -22,7 +30,7 @@
 # A user clicked the VS Code "Update" button (settings panel), which calls
 # ``runUpdate()`` in ``SorcarSidebarView.ts``.  That method opens a VS Code
 # integrated terminal and ``terminal.sendText``s a compound command ending in
-# ``bash '/Users/ksen/kiss_ai/install.sh'``.  The install ran through Xcode
+# ``bash '/Users/ksen/.kiss/kiss_ai/install.sh'``.  The install ran through Xcode
 # CLT, Homebrew, git, node and VS Code CLI, then died
 # right in the middle of the TypeScript compile::
 #
@@ -104,10 +112,50 @@
 #
 # Graceful fallback: if ``perl`` is unavailable (extremely unlikely on
 # macOS / mainstream Linux), the script simply continues without
-# detachment, preserving the previous trap-only behaviour.
+# detachment, preserving the previous trap-only behaviour.  Interactive
+# mode (below) skips the detachment deliberately, for the same trap-only
+# behaviour: its ``[Y/n]`` questions and ``sudo``'s password prompt need
+# the controlling terminal that ``setsid`` would take away.
 # ---------------------------------------------------------------------------
+#
+# ---------------------------------------------------------------------------
+# Interactive mode (the default at a terminal)
+# ---------------------------------------------------------------------------
+# A human running ``./install.sh`` (or the ``curl ... | bash`` one-liner,
+# which still has a controlling terminal) gets a say before anything is
+# installed or upgraded system-wide: installing Homebrew and upgrading git,
+# uv, Node.js and VS Code are each a ``[Y/n]`` question (see ``confirm``
+# below), and "no" keeps the installed version and carries on.
+#
+# ``_KISS_INTERACTIVE`` is 0 instead when
+#
+# * ``--non-interactive`` is passed or ``KISS_NONINTERACTIVE`` is set —
+#   what the automated callers do (the VS Code Update button, the kiss-web
+#   daemon's update endpoint, the Docker entrypoint); or
+# * ``/dev/tty`` cannot be opened, i.e. there is no terminal to ask on
+#   (cron, CI, a daemon), including inside the detached re-exec below.
+#
+# Non-interactive runs behave as before: every question takes its default
+# answer (Yes), outdated tools are upgraded without asking, and a failed
+# upgrade is a warning, never an abort.
+# BEGIN: kiss-interactive-mode
+_KISS_INTERACTIVE=1
+if [ -n "${KISS_NONINTERACTIVE:-}" ]; then
+    _KISS_INTERACTIVE=0
+fi
+for _kiss_arg in "$@"; do
+    if [ "$_kiss_arg" = "--non-interactive" ]; then
+        _KISS_INTERACTIVE=0
+    fi
+done
+unset _kiss_arg
+if [ "$_KISS_INTERACTIVE" = 1 ] && ! { : </dev/tty; } 2>/dev/null; then
+    _KISS_INTERACTIVE=0
+fi
+# END: kiss-interactive-mode
+#
 # BEGIN: kiss-new-session-reexec  (tests extract this block verbatim)
-if [ -z "${_KISS_NEW_SESSION:-}" ] && command -v perl >/dev/null 2>&1; then
+if [ -z "${_KISS_NEW_SESSION:-}" ] && [ "${_KISS_INTERACTIVE:-0}" != 1 ] && command -v perl >/dev/null 2>&1; then
     # Probe POSIX::setsid availability before committing to the re-exec —
     # if perl is present but the POSIX module fails to load (custom
     # micro-perl builds), fall through to the trap-only path.
@@ -185,6 +233,68 @@ fi
 # masked and the container ended up shipping the stale committed VSIX.
 set -eo pipefail
 
+# ---------------------------------------------------------------------------
+# Cross-process update lock — the same lock as scripts/install.sh.
+#
+# Two installers on one checkout (the kiss-web daemon's update endpoint runs
+# this script directly with --non-interactive, the VS Code Update button in
+# another window runs it too) race each other's git reset, npm build and
+# extension install.  scripts/install.sh already holds the lock for its
+# whole lifetime and exports KISS_UPDATE_LOCK_HELD=1 before handing over to
+# this script; callers that run this script directly get the same
+# protection here.
+#
+# The lock is a kernel advisory lock (flock(2)) on $HOME/.kiss/.update.lock
+# -- $HOME, not $KISS_HOME, because the resources it protects (this
+# checkout under ~/.kiss/kiss_ai, the global extension install) follow
+# $HOME.  Bash keeps the file open on fd 9 for its whole lifetime; perl
+# (already required by the re-exec above; flock(1) is not on macOS) locks
+# that very open file description, so the lock persists after perl exits
+# and the kernel drops it when this process dies, however it dies -- no
+# EXIT trap, no stale lock to break.  The pid in the file only feeds the
+# refusal message.  fd 9 must not leak into long-lived children (VS Code,
+# anything a build step leaves behind): every launch line below closes it
+# with ``9>&-``.
+#
+# Placement matters: this block sits AFTER the new-session re-exec above, so
+# the lock is taken (and its pid recorded) by the detached bash that does
+# the work — the parent ``exec``s perl and never reaches this line — and
+# after ``set -eo pipefail`` because the tests that exercise the re-exec
+# block paste everything up to that line into a harness run under the
+# real ``$HOME``, which must never take a real lock.
+# ---------------------------------------------------------------------------
+# BEGIN: kiss-update-lock
+_kiss_lock_file="$HOME/.kiss/.update.lock"
+
+acquire_update_lock() {
+    local holder attempt
+    mkdir -p "$HOME/.kiss"
+    exec 9>>"$_kiss_lock_file"
+    if ! perl -e 'use Fcntl qw(:flock); open(my $f, ">&=", 9) or exit 2; exit(flock($f, LOCK_EX | LOCK_NB) ? 0 : 1)'; then
+        # The winner writes its pid right after locking; give it a moment.
+        for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            holder=$(cat "$_kiss_lock_file" 2>/dev/null || true)
+            [ -n "$holder" ] && break
+            sleep 0.05
+        done
+        echo "another KISS update is already running (pid ${holder:-unknown}); exiting." >&2
+        exit 1
+    fi
+    echo "$$" > "$_kiss_lock_file"
+    export KISS_UPDATE_LOCK_HELD=1
+}
+
+if [ -z "${KISS_UPDATE_LOCK_HELD:-}" ]; then
+    acquire_update_lock
+fi
+# The marker's only consumer is the lock decision above: this script hands
+# over to no further installer, so drop it now.  Left exported it would
+# leak into every long-lived child (the launched VS Code, the daemon the
+# extension restarts), whose OWN later update runs would then skip
+# acquire_update_lock entirely — with the original lock long gone.
+unset KISS_UPDATE_LOCK_HELD
+# END: kiss-update-lock
+
 # Capture the user's working directory *before* any `cd` so that VS Code can
 # later be launched with this directory as the workspace root.  The agents
 # spawned inside VS Code default their PWD to the workspace root (see
@@ -256,6 +366,11 @@ LAST_SIGNAL_TS=0
 # — used by ``handle_interrupt`` to forcibly stop it on a confirmed
 # double-interrupt (since the child ignores SIGINT by design).
 CURRENT_CMD_PID=""
+# The ``confirm`` question currently waiting for an answer, if any.  A
+# single Ctrl-C at a question runs ``handle_interrupt`` but, on bash 5,
+# leaves the ``read`` waiting; re-printing the question after the notice
+# tells the user the script still expects an answer.
+CONFIRM_PENDING=""
 handle_interrupt() {
     local now
     now=$(date +%s)
@@ -278,6 +393,9 @@ handle_interrupt() {
     echo "   ⚠ Interrupt received but ignored — long npm/git steps can sit"
     echo "      silent for 30-60 s while they download or extract.  Press"
     echo "      Ctrl+C again within 3 s to really abort."
+    if [ -n "$CONFIRM_PENDING" ]; then
+        printf '   %s [Y/n] ' "$CONFIRM_PENDING"
+    fi
 }
 
 # Re-route stdout/stderr to the log file when the controlling terminal
@@ -323,7 +441,7 @@ run_with_heartbeat() {
     # them, which was the actual root cause of the
     # "Copying source files..." abort.  The install.sh-level trap above
     # remains the only way to actually stop the build (double-Ctrl+C).
-    ( trap '' INT TERM; exec "$@" ) &
+    ( trap '' INT TERM; exec "$@" ) 9>&- &
     local cmd_pid=$!
     CURRENT_CMD_PID=$cmd_pid
     # Heartbeat loop runs in its own subshell so a failing ``sleep`` (rare)
@@ -341,7 +459,7 @@ run_with_heartbeat() {
                 printf "   … %s still running (%ds elapsed)\n" "$label" "$elapsed"
             fi
         done
-    ) &
+    ) 9>&- &
     local hb_pid=$!
     # Use ``+e`` so a non-zero exit from the wrapped command is returned to
     # the caller instead of aborting the whole script — callers (e.g. the
@@ -367,6 +485,60 @@ run_with_heartbeat() {
     kill "$hb_pid" 2>/dev/null || true
     wait "$hb_pid" 2>/dev/null || true
     return $rc
+}
+
+# Ask the user a yes/no question; returns 0 for "yes" and 1 for "no".
+#
+# When ``_KISS_INTERACTIVE`` is 0 (see the "Interactive mode" block at the top)
+# this asks nothing and answers "yes", which is the historical behaviour
+# of every caller.  Otherwise the question goes to stdout (so it is logged
+# and stays in order with the surrounding output) and the answer is read
+# from ``/dev/tty`` rather than stdin, so it works for ``curl ... | bash``
+# too.
+#
+# Guards, each of which once crashed this script under ``set -e``:
+#
+# * ``read`` runs in an ``||`` list so a non-zero status can never trip
+#   ``set -e``; EOF (Ctrl-D) and a ``/dev/tty`` that can no longer be
+#   opened (the terminal went away after the startup probe) both take the
+#   default "yes" instead of dying;
+# * the single Ctrl-C that ``handle_interrupt`` deliberately ignores is not
+#   mistaken for an answer: bash 5 keeps the ``read`` waiting after the
+#   trap (the trap re-prints the question via ``CONFIRM_PENDING``), and a
+#   bash whose ``read`` gives up with status > 128 simply reads again.
+#
+# ``read -s`` turns off the terminal's own echo and the answer is printed
+# back through stdout instead, so question and answer travel the same
+# ``tee`` pipe and land in the log complete and in order (a direct append
+# to the log file could overtake ``tee``).
+confirm() {
+    local question="$1" answer rc
+    if [ "$_KISS_INTERACTIVE" != 1 ]; then
+        return 0
+    fi
+    CONFIRM_PENDING="$question"
+    printf '   %s [Y/n] ' "$question"
+    while :; do
+        rc=0
+        IFS= read -rs answer </dev/tty || rc=$?
+        if [ "$rc" -gt 128 ]; then
+            continue
+        fi
+        if [ "$rc" -ne 0 ]; then
+            CONFIRM_PENDING=""
+            echo "(no answer from the terminal; assuming yes)"
+            return 0
+        fi
+        printf '%s\n' "${answer:-yes}"
+        case "$answer" in
+            ""|[Yy]|[Yy][Ee][Ss]) CONFIRM_PENDING=""; return 0 ;;
+            [Nn]|[Nn][Oo]) CONFIRM_PENDING=""; return 1 ;;
+            *)
+                echo "   Please answer y or n."
+                printf '   %s [Y/n] ' "$question"
+                ;;
+        esac
+    done
 }
 
 OS="$(uname -s)"
@@ -441,10 +613,11 @@ ensure_xcode_clt() {
     if xcode-select -p &>/dev/null && [ -e "$(xcode-select -p)/usr/bin/git" ]; then
         echo "   Xcode Command Line Tools installed at $(xcode-select -p)"
     else
-        # This script always runs detached from the controlling terminal
-        # (see the kiss-new-session-reexec block above), so it cannot wait
-        # for keyboard input while the user completes the GUI dialog.
-        # Exit-and-rerun matches the ``install_git`` fallback behaviour.
+        # The GUI install can take many minutes and the non-interactive
+        # runs (detached, see the kiss-new-session-reexec block above)
+        # cannot wait for keyboard input, so exit-and-rerun is the one
+        # behaviour that works for every launch path; it matches the
+        # ``install_git`` fallback.
         echo ""
         echo "   A dialog has appeared to install the Xcode Command Line Tools."
         echo "   Complete the installation in that dialog, then re-run this script."
@@ -472,6 +645,11 @@ ensure_homebrew() {
     echo "   (e.g. git, cloudflared, and other runtime dependencies)."
     echo "   Set KISS_NO_BREW=1 to skip this step."
     echo ""
+    if ! confirm "Install Homebrew now?"; then
+        echo "   Skipping the Homebrew install; KISS Sorcar may not be able to"
+        echo "   install some tools on demand without it."
+        return 0
+    fi
     echo "   Installing Homebrew..."
     # `|| true`: a failed Homebrew bootstrap (no sudo, no network)
     # must not abort the install — the check below prints a warning
@@ -636,11 +814,11 @@ launch_vscode() {
     # spawned inside the editor inherit it as their PWD.
     case "$OS" in
         Darwin)
-            if open -a "Visual Studio Code" "$USER_PWD" >/dev/null 2>&1; then
+            if open -a "Visual Studio Code" "$USER_PWD" >/dev/null 2>&1 9>&-; then
                 echo "Launched VS Code via 'open -a' with workspace $USER_PWD."
                 return 0
             fi
-            if [ -d "/Applications/Visual Studio Code.app" ] && open -a "/Applications/Visual Studio Code.app" "$USER_PWD" >/dev/null 2>&1; then
+            if [ -d "/Applications/Visual Studio Code.app" ] && open -a "/Applications/Visual Studio Code.app" "$USER_PWD" >/dev/null 2>&1 9>&-; then
                 echo "Launched VS Code from /Applications with workspace $USER_PWD."
                 return 0
             fi
@@ -654,7 +832,7 @@ launch_vscode() {
                 "/snap/bin/code" \
                 "/usr/share/code/code"; do
                 if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-                    (nohup "$candidate" "$USER_PWD" >/dev/null 2>&1 &)
+                    (nohup "$candidate" "$USER_PWD" >/dev/null 2>&1 9>&- &)
                     echo "Launched VS Code from $candidate with workspace $USER_PWD."
                     return 0
                 fi
@@ -663,7 +841,7 @@ launch_vscode() {
     esac
 
     if find_code_cli && [ -n "$CODE_CLI" ]; then
-        (nohup "$CODE_CLI" "$USER_PWD" >/dev/null 2>&1 &)
+        (nohup "$CODE_CLI" "$USER_PWD" >/dev/null 2>&1 9>&- &)
         echo "Launched VS Code from $CODE_CLI with workspace $USER_PWD."
         return 0
     fi
@@ -736,6 +914,88 @@ install_repo_script_launcher() {
     } > "$BIN_DIR/$name"
     chmod +x "$BIN_DIR/$name"
     echo "   Installed $BIN_DIR/$name -> $target"
+}
+
+# Keep the freshly built ``kiss-sorcar.vsix`` from dirtying git, in both
+# kinds of checkout this script runs in ($1 = repo root):
+#
+# * Public ``kiss_ai`` clones: every release commit deliberately SHIPS the
+#   prebuilt VSIX as a tracked file (``tree_with_vsix`` in scripts/release.sh)
+#   so docker/code-server installs work without npm.  The build step above
+#   just overwrote that tracked file, so without countermeasures ``git
+#   status`` reports it modified and the auto-commit / worktree flows would
+#   commit the multi-MB binary on every task.  Remedy: put HEAD's copy back
+#   into BOTH the index and the working tree (``git checkout HEAD --``).
+#   By the time this guard runs the freshly built VSIX has already been
+#   installed into VS Code, so replacing it on disk with the release copy
+#   loses nothing — manual ``code --install-extension`` retries and
+#   docker-startup.sh then use the release-shipped bytes, and the repo is
+#   left byte-for-byte clean so the Update button's later ``git stash`` /
+#   ``git reset --hard @{upstream}`` preflight and ``git worktree add``
+#   never trip over a dirty or skip-worktree-pinned entry.  A single
+#   checkout also self-heals every broken index state this file can get
+#   into: a staged modification, a staged ``git rm --cached`` deletion
+#   (the old error message told users to run exactly that), and unmerged
+#   stages left by a conflicted ``git stash pop``.  Failures here only
+#   leave the file dirty for the preflight stash to handle, so they warn
+#   instead of aborting an otherwise finished install.
+#
+# * The development repo, where no commit contains the VSIX (it is matched
+#   by ``*.vsix`` in .gitignore): the file being tracked can only mean an
+#   accidental ``git add -f``, which the auto-commit flow would turn into a
+#   committed binary.  That remains a hard error (exit 1) telling the user
+#   how to untrack it.  The locally built VSIX stays untracked on disk for
+#   ``code --install-extension`` retries and docker-startup.sh.
+guard_vsix_tracking() {
+    local project_dir="$1"
+    local vsix_rel="src/kiss/agents/vscode/kiss-sorcar.vsix"
+    if git -C "$project_dir" rev-parse --verify --quiet "HEAD:$vsix_rel" >/dev/null; then
+        # Public kiss_ai clone: the release ships the VSIX tracked, by design.
+        # Clear any stale skip-worktree pin first: a pinned entry whose blob
+        # changes upstream makes ``git reset --hard @{upstream}`` fail with
+        # "Entry ... not uptodate", bricking every later update.
+        git -C "$project_dir" update-index --no-skip-worktree -- "$vsix_rel" 2>/dev/null || true
+        # Rewrite the index entry to HEAD's mode+blob via --index-info: the
+        # mode-0 line drops every stage of the path (a plain entry, a staged
+        # modification or deletion, and unmerged stages 1-3 alike), then the
+        # stage-0 line re-registers HEAD's blob.  ``git checkout HEAD --`` is
+        # NOT equivalent: it silently skips an unmerged entry whose stage-2
+        # blob already matches HEAD.
+        local mode blob zero
+        read -r mode _ blob _ < <(git -C "$project_dir" ls-tree HEAD -- "$vsix_rel") || true
+        zero="${blob//?/0}"
+        printf '0 %s\t%s\n%s %s 0\t%s\n' "$zero" "$vsix_rel" "$mode" "$blob" "$vsix_rel" |
+            git -C "$project_dir" update-index --index-info 2>/dev/null || true
+        # Write the release blob back to the working tree over the local
+        # rebuild.
+        git -C "$project_dir" checkout-index -q -f -- "$vsix_rel" 2>/dev/null || true
+        # Verify the result instead of trusting the exit codes above: only a
+        # path that is byte-for-byte clean keeps later ``git stash`` /
+        # ``git reset --hard`` preflights and worktree flows working.  The
+        # ``ls-files -v`` check must report a plain tracked entry ("H", not a
+        # skip-worktree "S"): a surviving pin hides a dirty file from ``git
+        # status`` while still bricking the next ``reset --hard``, and it
+        # also makes this verification fail honestly when the status command
+        # itself errors out (an empty capture alone would look clean).
+        local dirty
+        if dirty=$(git -C "$project_dir" status --porcelain -- "$vsix_rel" 2>/dev/null) &&
+            [ -z "$dirty" ] &&
+            [ "$(git -C "$project_dir" ls-files -v -- "$vsix_rel" 2>/dev/null)" = "H $vsix_rel" ]; then
+            echo "   Restored release-shipped $vsix_rel in git index and working tree"
+            echo "   (the freshly built VSIX was already installed into VS Code)."
+        else
+            echo "   WARNING: could not restore $vsix_rel from HEAD; the locally" >&2
+            echo "   rebuilt VSIX may show up as a git modification." >&2
+        fi
+        return 0
+    fi
+    if ! git -C "$project_dir" ls-files --error-unmatch "$vsix_rel" &>/dev/null; then
+        return 0  # untracked (development repo, healthy state) — nothing to do
+    fi
+    echo "   ERROR: $vsix_rel is tracked by git but must remain ignored." >&2
+    echo "   Run: git -C \"$project_dir\" rm --cached \"$vsix_rel\"" >&2
+    echo "   and ensure \`*.vsix\` stays in .gitignore." >&2
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -835,12 +1095,17 @@ upgrade_vscode() {
                 TMP_APP_DIR="$(mktemp -d /tmp/vscode-app-XXXXXX)"
                 if unzip -q "$TMP_ZIP" -d "$TMP_APP_DIR" \
                         && [ -d "$TMP_APP_DIR/Visual Studio Code.app" ]; then
-                    rm -rf "/Applications/Visual Studio Code.app"
-                    mv "$TMP_APP_DIR/Visual Studio Code.app" /Applications/
-                    echo "   VS Code upgraded in /Applications/"
-                    local CODE_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
-                    if [ -x "$CODE_BIN" ]; then
-                        ln -sf "$CODE_BIN" "$BIN_DIR/code"
+                    # Guarded like every other upgrade: a permission error
+                    # in /Applications must warn, not abort under ``set -e``.
+                    if rm -rf "/Applications/Visual Studio Code.app" \
+                            && mv "$TMP_APP_DIR/Visual Studio Code.app" /Applications/; then
+                        echo "   VS Code upgraded in /Applications/"
+                        local CODE_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+                        if [ -x "$CODE_BIN" ]; then
+                            ln -sf "$CODE_BIN" "$BIN_DIR/code" || true
+                        fi
+                    else
+                        echo "   WARNING: Could not replace /Applications/Visual Studio Code.app; continuing with the installed version."
                     fi
                 else
                     echo "   WARNING: Failed to unpack VS Code; continuing with the installed version."
@@ -886,7 +1151,28 @@ restore_stashed_changes() {
     # "finally" — even if the install aborts midway under ``set -e``.
     if [ "$STASHED_CHANGES" = "1" ]; then
         echo ">>> Restoring stashed local changes..."
-        git -C "$PROJECT_DIR" stash pop || true
+        if ! git -C "$PROJECT_DIR" stash pop; then
+            # A stash made by an OLDER install.sh can carry a stale rebuilt
+            # VSIX; popping it over the release copy guard_vsix_tracking
+            # just restored conflicts, leaving unmerged stages that make the
+            # NEXT update's ``git stash push`` fail with "needs merge" and
+            # skip the pull — bricking the Update button.  When the VSIX is
+            # the only conflict, heal it (the guard drops unmerged stages
+            # and restores HEAD's copy — the stale rebuild is regenerated by
+            # step [4/5] anyway).  The stash itself is always KEPT: a
+            # failed pop can also mean untracked stashed files could not
+            # be restored (a same-named file appeared meanwhile), and
+            # dropping it would lose them for good — "only the VSIX is
+            # unmerged" does not prove the pop restored everything else.
+            local vsix_rel="src/kiss/agents/vscode/kiss-sorcar.vsix"
+            local unmerged
+            unmerged=$(git -C "$PROJECT_DIR" diff --name-only --diff-filter=U 2>/dev/null || true)
+            if [ "$unmerged" = "$vsix_rel" ]; then
+                guard_vsix_tracking "$PROJECT_DIR" || true
+            fi
+            echo "   WARNING: 'git stash pop' did not apply cleanly; your local"
+            echo "   changes are preserved in 'git stash list'."
+        fi
         STASHED_CHANGES=0
     fi
 }
@@ -909,10 +1195,33 @@ update_repo() {
         echo "   Not a git checkout — skipping pull."
         return 0
     fi
+    # A stale rebuilt VSIX (or the unmerged stages a conflicted pop left in
+    # an older install) must never reach the dirty check below: stashing it
+    # makes the EXIT-trap ``git stash pop`` conflict with the release copy
+    # guard_vsix_tracking restores in step [5/5], and an already-unmerged
+    # entry makes ``git stash push`` fail with "needs merge" so the pull is
+    # skipped forever.  Restoring HEAD's copy up front is lossless — the
+    # rebuild is regenerated by step [4/5].  In a healthy development repo
+    # the guard is a no-op; a development repo with a force-added VSIX must
+    # fail HERE, loudly — the stash below would otherwise hide the staged
+    # binary from the step [5/5] guard and the EXIT-trap pop would restore
+    # it after that guard passed, silently bypassing the hard error.
+    # One run only: the output is captured and re-emitted on failure
+    # (success stays quiet here — step [5/5]'s own guard call reports the
+    # restoration), instead of a silenced probe plus a loud re-run that
+    # repeated every git operation of the guard.
+    local _kiss_guard_out
+    if ! _kiss_guard_out=$(guard_vsix_tracking "$PROJECT_DIR" 2>&1); then
+        printf '%s\n' "$_kiss_guard_out" >&2
+        exit 1
+    fi
     if [ -n "$(git -C "$PROJECT_DIR" status --porcelain)" ]; then
         echo "   Repository is dirty — stashing local changes..."
         if git -C "$PROJECT_DIR" stash push --include-untracked -m "install.sh auto-stash"; then
             STASHED_CHANGES=1
+            # The update lock (see the kiss-update-lock block) is a
+            # kernel lock the process's death releases, so this may be
+            # the script's only EXIT trap.
             trap restore_stashed_changes EXIT
         else
             echo "   WARNING: git stash failed; continuing without pulling."
@@ -976,7 +1285,8 @@ update_repo() {
 # dead pipe — SIGPIPE, script killed with rc=141 and an empty log,
 # defeating the trap fix above.  Ignored dispositions survive exec, so
 # tee inherits SIG_IGN and keeps draining until bash exits and closes
-# the pipe.
+# the pipe.  tee inherits the update-lock fd 9 as well, harmlessly: its
+# lifetime ends with the pipe, i.e. with this shell.
 exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
 
 {
@@ -984,6 +1294,11 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo "Directory: $PROJECT_DIR"
     echo "OS: $OS ($ARCH)"
+    if [ "$_KISS_INTERACTIVE" = 1 ]; then
+        echo "Mode: interactive (asks before installing Homebrew or upgrading tools; pass --non-interactive to skip the questions)"
+    else
+        echo "Mode: non-interactive (outdated tools are upgraded without asking)"
+    fi
     echo ""
 
     if [ "$OS" = "Darwin" ]; then
@@ -1009,11 +1324,15 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     # would otherwise abort the script at this assignment.
     INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
     if [ -n "$REQUIRED_GIT_VERSION" ] && [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
-        echo "   git $INSTALLED_GIT is older than the required version $REQUIRED_GIT_VERSION — upgrading..."
-        upgrade_git
-        INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-        if [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
-            echo "   WARNING: git is still $INSTALLED_GIT (< $REQUIRED_GIT_VERSION); some features may not work."
+        echo "   git $INSTALLED_GIT is older than the required version $REQUIRED_GIT_VERSION."
+        if confirm "Upgrade git to $REQUIRED_GIT_VERSION or later?"; then
+            upgrade_git
+            INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            if [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
+                echo "   WARNING: git is still $INSTALLED_GIT (< $REQUIRED_GIT_VERSION); some features may not work."
+            fi
+        else
+            echo "   Skipping the git upgrade; some features may not work with git $INSTALLED_GIT."
         fi
     fi
     echo "   git $INSTALLED_GIT ready"
@@ -1027,9 +1346,13 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     if command -v uv &>/dev/null; then
         INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         if [ -n "$REQUIRED_UV_VERSION" ] && [ -n "$INSTALLED_UV" ] && ! version_gte "$INSTALLED_UV" "$REQUIRED_UV_VERSION"; then
-            echo "   uv $INSTALLED_UV is older than the required version $REQUIRED_UV_VERSION — upgrading..."
-            upgrade_uv
-            INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            echo "   uv $INSTALLED_UV is older than the required version $REQUIRED_UV_VERSION."
+            if confirm "Upgrade uv to $REQUIRED_UV_VERSION?"; then
+                upgrade_uv
+                INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            else
+                echo "   Skipping the uv upgrade; continuing with uv $INSTALLED_UV."
+            fi
         fi
         echo "   uv $INSTALLED_UV ready"
     else
@@ -1044,9 +1367,13 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     if command -v node &>/dev/null && command -v npm &>/dev/null && command -v npx &>/dev/null; then
         INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
         if [ -n "$REQUIRED_NODE_VERSION" ] && [ -n "$INSTALLED_NODE" ] && ! version_gte "$INSTALLED_NODE" "$REQUIRED_NODE_VERSION"; then
-            echo "   Node.js $INSTALLED_NODE is older than the required version $REQUIRED_NODE_VERSION — upgrading..."
-            upgrade_node
-            INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
+            echo "   Node.js $INSTALLED_NODE is older than the required version $REQUIRED_NODE_VERSION."
+            if confirm "Upgrade Node.js to $REQUIRED_NODE_VERSION?"; then
+                upgrade_node
+                INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
+            else
+                echo "   Skipping the Node.js upgrade; the extension build may fail with node v$INSTALLED_NODE."
+            fi
         fi
         echo "   node v$INSTALLED_NODE ready"
         echo "   npm $(npm --version) ready"
@@ -1065,9 +1392,16 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     if [ -n "$CODE_CLI" ]; then
         INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
         if [ -n "$REQUIRED_VSCODE_VERSION" ] && [ -n "$INSTALLED_VSCODE" ] && ! version_gte "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"; then
-            echo "   VS Code $INSTALLED_VSCODE is older than the required version $REQUIRED_VSCODE_VERSION — upgrading..."
-            upgrade_vscode
-            INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
+            echo "   VS Code $INSTALLED_VSCODE is older than the required version $REQUIRED_VSCODE_VERSION."
+            if confirm "Upgrade VS Code?"; then
+                upgrade_vscode
+                INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
+                if [ -n "$INSTALLED_VSCODE" ] && ! version_gte "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"; then
+                    echo "   WARNING: VS Code is still $INSTALLED_VSCODE (< $REQUIRED_VSCODE_VERSION); the extension may refuse to install."
+                fi
+            else
+                echo "   Skipping the VS Code upgrade; the extension may refuse to install into VS Code $INSTALLED_VSCODE."
+            fi
         fi
         echo "   code CLI ready: $CODE_CLI (v$INSTALLED_VSCODE)"
     else
@@ -1148,38 +1482,39 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     # VS Code detect the on-disk extension update and reload — and that
     # reload can dispose (or simply stop rendering) the very terminal this
     # script is printing to.  The output then appears to freeze with no
-    # prompt ever returning, and users conclude the install hung.  It did
-    # not: the new-session (setsid) detachment at the top of this script
-    # keeps the install running, and the log (see ``$LOG_FILE``) shows it
-    # completing a few seconds later.  The only reliable channel to tell
-    # the user is this terminal, BEFORE it can die — hence the notice below
-    # must stay ahead of the ``--install-extension`` call.
+    # prompt ever returning, and users conclude the install hung.  In a
+    # non-interactive run it did not: the new-session (setsid) detachment
+    # at the top of this script keeps the install running, and the log
+    # (see ``$LOG_FILE``) shows it completing a few seconds later.  An
+    # interactive run skipped that detachment to keep its terminal, so a
+    # disposed terminal can cut it short; the log tells which happened.
+    # The only reliable channel to tell the user is this terminal, BEFORE
+    # it can die — hence the notice below must stay ahead of the
+    # ``--install-extension`` call.
     echo "   NOTE: VS Code may reload to pick up the update while this step runs."
     echo "         If this terminal stops updating (or never shows a prompt again),"
-    echo "         the install is NOT stuck — it keeps running detached and"
-    echo "         finishes on its own.  Follow progress with:"
+    if [ "${_KISS_INTERACTIVE:-0}" = 1 ]; then
+        echo "         check the log; if the reload closed this terminal the install"
+        echo "         may have been cut short, and re-running this script resumes it."
+    else
+        echo "         the install is NOT stuck — it keeps running detached and"
+        echo "         finishes on its own."
+    fi
+    echo "         Follow progress with:"
     echo "             tail -f \"$LOG_FILE\""
     echo "         Completion is marked by the line: === Source bootstrap complete ==="
-    if ! "$CODE_CLI" --install-extension "$VSIX" --force 2>&1; then
+    if ! "$CODE_CLI" --install-extension "$VSIX" --force 2>&1 9>&-; then
         echo "   ERROR: '$CODE_CLI --install-extension' failed; the update was not applied."
         exit 1
     fi
     echo "   Extension installed into VS Code"
-    # ``kiss-sorcar.vsix`` is a build artifact and MUST NOT be committed
-    # to git — it is ~2 MB of binary that bloats the history and is
-    # rebuilt deterministically by the ``npm run package`` step above.
-    # The file is matched by ``*.vsix`` in the repo's ``.gitignore`` so
-    # ``git status`` never lists it and the auto-commit / ``git add .``
-    # flows cannot pick it up.  We deliberately do NOT delete the VSIX
-    # here so that subsequent ``code --install-extension`` invocations
-    # (e.g. a manual retry) can reuse the freshly built artifact without
-    # rebuilding it.  As a defence-in-depth check, refuse to continue if
-    # the VSIX has somehow become tracked again (e.g. a ``git add -f``
-    # by mistake) — that would cause the worktree flow to commit it.
-    if git -C "$PROJECT_DIR" ls-files --error-unmatch "$VSIX" &>/dev/null; then
-        echo "   ERROR: $VSIX is tracked by git but must remain ignored." >&2
-        echo "   Run: git -C \"$PROJECT_DIR\" rm --cached \"$VSIX\"" >&2
-        echo "   and ensure ``*.vsix`` stays in .gitignore." >&2
+    # Keep the freshly built VSIX from dirtying git (see guard_vsix_tracking
+    # for the full rationale).  Public kiss_ai clones ship the VSIX as a
+    # tracked file in every release commit, so "tracked" is a healthy state
+    # there and the guard restores HEAD's copy instead of failing; in the
+    # development repo a tracked VSIX means an accidental ``git add -f``
+    # and remains a hard error.
+    if ! guard_vsix_tracking "$PROJECT_DIR"; then
         exit 1
     fi
 
@@ -1230,12 +1565,20 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     KISS_HOME_DIR="${KISS_HOME:-$HOME/.kiss}"
     mkdir -p "$KISS_HOME_DIR"
 
-    date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
+    # The marker must land in $KISS_HOME_DIR, not a hard-coded $HOME/.kiss:
+    # the extension resolves its state dir through $KISS_HOME (kissHomeDir()
+    # in userAssets.ts) and watches $KISS_HOME/.extension-updated to reload
+    # the window (extension.ts) and finish the update (DependencyInstaller).
+    # Writing the marker elsewhere leaves a custom-KISS_HOME install without
+    # its reload signal — the update appears to never happen.
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$KISS_HOME_DIR/.extension-updated"
     # Remove any stale source-install marker from older versions of this
     # installer.  The extension now always runs against the kiss_project
     # bundled inside the VSIX, so the marker is no longer consulted and
-    # leaving it around would only mislead troubleshooting.
-    rm -f "$HOME/.kiss/install_dir"
+    # leaving it around would only mislead troubleshooting.  Older
+    # installers wrote it to the hard-coded ~/.kiss regardless of
+    # KISS_HOME, so clean both locations.
+    rm -f "$KISS_HOME_DIR/install_dir" "$HOME/.kiss/install_dir"
     echo ""
 
     echo "=== Source bootstrap complete ==="

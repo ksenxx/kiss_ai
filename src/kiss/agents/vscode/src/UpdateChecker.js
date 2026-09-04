@@ -14,6 +14,7 @@ const {URL} = require('url');
 
 const DEFAULT_PYPI_URL = 'https://pypi.org/pypi/kiss-agent-framework/json';
 const DEFAULT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_SNOOZE_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
 
 // Mirrors userAssets.kissHomeDir() (this plain-CJS module is also
@@ -167,21 +168,47 @@ function readCache(cachePath) {
     const ts = typeof data.lastCheckMs === 'number' ? data.lastCheckMs : 0;
     const latest =
       typeof data.lastLatest === 'string' ? data.lastLatest : '';
-    return {lastCheckMs: ts, lastLatest: latest};
+    const snoozeUntilMs =
+      typeof data.snoozeUntilMs === 'number' ? data.snoozeUntilMs : 0;
+    const snoozedLatest =
+      typeof data.snoozedLatest === 'string' ? data.snoozedLatest : '';
+    return {lastCheckMs: ts, lastLatest: latest, snoozeUntilMs, snoozedLatest};
   } catch {
     return null;
   }
 }
 
+// "Remind me later" state: the notification stays suppressed while the
+// snooze window is open UNLESS a release NEWER than the snoozed one
+// appears (compareVersions returns 0 for an unparsable snoozedLatest,
+// so a snooze whose version was lost still suppresses everything until
+// it expires).
+function isSnoozeActive(cached, candidateLatest, nowMs) {
+  if (!cached || !cached.snoozeUntilMs) return false;
+  if (nowMs >= cached.snoozeUntilMs) return false;
+  return compareVersions(candidateLatest, cached.snoozedLatest) <= 0;
+}
+
+// audit0902-coverage:start
 function writeCache(cachePath, data) {
+  // Every window writes this file at activation.  The temp name must be
+  // unique per writer (pid + timestamp temp file, then rename): with one
+  // shared `<cache>.tmp`, a second window truncates the first one's temp
+  // file before it is renamed and the cache ends up empty -- unparsable,
+  // so the cooldown is lost.
+  const tmp = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
   try {
     fs.mkdirSync(path.dirname(cachePath), {recursive: true});
-    const tmp = cachePath + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(data));
     fs.renameSync(tmp, cachePath);
   } catch {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+    }
   }
 }
+// audit0902-coverage:end
 
 async function checkForExtensionUpdate(opts) {
   const o = opts || {};
@@ -218,6 +245,15 @@ async function checkForExtensionUpdate(opts) {
   const nowMs = now();
   if (cached && nowMs - cached.lastCheckMs < cooldownMs) {
     if (compareVersions(cached.lastLatest, current) > 0) {
+      if (isSnoozeActive(cached, cached.lastLatest, nowMs)) {
+        return {
+          checked: false,
+          notified: false,
+          latest: cached.lastLatest,
+          current,
+          reason: 'snoozed',
+        };
+      }
       notify({latest: cached.lastLatest, current});
       return {
         checked: false,
@@ -247,9 +283,32 @@ async function checkForExtensionUpdate(opts) {
     };
   }
 
-  writeCache(cachePath, {lastCheckMs: nowMs, lastLatest: latest});
+  // Re-read the cache: the network fetch takes seconds, and a sibling
+  // window may have recorded a "Remind me later" snooze meanwhile.
+  // Rewriting from the pre-fetch snapshot would erase that snooze and
+  // re-notify the user who just dismissed the popup.
+  const fresh = readCache(cachePath) || cached;
+
+  // Preserve a still-running snooze across the cache refresh: writeCache
+  // replaces the whole file, and dropping the snooze fields here would
+  // resurface the popup as soon as the 6h fetch cooldown lapsed.
+  const nextCache = {lastCheckMs: nowMs, lastLatest: latest};
+  if (fresh && fresh.snoozeUntilMs > nowMs) {
+    nextCache.snoozeUntilMs = fresh.snoozeUntilMs;
+    nextCache.snoozedLatest = fresh.snoozedLatest;
+  }
+  writeCache(cachePath, nextCache);
 
   if (compareVersions(latest, current) > 0) {
+    if (isSnoozeActive(fresh, latest, nowMs)) {
+      return {
+        checked: true,
+        notified: false,
+        latest,
+        current,
+        reason: 'snoozed',
+      };
+    }
     notify({latest, current});
     return {
       checked: true,
@@ -268,10 +327,35 @@ async function checkForExtensionUpdate(opts) {
   };
 }
 
+// Records a "Remind me later" click: suppresses the update popup for
+// snoozeMs (default 24h) for releases up to and including `latest`.
+// A release newer than `latest` published inside the window still
+// notifies.  Existing cooldown fields in the cache are preserved.
+function snoozeUpdateNotification(opts) {
+  const o = opts || {};
+  const cachePath =
+    o.cacheFilePath || path.join(kissHomeDir(), '.update-check.json');
+  const snoozeMs = typeof o.snoozeMs === 'number' ? o.snoozeMs : DEFAULT_SNOOZE_MS;
+  const now = typeof o.now === 'function' ? o.now : () => Date.now();
+  const nowMs = now();
+  const cached = readCache(cachePath) || {lastCheckMs: 0, lastLatest: ''};
+  const snoozedLatest =
+    typeof o.latest === 'string' && o.latest ? o.latest : cached.lastLatest;
+  const snoozeUntilMs = nowMs + snoozeMs;
+  writeCache(cachePath, {
+    lastCheckMs: cached.lastCheckMs,
+    lastLatest: cached.lastLatest,
+    snoozeUntilMs,
+    snoozedLatest,
+  });
+  return {snoozeUntilMs, snoozedLatest};
+}
+
 module.exports = {
   checkForExtensionUpdate,
   compareVersions,
   readVersionPy,
   resolveCurrentVersion,
   scanInstalledExtensionVersions,
+  snoozeUpdateNotification,
 };

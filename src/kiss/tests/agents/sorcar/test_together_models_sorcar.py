@@ -38,7 +38,10 @@ import kiss.core.vscode_config as vscode_config
 from kiss.agents.sorcar import persistence as sorcar_persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import model as model_factory
-from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+from kiss.core.models.openai_compatible_model import (
+    OpenAICompatibleBase,
+    OpenAICompatibleModel,
+)
 from kiss.tests.conftest import (
     requires_openai_api_key,
     requires_together_api_key,
@@ -54,6 +57,22 @@ _TOGETHER_TOOL_MODELS = [
     "meta-llama/Llama-3.3-70B-Instruct-Turbo",
     "openai/gpt-oss-120b",
 ]
+
+
+def _expected_transport_class(name: str) -> type[OpenAICompatibleBase]:
+    """Return the adapter class the factory must build for *name*.
+
+    Catalog entries carrying the live-verified ``use_responses_api`` flag
+    are built as the v2 Responses adapter; everything else stays on the
+    Chat Completions v1 adapter.
+    """
+    from kiss.core.models.model_info import MODEL_INFO
+    from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
+
+    info = MODEL_INFO.get(name)
+    if info is not None and info.use_responses_api is True:
+        return OpenAICompatibleModel2
+    return OpenAICompatibleModel
 
 
 def _find_tool(tools: list, name: str) -> Any:
@@ -151,7 +170,7 @@ class TestSorcarTogetherLive:
         no_tool_call: list[str] = []
         for name in _TOGETHER_TOOL_MODELS:
             self._switch(agent, set_model, name)
-            assert isinstance(agent.model, OpenAICompatibleModel)
+            assert isinstance(agent.model, _expected_transport_class(name))
             assert "api.together.xyz" in agent.model.base_url, (
                 f"set_model built {type(agent.model).__name__} with "
                 f"base_url={agent.model.base_url!r} for a Together model"
@@ -186,7 +205,7 @@ class TestSorcarTogetherLive:
             )
 
         self._switch(agent, set_model, "gpt-4o")
-        assert isinstance(agent.model, OpenAICompatibleModel)
+        assert isinstance(agent.model, _expected_transport_class("gpt-4o"))
         assert agent.model.base_url.startswith("https://api.openai.com"), (
             f"set_model kept base_url={agent.model.base_url!r} after "
             "switching back to a native OpenAI model"

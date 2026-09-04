@@ -46,6 +46,53 @@ return an empty unsuccessful :class:`TaskResult` for a task that
 actually succeeded.
 """
 
+_STOP_CONFIRM_GRACE_SECONDS = 20.0
+"""Bounded wait for a stopped-on-timeout task's terminal status.
+
+With ``stop_on_timeout`` a timeout sends the daemon a ``stop`` and
+then KEEPS READING until the task's terminal ``status
+running=false`` confirms it is dead, before the ``TimeoutError`` is
+raised.  Without the confirmation the caller would resume — and, in
+the ``run_agent`` channel dispatch, release the process-global
+workspace reservation — while the child might still be starting up on
+the daemon and could bind a LATER dispatch's workspace when its
+channel tools load.  The daemon's stop path force-interrupts a
+non-cooperating task after ~1 s, so confirmation normally arrives
+quickly; this grace bounds the wait against a wedged daemon, after
+which :class:`StopUnconfirmedTimeoutError` is raised (the stop stays
+best-effort at that point).
+"""
+
+
+class StopUnconfirmedTimeoutError(TimeoutError):
+    """Timeout whose ``stop_on_timeout`` stop was sent but never confirmed.
+
+    Raised by :func:`run` instead of the plain :class:`TimeoutError`
+    when the :data:`_STOP_CONFIRM_GRACE_SECONDS` wait for the stopped
+    task's terminal ``status running=false`` expires without an
+    answer: the ``stop`` was sent, but the daemon never confirmed the
+    task is dead, so the stop stays best-effort and the task may still
+    be running (and spending) on the daemon.  Raised even when a
+    SUCCESSFUL ``result`` event was received — the result is emitted
+    before the daemon's persistence/auto-commit/cleanup stages, so
+    without the terminal status the task may still be touching the
+    workspace.  Callers that report the timeout onward — the
+    ``run_agent`` dispatch — must not claim the task was stopped.
+    """
+
+_NO_DEADLINE_WAKE_SECONDS = 10.0
+"""Socket read wake-up interval for a ``timeout=None`` wait.
+
+A thread's injected async exception — the ``KeyboardInterrupt`` the
+daemon injects when the CALLING task is stopped while blocked in
+:func:`run`'s event wait — is delivered between bytecode instructions
+only, never inside a blocking C-level ``recv``.  An unbounded blocking
+read on a silent daemon would therefore starve the stop cascade in
+:func:`run`'s ``finally`` block forever.  With no deadline the socket
+read instead times out and retries at this interval, giving Python a
+chance to deliver the pending exception.
+"""
+
 
 @dataclass(frozen=True)
 class TaskResult:
@@ -248,6 +295,49 @@ def resolve_agent_path(agent_path: str | None) -> str:
     )
 
 
+def _frame_limit_error() -> ConnectionError:
+    """Return the error for a daemon frame exceeding the client cap.
+
+    Shared by :func:`run`'s two detection sites — the no-newline
+    accumulation check and the extracted-line length check — so the
+    two cannot drift apart.  Reads :data:`_MAX_LINE_BYTES` at call
+    time (tests shrink it).
+    """
+    return ConnectionError(
+        "The sorcar daemon sent an event frame larger "
+        f"than the {_MAX_LINE_BYTES}-byte client limit"
+    )
+
+
+def _send_stop(sock: socket.socket, tab_id: str, run_token: str) -> None:
+    """Send the daemon a run-token-guarded ``stop`` for *tab_id*.
+
+    Shared by :func:`run`'s stop-on-timeout path and the abort-cascade
+    in its ``finally`` block: both stops MUST carry the run token (so
+    the daemon's ``_stop_task`` guard rejects the stop when the tab
+    was reused by a newer run), and a drifted duplicate would desync
+    that guarantee.  The 5-second send bound keeps a wedged daemon
+    from blocking the caller.
+
+    Args:
+        sock: The connected daemon socket.
+        tab_id: The run's synthetic tab id.
+        run_token: The client-minted per-submission run token.
+
+    Raises:
+        OSError: When the stop could not be written to the socket
+            (including a send timeout).
+    """
+    sock.settimeout(5.0)
+    sock.sendall(
+        json.dumps({
+            "type": "stop",
+            "tabId": tab_id,
+            "taskId": run_token,
+        }).encode("utf-8") + b"\n",
+    )
+
+
 def run(
     prompt: str,
     *,
@@ -267,7 +357,8 @@ def run(
     append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
-    timeout: float = 3600.0,
+    timeout: float | None = 3600.0,
+    stop_on_timeout: bool = False,
     sock_path: str | Path | None = None,
 ) -> TaskResult:
     """Run *prompt* as a task on the local Sorcar daemon and block until done.
@@ -354,6 +445,31 @@ def run(
                 def get_append_to_system_prompt() -> str: ...
                 def get_append_to_prompt() -> str: ...
 
+            The script may also define two hook getters with no
+            corresponding parameter on this function (a callable
+            cannot travel the wire, so the hooks exist ONLY as
+            agent-script getters)::
+
+                def get_llm_call_hook() -> Callable | None: ...
+                def get_tool_call_hook() -> Callable | None: ...
+
+            Each returns a callable — ``llm_call_hook`` and
+            ``tool_call_hook`` respectively — (or ``None`` for "no
+            hook") that the daemon passes to the underlying
+            :meth:`kiss.core.kiss_agent.KISSAgent.run` of every
+            task-executor sub-session of the task's agent (internal
+            helper sessions, e.g. the failed-session trajectory
+            summarizer, are not hooked).  Per that method's contract,
+            ``llm_call_hook(new_messages)`` is called before every LLM
+            call and its return value replaces the new messages about
+            to be sent, and ``tool_call_hook(name, args)`` is called
+            before every tool call — the tool executes only when the
+            hook returns ``"OK"``; any other returned string is given
+            to the model as the tool's result instead.  Like every
+            getter, they execute **in the daemon process**; the hooks
+            apply to the task's own agent, not to sub-agents it spawns
+            via ``run_parallel``.
+
             The ``get_X()`` functions are never serialized by the
             client — they run **in the daemon process**, exactly like a
             tools file's ``get_tools()``.  ``get_tools()`` here returns
@@ -364,11 +480,13 @@ def run(
             *tools*; a ``get_tools()`` that instead returns a *list*
             of tool callables (the tools-file contract, as in the
             channel agent modules) makes the script its own tools
-            file.  ``timeout``, *sock_path*, and *scope_work_dir*
-            have no getters by design: the first two are
-            client-transport parameters — the script only runs on the
-            daemon that *sock_path* selects, and *timeout* bounds this
-            client's local wait — and *scope_work_dir* is the CALLING
+            file.  ``timeout``, *stop_on_timeout*, *sock_path*, and
+            *scope_work_dir* have no getters by design: the first
+            three are client-transport parameters — the script only
+            runs on the daemon that *sock_path* selects, *timeout*
+            bounds this client's local wait, and *stop_on_timeout*
+            picks this client's timeout behavior — and
+            *scope_work_dir* is the CALLING
             client's tab-bar scope, which the dispatched script must
             not be able to repoint at another workspace.  The
             *extension_agent_path* itself is resolved against this process's
@@ -420,7 +538,36 @@ def run(
             actually runs with, so it is also what the chat history
             records and what follow-up tasks of the same chat see as
             context.  Empty (default) appends nothing.
-        timeout: Maximum seconds to wait for the task to finish.
+        timeout: Maximum seconds to wait for the task to finish;
+            ``None`` waits indefinitely.
+        stop_on_timeout: Whether a *timeout* expiry also STOPS the
+            task.  ``False`` (the default) keeps the documented
+            timeout contract — the caller stops waiting, the task
+            keeps running.  With ``True`` the client sends the daemon
+            a ``stop`` for the task and keeps reading until the task's
+            terminal status confirms it is dead (waiting up to
+            :data:`_STOP_CONFIRM_GRACE_SECONDS`; on a wedged daemon
+            :class:`StopUnconfirmedTimeoutError` is raised instead,
+            the stop then staying best-effort) before raising the
+            ``TimeoutError``.
+            ``True`` is for callers that must not let the task outlive
+            the wait, e.g. the ``run_agent`` channel dispatch, whose
+            process-global workspace reservation is released as soon
+            as the call returns: a surviving sub-task could bind
+            another account's credentials when its channel tools load.
+            When the task finished ON ITS OWN — a SUCCESSFUL terminal
+            ``result`` AND the terminal status raced the stop onto the
+            wire — the completed :class:`TaskResult` is returned
+            instead of a ``TimeoutError`` that would discard the
+            finished work (only natural completions carry ``success:
+            true``; every daemon stop/cancel/failure path broadcasts
+            ``success: false``).  A successful result WITHOUT the
+            terminal status never settles the wait: the daemon's
+            persistence / auto-commit / worktree cleanup still run
+            after the result is emitted, so only the terminal status
+            proves the task is dead, and the grace expiring with just
+            the result in hand raises
+            :class:`StopUnconfirmedTimeoutError` all the same.
         sock_path: Daemon UDS path override (defaults to
             ``$KISS_SORCAR_SOCK`` or ``$KISS_HOME/sorcar.sock``).
 
@@ -438,12 +585,38 @@ def run(
             :func:`resolve_tools_file`), or when *extension_agent_path* is
             neither empty nor the path string of an existing Python
             (``.py``) file (see :func:`resolve_agent_path`).
-        ConnectionError: When no daemon is listening on the socket, or
-            the daemon drops the connection before the task finishes.
+        ConnectionError: When no daemon is listening on the socket,
+            the daemon drops the connection before the task finishes,
+            or a *stop_on_timeout* stop cannot be sent on the broken
+            connection (a plain ``TimeoutError`` would falsely imply
+            the task was stopped).
         TimeoutError: When the task does not finish within *timeout*
-            seconds.  The client then sends the daemon an explicit
+            seconds (never raised when *timeout* is ``None``).  The
+            client then sends the daemon an explicit
             ``closeTab`` for the task's tab and disconnects; the task
-            keeps running and its state is disposed when it ends.
+            keeps running and its state is disposed when it ends —
+            unless *stop_on_timeout* is true, in which case the task
+            is first stopped and its terminal status awaited (see the
+            parameter's documentation).
+        StopUnconfirmedTimeoutError: When *stop_on_timeout* is true
+            and the stop was sent but the daemon never confirmed the
+            task's death within :data:`_STOP_CONFIRM_GRACE_SECONDS` —
+            the task may still be running.  A subclass of
+            ``TimeoutError``, so a plain ``except TimeoutError`` still
+            catches it.
+
+    Every other abort of the wait — most importantly the
+    ``KeyboardInterrupt`` injected when the CALLING task is stopped
+    while blocked in a ``run_agent`` dispatch — additionally sends the
+    daemon a ``stop`` for the dispatched task's tab before
+    disconnecting.  Without the cascade, the orphaned sub-task kept
+    running invisibly and, when it was a non-worktree task, kept its
+    repository flagged busy: a manual Git Commit pressed after the
+    parent showed "Task stopped by user" was refused with "A task is
+    still running in this folder" with no visible task running.  A
+    timeout intentionally does NOT stop the task (see above) unless
+    *stop_on_timeout* is true: by default the caller chose to stop
+    waiting, not to cancel the work.
     """
     if not prompt or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
@@ -451,11 +624,16 @@ def run(
     agent_file = resolve_agent_path(extension_agent_path)
     path = _resolve_sock_path(sock_path)
     tab_id = f"api-{uuid.uuid4().hex}"
-    deadline = time.monotonic() + timeout
+    # Client-minted per-submission run token.  Echoed on the run's
+    # ``status`` events, and — critically — sent with the
+    # abort-cascade ``stop`` below so the daemon only stops THIS run:
+    # a late stop must never kill a newer run that reused the tab.
+    run_token = uuid.uuid4().hex
+    deadline = None if timeout is None else time.monotonic() + timeout
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    reader: Any = None
+    aborted: BaseException | None = None
     try:
-        sock.settimeout(min(timeout, 10.0))
+        sock.settimeout(10.0 if timeout is None else min(timeout, 10.0))
         try:
             sock.connect(str(path))
         except OSError as exc:
@@ -467,7 +645,7 @@ def run(
             "type": "run",
             "prompt": prompt,
             "tabId": tab_id,
-            "taskId": uuid.uuid4().hex,
+            "taskId": run_token,
             "chatId": chat_id,
             "workDir": work_dir,
             "tabScopeWorkDir": scope_work_dir,
@@ -486,39 +664,120 @@ def run(
             "appendToPrompt": append_to_prompt,
         }
         sock.sendall(json.dumps(cmd).encode("utf-8") + b"\n")
-        reader = sock.makefile("rb", buffering=_MAX_LINE_BYTES)
+        # Newline-framed events are assembled by hand from ``recv``
+        # chunks instead of ``sock.makefile().readline()``: a buffered
+        # reader DISCARDS the partial line it has accumulated when the
+        # underlying read raises, so the periodic no-deadline wake-up
+        # below (and a finite deadline expiring mid-line) would corrupt
+        # the event stream.  ``recv_buf`` survives the raise unharmed.
+        recv_buf = bytearray()
+        scanned = 0  # recv_buf[:scanned] is known newline-free
         result_event: dict[str, Any] | None = None
         task_id = ""
         started = False
+        stopping = False  # stop-on-timeout sent; awaiting confirmation
+        timeout_msg = f"Task did not finish within {timeout} seconds"
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"Task did not finish within {timeout} seconds"
-                )
-            sock.settimeout(remaining)
-            try:
-                line = reader.readline(_MAX_LINE_BYTES)
-            except TimeoutError:
-                raise TimeoutError(
-                    f"Task did not finish within {timeout} seconds"
-                ) from None
-            if not line:
-                raise ConnectionError(
-                    "The sorcar daemon closed the connection before the "
-                    "task finished"
-                )
-            if len(line) >= _MAX_LINE_BYTES and not line.endswith(b"\n"):
-                # ``readline(size)`` returned a full-size chunk with no
-                # terminating newline: the daemon sent a frame larger
-                # than the client cap.  Silently skipping the fragments
-                # would discard a possibly terminal ``result`` event
-                # and misreport the task as failed — fail loudly
-                # instead.
-                raise ConnectionError(
-                    "The sorcar daemon sent an event frame larger than "
-                    f"the {_MAX_LINE_BYTES}-byte client limit"
-                )
+            newline_at = recv_buf.find(b"\n", scanned)
+            if newline_at < 0:
+                # Only bytes appended after this point need scanning
+                # next round — a large frame arriving in many chunks
+                # must not be rescanned from the start each time.
+                scanned = len(recv_buf)
+                if len(recv_buf) >= _MAX_LINE_BYTES:
+                    # The daemon sent a frame larger than the client
+                    # cap.  Silently skipping the fragments would
+                    # discard a possibly terminal ``result`` event and
+                    # misreport the task as failed — fail loudly
+                    # instead.
+                    raise _frame_limit_error()
+                if deadline is None:
+                    # No deadline: wake periodically so an injected
+                    # abort (see _NO_DEADLINE_WAKE_SECONDS) can be
+                    # delivered; the timeout is retried, not an error.
+                    sock.settimeout(_NO_DEADLINE_WAKE_SECONDS)
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        if stop_on_timeout and not stopping:
+                            # Stop the timed-out task, then KEEP
+                            # READING (bounded by the confirmation
+                            # grace) until its terminal status proves
+                            # it is dead — the caller must not resume
+                            # while the child could still act (see
+                            # _STOP_CONFIRM_GRACE_SECONDS).
+                            stopping = True
+                            deadline = (
+                                time.monotonic()
+                                + _STOP_CONFIRM_GRACE_SECONDS
+                            )
+                            try:
+                                _send_stop(sock, tab_id, run_token)
+                            except OSError as send_exc:
+                                # The stop could not even be sent, so
+                                # the task was neither stopped nor
+                                # confirmed dead — raising the plain
+                                # TimeoutError here would let a caller
+                                # (``_dispatch``) claim "was stopped".
+                                # Surface the broken daemon connection
+                                # instead, like every other mid-run
+                                # socket failure.
+                                raise ConnectionError(
+                                    "The sorcar daemon connection "
+                                    "failed while stopping the "
+                                    f"timed-out task: {send_exc}"
+                                ) from send_exc
+                            continue
+                        if stopping:
+                            # The confirmation grace expired without a
+                            # terminal status: the stop was sent but
+                            # never answered, so the task may still be
+                            # running — the caller must not be told it
+                            # was stopped.  Even a stored SUCCESSFUL
+                            # result is no proof the task is dead: the
+                            # agent emits it BEFORE the daemon's
+                            # persistence / auto-commit / worktree
+                            # cleanup stages run, and a stop can still
+                            # take effect during those stages, so
+                            # returning the result here would let the
+                            # caller (``run_agent``) release its
+                            # workspace reservation while the task is
+                            # still touching the workspace.  Only the
+                            # terminal ``status running=false`` —
+                            # broadcast by the outermost ``finally`` of
+                            # ``task_runner._run_task`` — proves the
+                            # task thread exited (see the
+                            # terminal-status branch below, the one
+                            # place a stored result may be returned).
+                            raise StopUnconfirmedTimeoutError(timeout_msg)
+                        raise TimeoutError(timeout_msg)
+                    sock.settimeout(remaining)
+                try:
+                    chunk = sock.recv(65536)
+                except TimeoutError:
+                    if deadline is None:
+                        continue  # pure wake-up; keep waiting
+                    # Finite deadline: loop back — the remaining<=0
+                    # branch above decides between the stop-on-timeout
+                    # cascade and raising.
+                    continue
+                if not chunk:
+                    raise ConnectionError(
+                        "The sorcar daemon closed the connection before "
+                        "the task finished"
+                    )
+                recv_buf += chunk
+                continue
+            if newline_at >= _MAX_LINE_BYTES:
+                # The newline landed in the same chunk that pushed the
+                # frame over the cap, so the no-newline check above
+                # never saw the overflow — the frame (newline included,
+                # length ``newline_at + 1``) is over the limit all the
+                # same.
+                raise _frame_limit_error()
+            line = bytes(recv_buf[: newline_at + 1])
+            del recv_buf[: newline_at + 1]
+            scanned = 0
             try:
                 event = json.loads(line.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
@@ -535,9 +794,59 @@ def run(
             elif etype == "status":
                 if event.get("running"):
                     started = True
+                elif stopping:
+                    if result_event is not None and result_event.get("success"):
+                        # The task finished ON ITS OWN while the client
+                        # was declaring the timeout: its successful
+                        # result and terminal status were already on
+                        # the wire when the stop was sent (the daemon's
+                        # run-token-guarded stop is a no-op for a
+                        # finished run).  Every daemon-side stop /
+                        # cancel / failure path broadcasts its terminal
+                        # ``result`` with ``success: false``
+                        # (``task_runner._broadcast_failure_result``),
+                        # so a successful result can only be a natural
+                        # completion — return it instead of discarding
+                        # the completed work behind a ``TimeoutError``
+                        # that falsely claims the task "was stopped".
+                        return _to_task_result(result_event, chat_id, task_id)
+                    # The terminal status confirms the
+                    # stopped-on-timeout task is dead; the run still
+                    # timed out.  ``started`` is deliberately not
+                    # required here: a stop can interrupt the task
+                    # during its setup, BEFORE the initial
+                    # ``running=true`` was ever broadcast, while the
+                    # daemon's ``finally`` still broadcasts the
+                    # terminal ``running=false`` (see
+                    # ``task_runner._run_task``) — that is a confirmed
+                    # stop, not an unconfirmed one.
+                    raise TimeoutError(timeout_msg)
                 elif started:
                     return _to_task_result(result_event, chat_id, task_id)
+    except BaseException as exc:
+        aborted = exc
+        raise
     finally:
+        if aborted is not None and not isinstance(aborted, TimeoutError):
+            # The wait was aborted — typically by the KeyboardInterrupt
+            # injected when the CALLING task is stopped while blocked
+            # here.  Cascade the stop to the dispatched task: without
+            # it the orphan keeps running invisibly and, when it is a
+            # non-worktree task, keeps its repository flagged busy, so
+            # a manual Git Commit after the parent's "Task stopped by
+            # user" is refused with "A task is still running in this
+            # folder".  A TimeoutError is excluded on purpose: its
+            # documented contract is "the task keeps running", and a
+            # ``stop_on_timeout`` timeout already sent its stop (and
+            # awaited confirmation) inside the read loop.
+            # Best-effort, like the closeTab below.
+            # ``taskId`` carries this run's token so the daemon
+            # rejects the stop if the tab was already reused by a
+            # newer run (see ``_stop_task``'s run_token guard).
+            try:
+                _send_stop(sock, tab_id, run_token)
+            except OSError:
+                pass
         # The synthetic tab is this client's alone, and a disconnect no
         # longer tears tabs down (tabs are global state shared by every
         # client), so explicitly ask the daemon to close it on every
@@ -552,16 +861,6 @@ def run(
                 json.dumps({"type": "closeTab", "tabId": tab_id})
                 .encode("utf-8") + b"\n",
             )
-        except OSError:
-            pass
-        # ``sock.makefile()`` holds an independent reference to the
-        # socket descriptor, so closing only the socket object leaves
-        # the buffered reader (and its multi-MiB buffer) alive whenever
-        # a caller retains a raised exception whose traceback pins this
-        # frame.  Close the reader first so the peer promptly sees EOF.
-        try:
-            if reader is not None:
-                reader.close()
         except OSError:
             pass
         try:
