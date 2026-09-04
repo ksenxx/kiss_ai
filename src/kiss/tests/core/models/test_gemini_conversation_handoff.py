@@ -449,7 +449,9 @@ class TestGeminiToOpenAILive:
     """Live replay of a Gemini-format history through the OpenAI API."""
 
     def test_generate_with_tools_after_gemini_handoff(self) -> None:
-        m = model("gpt-4o")
+        # This class pins the V1 (Chat Completions) handoff path, so the
+        # catalog's v2 default is overridden explicitly.
+        m = model("gpt-4o", model_config={"use_responses_api": False})
         assert isinstance(m, OpenAICompatibleModel)
         m.initialize("placeholder")
         m.conversation = copy.deepcopy(_GEMINI_STYLE_CONVERSATION)
@@ -457,7 +459,9 @@ class TestGeminiToOpenAILive:
         assert "5" in content or function_calls
 
     def test_generate_without_tools_after_gemini_handoff(self) -> None:
-        m = model("gpt-4o")
+        # This class pins the V1 (Chat Completions) handoff path, so the
+        # catalog's v2 default is overridden explicitly.
+        m = model("gpt-4o", model_config={"use_responses_api": False})
         assert isinstance(m, OpenAICompatibleModel)
         m.initialize("placeholder")
         m.conversation = copy.deepcopy(_GEMINI_STYLE_CONVERSATION) + [
