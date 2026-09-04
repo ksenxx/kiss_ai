@@ -326,11 +326,31 @@ async function runFinalization(
     installCliScript(kissProjectPath, uvPath);
   }
 
-  log(
-    'MODEL_INFO.json and INJECTIONS.md are read directly from the bundled ' +
-      'package; no copies are made into ~/.kiss/ (user overrides live in ' +
-      'MY_MODELS.json and MY_INJECTION.md).',
-  );
+  // Refresh the user-local model catalog from the freshly installed
+  // bundle: an installed KISS Sorcar reads $KISS_HOME/MODEL_INFO.json at
+  // runtime (kiss.core.models.model_info._select_catalog_path), and the
+  // settings panel's "Update Models" button updates that copy in place.
+  // INJECTIONS.md stays bundled-only (user overrides live in
+  // MY_MODELS.json and MY_INJECTION.md).
+  try {
+    const modelInfoSrc = path.join(
+      kissProjectPath,
+      'src',
+      'kiss',
+      'core',
+      'models',
+      'MODEL_INFO.json',
+    );
+    const modelInfoDst = path.join(kissHomeDir(), 'MODEL_INFO.json');
+    fs.mkdirSync(kissHomeDir(), {recursive: true});
+    fs.copyFileSync(modelInfoSrc, modelInfoDst);
+    log(`Copied MODEL_INFO.json to ${modelInfoDst}`);
+  } catch (err) {
+    log(
+      `Failed to copy MODEL_INFO.json into ${kissHomeDir()}: ` +
+        `${err instanceof Error ? err.message : err}`,
+    );
+  }
 
   if (progress) progress.report({message: 'Checking cloudflared...'});
   await installCloudflaredIfNeeded();

@@ -2493,6 +2493,7 @@
   const worktreeToggleBtn = document.getElementById('cfg-use-worktree');
   const autocommitBtn = document.getElementById('autocommit-btn');
   const updateBtn = document.getElementById('cfg-update-btn');
+  const updateModelsBtn = document.getElementById('cfg-update-models-btn');
   const serverResetBtn = document.getElementById('cfg-server-reset-btn');
   const serverResetConfirmModal = document.getElementById(
     'server-reset-confirm-modal',
@@ -8825,6 +8826,14 @@
         e.preventDefault();
         e.stopPropagation();
         api.runUpdate();
+      });
+    }
+
+    if (updateModelsBtn) {
+      updateModelsBtn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        api.updateModels();
       });
     }
 
