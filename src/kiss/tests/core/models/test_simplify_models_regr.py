@@ -92,7 +92,13 @@ def test_model_routing_by_prefix() -> None:
     assert type(model("text-embedding-004")).__name__ == "OpenAICompatibleModel"
     for name in ("gpt-4o", "openrouter/foo/bar", "glm-4", "kimi-k2", "moonshot-v1",
                  "meta-llama/Llama-3", "Qwen/qwen-x", "o3-mini"):
-        assert type(model(name)).__name__ == "OpenAICompatibleModel", name
+        info = MODEL_INFO.get(name)
+        expected = (
+            "OpenAICompatibleModel2"
+            if info is not None and info.use_responses_api is True
+            else "OpenAICompatibleModel"
+        )
+        assert type(model(name)).__name__ == expected, name
 
 
 def test_model_base_url_override_bypasses_routing() -> None:
