@@ -36,7 +36,6 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-import kiss.server.server as _server_module
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
@@ -56,15 +55,8 @@ class TestFailureBannerMetricsAreDeltas(unittest.TestCase):
 
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
-        self._orig_followup = _server_module.generate_followup_text
-
-        def fake_followup(task: str, result: str, model: str) -> str:
-            return ""
-
-        _server_module.generate_followup_text = fake_followup  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        _server_module.generate_followup_text = self._orig_followup
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

@@ -114,11 +114,14 @@ class TestTaskEndEventOrdering(unittest.TestCase):
             "model": "claude-opus-4-6", "workDir": self.tmpdir,
             "tabId": "0", "useWorktree": False, "autoCommit": True,
         })
+        # 60 s (not 10 s): a stubbed task takes ~2-3 s alone but far
+        # longer when the suite runs as ~30 concurrent pytest splits; a
+        # genuine hang (the bug this file guards) still fails the join.
         t = _tab_task_thread("0")
         if t is not None:
-            t.join(timeout=10)
+            t.join(timeout=60)
             assert not t.is_alive()
-        deadline = time.time() + 10
+        deadline = time.time() + 60
         while time.time() < deadline:
             with self.lock:
                 done = sum(
@@ -181,7 +184,7 @@ class TestTaskEndEventPersistence(unittest.TestCase):
             })
             t = _tab_task_thread("0")
             assert t is not None
-            t.join(timeout=10)
+            t.join(timeout=60)
         finally:
             parent.run = saved
             self.original_run = _patch_run()
@@ -268,7 +271,7 @@ class TestPeriodicEventFlush(unittest.TestCase):
             resume.set()
             t = _tab_task_thread("0")
             assert t is not None
-            t.join(timeout=10)
+            t.join(timeout=60)
         finally:
             parent.run = saved_run
 

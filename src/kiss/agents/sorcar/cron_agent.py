@@ -522,11 +522,9 @@ def _run_prompt_job(
             "(the task keeps running in the daemon)"
         )
     except OSError as e:
-        sock = (
-            sock_path
-            or os.environ.get("KISS_SORCAR_SOCK")
-            or str(kiss_home() / "sorcar.sock")
-        )
+        # Name the exact socket the client resolved (same precedence
+        # rules, same helper) instead of re-deriving it here.
+        sock = daemon_client._resolve_sock_path(sock_path)
         return "error", (
             f"cannot reach the kiss-web daemon at {sock}: {e} "
             "(prompt jobs need a running kiss-web daemon; "

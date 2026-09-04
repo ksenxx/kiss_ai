@@ -6,17 +6,12 @@
 
 from __future__ import annotations
 
-import logging
-
 # ``generate_commit_message_from_diff`` is re-exported: production
 # callers (``server.py``, ``merge_flow.py``) import it from here.
 from kiss.agents.sorcar.commit_message import (
-    _run_oneshot_llm,
     generate_commit_message_from_diff,  # noqa: F401 — re-exported
 )
 from kiss.core.models.model_info import _OPENAI_PREFIXES
-
-logger = logging.getLogger(__name__)
 
 
 def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
@@ -99,34 +94,6 @@ def model_vendor(name: str) -> tuple[str, int]:
     if name.startswith("openrouter/"):
         return "OpenRouter", 5
     return "Together AI", 6
-
-
-def generate_followup_text(task: str, result: str, model: str) -> str:
-    """Generate a follow-up task suggestion via LLM.
-
-    Args:
-        task: The completed task description.
-        result: The task result summary.
-        model: The model to use for generation.
-
-    Returns:
-        Suggestion text, or empty string on failure.
-    """
-    return _run_oneshot_llm(
-        agent_name="Followup Proposer",
-        prompt_template=(
-            "A developer just completed this task:\n"
-            "Task: {task}\n"
-            "Result summary: {result}\n\n"
-            "Suggest ONE short, concrete follow-up task they "
-            "might want to do next. Return ONLY the task "
-            "description as a single plain-text sentence."
-        ),
-        arguments={"task": task, "result": result},
-        model=model,
-        fallback="",
-        failure_log="Followup generation failed",
-    )
 
 
 SUGGESTION_LIMIT = 20

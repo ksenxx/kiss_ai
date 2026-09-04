@@ -274,6 +274,7 @@ class ChatSorcarAgent(SorcarAgent):
         is_parallel: bool,
         is_worktree: bool,
         max_budget: float | None = None,
+        auto_commit_mode: bool = True,
     ) -> dict[str, object]:
         """Build the task-history "extra" payload for persistence.
 
@@ -289,6 +290,12 @@ class ChatSorcarAgent(SorcarAgent):
             is_worktree: Whether worktree isolation is in effect.
             max_budget: The run's resolved budget cap in USD, or None
                 to omit it from the payload.
+            auto_commit_mode: The run's effective auto-commit toggle.
+                ``persistence._add_task`` maps an ABSENT toggle to
+                manual-commit while the schema default is ON, so the
+                early row must always carry the real value or a task
+                viewed mid-run (killed, or running in another process)
+                is labelled manual-commit.
 
         Returns:
             The extra-payload dict.
@@ -299,6 +306,7 @@ class ChatSorcarAgent(SorcarAgent):
             "version": __version__,
             "is_parallel": is_parallel,
             "is_worktree": is_worktree,
+            "auto_commit_mode": auto_commit_mode,
         }
         if max_budget is not None:
             payload["max_budget"] = max_budget
@@ -396,12 +404,14 @@ class ChatSorcarAgent(SorcarAgent):
         chat webview would load a blank session even though the task and
         its result are in ``task_history``.
 
-        This synthesizes the two events the webview needs to render the
-        exchange — a ``prompt`` event (the user's task) and a ``result``
-        event (the agent's summary / success / cost) — but only when the
-        task has no transcript events yet (the run's ``task_settings``
-        metadata event, persisted before any output, is ignored), so a
-        recording printer's full event stream is never duplicated.
+        This synthesizes the events the webview needs to render the
+        exchange — a ``prompt`` event (the user's task), a ``result``
+        event (the agent's summary / success / cost) and, when the agent
+        proposed one via ``finish(suggested_next_task=...)``, a
+        ``followup_suggestion`` event — but only when the task has no
+        transcript events yet (the run's ``task_settings`` metadata
+        event, persisted before any output, is ignored), so a recording
+        printer's full event stream is never duplicated.
 
         Args:
             task_id: Stable ``task_history`` row id for this run.
@@ -434,6 +444,11 @@ class ChatSorcarAgent(SorcarAgent):
         else:
             event["summary"] = result_summary or ""
         _append_chat_event(event, task_id=task_id)
+        suggestion = str((parsed or {}).get("suggested_next_task") or "").strip()
+        if suggestion:
+            _append_chat_event(
+                {"type": "followup_suggestion", "text": suggestion}, task_id=task_id,
+            )
 
     def run(  # type: ignore[override]
         self,
@@ -500,6 +515,11 @@ class ChatSorcarAgent(SorcarAgent):
         )
         resolved_work_dir = str(Path(kwargs.get("work_dir") or ".").resolve())
         run_is_parallel = bool(kwargs.get("is_parallel", True))
+        # The effective toggle: ``WorktreeSorcarAgent.run`` binds
+        # ``auto_commit_enabled`` from its kwarg / config BEFORE
+        # delegating here; this class has no toggle, and absent means
+        # ON (schema default + legacy migration).
+        auto_commit_mode = bool(getattr(self, "auto_commit_enabled", True))
         start_ts_ms = int(time.time() * 1000)
 
         early_extra = self._build_extra_payload(
@@ -508,6 +528,7 @@ class ChatSorcarAgent(SorcarAgent):
             is_parallel=run_is_parallel,
             is_worktree=is_worktree,
             max_budget=resolved_budget,
+            auto_commit_mode=auto_commit_mode,
         )
         early_extra["startTs"] = start_ts_ms
 
@@ -520,6 +541,13 @@ class ChatSorcarAgent(SorcarAgent):
         task_key = str(task_id)
         result_summary = ""
         result_raw = ""
+        # Whether ``super().run`` was reached.  Until then every live
+        # field the final save would read — ``_launch_model_name``,
+        # ``model_name``, ``_is_parallel``, the usage counters — is
+        # either unset (fresh agent) or the PREVIOUS run's (reused
+        # agent), so the final save must fall back to this run's
+        # resolved settings and zero usage.
+        run_started = False
         # Every remaining setup step (state registration, printer
         # wiring, frequent-task recording, ...) must run inside the try
         # below: an exception in any of them would otherwise bypass the
@@ -596,6 +624,7 @@ class ChatSorcarAgent(SorcarAgent):
             if self._subagent_info is None:
                 _record_frequent_task(prompt_template)
 
+            run_started = True
             result = super().run(prompt_template=agent_prompt, **kwargs)
             result_raw = result if isinstance(result, str) else ""
             result_summary = _extract_result_summary(result)
@@ -630,32 +659,42 @@ class ChatSorcarAgent(SorcarAgent):
                     tl.task_id = ""
             if not skip_persistence:
                 _save_task_result(task_id=task_id, result=result_summary)
-                # getattr defaults: when setup failed BEFORE super().run
-                # ran _reset (e.g. a broken printer hook), the usage
-                # fields do not exist yet; the persistence path must not
-                # raise from this finally and mask the original error.
-                extra_payload = self._build_extra_payload(
-                    model=(
+                # Once ``super().run`` started, the live agent state is
+                # this run's (``_reset`` resolved the model and zeroed
+                # the counters); before that point it is unset or the
+                # previous run's, so the row keeps this run's resolved
+                # settings and records no usage — a task that never ran
+                # spent nothing.  The per-run resolved work_dir and
+                # budget are used either way: ``_reset`` sets the
+                # attributes to exactly these values on success, and
+                # ``self.work_dir`` / ``self.max_budget`` would otherwise
+                # carry a blank or the previous run's directory/budget
+                # into this row.
+                if run_started:
+                    final_model = (
                         getattr(self, "_launch_model_name", "")
                         or getattr(self, "model_name", "")
                         or resolved_model
-                    ),
-                    work_dir=self.work_dir,
-                    is_parallel=self._is_parallel,
+                    )
+                    final_is_parallel = self._is_parallel
+                    final_tokens = int(getattr(self, "total_tokens_used", 0) or 0)
+                    final_cost = float(getattr(self, "budget_used", 0.0) or 0.0)
+                    final_steps = int(getattr(self, "total_steps", 0) or 0)
+                else:
+                    final_model = resolved_model
+                    final_is_parallel = run_is_parallel
+                    final_tokens, final_cost, final_steps = 0, 0.0, 0
+                extra_payload = self._build_extra_payload(
+                    model=final_model,
+                    work_dir=resolved_work_dir,
+                    is_parallel=final_is_parallel,
                     is_worktree=is_worktree,
-                    # The per-run resolved value, NOT ``self.max_budget``:
-                    # on a reused agent whose setup failed before
-                    # ``_reset``, the attribute still holds the PREVIOUS
-                    # run's budget.  ``_reset`` sets the attribute to
-                    # exactly this value, so nothing is lost on success.
                     max_budget=resolved_budget,
+                    auto_commit_mode=auto_commit_mode,
                 )
-                extra_payload["tokens"] = int(
-                    getattr(self, "total_tokens_used", 0) or 0
-                )
-                extra_payload["cost"] = round(
-                    float(getattr(self, "budget_used", 0.0) or 0.0), 6
-                )
+                extra_payload["tokens"] = final_tokens
+                extra_payload["cost"] = round(final_cost, 6)
+                extra_payload["steps"] = final_steps
                 _save_task_extra(extra_payload, task_id=task_id)
                 self._persist_replay_events_if_missing(
                     task_id=task_id,

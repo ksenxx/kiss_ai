@@ -31,7 +31,6 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
-import kiss.server.server as _server_module
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.kiss_error import KISSError
 from kiss.server import agent_state
@@ -181,13 +180,6 @@ class TestSingleFailureResultBroadcast(unittest.TestCase):
 
         self.server.printer.broadcast = recording_broadcast  # type: ignore[assignment]
 
-        self._orig_followup = _server_module.generate_followup_text
-
-        def fake_followup(task: str, result: str, model: str) -> str:
-            return ""
-
-        _server_module.generate_followup_text = fake_followup  # type: ignore[assignment]
-
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
 
@@ -198,7 +190,6 @@ class TestSingleFailureResultBroadcast(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._parent_class.run = self._original_run
-        _server_module.generate_followup_text = self._orig_followup
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
