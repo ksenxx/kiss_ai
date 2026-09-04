@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
-from kiss.agents.sorcar._concurrency import _fcntl, _race_delay
+from kiss.agents.sorcar._concurrency import _fcntl, _race_delay, pid_alive
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,18 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
 
 _repo_locks: dict[str, threading.RLock] = {}
 _repo_locks_guard = threading.Lock()
+
+# ``(resolved repo root, branch)`` pairs whose keep-for-review decision
+# is held in THIS process only: :meth:`GitWorktreeOps.save_preserve_marker`
+# could not write the durable ``kiss-preserve`` marker (e.g.
+# ``.git/config.lock`` held by another git process).  Recorded on every
+# failed write and dropped by the next successful one, so
+# :meth:`GitWorktreeOps.load_preserve_marker` — and through it every
+# same-process :meth:`GitWorktreeOps.reclaim_orphaned_worktrees`, whose
+# owner-pid protection deliberately exempts this process — treats the
+# branch as preserved until the marker really is on disk.
+_volatile_preserve_claims: set[tuple[str, str]] = set()
+_volatile_preserve_guard = threading.Lock()
 
 _REPO_SCOPED_GIT_ENV = (
     "GIT_DIR",
@@ -365,6 +377,16 @@ _RESCUE_SKIP_COMPONENTS = frozenset({
     ".DS_Store",
 })
 
+# Repo-local (info/exclude) ignore pattern covering every collision
+# sibling the rescue can generate — ``<stem>.kiss-rescued-<ns><ext>``
+# and ``<name>.kiss-rescued-<ns>`` alike.  Extension preservation alone
+# cannot keep every original rule matching (``model.tar.gz`` →
+# ``model.tar.kiss-rescued-<ns>.gz`` no longer matches ``*.tar.gz``,
+# and no sibling of ``.env`` can match the exact-name ``.env`` rule),
+# so this pattern is the actual keep-it-ignored guarantee (see
+# :meth:`GitWorktreeOps.rescue_ignored_files`).
+_RESCUE_EXCLUDE_PATTERN = "*.kiss-rescued-*"
+
 
 def _same_path(left: Path, right: Path) -> bool:
     """Return True when both paths denote the same directory.
@@ -603,13 +625,50 @@ class GitWorktreeOps:
             branch: New branch name to create.
             wt_dir: Directory for the new worktree.
 
+        The new worktree is registered with ``git worktree add`` and
+        stamped with this process's pid (:meth:`save_owner_pid`) under
+        the cross-process reclaim lock (:func:`_reclaim_process_lock`).
+        ``repo_lock`` only serialises threads of ONE process, so a
+        second Sorcar process running
+        :meth:`reclaim_orphaned_worktrees` in between the two steps
+        used to find a registered ``kiss/wt-*`` worktree with no owner
+        and no ``kiss-original`` config, treat it as a legacy orphan,
+        and squash-merge (a no-op) and DELETE it under the process
+        that was about to run a task — or hand a pool spare to a task
+        — in it.  Holding the reclaim lock across both steps means a
+        concurrent reclaim either finishes before the worktree exists
+        or sees it already owned by a live pid and skips it.
+
+        The owner stamp is part of a successful creation, not a
+        best-effort extra: a worktree returned without it (``git
+        config`` failed — e.g. another git process held
+        ``.git/config.lock``) would be exactly the owner-less "legacy
+        orphan" a peer process deletes the moment the lock above is
+        released.  So a failed stamp removes the just-added worktree
+        and branch — still under the reclaim lock — and reports
+        failure, and the caller falls back the same way it does for a
+        failed ``worktree add``.
+
         Returns:
-            True if worktree was created successfully, False otherwise.
+            True if the worktree was created AND stamped with this
+            process's pid, False otherwise (nothing is left on disk).
         """
-        result = _git("worktree", "add", "-b", branch, str(wt_dir), cwd=repo)
-        if result.returncode != 0:
-            logger.warning("Failed to create worktree: %s", result.stderr.strip())
-            return False
+        with _reclaim_process_lock(repo):
+            result = _git("worktree", "add", "-b", branch, str(wt_dir), cwd=repo)
+            if result.returncode != 0:
+                logger.warning(
+                    "Failed to create worktree: %s", result.stderr.strip(),
+                )
+                return False
+            if not GitWorktreeOps.save_owner_pid(repo, branch):
+                logger.warning(
+                    "Removing freshly created worktree %s: its owner pid "
+                    "could not be recorded, so another process's reclaim "
+                    "would delete it under this one",
+                    wt_dir,
+                )
+                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                return False
         return True
 
     @staticmethod
@@ -1342,6 +1401,12 @@ class GitWorktreeOps:
         publish that preserved work — the persisted marker makes
         that decision durable across process restarts.
 
+        When the write fails the decision is recorded in the process-
+        local :data:`_volatile_preserve_claims` instead, so within this
+        process :meth:`load_preserve_marker` already reports the branch
+        as preserved; the caller keeps its in-memory claim and retries
+        later, and the successful retry drops the volatile record.
+
         Args:
             repo: Git repo root path.
             branch: The worktree branch name.
@@ -1349,16 +1414,31 @@ class GitWorktreeOps:
         Returns:
             True if the marker was saved successfully.
         """
-        return GitWorktreeOps._save_branch_config(
+        key = (str(repo.resolve()), branch)
+        saved = GitWorktreeOps._save_branch_config(
             repo, branch, "kiss-preserve", "1", "preserve-for-review marker",
         )
+        with _volatile_preserve_guard:
+            if saved:
+                _volatile_preserve_claims.discard(key)
+            else:
+                _volatile_preserve_claims.add(key)
+        return saved
 
     @staticmethod
     def load_preserve_marker(repo: Path, branch: str) -> bool:
-        """Return True when *branch* carries a preserve-for-review marker."""
-        return GitWorktreeOps._load_branch_config(
+        """Return True when *branch* is preserved for manual review.
+
+        Either the durable ``kiss-preserve`` marker is on disk, or this
+        process holds a volatile claim for *branch* because its marker
+        write failed (see :meth:`save_preserve_marker`).
+        """
+        if GitWorktreeOps._load_branch_config(
             repo, branch, "kiss-preserve",
-        ) == "1"
+        ) == "1":
+            return True
+        with _volatile_preserve_guard:
+            return (str(repo.resolve()), branch) in _volatile_preserve_claims
 
     @staticmethod
     def save_owner_pid(repo: Path, branch: str) -> bool:
@@ -1404,28 +1484,16 @@ class GitWorktreeOps:
     def _pid_alive(pid: int) -> bool:
         """Whether a process with *pid* is currently running.
 
-        ``os.kill(pid, 0)`` sends no signal but performs the existence
-        and permission checks: ``ProcessLookupError`` means dead,
-        ``PermissionError`` means alive under another user.  Any other
-        failure is reported as alive — the safe direction, since the
-        caller skips (never destroys) worktrees of live owners.
+        Thin alias of the shared :func:`pid_alive` probe (kept for
+        callers and tests that address it through this class).
 
         Args:
             pid: The process id to probe.
 
         Returns:
-            True when the process exists (or existence could not be
-            ruled out), False when it is definitely gone.
+            True when the process exists, False when it is gone.
         """
-        if pid <= 0:
-            return False
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except OSError:  # pragma: no cover — permission or platform
-            return True
-        return True
+        return pid_alive(pid)
 
     @staticmethod
     def save_spare_marker(repo: Path, branch: str) -> bool:
@@ -1519,6 +1587,39 @@ class GitWorktreeOps:
         return [f for f in result.stdout.split("\0") if f]
 
     @staticmethod
+    def spare_has_content(repo: Path, branch: str, wt_dir: Path) -> bool:
+        """Whether a pool spare worktree holds anything worth preserving.
+
+        The framework never writes into a spare (see
+        :mod:`kiss.agents.sorcar.worktree_pool`), so content in one
+        means an external writer put it there — and every path that
+        would destroy a spare (consuming it, discarding the pool,
+        reclaiming an orphaned spare) must apply the SAME probe and
+        preserve it instead.  ``list_ignored_files`` is part of the
+        probe because porcelain status omits ignored files: a fresh
+        spare checkout has none, so any present were written
+        externally.  ``None`` (git could not enumerate them) counts as
+        content — unenumerable state is preserved, never destroyed.
+
+        Args:
+            repo: Git repo root path.
+            branch: The spare's ``kiss/wt-*`` branch name.
+            wt_dir: The spare's worktree directory.
+
+        Returns:
+            True when the spare has uncommitted changes, ignored files
+            (or they could not be listed), or commits unique to its
+            branch; False when it is contentless plumbing.
+        """
+        ignored = GitWorktreeOps.list_ignored_files(wt_dir)
+        return (
+            GitWorktreeOps.has_uncommitted_changes(wt_dir)
+            or ignored is None
+            or bool(ignored)
+            or not GitWorktreeOps._branch_is_expendable(repo, branch)
+        )
+
+    @staticmethod
     def rescue_ignored_files(wt_dir: Path, repo: Path) -> tuple[int, bool]:
         """Copy task-created git-ignored files from *wt_dir* into *repo*.
 
@@ -1541,8 +1642,17 @@ class GitWorktreeOps:
           existing destination's bytes already equal the worktree's,
           nothing is lost and the file is skipped; when they differ,
           the worktree's version is landed NEXT TO it under a
-          ``<name>.kiss-rescued-<ns>`` sibling name so neither copy is
-          lost.
+          ``<stem>.kiss-rescued-<ns><ext>`` sibling name so neither copy is
+          lost.  Because a sibling name can stop matching the ignore
+          rule that covered the original (compound suffixes, exact
+          names), a :data:`_RESCUE_EXCLUDE_PATTERN` entry is appended
+          (idempotently) to the destination's local
+          ``info/exclude`` BEFORE anything is landed, so no sibling
+          can ever be swept up by a later ``git add -A``.  When that
+          exclusion cannot be written, the rescue still proceeds
+          (preserving the only copy outranks ignore hygiene) and each
+          landed sibling is verified with ``git check-ignore``,
+          warning about any that are no longer ignored.
         * Landing is atomic: the source is hard-linked into place
           (``os.link`` fails on an existing path and never follows a
           symlink), so a racing main-tree writer can neither be
@@ -1582,12 +1692,21 @@ class GitWorktreeOps:
                 wt_dir,
             )
             return (0, False)
+        candidates = [
+            rel for rel in ignored
+            if not any(
+                p in _RESCUE_SKIP_COMPONENTS for p in Path(rel).parts
+            )
+        ]
+        # The exclusion must be in place BEFORE anything lands: a
+        # collision sibling is auto-commit bait from the instant it
+        # exists (see _RESCUE_EXCLUDE_PATTERN).
+        exclude_ok = not candidates or (
+            GitWorktreeOps._ensure_rescue_sibling_excluded(repo)
+        )
         rescued = 0
         ok = True
-        for rel in ignored:
-            parts = Path(rel).parts
-            if any(p in _RESCUE_SKIP_COMPONENTS for p in parts):
-                continue
+        for rel in candidates:
             src = wt_dir / rel
             dst = repo / rel
             try:
@@ -1599,8 +1718,11 @@ class GitWorktreeOps:
                     )
                     ok = False
                     continue
-                if GitWorktreeOps._land_rescued_file(src, dst):
+                landed = GitWorktreeOps._land_rescued_file(src, dst)
+                if landed is not None:
                     rescued += 1
+                    if not exclude_ok and ".kiss-rescued-" in landed.name:
+                        GitWorktreeOps._warn_unignored_sibling(repo, landed)
             except OSError:
                 logger.warning(
                     "Failed to rescue ignored file %s into %s",
@@ -1613,6 +1735,73 @@ class GitWorktreeOps:
                 rescued, wt_dir, repo,
             )
         return (rescued, ok)
+
+    @staticmethod
+    def _ensure_rescue_sibling_excluded(repo: Path) -> bool:
+        """Install the local ignore rule for rescue-sibling names in *repo*.
+
+        Appends :data:`_RESCUE_EXCLUDE_PATTERN` (idempotently, under
+        the per-repo and file locks of ``_append_info_line``) to the
+        destination repository's ``<git_common_dir>/info/exclude`` —
+        the same file ``git rev-parse --git-path info/exclude``
+        resolves to, correct for linked worktrees and submodules whose
+        ``.git`` is a file, and never a tracked file of the user's
+        repo.  The rescue only ever lands files git IGNORES, so every
+        collision sibling must stay ignored too, or the next
+        auto-commit's ``git add -A`` would commit it as a tracked
+        artifact; this pattern is that guarantee, since
+        extension-preserving sibling naming alone cannot keep
+        compound-suffix (``*.tar.gz``) or exact-name (``.env``) rules
+        matching.
+
+        Args:
+            repo: The rescue destination repository root.
+
+        Returns:
+            True when the pattern is present (just installed or
+            already there); False when it could not be written — the
+            caller then falls back to verifying each landed sibling
+            with ``git check-ignore``.
+        """
+        try:
+            GitWorktreeOps._append_info_line(
+                repo, "exclude", _RESCUE_EXCLUDE_PATTERN,
+            )
+            return True
+        except OSError:
+            logger.warning(
+                "Cannot install the %s rescue-sibling exclusion in "
+                "%s's info/exclude; falling back to per-file "
+                "check-ignore verification",
+                _RESCUE_EXCLUDE_PATTERN, repo, exc_info=True,
+            )
+            return False
+
+    @staticmethod
+    def _warn_unignored_sibling(repo: Path, landed: Path) -> None:
+        """Warn when the landed collision sibling *landed* is not ignored.
+
+        Only reached when the :data:`_RESCUE_EXCLUDE_PATTERN`
+        exclusion could not be written: the sibling then relies solely
+        on its preserved extension matching the original ignore rule,
+        which holds for simple suffixes (``*.log``) but fails for
+        compound suffixes (``*.tar.gz``) and exact names (``.env``).
+        The rescue still proceeds either way — preserving the only
+        copy of task output outranks ignore hygiene — but an unignored
+        sibling is auto-commit bait, so it must at least be reported.
+
+        Args:
+            repo: The rescue destination repository root.
+            landed: The just-landed ``.kiss-rescued-`` sibling path.
+        """
+        check = _git("check-ignore", "-q", "--", str(landed), cwd=repo)
+        if check.returncode == 0:
+            return
+        logger.warning(
+            "Rescued sibling %s is NOT git-ignored (the rescue "
+            "exclusion could not be installed); a later `git add -A` "
+            "may commit it", landed,
+        )
 
     @staticmethod
     def _rescue_dst_contained(dst: Path, repo: Path) -> bool:
@@ -1645,7 +1834,7 @@ class GitWorktreeOps:
             return False
 
     @staticmethod
-    def _land_rescued_file(src: Path, dst: Path) -> bool:
+    def _land_rescued_file(src: Path, dst: Path) -> Path | None:
         """Place *src* at *dst* without overwriting or following links.
 
         Symlink sources are recreated with ``os.symlink`` (atomic,
@@ -1655,15 +1844,16 @@ class GitWorktreeOps:
         exclusive-create copy is used.  An existing destination with
         identical bytes counts as already safe; one with different
         bytes gets the worktree's version landed under a
-        ``<name>.kiss-rescued-<ns>`` sibling so neither copy is lost.
+        ``<stem>.kiss-rescued-<ns><ext>`` sibling so neither copy is lost.
 
         Args:
             src: The worktree file to preserve.
             dst: The main-repo destination path.
 
         Returns:
-            True when a new file was landed, False when the file was
-            already safe (identical or non-file source).
+            The path the file was landed at (*dst* itself or a
+            collision sibling), or None when the file was already safe
+            (identical or non-file source) and nothing was landed.
 
         Raises:
             OSError: When the file could not be landed at all (the
@@ -1678,30 +1868,31 @@ class GitWorktreeOps:
                     dst.is_symlink()
                     and os.readlink(dst) == os.readlink(src)
                 ):
-                    return False
+                    return None
                 dst = GitWorktreeOps._rescued_sibling(dst)
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
             os.symlink(os.readlink(src), dst)
-            return True
+            return dst
         if not src.is_file():
-            return False
+            return None
         if dst.is_symlink() or dst.exists():
             if dst.is_file() and not dst.is_symlink() and filecmp.cmp(
                 str(src), str(dst), shallow=False,
             ):
-                return False
+                return None
             dst = GitWorktreeOps._rescued_sibling(dst)
         else:
             dst.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.link(src, dst)
-            return True
+            return dst
         except FileExistsError:
             # A racing writer created dst between the check and the
             # link; its file wins, ours lands beside it.
-            os.link(src, GitWorktreeOps._rescued_sibling(dst))
-            return True
+            sibling = GitWorktreeOps._rescued_sibling(dst)
+            os.link(src, sibling)
+            return sibling
         except OSError:
             # Filesystem without hard-link support: exclusive-create
             # copy (never follows a symlink, never overwrites).
@@ -1715,17 +1906,32 @@ class GitWorktreeOps:
                 dst.unlink(missing_ok=True)
                 raise
             shutil.copystat(str(src), str(dst))
-            return True
+            return dst
 
     @staticmethod
     def _rescued_sibling(dst: Path) -> Path:
-        """Return a unique ``<name>.kiss-rescued-<ns>`` sibling of *dst*.
+        """Return a unique ``<stem>.kiss-rescued-<ns><ext>`` sibling of *dst*.
 
         Used when *dst* already exists with different content: the
         user's file keeps its name, the worktree's version is
         preserved beside it instead of being silently dropped.
+
+        The marker goes BEFORE the extension (``app.log`` becomes
+        ``app.kiss-rescued-<ns>.log``) so non-git tooling keyed on the
+        extension — and single-suffix ``.gitignore`` rules like
+        ``*.log`` — still recognize the sibling.  Extensionless names
+        (``.env``, ``README``) keep the old ``<name>.kiss-rescued-<ns>``
+        shape.  Naming alone is NOT what keeps the sibling ignored:
+        compound-suffix (``*.tar.gz``) and exact-name (``.env``) rules
+        cannot survive any rename, so
+        :meth:`_ensure_rescue_sibling_excluded` installs the
+        :data:`_RESCUE_EXCLUDE_PATTERN` local exclusion — matching
+        every shape produced here — before the rescue lands anything.
         """
-        return dst.with_name(f"{dst.name}.kiss-rescued-{time.time_ns()}")
+        return dst.with_name(
+            f"{dst.name.removesuffix(dst.suffix)}"
+            f".kiss-rescued-{time.time_ns()}{dst.suffix}"
+        )
 
     @staticmethod
     def clean_untracked(wt_dir: Path) -> bool:
@@ -2106,6 +2312,17 @@ class GitWorktreeOps:
         Checking reachability from *all* other refs is both stricter
         and cheaper than replaying the merge.
 
+        ``--single-worktree`` matters: without it ``--all`` also lists
+        the ``HEAD`` of every linked worktree, and a branch that is
+        checked out in one (every pool spare, every live task
+        worktree) is trivially "reachable" from its own worktree's
+        HEAD — so a spare carrying an external commit was reported
+        expendable and ``take_spare`` / ``discard_all`` / the reclaim
+        pass destroyed that commit (``reset --hard``, ``branch -D``).
+        Only the current working tree's HEAD is a genuinely *other*
+        ref; the caller's ``checked_out_branches`` / ``_same_path``
+        guards already keep that one out of the question.
+
         Args:
             repo: Git repo root path.
             branch: Branch name to test.
@@ -2119,6 +2336,7 @@ class GitWorktreeOps:
             "--max-count=1",
             branch,
             "--not",
+            "--single-worktree",
             "--exclude=refs/heads/" + branch,
             "--all",
             cwd=repo,
@@ -2250,9 +2468,14 @@ class GitWorktreeOps:
 
         * The branch is in *exclude_branches* (caller's live-agent
           set — e.g. the current task's own worktree).
-        * The saved ``kiss-original`` config is missing (unknown
-          merge target).
-        * The saved original branch no longer exists in the repo.
+        * The saved ``kiss-owner-pid`` names a process other than this
+          one that is still alive (a daemon's or CLI run's live task
+          worktree or pooled spare); this is tested before every
+          destructive branch below, including the spare discard.
+        * The saved original branch no longer exists in the repo.  (A
+          MISSING ``kiss-original`` config — a legacy worktree — is
+          not a reason to skip: the main tree's current branch is used
+          as the merge target, guarded by the rules below.)
         * The main tree's current branch differs from the saved
           original branch (reclaim never checks out for the user).
         * The main tree's current HEAD is detached.
@@ -2317,6 +2540,32 @@ class GitWorktreeOps:
                     # so this branch is only reachable on an rm-vs-
                     # iteration race with an external process.
                     continue
+                owner_pid = GitWorktreeOps.load_owner_pid(repo, branch)
+                if (
+                    owner_pid is not None
+                    and owner_pid != os.getpid()
+                    and GitWorktreeOps._pid_alive(owner_pid)
+                ):
+                    # Another Sorcar process (daemon vs. CLI) owns this
+                    # worktree and is still alive: its task may be
+                    # running right now — or its pool is holding this
+                    # spare for the next task — and this process's
+                    # exclusion set cannot see either.  Reclaiming
+                    # would auto-commit, merge, and delete (or, for a
+                    # spare, simply delete) a LIVE worktree under its
+                    # owner.  Checked BEFORE the spare-marker branch,
+                    # which destroys unconditionally.  Our own pid is
+                    # exempt: within this process the exclusion set is
+                    # authoritative for live tasks and spares, and
+                    # ``load_preserve_marker`` below also honours the
+                    # process-local claims of kept worktrees whose
+                    # marker write failed.
+                    logger.info(
+                        "Skipping orphan-worktree reclaim of %s: "
+                        "owning process %d is still alive",
+                        wt_dir, owner_pid,
+                    )
+                    continue
                 if GitWorktreeOps.load_spare_marker(repo, branch):
                     # A pool spare (created by worktree_pool, never
                     # yet given to a task) is contentless plumbing:
@@ -2325,20 +2574,7 @@ class GitWorktreeOps:
                     # so the no-config merge fallback below would
                     # squash that snapshot into the CURRENT branch
                     # even after the user switched branches.
-                    # ``list_ignored_files`` is part of the content
-                    # probe because porcelain status omits ignored
-                    # files — a fresh spare checkout has none, so any
-                    # present were written externally.  ``None``
-                    # (git failure) counts as content: unenumerable
-                    # state must be preserved, never destroyed.
-                    ignored = GitWorktreeOps.list_ignored_files(wt_dir)
-                    if GitWorktreeOps.has_uncommitted_changes(
-                        wt_dir,
-                    ) or ignored is None or ignored or (
-                        not GitWorktreeOps._branch_is_expendable(
-                            repo, branch,
-                        )
-                    ):
+                    if GitWorktreeOps.spare_has_content(repo, branch, wt_dir):
                         # A spare is never written to, so content here
                         # means something external happened; preserve
                         # rather than destroy.
@@ -2361,25 +2597,6 @@ class GitWorktreeOps:
                         "Skipping orphan-worktree reclaim of %s: "
                         "branch '%s' is marked preserve-for-review",
                         wt_dir, branch,
-                    )
-                    continue
-                owner_pid = GitWorktreeOps.load_owner_pid(repo, branch)
-                if (
-                    owner_pid is not None
-                    and owner_pid != os.getpid()
-                    and GitWorktreeOps._pid_alive(owner_pid)
-                ):
-                    # Another Sorcar process (daemon vs. CLI) owns this
-                    # worktree and is still alive: its task may be
-                    # running right now, and this process's exclusion
-                    # set cannot see it.  Reclaiming would auto-commit,
-                    # merge, and delete a LIVE worktree under its
-                    # owner.  Our own pid is exempt: within this
-                    # process the exclusion set is authoritative.
-                    logger.info(
-                        "Skipping orphan-worktree reclaim of %s: "
-                        "owning process %d is still alive",
-                        wt_dir, owner_pid,
                     )
                     continue
                 original_branch = GitWorktreeOps.load_original_branch(

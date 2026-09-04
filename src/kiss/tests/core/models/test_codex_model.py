@@ -16,7 +16,9 @@ from kiss.core.models.codex_model import (
     _find_in_candidate_paths,
     find_codex_executable,
 )
+from kiss.core.models.model import CLI_SYSTEM_PROMPT_HEADER
 from kiss.core.models.model_info import MODEL_INFO, model
+from kiss.scripts.update_models import SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 
 _has_codex = shutil.which("codex") is not None
@@ -28,13 +30,23 @@ requires_codex_cli = pytest.mark.skipif(not _has_codex, reason="codex CLI not in
 _CODEX_MODEL_NAMES = (
     "codex/codex-auto-review",
     "codex/default",
-    "codex/gpt-5.2",
     "codex/gpt-5.4",
     "codex/gpt-5.4-mini",
     "codex/gpt-5.5",
     "codex/gpt-5.6-luna",
     "codex/gpt-5.6-sol",
     "codex/gpt-5.6-terra",
+)
+
+# Slugs rejected by the Codex CLI when authenticated with a ChatGPT
+# subscription (HTTP 400: "not supported when using Codex with a ChatGPT
+# account"), verified live on 2026-09-02. They must stay out of the
+# catalog. Derived from the updater's exclusion set so the two cannot
+# drift (a refresh once resurrected them when this list was standalone).
+_SUBSCRIPTION_INCOMPATIBLE_NAMES = tuple(
+    sorted(
+        f"codex/{slug}" for slug in SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS
+    )
 )
 
 
@@ -202,12 +214,11 @@ class TestBuildPrompt:
         assert "[User]: Do something" in prompt
         assert "[Assistant]: Calling tool" in prompt
 
-    def test_system_instruction_is_prepended(self) -> None:
+    def test_system_instruction_is_appended_after_header(self) -> None:
         m = CodexModel("codex/default", model_config={"system_instruction": "Be brief."})
         m.initialize("hi")
         prompt = m._build_prompt()
-        assert prompt.startswith("[System]: Be brief.")
-        assert "[User]: hi" in prompt
+        assert prompt == "hi" + CLI_SYSTEM_PROMPT_HEADER + "Be brief."
 
 
 class TestParseStreamEvents:
@@ -360,6 +371,10 @@ class TestModelInfoEntries:
     def test_codex_models_support_function_calling(self) -> None:
         for name in _CODEX_MODEL_NAMES:
             assert MODEL_INFO[name].is_function_calling_supported
+
+    def test_subscription_incompatible_models_not_in_model_info(self) -> None:
+        for name in _SUBSCRIPTION_INCOMPATIBLE_NAMES:
+            assert name not in MODEL_INFO
 
 
 @requires_codex_cli

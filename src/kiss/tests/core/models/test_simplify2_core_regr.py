@@ -29,7 +29,7 @@ from typing import Any
 
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.codex_model import CodexModel
-from kiss.core.models.model import Attachment
+from kiss.core.models.model import CLI_SYSTEM_PROMPT_HEADER, Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
     calculate_cost,
@@ -164,12 +164,11 @@ def test_cli_models_multi_turn_prompt_renders_dialogue() -> None:
         assert "[Tool Result]: tool output" in prompt
 
 
-def test_codex_prompt_prepends_system_instruction() -> None:
+def test_codex_prompt_appends_system_instruction_after_header() -> None:
     m = make_cli(CodexModel, model_config={"system_instruction": "be terse"})
     m.initialize("do it")
     prompt = m._build_prompt()
-    assert prompt.startswith("[System]: be terse")
-    assert "[User]: do it" in prompt
+    assert prompt == "do it" + CLI_SYSTEM_PROMPT_HEADER + "be terse"
 
 
 def test_cli_attachment_warning_preserves_logger_and_record(caplog: Any) -> None:

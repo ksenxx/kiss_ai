@@ -23,10 +23,20 @@ session replays) and content tabs are client-local stand-ins for the
 VS Code editor, so neither is registered.
 
 The registry persists to ``KISS_HOME/tabs.json`` with atomic writes
-(temp file + ``os.replace``) so tabs survive daemon restarts.  A
-single daemon owns the file (daemon startup already guarantees one
-daemon per ``KISS_HOME`` via the UDS socket liveness check), so a
-thread lock suffices for the registry's readers and writers.
+(unique sibling temp file + ``os.replace``, via
+:func:`kiss.core.utils.atomic_write_text`) so tabs survive daemon
+restarts and a reader never sees a torn document.  The file has
+exactly ONE owner: a registry loads it once and publishes its complete
+in-memory list on every save, so a second live registry on the same
+file would overwrite the first one's tabs with a stale snapshot.
+Daemon startup guarantees one canonical daemon per ``KISS_HOME`` (UDS
+socket liveness check), and a server embedded in another process that
+shares the KISS home — the channel launcher's private-UDS daemon —
+owns a private registry file instead
+(``VSCodeServer.use_private_tab_registry``).  A thread lock therefore
+suffices for the registry's in-memory readers and writers; the unique
+temp name is belt-and-braces for a sibling instance (a test next to a
+live daemon) that the lock cannot see.
 """
 
 from __future__ import annotations
@@ -34,10 +44,11 @@ from __future__ import annotations
 import enum
 import json
 import logging
-import os
 import threading
 from pathlib import Path
 from typing import Any
+
+from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +97,60 @@ def _clean_str(value: Any, max_len: int = 0) -> str:
     return out
 
 
+def _sanitize_entries(
+    entries: list[Any], *, keep_task_id: bool,
+) -> list[dict[str, str]]:
+    """Return the registry entries worth adopting from raw *entries*.
+
+    The ONE sanitising pass behind both :meth:`TabRegistry._load` (the
+    on-disk ``tabs.json``) and :meth:`TabRegistry.merge_if_empty` (a
+    legacy client's ``restoredTabs``): non-dict items, blank or
+    repeated tab ids and later duplicates of an already-bound chat are
+    dropped, every field is stripped, the title is capped and — like
+    every other creation path — defaults to ``"new chat"``, and at
+    most :data:`_MAX_TABS` entries survive.
+
+    Args:
+        entries: Raw entry dicts (anything else is skipped).
+        keep_task_id: Adopt each entry's ``taskId`` pin.  True for the
+            persisted registry; False for legacy client tabs, which
+            never carried one.
+
+    Returns:
+        The sanitised entries, in input order.
+    """
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    seen_chats: set[str] = set()
+    for entry in entries[:_MAX_TABS]:
+        if not isinstance(entry, dict):
+            continue
+        tab_id = _clean_str(entry.get("tabId"))
+        if not tab_id or tab_id in seen:
+            continue
+        chat_id = _clean_str(entry.get("chatId"))
+        if chat_id:
+            # One tab per chat: drop later duplicates.
+            if chat_id in seen_chats:
+                continue
+            seen_chats.add(chat_id)
+        seen.add(tab_id)
+        out.append({
+            "tabId": tab_id,
+            "chatId": chat_id,
+            "title": (
+                _clean_str(entry.get("title"), _MAX_TITLE_CHARS)
+                or "new chat"
+            ),
+            "workDir": _clean_str(entry.get("workDir")),
+            "scopeWorkDir": _clean_str(entry.get("scopeWorkDir")),
+            "taskId": (
+                _clean_str(entry.get("taskId")) if keep_task_id else ""
+            ),
+        })
+    return out
+
+
 class TabRegistry:
     """Ordered, persistent registry of the shared chat tabs.
 
@@ -125,29 +190,7 @@ class TabRegistry:
         entries = raw.get("tabs") if isinstance(raw, dict) else None
         if not isinstance(entries, list):
             return
-        seen: set[str] = set()
-        seen_chats: set[str] = set()
-        for entry in entries[:_MAX_TABS]:
-            if not isinstance(entry, dict):
-                continue
-            tab_id = _clean_str(entry.get("tabId"))
-            if not tab_id or tab_id in seen:
-                continue
-            chat_id = _clean_str(entry.get("chatId"))
-            if chat_id:
-                # One tab per chat: drop later duplicates on load.
-                if chat_id in seen_chats:
-                    continue
-                seen_chats.add(chat_id)
-            seen.add(tab_id)
-            self._tabs.append({
-                "tabId": tab_id,
-                "chatId": chat_id,
-                "title": _clean_str(entry.get("title"), _MAX_TITLE_CHARS),
-                "workDir": _clean_str(entry.get("workDir")),
-                "scopeWorkDir": _clean_str(entry.get("scopeWorkDir")),
-                "taskId": _clean_str(entry.get("taskId")),
-            })
+        self._tabs = _sanitize_entries(entries, keep_task_id=True)
 
     def _save_locked(self) -> None:
         """Atomically persist the tab list (caller holds the lock).
@@ -159,13 +202,13 @@ class TabRegistry:
         the file.
         """
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_name(self._path.name + ".tmp")
-            tmp.write_text(
-                json.dumps({"tabs": self._tabs}, indent=1),
-                encoding="utf-8",
+            # The shared unique-temp writer: a fixed ``tabs.json.tmp``
+            # let a sibling registry instance (another daemon, a test
+            # next to a live daemon) truncate the temp inode this one
+            # was about to rename into place, publishing an empty file.
+            atomic_write_text(
+                self._path, json.dumps({"tabs": self._tabs}, indent=1),
             )
-            os.replace(tmp, self._path)
         except OSError:
             if not self._persist_failed:
                 logger.error(
@@ -291,7 +334,7 @@ class TabRegistry:
             ``True`` when the tab existed and was removed.
         """
         with self._lock:
-            entry = self._find_locked(tab_id)
+            entry = self._find_locked(_clean_str(tab_id))
             if entry is None:
                 return False
             self._tabs.remove(entry)
@@ -412,31 +455,11 @@ class TabRegistry:
         with self._lock:
             if self._tabs:
                 return False
-            seen: set[str] = set()
-            seen_chats: set[str] = set()
-            for entry in entries[:_MAX_TABS]:
-                tab_id = _clean_str(entry.get("tabId"))
-                if not tab_id or tab_id in seen:
-                    continue
-                chat_id = _clean_str(entry.get("chatId"))
-                if chat_id:
-                    # One tab per chat: drop duplicate legacy tabs.
-                    if chat_id in seen_chats:
-                        continue
-                    seen_chats.add(chat_id)
-                seen.add(tab_id)
-                self._tabs.append({
-                    "tabId": tab_id,
-                    "chatId": chat_id,
-                    "title": (
-                        _clean_str(entry.get("title"), _MAX_TITLE_CHARS)
-                        or "new chat"
-                    ),
-                    "workDir": _clean_str(entry.get("workDir")),
-                    "scopeWorkDir": _clean_str(entry.get("scopeWorkDir")),
-                    "taskId": "",
-                })
-            if not self._tabs:
+            adopted = _sanitize_entries(
+                list(entries), keep_task_id=False,
+            )
+            if not adopted:
                 return False
+            self._tabs = adopted
             self._save_locked()
             return True

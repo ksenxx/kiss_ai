@@ -15,7 +15,7 @@ The two implementations are NOT equivalent:
           entry, including a directory named ``install.sh``.
 * Python: ``candidate.is_file()`` — true only for regular files.
 
-So when ``~/kiss_ai/install.sh`` is a directory (e.g. a botched
+So when ``~/.kiss/kiss_ai/install.sh`` is a directory (e.g. a botched
 checkout or extraction), the VS Code extension "finds" the installer
 and tries to ``bash`` a directory in a terminal, while the remote
 webapp reports "install.sh not found".  The two frontends that are
@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.server.web_server import _find_install_script
+from kiss.server.web_server import _KISS_AI_ROOT, _find_install_script
 
 _INSTALLER_PATH_JS = (
     Path(__file__).resolve().parents[3]
@@ -46,6 +46,25 @@ _INSTALLER_PATH_JS = (
 )
 
 _NODE = shutil.which("node")
+
+
+def _js_kiss_ai_root() -> str:
+    """Run the extension's ``kissAiRoot()`` under real node."""
+    assert _NODE is not None
+    script = (
+        f"const {{kissAiRoot}} = require({json.dumps(str(_INSTALLER_PATH_JS))});"
+        "console.log(JSON.stringify(kissAiRoot()));"
+    )
+    out = subprocess.run(
+        [_NODE, "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    result = json.loads(out.stdout.strip())
+    assert isinstance(result, str)
+    return result
 
 
 def _js_find_install_script(root: Path) -> str | None:
@@ -103,3 +122,15 @@ class TestInstallerPathParity:
             f"installer lookup diverged for a directory named install.sh: "
             f"python={py!r} js={js!r}"
         )
+
+    def test_default_root_is_kiss_home_clone_in_both_twins(self) -> None:
+        """Both twins default to ``~/.kiss/kiss_ai``, the curl installer's clone.
+
+        ``scripts/install.sh`` (the ``curl | bash`` entry point) clones the
+        public repo into ``~/.kiss/kiss_ai``; an Update button probing the
+        legacy ``~/kiss_ai`` would never find that clone.
+        """
+        expected = Path.home() / ".kiss" / "kiss_ai"
+        assert _KISS_AI_ROOT == expected
+        assert _js_kiss_ai_root() == str(expected)
+        assert _KISS_AI_ROOT != Path.home() / "kiss_ai"

@@ -73,13 +73,31 @@ async function run() {
   chatBtn.click();
   await sleep(0);
   await sleep(600);
-  assert.ok(!rowBtn.classList.contains('copied'), 'row first timer still reverts');
-  assert.ok(chatBtn.classList.contains('copied'), 'id second click resets its timer');
-  assert.ok(!taskBtn.classList.contains('copied'), 'untouched task flash reverts');
-  assert.strictEqual(rowBtn.innerHTML, idleSvg, 'row icon reverts to copy svg');
+  // audit0903: every copy button restarts its flash timer on re-click,
+  // so neither second flash is cut short by the first click's timer.
+  assert.ok(
+    rowBtn.classList.contains('copied'),
+    'row second click resets its timer',
+  );
+  assert.ok(
+    chatBtn.classList.contains('copied'),
+    'id second click resets its timer',
+  );
+  assert.ok(
+    !taskBtn.classList.contains('copied'),
+    'untouched task flash reverts',
+  );
 
   await sleep(1_000);
-  assert.ok(!chatBtn.classList.contains('copied'), 'reset id timer eventually reverts');
+  assert.ok(
+    !rowBtn.classList.contains('copied'),
+    'reset row timer eventually reverts',
+  );
+  assert.ok(
+    !chatBtn.classList.contains('copied'),
+    'reset id timer eventually reverts',
+  );
+  assert.strictEqual(rowBtn.innerHTML, idleSvg, 'row icon reverts to copy svg');
 
   win.close();
   console.log('  ok - history copy buttons copy and flash identically');

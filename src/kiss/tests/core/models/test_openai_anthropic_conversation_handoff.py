@@ -189,7 +189,9 @@ class TestHandoffLive:
 
     def test_generate_with_tools_after_anthropic_handoff(self) -> None:
         """The exact failing scenario: tools call replaying an Anthropic history."""
-        m = model("gpt-4.1-mini")
+        # This class pins the V1 (Chat Completions) handoff path, so the
+        # catalog's v2 default is overridden explicitly.
+        m = model("gpt-4.1-mini", model_config={"use_responses_api": False})
         assert isinstance(m, OpenAICompatibleModel)
         m.initialize("placeholder")
         m.conversation = [dict(msg) for msg in _ANTHROPIC_STYLE_CONVERSATION]
@@ -198,7 +200,9 @@ class TestHandoffLive:
 
     def test_generate_without_tools_after_anthropic_handoff(self) -> None:
         """generate() must also survive thinking blocks in the history."""
-        m = model("gpt-4.1-mini")
+        # This class pins the V1 (Chat Completions) handoff path, so the
+        # catalog's v2 default is overridden explicitly.
+        m = model("gpt-4.1-mini", model_config={"use_responses_api": False})
         assert isinstance(m, OpenAICompatibleModel)
         m.initialize("placeholder")
         m.conversation = [
@@ -356,7 +360,9 @@ class TestXhighHandoffLive:
 
     def test_generate_with_tools_after_anthropic_handoff(self) -> None:
         """The exact reported scenario, on the xhigh alias of gpt-5.5."""
-        m = model("gpt-5.5-xhigh")
+        # This class pins the V1 (Chat Completions) handoff path, so the
+        # catalog's v2 default is overridden explicitly.
+        m = model("gpt-5.5-xhigh", model_config={"use_responses_api": False})
         assert isinstance(m, OpenAICompatibleModel)
         m.initialize("placeholder")
         m.conversation = [dict(msg) for msg in _ANTHROPIC_STYLE_CONVERSATION]
@@ -365,7 +371,9 @@ class TestXhighHandoffLive:
 
     def test_generate_without_tools_after_anthropic_handoff(self) -> None:
         """generate() on gpt-5.5-xhigh must survive thinking blocks too."""
-        m = model("gpt-5.5-xhigh")
+        # This class pins the V1 (Chat Completions) handoff path, so the
+        # catalog's v2 default is overridden explicitly.
+        m = model("gpt-5.5-xhigh", model_config={"use_responses_api": False})
         assert isinstance(m, OpenAICompatibleModel)
         m.initialize("placeholder")
         m.conversation = [

@@ -11,9 +11,9 @@ literally contains ``{result}`` — common when tasks quote code or
 template text) was re-expanded by a later key's replacement pass.  The
 substituted prompt then leaked the other argument's value into the
 middle of the first one, and the outcome depended on dict insertion
-order.  Real-world trigger: ``generate_followup_text`` passes
-``{"task": ..., "result": ...}`` where both values are arbitrary
-user/LLM text.
+order.  Real-world trigger: one-shot helper prompts (e.g. commit-message
+generation) pass ``{"task": ..., "result": ...}``-style arguments where
+both values are arbitrary user/LLM text.
 
 The fix substitutes all ``{key}`` tokens in a single pass over the
 template, so replacement values are never rescanned.

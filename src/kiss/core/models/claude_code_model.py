@@ -17,10 +17,19 @@ any file modifications the user requested.  Tool activity (tool invocations
 and their results) is streamed to the UI as thinking blocks, the same way
 CodexModel surfaces ``command_execution`` events.
 
-For KISS-level tool calling, tool descriptions are injected into the prompt
-and the model's text output is parsed for tool-call JSON — the same approach
-used by :class:`kiss.core.models.codex_model.CodexModel` and for DeepSeek R1
-in :mod:`kiss.core.models.openai_compatible_model`.
+Claude Code is a full coding agent, so ``runs_task_to_completion``
+(inherited from :class:`~kiss.core.models.model.CLITextModel`) is True:
+:class:`~kiss.core.kiss_agent.KISSAgent` hands it the whole task — with the
+KISS system prompt appended after
+:data:`~kiss.core.models.model.CLI_SYSTEM_PROMPT_HEADER` — in one
+``generate()`` call and returns its final output, instead of driving a
+turn-by-turn KISS tool loop.
+
+For direct (non-KISSAgent) KISS-level tool calling, tool descriptions are
+injected into the prompt and the model's text output is parsed for
+tool-call JSON — the same approach used by
+:class:`kiss.core.models.codex_model.CodexModel` and for DeepSeek R1 in
+:mod:`kiss.core.models.openai_compatible_model`.
 
 The subprocess supervision both CLI-backed adapters share
 (:class:`~kiss.core.models.model._CLIProcess`,
@@ -43,14 +52,10 @@ from kiss.core.models.model import (
     CLITextModel,
     ThinkingCallback,
     TokenCallback,
-    _cli_stall_error,
-    _CLIProcess,
     _iter_balanced_json_objects,
     _iter_tool_calls_lists,
     _parse_text_based_tool_calls,
-    _StreamReadTimeoutError,
     _ToolCallFilteredStream,
-    flatten_content_to_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -232,7 +237,9 @@ class ClaudeCodeModel(CLITextModel):
         Args:
             model_name: Full model name including ``cc/`` prefix (e.g. ``cc/opus``).
             model_config: Optional configuration. Recognised keys:
-                - ``system_instruction`` (str): System prompt for the session.
+                - ``system_instruction`` (str): Appended to the task prompt
+                  after ``CLI_SYSTEM_PROMPT_HEADER`` (the CLI keeps its own
+                  native system prompt).
                 - ``timeout`` (int): Subprocess timeout in seconds (default 300).
             token_callback: Optional callback invoked with each streamed text token.
             thinking_callback: Optional callback invoked with ``True`` when a
@@ -248,20 +255,10 @@ class ClaudeCodeModel(CLITextModel):
         self._last_thinking_content: str = ""
         self._pre_result_content: str = ""
         self._stopped_for_tool_calls: bool = False
-
-    def _build_prompt(self) -> str:
-        """Build a single prompt string from the conversation history.
-
-        For multi-turn conversations, formats all messages into a single
-        text block since the Claude CLI is stateless.  Tool-result messages
-        (``role == "tool"``) are rendered as ``[Tool Result]: …``.
-
-        Returns:
-            The assembled prompt string.
-        """
-        if len(self.conversation) == 1:
-            return flatten_content_to_text(self.conversation[0]["content"])
-        return self._conversation_as_dialogue()
+        # Usage accumulated from ``message_delta`` events of the current
+        # generate() call, kept on the instance so a run that raises
+        # mid-stream can still be billed (see take_partial_usage_response).
+        self._partial_usage: dict[str, Any] = {}
 
     def _build_cli_args(self) -> list[str]:
         """Build the ``claude`` CLI argument list.
@@ -285,15 +282,10 @@ class ClaudeCodeModel(CLITextModel):
             "--dangerously-skip-permissions",
             "--no-session-persistence",
             "--model", self._cli_model,
-        ]
-        system_instruction = self.model_config.get("system_instruction")
-        if system_instruction:
-            args.extend(["--system-prompt", system_instruction])
-        args.extend([
             "--output-format", "stream-json",
             "--verbose",
             "--include-partial-messages",
-        ])
+        ]
         return args
 
     def generate(self) -> tuple[str, Any]:
@@ -328,35 +320,46 @@ class ClaudeCodeModel(CLITextModel):
             KeyboardInterrupt: If the user stopped the task mid-turn.
         """
         prompt = self._build_prompt()
-        timeout = self.model_config.get("timeout", 300)
         args = self._build_cli_args()
         self._stopped_for_tool_calls = False
+        self._partial_usage = {}
         stop_on_tool_calls = self._tool_bearing_turn
 
-        with _CLIProcess(args, "Claude Code CLI", timeout) as proc:
-            try:
-                # Inside the handlers: sending the prompt is bounded by
-                # the same deadline and Stop signal as reading the reply.
-                proc.send_prompt(prompt)
-                content, result_json = self._parse_stream_events(
-                    proc.lines(), stop_on_tool_calls=stop_on_tool_calls
-                )
-            except _StreamReadTimeoutError:
-                self._close_thinking_if_open()
-                raise _cli_stall_error("Claude Code CLI", timeout) from None
-            except KeyboardInterrupt:
-                self._close_thinking_if_open()
-                raise
+        with self._cli_turn(args, "Claude Code CLI") as proc:
+            proc.send_prompt(prompt)
+            content, result_json = self._parse_stream_events(
+                proc.lines(), stop_on_tool_calls=stop_on_tool_calls
+            )
             if not self._stopped_for_tool_calls:
-                status = proc.wait_for_exit()
-                if status not in (0, -15, None):
-                    raise KISSError(
-                        f"Claude Code CLI failed (exit {status}): "
-                        f"{proc.stderr_text().strip()}"
-                    )
+                proc.raise_for_exit()
 
+        # The turn completed: its usage is in result_json, so the partial
+        # snapshot must not be billed a second time by a later
+        # take_partial_usage_response() call.
+        self._partial_usage = {}
         self.conversation.append({"role": "assistant", "content": content})
         return content, result_json
+
+    def take_partial_usage_response(self) -> Any:
+        """Return (and consume) usage seen before a failed generation.
+
+        The Claude CLI reports usage per assistant message via
+        ``message_delta`` events, accumulated in ``self._partial_usage``
+        as the stream is parsed.  When ``generate()`` raises mid-stream
+        (stall timeout, parse error), that accumulated usage is real spend
+        the terminal ``result`` event never got to report; this hands it
+        to the caller in the same shape as a normal response.
+
+        Returns:
+            ``{"usage": {...}}`` when partial usage was observed, else
+            ``None``.  The stored value is cleared so it is never counted
+            twice.
+        """
+        if not self._partial_usage:
+            return None
+        usage = self._partial_usage
+        self._partial_usage = {}
+        return {"usage": usage}
 
     def _emit_tool_use_as_thinking(
         self, block: dict[str, Any], seen_tool_use_ids: set[str]
@@ -435,7 +438,10 @@ class ClaudeCodeModel(CLITextModel):
         found_tool_calls = False
         last_tc_end = -1
         seen_tool_use_ids: set[str] = set()
-        aggregated_usage: dict[str, Any] = {}
+        # Accumulated on the instance so a stream that raises mid-parse
+        # still leaves its observed usage billable (issue: a whole-task
+        # run timing out otherwise erased ALL of its known spend).
+        aggregated_usage = self._partial_usage
         current_tool_block: dict[str, Any] | None = None
         current_tool_json = ""
 

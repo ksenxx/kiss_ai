@@ -22,14 +22,11 @@ from pathlib import Path
 from typing import Any
 
 try:
-    import fcntl
-except ImportError:  # pragma: no cover — Windows has no fcntl
-    fcntl = None  # type: ignore[assignment]
-try:
     import msvcrt  # type: ignore[import-not-found]
 except ImportError:  # POSIX has no msvcrt
     msvcrt = None  # type: ignore[assignment]
 
+from kiss.agents.sorcar._concurrency import _fcntl as fcntl
 from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SLUG_PREFIX,
     _WORKTREE_SUBDIR,
@@ -136,19 +133,27 @@ def _worktree_index(parts: tuple[str, ...]) -> int | None:
     in ``git_worktree`` silently turn all of them into dead code, and
     the agent would write straight into the user's main checkout.
 
+    When *parts* runs through several nested worktrees (a repo that
+    itself lives inside another repo's ``.kiss-worktrees/kiss_wt-*``
+    directory, e.g. a project checked out under a kiss worktree, or
+    the test suite running from inside one), the *innermost* marker
+    is returned: the worktree closest to the path is the one whose
+    parent repo the agent is actually working on.  Matching the
+    outermost marker instead would make every guard in this module
+    treat the outer checkout as "the" parent repo and silently skip
+    remap/fallback for the nested one.
+
     Args:
         parts: ``Path.parts`` of the path (or work dir) to inspect.
 
     Returns:
-        The index ``i`` such that ``parts[i]`` is the worktree subdir
-        and ``parts[i + 1]`` is a worktree slug, or ``None`` when
-        *parts* does not run through a worktree.
+        The largest index ``i`` such that ``parts[i]`` is the worktree
+        subdir and ``parts[i + 1]`` is a worktree slug, or ``None``
+        when *parts* does not run through a worktree.
     """
-    for i, part in enumerate(parts):
-        if (
-            part == _WORKTREE_SUBDIR
-            and i + 1 < len(parts)
-            and parts[i + 1].startswith(_WORKTREE_SLUG_PREFIX)
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i] == _WORKTREE_SUBDIR and parts[i + 1].startswith(
+            _WORKTREE_SLUG_PREFIX
         ):
             return i
     return None

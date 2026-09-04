@@ -463,6 +463,49 @@ async function run() {
   }
 
   {
+    // Mobile-Safari ordering: the authenticated socket is already dead
+    // (CLOSING) but its queued ``onclose`` has not run yet when a wake-up
+    // listener fires.  connect() must record "had a session and lost it"
+    // itself, otherwise the replacement socket's auth_ok would skip the
+    // reload and leave the page on stale pre-restart state.
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    const FakeWebSocket = installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    evalShim(window, shimJs);
+    const s0 = sockets[0];
+    s0.fireOpen();
+    s0.fireMessage({type: 'auth_ok'});
+    assert.strictEqual(
+      window.sessionStorage.getItem('sorcar-reconnect-pending'), null,
+      'a live authenticated session carries no reconnect flag',
+    );
+    s0.readyState = FakeWebSocket.CLOSING;
+    window.dispatchEvent(new window.Event('focus'));
+    try {
+      assert.strictEqual(sockets.length, 2, 'CLOSING socket is replaced');
+      assert.strictEqual(
+        window.sessionStorage.getItem('sorcar-reconnect-pending'), '1',
+        'replacing a still-authenticated socket must latch the reconnect flag',
+      );
+      const s1 = sockets[1];
+      s1.fireOpen();
+      s1.sent.length = 0;
+      s1.fireMessage({type: 'auth_ok'});
+      window.acquireVsCodeApi().postMessage({type: 'runTask', prompt: 'stale'});
+      assert.ok(
+        !s1.sent.some((d) => /"type":"runTask"/.test(d)),
+        'auth_ok after a lost session must take the reload path, not reuse',
+      );
+      ok('wake-up replacing a CLOSING authenticated socket latches the reload');
+    } catch (err) {
+      fail('CLOSING-socket replacement lost the had-auth latch', err);
+    }
+    window.close();
+  }
+
+  {
     const dom = buildDom({opaqueOrigin: true, noModal: true});
     const {window} = dom;
     window.prompt = function () { return 'promptpwd'; };

@@ -3,10 +3,10 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end test for the SHA-256 manifest fetchers in
-// DependencyInstaller: both fetchUvStyleSha256 and fetchNodeSha256 must
-// share one HTTPS text transport (httpsGetText) and parse their
-// respective manifest formats served by a real local TLS server.
+// End-to-end test for the SHA-256 manifest fetcher in
+// DependencyInstaller: fetchUvStyleSha256 must use the HTTPS text
+// transport (httpsGetText) and parse the uv-style `.sha256` manifest
+// served by a real local TLS server.
 
 'use strict';
 
@@ -50,11 +50,9 @@ assert.ok(
   fs.existsSync(sourcePath),
   `compiled extension missing: ${sourcePath} — run \`npm run compile\` first`,
 );
-const {httpsGetText, fetchUvStyleSha256, fetchNodeSha256} =
-  require(sourcePath);
+const {httpsGetText, fetchUvStyleSha256} = require(sourcePath);
 assert.strictEqual(typeof httpsGetText, 'function');
 assert.strictEqual(typeof fetchUvStyleSha256, 'function');
-assert.strictEqual(typeof fetchNodeSha256, 'function');
 
 const DIGEST_A = 'a'.repeat(64);
 const DIGEST_B = 'b'.repeat(64);
@@ -65,12 +63,9 @@ const server = https.createServer(
     if (req.url === '/tool.tar.gz.sha256') {
       res.writeHead(200);
       res.end(`${DIGEST_A}  tool.tar.gz\n`);
-    } else if (req.url === '/SHASUMS256.txt') {
+    } else if (req.url === '/manifest.txt') {
       res.writeHead(200);
-      res.end(
-        `${DIGEST_A}  node-v0.0.0-linux-x64.tar.gz\n` +
-          `${DIGEST_B}  node-v0.0.0-darwin-arm64.tar.gz\n`,
-      );
+      res.end(`${DIGEST_B}  other.tar.gz\n`);
     } else {
       res.writeHead(404);
       res.end('not found');
@@ -82,7 +77,7 @@ async function main() {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `https://127.0.0.1:${server.address().port}`;
 
-  const text = await httpsGetText(`${base}/SHASUMS256.txt`);
+  const text = await httpsGetText(`${base}/manifest.txt`);
   assert.ok(text && text.includes(DIGEST_B), 'httpsGetText returns body');
   assert.strictEqual(
     await httpsGetText(`${base}/missing`),
@@ -111,23 +106,9 @@ async function main() {
     'uv-style fetch returns null on 404',
   );
 
-  assert.strictEqual(
-    await fetchNodeSha256(
-      'node-v0.0.0-darwin-arm64.tar.gz',
-      `${base}/SHASUMS256.txt`,
-    ),
-    DIGEST_B,
-    'node SHASUMS256 manifest parsed per asset',
-  );
-  assert.strictEqual(
-    await fetchNodeSha256('node-unknown.tar.gz', `${base}/SHASUMS256.txt`),
-    null,
-    'unlisted asset yields null',
-  );
-
   server.close();
   fs.rmSync(tmpDir, {recursive: true, force: true});
-  console.log('  ok - sha fetchers share one HTTPS transport and parse');
+  console.log('  ok - sha fetcher uses the HTTPS transport and parses');
 }
 
 main().then(

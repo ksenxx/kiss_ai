@@ -156,9 +156,13 @@ server._active_url = "https://example.trycloudflare.com"
 
 server._install_signal_handlers()
 
-print("READY", flush=True)
 pid = os.getpid()
 try:
+    # READY is printed *inside* the try: the test sends SIGTERM as soon as
+    # it reads this line, and under load the signal can land while this
+    # process is still returning from print().  Outside the try that
+    # KeyboardInterrupt would escape as an unclean exit (rc=-2).
+    print("READY", flush=True)
     while True:
         time.sleep(3600)
 except KeyboardInterrupt:

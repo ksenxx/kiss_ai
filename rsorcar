@@ -43,12 +43,13 @@
 #   4. Copy the ~/*rc file that holds the API keys (the one with the most
 #      ``FOO_API_KEY=`` style lines) into ~/.kiss/ — not into the remote's
 #      home directory, which has shell files of its own that a copy of this
-#      machine's would destroy — and distill those lines into
-#      ~/.kiss/api_keys.env (sourced by bash) and ~/.kiss/api_keys.systemd.env
-#      (read by the kiss-web service).  Sourcing a zsh rc from bash is
-#      unreliable, hence the distilled copies.  scripts/install-api-keys.sh
-#      then adds one delimited block to ~/.bashrc, keeping a copy of that file
-#      as it was and replacing it by an atomic rename.
+#      machine's would destroy — and distill those lines, overlaid with this
+#      machine's canonical ~/.kiss/api_keys.env (the store the settings panel
+#      writes), into the remote's ~/.kiss/api_keys.env.  That one file is the
+#      key store on every install: the kiss-web daemon parses it itself at
+#      startup, and scripts/install-api-keys.sh adds one delimited block to
+#      ~/.bashrc that sources it for interactive shells, keeping a copy of
+#      that file as it was and replacing it by an atomic rename.
 #   4b. Sync the task database (~/.kiss/sorcar.db) both ways on every run, so
 #      the History panel on *either* machine lists every task either machine
 #      ever ran, with the tasks that ran in one checkout re-pointed at the
@@ -315,39 +316,59 @@ find_rc_file() {
     printf '%s' "$best"
 }
 RC_FILE="$(find_rc_file)"
-[[ -n "$RC_FILE" ]] || die "No ~/*rc file with API keys found — nothing to give the remote agent."
+# The canonical store lives under $KISS_HOME (default ~/.kiss) — the same
+# path resolution api_keys_env_path() uses — so keys saved in the settings
+# panel of an install running with a custom KISS_HOME are deployed too.
+LOCAL_KEYS_ENV="${KISS_HOME:-$HOME/.kiss}/api_keys.env"
+[[ -n "$RC_FILE" || -f "$LOCAL_KEYS_ENV" ]] \
+    || die "No API keys found — neither a ~/*rc file with keys nor $LOCAL_KEYS_ENV."
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-# Distil the credential lines.  ~/.kiss/api_keys.env is bash syntax; the
-# systemd variant drops "export", shell-environment variables and any value
-# containing $ or ` (systemd does not expand them, so a "PATH=x:$PATH" line
-# would corrupt the service environment).
-grep -E "$KEY_RE" "$RC_FILE" \
-    | sed -E 's/^[[:space:]]*//; s/^export[[:space:]]+//' > "$TMP_DIR/keys.raw"
-awk '{print "export " $0}' "$TMP_DIR/keys.raw" > "$TMP_DIR/api_keys.env"
-grep -vE '^(PATH|MANPATH|LD_LIBRARY_PATH|DYLD_LIBRARY_PATH|PS1|PROMPT|LANG|LC_[A-Z]+|HOME|SHELL|TERM|EDITOR)=' \
-    "$TMP_DIR/keys.raw" | grep -vE '[$`]' > "$TMP_DIR/api_keys.systemd.env" || true
+# Distil the credential lines into the remote's canonical key store,
+# ~/.kiss/api_keys.env (bash syntax; the kiss-web daemon also parses it
+# itself at startup, so no systemd variant is needed).  The rc lines come
+# first and this machine's own ~/.kiss/api_keys.env — the store the settings
+# panel writes — second, then the last assignment of each variable wins: a
+# key saved in the panel beats a stale rc line, and a key deleted there
+# (which scrubs both files) is not shipped at all.
+: > "$TMP_DIR/keys.raw"
+for src in "$RC_FILE" "$LOCAL_KEYS_ENV"; do
+    [[ -n "$src" && -f "$src" ]] || continue
+    grep -E "$KEY_RE" "$src" \
+        | sed -E 's/^[[:space:]]*//; s/^export[[:space:]]+//' \
+        >> "$TMP_DIR/keys.raw" || true
+done
+awk -F= '{ line[$1] = $0; if (!seen[$1]++) order[++n] = $1 }
+         END { for (i = 1; i <= n; i++) print "export " line[order[i]] }' \
+    "$TMP_DIR/keys.raw" > "$TMP_DIR/api_keys.env"
 KEY_COUNT="$(wc -l < "$TMP_DIR/api_keys.env" | tr -d ' ')"
+[[ "$KEY_COUNT" != "0" ]] || die "No API keys found in ${RC_FILE:-<no rc file>} or $LOCAL_KEYS_ENV."
 
-step "Copying $(basename "$RC_FILE") and $KEY_COUNT exported variables to $TARGET ..."
-ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && chmod 700 "$HOME/.kiss"'
+step "Copying API keys ($KEY_COUNT exported variables) to $TARGET ..."
+# The stale api_keys.systemd.env of an older deploy is removed so nothing on
+# the remote can ever re-inject a key that a newer deploy or the settings
+# panel has deleted.
+ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && chmod 700 "$HOME/.kiss" \
+    && rm -f "$HOME/.kiss/api_keys.systemd.env"'
 # The rc file goes into ~/.kiss, not into the remote's home: a home directory
 # already holds a .bashrc or .zshrc of its own, and dropping this machine's
 # copy on top of it destroys the shell configuration of the host (in the
 # .bashrc case, the very file the next step edits).  It holds every API key,
 # so it is also kept unreadable by anyone else — the copy in the home
 # directory was world-readable.
-scp -q "$RC_FILE" "$TARGET:.kiss/$(basename "$RC_FILE")"
-scp -q "$TMP_DIR/api_keys.env" "$TMP_DIR/api_keys.systemd.env" "$TARGET:.kiss/"
+if [[ -n "$RC_FILE" ]]; then
+    scp -q "$RC_FILE" "$TARGET:.kiss/$(basename "$RC_FILE")"
+    ssh "$TARGET" "chmod 600 \"\$HOME/.kiss/$(basename "$RC_FILE")\""
+fi
+scp -q "$TMP_DIR/api_keys.env" "$TARGET:.kiss/"
 # Steps 7a and 7c run these two on the remote.  They are shipped rather than
 # run out of the synced checkout, so that deploying a branch older than they
 # are still gets the version that keeps the rest of ~/.kiss/config.json, and
 # the one that looks for a running task before the web app is restarted.
 scp -q "$SCRIPT_DIR/src/kiss/scripts/remote_config.py" \
        "$SCRIPT_DIR/src/kiss/scripts/running_tasks.py" "$TARGET:.kiss/"
-ssh "$TARGET" "chmod 600 \"\$HOME/.kiss/$(basename "$RC_FILE")\""
 # Make interactive and non-interactive bash sessions (which is what the agent
 # and its tools run under) see the keys; see scripts/install-api-keys.sh for
 # how ~/.bashrc is edited without damaging what is in it.
@@ -473,8 +494,9 @@ fi
 # --- 5d. install.sh --------------------------------------------------------
 # KISS_SKIP_UPDATE: never ``git pull`` over the tree we just shipped.
 # KISS_SKIP_LAUNCH: no editor launch; this script starts the web app instead.
+# --non-interactive: no [Y/n] upgrade questions (there is no pty anyway).
 rinfo "Running install.sh ..."
-KISS_SKIP_UPDATE=1 KISS_SKIP_LAUNCH=1 bash "$REMOTE_DIR/install.sh"
+KISS_SKIP_UPDATE=1 KISS_SKIP_LAUNCH=1 bash "$REMOTE_DIR/install.sh" --non-interactive
 
 # --- 6a. Python environment ------------------------------------------------
 if ! command -v uv >/dev/null 2>&1; then
@@ -539,6 +561,23 @@ command -v cloudflared >/dev/null 2>&1 \
 # any time".  The service binds 0.0.0.0:$WEB_PORT and publishes the tunnel.
 rinfo "Starting kiss-web as a systemd user service on port $WEB_PORT ..."
 mkdir -p "$HOME/.config/systemd/user" "$HOME/.kiss"
+# A current branch reads ~/.kiss/api_keys.env itself at daemon startup
+# (load_api_keys), so the unit needs no EnvironmentFile and keys live in one
+# file.  A deployed branch OLDER than that loader only re-sources ~/.bashrc,
+# which a stock Debian/Ubuntu interactivity guard cuts short — such a service
+# would start keyless.  Only for that case the old systemd mirror is
+# regenerated from the canonical file and wired back into the unit.
+ENV_FILE_LINE=""
+if ! grep -q "def load_api_keys" \
+        "$REMOTE_DIR/src/kiss/core/vscode_config.py" 2>/dev/null; then
+    sed -E 's/^export //' "$HOME/.kiss/api_keys.env" 2>/dev/null \
+        | grep -vE '^(PATH|MANPATH|LD_LIBRARY_PATH|DYLD_LIBRARY_PATH|PS1|PROMPT|LANG|LC_[A-Z]+|HOME|SHELL|TERM|EDITOR)=' \
+        | grep -vE '[$`]' > "$HOME/.kiss/api_keys.systemd.env" || true
+    chmod 600 "$HOME/.kiss/api_keys.systemd.env"
+    ENV_FILE_LINE="EnvironmentFile=-%h/.kiss/api_keys.systemd.env"
+    rinfo "Deployed branch predates the canonical key loader;" \
+          "keeping the systemd EnvironmentFile for it."
+fi
 cat > "$HOME/.config/systemd/user/kiss-web.service" <<UNIT
 [Unit]
 Description=KISS Sorcar Remote Web Server
@@ -549,7 +588,7 @@ Wants=network-online.target
 Type=simple
 ExecStart=$REMOTE_DIR/.venv/bin/kiss-web --workdir $REMOTE_DIR
 WorkingDirectory=$REMOTE_DIR
-EnvironmentFile=-%h/.kiss/api_keys.systemd.env
+$ENV_FILE_LINE
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Restart=always
 RestartSec=5

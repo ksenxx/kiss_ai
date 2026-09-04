@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for the core configuration findings F2, F3, F4 and F7.
 
-* **F2** — ``save_api_key_to_shell`` rebuilt ``DEFAULT_CONFIG`` from
+* **F2** — ``save_api_key`` rebuilt ``DEFAULT_CONFIG`` from
   scratch, silently reverting the ``max_budget`` that
   ``apply_config_to_env`` had just applied.
 * **F3** — ``is_parallel`` was a ``DEFAULTS`` key with no reader; it was
@@ -40,7 +40,7 @@ from kiss.core.vscode_config import (
     RETIRED_KEYS,
     apply_config_to_env,
     load_config,
-    save_api_key_to_shell,
+    save_api_key,
     save_config,
 )
 
@@ -83,7 +83,7 @@ def test_saving_an_api_key_does_not_revert_max_budget(config_file: Path) -> None
     """F2: an API key saved in the same settings round-trip must not reset the budget.
 
     The settings handler calls ``apply_config_to_env`` and then
-    ``save_api_key_to_shell`` for every key in the same payload, so a
+    ``save_api_key`` for every key in the same payload, so a
     user who changes the budget *and* pastes a key in one panel close
     used to end up with the live budget silently back at its default.
     """
@@ -91,7 +91,7 @@ def test_saving_an_api_key_does_not_revert_max_budget(config_file: Path) -> None
     apply_config_to_env(load_config())
     assert config_module.DEFAULT_CONFIG.max_budget == 5.0
 
-    save_api_key_to_shell("ANTHROPIC_API_KEY", "sk-f2-probe")
+    save_api_key("ANTHROPIC_API_KEY", "sk-f2-probe")
 
     assert config_module.DEFAULT_CONFIG.max_budget == 5.0
     assert config_module.DEFAULT_CONFIG.ANTHROPIC_API_KEY == "sk-f2-probe"
@@ -99,10 +99,10 @@ def test_saving_an_api_key_does_not_revert_max_budget(config_file: Path) -> None
 
 def test_refreshing_config_still_picks_up_new_keys(config_file: Path) -> None:
     """F2: the refresh must keep doing its actual job — importing new env keys."""
-    save_api_key_to_shell("OPENAI_API_KEY", "sk-f2-openai")
+    save_api_key("OPENAI_API_KEY", "sk-f2-openai")
     assert config_module.DEFAULT_CONFIG.OPENAI_API_KEY == "sk-f2-openai"
 
-    save_api_key_to_shell("OPENAI_API_KEY", "sk-f2-openai-rotated")
+    save_api_key("OPENAI_API_KEY", "sk-f2-openai-rotated")
     assert config_module.DEFAULT_CONFIG.OPENAI_API_KEY == "sk-f2-openai-rotated"
 
 
