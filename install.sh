@@ -13,8 +13,8 @@
 #
 # Usage: ./install.sh [--non-interactive]
 #
-#   Run from a terminal, the script asks ``[Y/n]`` before installing Homebrew
-#   or upgrading git, uv, Node.js and VS Code.  ``--non-interactive`` (same as
+#   Run from a terminal, the script asks ``[Y/n]`` before installing
+#   Homebrew.  ``--non-interactive`` (same as
 #   ``KISS_NONINTERACTIVE=1``) answers every question with its default (Yes)
 #   and never touches the terminal; it is also what happens automatically
 #   when there is no terminal to ask on.  See "Interactive mode" below.
@@ -122,10 +122,12 @@
 # Interactive mode (the default at a terminal)
 # ---------------------------------------------------------------------------
 # A human running ``./install.sh`` (or the ``curl ... | bash`` one-liner,
-# which still has a controlling terminal) gets a say before anything is
-# installed or upgraded system-wide: installing Homebrew and upgrading git,
-# uv, Node.js and VS Code are each a ``[Y/n]`` question (see ``confirm``
-# below), and "no" keeps the installed version and carries on.
+# which still has a controlling terminal) is asked ``[Y/n]`` before
+# Homebrew is installed (see ``confirm`` below); "no" skips it and
+# carries on.  Tools the install cannot proceed without (git, Node.js,
+# VS Code) are still installed without a question when missing, and an
+# already-installed tool is used as-is — this script never upgrades
+# third-party software.
 #
 # ``_KISS_INTERACTIVE`` is 0 instead when
 #
@@ -136,8 +138,7 @@
 #   (cron, CI, a daemon), including inside the detached re-exec below.
 #
 # Non-interactive runs behave as before: every question takes its default
-# answer (Yes), outdated tools are upgraded without asking, and a failed
-# upgrade is a warning, never an abort.
+# answer (Yes).
 # BEGIN: kiss-interactive-mode
 _KISS_INTERACTIVE=1
 if [ -n "${KISS_NONINTERACTIVE:-}" ]; then
@@ -309,21 +310,6 @@ BIN_DIR="$HOME/.local/bin"
 LOG_DIR="$HOME/.kiss"
 LOG_FILE="$LOG_DIR/install.log"
 NODE_VERSION="v22.16.0"
-
-# Required versions — extracted from the repo's source of truth so that
-# install.sh stays in sync with DependencyInstaller.ts and package.json
-# without hard-coding duplicates.
-DEP_INSTALLER_TS="$PROJECT_DIR/src/kiss/agents/vscode/src/DependencyInstaller.ts"
-VSCODE_PACKAGE_JSON="$PROJECT_DIR/src/kiss/agents/vscode/package.json"
-
-# The trailing `|| true` matters: with `set -eo pipefail` an absent file or
-# renamed constant makes `grep` exit non-zero, which would otherwise kill the
-# whole script at these assignments before it printed anything.  An empty
-# version simply skips the corresponding version check below.
-REQUIRED_GIT_VERSION=$(grep "const GIT_VERSION" "$DEP_INSTALLER_TS" 2>/dev/null | head -1 | sed "s/.*= '//;s/'.*//" || true)
-REQUIRED_UV_VERSION=$(grep "const UV_VERSION" "$DEP_INSTALLER_TS" 2>/dev/null | head -1 | sed "s/.*= '//;s/'.*//" || true)
-REQUIRED_VSCODE_VERSION=$(grep '"vscode"' "$VSCODE_PACKAGE_JSON" 2>/dev/null | head -1 | sed 's/[^0-9.]//g' || true)
-REQUIRED_NODE_VERSION="${NODE_VERSION#v}"
 
 mkdir -p "$BIN_DIR" "$LOG_DIR"
 export PATH="$BIN_DIR:$PATH"
@@ -563,8 +549,7 @@ fi
 # daemon, whose launchd/systemd environment has a minimal PATH without
 # /opt/homebrew/bin (or /usr/local/bin on Intel Macs).  Without this,
 # `command -v brew` failed even though Homebrew was installed, so
-# `ensure_homebrew` tried to re-install it and `upgrade_git` aborted the
-# whole update with "Cannot upgrade git without Homebrew".
+# `ensure_homebrew` tried to re-install it.
 if [ "$OS" = "Darwin" ] && ! command -v brew &>/dev/null; then
     if [ -x /opt/homebrew/bin/brew ]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
@@ -999,145 +984,6 @@ guard_vsix_tracking() {
 }
 
 # ---------------------------------------------------------------------------
-# Version helpers
-# ---------------------------------------------------------------------------
-
-# Compare two dotted version strings.  Returns 0 (true) when $1 >= $2.
-version_gte() {
-    local IFS=.
-    # shellcheck disable=SC2206
-    local i a=($1) b=($2)
-    for ((i = 0; i < ${#b[@]}; i++)); do
-        # Force base-10 so components with leading zeros (e.g. "08") are not
-        # parsed as invalid octal, which would error out the arithmetic.
-        local va=$((10#${a[i]:-0}))
-        local vb=$((10#${b[i]:-0}))
-        if ((va > vb)); then return 0; fi
-        if ((va < vb)); then return 1; fi
-    done
-    return 0
-}
-
-# ---------------------------------------------------------------------------
-# Upgrade helpers — invoked when the installed version is older than required
-# ---------------------------------------------------------------------------
-
-# Upgrade failures are deliberately non-fatal: a missing package manager or
-# a flaky network must not abort the whole update (the previous behaviour —
-# `exit 1` / unguarded commands under `set -e` — made the update button fail
-# whenever the git-upgrade question fired in an environment without brew).
-# The caller re-checks the installed version afterwards and warns if it is
-# still too old.
-upgrade_git() {
-    echo "   Upgrading git..."
-    case "$OS" in
-        Darwin)
-            if command -v brew &>/dev/null; then
-                brew install git 2>/dev/null || brew upgrade git \
-                    || echo "   WARNING: Homebrew could not upgrade git; continuing with the installed git."
-            else
-                echo "   WARNING: Cannot upgrade git without Homebrew; continuing with the installed git."
-            fi
-            ;;
-        Linux)
-            if command -v apt-get &>/dev/null; then
-                sudo apt-get update -y && sudo apt-get install -y --only-upgrade git || true
-            elif command -v dnf &>/dev/null; then
-                sudo dnf upgrade -y git || true
-            elif command -v yum &>/dev/null; then
-                sudo yum update -y git || true
-            elif command -v pacman &>/dev/null; then
-                sudo pacman -Syu --noconfirm git || true
-            elif command -v apk &>/dev/null; then
-                sudo apk upgrade git || true
-            else
-                echo "   WARNING: No supported package manager found to upgrade git; continuing."
-            fi
-            ;;
-    esac
-    # A freshly installed git may live at a new path (e.g. /opt/homebrew/bin)
-    # that bash's command hash still shadows with the old binary.
-    hash -r
-}
-
-upgrade_uv() {
-    echo "   Upgrading uv to $REQUIRED_UV_VERSION..."
-    curl -LsSf "https://astral.sh/uv/${REQUIRED_UV_VERSION}/install.sh" | sh \
-        || echo "   WARNING: uv upgrade failed; the VS Code extension will retry during setup."
-    export PATH="$HOME/.local/bin:$PATH"
-    hash -r
-}
-
-upgrade_node() {
-    echo "   Upgrading Node.js to $NODE_VERSION..."
-    install_node || echo "   WARNING: Node.js upgrade failed; continuing with the installed version."
-    hash -r
-}
-
-upgrade_vscode() {
-    echo "   Upgrading VS Code..."
-    case "$OS" in
-        Darwin)
-            local ARCH_VS
-            case "$ARCH" in
-                aarch64|arm64) ARCH_VS="darwin-arm64" ;;
-                x86_64)        ARCH_VS="darwin" ;;
-            esac
-            local TMP_ZIP TMP_APP_DIR
-            TMP_ZIP="$(mktemp /tmp/vscode-XXXXXX.zip)"
-            osascript -e 'quit app "Visual Studio Code"' 2>/dev/null || true
-            sleep 2
-            # Unpack into a temp dir FIRST and only then swap the app: the
-            # old code removed /Applications/Visual Studio Code.app before
-            # unzip, so a corrupt download crashed the script (`set -e`)
-            # AND left the user with no VS Code at all.
-            if curl -fsSL "https://update.code.visualstudio.com/latest/${ARCH_VS}/stable" -o "$TMP_ZIP"; then
-                TMP_APP_DIR="$(mktemp -d /tmp/vscode-app-XXXXXX)"
-                if unzip -q "$TMP_ZIP" -d "$TMP_APP_DIR" \
-                        && [ -d "$TMP_APP_DIR/Visual Studio Code.app" ]; then
-                    # Guarded like every other upgrade: a permission error
-                    # in /Applications must warn, not abort under ``set -e``.
-                    if rm -rf "/Applications/Visual Studio Code.app" \
-                            && mv "$TMP_APP_DIR/Visual Studio Code.app" /Applications/; then
-                        echo "   VS Code upgraded in /Applications/"
-                        local CODE_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
-                        if [ -x "$CODE_BIN" ]; then
-                            ln -sf "$CODE_BIN" "$BIN_DIR/code" || true
-                        fi
-                    else
-                        echo "   WARNING: Could not replace /Applications/Visual Studio Code.app; continuing with the installed version."
-                    fi
-                else
-                    echo "   WARNING: Failed to unpack VS Code; continuing with the installed version."
-                fi
-                rm -rf "$TMP_ZIP" "$TMP_APP_DIR"
-            else
-                rm -f "$TMP_ZIP"
-                echo "   WARNING: Failed to download VS Code; continuing with the installed version."
-            fi
-            ;;
-        Linux)
-            if command -v snap &>/dev/null; then
-                sudo snap refresh code 2>&1 || true
-            elif command -v apt-get &>/dev/null; then
-                sudo apt-get update -y && sudo apt-get install -y --only-upgrade code 2>&1 || true
-            elif command -v dnf &>/dev/null; then
-                sudo dnf upgrade -y code 2>&1 || true
-            else
-                echo "   WARNING: Cannot upgrade VS Code automatically."
-                echo "   Please upgrade from https://code.visualstudio.com if problems occur."
-            fi
-            ;;
-    esac
-    find_code_cli || true
-}
-
-upgrade_brew() {
-    echo "   Updating Homebrew..."
-    brew update
-}
-
-# ---------------------------------------------------------------------------
 # Repo update helpers — stash local changes, pull latest, then restore them.
 # ---------------------------------------------------------------------------
 
@@ -1295,9 +1141,9 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     echo "Directory: $PROJECT_DIR"
     echo "OS: $OS ($ARCH)"
     if [ "$_KISS_INTERACTIVE" = 1 ]; then
-        echo "Mode: interactive (asks before installing Homebrew or upgrading tools; pass --non-interactive to skip the questions)"
+        echo "Mode: interactive (asks before installing Homebrew; pass --non-interactive to skip the question)"
     else
-        echo "Mode: non-interactive (outdated tools are upgraded without asking)"
+        echo "Mode: non-interactive (every question takes its default answer)"
     fi
     echo ""
 
@@ -1323,18 +1169,6 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     # `|| true`: under `pipefail` a git that prints no parseable version
     # would otherwise abort the script at this assignment.
     INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-    if [ -n "$REQUIRED_GIT_VERSION" ] && [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
-        echo "   git $INSTALLED_GIT is older than the required version $REQUIRED_GIT_VERSION."
-        if confirm "Upgrade git to $REQUIRED_GIT_VERSION or later?"; then
-            upgrade_git
-            INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-            if [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
-                echo "   WARNING: git is still $INSTALLED_GIT (< $REQUIRED_GIT_VERSION); some features may not work."
-            fi
-        else
-            echo "   Skipping the git upgrade; some features may not work with git $INSTALLED_GIT."
-        fi
-    fi
     echo "   git $INSTALLED_GIT ready"
     echo ""
 
@@ -1345,15 +1179,6 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     echo ">>> Checking uv..."
     if command -v uv &>/dev/null; then
         INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-        if [ -n "$REQUIRED_UV_VERSION" ] && [ -n "$INSTALLED_UV" ] && ! version_gte "$INSTALLED_UV" "$REQUIRED_UV_VERSION"; then
-            echo "   uv $INSTALLED_UV is older than the required version $REQUIRED_UV_VERSION."
-            if confirm "Upgrade uv to $REQUIRED_UV_VERSION?"; then
-                upgrade_uv
-                INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-            else
-                echo "   Skipping the uv upgrade; continuing with uv $INSTALLED_UV."
-            fi
-        fi
         echo "   uv $INSTALLED_UV ready"
     else
         echo "   uv not found — will be installed by the VS Code extension"
@@ -1366,15 +1191,6 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     fi
     if command -v node &>/dev/null && command -v npm &>/dev/null && command -v npx &>/dev/null; then
         INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
-        if [ -n "$REQUIRED_NODE_VERSION" ] && [ -n "$INSTALLED_NODE" ] && ! version_gte "$INSTALLED_NODE" "$REQUIRED_NODE_VERSION"; then
-            echo "   Node.js $INSTALLED_NODE is older than the required version $REQUIRED_NODE_VERSION."
-            if confirm "Upgrade Node.js to $REQUIRED_NODE_VERSION?"; then
-                upgrade_node
-                INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
-            else
-                echo "   Skipping the Node.js upgrade; the extension build may fail with node v$INSTALLED_NODE."
-            fi
-        fi
         echo "   node v$INSTALLED_NODE ready"
         echo "   npm $(npm --version) ready"
     else
@@ -1391,18 +1207,6 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     fi
     if [ -n "$CODE_CLI" ]; then
         INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
-        if [ -n "$REQUIRED_VSCODE_VERSION" ] && [ -n "$INSTALLED_VSCODE" ] && ! version_gte "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"; then
-            echo "   VS Code $INSTALLED_VSCODE is older than the required version $REQUIRED_VSCODE_VERSION."
-            if confirm "Upgrade VS Code?"; then
-                upgrade_vscode
-                INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
-                if [ -n "$INSTALLED_VSCODE" ] && ! version_gte "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"; then
-                    echo "   WARNING: VS Code is still $INSTALLED_VSCODE (< $REQUIRED_VSCODE_VERSION); the extension may refuse to install."
-                fi
-            else
-                echo "   Skipping the VS Code upgrade; the extension may refuse to install into VS Code $INSTALLED_VSCODE."
-            fi
-        fi
         echo "   code CLI ready: $CODE_CLI (v$INSTALLED_VSCODE)"
     else
         echo "   ERROR: VS Code CLI not found — cannot install the extension."
