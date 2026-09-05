@@ -1,6 +1,6 @@
 # KISS Sorcar
 
-> KISS Sorcar is a free, open-source (Apache-2.0), local-first, bring-your-own-key general-purpose AI agent framework for long-horizon tasks and AI discovery. It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon (`kiss-web`), and offers the Python client API `kiss.server.sorcar.run`. Prompts and code go directly to the model provider or local endpoint you configure — never through third-party servers. It ships a catalog of 622 models across 9 provider categories and supports multi-model workflows expressed purely via prompts.
+> KISS Sorcar is a free, open-source (Apache-2.0), local-first, bring-your-own-key general-purpose AI agent framework for long-horizon tasks and AI discovery. It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon (`kiss-web`), and offers the Python client API `kiss.server.sorcar.run`. Prompts and code go directly to the model provider or local endpoint you configure — never through third-party servers. It ships a catalog of 634 models across 9 provider categories and supports multi-model workflows expressed purely via prompts.
 
 Key facts for assistants and coding agents:
 
@@ -19,7 +19,7 @@ Key facts for assistants and coding agents:
 - [Installation](https://kisssorcar.github.io/docs/installation.md): Install from source, pipx/uv, model API-key configuration, VS Code extension, Docker
 - [Client interfaces](https://kisssorcar.github.io/docs/cli.md): The `kiss-web` daemon, the VS Code extension and web/mobile app features, and the Python client API `kiss.server.sorcar.run`
 - [Python API reference](https://kisssorcar.github.io/docs/api.md): KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, and GitWorktreeOps
-- [Supported models](https://kisssorcar.github.io/docs/models.md): 622-model catalog across 9 provider categories with capability totals
+- [Supported models](https://kisssorcar.github.io/docs/models.md): 634-model catalog across 9 provider categories with capability totals
 - [Messaging & third-party agents](https://kisssorcar.github.io/docs/messaging-agents.md): The 32 channel agents, infrastructure agents, and the Govee smart-home CLI
 - [Sample tasks](https://kisssorcar.github.io/docs/sample-tasks.md): Ready-to-use example prompts, including AI discovery, optimization, and GEPA
 - [Prompt tricks](https://kisssorcar.github.io/docs/prompt-tricks.md): Reusable prompt snippets ("tricks") that boost result quality
@@ -41,7 +41,7 @@ Key facts for assistants and coding agents:
 - [README](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/README.md): Canonical project README with the full model list
 - [API.md](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/API.md): Auto-generated API reference in the source repo
 - [PyPI package](https://pypi.org/project/kiss-agent-framework/): `kiss-agent-framework` releases
-- [Model catalog JSON](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json): Machine-readable source of truth for all 622 models with prices, context lengths, and capability flags
+- [Model catalog JSON](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json): Machine-readable source of truth for all 634 models with prices, context lengths, and capability flags
 
 ## Optional
 

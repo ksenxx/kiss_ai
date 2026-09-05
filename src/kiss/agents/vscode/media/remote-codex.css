@@ -61,11 +61,11 @@ body.remote-chat {
 
   /*
    * Settings drawer width on desktop — wide enough for the Tips,
-   * Update, and Reset Server actions to stay on one line across font
-   * metrics, while remaining a narrow drawer instead of the 90vw
-   * mobile sheet.
+   * Git Commit, Update, Reset Server, and Update Models actions to
+   * stay on one line across font metrics, while remaining a narrow
+   * drawer instead of the 90vw mobile sheet.
    */
-  --settings-panel-w: 480px;
+  --settings-panel-w: 620px;
 
   background: var(--bg);
   color: var(--fg);
