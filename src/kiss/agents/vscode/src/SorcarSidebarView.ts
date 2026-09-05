@@ -1384,6 +1384,67 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._worktreeProgresses.delete(tabId);
   }
 
+  /**
+   * Open a visible "KISS Sorcar Update" terminal whose terminal PROCESS is
+   * `/bin/bash -c <command>` (plus a signal guard and a hold-open tail),
+   * instead of typing the command into an interactive shell with
+   * `sendText`.
+   *
+   * Why not sendText: text sent to a shell prompt is just keystrokes, and
+   * other extensions inject keystrokes into every new terminal.  The
+   * Python / Python-Environments extension "activates" the workspace venv
+   * in each new terminal, and that activation makes VS Code send Ctrl+C
+   * first (core clears what it believes is leftover prompt input — see
+   * microsoft/vscode#287139) followed by ` source .../activate`.  The
+   * Ctrl+C cancelled the update command at the zsh prompt before it ever
+   * ran (`^C%` then `source .../.venv/bin/activate` in the user's
+   * transcript).  Running the installer AS the terminal process leaves no
+   * prompt to stomp on and no shell integration for `executeCommand` to
+   * send ^C through.
+   *
+   * The guard: `trap '' INT TERM HUP` makes the whole install pipeline
+   * immune to a stray \x03 that an extension may still write into the PTY
+   * (the line discipline turns it into SIGINT for the foreground process
+   * group).  Signals ignored at entry stay ignored in non-interactive
+   * children (bash, git, curl, uv all honour inherited SIG_IGN), and the
+   * root install.sh additionally detaches into its own session.  Any
+   * injected activation TEXT lands on the installer's stdin and is never
+   * executed.
+   *
+   * The tail: a terminal with a custom `shellPath` is disposed the moment
+   * its process exits, which would wipe the output — including the
+   * cross-process lock's "another KISS update is already running (pid N)"
+   * refusal and any install error.  On failure the tail holds the pane
+   * open until the user presses Enter on an EMPTY line (or stdin hits
+   * EOF, so a piped run can never hang): the venv-activation text other
+   * extensions inject is a non-empty line and may arrive at any time, so
+   * a plain `read` would let it close the pane before the user saw the
+   * error.  On success the pane may close: install.sh writes the
+   * .extension-updated marker and the window reloads anyway.
+   */
+  private _openUpdateTerminal(cwd: string, command: string): void {
+    // audit0902-coverage:start
+    const guarded =
+      "trap '' INT TERM HUP; " +
+      command +
+      '; _kiss_rc=$?; ' +
+      'if [ "$_kiss_rc" -ne 0 ]; then ' +
+      'printf "\\n>>> KISS Sorcar update exited with status %s. ' +
+      'Press Enter to close this terminal.\\n" "$_kiss_rc"; ' +
+      'while IFS= read -r _kiss_enter; do ' +
+      'if [ -z "$_kiss_enter" ]; then break; fi; ' +
+      'done; ' +
+      'fi; exit "$_kiss_rc"';
+    const terminal = vscode.window.createTerminal({
+      name: 'KISS Sorcar Update',
+      cwd,
+      shellPath: '/bin/bash',
+      shellArgs: ['-c', guarded],
+    });
+    terminal.show();
+    // audit0902-coverage:end
+  }
+
   public runUpdate(): void {
     // Every click runs the installer; there is deliberately no
     // per-window "already running" guard here.  Whether another
@@ -1406,35 +1467,27 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // repo into ~/.kiss/kiss_ai (kissAiRoot()) and hands over to its
       // install.sh, holding the same cross-process update lock.  The URL
       // travels via the environment (like KISS_HOME below) so no shell
-      // quoting of it is ever needed inside the bash -c string.
-      const bootTerminal = vscode.window.createTerminal({
-        name: 'KISS Sorcar Update',
-        cwd: os.homedir(),
-      });
-      bootTerminal.show();
+      // quoting of it is ever needed inside the nested bash -c string.
       const escHome = kissHomeDir().replace(/'/g, "'\\''");
       const escUrl = bootstrapInstallUrl().replace(/'/g, "'\\''");
-      bootTerminal.sendText(
+      this._openUpdateTerminal(
+        os.homedir(),
         `KISS_HOME='${escHome}' KISS_NONINTERACTIVE=1 ` +
           `KISS_BOOTSTRAP_URL='${escUrl}' bash -c ` +
           `'set -o pipefail; curl -fsSL "$KISS_BOOTSTRAP_URL" | bash'`,
       );
       return;
     }
-    const terminal = vscode.window.createTerminal({
-      name: 'KISS Sorcar Update',
-      cwd: path.dirname(scriptPath),
-    });
     // audit0902-coverage:end
-    terminal.show();
     const escScript = scriptPath.replace(/'/g, "'\\''");
     const escDir = path.dirname(scriptPath).replace(/'/g, "'\\''");
     // Pin KISS_HOME to the value THIS extension host resolved: install.sh
     // writes the .extension-updated marker into $KISS_HOME, and the reload
     // watcher (extension.ts) watches the extension host's $KISS_HOME.  The
-    // terminal's shell startup files could export a different KISS_HOME,
-    // and then the marker would land where no watcher looks — the update
-    // installs but this window never reloads.
+    // terminal process inherits the window's environment, which could
+    // carry a different KISS_HOME, and then the marker would land where
+    // no watcher looks — the update installs but this window never
+    // reloads.
     const escKissHome = kissHomeDir().replace(/'/g, "'\\''");
     // audit0902-coverage:start
     // scripts/install.sh (the curl bootstrap) syncs the clone with origin
@@ -1453,7 +1506,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     );
     if (fs.existsSync(bootstrap)) {
       const escBootstrap = bootstrap.replace(/'/g, "'\\''");
-      terminal.sendText(
+      this._openUpdateTerminal(
+        path.dirname(scriptPath),
         `cd '${escDir}'; KISS_HOME='${escKissHome}' KISS_NONINTERACTIVE=1 ` +
           `bash '${escBootstrap}'`,
       );
@@ -1474,7 +1528,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // [5/5].
       `KISS_HOME='${escKissHome}' bash '${escScript}' --non-interactive`,
     ].join('; ');
-    terminal.sendText(preflight);
+    this._openUpdateTerminal(path.dirname(scriptPath), preflight);
   }
 
   public async submitTask(prompt: string): Promise<void> {

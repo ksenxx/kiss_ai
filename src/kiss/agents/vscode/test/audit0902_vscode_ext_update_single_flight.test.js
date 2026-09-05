@@ -28,6 +28,20 @@
 // refused until the terminal was closed.  The guard is gone: each click
 // opens a terminal running the locked installer, and the lock alone
 // decides whether it may proceed.
+//
+// Round 3 (2026-09-05): the command is no longer TYPED into an interactive
+// shell with sendText -- the Python(-Environments) extension "activates"
+// the workspace venv in every new terminal, and that activation makes
+// VS Code send Ctrl+C (clearing what core believes is leftover prompt
+// input, see microsoft/vscode#287139) followed by ` source .../activate`,
+// which cancelled the update command at the zsh prompt before it ever ran.
+// runUpdate() now creates the terminal with shellPath='/bin/bash' and
+// shellArgs=['-c', guarded] so the installer IS the terminal process:
+// there is no prompt to stomp on, the command starts with
+// `trap '' INT TERM HUP` so a stray \x03 cannot SIGINT the install, and a
+// hold-open tail keeps failure output visible (a shellPath terminal is
+// disposed when its process exits).  See
+// updateTerminalStompImmunity.test.js for the real-PTY ^C reproduction.
 
 'use strict';
 
@@ -90,6 +104,8 @@ global.__kissVscodeStub = {
       const t = {
         name: opts && opts.name,
         cwd: opts && opts.cwd,
+        shellPath: opts && opts.shellPath,
+        shellArgs: opts && opts.shellArgs,
         sent: [],
         shows: 0,
         disposed: false,
@@ -194,28 +210,65 @@ function toasts(posted) {
   return posted.filter(m => m.type === 'notification' && !m.close);
 }
 
+const GUARD_PREFIX = "trap '' INT TERM HUP; ";
+const TAIL_START = '; _kiss_rc=$?; ';
+
+// The terminal must run the installer as its own process (shellPath +
+// shellArgs), never via sendText: text typed at a shell prompt is cancelled
+// by the ^C that the Python extension's venv activation makes VS Code send.
+// Returns the inner installer command with the signal guard and the
+// hold-open tail stripped, after asserting both are present.
+function installerCommandOf(terminal) {
+  assert.strictEqual(
+    terminal.sent.length,
+    0,
+    `update must not sendText into a shell prompt: ${JSON.stringify(terminal.sent)}`,
+  );
+  assert.strictEqual(terminal.shellPath, '/bin/bash');
+  assert.ok(Array.isArray(terminal.shellArgs), 'shellArgs must be an array');
+  assert.strictEqual(terminal.shellArgs[0], '-c');
+  const guarded = terminal.shellArgs[1];
+  assert.ok(
+    guarded.startsWith(GUARD_PREFIX),
+    `command must ignore INT/TERM/HUP first: ${guarded}`,
+  );
+  const tailIdx = guarded.indexOf(TAIL_START);
+  assert.ok(tailIdx > 0, `command must end with the hold-open tail: ${guarded}`);
+  const tail = guarded.slice(tailIdx);
+  // The hold-open read may only close the pane on an EMPTY line (Enter) or
+  // EOF: the venv-activation text other extensions inject is a non-empty
+  // line and may arrive at any time after a failure.
+  assert.ok(
+    /while IFS= read -r _kiss_enter/.test(tail) &&
+      /if \[ -z "\$_kiss_enter" \]; then break; fi/.test(tail) &&
+      /exit "\$_kiss_rc"/.test(tail),
+    `tail must hold the pane open on failure until an empty Enter and ` +
+      `forward the exit status: ${tail}`,
+  );
+  return guarded.slice(GUARD_PREFIX.length, tailIdx);
+}
+
 async function testSecondClickRunsTheInstallerAgain() {
   const {view, posted, fire} = makeSidebar();
   view.runUpdate();
   assert.strictEqual(terminals.length, 1, 'first click opened no terminal');
   assert.strictEqual(terminals[0].name, 'KISS Sorcar Update');
   assert.strictEqual(terminals[0].cwd, installRoot);
-  assert.strictEqual(terminals[0].sent.length, 1);
+  const firstCmd = installerCommandOf(terminals[0]);
   assert.ok(
-    terminals[0].sent[0].includes('install.sh') &&
-      terminals[0].sent[0].includes('--non-interactive'),
-    `terminal did not run install.sh: ${terminals[0].sent[0]}`,
+    firstCmd.includes('install.sh') && firstCmd.includes('--non-interactive'),
+    `terminal did not run install.sh: ${firstCmd}`,
   );
   assert.strictEqual(terminals[0].shows, 1);
 
-  // The installer has finished but its shell is still open (the command
-  // has no trailing `exit`).  A second click -- notification action or
-  // the webview's Update button -- must simply run the installer again
-  // in a fresh terminal: whether another installer is STILL running is
-  // decided by install.sh's own cross-process lock, which prints the
-  // refusal itself.  The old per-window guard keyed on the terminal's
-  // lifetime and wrongly refused every later click until the terminal
-  // was closed.
+  // The first installer may still be running (or its failed terminal may
+  // still be holding the pane open).  A second click -- notification
+  // action or the webview's Update button -- must simply run the
+  // installer again in a fresh terminal: whether another installer is
+  // STILL running is decided by install.sh's own cross-process lock,
+  // which prints the refusal itself.  The old per-window guard keyed on
+  // the terminal's lifetime and wrongly refused every later click until
+  // the terminal was closed.
   view.runUpdate();
   fire({type: 'runUpdate'});
   await new Promise(resolve => setImmediate(resolve));
@@ -225,8 +278,7 @@ async function testSecondClickRunsTheInstallerAgain() {
     `later clicks must run install.sh again (${terminals.length} terminals)`,
   );
   for (const t of terminals) {
-    assert.strictEqual(t.sent.length, 1);
-    assert.strictEqual(t.sent[0], terminals[0].sent[0]);
+    assert.strictEqual(installerCommandOf(t), firstCmd);
     assert.strictEqual(t.shows, 1);
   }
   const already = toasts(posted).filter(m =>
@@ -285,8 +337,7 @@ async function testMissingInstallScriptRunsCurlBootstrap() {
     assert.strictEqual(term.name, 'KISS Sorcar Update');
     assert.strictEqual(term.cwd, os.homedir());
     assert.strictEqual(term.shows, 1);
-    assert.strictEqual(term.sent.length, 1);
-    const cmd = term.sent[0];
+    const cmd = installerCommandOf(term);
     assert.ok(
       /KISS_HOME='[^']*' KISS_NONINTERACTIVE=1 KISS_BOOTSTRAP_URL='[^']*' bash -c /.test(
         cmd,
@@ -303,9 +354,10 @@ async function testMissingInstallScriptRunsCurlBootstrap() {
       /is getting installed/.test(m.message || ''),
     );
     assert.strictEqual(started.length, 1);
-    // Execute the exact terminal command in a real bash: the fake
-    // bootstrap must run with KISS_HOME and KISS_NONINTERACTIVE set.
-    childProcess.execSync(cmd, {shell: '/bin/bash'});
+    // Execute the exact terminal PROCESS (shellPath + shellArgs, guard and
+    // tail included): the fake bootstrap must run with KISS_HOME and
+    // KISS_NONINTERACTIVE set.
+    childProcess.execFileSync(term.shellPath, term.shellArgs);
     assert.ok(fs.existsSync(marker), 'the curl bootstrap did not run');
     assert.strictEqual(
       fs.readFileSync(marker, 'utf8').trim(),
@@ -327,7 +379,7 @@ function testLockedBootstrapIsPreferred() {
   // Without scripts/install.sh: the legacy preflight + install.sh.
   const legacy = makeSidebar();
   legacy.view.runUpdate();
-  const legacyCmd = terminals[terminals.length - 1].sent[0];
+  const legacyCmd = installerCommandOf(terminals[terminals.length - 1]);
   assert.ok(
     /git reset --hard/.test(legacyCmd) &&
       /bash '[^']*\/install\.sh' --non-interactive$/.test(legacyCmd),
@@ -335,8 +387,8 @@ function testLockedBootstrapIsPreferred() {
   );
   // install.sh writes the .extension-updated marker into $KISS_HOME and
   // extension.ts watches the extension host's $KISS_HOME; the command must
-  // pin that value so a shell rc exporting a different KISS_HOME cannot
-  // send the marker where no watcher looks.
+  // pin that value so an inherited environment carrying a different
+  // KISS_HOME cannot send the marker where no watcher looks.
   assert.ok(
     /KISS_HOME='[^']*' bash '[^']*\/install\.sh' --non-interactive$/.test(
       legacyCmd,
@@ -354,7 +406,7 @@ function testLockedBootstrapIsPreferred() {
   try {
     const {view} = makeSidebar();
     view.runUpdate();
-    const cmd = terminals[terminals.length - 1].sent[0];
+    const cmd = installerCommandOf(terminals[terminals.length - 1]);
     assert.ok(
       !/git reset --hard|git fetch|git stash/.test(cmd),
       `no unlocked git preflight may run before the locked bootstrap: ${cmd}`,
