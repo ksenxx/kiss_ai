@@ -100,7 +100,11 @@ class TestCommandHandlerIntegration:
     def test_save_config_with_api_keys(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """saveConfig with API keys writes them to RC file and env."""
+        """saveConfig with API keys writes them to the canonical store and env.
+
+        Keys land in ``$KISS_HOME/api_keys.env`` only; the shell RC gets a
+        hook sourcing that file, never a second copy of the key.
+        """
         monkeypatch.setenv("SHELL", "/bin/zsh")
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         server, captured = self._capture_broadcasts(monkeypatch)
@@ -110,11 +114,13 @@ class TestCommandHandlerIntegration:
             "apiKeys": {"OPENROUTER_API_KEY": "or-key-123"},
         })
         assert os.environ["OPENROUTER_API_KEY"] == "or-key-123"
-        rc = Path.home() / ".zshrc"
         assert (
             f"export OPENROUTER_API_KEY={shlex.quote('or-key-123')}"
-            in rc.read_text()
+            in vscode_config.api_keys_env_path().read_text()
         )
+        rc_content = (Path.home() / ".zshrc").read_text()
+        assert "or-key-123" not in rc_content
+        assert '. "$HOME/.kiss/api_keys.env"' in rc_content
 
     def test_save_config_skips_empty_api_keys(
         self, monkeypatch: pytest.MonkeyPatch,

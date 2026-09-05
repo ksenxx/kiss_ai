@@ -44,3 +44,6 @@ _
 USER_PREFS.md
 claude_skills/
 ~*
+err_gcc_san.txt
+exit_gcc_san.txt
+out_gcc_san.txt

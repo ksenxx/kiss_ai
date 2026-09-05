@@ -316,7 +316,7 @@ body {
 
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
 
-/* Tips / Update / Reset Server.  ``flex-wrap`` + the
+/* Tips / Git Commit / Update / Reset Server / Update Models.  ``flex-wrap`` + the
    ``white-space: nowrap`` on the buttons below make the row break
    BETWEEN buttons when it is too narrow, never inside a label. */
 .config-update-row {

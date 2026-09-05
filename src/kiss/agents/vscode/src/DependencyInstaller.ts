@@ -326,11 +326,31 @@ async function runFinalization(
     installCliScript(kissProjectPath, uvPath);
   }
 
-  log(
-    'MODEL_INFO.json and INJECTIONS.md are read directly from the bundled ' +
-      'package; no copies are made into ~/.kiss/ (user overrides live in ' +
-      'MY_MODELS.json and MY_INJECTION.md).',
-  );
+  // Refresh the user-local model catalog from the freshly installed
+  // bundle: an installed KISS Sorcar reads $KISS_HOME/MODEL_INFO.json at
+  // runtime (kiss.core.models.model_info._select_catalog_path), and the
+  // settings panel's "Update Models" button updates that copy in place.
+  // INJECTIONS.md stays bundled-only (user overrides live in
+  // MY_MODELS.json and MY_INJECTION.md).
+  try {
+    const modelInfoSrc = path.join(
+      kissProjectPath,
+      'src',
+      'kiss',
+      'core',
+      'models',
+      'MODEL_INFO.json',
+    );
+    const modelInfoDst = path.join(kissHomeDir(), 'MODEL_INFO.json');
+    fs.mkdirSync(kissHomeDir(), {recursive: true});
+    fs.copyFileSync(modelInfoSrc, modelInfoDst);
+    log(`Copied MODEL_INFO.json to ${modelInfoDst}`);
+  } catch (err) {
+    log(
+      `Failed to copy MODEL_INFO.json into ${kissHomeDir()}: ` +
+        `${err instanceof Error ? err.message : err}`,
+    );
+  }
 
   if (progress) progress.report({message: 'Checking cloudflared...'});
   await installCloudflaredIfNeeded();
@@ -1762,15 +1782,23 @@ function getShellRcPath(): string {
 
 function validateAnthropicKey(key: string): Promise<boolean> {
   return new Promise(resolve => {
+    const headers: Record<string, string> = {
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+    };
+    // An identity-linked API key is rejected (400) unless the request
+    // names the workspace it acts in, so a valid key would fail this
+    // probe without the header.
+    const workspaceId = (process.env.ANTHROPIC_WORKSPACE_ID || '').trim();
+    if (workspaceId) {
+      headers['anthropic-workspace-id'] = workspaceId;
+    }
     const req = https.request(
       {
         hostname: 'api.anthropic.com',
         path: '/v1/models',
         method: 'GET',
-        headers: {
-          'x-api-key': key,
-          'anthropic-version': '2023-06-01',
-        },
+        headers,
         timeout: 15000,
       },
       res => {
@@ -1948,19 +1976,7 @@ async function promptForApiKey(
   }
 }
 
-function loadApiKeysFromShellRc(): void {
-  const rcPath = getShellRcPath();
-  const content = readShellRc(rcPath);
-  if (!content) return;
-
-  const isPs1 = rcPath.endsWith('.ps1');
-  const isFish = rcPath.endsWith('config.fish');
-  const pattern = isPs1
-    ? /^\s*\$env:(\w+)\s*=\s*(.+)$/gm
-    : isFish
-      ? /^\s*set\s+-gx\s+(\w+)\s+(.+)$/gm
-      : /^\s*export\s+(\w+)=(.+)$/gm;
-
+function importEnvAssignments(content: string, pattern: RegExp): void {
   let match;
   while ((match = pattern.exec(content)) !== null) {
     const name = match[1];
@@ -1975,6 +1991,31 @@ function loadApiKeysFromShellRc(): void {
       process.env[name] = value;
     }
   }
+}
+
+function loadApiKeysFromShellRc(): void {
+  // The canonical key store first: $KISS_HOME/api_keys.env is where the
+  // settings panel and ./rsorcar persist keys (bash `export KEY=value`
+  // syntax), and save_api_key scrubs assignments out of the shell RC, so
+  // a key saved through the panel exists ONLY here.  Already-set process
+  // environment variables always win.
+  const canonical = readShellRc(path.join(kissHomeDir(), 'api_keys.env'));
+  if (canonical) {
+    importEnvAssignments(canonical, /^\s*export\s+(\w+)=(.+)$/gm);
+  }
+
+  const rcPath = getShellRcPath();
+  const content = readShellRc(rcPath);
+  if (!content) return;
+
+  const isPs1 = rcPath.endsWith('.ps1');
+  const isFish = rcPath.endsWith('config.fish');
+  const pattern = isPs1
+    ? /^\s*\$env:(\w+)\s*=\s*(.+)$/gm
+    : isFish
+      ? /^\s*set\s+-gx\s+(\w+)\s+(.+)$/gm
+      : /^\s*export\s+(\w+)=(.+)$/gm;
+  importEnvAssignments(content, pattern);
 }
 
 // Prompt-then-save of an API key is a read-modify-write of the shell rc

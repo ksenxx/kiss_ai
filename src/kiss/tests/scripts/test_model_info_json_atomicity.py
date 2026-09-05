@@ -14,12 +14,14 @@ Two findings from ``tmp/audit/01-core-models-a.md``:
   ``JSONDecodeError`` traceback out of ``import kiss.core.models.model_info``
   instead of running.  The window is milliseconds, but ``run_parallel``
   can start dozens of processes per second against a live checkout.
-* **F4** — the script's module docstring and ``apply_updates_to_file``'s
-  docstring both promised that ``~/.kiss/MODEL_INFO.json`` "is also
-  refreshed"; no code path has written that file since the copy was
-  deliberately removed (``src/kiss/tests/test_install_no_model_info_copy.py``
-  forbids re-adding it).  The regression below pins the real behaviour so
-  nobody "fixes" the stale prose by re-introducing the copy.
+* **F4** — ``_write_model_info_json`` writes ONLY the catalog path it is
+  handed, never a second, implicit location.  The user-local
+  ``~/.kiss/MODEL_INFO.json`` copy is owned by the installer (seeded on
+  install) and by explicit ``update_models --model-info`` runs (the
+  settings panel's "Update Models" button); a repo-catalog write that
+  also silently rewrote the user copy would clobber the user's own
+  catalog updates.  The regression below pins the single-target
+  behaviour.
 
 No mocks, patches or test doubles: real threads, real temp files, and the
 real production functions on both sides of the file.
@@ -179,13 +181,13 @@ class TestReaderToleratesAConcurrentRewrite:
         assert set(raw) == set(data)
 
 
-class TestNoUserLocalCatalogCopy:
-    """F4: the documented ``~/.kiss/MODEL_INFO.json`` sync must not exist.
+class TestNoImplicitUserLocalCatalogWrite:
+    """F4: writing one catalog never implicitly rewrites the user copy.
 
-    The defect itself is in the prose — the code has not written that file
-    since the copy was removed on purpose.  This pins the behaviour so the
-    stale docstrings cannot be "fixed" by re-adding the write, which
-    ``test_install_no_model_info_copy.py`` also forbids for the installer.
+    ``~/.kiss/MODEL_INFO.json`` is written only by its owners — the
+    installer's seed copy and explicit ``update_models --model-info``
+    runs.  A repo-catalog write that also touched the user copy would
+    silently clobber the user's own "Update Models" results.
     """
 
     def test_writing_the_catalog_does_not_touch_the_user_copy(

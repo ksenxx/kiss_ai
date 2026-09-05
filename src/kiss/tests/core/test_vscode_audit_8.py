@@ -32,6 +32,7 @@ class TestAPIKeyEnvVarsType:
             "GEMINI_API_KEY",
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
+            "ANTHROPIC_WORKSPACE_ID",
             "TOGETHER_API_KEY",
             "OPENROUTER_API_KEY",
             "ZAI_API_KEY",
