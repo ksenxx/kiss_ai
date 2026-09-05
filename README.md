@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.9.3-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.9.4-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -27,7 +27,7 @@ ______________________________________________________________________
 <details>
 <summary><strong>Table of Contents</strong></summary>
 
-- [KISS Sorcar vs Claude Code vs Cursor](#-kiss-sorcar-vs-claude-code-vs-cursor)
+- [KISS Sorcar vs Claude Code vs Cursor](#kiss-sorcar-vs-claude-code-vs-cursor)
 - [What is in the Name](#what-is-in-the-name)
 - [Installation](#installation)
   - [Full install from source](#full-install-from-source)
@@ -38,12 +38,13 @@ ______________________________________________________________________
   - [VS Code extension and web/mobile app](#vs-code-extension-and-webmobile-app)
   - [The `kiss-web` daemon](#the-kiss-web-daemon)
   - [Python client API](#python-client-api)
+  - [Extension agents](#extension-agents)
   - [Skills, MCP servers, and customization](#skills-mcp-servers-and-customization)
-- [Messaging & Third-Party Agents](#-messaging--third-party-agents)
-- [Models Supported](#-models-supported)
-- [Contributing](#-contributing)
-- [License](#-license)
-- [Citation](#-citation)
+- [Messaging & Third-Party Agents](#messaging--third-party-agents)
+- [Models Supported](#models-supported)
+- [Contributing](#contributing)
+- [License](#license)
+- [Citation](#citation)
 
 </details>
 
@@ -51,7 +52,7 @@ ______________________________________________________________________
   <img src="assets/sorcar-main.gif" alt="KISS Sorcar demo" width="100%">
 </div>
 
-## 🆚 KISS Sorcar vs Claude Code vs Cursor
+## KISS Sorcar vs Claude Code vs Cursor
 
 | Capability | **KISS Sorcar** | **Claude Code** | **Cursor** |
 |---|---|---|---|
@@ -61,7 +62,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 634 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 643 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -165,12 +166,80 @@ print(result.text, result.success, result.cost, result.tokens, result.steps)
 follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-`run()` accepts keyword options mirroring the chat interface — `model`, `work_dir`, `scope_work_dir` (workspace directory the task's tab is scoped to, when different from the execution `work_dir`), `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config` (custom endpoint/headers), `web_tools`, `is_parallel`, `timeout`, `sock_path` (daemon socket override) — plus options to customize the agent itself:
+`run()` accepts keyword options mirroring the chat interface — `model`, `work_dir`, `scope_work_dir` (workspace directory the task's tab is scoped to, when different from the execution `work_dir`), `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config` (custom endpoint/headers), `web_tools`, `is_parallel`, `timeout`, `stop_on_timeout` (also stop the task when `timeout` expires; default `False` — the task keeps running), `sock_path` (daemon socket override) — plus options to customize the agent itself:
 
 - `tools="/path/to/my_tools.py"` — a Python file whose `get_tools()` function returns the functions the daemon registers as extra agent tools. The functions are never serialized: only the path travels over the socket, and the daemon imports the file, calls `get_tools()`, and runs the tools in its own process.
 - `system_prompt` — replace the default system prompt for the run (and its sub-agents); `append_to_system_prompt` / `append_to_prompt` — append text to the system prompt or task prompt instead of replacing them.
 - `append_basic_tools=False` — restrict the agent to `finish` plus your `tools` file, dropping the built-in toolset.
-- `extension_agent_path` — run a full extension agent, a Python file that can also define `get_prompt()`, `get_system_prompt()`, and other overrides; see the authoring guide in [src/kiss/server/README.md](src/kiss/server/README.md).
+- `extension_agent_path` — run a full extension agent, a Python file that computes the run's parameters and tools on the daemon; see [Extension agents](#extension-agents) below.
+
+### Extension agents
+
+An **extension agent** is a plain Python file whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports the file on every run and calls its top-level `get_X()` functions to compute the run's parameters; parameters without a getter keep whatever the caller passed. One file can define the task prompt, system prompt, model, budget, tools, and safety hooks — a complete custom agent:
+
+```python
+# weather_agent.py — a minimal extension agent
+import requests
+
+def get_prompt() -> str:
+    return "Look up the current weather in San Francisco and report it."
+
+def get_max_budget() -> float:
+    return 0.50
+
+def get_use_worktree() -> bool:
+    return False  # no repo changes expected
+
+def get_append_basic_tools() -> bool:
+    return False  # restrict the agent to finish + our tools
+
+def get_system_prompt() -> str:
+    return ("You are a weather assistant. Use the get_weather tool "
+            "to look up weather, then call finish with the result.")
+
+def get_weather(city: str) -> str:
+    """Return current weather for a city from wttr.in.
+
+    Args:
+        city: City name to look up.
+    """
+    resp = requests.get(f"https://wttr.in/{city}?format=3", timeout=10)
+    resp.raise_for_status()
+    return resp.text.strip()
+
+def get_tools() -> list:
+    """Return the tools the agent may call."""
+    return [get_weather]
+```
+
+```python
+from kiss.server import sorcar
+
+result = sorcar.run(
+    "placeholder",  # required non-blank; overridden by get_prompt()
+    extension_agent_path="weather_agent.py",
+)
+```
+
+Key points:
+
+- **Overridable parameters.** Every `sorcar.run()` parameter except `timeout`, `stop_on_timeout`, `sock_path`, `scope_work_dir`, and `extension_agent_path` itself has a getter: `get_prompt()`, `get_work_dir()`, `get_model()`, `get_chat_id()`, `get_system_prompt()`, `get_tools()`, `get_use_worktree()`, `get_auto_commit()`, `get_max_budget()`, `get_model_config()`, `get_web_tools()`, `get_is_parallel()`, `get_append_basic_tools()`, `get_append_to_system_prompt()`, and `get_append_to_prompt()`.
+- **Atomic, type-checked overrides.** Getters run in the daemon process and are re-imported from source on every run. Each return value is type-checked; overrides apply only after every getter succeeds, and a broken getter fails the task with a diagnostic in `TaskResult.text`.
+- **Tools, two ways.** `get_tools()` may return a list of callables — making the script its own tools file — or the path of a separate Python file whose `get_tools()` returns the callables. Either way the tools execute in the daemon process; nothing is serialized over the socket. `get_tools()` overrides (does not append to) the caller's `tools` argument.
+- **Hook getters.** `get_llm_call_hook()` and `get_tool_call_hook()` return functions with no `run()` equivalent (callables can't travel the wire). `llm_call_hook(new_messages)` runs before every LLM call and its return value replaces the outgoing messages; `tool_call_hook(name, args)` runs before every tool call — returning `"OK"` lets the tool execute, any other string suppresses the call and is given to the model as the tool's result:
+
+```python
+# guarded_agent.py — veto dangerous shell commands
+def tool_call_hook(name, args):
+    if name == "Bash" and "rm -rf" in str(args.get("command", "")):
+        return "Blocked: destructive command"
+    return "OK"
+
+def get_tool_call_hook():
+    return tool_call_hook
+```
+
+The full authoring guide — every getter's semantics, error handling, chat continuation, model configuration, and a complete worked example — is in [src/kiss/server/README.md](src/kiss/server/README.md).
 
 ### Skills, MCP servers, and customization
 
@@ -179,7 +248,7 @@ follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 - "Tricks" button entries read from `~/.kiss/INJECTIONS.md` (one per `## Trick` section), seeded on install from the bundled `src/kiss/INJECTIONS.md`. Edit the file to customise the dropdown; remove it to regenerate from the bundled defaults.
 - Welcome-screen sample-task chips are the concatenation of two `## Task`-sectioned Markdown files: (1) `~/.kiss/MY_TASK_TEMPLATES.md` — your personal tasks, auto-created on first launch with the seed `## Task\n\nHi!\n` and never overwritten thereafter; (2) the bundled `src/kiss/SAMPLE_TASKS.md` — sample tasks shipped with the extension, read directly from the package so every upgrade delivers the latest chips. To customise your chips edit `~/.kiss/MY_TASK_TEMPLATES.md`; to reset it remove the file.
 
-## 💬 Messaging & Third-Party Agents
+## Messaging & Third-Party Agents
 
 KISS Sorcar includes 32 third-party channel agents that act on messaging services, mailboxes, and devices on your behalf:
 
@@ -191,32 +260,32 @@ Two infrastructure agents round out the set: an **A2A agent** (`kiss-a2a`) expos
 
 These agents live in `src/kiss/agents/third_party_agents/`.
 
-## 🤖 Models Supported
+## Models Supported
 
-KISS Sorcar ships a catalog of **634 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **643 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 105 |
+| OpenAI | 110 |
 | Anthropic | 14 |
 | Gemini / Google | 27 |
 | Together AI | 91 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 356 |
+| OpenRouter | 360 |
 | Claude Code CLI (`cc/*`) | 14 |
 | Codex CLI (`codex/*`) | 9 |
 
 Current catalog capability totals:
 
-- **614** generation-capable models
-- **455** function-calling-capable models
+- **623** generation-capable models
+- **464** function-calling-capable models
 - **11** embedding models
 
 Full model list:
 
 <details>
-<summary><strong>OpenAI (105)</strong></summary>
+<summary><strong>OpenAI (110)</strong></summary>
 
 - `computer-use-preview`
 - `computer-use-preview-2025-03-11`
@@ -507,7 +576,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (356)</strong></summary>
+<summary><strong>OpenRouter (360)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -900,15 +969,15 @@ Full model list:
 
 </details>
 
-## 🤗 Contributing
+## Contributing
 
 Contributions in the form of issues are welcome. KISS Sorcar should be able to help implement and review them.
 
-## 📄 License
+## License
 
 Apache-2.0. See [LICENSE](LICENSE).
 
-## 📚 Citation
+## Citation
 
 If you use KISS Sorcar in your research, please cite:
 
