@@ -144,7 +144,7 @@
 - `parent_tab_id`: Frontend tab id of the parent, forwarded in ``_subagent_info`` so the child's ``new_tab`` broadcast tells the owning webview which tab spawned it.
 - `base_system_prompt`: Custom base system prompt forwarded to each sub-agent's ``run``, so a parent running with a caller-supplied system prompt (see :meth:`SorcarAgent.run`) spawns children that use the same prompt instead of the default ``SYSTEM.md``. ``""`` keeps the default.
 - `system_prompt_suffix`: Extra text appended to each sub-agent's base system prompt, forwarded as the ``system_prompt`` argument of each sub-agent's ``run``.  A parent running with an append-only system-prompt suffix (see :meth:`SorcarAgent.run`'s *system_prompt*) passes it on so the extra instructions constrain the whole task tree, mirroring *base_system_prompt*.  ``""`` appends nothing.
-- `web_tools`: Whether each sub-agent gets browser/web tools, forwarded to each sub-agent's ``run``.  A parent running without web tools (e.g. ``sorcar --no-web``) passes False so its children cannot re-acquire the browser it was denied.
+- `web_tools`: Whether each sub-agent gets browser/web tools, forwarded to each sub-agent's ``run``.  A parent running without web tools (``run(web_tools=False)``) passes False so its children cannot re-acquire the browser it was denied.
 - **Returns:** List of YAML result strings in the **same order** as *tasks*. Each string contains ``success`` and ``summary`` keys.  If a task raises an unhandled exception the corresponding entry is a YAML string with ``success: false`` and the traceback in ``summary``.
 
 ---
