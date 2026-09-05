@@ -110,6 +110,7 @@ export type FromWebviewMessage =
     }
   | {type: 'sizeReport'; innerWidth: number; screenWidth: number}
   | {type: 'runUpdate'}
+  | {type: 'updateModels'}
   | {type: 'snoozeUpdate'; latest?: string}
   | {type: 'serverReset'}
   | {type: 'notificationAction'; id: string; action?: string}

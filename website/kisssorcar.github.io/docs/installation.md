@@ -10,27 +10,6 @@ curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install
 
 The installer targets macOS and Linux on `x86_64`, `aarch64`, and `arm64`. It installs or checks the tools needed to run KISS Sorcar and build/install the VS Code extension.
 
-### Upgrade questions
-
-Run from a terminal, the installer asks before replacing tools you already have. Each of these is a `[Y/n]` question (Enter means yes; "n" keeps what you have and continues):
-
-- installing Homebrew (macOS only, when it is missing)
-- upgrading git, uv, Node.js, or VS Code when the installed version is older than the one KISS Sorcar requires
-
-Tools that are missing altogether (git, Node.js, the VS Code CLI, the Xcode Command Line Tools on macOS) are installed without a question, because the installer cannot continue without them. Declining an upgrade is allowed but the installer warns you about the consequence (for example, the extension build may fail with an old Node.js). On Linux a git upgrade goes through `sudo`, which prompts for your password as usual.
-
-To answer every question with its default (yes) without asking, pass the flag or set the variable for the shell that runs the installer:
-
-```bash
-~/.kiss/kiss_ai/install.sh --non-interactive
-# or
-curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | KISS_NONINTERACTIVE=1 bash
-```
-
-Without a terminal (cron, CI, the daemon) the installer is non-interactive automatically. The **Update** button in the VS Code extension and the web app, the Docker image, and `rsorcar` always run it non-interactively; in those paths a failed upgrade is reported as a warning and the installer continues.
-
-Other switches: `KISS_NO_BREW=1` skips the Homebrew install entirely, `KISS_SKIP_UPDATE=1` installs the checkout as-is without a `git pull`, and `KISS_SKIP_LAUNCH=1` leaves VS Code closed at the end. Everything the installer does is logged to `~/.kiss/install.log`.
-
 ## Python Package Install
 
 If you only want the Python package (the `kiss-web` daemon, the Python client API, and the messaging-agent entry points):
@@ -68,7 +47,7 @@ To install only the KISS Sorcar extension, open Visual Studio Code, search for *
 To run KISS Sorcar in a Docker container (exposes a VS Code interface in the host machine's browser):
 
 ```bash
-~/.kiss/kiss_ai/sorcar-docker
+~/kiss_ai/sorcar-docker
 ```
 
 ## Next Steps

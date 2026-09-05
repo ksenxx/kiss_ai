@@ -138,6 +138,22 @@ def substitute_prompt_args(template: str, arguments: dict[str, str] | None) -> s
     return pattern.sub(lambda m: str(arguments[m.group(0)[1:-1]]), template)
 
 
+def _is_secret_config_field(name: str) -> bool:
+    """Return True for config field names holding credentials.
+
+    ``WORKSPACE_ID`` covers ``ANTHROPIC_WORKSPACE_ID``: not a key itself,
+    but account-identifying and managed alongside the API keys, so it must
+    not be serialized into trajectories either.
+
+    Args:
+        name: The config field name to classify.
+
+    Returns:
+        bool: True when the field must be excluded from serialization.
+    """
+    return "API_KEY" in name or "WORKSPACE_ID" in name
+
+
 def config_to_dict() -> dict[Any, Any]:
     """Convert the config to a dictionary.
 
@@ -147,7 +163,11 @@ def config_to_dict() -> dict[Any, Any]:
 
     def convert_to_json(obj: Any) -> Any:
         if isinstance(obj, dict):  # pragma: no cover – config has no raw dicts
-            return {k: convert_to_json(v) for k, v in obj.items() if "API_KEY" not in k}  # type: ignore[misc]
+            return {
+                k: convert_to_json(v)
+                for k, v in obj.items()  # type: ignore[misc]
+                if not _is_secret_config_field(k)
+            }
         if isinstance(obj, list):  # pragma: no cover – config has no raw lists
             return [convert_to_json(item) for item in obj]  # type: ignore[misc]
         if isinstance(obj, (str, int, float, bool, type(None))):
@@ -156,7 +176,7 @@ def config_to_dict() -> dict[Any, Any]:
             return {
                 k: convert_to_json(getattr(obj, k))
                 for k in obj.__dict__.keys()
-                if "API_KEY" not in k
+                if not _is_secret_config_field(k)
             }
         return obj  # pragma: no cover – all config values have __dict__ or are primitives
 

@@ -71,6 +71,89 @@ PACKAGE_MODEL_INFO_PATH = Path(__file__).parent / "MODEL_INFO.json"
 
 USER_MY_MODELS_PATH = Path.home() / ".kiss" / "MY_MODELS.json"
 
+
+def user_model_info_path() -> Path:
+    """Return the user-local catalog path ``$KISS_HOME/MODEL_INFO.json``.
+
+    ``KISS_HOME`` defaults to ``~/.kiss``.  The installer (both
+    ``install.sh`` and the VS Code extension's ``DependencyInstaller``)
+    seeds this file from the bundled catalog on every install/update, and
+    the settings panel's "Update Models" button refreshes it in place via
+    ``kiss.scripts.update_models --model-info``.  An *installed* KISS
+    Sorcar reads its model catalog from here (see
+    :func:`_select_catalog_path`); a development checkout keeps reading
+    the bundled :data:`PACKAGE_MODEL_INFO_PATH`.
+    """
+    return config_module.kiss_home() / "MODEL_INFO.json"
+
+
+def _is_installed_package(package_file: Path | None = None) -> bool:
+    """Return True when this package runs from an installed (non-git) copy.
+
+    "Installed" means the packaged VS Code extension bundle
+    (``.../kiss_project/src/kiss/...``), which ships without a ``.git``
+    marker at its project root.  A development checkout — including the
+    ``~/.kiss/kiss_ai`` clone the installer builds from — has ``.git``
+    (a directory, or a file in a git worktree) at the root and keeps
+    using the bundled catalog, so a stale ``~/.kiss/MODEL_INFO.json``
+    can never shadow the checkout's own source of truth.
+
+    Args:
+        package_file: The ``model_info.py`` location to classify;
+            defaults to this very file.  Parameterized so tests can
+            exercise both verdicts against real temp trees.
+
+    Returns:
+        True when the project root four levels above the package file
+        exists and carries no ``.git`` entry.
+    """
+    file = Path(__file__) if package_file is None else package_file
+    parents = file.resolve().parents
+    # .../<root>/src/kiss/core/models/model_info.py -> parents[4] == <root>
+    if len(parents) < 5:
+        return False
+    root = parents[4]
+    return not (root / ".git").exists()
+
+
+def _select_catalog_path(
+    env_value: str,
+    installed: bool,
+    user_path: Path,
+    package_path: Path,
+) -> Path:
+    """Choose which ``MODEL_INFO.json`` file backs ``MODEL_INFO``.
+
+    Precedence:
+
+    1. ``env_value`` (the ``KISS_MODEL_INFO_PATH`` environment variable,
+       set by ``update_models.py --model-info`` so the updater reads the
+       exact catalog it rewrites) — when it names an existing file.  A
+       non-existing override falls back to the bundled catalog, which
+       lets the updater bootstrap a brand-new target file.
+    2. The user-local copy (``~/.kiss/MODEL_INFO.json``) — only when the
+       package is *installed* (see :func:`_is_installed_package`) and
+       the copy exists.
+    3. The bundled :data:`PACKAGE_MODEL_INFO_PATH`.
+
+    Args:
+        env_value: Value of ``KISS_MODEL_INFO_PATH`` (may be empty).
+        installed: Whether the package runs from an installed bundle.
+        user_path: The user-local catalog location.
+        package_path: The bundled catalog location.
+
+    Returns:
+        The catalog path to read.
+    """
+    if env_value:
+        override = Path(env_value).expanduser()
+        if override.exists():
+            return override
+        return package_path
+    if installed and user_path.exists():
+        return user_path
+    return package_path
+
 MY_MODELS_DEFAULT_CONTENT = json.dumps(
     {
         "_documentation": [
@@ -335,14 +418,56 @@ def _sync_alias_transport_flags(
 def _load_model_info() -> dict[str, ModelInfo]:
     """Load ``MODEL_INFO`` from JSON, applying cache-pricing defaults.
 
-    The bundled :data:`PACKAGE_MODEL_INFO_PATH` is the source of truth
-    for shipped models.  ``~/.kiss/MY_MODELS.json`` (auto-seeded on
-    first read) is then merged on top: matching keys override the
-    bundled entry, and brand-new keys are added.  Generated thinking
-    aliases of a user-overridden base then re-mirror the base's
-    ``use_responses_api`` flag (see :func:`_sync_alias_transport_flags`).
+    The catalog file is chosen by :func:`_select_catalog_path`:
+    ``KISS_MODEL_INFO_PATH`` (when set and existing), else the
+    user-local ``~/.kiss/MODEL_INFO.json`` on installed copies, else the
+    bundled :data:`PACKAGE_MODEL_INFO_PATH`.  A non-bundled catalog that
+    turns out unreadable, corrupt, or schema-invalid (valid JSON whose
+    entries lack required fields) falls back to the bundled one so a
+    damaged user copy can never brick every KISS process at import time.
+    ``~/.kiss/MY_MODELS.json`` (auto-seeded on first read) is then
+    merged on top: matching keys override the catalog entry, and
+    brand-new keys are added.  Generated thinking aliases of a
+    user-overridden base then re-mirror the base's ``use_responses_api``
+    flag (see :func:`_sync_alias_transport_flags`).
     """
-    raw = _read_model_info_json(PACKAGE_MODEL_INFO_PATH)
+    catalog_path = _select_catalog_path(
+        os.environ.get("KISS_MODEL_INFO_PATH", "").strip(),
+        _is_installed_package(),
+        user_model_info_path(),
+        PACKAGE_MODEL_INFO_PATH,
+    )
+    try:
+        return _load_catalog_file(catalog_path)
+    except (KISSError, KeyError, TypeError, ValueError, AttributeError):
+        if catalog_path == PACKAGE_MODEL_INFO_PATH:
+            raise
+        logger.warning(
+            "Model catalog %s is unreadable or invalid; falling back to "
+            "the bundled %s",
+            catalog_path,
+            PACKAGE_MODEL_INFO_PATH,
+            exc_info=True,
+        )
+        return _load_catalog_file(PACKAGE_MODEL_INFO_PATH)
+
+
+def _load_catalog_file(catalog_path: Path) -> dict[str, ModelInfo]:
+    """Read *catalog_path*, merge ``MY_MODELS.json``, and build the table.
+
+    Args:
+        catalog_path: The ``MODEL_INFO.json`` file to load.
+
+    Returns:
+        The complete name → :class:`ModelInfo` mapping.
+
+    Raises:
+        KISSError: When the catalog is unreadable or not a JSON object.
+        KeyError, TypeError, ValueError, AttributeError: When an entry
+            does not conform to the catalog schema (e.g. a required
+            field is missing or has the wrong type).
+    """
+    raw = _read_model_info_json(catalog_path)
     user_entries = _read_my_models()
     for name, entry in user_entries.items():
         raw[name] = entry

@@ -19,6 +19,8 @@
 # Environment:
 #   GH_TOKEN             — GitHub token (auto-detected from `gh auth token`)
 #   ANTHROPIC_API_KEY    — Anthropic API key (recommended)
+#   ANTHROPIC_WORKSPACE_ID — Anthropic workspace id (required when the API
+#                          key is identity-linked)
 #   OPENAI_API_KEY       — OpenAI API key (optional)
 #   GEMINI_API_KEY       — Gemini API key (optional)
 #   TOGETHER_API_KEY     — Together API key (optional)
@@ -100,7 +102,7 @@ fi
 # 5. Collect environment variables (git credentials + API keys)
 # ---------------------------------------------------------------------------
 ENV_ARGS=(-e "GH_TOKEN=${GH_TOKEN}")
-for key in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY TOGETHER_API_KEY OPENROUTER_API_KEY; do
+for key in ANTHROPIC_API_KEY ANTHROPIC_WORKSPACE_ID OPENAI_API_KEY GEMINI_API_KEY TOGETHER_API_KEY OPENROUTER_API_KEY; do
     [[ -n "${!key:-}" ]] && ENV_ARGS+=(-e "${key}=${!key}")
 done
 

@@ -26,6 +26,7 @@ API_KEY_INPUT_IDS = [
     "cfg-key-GEMINI_API_KEY",
     "cfg-key-OPENAI_API_KEY",
     "cfg-key-ANTHROPIC_API_KEY",
+    "cfg-key-ANTHROPIC_WORKSPACE_ID",
     "cfg-key-TOGETHER_API_KEY",
     "cfg-key-OPENROUTER_API_KEY",
     "cfg-key-ZAI_API_KEY",

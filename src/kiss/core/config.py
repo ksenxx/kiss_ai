@@ -129,6 +129,15 @@ class Config(BaseModel):
         default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""),
         description="Anthropic API key (can also be set via ANTHROPIC_API_KEY env var)",
     )
+    ANTHROPIC_WORKSPACE_ID: str = Field(
+        default_factory=lambda: os.getenv("ANTHROPIC_WORKSPACE_ID", ""),
+        description=(
+            "Anthropic workspace id (wrkspc_...) sent as the "
+            "anthropic-workspace-id request header; the Anthropic API requires "
+            "it when ANTHROPIC_API_KEY is an identity-linked key "
+            "(can also be set via ANTHROPIC_WORKSPACE_ID env var)"
+        ),
+    )
     TOGETHER_API_KEY: str = Field(
         default_factory=lambda: os.getenv("TOGETHER_API_KEY", ""),
         description="Together API key (can also be set via TOGETHER_API_KEY env var)",
