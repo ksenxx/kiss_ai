@@ -4536,7 +4536,7 @@ class RemoteAccessServer:
         the event loop.  ``start_new_session=True`` keeps the updater
         alive when ``install.sh`` restarts this very daemon.
         ``--non-interactive`` / ``KISS_NONINTERACTIVE=1`` make the
-        script answer its ``[Y/n]`` upgrade questions with their
+        script answer its ``[Y/n]`` questions with their
         defaults (it would anyway, having no terminal to ask on), and
         ``stdin=DEVNULL`` detaches it from the daemon's stdin.
         Failures are emitted as ``error`` events instead of raised,

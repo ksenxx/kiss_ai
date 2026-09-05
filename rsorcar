@@ -494,7 +494,7 @@ fi
 # --- 5d. install.sh --------------------------------------------------------
 # KISS_SKIP_UPDATE: never ``git pull`` over the tree we just shipped.
 # KISS_SKIP_LAUNCH: no editor launch; this script starts the web app instead.
-# --non-interactive: no [Y/n] upgrade questions (there is no pty anyway).
+# --non-interactive: no [Y/n] questions (there is no pty anyway).
 rinfo "Running install.sh ..."
 KISS_SKIP_UPDATE=1 KISS_SKIP_LAUNCH=1 bash "$REMOTE_DIR/install.sh" --non-interactive
 
