@@ -36,8 +36,21 @@
   const _activePanels = new Set();
   let _activePanelTickIv = null;
 
-  function stampPanelStart(el) {
-    if (!el || _deferHighlight) return;
+  function stampPanelStart(el, ts) {
+    if (!el) return;
+    if (_deferHighlight) {
+      // A replayed panel must not be stamped with the render-time
+      // clock: Date.now() here would measure the replay, not the tool.
+      // The event's own wall-clock start is remembered instead, so the
+      // closing event's timestamp can render the panel's true duration
+      // (finalizePanelTime) and a panel of a still-running task can
+      // resume ticking after the replay (renderReplayedEvents).
+      const n = Number(ts);
+      if (isFinite(n) && n > 0 && n <= 8.64e15 && !el.dataset.startTs) {
+        el.dataset.startTs = String(Math.round(n));
+      }
+      return;
+    }
     if (el.dataset.startMs) return;
     el.dataset.startMs = String(Date.now());
     _activePanels.add(el);
@@ -46,11 +59,7 @@
   }
 
   // panelts-coverage:start
-  function _renderPanelTime(el) {
-    if (!el) return;
-    const startMs = Number(el.dataset.startMs || 0);
-    if (!startMs) return;
-    const ms = Date.now() - startMs;
+  function _renderElapsedLabel(el, ms) {
     const footer = window.PanelCopy.ensurePanelFoot(el);
     if (footer !== el.lastElementChild) el.appendChild(footer);
     let span = footer.querySelector(':scope > .panel-elapsed');
@@ -60,6 +69,13 @@
       footer.appendChild(span);
     }
     span.textContent = fmtElapsedMs(ms);
+  }
+
+  function _renderPanelTime(el) {
+    if (!el) return;
+    const startMs = Number(el.dataset.startMs || 0);
+    if (!startMs) return;
+    _renderElapsedLabel(el, Date.now() - startMs);
   }
   // panelts-coverage:end
 
@@ -81,11 +97,41 @@
     }, 1000);
   }
 
-  function finalizePanelTime(el) {
+  function finalizePanelTime(el, endTs) {
     if (!el) return;
+    // Idempotent: a panel already sealed keeps its frozen duration. A
+    // second close (a `result` sweeping the last tool panel it already
+    // sealed, a terminal event after the tool_result) must not
+    // re-render it against a later clock.
+    if (el.dataset.timeDone) {
+      _activePanels.delete(el);
+      if (_activePanels.size === 0 && _activePanelTickIv) {
+        clearInterval(_activePanelTickIv);
+        _activePanelTickIv = null;
+      }
+      return;
+    }
     const startMs = Number(el.dataset.startMs || 0);
-    if (!startMs) return;
-    _renderPanelTime(el);
+    const startTs = Number(el.dataset.startTs || 0);
+    const end = Number(endTs);
+    const endOk = isFinite(end) && end > 0 && end <= 8.64e15;
+    if (startTs && endOk) {
+      // The event timestamps are authoritative on both replayed and
+      // replay-promoted panels: the closing event's own wall-clock stamp
+      // measures the tool, while Date.now() would also count however
+      // long the event took to REACH this client.
+      _renderElapsedLabel(el, Math.max(0, end - startTs));
+    } else if (startMs) {
+      _renderPanelTime(el);
+    } else if (!startTs && !startMs) {
+      // Never stamped at all: nothing to seal.
+      return;
+    }
+    // The remaining case is a replay-stamped panel (data-start-ts only)
+    // whose closing event carries no usable timestamp: it renders no
+    // duration — a wall-clock fallback would measure time since a
+    // historical start — but is still sealed below so it can never
+    // resume ticking.
     el.dataset.timeDone = '1';
     _activePanels.delete(el);
     if (_activePanels.size === 0 && _activePanelTickIv) {
@@ -104,6 +150,46 @@
       _renderPanelTime(stamped[i]);
     }
     _startActivePanelTick();
+  }
+
+  /**
+   * Seal every still-ticking panel in *root*.
+   *
+   * Called when a task ends (task_done / task_error / task_stopped /
+   * task_interrupted): whatever panels its transcript still has open —
+   * a tool call that never reported back, a finish panel — stop at the
+   * task's end instead of counting time the task no longer spends, and
+   * can never be revived by a later tab switch.
+   *
+   * @param {Element|DocumentFragment|null} root The tab's transcript.
+   * @param {number|undefined} endTs The terminal event's timestamp.
+   */
+  function sealPanelTimes(root, endTs) {
+    if (!root || !root.querySelectorAll) return;
+    const open = root.querySelectorAll(
+      '[data-start-ms]:not([data-time-done]),' +
+        '[data-start-ts]:not([data-time-done])',
+    );
+    for (let i = 0; i < open.length; i++) finalizePanelTime(open[i], endTs);
+  }
+
+  /**
+   * Seal the ticking panels of the tab a terminal event names.
+   *
+   * The tab's transcript is #output when it is on screen and its
+   * detached fragment when it is hidden; a terminal event for a tab
+   * this client no longer has is a no-op.
+   *
+   * @param {string|undefined} evTabId The terminal event's tab id.
+   * @param {number|undefined} endTs The terminal event's timestamp.
+   */
+  function sealTabPanelTimes(evTabId, endTs) {
+    if (evTabId === undefined || evTabId === activeTabId) {
+      sealPanelTimes(O, endTs);
+      return;
+    }
+    const endTab = getTab(evTabId);
+    if (endTab) sealPanelTimes(endTab.outputFragment, endTs);
   }
 
   function discardProvisionalPanel(el) {
@@ -679,7 +765,7 @@
     hdr.textContent = 'Thoughts';
     addCollapse(panel, hdr, ts);
     panel.appendChild(hdr);
-    stampPanelStart(panel);
+    stampPanelStart(panel, ts);
     return panel;
   }
 
@@ -2984,9 +3070,14 @@
    * @param {Array<object>} events The transcript to replay.
    * @param {string|undefined} ownerTabId The tab the transcript
    *     belongs to; file links are cached and stamped against it.
+   * @param {?function} onFollowupClick Click handler for replayed
+   *     "Suggested next" bars (renderAdjacentTask passes
+   *     copyFollowupToInput so bars of earlier tasks spliced into the
+   *     chat stay clickable after a reload); omitted by the share
+   *     export, whose serialized HTML cannot carry listeners.
    * @returns {Element} The detached container.
    */
-  function replayDetachedTranscript(events, ownerTabId) {
+  function replayDetachedTranscript(events, ownerTabId, onFollowupClick) {
     const container = mkEl('div', 'adjacent-task');
     const savedTokens = statusTokens ? statusTokens.textContent : '';
     const savedBudget = statusBudget ? statusBudget.textContent : '';
@@ -3008,6 +3099,7 @@
       // tableak-coverage:start
       replayEventsInto(container, events, {
         ownerTabId: ownerTabId || activeTabId,
+        onFollowupClick: onFollowupClick || null,
       });
       // tableak-coverage:end
     }
@@ -3050,7 +3142,11 @@
 
     const taskLabel = task || '(untitled task)';
 
-    const container = replayDetachedTranscript(events, ownerTabId);
+    const container = replayDetachedTranscript(
+      events,
+      ownerTabId,
+      copyFollowupToInput,
+    );
     container.dataset.task = taskLabel;
     if (hasTaskId) container.dataset.taskId = String(taskId);
     if (!container.firstChild) {
@@ -4880,7 +4976,7 @@
           collapseNestedRunParallel(c);
         }
         tState.lastToolCallEl = c;
-        stampPanelStart(c);
+        stampPanelStart(c, ev.ts);
         if (ev.command) {
           const bp = mkEl('div', 'bash-panel');
           const bpContent = mkEl('div', 'bash-panel-content');
@@ -4906,7 +5002,8 @@
         // flush frame outlives this panel and fires against the next.
         if (tState.bashRaf) cancelAnimationFrame(tState.bashRaf);
         tState.bashRaf = 0;
-        if (tState.lastToolCallEl) finalizePanelTime(tState.lastToolCallEl);
+        if (tState.lastToolCallEl)
+          finalizePanelTime(tState.lastToolCallEl, ev.ts);
         if (
           tState.lastToolCallEl &&
           tState.lastToolCallEl.classList.contains('tc-run-parallel')
@@ -5247,7 +5344,7 @@
       ctx.lastToolName = ev.name || '';
       if (ctx.llmPanel && ctx.llmPanel._provisional)
         discardProvisionalPanel(ctx.llmPanel);
-      else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel);
+      else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel, ev.ts);
       ctx.llmPanel = null;
       ctx.llmPanelState = mkS();
       ctx.pendingPanel = true;
@@ -5301,8 +5398,15 @@
     if (t === 'result') {
       if (ctx.llmPanel && ctx.llmPanel._provisional)
         discardProvisionalPanel(ctx.llmPanel);
-      else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel);
+      else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel, ev.ts);
       ctx.llmPanel = null;
+      // The `finish` tool call produced this result, and the daemon
+      // deliberately emits no tool_result for finish — the result IS
+      // its close. Sealing the last tool panel here freezes finish's
+      // elapsed label; any other tool's panel was already sealed by
+      // its own tool_result (finalizePanelTime is idempotent).
+      if (ctx.state.lastToolCallEl)
+        finalizePanelTime(ctx.state.lastToolCallEl, ev.ts);
       // The daemon's own count is the authoritative one.
       if (ev.step_count) ctx.stepCount = ev.step_count;
       collapseAllExceptResult(ctx.container, ctx.tabId);
@@ -6699,11 +6803,7 @@
         // tableak-coverage:start
         if (!isForActiveTab(ev)) break;
         // tableak-coverage:end
-        const fu = mkFollowupBar(ev.text, () => {
-          inp.value = ev.text;
-          syncClearBtn();
-          inp.focus();
-        });
+        const fu = mkFollowupBar(ev.text, copyFollowupToInput);
         O.appendChild(fu);
         // autoscroll-coverage:start
         autoScrollLatestEventPanel(fu);
@@ -6803,9 +6903,9 @@
           if (statusTokens) statusTokens.textContent = '';
           if (statusBudget) statusBudget.textContent = '';
           if (statusSteps) statusSteps.textContent = '';
-          let bgSteps = 0;
+          let bgCtx = null;
           try {
-            bgSteps = replayEventsInto(frag, ev.events || [], {
+            bgCtx = replayEventsInto(frag, ev.events || [], {
               ownerTabId: teTabId,
               // The replayed usage_info / result events painted this
               // hidden tab's tokens and cost onto the borrowed status
@@ -6827,11 +6927,7 @@
                 if (statusSteps && statusSteps.textContent)
                   teTab.statusStepsText = statusSteps.textContent;
               },
-              onFollowupClick: function (text) {
-                inp.value = text;
-                syncClearBtn();
-                inp.focus();
-              },
+              onFollowupClick: copyFollowupToInput,
             });
           } catch (e) {
             teTab.outputFragment = teOldFrag;
@@ -6853,7 +6949,31 @@
             // visibletask-coverage:end
           }
           teTab.welcomeVisible = false;
-          if (bgSteps > 0) teTab.statusStepsText = 'Steps: ' + bgSteps;
+          // This replay REPLACED the tab's transcript, so the tab's
+          // live-stream state must resume from the replay's tail (the
+          // open tool_call panel, the current thoughts panel) — the
+          // old state points into the discarded fragment, and a live
+          // event routed through it would render into detached panels
+          // and vanish.
+          teTab.streamState = bgCtx.state;
+          teTab.streamLlmPanel = bgCtx.llmPanel;
+          teTab.streamLlmPanelState = bgCtx.llmPanelState;
+          teTab.streamLastToolName = bgCtx.lastToolName;
+          teTab.streamPendingPanel = bgCtx.pendingPanel;
+          teTab.streamStepCount = bgCtx.stepCount;
+          // The replay's collapse pass can close the tab that was on
+          // screen and put THIS tab there in its place (a finished
+          // fan-out takes its sub-agent tabs with it). restoreTab ran
+          // before bgCtx existed, so the module-level live stream state
+          // it loaded points into the discarded old transcript; the
+          // next live event would render into detached panels. Hand the
+          // replay's tail state to the live stream too.
+          if (activeTabId === teTabId) {
+            state = bgCtx.state;
+            saveLiveStreamCtx(bgCtx);
+          }
+          if (bgCtx.stepCount > 0)
+            teTab.statusStepsText = 'Steps: ' + bgCtx.stepCount;
           break;
         }
         if (ev.task) {
@@ -7175,6 +7295,7 @@
             : doneLabelFor(doneT0 || doneNow, doneNow);
         // donelabel-coverage:end
         markTabDone(ev.tabId, ev.success === false);
+        sealTabPanelTimes(ev.tabId, ev.endTs);
         clearActionProgressForTab(ev.tabId);
         setReady(doneLabel, ev.tabId, ev.startTs, ev.endTs);
         focusFinishedTab(ev.tabId);
@@ -7204,6 +7325,7 @@
             endTab.streamPendingPanel = true;
           }
         }
+        sealTabPanelTimes(ev.tabId, ev.endTs);
         const label =
           t === 'task_error'
             ? 'Error'
@@ -8140,11 +8262,7 @@
         '<span class="chip-text">' +
         esc(s.text) +
         '</span>';
-      chip.addEventListener('click', () => {
-        inp.value = s.text;
-        syncClearBtn();
-        inp.focus();
-      });
+      chip.addEventListener('click', () => copyFollowupToInput(s.text));
       container.appendChild(chip);
     });
   }
@@ -8163,22 +8281,39 @@
    * @param {Element|DocumentFragment} container Where to render.
    * @param {Array<object>} events The transcript to replay.
    * @param {object} [opts] ownerTabId / onFollowupClick.
-   * @returns {number} The number of steps the transcript records.
+   * @returns {object} The replay's stream context: its stepCount is the
+   *   number of steps the transcript records, and its tail state (the
+   *   open tool_call panel, the current thoughts panel, ...) is what a
+   *   live continuation of a still-running task must resume from.
    */
   function replayEventsInto(container, events, opts) {
     if (_rpDeferredCloses !== null) {
       return renderReplayedEvents(container, events, opts);
     }
     _rpDeferredCloses = [];
-    let steps;
+    let ctx;
     try {
-      steps = renderReplayedEvents(container, events, opts);
+      ctx = renderReplayedEvents(container, events, opts);
     } catch (e) {
       _rpDeferredCloses = null;
       throw e;
     }
     rpFlushDeferredCloses();
-    return steps;
+    return ctx;
+  }
+
+  /**
+   * Copy a suggested follow-up prompt into the chat input box and
+   * focus it — the one behavior every clickable "Suggested next" bar
+   * (live stream, active-tab replay, background-tab replay, spliced-in
+   * adjacent transcripts) and welcome suggestion chip shares.
+   *
+   * @param {string} text The prompt to place in the input box.
+   */
+  function copyFollowupToInput(text) {
+    inp.value = text;
+    syncClearBtn();
+    inp.focus();
   }
 
   /**
@@ -8186,7 +8321,9 @@
    * event, identical for live streams and history replays.
    *
    * @param {string} text The suggested follow-up prompt.
-   * @param {?function} onClick Click handler, or null for a static bar.
+   * @param {?function} onClick Click handler, called with *text*, or
+   *     null for a static bar (share-page export, whose serialized
+   *     HTML cannot carry listeners).
    * @returns {HTMLElement} The bar, ready to append.
    */
   function mkFollowupBar(text, onClick) {
@@ -8196,7 +8333,7 @@
       '<span class="fu-text">' +
       esc(text) +
       '</span>';
-    if (onClick) fu.addEventListener('click', onClick);
+    if (onClick) fu.addEventListener('click', () => onClick(text));
     return fu;
   }
 
@@ -8223,10 +8360,7 @@
           return;
         }
         if (t === 'followup_suggestion') {
-          const onClick =
-            opts && opts.onFollowupClick
-              ? () => opts.onFollowupClick(ev.text)
-              : null;
+          const onClick = (opts && opts.onFollowupClick) || null;
           container.appendChild(mkFollowupBar(ev.text, onClick));
           return;
         }
@@ -8236,6 +8370,33 @@
       });
     } finally {
       _deferHighlight = prevDefer;
+    }
+    // The replay is over: the returned context may be adopted as a
+    // still-running task's live stream state (replayTaskEvents, the
+    // task_events background branch), and a REPLAY-only flag left on it
+    // would suppress the report tabs of reports the live continuation
+    // writes from here on.
+    delete ctx.state.suppressReportOpen;
+    // A replayed panel that no later event closed is still in progress
+    // when its task is still running (a sub-agent tab opened mid-run,
+    // a running chat resumed after a reload): it takes up the live
+    // tick from its own event's wall-clock start, exactly like the
+    // live-streamed panel it was before the replay. A finished task's
+    // open panels keep no elapsed label — the tool never reported
+    // back, so no duration exists. An adjacent-task container is
+    // always a NEIGHBOURING task's finished transcript, so it never
+    // ticks even while its owner tab runs its live task.
+    const replayOwnerTab = getTab(ownerTabId);
+    const isAdjacentReplay =
+      !!container.classList && container.classList.contains('adjacent-task');
+    if (replayOwnerTab && replayOwnerTab.isRunning && !isAdjacentReplay) {
+      const open = container.querySelectorAll(
+        '[data-start-ts]:not([data-time-done]):not([data-start-ms])',
+      );
+      for (let i = 0; i < open.length; i++) {
+        open[i].dataset.startMs = open[i].dataset.startTs;
+      }
+      reviveActivePanelTimes(container);
     }
     // Runs after every event has rendered but BEFORE the collapse pass
     // below: collapsing a finished run_parallel panel closes its
@@ -8252,22 +8413,26 @@
         }
       });
     }
-    return ctx.stepCount;
+    return ctx;
   }
 
   function replayTaskEvents(events) {
     clearOutput();
     resetOutputState();
     clearUsageMetrics();
-    const rSteps = replayEventsInto(O, events, {
+    const rCtx = replayEventsInto(O, events, {
       ownerTabId: activeTabId,
-      onFollowupClick: function (text) {
-        inp.value = text;
-        syncClearBtn();
-        inp.focus();
-      },
+      onFollowupClick: copyFollowupToInput,
     });
-    if (rSteps > 0) updateStepCount(rSteps);
+    // The live stream resumes exactly where the replay left off: the
+    // replay's tail state (the open tool_call panel, the provisional
+    // thoughts panel, the current tool name) becomes the visible
+    // stream's state, so a still-running task's next live event fills
+    // and closes the replayed panels instead of rendering orphans
+    // beside them.
+    state = rCtx.state;
+    saveLiveStreamCtx(rCtx);
+    if (rCtx.stepCount > 0) updateStepCount(rCtx.stepCount);
     // autoscroll-coverage:start
     // clearOutput() above released any user scroll lock: the replayed
     // chat lands at the end of its latest event panel.

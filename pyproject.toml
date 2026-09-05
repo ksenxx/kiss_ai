@@ -357,6 +357,7 @@ Repository = "https://github.com/ksen/kiss"
 [project.scripts]
 check = "kiss.scripts.check:main"
 generate-api-docs = "kiss.scripts.generate_api_docs:main"
+sorcar = "kiss.agents.sorcar.sorcar_agent:main"
 kiss-slack = "kiss.agents.third_party_agents.slack_agent:main"
 kiss-gmail = "kiss.agents.third_party_agents.gmail_agent:main"
 kiss-whatsapp = "kiss.agents.third_party_agents.whatsapp_agent:main"

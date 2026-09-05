@@ -224,6 +224,10 @@ class AgentPathApiTest(unittest.TestCase):
         parameter and the script defines a getter for each — the
         daemon-built agent must see the SCRIPT's values, proving the
         getters ran on the daemon and won over the passed arguments.
+        The script also defines ``get_web_tools()`` and
+        ``get_is_parallel()``, which are NOT part of the getter
+        contract: they must be ignored and the client-passed values
+        kept.
         """
         available = get_available_models()
         assert available, "test needs at least one available model"
@@ -297,10 +301,13 @@ class AgentPathApiTest(unittest.TestCase):
 
 
             def get_web_tools():
+                # NOT a supported getter: web_tools has no agent-script
+                # override — this must be ignored, never called.
                 return False
 
 
             def get_is_parallel():
+                # NOT a supported getter either; must be ignored too.
                 return False
             ''',
         )
@@ -352,8 +359,11 @@ class AgentPathApiTest(unittest.TestCase):
         assert seen["_auto_commit_attr"] is False
         assert seen["max_budget"] == 1.25
         assert seen["model_config"] == {"base_url": "http://localhost:1234/v1"}
-        assert seen["_web_tools_attr"] is False
-        assert seen["_is_parallel_attr"] is False
+        # ``get_web_tools()`` / ``get_is_parallel()`` are NOT agent-script
+        # getters: the script's False returns are ignored and the
+        # client-passed True values survive.
+        assert seen["_web_tools_attr"] is True
+        assert seen["_is_parallel_attr"] is True
         assert [t.__name__ for t in seen["tools"]] == ["scripted_tool"]
         assert seen["tools"][0](x=21) == 42
 
@@ -592,7 +602,7 @@ class AgentPathApiTest(unittest.TestCase):
 
         ``apply_agent_overrides`` is the daemon-side loader; drive it
         directly with a real script whose ``get_chat_id()`` succeeds
-        and whose LATER ``get_web_tools()`` raises: the command must
+        and whose LATER ``get_use_worktree()`` raises: the command must
         come out exactly as it went in — a direct ``_run_task`` caller
         seeds its run state from the command, so a partial override
         surviving the failure would leak the broken script's chat id
@@ -613,7 +623,7 @@ class AgentPathApiTest(unittest.TestCase):
                 return "hijacked-chat"
 
 
-            def get_web_tools():
+            def get_use_worktree():
                 raise RuntimeError("late failure")
             ''',
         )
@@ -621,13 +631,13 @@ class AgentPathApiTest(unittest.TestCase):
             "type": "run",
             "prompt": "hi",
             "chatId": "original-chat",
-            "webTools": None,
+            "useWorktree": True,
             "agentPath": agent_path,
         }
         original = dict(cmd)
         with self.assertRaises(AgentFileError) as ctx:
             apply_agent_overrides(cmd)
-        assert "get_web_tools()" in str(ctx.exception)
+        assert "get_use_worktree()" in str(ctx.exception)
         assert "late failure" in str(ctx.exception)
         assert cmd == original
 

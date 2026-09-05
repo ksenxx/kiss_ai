@@ -66,22 +66,28 @@ PARAM_FIELDS: tuple[tuple[str, str], ...] = (
     ("auto_commit", "autoCommit"),
     ("max_budget", "maxBudget"),
     ("model_config", "modelConfig"),
-    ("web_tools", "webTools"),
-    ("is_parallel", "useParallel"),
-    ("append_basic_tools", "appendBasicTools"),
+    ("if_append_basic_tools", "appendBasicTools"),
     ("append_to_system_prompt", "appendToSystemPrompt"),
     ("append_to_prompt", "appendToPrompt"),
 )
-"""The overridable ``run`` parameters, as ``(param, wire_field)`` pairs.
+"""The overridable ``run`` parameters, as ``(getter_suffix, wire_field)`` pairs.
 
-Each entry maps a :func:`kiss.server.sorcar.run` parameter name (the
-``X`` of the agent script's optional ``get_X()`` getter) to the ``run``
-command wire field it overrides.  ``timeout``, ``stop_on_timeout``,
-and ``sock_path`` are absent by design: they are client-transport
-parameters — the script only runs on the daemon that ``sock_path``
-selects, ``timeout`` bounds the client's local wait, and
+Each entry maps the ``X`` of the agent script's optional ``get_X()``
+getter to the ``run`` command wire field it overrides.  The suffix is
+the :func:`kiss.server.sorcar.run` parameter name, except
+``if_append_basic_tools``, whose getter
+``get_if_append_basic_tools()`` overrides the ``append_basic_tools``
+parameter (wire field ``appendBasicTools``).  ``timeout``,
+``stop_on_timeout``, and ``sock_path`` are absent by design: they are
+client-transport parameters — the script only runs on the daemon that
+``sock_path`` selects, ``timeout`` bounds the client's local wait, and
 ``stop_on_timeout`` picks the client's timeout behavior — so a
-daemon-side getter could never take effect.  ``scope_work_dir`` (wire field ``tabScopeWorkDir``) is
+daemon-side getter could never take effect.  ``web_tools`` and
+``is_parallel`` have no getters either: an extension-agent run always
+uses the values the client passed to ``run()`` (the parameters'
+defaults when the caller passed none), so a script defining
+``get_web_tools()`` or ``get_is_parallel()`` is simply not consulted
+for them.  ``scope_work_dir`` (wire field ``tabScopeWorkDir``) is
 absent by design too: it is the CALLING client's tab-bar visibility
 scope, which the dispatched script must not be able to repoint at
 another workspace — and its absence here is what lets the scope
@@ -114,7 +120,9 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
 
     Args:
         raw_path: The agent-script path, for diagnostic messages.
-        param: The ``run`` parameter name the getter overrides.
+        param: The getter suffix (:data:`PARAM_FIELDS` /
+            :data:`HOOK_FIELDS` first element) whose ``get_{param}()``
+            produced *value*.
         value: The getter's return value.
 
     Returns:
@@ -159,7 +167,7 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
             "tool callables, or None"
         )
     elif param in (
-        "use_worktree", "auto_commit", "is_parallel", "append_basic_tools",
+        "use_worktree", "auto_commit", "if_append_basic_tools",
     ):
         ok = isinstance(value, bool)
         expected = "a bool"
@@ -183,9 +191,6 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
     elif param == "model_config":
         ok = value is None or isinstance(value, dict)
         expected = "a dict or None"
-    elif param == "web_tools":
-        ok = value is None or isinstance(value, bool)
-        expected = "a bool or None"
     elif param in ("llm_call_hook", "tool_call_hook"):
         ok = value is None or callable(value)
         expected = "a callable or None"

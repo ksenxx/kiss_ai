@@ -1468,9 +1468,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       "git reset --hard '@{upstream}' 2>/dev/null || git reset --hard origin/HEAD 2>/dev/null || true",
       'if [ -n "$_kiss_stashed" ]; then git stash pop >/dev/null 2>&1 || true; fi',
       // --non-interactive: the Update button is automation.  install.sh
-      // would otherwise ask its [Y/n] upgrade questions in this terminal
-      // and skip the setsid detachment that protects the install from the
-      // terminal-disposal ^C during step [5/5].
+      // would otherwise ask its [Y/n] questions (e.g. the Homebrew
+      // install) in this terminal and skip the setsid detachment that
+      // protects the install from the terminal-disposal ^C during step
+      // [5/5].
       `KISS_HOME='${escKissHome}' bash '${escScript}' --non-interactive`,
     ].join('; ');
     terminal.sendText(preflight);

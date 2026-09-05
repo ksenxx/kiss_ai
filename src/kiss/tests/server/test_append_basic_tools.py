@@ -426,7 +426,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         assert self._executor_tool_names(calls) == ["finish"]
 
     def test_agent_script_getter_overrides_to_false(self) -> None:
-        """A script ``get_append_basic_tools()`` overrides the client value.
+        """A script ``get_if_append_basic_tools()`` overrides the client value.
 
         The client sends the default (``True``); the agent script's
         getter returns ``False`` — the daemon-side override must win,
@@ -438,7 +438,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             """Agent script disabling the basic toolset."""
 
 
-            def get_append_basic_tools() -> bool:
+            def get_if_append_basic_tools() -> bool:
                 """Run with only finish and the client tools."""
                 return False
             ''',
@@ -458,14 +458,14 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         assert self._executor_tool_names(calls) == ["finish", "client_tool"]
 
     def test_agent_script_getter_wrong_type_fails_task(self) -> None:
-        """A non-bool ``get_append_basic_tools()`` stops the task loudly."""
+        """A non-bool ``get_if_append_basic_tools()`` stops the task loudly."""
         agent_path = self._write_py(
             "bad_append_agent.py",
             '''
             """Agent script with a wrong-typed getter."""
 
 
-            def get_append_basic_tools() -> str:
+            def get_if_append_basic_tools() -> str:
                 """Return the wrong type."""
                 return "yes"
             ''',
@@ -481,7 +481,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is False
-        assert "get_append_basic_tools" in result.text
+        assert "get_if_append_basic_tools" in result.text
         assert "bool" in result.text
         assert calls == [], "no executor session may start for a broken script"
 

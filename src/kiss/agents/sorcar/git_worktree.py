@@ -1226,6 +1226,13 @@ class GitWorktreeOps:
                 _race_delay()
                 prefix = "" if not content or content.endswith("\n") else "\n"
                 f.write(f"{prefix}{entry}\n")
+                # Flush while the flock is still held: the context
+                # managers unwind in reverse order, releasing the lock
+                # BEFORE ``open()``'s exit flushes the buffered write.
+                # Without this a second process could grab the flock,
+                # read the still-unflushed file, miss the entry, and
+                # append a duplicate.
+                f.flush()
 
     @staticmethod
     def ensure_excluded(repo: Path) -> None:
