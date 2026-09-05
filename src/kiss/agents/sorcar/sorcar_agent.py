@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -1021,6 +1022,7 @@ class SorcarAgent(RelentlessAgent):
                 system_prompt_suffix=str(
                     getattr(self, "_system_prompt_suffix", "") or ""
                 ),
+                web_tools=self._use_web_tools,
             )
         finally:
             # stop() joins the monitor BEFORE the offsets bump below so a
@@ -1851,6 +1853,7 @@ def run_tasks_parallel(
     parent_tab_id: str = "",
     base_system_prompt: str = "",
     system_prompt_suffix: str = "",
+    web_tools: bool = True,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -1939,6 +1942,10 @@ def run_tasks_parallel(
             :meth:`SorcarAgent.run`'s *system_prompt*) passes it on so
             the extra instructions constrain the whole task tree,
             mirroring *base_system_prompt*.  ``""`` appends nothing.
+        web_tools: Whether each sub-agent gets browser/web tools,
+            forwarded to each sub-agent's ``run``.  A parent running
+            without web tools (e.g. ``sorcar --no-web``) passes False
+            so its children cannot re-acquire the browser it was denied.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -2022,6 +2029,7 @@ def run_tasks_parallel(
                 model_config=model_config,
                 base_system_prompt=base_system_prompt,
                 system_prompt=system_prompt_suffix or None,
+                web_tools=web_tools,
             )
             return result
         except KeyboardInterrupt:
@@ -2123,6 +2131,35 @@ def run_tasks_parallel(
     return results
 
 
+def _budget_arg(text: str) -> float:
+    """Parse and validate a ``--max-budget`` command-line value.
+
+    Plain ``float`` would accept ``nan`` and infinities, and the budget
+    checks compare with ``>=`` / ``<= 0`` — a NaN cap makes both
+    comparisons false and silently disables budget enforcement, so
+    non-finite and non-positive values are rejected here.
+
+    Args:
+        text: The raw command-line value.
+
+    Returns:
+        The budget as a positive finite float.
+
+    Raises:
+        argparse.ArgumentTypeError: If *text* is not a number or is not
+            a positive finite value.
+    """
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid budget value: {text!r}") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(
+            f"budget must be a positive finite number, got {text!r}"
+        )
+    return value
+
+
 def _ask_user_in_terminal(question: str) -> str:
     """Print *question* on the terminal and return the user's typed reply.
 
@@ -2170,7 +2207,7 @@ def main() -> None:
     parser.add_argument(
         "-b",
         "--max-budget",
-        type=float,
+        type=_budget_arg,
         default=None,
         help="maximum budget in USD for the task",
     )
@@ -2202,6 +2239,11 @@ def main() -> None:
         )
 
     work_dir = args.work_dir or os.environ.get("KISS_WORKDIR") or os.getcwd()
+    # Interactive terminals get the verbose console printer, which
+    # already displays the formatted result at the end of the run —
+    # printing the raw YAML again would show it twice.  Piped/redirected
+    # stdout gets exactly the raw YAML result and nothing else.
+    verbose = sys.stdout.isatty()
     agent = SorcarAgent("Sorcar CLI")
     result = agent.run(
         model_name=model_name,
@@ -2209,10 +2251,11 @@ def main() -> None:
         work_dir=work_dir,
         max_budget=args.max_budget,
         web_tools=not args.no_web,
-        verbose=True,
+        verbose=verbose,
         ask_user_question_callback=_ask_user_in_terminal,
     )
-    print(result)
+    if not verbose:
+        print(result)
     try:
         success = bool(yaml.safe_load(result).get("success"))
     except Exception:

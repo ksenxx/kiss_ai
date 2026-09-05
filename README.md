@@ -121,7 +121,7 @@ To install only the KISS Sorcar extension, open Visual Studio Code, search for *
 
 ## Using KISS Sorcar
 
-KISS Sorcar has three client interfaces, all served by one local daemon: the **VS Code extension**, the **remote web/mobile app**, and the **Python client API**.
+KISS Sorcar has three client interfaces, all served by one local daemon: the **VS Code extension**, the **remote web/mobile app**, and the **Python client API**. A fourth interface, the **`sorcar` terminal command**, runs a SorcarAgent directly in the current directory without the daemon: `sorcar "Summarize README.md"` (see `sorcar --help` for the model, budget, and web-tool flags).
 
 ### VS Code extension and web/mobile app
 
