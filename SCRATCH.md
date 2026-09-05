@@ -41,3 +41,5 @@ Why I trust the results:
 
 Optimized SQLite Repository: https://github.com/ksenxx/sqlite-optimized/
 Blog: https://kisssorcar.github.io/blog/sqlite-optimization-blog.html
+
+When "suggested next" is clicked, it must copy the task to the chat input text box, but it sometimes does not work in chat webviews when reloaded.  Fix it.  Check the invariant for other cases.

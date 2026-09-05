@@ -2,14 +2,19 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""``install.sh`` upgrade questions: interactive by default, never fatal.
+"""``install.sh`` questions: only the Homebrew install asks, and never fatally.
 
 Run from a terminal, ``install.sh`` asks ``[Y/n]`` before installing
-Homebrew and before upgrading an outdated git, uv, Node.js or VS Code
-("no" keeps the installed version and continues).  ``--non-interactive``
-or ``KISS_NONINTERACTIVE=1`` answers every question with its default
-(Yes) without touching the terminal, and so does the absence of a
-terminal altogether (the kiss-web daemon, cron, the detached re-exec).
+Homebrew ("no" skips it and continues).  ``--non-interactive`` or
+``KISS_NONINTERACTIVE=1`` answers the question with its default (Yes)
+without touching the terminal, and so does the absence of a terminal
+altogether (the kiss-web daemon, cron, the detached re-exec).
+
+The script deliberately has NO update/upgrade logic for third-party
+tools: an installed git, uv, Node.js or VS Code is used as-is, whatever
+its version.  Several tests below run the script against stub binaries
+reporting very old versions and assert that no upgrade question is
+asked, nothing is upgraded, and the run still reaches the build step.
 
 History the tests guard against
 ===============================
@@ -18,24 +23,21 @@ An earlier prompt implementation crashed under ``set -eo pipefail``:
 * an unguarded ``read ... </dev/tty`` returned non-zero on EOF and killed
   the script silently, right at the question;
 * the non-interactive path hard-exited on a failing ``brew``, so the
-  Update button never completed;
-* a missing version constant in ``DependencyInstaller.ts`` made the
-  ``REQUIRED_*`` extraction pipelines fail under ``pipefail``.
+  Update button never completed.
 
-The prompts were then removed, and are now back with guards.  The tests
-run the real ``install.sh`` inside a hermetic sandbox (stub
+The tests run the real ``install.sh`` inside a hermetic sandbox (stub
 ``git``/``brew``/``sudo``/``node``/``npm``/``code``/... binaries, throwaway
-``$HOME``) with an outdated git and assert the script gets *past* the
-question all the way to the extension build step (a stub ``npm run
-package`` prints a marker and stops the run deterministically).
-Terminal runs use ``script(1)`` to attach a real controlling pty and
-feed the answers through it.
+``$HOME``) and assert the script gets *past* the question all the way to
+the extension build step (a stub ``npm run package`` prints a marker and
+stops the run deterministically).  Terminal runs use ``script(1)`` to
+attach a real controlling pty and feed the answers through it.
 """
 
 from __future__ import annotations
 
 import os
 import select
+import shutil
 import subprocess
 import sys
 import time
@@ -49,14 +51,15 @@ INSTALL_SCRIPT = REPO / "install.sh"
 NPM_MARKER = "NPM-PACKAGE-MARKER"
 NPM_EXIT = 7
 
+# Deliberately ancient stub versions: the script must accept them as-is.
 OLD_GIT_VERSION = "2.30.0"
-REQUIRED_GIT_VERSION = "2.49.0"
-REQUIRED_UV_VERSION = "0.11.2"
+OLD_UV_VERSION = "0.5.0"
+OLD_NODE_VERSION = "v18.0.0"
+OLD_CODE_VERSION = "1.90.0"
 
-GIT_QUESTION = f"Upgrade git to {REQUIRED_GIT_VERSION} or later? [Y/n]"
-GIT_OUTDATED = f"git {OLD_GIT_VERSION} is older than the required version {REQUIRED_GIT_VERSION}."
-GIT_UPGRADING = "Upgrading git..."
-GIT_SKIPPED = "Skipping the git upgrade"
+BREW_QUESTION = "Install Homebrew now? [Y/n]"
+BREW_SKIPPED = "Skipping the Homebrew install"
+BREW_INSTALLING = "Installing Homebrew..."
 
 CTRL_C = "\x03"
 CTRL_D = "\x04"
@@ -71,31 +74,28 @@ def _write_stub(bin_dir: Path, name: str, body: str) -> None:
 
 def make_sandbox(
     root: Path,
-    with_dep_installer_ts: bool = True,
     log_perl: bool = False,
     darwin: bool = False,
-    outdated_everything: bool = False,
 ) -> dict:
     """Build a hermetic install.sh sandbox under *root*.
 
     Returns a dict with the script path, the environment to run it with
     and *root*.  All external tools that install.sh probes are stubbed
-    so no upgrade can touch the real system: ``brew`` and ``sudo`` log
+    so no install can touch the real system: ``brew`` and ``sudo`` log
     their arguments and fail, ``curl`` succeeds with empty output, and
     the stub ``npm run package`` stops the run with :data:`NPM_MARKER`.
+    Every stub reports an ancient version so the tests prove the script
+    accepts installed tools as-is instead of upgrading them.
 
     Args:
         root: Empty directory to build the sandbox in.
-        with_dep_installer_ts: Write the ``DependencyInstaller.ts`` the
-            script extracts ``REQUIRED_GIT_VERSION``/``REQUIRED_UV_VERSION``
-            from; ``False`` reproduces the missing-constants regression.
-        log_perl: Add a ``perl`` stub that records its invocation in
-            ``root/perl.log`` and fails, so a test can tell whether the
-            new-session re-exec block was even attempted.
+        log_perl: Add a ``perl`` stub that records the new-session
+            re-exec block's ``POSIX::setsid`` probe in ``root/perl.log``
+            and fails it (so the block is attempted but never re-execs),
+            while delegating every other invocation — the update lock's
+            ``flock`` call — to the real perl.
         darwin: Add a ``uname`` stub reporting ``Darwin``/``x86_64`` and
             omit ``brew`` so the macOS Homebrew question is reached.
-        outdated_everything: Report outdated uv, Node.js and VS Code as
-            well as git so every upgrade question is asked.
     """
     kiss_ai = root / "kiss_ai"
     home = root / "home"
@@ -111,18 +111,19 @@ def make_sandbox(
 
     src_dir = kiss_ai / "src" / "kiss" / "agents" / "vscode"
     (src_dir / "src").mkdir(parents=True)
-    if with_dep_installer_ts:
-        (src_dir / "src" / "DependencyInstaller.ts").write_text(
-            f"const UV_VERSION = '{REQUIRED_UV_VERSION}';\n"
-            f"const GIT_VERSION = '{REQUIRED_GIT_VERSION}';\n",
-            encoding="utf-8",
-        )
-    (src_dir / "package.json").write_text(
-        '{"engines": {"vscode": "^1.98.0"}}\n', encoding="utf-8",
+    # Version-source fixtures with impossibly high thresholds.  install.sh
+    # no longer reads these files, but a REINTRODUCED version-gated upgrade
+    # path (the removed logic extracted required versions from exactly
+    # these two files) would see every stub tool as hopelessly outdated
+    # and trip the no-upgrade assertions instead of passing vacuously on
+    # empty extracted versions.
+    (src_dir / "src" / "DependencyInstaller.ts").write_text(
+        "const UV_VERSION = '99.0.0';\nconst GIT_VERSION = '99.0.0';\n",
+        encoding="utf-8",
     )
-    scripts_dir = kiss_ai / "scripts"
-    scripts_dir.mkdir()
-    _write_stub(scripts_dir, "fetch-claude-skills.sh", "echo skills-ok\n")
+    (src_dir / "package.json").write_text(
+        '{"engines": {"vscode": "^99.0.0"}}\n', encoding="utf-8",
+    )
 
     _write_stub(
         stub_bin,
@@ -135,32 +136,44 @@ def make_sandbox(
     if not darwin:
         _write_stub(stub_bin, "brew", f'echo "brew $*" >> "{root}/brew.log"\nexit 1\n')
     _write_stub(stub_bin, "sudo", f'echo "sudo $*" >> "{root}/sudo.log"\nexit 1\n')
-    _write_stub(stub_bin, "apt-get", "exit 0\n")
-    _write_stub(stub_bin, "curl", "exit 0\n")
-    uv_version = "0.5.0" if outdated_everything else REQUIRED_UV_VERSION
-    node_version = "v18.0.0" if outdated_everything else "v22.16.0"
-    code_version = "1.90.0" if outdated_everything else "1.98.2"
-    _write_stub(stub_bin, "uv", f'echo "uv {uv_version} (stub)"\n')
-    _write_stub(stub_bin, "node", f'echo "{node_version}"\n')
+    _write_stub(stub_bin, "apt-get", f'echo "apt-get $*" >> "{root}/aptget.log"\nexit 0\n')
+    _write_stub(stub_bin, "curl", f'echo "curl $*" >> "{root}/curl.log"\nexit 0\n')
+    _write_stub(stub_bin, "uv", f'echo "uv {OLD_UV_VERSION} (stub)"\n')
+    _write_stub(stub_bin, "node", f'echo "{OLD_NODE_VERSION}"\n')
     _write_stub(stub_bin, "npx", "exit 0\n")
     _write_stub(
         stub_bin,
         "npm",
         '[ "$1" = "ci" ] && exit 0\n'
-        f'[ "$1" = "run" ] && {{ echo "{NPM_MARKER}"; exit {NPM_EXIT}; }}\n'
+        'if [ "$1" = "run" ]; then\n'
+        f'  [ "$2" = "package" ] && {{ echo "{NPM_MARKER}"; exit {NPM_EXIT}; }}\n'
+        "  exit 0\n"
+        "fi\n"
         "exit 0\n",
     )
-    _write_stub(stub_bin, "code", f'printf "{code_version}\\nabcdef\\nstub\\n"\n')
+    _write_stub(stub_bin, "code", f'printf "{OLD_CODE_VERSION}\\nabcdef\\nstub\\n"\n')
     _write_stub(
         stub_bin,
         "xcode-select",
         f'[ "$1" = "-p" ] && {{ echo "{clt}"; exit 0; }}\nexit 1\n',
     )
-    # ``upgrade_vscode`` on Darwin quits the running VS Code via osascript;
-    # never let the sandbox reach the real one on a macOS host.
+    # Belt and braces: nothing in the sandbox should reach osascript, but
+    # never let a stray call touch the real VS Code on a macOS host.
     _write_stub(stub_bin, "osascript", "exit 0\n")
     if log_perl:
-        _write_stub(stub_bin, "perl", f'echo "perl $*" >> "{root}/perl.log"\nexit 1\n')
+        # Fail only the re-exec block's ``use POSIX qw(setsid)`` probe
+        # (recording it), so the run stays attached to the pty; every
+        # other perl call — the update lock's flock — needs the real
+        # perl, resolved on the host's PATH before the stub shadows it.
+        real_perl = shutil.which("perl") or "/usr/bin/perl"
+        _write_stub(
+            stub_bin,
+            "perl",
+            'case "$*" in\n'
+            f'  *POSIX*setsid*) echo "perl $*" >> "{root}/perl.log"; exit 1 ;;\n'
+            f'  *) exec "{real_perl}" "$@" ;;\n'
+            "esac\n",
+        )
     if darwin:
         _write_stub(
             stub_bin,
@@ -230,36 +243,86 @@ def _assert_reached_build(result: subprocess.CompletedProcess) -> None:
 
     Under a pty the exit status is checked only where ``script(1)`` forwards
     it (``-e``, util-linux); BSD ``script`` on macOS always exits 0, so
-    there the marker plus the absence of the next build step is the proof.
+    there the marker plus the absence of the next install step (the
+    launcher install that follows the packaging step) is the proof.
     """
     assert NPM_MARKER in result.stdout, (
-        f"install.sh did not reach the build step:\n{result.stdout}"
+        f"install.sh did not reach the packaging step:\n{result.stdout}"
     )
-    assert "Copying bundled KISS runtime" not in result.stdout, result.stdout
+    assert "Installing rsorcar" not in result.stdout, result.stdout
     if not (sys.platform == "darwin" and result.args[0] == "script"):
         assert result.returncode == NPM_EXIT, result.stdout
 
 
+def _assert_nothing_upgraded(
+    result: subprocess.CompletedProcess, root: Path, allow_curl: bool = False
+) -> None:
+    """Old tools must be accepted as-is: no question, no upgrade attempt.
+
+    Besides the console wording, every stub that a resurrected upgrade
+    path would have to run (``sudo``, ``apt-get``, ``brew``, ``curl``)
+    logs its invocation; those logs must not exist.  *allow_curl* is for
+    the macOS test that answers "yes" to the Homebrew question, whose
+    legitimate bootstrap runs ``curl``.
+    """
+    out = result.stdout
+    assert "Upgrade" not in out, out
+    assert "Upgrading" not in out, out
+    assert "older than the required version" not in out, out
+    assert f"git {OLD_GIT_VERSION} ready" in out, out
+    assert f"uv {OLD_UV_VERSION} ready" in out, out
+    assert f"node {OLD_NODE_VERSION} ready" in out, out
+    assert f"(v{OLD_CODE_VERSION})" in out, out
+    for log_name in ("sudo.log", "aptget.log", "brew.log"):
+        assert not (root / log_name).exists(), (
+            f"{log_name} written — a system-mutating command ran:\n"
+            + (root / log_name).read_text(encoding="utf-8")
+        )
+    if not allow_curl:
+        assert not (root / "curl.log").exists(), (
+            "curl ran — a download was attempted:\n"
+            + (root / "curl.log").read_text(encoding="utf-8")
+        )
+
+
 # ---------------------------------------------------------------------------
-# Non-interactive paths
+# Third-party tools are never upgraded
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.slow
-def test_no_terminal_upgrades_without_asking(tmp_path: Path) -> None:
-    """Daemon update path: no tty, old git, failing package manager.
+def test_no_terminal_accepts_old_tools_without_upgrading(tmp_path: Path) -> None:
+    """Daemon update path: no tty, ancient git/uv/node/code stubs.
 
-    Without a terminal there is nobody to ask, so the run is
-    non-interactive: git is upgraded unconditionally, the failing
-    upgrade only warns, and the script continues to the build step.
+    The script must accept every installed tool as-is — no version
+    check, no upgrade, no question — and continue to the build step.
     """
     sandbox = make_sandbox(tmp_path)
     result = run_install(sandbox, use_pty=False)
     assert "Mode: non-interactive" in result.stdout, result.stdout
-    assert GIT_OUTDATED in result.stdout, result.stdout
-    assert GIT_UPGRADING in result.stdout, result.stdout
     assert "[Y/n]" not in result.stdout, result.stdout
-    assert f"WARNING: git is still {OLD_GIT_VERSION}" in result.stdout, result.stdout
+    _assert_nothing_upgraded(result, tmp_path)
+    _assert_reached_build(result)
+
+
+@pytest.mark.slow
+def test_terminal_accepts_old_tools_without_asking(tmp_path: Path) -> None:
+    """Interactive runs ask nothing on Linux: there is no upgrade question.
+
+    With the answer channel open (a real pty) and every stub tool
+    ancient, the script must not ask a single ``[Y/n]`` question — the
+    Homebrew question is macOS-only and upgrade questions no longer
+    exist.  The setsid re-exec must be skipped in interactive mode,
+    which the failing ``perl`` stub would record.
+    """
+    sandbox = make_sandbox(tmp_path, log_perl=True)
+    result = run_install(sandbox, use_pty=True, input_text="n\n")
+    assert "Mode: interactive" in result.stdout, result.stdout
+    assert "[Y/n]" not in result.stdout, result.stdout
+    _assert_nothing_upgraded(result, tmp_path)
+    assert not (tmp_path / "perl.log").exists(), (
+        "interactive runs must skip the setsid re-exec:\n" + result.stdout
+    )
     _assert_reached_build(result)
 
 
@@ -278,95 +341,70 @@ def test_non_interactive_opt_out_at_a_terminal(
     """``--non-interactive`` / ``KISS_NONINTERACTIVE=1`` silence the questions on a pty.
 
     This is what the Update button and the Docker entrypoint pass.  The
-    "n" typed into the terminal must be ignored (git is upgraded anyway)
-    and the new-session re-exec must still be attempted, which the
-    ``perl`` stub records.
+    "n" typed into the terminal must be ignored and the new-session
+    re-exec must still be attempted, which the ``perl`` stub records.
     """
     sandbox = make_sandbox(tmp_path, log_perl=True)
     result = run_install(sandbox, use_pty=True, args=args, input_text="n\n", extra_env=extra_env)
     assert "Mode: non-interactive" in result.stdout, result.stdout
     assert "[Y/n]" not in result.stdout, result.stdout
-    assert GIT_UPGRADING in result.stdout, result.stdout
+    _assert_nothing_upgraded(result, tmp_path)
     assert (tmp_path / "perl.log").exists(), (
         "non-interactive runs must keep the setsid re-exec:\n" + result.stdout
     )
     _assert_reached_build(result)
 
 
-@pytest.mark.slow
-def test_missing_version_constants_do_not_crash(tmp_path: Path) -> None:
-    """A missing DependencyInstaller.ts must not kill the script.
-
-    Under ``pipefail`` the ``REQUIRED_*`` extraction pipelines exited
-    non-zero when the constants file was absent, killing install.sh at
-    the very top before any output.  Empty versions must simply skip
-    the version checks.
-    """
-    sandbox = make_sandbox(tmp_path, with_dep_installer_ts=False)
-    result = run_install(sandbox, use_pty=False)
-    assert "Checking git" in result.stdout, result.stdout
-    assert "older than the required version" not in result.stdout, result.stdout
-    _assert_reached_build(result)
-
-
 # ---------------------------------------------------------------------------
-# Interactive paths (the default at a terminal)
+# The Homebrew question (macOS, the one remaining interactive question)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.slow
-def test_terminal_asks_and_no_keeps_installed_git(tmp_path: Path) -> None:
-    """At a terminal the script asks; "n" skips the upgrade and continues.
+def _darwin_sandbox(tmp_path: Path) -> dict:
+    """A Darwin sandbox, skipping when a real Homebrew would preempt the question."""
+    if any(Path(p).exists() for p in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew")):
+        pytest.skip("a real Homebrew is installed; install.sh would find it before asking")
+    return make_sandbox(tmp_path, darwin=True)
 
-    The answer is read from ``/dev/tty``, so the setsid re-exec must be
-    skipped (otherwise there would be no controlling terminal); the
-    ``perl`` stub proves the block was not even attempted.
+
+@pytest.mark.slow
+@pytest.mark.parametrize("brew_answer", ["n", "y"])
+def test_macos_asks_before_installing_homebrew(tmp_path: Path, brew_answer: str) -> None:
+    """On macOS without Homebrew the install is a question.
+
+    A ``uname`` stub makes install.sh take its Darwin path on any host;
+    the stubbed ``curl`` returns an empty installer so "y" runs a no-op
+    Homebrew bootstrap that ends in the existing "did not complete"
+    warning.  Either way the run must continue to the build step, with
+    no further questions.
     """
-    sandbox = make_sandbox(tmp_path, log_perl=True)
-    result = run_install(sandbox, use_pty=True, input_text="n\n")
-    assert "Mode: interactive" in result.stdout, result.stdout
-    assert GIT_OUTDATED in result.stdout, result.stdout
-    assert GIT_QUESTION in result.stdout, result.stdout
-    assert GIT_SKIPPED in result.stdout, result.stdout
-    assert GIT_UPGRADING not in result.stdout, result.stdout
-    assert not (tmp_path / "sudo.log").exists(), "declined upgrade must not run sudo"
-    assert not (tmp_path / "brew.log").exists(), "declined upgrade must not run brew"
-    assert not (tmp_path / "perl.log").exists(), (
-        "interactive runs must skip the setsid re-exec:\n" + result.stdout
-    )
+    sandbox = _darwin_sandbox(tmp_path)
+    result = run_install(sandbox, use_pty=True, input_text=f"{brew_answer}\n")
+    out = result.stdout
+    assert "OS: Darwin" in out, out
+    assert BREW_QUESTION in out, out
+    if brew_answer == "n":
+        assert BREW_SKIPPED in out, out
+        assert BREW_INSTALLING not in out, out
+    else:
+        assert BREW_INSTALLING in out, out
+        assert "WARNING: Homebrew install did not complete" in out, out
+    _assert_nothing_upgraded(result, tmp_path, allow_curl=brew_answer == "y")
     _assert_reached_build(result)
     # Question and echoed answer travel the same tee pipe, so the log has
     # the complete line.
     log = (tmp_path / "home" / ".kiss" / "install.log").read_text(encoding="utf-8")
-    assert f"{GIT_QUESTION} n\n" in log, log
-    assert GIT_SKIPPED in log, log
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("answer", ["\n", "y\n", "YES\n"], ids=["enter", "y", "YES"])
-def test_terminal_yes_runs_the_upgrade(tmp_path: Path, answer: str) -> None:
-    """Enter (the default), "y" and "yes" all run the upgrade.
-
-    The stubbed package manager fails, so the run must warn and still
-    reach the build step, exactly like the non-interactive path.
-    """
-    sandbox = make_sandbox(tmp_path)
-    result = run_install(sandbox, use_pty=True, input_text=answer)
-    assert f"{GIT_QUESTION} {answer.strip() or 'yes'}" in result.stdout, result.stdout
-    assert GIT_UPGRADING in result.stdout, result.stdout
-    assert GIT_SKIPPED not in result.stdout, result.stdout
-    assert f"WARNING: git is still {OLD_GIT_VERSION}" in result.stdout, result.stdout
-    _assert_reached_build(result)
+    assert f"{BREW_QUESTION} {brew_answer}\n" in log, log
 
 
 @pytest.mark.slow
 def test_terminal_invalid_answer_is_asked_again(tmp_path: Path) -> None:
     """Anything but y/yes/n/no/Enter re-asks the question."""
-    sandbox = make_sandbox(tmp_path)
+    sandbox = _darwin_sandbox(tmp_path)
     result = run_install(sandbox, use_pty=True, input_text="maybe\nNO\n")
     assert "Please answer y or n." in result.stdout, result.stdout
-    assert result.stdout.count(GIT_QUESTION) == 2, result.stdout
-    assert GIT_SKIPPED in result.stdout, result.stdout
+    assert result.stdout.count(BREW_QUESTION) == 2, result.stdout
+    assert BREW_SKIPPED in result.stdout, result.stdout
     _assert_reached_build(result)
 
 
@@ -378,38 +416,11 @@ def test_terminal_eof_takes_the_default(tmp_path: Path) -> None:
     ``set -e``; a ``/dev/tty`` that can no longer be opened fails the same
     ``read`` the same way.
     """
-    sandbox = make_sandbox(tmp_path)
+    sandbox = _darwin_sandbox(tmp_path)
     result = run_install(sandbox, use_pty=True, input_text=CTRL_D)
-    assert GIT_QUESTION in result.stdout, result.stdout
+    assert BREW_QUESTION in result.stdout, result.stdout
     assert "(no answer from the terminal; assuming yes)" in result.stdout, result.stdout
-    assert GIT_UPGRADING in result.stdout, result.stdout
-    _assert_reached_build(result)
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("answers", ["n\nn\nn\nn\n", "\n\n\n\n"], ids=["all-no", "all-yes"])
-def test_terminal_asks_for_every_outdated_tool(tmp_path: Path, answers: str) -> None:
-    """uv, Node.js and VS Code get their own questions, honoured independently."""
-    sandbox = make_sandbox(tmp_path, outdated_everything=True)
-    result = run_install(sandbox, use_pty=True, input_text=answers)
-    out = result.stdout
-    assert GIT_QUESTION in out, out
-    assert f"Upgrade uv to {REQUIRED_UV_VERSION}? [Y/n]" in out, out
-    assert "Upgrade Node.js to 22.16.0? [Y/n]" in out, out
-    assert "Upgrade VS Code? [Y/n]" in out, out
-    if answers.startswith("n"):
-        assert GIT_SKIPPED in out, out
-        assert "Skipping the uv upgrade; continuing with uv 0.5.0." in out, out
-        assert "Skipping the Node.js upgrade" in out, out
-        assert "Skipping the VS Code upgrade" in out, out
-        assert "Upgrading" not in out, out
-    else:
-        assert GIT_UPGRADING in out, out
-        assert f"Upgrading uv to {REQUIRED_UV_VERSION}..." in out, out
-        assert "Upgrading Node.js to v22.16.0..." in out, out
-        assert "Upgrading VS Code..." in out, out
-        assert "WARNING: VS Code is still 1.90.0 (< 1.98.0)" in out, out
-        assert "Skipping" not in out, out
+    assert BREW_INSTALLING in result.stdout, result.stdout
     _assert_reached_build(result)
 
 
@@ -448,7 +459,7 @@ def test_terminal_ctrl_c_at_the_question_asks_again(tmp_path: Path) -> None:
     (bash blocked in ``read``) so it cannot land before the trap is
     installed.
     """
-    sandbox = make_sandbox(tmp_path)
+    sandbox = _darwin_sandbox(tmp_path)
     proc = subprocess.Popen(
         _pty_command(sandbox, ()),
         cwd=str(sandbox["script"].parent),
@@ -460,14 +471,14 @@ def test_terminal_ctrl_c_at_the_question_asks_again(tmp_path: Path) -> None:
     )
     assert proc.stdin is not None
     try:
-        head = _read_until(proc, GIT_QUESTION, deadline_s=60)
+        head = _read_until(proc, BREW_QUESTION, deadline_s=60)
         time.sleep(0.5)
         proc.stdin.write(CTRL_C.encode())
         proc.stdin.flush()
         # One read: the trap's notice and the re-printed question arrive
         # together, and a second call would wait for output that has
         # already been consumed.
-        after_interrupt = _read_until(proc, GIT_QUESTION, deadline_s=20)
+        after_interrupt = _read_until(proc, BREW_QUESTION, deadline_s=20)
         assert "Interrupt received but ignored" in after_interrupt, after_interrupt
         head += after_interrupt
         proc.stdin.write(b"n\n")
@@ -480,9 +491,9 @@ def test_terminal_ctrl_c_at_the_question_asks_again(tmp_path: Path) -> None:
             proc.kill()
             proc.wait(timeout=10)
     out = head + rest.decode(errors="replace")
-    assert out.count(GIT_QUESTION) == 2, out
-    assert GIT_SKIPPED in out, out
-    assert GIT_UPGRADING not in out, out
+    assert out.count(BREW_QUESTION) == 2, out
+    assert BREW_SKIPPED in out, out
+    assert BREW_INSTALLING not in out, out
     assert NPM_MARKER in out, out
     # ``script -c`` runs install.sh under a ``sh -c`` wrapper that shares
     # the pty's foreground process group.  That untrapped, non-interactive
@@ -491,36 +502,7 @@ def test_terminal_ctrl_c_at_the_question_asks_again(tmp_path: Path) -> None:
     # reports 130 whatever install.sh returned.  Prove install.sh stopped
     # at the stub's exit 7 under ``set -e`` from its output instead: the
     # step after the marker never ran.
-    assert "Copying bundled KISS runtime" not in out, out
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("brew_answer", ["n", "y"])
-def test_macos_asks_before_installing_homebrew(tmp_path: Path, brew_answer: str) -> None:
-    """On macOS without Homebrew the install is a question too.
-
-    A ``uname`` stub makes install.sh take its Darwin path on any host;
-    the stubbed ``curl`` returns an empty installer so "y" runs a no-op
-    Homebrew bootstrap that ends in the existing "did not complete"
-    warning.  Either way the git question follows and "n" to it must
-    still reach the build step.
-    """
-    if any(Path(p).exists() for p in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew")):
-        pytest.skip("a real Homebrew is installed; install.sh would find it before asking")
-    sandbox = make_sandbox(tmp_path, darwin=True)
-    result = run_install(sandbox, use_pty=True, input_text=f"{brew_answer}\nn\n")
-    out = result.stdout
-    assert "OS: Darwin" in out, out
-    assert "Install Homebrew now? [Y/n]" in out, out
-    if brew_answer == "n":
-        assert "Skipping the Homebrew install" in out, out
-        assert "Installing Homebrew..." not in out, out
-    else:
-        assert "Installing Homebrew..." in out, out
-        assert "WARNING: Homebrew install did not complete" in out, out
-    assert GIT_QUESTION in out, out
-    assert GIT_SKIPPED in out, out
-    _assert_reached_build(result)
+    assert "Installing rsorcar" not in out, out
 
 
 if __name__ == "__main__":
