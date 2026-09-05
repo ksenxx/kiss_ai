@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import uuid
@@ -2119,3 +2121,100 @@ def run_tasks_parallel(
                 totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)
                 totals_out["total_steps"] = sum(u[2] for u in sub_usage)
     return results
+
+
+def _ask_user_in_terminal(question: str) -> str:
+    """Print *question* on the terminal and return the user's typed reply.
+
+    Used as the ``ask_user_question_callback`` of :func:`main` so the
+    agent's ``ask_user_question`` tool works when the agent runs from a
+    shell instead of the kiss-web UI.
+
+    Args:
+        question: The question the agent wants the user to answer.
+
+    Returns:
+        The line the user typed, or an empty string on end-of-file.
+    """
+    print(f"\n{question}")
+    try:
+        return input("> ")
+    except EOFError:
+        return ""
+
+
+def main() -> None:
+    """Run a :class:`SorcarAgent` on a task given on the command line.
+
+    Installed as the ``sorcar`` console script.  The task is the
+    positional arguments joined with spaces; when none are given and
+    stdin is not a terminal, the task is read from stdin instead.  The
+    agent works in ``$KISS_WORKDIR`` — exported by the
+    ``~/.local/bin/sorcar`` wrapper the VS Code extension installs, so
+    the agent acts on the directory the user invoked ``sorcar`` from —
+    falling back to the current directory.  Exits with status 0 when
+    the agent reports success and 1 otherwise.
+    """
+    parser = argparse.ArgumentParser(
+        prog="sorcar",
+        description="Run the KISS SorcarAgent on a task.",
+        epilog='example: sorcar "Summarize README.md"',
+    )
+    parser.add_argument("task", nargs="*", help="the task for the agent")
+    parser.add_argument(
+        "-m",
+        "--model",
+        default="",
+        help="LLM model name (default: best model for the configured API keys)",
+    )
+    parser.add_argument(
+        "-b",
+        "--max-budget",
+        type=float,
+        default=None,
+        help="maximum budget in USD for the task",
+    )
+    parser.add_argument(
+        "--work-dir",
+        default="",
+        help="directory the agent works in (default: $KISS_WORKDIR or the"
+        " current directory)",
+    )
+    parser.add_argument(
+        "--no-web",
+        action="store_true",
+        help="disable browser/web tools",
+    )
+    args = parser.parse_args()
+
+    task = " ".join(args.task).strip()
+    if not task and not sys.stdin.isatty():
+        task = sys.stdin.read().strip()
+    if not task:
+        parser.error('no task given, e.g.: sorcar "Summarize README.md"')
+
+    model_name = args.model or get_default_model()
+    if model_name == "No model":
+        parser.exit(
+            1,
+            "sorcar: no model available — set at least one API key"
+            " (e.g. ANTHROPIC_API_KEY) in the environment\n",
+        )
+
+    work_dir = args.work_dir or os.environ.get("KISS_WORKDIR") or os.getcwd()
+    agent = SorcarAgent("Sorcar CLI")
+    result = agent.run(
+        model_name=model_name,
+        prompt_template=task,
+        work_dir=work_dir,
+        max_budget=args.max_budget,
+        web_tools=not args.no_web,
+        verbose=True,
+        ask_user_question_callback=_ask_user_in_terminal,
+    )
+    print(result)
+    try:
+        success = bool(yaml.safe_load(result).get("success"))
+    except Exception:
+        success = False
+    raise SystemExit(0 if success else 1)
