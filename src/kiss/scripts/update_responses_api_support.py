@@ -51,13 +51,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import kiss.scripts.update_models as update_models_module
 from kiss.core import config as config_module
 from kiss.core.models.model_info import (
     OpenAICompatibleProvider,
     _match_openai_compatible_provider,
 )
 from kiss.scripts.update_models import (
-    MODEL_INFO_PATH,
     _alias_base_name,
     _read_model_info_json,
     _write_model_info_json,
@@ -424,6 +424,17 @@ def main() -> None:
     """Probe the catalog and update ``use_responses_api`` flags on disk."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--model-info",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Location of the MODEL_INFO.json catalog to read and update "
+            "(default: the repo's bundled catalog, "
+            f"{update_models_module.DEFAULT_MODEL_INFO_PATH})"
+        ),
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="Probe and report, but do not write."
     )
     parser.add_argument(
@@ -441,7 +452,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    data = _read_model_info_json(MODEL_INFO_PATH)
+    # Read the (possibly retargeted) global at call time — a from-import
+    # would freeze the repo default even after update_models.main()
+    # rebinds it or a test monkeypatches it.
+    catalog_path = (
+        Path(args.model_info).expanduser().resolve()
+        if args.model_info is not None
+        else update_models_module.MODEL_INFO_PATH
+    )
+    data = _read_model_info_json(catalog_path)
     candidates, skipped = _candidate_names(data, args.only)
     print(f"Probing {len(candidates)} models ({len(skipped)} skipped) ...")
 
@@ -509,8 +528,8 @@ def main() -> None:
             sys.stderr.flush()
             os._exit(2)
         return
-    _write_model_info_json(MODEL_INFO_PATH, data)
-    print(f"Written to {MODEL_INFO_PATH}")
+    _write_model_info_json(catalog_path, data)
+    print(f"Written to {catalog_path}")
     if failed:
         print("\nModels staying on Chat Completions (probe failed):")
         for name in failed:

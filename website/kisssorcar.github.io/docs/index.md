@@ -8,7 +8,7 @@
 - [Installation](installation.md) — Install from source, pipx/uv, API-key configuration, VS Code extension, Docker
 - [Client Interfaces](cli.md) — The `kiss-web` daemon, VS Code extension, web/mobile app, and Python client API
 - [Python API Reference](api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, GitWorktreeOps
-- [Supported Models](models.md) — 622-model catalog across 9 provider categories
+- [Supported Models](models.md) — 634-model catalog across 9 provider categories
 - [Messaging & Third-Party Agents](messaging-agents.md) — 32 channel agents plus infrastructure agents and the Govee smart-home CLI
 - [Sample Tasks](sample-tasks.md) — Ready-to-use example prompts
 - [Prompt Tricks](prompt-tricks.md) — Reusable prompt snippets that boost result quality

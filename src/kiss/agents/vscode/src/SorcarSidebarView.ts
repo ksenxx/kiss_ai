@@ -232,6 +232,12 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // update-check cache shared with this extension host, and
   // rebroadcasts so every window's toast disappears.
   snoozeUpdate: ['latest'],
+  // The daemon owns the model-catalog refresh: it spawns
+  // kiss.scripts.update_models against ~/.kiss/MODEL_INFO.json and
+  // reports progress/failures back over the connection, so the settings
+  // panel's "Update Models" button behaves identically in the webview
+  // and in a remote browser window.
+  updateModels: [],
 };
 
 export class SorcarSidebarView implements vscode.WebviewViewProvider {

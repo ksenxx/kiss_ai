@@ -1530,22 +1530,30 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
     # restart the old daemon keeps serving, so running this script never
     # clobbers in-flight agent runs.
 
-    # MODEL_INFO.json is intentionally NOT copied into the user's kiss
-    # home directory.  The bundled
-    # ``src/kiss/core/models/MODEL_INFO.json`` is read directly from
-    # the installed package at runtime by ``kiss.core.models.model_info``,
-    # so every extension upgrade automatically delivers the latest model
-    # pricing/context table without leaving a stale user-side copy
-    # shadowing the freshly installed bundled file.
+    # MODEL_INFO.json IS copied into the user's kiss home directory:
+    # every install/update refreshes ``$KISS_HOME/MODEL_INFO.json`` from
+    # the bundled ``src/kiss/core/models/MODEL_INFO.json``, and an
+    # *installed* KISS Sorcar reads its model catalog from that copy at
+    # runtime (``kiss.core.models.model_info._select_catalog_path``).
+    # The settings panel's "Update Models" button then refreshes the
+    # copy in place via ``kiss.scripts.update_models --model-info``.
+    # Development checkouts (project roots with a .git marker) keep
+    # reading the bundled file directly, so this copy never shadows a
+    # checkout's own source of truth.
     #
     # User-curated model overrides / extensions live in
     # ``~/.kiss/MY_MODELS.json`` — auto-seeded on first import with a
     # short documentation block and one commented-out example entry —
     # matching the ``MY_INJECTION.md`` / ``MY_TASK_TEMPLATES.md`` pattern.
-    #
-    # Re-introducing the copy here would mean a stale user-side
-    # ``~/.kiss/MODEL_INFO.json`` shadowing the freshly installed
-    # bundled file forever after the first install.
+    MODEL_INFO_SRC="$PROJECT_DIR/src/kiss/core/models/MODEL_INFO.json"
+    MODEL_INFO_DST="${KISS_HOME:-$HOME/.kiss}/MODEL_INFO.json"
+    if [ -f "$MODEL_INFO_SRC" ]; then
+        mkdir -p "$(dirname "$MODEL_INFO_DST")"
+        cp "$MODEL_INFO_SRC" "$MODEL_INFO_DST"
+        echo "   Copied MODEL_INFO.json to $MODEL_INFO_DST"
+    else
+        echo "   WARNING: $MODEL_INFO_SRC not found; skipped the ~/.kiss copy"
+    fi
 
     # INJECTIONS.md is intentionally NOT copied into the user's kiss
     # home directory.  The bundled ``src/kiss/INJECTIONS.md`` is read

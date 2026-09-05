@@ -100,15 +100,18 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_POST(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
-        """Record the request and write the scripted SSE chunks."""
+        """Record the request and write the scripted reply."""
         server: Any = self.server
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b"{}"
         with server.lock:
             server.requests.append(json.loads(raw or b"{}"))
+            server.request_headers.append(
+                {k.lower(): v for k, v in self.headers.items()}
+            )
         body = b"".join(server.chunks)
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
+        self.send_response(server.status)
+        self.send_header("Content-Type", server.content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -132,16 +135,28 @@ class ScriptedAnthropicServer:
     receives, and ``requests`` accumulates every decoded request body.
     """
 
-    def __init__(self, chunks: list[bytes] | None = None) -> None:
+    def __init__(
+        self,
+        chunks: list[bytes] | None = None,
+        status: int = 200,
+        content_type: str = "text/event-stream",
+    ) -> None:
         """Start the server on an ephemeral loopback port.
 
         Args:
-            chunks: The SSE chunks to answer every request with; defaults
-                to a one-text-block assistant turn.
+            chunks: The bytes to answer every request with; defaults to
+                the SSE chunks of a one-text-block assistant turn.
+            status: The HTTP status code of every reply; a non-200 code
+                turns the scripted reply into a real API error (give the
+                error JSON as a single chunk).
+            content_type: The Content-Type of every reply.
         """
         self._server = _DaemonServer(("127.0.0.1", 0), _Handler)
         self._server.chunks = chunks or text_message_stream()  # type: ignore[attr-defined]
+        self._server.status = status  # type: ignore[attr-defined]
+        self._server.content_type = content_type  # type: ignore[attr-defined]
         self._server.requests = []  # type: ignore[attr-defined]
+        self._server.request_headers = []  # type: ignore[attr-defined]
         self._server.lock = threading.Lock()  # type: ignore[attr-defined]
         self._thread = threading.Thread(
             target=self._server.serve_forever, daemon=True
@@ -158,6 +173,16 @@ class ScriptedAnthropicServer:
         """Return a snapshot of the request bodies received so far."""
         with self._server.lock:  # type: ignore[attr-defined]
             return list(self._server.requests)  # type: ignore[attr-defined]
+
+    @property
+    def request_headers(self) -> list[dict[str, str]]:
+        """Return a snapshot of the request headers received so far.
+
+        Header names are lower-cased, one dict per request, in the same
+        order as :attr:`requests`.
+        """
+        with self._server.lock:  # type: ignore[attr-defined]
+            return list(self._server.request_headers)  # type: ignore[attr-defined]
 
     def stop(self) -> None:
         """Shut the server down and join its accept thread."""
