@@ -131,7 +131,10 @@ def _make_diverged_clone(
 
 
 def _extract_runupdate_preflight(ts_text: str, esc_dir: str, esc_script: str) -> str:
-    """Reconstruct the shell string that ``runUpdate`` sends to the terminal.
+    """Reconstruct the shell string ``runUpdate`` runs as the terminal process.
+
+    The string is executed via ``bash -c`` (terminal ``shellPath`` /
+    ``shellArgs``), never typed into a shell prompt with ``sendText``.
 
     Reads the ``const preflight = [...]`` array literal directly from
     ``SorcarSidebarView.ts``, evaluates each JS string element with the
