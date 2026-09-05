@@ -115,6 +115,12 @@ def test_default_target_is_the_bundled_repo_catalog() -> None:
     # change the default path rendered into --help; drop it so the
     # default is derived from this repo (the subprocess cwd).
     env = {k: v for k, v in os.environ.items() if k != "KISS_WORKDIR"}
+    # argparse wraps help lines at hyphens, so a long checkout path
+    # (e.g. a ``.kiss-worktrees`` dir) can be split mid-path across
+    # lines.  argparse sizes its formatter from COLUMNS; make it wide
+    # enough that the path is never wrapped, keeping the assertion
+    # below an exact substring match.
+    env["COLUMNS"] = "4096"
     proc = subprocess.run(
         [sys.executable, str(_SCRIPT), "--help"],
         capture_output=True,
