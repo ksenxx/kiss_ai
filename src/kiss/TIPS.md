@@ -19,7 +19,7 @@ Use 'claude-fable-5-1' model for all tasks, including software development. Use 
 
 # Tip
 
-## What is the status of an agent perfoeming a task?
+## What is the status of an agent performing a task?
 
 If you want to get the status of a task, you can open a new chat and ask KISS Sorcar what is the status of the task doing …
 
