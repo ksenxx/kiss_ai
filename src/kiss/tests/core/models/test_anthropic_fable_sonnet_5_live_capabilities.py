@@ -62,8 +62,11 @@ def anthropic_models() -> dict[str, Any]:
     """
     if not os.environ.get("ANTHROPIC_API_KEY"):
         pytest.skip("ANTHROPIC_API_KEY not set; live Anthropic API not reachable")
+    # An identity-linked key is rejected without the workspace id header.
+    workspace_id = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
+    headers = {"anthropic-workspace-id": workspace_id} if workspace_id else None
     try:
-        client = anthropic.Anthropic()
+        client = anthropic.Anthropic(default_headers=headers)
         page = client.models.list(limit=1000)
     except Exception as e:  # noqa: BLE001 - want to skip on ANY network / auth error
         pytest.skip(f"Anthropic /v1/models not reachable: {e!r}")

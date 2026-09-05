@@ -277,6 +277,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("autocommitAction"),
     ApiCommand("auth", required=("password",), handler="drop"),
     ApiCommand("runUpdate", handler="run_update"),
+    ApiCommand("updateModels", handler="update_models"),
     ApiCommand("snoozeUpdate", handler="snooze_update"),
     ApiCommand("serverReset", handler="server_reset"),
     ApiCommand(
@@ -497,6 +498,8 @@ class ServerBackend(Protocol):
     async def _send_welcome_info(self) -> None: ...
 
     async def _handle_run_update(self, conn_id: str = "") -> None: ...
+
+    async def _handle_update_models(self, conn_id: str = "") -> None: ...
 
     async def _handle_snooze_update(self, latest: str = "") -> None: ...
 
@@ -1165,6 +1168,21 @@ class ServerApi:
                 notifications reach only the requesting window.
         """
         await self._backend._handle_run_update(ctx.conn_state["conn_id"])
+
+    async def update_models(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Refresh the user-local model catalog (``~/.kiss/MODEL_INFO.json``).
+
+        Services the settings panel's "Update Models" button: the daemon
+        runs ``kiss.scripts.update_models --model-info`` against the
+        user-local catalog copy as a detached subprocess.
+
+        Args:
+            cmd: The ``updateModels`` command (unused).
+            ctx: The transport context of the current call; supplies
+                the requesting ``conn_id`` so acknowledgement
+                notifications reach only the requesting window.
+        """
+        await self._backend._handle_update_models(ctx.conn_state["conn_id"])
 
     async def snooze_update(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Snooze the update notification for 24 hours.

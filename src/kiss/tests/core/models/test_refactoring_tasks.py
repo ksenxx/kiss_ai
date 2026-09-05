@@ -37,10 +37,17 @@ class TestFindToolCallIds:
 
 
 class TestAddFunctionResults:
-    """Tests for Model.add_function_results_to_conversation_and_return (OpenAI base)."""
+    """Tests for Model.add_function_results_to_conversation_and_return (OpenAI base).
+
+    The Chat Completions (v1) transport is forced explicitly: this class
+    tests the base ``Model`` fallback-id behavior, and the catalog now
+    routes ``gpt-4.1-mini`` through the Responses-API adapter
+    (``OpenAICompatibleModel2``), which deliberately raises instead of
+    synthesising a call_id for an unmatched tool result.
+    """
 
     def _make_model(self) -> Model:
-        m = model("gpt-4.1-mini")
+        m = model("gpt-4.1-mini", model_config={"use_responses_api": False})
         m.conversation = []
         m.usage_info_for_messages = ""
         return m

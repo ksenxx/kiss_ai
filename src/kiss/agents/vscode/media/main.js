@@ -506,6 +506,13 @@
 
   let tabs = [];
   let activeTabId = '';
+  // The tab the bar last scrolled into view.  renderTabBar() runs on
+  // many unrelated events (title updates, running-state changes,
+  // stream events); scrolling the active tab into view on each of
+  // those would yank the bar away from wherever the user scrolled it.
+  // So the bar auto-scrolls only when the active tab actually changed
+  // since the previous render -- i.e. on a real tab switch.
+  let lastScrolledTabId = null;
   // The chat tab the host believes is on screen. Kept in step with the host
   // so a tab that gets closed can never be left standing there.
   let reportedChatTabId = '';
@@ -706,6 +713,9 @@
     // visibletask-coverage:end
     tab.welcomeVisible = welcome ? welcome.style.display !== 'none' : true;
     if (welcome && welcome.parentNode === O) O.removeChild(welcome);
+    // autoscroll-coverage:start
+    saveLockedSubpanelOffsets();
+    // autoscroll-coverage:end
     tab.outputFragment = document.createDocumentFragment();
     while (O.firstChild) tab.outputFragment.appendChild(O.firstChild);
     // visibletask-coverage:start
@@ -843,8 +853,12 @@
       tab.outputFragment = null;
       reviveActivePanelTimes(O);
       // autoscroll-coverage:start
-      // Events may have streamed into the fragment while the tab was
-      // hidden: land the restored chat at the end of its latest panel.
+      // The detach reset the scroll offsets of the transcript's
+      // subpanels (real browsers destroy detached scrollers): put the
+      // locked ones back where the user was reading, then land the
+      // restored chat at the end of its latest panel — events may have
+      // streamed into the fragment while the tab was hidden.
+      restoreLockedSubpanelOffsets();
       autoScrollLatestEventPanel(O.lastElementChild);
       // autoscroll-coverage:end
     }
@@ -1216,8 +1230,9 @@
     }
 
     const activeEl = tabList.querySelector('.chat-tab.active');
-    if (activeEl)
+    if (activeEl && activeTabId !== lastScrolledTabId)
       activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
+    lastScrolledTabId = activeTabId;
   }
 
   function switchToTab(tabId) {
@@ -2493,6 +2508,7 @@
   const worktreeToggleBtn = document.getElementById('cfg-use-worktree');
   const autocommitBtn = document.getElementById('autocommit-btn');
   const updateBtn = document.getElementById('cfg-update-btn');
+  const updateModelsBtn = document.getElementById('cfg-update-models-btn');
   const serverResetBtn = document.getElementById('cfg-server-reset-btn');
   const serverResetConfirmModal = document.getElementById(
     'server-reset-confirm-modal',
@@ -3963,6 +3979,10 @@
     }
     // report-coverage:end
     if (activeTabId === oldId) activeTabId = newTabId;
+    // A retag is an identity rename of the tab already on screen, not
+    // a tab switch: the scroll tracker must follow the rename or the
+    // next render would auto-scroll the bar (see lastScrolledTabId).
+    if (lastScrolledTabId === oldId) lastScrolledTabId = newTabId;
     // The host is told which CHAT tab is on screen even while a content
     // tab is active, so the reported id must follow the rename on its
     // own -- a stale one keeps the host matching merges against a tab
@@ -4461,7 +4481,7 @@
   // follows the tail of the latest event panel — unless the user
   // scroll lock below is engaged — and every scrollable subpanel of an
   // event panel follows its own tail as streamed text appears inside
-  // it.
+  // it, unless that subpanel's own user scroll lock is engaged.
   const AUTO_SCROLL_SUBPANEL_SEL =
     '.think, .bash-panel-content, .llm-panel, .tc-b, .tr, ' +
     '.prompt-body, .system-prompt-body';
@@ -4478,16 +4498,77 @@
   // land at the bottom, so they never engage the lock.
   let userScrollLock = false;
 
-  function chatDistanceFromBottom() {
-    return Math.max(0, O.scrollHeight - O.clientHeight - O.scrollTop);
+  function distanceFromBottom(el) {
+    return Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop);
   }
 
   function updateUserScrollLock() {
-    userScrollLock = chatDistanceFromBottom() > 1;
+    userScrollLock = distanceFromBottom(O) > 1;
   }
 
   function resetUserScrollLock() {
     userScrollLock = false;
+  }
+
+  // Per-subpanel user scroll lock: the same override applies to every
+  // scrollable subpanel of an event panel (thinking, thoughts, bash
+  // output, tool bodies…).  A user scroll away from a subpanel's
+  // bottom disables that subpanel's auto-scroll; it resumes once the
+  // user scrolls the subpanel back to its bottom (1px tolerance for
+  // fractional scroll positions, as for the chat).  The lock lives on
+  // the element itself, so it travels with a background tab's detached
+  // fragment and disappears with the element when a transcript is
+  // rebuilt (replay/clear).  Scroll events do not bubble, but they do
+  // pass ancestor CAPTURE listeners, so one listener on the chat
+  // container serves every subpanel, present and future.
+  function updateSubpanelScrollLock(el) {
+    el._userScrollLock = distanceFromBottom(el) > 1;
+  }
+
+  O.addEventListener(
+    'scroll',
+    e => {
+      const el = e.target;
+      if (el !== O && el.matches && el.matches(AUTO_SCROLL_SUBPANEL_SEL))
+        updateSubpanelScrollLock(el);
+    },
+    true,
+  );
+
+  function autoScrollSubpanel(el) {
+    // Mirrors autoScrollChat: a locked subpanel is left where the user
+    // put it, but a lock observed at the bottom is stale (a content
+    // shrink can land the subpanel at its bottom without any scroll
+    // event) and is re-derived; an engaged lock is never created here.
+    if (el._userScrollLock) updateSubpanelScrollLock(el);
+    if (!el._userScrollLock) scrollPanelToEnd(el);
+  }
+
+  // Real browsers destroy an element's scroller when it leaves the
+  // document, silently resetting its scroll offset to 0 — so a tab
+  // switch (which detaches the transcript into a fragment) would bring
+  // a LOCKED subpanel back at its top instead of where the user was
+  // reading.  The offsets of locked subpanels are saved right before
+  // the detach and reapplied right after the reattach; unlocked
+  // subpanels need no saving, the restore pass scrolls them to their
+  // end anyway.
+  function saveLockedSubpanelOffsets() {
+    const subs = O.querySelectorAll(AUTO_SCROLL_SUBPANEL_SEL);
+    for (let i = 0; i < subs.length; i++) {
+      const sp = subs[i];
+      if (sp._userScrollLock) sp._savedScrollTop = sp.scrollTop;
+    }
+  }
+
+  function restoreLockedSubpanelOffsets() {
+    const subs = O.querySelectorAll(AUTO_SCROLL_SUBPANEL_SEL);
+    for (let i = 0; i < subs.length; i++) {
+      const sp = subs[i];
+      if (sp._userScrollLock && sp._savedScrollTop !== undefined) {
+        sp.scrollTop = sp._savedScrollTop;
+        delete sp._savedScrollTop;
+      }
+    }
   }
 
   function autoScrollChat() {
@@ -4511,7 +4592,8 @@
     if (!el || !O.contains(el)) return;
     let n = el;
     while (n && n !== O) {
-      if (n.matches && n.matches(AUTO_SCROLL_SUBPANEL_SEL)) scrollPanelToEnd(n);
+      if (n.matches && n.matches(AUTO_SCROLL_SUBPANEL_SEL))
+        autoScrollSubpanel(n);
       n = n.parentElement;
     }
     autoScrollChat();
@@ -4522,9 +4604,9 @@
     // end, then the outer chat to the end of that panel.
     if (panel && O.contains(panel)) {
       if (panel.matches && panel.matches(AUTO_SCROLL_SUBPANEL_SEL))
-        scrollPanelToEnd(panel);
+        autoScrollSubpanel(panel);
       const subs = panel.querySelectorAll(AUTO_SCROLL_SUBPANEL_SEL);
-      for (let i = 0; i < subs.length; i++) scrollPanelToEnd(subs[i]);
+      for (let i = 0; i < subs.length; i++) autoScrollSubpanel(subs[i]);
     }
     autoScrollChat();
   }
@@ -8744,6 +8826,7 @@
       'cfg-key-GEMINI_API_KEY',
       'cfg-key-OPENAI_API_KEY',
       'cfg-key-ANTHROPIC_API_KEY',
+      'cfg-key-ANTHROPIC_WORKSPACE_ID',
       'cfg-key-TOGETHER_API_KEY',
       'cfg-key-OPENROUTER_API_KEY',
       'cfg-key-ZAI_API_KEY',
@@ -8824,6 +8907,14 @@
         e.preventDefault();
         e.stopPropagation();
         api.runUpdate();
+      });
+    }
+
+    if (updateModelsBtn) {
+      updateModelsBtn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        api.updateModels();
       });
     }
 
@@ -10975,6 +11066,10 @@
     const inp = document.getElementById(inputId);
     const proto = document.getElementById('cfg-remote-password-toggle');
     if (!inp || !proto) return;
+    // The workspace id is an identifier, not a key; the toggle's
+    // accessible name must say what it actually reveals.
+    const noun =
+      inputId === 'cfg-key-ANTHROPIC_WORKSPACE_ID' ? 'workspace ID' : 'API key';
     inp.type = 'password';
     inp.setAttribute('autocomplete', 'off');
     const wrap = document.createElement('div');
@@ -10984,14 +11079,14 @@
     const btn = proto.cloneNode(true);
     btn.id = inputId + '-toggle';
     btn.setAttribute('aria-pressed', 'false');
-    btn.setAttribute('aria-label', 'Show API key');
-    btn.setAttribute('title', 'Show API key');
+    btn.setAttribute('aria-label', 'Show ' + noun);
+    btn.setAttribute('title', 'Show ' + noun);
     const eye = btn.querySelector('.icon-eye');
     const eyeOff = btn.querySelector('.icon-eye-off');
     if (eye) eye.style.display = '';
     if (eyeOff) eyeOff.style.display = 'none';
     wrap.appendChild(btn);
-    setupPasswordToggle(btn.id, inputId, 'API key');
+    setupPasswordToggle(btn.id, inputId, noun);
   }
 
   let configFormPopulated = false;
@@ -11076,6 +11171,7 @@
       'GEMINI_API_KEY',
       'OPENAI_API_KEY',
       'ANTHROPIC_API_KEY',
+      'ANTHROPIC_WORKSPACE_ID',
       'TOGETHER_API_KEY',
       'OPENROUTER_API_KEY',
       'ZAI_API_KEY',
@@ -11140,6 +11236,7 @@
       'GEMINI_API_KEY',
       'OPENAI_API_KEY',
       'ANTHROPIC_API_KEY',
+      'ANTHROPIC_WORKSPACE_ID',
       'TOGETHER_API_KEY',
       'OPENROUTER_API_KEY',
       'ZAI_API_KEY',

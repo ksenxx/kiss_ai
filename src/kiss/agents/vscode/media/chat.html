@@ -234,12 +234,19 @@
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
               <span>Reset Server</span>
             </button>
+            <button type="button" id="cfg-update-models-btn" class="config-update-btn" data-tooltip="Refresh the model catalog in ~/.kiss/MODEL_INFO.json">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+              <span>Update Models</span>
+            </button>
           </div>
 
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
           <label class="config-label">Anthropic API Key
             <input type="password" autocomplete="off" id="cfg-key-ANTHROPIC_API_KEY" placeholder="Enter Anthropic API key">
+          </label>
+          <label class="config-label">Anthropic Workspace ID (identity-linked keys only)
+            <input type="password" autocomplete="off" id="cfg-key-ANTHROPIC_WORKSPACE_ID" placeholder="wrkspc_... (required for identity-linked keys)">
           </label>
           <label class="config-label">OpenAI API Key
             <input type="password" autocomplete="off" id="cfg-key-OPENAI_API_KEY" placeholder="Enter OpenAI API key">
