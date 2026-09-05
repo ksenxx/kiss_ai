@@ -1944,7 +1944,7 @@ def run_tasks_parallel(
             mirroring *base_system_prompt*.  ``""`` appends nothing.
         web_tools: Whether each sub-agent gets browser/web tools,
             forwarded to each sub-agent's ``run``.  A parent running
-            without web tools (e.g. ``sorcar --no-web``) passes False
+            without web tools (``run(web_tools=False)``) passes False
             so its children cannot re-acquire the browser it was denied.
 
     Returns:
@@ -2183,21 +2183,33 @@ def _ask_user_in_terminal(question: str) -> str:
 def main() -> None:
     """Run a :class:`SorcarAgent` on a task given on the command line.
 
-    Installed as the ``sorcar`` console script.  The task is the
-    positional arguments joined with spaces; when none are given and
-    stdin is not a terminal, the task is read from stdin instead.  The
-    agent works in ``$KISS_WORKDIR`` — exported by the
-    ``~/.local/bin/sorcar`` wrapper the VS Code extension installs, so
-    the agent acts on the directory the user invoked ``sorcar`` from —
-    falling back to the current directory.  Exits with status 0 when
-    the agent reports success and 1 otherwise.
+    Installed as the ``sorcar`` console script.  The task comes from
+    exactly one of two required, mutually exclusive options: ``-t
+    TASK`` runs the given string, and ``-f FILE`` runs the file's
+    content as the task.  The agent works in ``$KISS_WORKDIR`` —
+    exported by the ``~/.local/bin/sorcar`` wrapper the VS Code
+    extension installs, so the agent acts on the directory the user
+    invoked ``sorcar`` from — falling back to the current directory.
+    Exits with status 0 when the agent reports success and 1 otherwise.
     """
     parser = argparse.ArgumentParser(
         prog="sorcar",
         description="Run the KISS SorcarAgent on a task.",
-        epilog='example: sorcar "Summarize README.md"',
+        epilog='example: sorcar -t "Summarize README.md"',
     )
-    parser.add_argument("task", nargs="*", help="the task for the agent")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "-t",
+        "--task",
+        default=None,
+        help="the task for the agent",
+    )
+    source.add_argument(
+        "-f",
+        "--file",
+        default=None,
+        help="file whose content is used as the task",
+    )
     parser.add_argument(
         "-m",
         "--model",
@@ -2217,18 +2229,24 @@ def main() -> None:
         help="directory the agent works in (default: $KISS_WORKDIR or the"
         " current directory)",
     )
-    parser.add_argument(
-        "--no-web",
-        action="store_true",
-        help="disable browser/web tools",
-    )
     args = parser.parse_args()
 
-    task = " ".join(args.task).strip()
-    if not task and not sys.stdin.isatty():
-        task = sys.stdin.read().strip()
-    if not task:
-        parser.error('no task given, e.g.: sorcar "Summarize README.md"')
+    if args.file is not None:
+        try:
+            task = Path(args.file).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            # UnicodeError too: a non-UTF-8 file must surface as the
+            # same status-2 usage error as an unreadable one, not as an
+            # uncaught UnicodeDecodeError traceback with exit status 1.
+            parser.error(f"cannot read task file {args.file!r}: {exc}")
+        if not task:
+            parser.error(f"task file {args.file!r} is empty")
+    else:
+        task = args.task.strip()
+        if not task:
+            parser.error(
+                'task must not be empty, e.g.: sorcar -t "Summarize README.md"'
+            )
 
     model_name = args.model or get_default_model()
     if model_name == "No model":
@@ -2250,7 +2268,6 @@ def main() -> None:
         prompt_template=task,
         work_dir=work_dir,
         max_budget=args.max_budget,
-        web_tools=not args.no_web,
         verbose=verbose,
         ask_user_question_callback=_ask_user_in_terminal,
     )

@@ -14,6 +14,12 @@ adds :func:`kiss.agents.sorcar.sorcar_agent.main` and points the
 ``sorcar`` project script at it, so ``uv run … sorcar`` resolves inside
 the project again.
 
+The task is given via exactly one of two required, mutually exclusive
+options: ``-t TASK`` (an inline task string) or ``-f FILE`` (the file's
+content becomes the task).  Argparse enforces the exactly-one contract;
+the CLI additionally rejects a blank ``-t`` value, an unreadable ``-f``
+path, and an empty ``-f`` file.
+
 Every test here launches a REAL subprocess — no mocks, patches, or
 fakes.  ``test_console_script_is_wired`` runs the installed ``sorcar``
 console script itself, so deleting or misspelling the
@@ -145,38 +151,64 @@ class TestArgumentHandling:
         assert proc.returncode == 0
         assert "Run the KISS SorcarAgent on a task." in proc.stdout
         assert "--max-budget" in proc.stdout
+        assert "--task" in proc.stdout
+        assert "--file" in proc.stdout
+        assert "--no-web" not in proc.stdout
 
-    def test_no_task_with_piped_empty_stdin_errors(self, tmp_path: Path) -> None:
-        # stdin is not a tty, so main() reads it, finds nothing, and
-        # exits with argparse's usage error (status 2).
+    def test_neither_task_nor_file_errors(self, tmp_path: Path) -> None:
+        # -t and -f form a required mutually exclusive group: with
+        # neither given, argparse exits with a usage error (status 2)
+        # without touching stdin.
         proc = _run_cli([], env=_base_env(tmp_path), cwd=str(tmp_path))
         assert proc.returncode == 2
-        assert "no task given" in proc.stderr
+        assert "one of the arguments -t/--task -f/--file is required" in proc.stderr
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="pty is POSIX-only")
-    def test_no_task_with_tty_stdin_errors_without_reading(
-        self, tmp_path: Path
-    ) -> None:
-        # A pty stdin makes isatty() True, so main() must NOT block
-        # reading stdin and must exit with the usage error directly.
-        import pty
-
-        master, slave = pty.openpty()
-        try:
-            proc = subprocess.run(
-                [sys.executable, "-c", _BOOTSTRAP],
-                env=_base_env(tmp_path),
-                cwd=str(tmp_path),
-                stdin=slave,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-        finally:
-            os.close(master)
-            os.close(slave)
+    def test_task_and_file_together_error(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.txt"
+        task_file.write_text("do something")
+        proc = _run_cli(
+            ["-t", "do something", "-f", str(task_file)],
+            env=_base_env(tmp_path),
+            cwd=str(tmp_path),
+        )
         assert proc.returncode == 2
-        assert "no task given" in proc.stderr
+        assert "not allowed with argument" in proc.stderr
+
+    def test_blank_task_errors(self, tmp_path: Path) -> None:
+        # An explicit but whitespace-only -t value is rejected before
+        # any model or agent setup.
+        proc = _run_cli(["-t", "   "], env=_base_env(tmp_path), cwd=str(tmp_path))
+        assert proc.returncode == 2
+        assert "task must not be empty" in proc.stderr
+
+    def test_unreadable_task_file_errors(self, tmp_path: Path) -> None:
+        missing = tmp_path / "no_such_task.txt"
+        proc = _run_cli(
+            ["-f", str(missing)], env=_base_env(tmp_path), cwd=str(tmp_path)
+        )
+        assert proc.returncode == 2
+        assert "cannot read task file" in proc.stderr
+
+    def test_non_utf8_task_file_errors(self, tmp_path: Path) -> None:
+        # A file that cannot be decoded as UTF-8 must produce the same
+        # status-2 usage error as an unreadable one, not an uncaught
+        # UnicodeDecodeError traceback with exit status 1.
+        binary = tmp_path / "binary_task.bin"
+        binary.write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe")
+        proc = _run_cli(
+            ["-f", str(binary)], env=_base_env(tmp_path), cwd=str(tmp_path)
+        )
+        assert proc.returncode == 2
+        assert "cannot read task file" in proc.stderr
+
+    def test_empty_task_file_errors(self, tmp_path: Path) -> None:
+        empty = tmp_path / "empty_task.txt"
+        empty.write_text("  \n\t\n")
+        proc = _run_cli(
+            ["-f", str(empty)], env=_base_env(tmp_path), cwd=str(tmp_path)
+        )
+        assert proc.returncode == 2
+        assert "is empty" in proc.stderr
 
     @pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-5", "abc"])
     def test_invalid_budget_rejected(self, tmp_path: Path, bad: str) -> None:
@@ -184,7 +216,9 @@ class TestArgumentHandling:
         # comparison false — enforcement would be silently disabled, so
         # the CLI must reject these at parse time (argparse status 2).
         proc = _run_cli(
-            ["-b", bad, "some task"], env=_base_env(tmp_path), cwd=str(tmp_path)
+            ["-b", bad, "-t", "some task"],
+            env=_base_env(tmp_path),
+            cwd=str(tmp_path),
         )
         assert proc.returncode == 2
         assert "budget" in proc.stderr
@@ -199,7 +233,7 @@ class TestArgumentHandling:
                 del env[key]
         env["PATH"] = "/usr/bin:/bin"
         env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
-        proc = _run_cli(["do", "something"], env=env, cwd=str(tmp_path))
+        proc = _run_cli(["-t", "do something"], env=env, cwd=str(tmp_path))
         assert proc.returncode == 1
         assert "no model available" in proc.stderr
 
@@ -245,7 +279,7 @@ class TestAskUserInTerminal:
 class TestRealAgentRuns:
     """Full CLI-to-agent runs with the cheap stand-in model."""
 
-    def test_argv_task_success_exits_zero(self, tmp_path: Path) -> None:
+    def test_task_option_success_exits_zero(self, tmp_path: Path) -> None:
         # Observable --work-dir verification: the task (which contains
         # literal {braces} that must survive prompt handling) makes the
         # agent write a file, asserted to appear in the --work-dir
@@ -258,9 +292,9 @@ class TestRealAgentRuns:
                 "gpt-4o-mini",
                 "-b",
                 "1.0",
-                "--no-web",
                 "--work-dir",
                 str(work),
+                "-t",
                 "Use the Write tool to create a file named proof.txt in the"
                 " current working directory with exact content {ok}. Then"
                 " immediately call the finish tool with success=true,"
@@ -276,34 +310,42 @@ class TestRealAgentRuns:
         assert proof.exists(), "task file missing — --work-dir was not honored"
         assert "{ok}" in proof.read_text(), "braces were mangled in the prompt"
 
-    def test_stdin_task_failure_exits_one(self, tmp_path: Path) -> None:
-        # The task arrives on piped stdin, the work dir via KISS_WORKDIR
-        # (the variable the ~/.local/bin/sorcar wrapper exports), and
-        # the agent is told to report failure — exit status must be 1
-        # and the marker file must land in $KISS_WORKDIR.
+    def test_file_task_failure_exits_one(self, tmp_path: Path) -> None:
+        # The task arrives via -f (the file's content IS the task, and
+        # it too contains literal {braces} that must survive), the work
+        # dir via KISS_WORKDIR (the variable the ~/.local/bin/sorcar
+        # wrapper exports), and the agent is told to report failure —
+        # exit status must be 1 and the marker file must land in
+        # $KISS_WORKDIR with the exact braced content.
         work = tmp_path / "work"
         work.mkdir()
         env = _base_env(tmp_path)
         env["KISS_WORKDIR"] = str(work)
+        task_file = tmp_path / "task.txt"
+        task_file.write_text(
+            "Use the Write tool to create a file named marker.txt in the"
+            " current working directory with exact content {no}. Then"
+            " immediately call the finish tool with success=false,"
+            " is_continue=false, and summary_in_html '<p>cannot</p>'."
+            " Do nothing else.\n"
+        )
         proc = _run_cli(
-            ["-m", "gpt-4o-mini", "-b", "1.0", "--no-web"],
+            ["-m", "gpt-4o-mini", "-b", "1.0", "-f", str(task_file)],
             env=env,
             cwd=str(tmp_path),
-            input_text=(
-                "Use the Write tool to create a file named marker.txt in the"
-                " current working directory with content NO. Then immediately"
-                " call the finish tool with success=false, is_continue=false,"
-                " and summary_in_html '<p>cannot</p>'. Do nothing else."
-            ),
         )
         assert proc.returncode == 1, proc.stdout + proc.stderr
         assert "success: false" in proc.stdout
-        assert (work / "marker.txt").exists(), "KISS_WORKDIR was not honored"
+        marker = work / "marker.txt"
+        assert marker.exists(), "KISS_WORKDIR was not honored"
+        assert "{no}" in marker.read_text(), (
+            "braces were mangled in the file-sourced prompt"
+        )
 
     def test_ask_user_question_reads_terminal_stdin(self, tmp_path: Path) -> None:
         # End-to-end wiring of ask_user_question_callback: the agent asks
         # a question, the answer arrives on the CLI's stdin (the task
-        # itself came from argv, so stdin is free for answers), and the
+        # itself came from -t, so stdin is free for answers), and the
         # answer must surface in the final result.
         work = tmp_path / "work"
         work.mkdir()
@@ -313,9 +355,9 @@ class TestRealAgentRuns:
                 "gpt-4o-mini",
                 "-b",
                 "1.0",
-                "--no-web",
                 "--work-dir",
                 str(work),
+                "-t",
                 "First call the ask_user_question tool with the question"
                 " 'What color?'. Then immediately call the finish tool with"
                 " success=true, is_continue=false, and summary_in_html set to"
