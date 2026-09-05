@@ -506,6 +506,13 @@
 
   let tabs = [];
   let activeTabId = '';
+  // The tab the bar last scrolled into view.  renderTabBar() runs on
+  // many unrelated events (title updates, running-state changes,
+  // stream events); scrolling the active tab into view on each of
+  // those would yank the bar away from wherever the user scrolled it.
+  // So the bar auto-scrolls only when the active tab actually changed
+  // since the previous render -- i.e. on a real tab switch.
+  let lastScrolledTabId = null;
   // The chat tab the host believes is on screen. Kept in step with the host
   // so a tab that gets closed can never be left standing there.
   let reportedChatTabId = '';
@@ -1216,8 +1223,9 @@
     }
 
     const activeEl = tabList.querySelector('.chat-tab.active');
-    if (activeEl)
+    if (activeEl && activeTabId !== lastScrolledTabId)
       activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
+    lastScrolledTabId = activeTabId;
   }
 
   function switchToTab(tabId) {
@@ -3964,6 +3972,10 @@
     }
     // report-coverage:end
     if (activeTabId === oldId) activeTabId = newTabId;
+    // A retag is an identity rename of the tab already on screen, not
+    // a tab switch: the scroll tracker must follow the rename or the
+    // next render would auto-scroll the bar (see lastScrolledTabId).
+    if (lastScrolledTabId === oldId) lastScrolledTabId = newTabId;
     // The host is told which CHAT tab is on screen even while a content
     // tab is active, so the reported id must follow the rename on its
     // own -- a stale one keeps the host matching merges against a tab
