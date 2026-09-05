@@ -186,6 +186,9 @@ global.document = {
 // We declare them here so the extracted body type-checks under Node.
 var tabs = __TABS__;
 var activeTabId = __ACTIVE__;
+// Tracks the last tab the bar auto-scrolled to; renderTabBar reads and
+// writes it so the bar only scrolls on an actual tab switch.
+var lastScrolledTabId = null;
 function closeTab() {}
 function switchToTab() {}
 // All tabs in these tests belong to the current workspace, so none
