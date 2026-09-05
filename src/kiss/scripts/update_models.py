@@ -13,19 +13,25 @@ support: every tested model is live-probed through ``/v1/responses`` (see
 ``"use_responses_api": true`` only when the probe passes, which makes the
 ``model()`` factory build it on the v2 transport.
 
-The script writes the source-of-truth ``src/kiss/core/models/MODEL_INFO.json``
-in the repo, and nothing else: there is deliberately no user-local
-``~/.kiss/MODEL_INFO.json`` copy to keep in sync, and
-``src/kiss/tests/test_install_no_model_info_copy.py`` forbids re-introducing
-one. A running KISS install picks the catalog up from the package on its
-next start. The write is atomic (temp file + ``os.replace``) because
-``model_info`` loads the catalog at import time, so a truncating rewrite
-would break every process that starts while the script is running.
+By default the script writes the source-of-truth
+``src/kiss/core/models/MODEL_INFO.json`` in the repo.  The ``--model-info``
+option points it at a different catalog file instead — most importantly the
+user-local ``~/.kiss/MODEL_INFO.json``, which the installer seeds from the
+bundled catalog and which an installed KISS Sorcar reads at runtime (see
+``kiss.core.models.model_info``); the settings panel's "Update Models"
+button runs this script against that copy.  When a non-default target is
+updated, the repo's ``README.md`` catalog totals are left untouched.  The
+write is atomic (temp file + ``os.replace``) because ``model_info`` loads
+the catalog at import time, so a truncating rewrite would break every
+process that starts while the script is running.
 
 Usage:
     uv run python scripts/update_models.py [OPTIONS]
 
 Options:
+    --model-info PATH  Location of the MODEL_INFO.json catalog to update
+                       (default: the repo's bundled
+                       src/kiss/core/models/MODEL_INFO.json)
     --dry-run        Show what would change without modifying files
     --skip-test      Skip model capability testing for new models
     --test-existing  Re-test capabilities of existing models too
@@ -82,8 +88,28 @@ def _find_project_root() -> Path:
 PROJECT_ROOT = _find_project_root()
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-MODEL_INFO_PATH = PROJECT_ROOT / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
+DEFAULT_MODEL_INFO_PATH = (
+    PROJECT_ROOT / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
+)
+MODEL_INFO_PATH = DEFAULT_MODEL_INFO_PATH
 README_PATH = PROJECT_ROOT / "README.md"
+
+
+def _writes_default_catalog() -> bool:
+    """Return True when the update targets the repo's bundled catalog.
+
+    The README's "Models Supported" totals describe the bundled
+    ``src/kiss/core/models/MODEL_INFO.json`` only, so a run pointed at a
+    different catalog via ``--model-info`` (e.g. the user-local
+    ``~/.kiss/MODEL_INFO.json``) must not rewrite them.  Both sides are
+    resolved so a symlinked spelling of the default still counts as the
+    default.
+    """
+    try:
+        return MODEL_INFO_PATH.resolve() == DEFAULT_MODEL_INFO_PATH.resolve()
+    except OSError:
+        logger.debug("Exception caught", exc_info=True)
+        return MODEL_INFO_PATH == DEFAULT_MODEL_INFO_PATH
 
 _EXCLUDED_PREFIXES: tuple[str, ...] = (
     "minimax-",
@@ -265,10 +291,12 @@ def fetch_anthropic(verbose: bool = False) -> dict[str, dict]:
         return {}
     if verbose:  # pragma: no branch
         print("  Fetching Anthropic models...")
-    data = api_get(
-        "https://api.anthropic.com/v1/models",
-        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
-    )
+    headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+    workspace_id = os.getenv("ANTHROPIC_WORKSPACE_ID", "").strip()
+    if workspace_id:  # pragma: no branch
+        # Required when the key is identity-linked; harmless otherwise.
+        headers["anthropic-workspace-id"] = workspace_id
+    data = api_get("https://api.anthropic.com/v1/models", headers=headers)
     models: dict[str, dict] = {}
     for m in data.get("data", []):  # pragma: no branch
         model_id = m.get("id", "")
@@ -1760,11 +1788,11 @@ def apply_updates_to_file(
     current: dict[str, dict],
     dry_run: bool = False,
 ) -> None:
-    """Apply MODEL_INFO updates/additions/removals to the JSON source of truth.
+    """Apply MODEL_INFO updates/additions/removals to the target catalog.
 
-    Mutates ``MODEL_INFO_PATH`` (the in-repo ``MODEL_INFO.json``) and
-    nothing else — no user-local copy is written (see the module
-    docstring).
+    Mutates ``MODEL_INFO_PATH`` — the repo's bundled ``MODEL_INFO.json``
+    by default, or the catalog selected with ``--model-info`` (see the
+    module docstring) — and nothing else.
 
     Args:
         updates: ``[{"name": str, "changes": {field: value, ...}}]``.
@@ -1981,14 +2009,27 @@ def _run_scrub_only(dry_run: bool = False) -> None:
         data.pop(name, None)
     _write_model_info_json(MODEL_INFO_PATH, data)
     print(f"  Written to {MODEL_INFO_PATH}")
-    print("\n[3/3] Syncing README catalog totals...")
-    changed = sync_readme_catalog(README_PATH, MODEL_INFO_PATH)
-    print(f"  README updated: {changed} ({README_PATH})")
+    if _writes_default_catalog():
+        print("\n[3/3] Syncing README catalog totals...")
+        changed = sync_readme_catalog(README_PATH, MODEL_INFO_PATH)
+        print(f"  README updated: {changed} ({README_PATH})")
+    else:
+        print("\n[3/3] Non-default catalog target: README left untouched")
     print("\nDone!")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Update MODEL_INFO.json from vendor APIs")
+    parser.add_argument(
+        "--model-info",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Location of the MODEL_INFO.json catalog to read and update "
+            f"(default: {DEFAULT_MODEL_INFO_PATH})"
+        ),
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -2007,6 +2048,33 @@ def main() -> None:
     )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
+
+    if args.model_info is not None:
+        # An explicit --model-info retargets the module-global write path
+        # (left untouched otherwise, so a caller that pre-set the global
+        # keeps its target).  The env override makes
+        # kiss.core.models.model_info — imported lazily by
+        # get_current_model_info() and the capability probes — read the
+        # SAME catalog this run updates, so "current" and "target" never
+        # diverge; a target that does not exist yet falls back to the
+        # bundled catalog inside model_info.
+        global MODEL_INFO_PATH
+        MODEL_INFO_PATH = Path(args.model_info).expanduser().resolve()
+        os.environ["KISS_MODEL_INFO_PATH"] = str(MODEL_INFO_PATH)
+        if (
+            not args.dry_run
+            and not _writes_default_catalog()
+            and not MODEL_INFO_PATH.exists()
+            and DEFAULT_MODEL_INFO_PATH.exists()
+        ):
+            # A brand-new non-default target starts as a copy of the
+            # bundled catalog; without the seed, apply_updates_to_file
+            # would begin from an empty table and publish a catalog
+            # holding only the entries this very run happened to touch.
+            _write_model_info_json(
+                MODEL_INFO_PATH, _read_model_info_json(DEFAULT_MODEL_INFO_PATH)
+            )
+            print(f"Seeded {MODEL_INFO_PATH} from {DEFAULT_MODEL_INFO_PATH}")
 
     if args.scrub_only:
         _run_scrub_only(dry_run=args.dry_run)
@@ -2170,7 +2238,7 @@ def main() -> None:
     print("\n[6/6] Applying changes...")
     apply_updates_to_file(updates, new_models, deprecated, current, dry_run=args.dry_run)
 
-    if not args.dry_run and README_PATH.exists():
+    if not args.dry_run and _writes_default_catalog() and README_PATH.exists():
         print("\n  Syncing README catalog totals...")
         changed = sync_readme_catalog(README_PATH, MODEL_INFO_PATH)
         print(f"  README updated: {changed} ({README_PATH})")

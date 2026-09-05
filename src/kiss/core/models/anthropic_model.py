@@ -8,6 +8,7 @@
 import base64
 import json
 import logging
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -34,6 +35,29 @@ logger = logging.getLogger(__name__)
 
 _CONNECT_TIMEOUT = 10.0
 _MAX_RETRIES = 1
+
+_WORKSPACE_ID_REQUIRED_MARKER = "anthropic-workspace-id is required"
+"""The API's own words for the missing-workspace-id 400.
+
+Matching this full phrase (not just the header name) keeps other errors
+that merely mention the header — e.g. a malformed id — un-rewritten.
+"""
+
+_WORKSPACE_ID_HINT = (
+    "Anthropic rejected the request: {error}\n"
+    "The configured ANTHROPIC_API_KEY is an identity-linked API key, and the "
+    "Anthropic API requires every request made with such a key to carry the "
+    "id of the workspace it acts in. Find the workspace id (wrkspc_...) in "
+    "the Anthropic Console under Settings > Workspaces, then set it as "
+    "ANTHROPIC_WORKSPACE_ID: either in the settings panel of this install "
+    "(API Keys section — applies from the next task on, no restart needed) "
+    "or as a line\n"
+    "    export ANTHROPIC_WORKSPACE_ID=wrkspc_...\n"
+    "in $KISS_HOME/api_keys.env (default ~/.kiss/api_keys.env), followed by "
+    "a daemon restart. To fix a remote install from the deploying machine "
+    "instead, set it there and re-run ./rsorcar so the key store is shipped "
+    "to the remote again."
+)
 
 # The request parameters an Anthropic message call accepts, taken from the
 # SDK's own signature (keyword-only, no **kwargs), so an unsupported
@@ -424,10 +448,20 @@ class AnthropicModel(Model):
                 is available; otherwise they are skipped with a warning.  Video
                 attachments are always skipped.
         """
+        # An identity-linked Anthropic API key is only valid together with
+        # the id of the workspace the request acts in; the API rejects a
+        # request without it (400: "anthropic-workspace-id is required when
+        # authenticating with an identity-linked API key").  The id comes
+        # from the ANTHROPIC_WORKSPACE_ID environment variable, which
+        # load_api_keys() imports from ~/.kiss/api_keys.env at daemon
+        # startup and ./rsorcar ships to remote installs.
+        workspace_id = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
+        default_headers = {"anthropic-workspace-id": workspace_id} if workspace_id else None
         self.client = Anthropic(
             api_key=self.api_key,
             timeout=httpx.Timeout(self._stream_stall_timeout, connect=_CONNECT_TIMEOUT),
             max_retries=_MAX_RETRIES,
+            default_headers=default_headers,
         )
         content: str | list[dict[str, Any]] = prompt
         if attachments:
@@ -894,6 +928,15 @@ class AnthropicModel(Model):
                 raise self._stop_error() from exc
             if watchdog is not None and watchdog.stalled:
                 raise self._stall_error() from exc
+            if _WORKSPACE_ID_REQUIRED_MARKER in str(exc):
+                # The API's own message names the missing header but not
+                # where KISS reads it from; replace it with an actionable
+                # error.  Raising KISSError makes the agentic loop
+                # (KISSAgent._run_agentic_loop's ``except KISSError``
+                # branch) re-raise immediately, so the run fails with the
+                # hint instead of retrying a request that can never
+                # succeed.
+                raise KISSError(_WORKSPACE_ID_HINT.format(error=exc)) from exc
             raise
 
     @staticmethod

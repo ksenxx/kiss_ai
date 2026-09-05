@@ -1540,11 +1540,18 @@ def _get_ntfy_url() -> str:
 
 _NTFY_BASE_URL = "https://ntfy.sh"
 
+# A same-URL ntfy message younger than this many seconds suppresses a
+# repost (anti-spam for watchdog restarts and named-tunnel
+# re-registrations).  An *older* same-URL message is reposted anyway so
+# a daemon restart bumps the URL back to the top of the subscriber's
+# feed and restarts ntfy.sh's 12h message-cache clock.
+_NTFY_REPOST_MAX_AGE = 3600.0
+
 
 def _fetch_last_ntfy_message(
     topic: str, base_url: str = _NTFY_BASE_URL,
-) -> str | None:
-    """Return the most recent message body posted to ``{base_url}/{topic}``.
+) -> tuple[str, float] | None:
+    """Return the most recent message posted to ``{base_url}/{topic}``.
 
     Queries ntfy.sh's poll endpoint (``/{topic}/json?poll=1``) which
     returns cached messages (default retention 12h) as newline-
@@ -1557,9 +1564,11 @@ def _fetch_last_ntfy_message(
         base_url: Override the ntfy server URL (used by tests).
 
     Returns:
-        The body (``message`` field) of the most recent cached
-        message, or ``None`` if the topic has no cached messages or
-        the request fails.
+        A ``(message, time)`` tuple for the most recent cached
+        message, where ``time`` is the message's publish time in epoch
+        seconds (``0.0`` when the server omits or mangles the field),
+        or ``None`` if the topic has no cached messages or the request
+        fails.
     """
     try:
         req = urllib.request.Request(
@@ -1571,7 +1580,7 @@ def _fetch_last_ntfy_message(
     except Exception:
         logger.debug("Failed to fetch last ntfy message", exc_info=True)
         return None
-    last: str | None = None
+    last: tuple[str, float] | None = None
     for line in body.splitlines():
         line = line.strip()
         if not line:
@@ -1584,7 +1593,12 @@ def _fetch_last_ntfy_message(
             continue
         msg = obj.get("message")
         if isinstance(msg, str):
-            last = msg
+            raw_time = obj.get("time")
+            posted_at = (
+                float(raw_time)
+                if isinstance(raw_time, (int, float)) else 0.0
+            )
+            last = (msg, posted_at)
     return last
 
 
@@ -1598,10 +1612,14 @@ def _post_url_to_message_board(
     message is posted with a title indicating it is a KISS Sorcar
     remote URL update.  Before posting, the most recent cached
     message on the topic is fetched via :func:`_fetch_last_ntfy_message`;
-    if it already matches ``url`` the post is skipped so subscribers
+    if it already matches ``url`` *and* is younger than
+    :data:`_NTFY_REPOST_MAX_AGE`, the post is skipped so subscribers
     are not woken up by duplicate notifications when a watchdog
     restart or named-tunnel re-registration produces the same public
-    hostname.  Failures are logged but never raised.
+    hostname.  An older same-URL message no longer suppresses the
+    post: reposting bumps the URL back to the top of the subscriber's
+    ntfy feed after a daemon restart and restarts ntfy.sh's 12h
+    message-cache clock.  Failures are logged but never raised.
 
     Args:
         url: The ``https://`` URL to publish.
@@ -1612,12 +1630,19 @@ def _post_url_to_message_board(
     try:
         topic = _get_machine_topic()
         last = _fetch_last_ntfy_message(topic, base_url=base_url)
-        if last is not None and last.strip() == url.strip():
+        if last is not None and last[0].strip() == url.strip():
+            age = time.time() - last[1]
+            if age < _NTFY_REPOST_MAX_AGE:
+                logger.info(
+                    "Skipping ntfy.sh post for %s; last message on "
+                    "topic %s already has the same URL "
+                    "(posted %.0fs ago)", url, topic, age,
+                )
+                return
             logger.info(
-                "Skipping ntfy.sh post for %s; last message on "
-                "topic %s already has the same URL", url, topic,
+                "Reposting %s to ntfy.sh topic %s; last same-URL "
+                "message is stale (posted %.0fs ago)", url, topic, age,
             )
-            return
         data = url.encode("utf-8")
         req = urllib.request.Request(
             f"{base_url}/{topic}",
@@ -3834,6 +3859,19 @@ class RemoteAccessServer:
         self._update_proc: subprocess.Popen[bytes] | None = None
         self._update_starting = False
         self._update_watch_task: asyncio.Task[None] | None = None
+        self._update_models_log_path: Path = (
+            _kiss_home_dir() / "update_models.log"
+        )
+        self._update_models_argv: list[str] = [
+            sys.executable,
+            "-m",
+            "kiss.scripts.update_models",
+            "--model-info",
+            str(_kiss_home_dir() / "MODEL_INFO.json"),
+        ]
+        self._update_models_proc: subprocess.Popen[bytes] | None = None
+        self._update_models_starting = False
+        self._update_models_watch_task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._uds_inode: int | None = None
 
@@ -4587,6 +4625,143 @@ class RemoteAccessServer:
                 text = f"KISS Sorcar update: {line.strip()}"
                 break
         self._broadcast_to_conn({"type": "error", "text": text}, conn_id)
+
+    async def _handle_update_models(self, conn_id: str = "") -> None:
+        """Refresh ``~/.kiss/MODEL_INFO.json`` via ``update_models.py``.
+
+        Services the settings panel's "Update Models" button (both the
+        VS Code webview, which forwards the command to this daemon, and
+        remote browser windows): runs :data:`_update_models_argv` —
+        ``kiss.scripts.update_models --model-info
+        $KISS_HOME/MODEL_INFO.json`` in this daemon's interpreter — as a
+        detached subprocess whose output is appended to
+        ``~/.kiss/update_models.log``.  The script seeds a missing
+        target from the bundled catalog, fetches the latest vendor
+        pricing/context tables, capability-tests new models, and
+        rewrites the user-local catalog atomically.  Every process
+        started AFTER the rewrite reads the refreshed copy through
+        ``kiss.core.models.model_info`` (on installed copies; a daemon
+        running from a git checkout keeps reading the checkout's bundled
+        catalog); this already-running daemon holds the catalog it
+        imported at startup until it is restarted.
+
+        Mirrors :meth:`_handle_run_update`: a single-flight guard keeps
+        two clicks from racing two updaters over the same file, the
+        acknowledgement ``notice`` / ``error`` events are stamped with
+        the requesting connection's ``connId`` so they reach only the
+        clicking window, and :meth:`_watch_update_models_exit` reports
+        the subprocess's exit.
+
+        Args:
+            conn_id: Requesting connection id (``""`` to broadcast).
+        """
+        loop = self._loop
+        assert loop is not None
+        if self._update_models_starting or (
+            self._update_models_proc is not None
+            and self._update_models_proc.poll() is None
+        ):
+            self._broadcast_to_conn({
+                "type": "notice",
+                "text": (
+                    "A model catalog update is already running… "
+                    f"(output: {self._update_models_log_path})"
+                ),
+            }, conn_id)
+            return
+        self._update_models_starting = True
+        self._broadcast_to_conn({
+            "type": "notice",
+            "text": (
+                f"Updating the model catalog {self._update_models_argv[-1]}… "
+                f"(output: {self._update_models_log_path})"
+            ),
+        }, conn_id)
+        spawned = await loop.run_in_executor(
+            None, self._spawn_update_models, conn_id,
+        )
+        if spawned is not None:
+            self._update_models_watch_task = asyncio.create_task(
+                self._watch_update_models_exit(spawned, conn_id),
+            )
+
+    def _spawn_update_models(
+        self, conn_id: str = "",
+    ) -> subprocess.Popen[bytes] | None:
+        """Start the model-catalog updater detached, logging its output.
+
+        Runs in the executor so file I/O and the process spawn never
+        block the event loop.  ``start_new_session=True`` and
+        ``stdin=DEVNULL`` detach the updater from the daemon: the
+        catalog refresh (which live-probes new models) may outlive a
+        daemon restart.  Spawn failures are emitted as ``error`` events
+        instead of raised, stamped with the requesting connection's
+        ``connId`` so only the clicking window renders the banner.
+
+        Args:
+            conn_id: Requesting connection id (``""`` to broadcast).
+
+        Returns:
+            The started process, or ``None`` when the spawn failed.
+        """
+        try:
+            self._update_models_log_path.parent.mkdir(
+                parents=True, exist_ok=True,
+            )
+            with open(self._update_models_log_path, "ab") as log:
+                self._update_models_proc = subprocess.Popen(
+                    self._update_models_argv,
+                    cwd=str(Path.home()),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                return self._update_models_proc
+        except OSError as exc:
+            self._broadcast_to_conn({
+                "type": "error",
+                "text": f"Failed to start the model catalog update: {exc}",
+            }, conn_id)
+            return None
+        finally:
+            self._update_models_starting = False
+
+    async def _watch_update_models_exit(
+        self, proc: subprocess.Popen[bytes], conn_id: str,
+    ) -> None:
+        """Report the model-catalog updater's exit to the clicking window.
+
+        Polls the detached updater without tying up an executor thread.
+        A clean exit gets a completion ``notice`` (unlike the installer
+        watched by :meth:`_watch_update_exit`, the catalog refresh gives
+        no other feedback — no window reload, no terminal), a non-zero
+        exit an ``error`` pointing at the log.
+
+        Args:
+            proc: The updater started by :meth:`_spawn_update_models`.
+            conn_id: Requesting connection id (``""`` to broadcast).
+        """
+        while proc.poll() is None:
+            await asyncio.sleep(0.2)
+        if proc.returncode == 0:
+            self._broadcast_to_conn({
+                "type": "notice",
+                "text": (
+                    "Model catalog update complete "
+                    f"(output: {self._update_models_log_path}). New tasks "
+                    "pick up the refreshed catalog; use Reset Server to "
+                    "refresh this window's model list."
+                ),
+            }, conn_id)
+            return
+        self._broadcast_to_conn({
+            "type": "error",
+            "text": (
+                f"Model catalog update failed (exit {proc.returncode}), "
+                f"see {self._update_models_log_path}"
+            ),
+        }, conn_id)
 
     def _identify_voice_speaker(self, pcm: bytes) -> int | None:
         """Return the stable speaker number for an utterance's PCM.
@@ -7340,6 +7515,8 @@ class RemoteAccessServer:
             self._version_check_task = None
             await _cancel_task(self._update_watch_task)
             self._update_watch_task = None
+            await _cancel_task(self._update_models_watch_task)
+            self._update_models_watch_task = None
             if self._ws_server is not None:
                 self._ws_server.close()
                 try:

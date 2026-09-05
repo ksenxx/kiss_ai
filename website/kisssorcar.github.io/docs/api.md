@@ -10,7 +10,7 @@ A KISS agent using native function calling.
 
 **Constructor:** `KISSAgent(name: str) -> None`
 
-- **run** — Runs the agent's main ReAct loop to solve the task.
+- **run** — Runs the agent's main ReAct loop to solve the task. Run-to-completion models (`cc/*`, `codex/*`) skip the ReAct loop entirely: the whole task is handed to the CLI agent in one `generate()` call and its final output is returned; `tools` are registered but never exposed to such a model — it uses its own native tools.
 
   ```python
   run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None,
@@ -18,10 +18,12 @@ A KISS agent using native function calling.
       is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None,
       model_config: dict[str, Any] | None = None, printer: Printer | None = None,
       verbose: bool | None = None, attachments: list[Attachment] | None = None,
-      print_prompts: bool = True) -> str
+      print_prompts: bool = True,
+      llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
+      tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None) -> str
   ```
 
-  Key parameters: `model_name` (LLM to use), `prompt_template` + `arguments` (task prompt with substitutions), `tools` (callables exposed to the model; a built-in `finish` tool is always added), `max_steps` (default 10000), `max_budget` (default $10), `attachments` (images/PDFs for the initial prompt). Returns the result string of the agent's task.
+  Key parameters: `model_name` (LLM to use), `prompt_template` + `arguments` (task prompt with substitutions), `tools` (callables exposed to the model; a built-in `finish` tool is always added), `max_steps` (default 10000), `max_budget` (default $10), `attachments` (images/PDFs for the initial prompt), `llm_call_hook` (called before every LLM call with the new messages about to be sent; its return value replaces them), `tool_call_hook` (called before every tool call with the tool's name and arguments; returning `"OK"` lets the tool execute, any other string suppresses the call and is returned to the model as the tool's result). Returns the result string of the agent's task.
 
 - **finish** — `finish(result: str) -> str`. The agent must call this with the final answer.
 
@@ -32,8 +34,8 @@ A KISS agent using native function calling.
 Base agent with auto-continuation across multiple sub-sessions for long-horizon tasks.
 
 - **perform_task** — `perform_task(tools, attachments=None) -> str`. Executes the task with auto-continuation across sub-sessions; returns a YAML string with `success` and `summary` keys.
-- **run** — Full signature adds: `model_name`, `prompt_template`, `arguments`, `system_prompt`, `max_steps` (per sub-session), `max_budget` (USD), `model_config`, `work_dir`, `printer`, `max_sub_sessions`, `docker_image` (run tools inside a container), `verbose`, `tools`, `attachments`. Returns YAML with `success` and `summary`.
-- **finish** — `finish(success: bool, is_continue: bool = False, summary_in_html: str = '', suggested_next_task: str = '') -> str`. The summary is always HTML (Markdown/plain-text input is converted). `is_continue=True` pauses an incomplete task so it resumes in a new sub-session. `suggested_next_task` is one plain-text sentence proposing the user's next task; when non-empty it is emitted as a `suggested_next_task` key in the result YAML and shown as "Suggested next" in the chat UI and CLI.
+- **run** — Full signature adds: `model_name`, `prompt_template`, `arguments`, `system_prompt`, `max_steps` (per sub-session), `max_budget` (USD), `model_config`, `work_dir`, `printer`, `max_sub_sessions`, `docker_image` (run tools inside a container), `verbose`, `tools`, `attachments`, `llm_call_hook`, `tool_call_hook` (both installed on every per-session executor `KISSAgent`). Returns YAML with `success` and `summary`.
+- **finish** — `finish(success: bool, is_continue: bool = False, summary_in_html: str = '') -> str`. The summary is always HTML (Markdown/plain-text input is converted). `is_continue=True` pauses an incomplete task so it resumes in a new sub-session.
 
 ## `kiss.agents.sorcar.sorcar_agent` — Coding + browser automation
 
@@ -43,7 +45,7 @@ Agent with both coding tools and browser automation for web + code tasks.
 
 **Constructor:** `SorcarAgent(name: str) -> None`
 
-- **run** — Adds on top of `RelentlessAgent.run`: `web_tools: bool = True` (set False for terminal-only), `is_parallel: bool = True` (enables the `run_parallel` tool for spawning parallel sub-agents), `current_editor_file` (path appended to the prompt), `ask_user_question_callback` (collects a text response from the user). Returns YAML with `success` and `summary`.
+- **run** — Adds on top of `RelentlessAgent.run`: `web_tools: bool = True` (set False for terminal-only), `is_parallel: bool = True` (enables the `run_parallel` tool for spawning parallel sub-agents), `current_editor_file` (path appended to the prompt), `ask_user_question_callback` (collects a text response from the user), `base_system_prompt` (replaces the default system prompt for this agent and its `run_parallel` sub-agents), `append_basic_tools` (set False to run with only `finish` plus the caller's tools), `llm_call_hook`, `tool_call_hook` (forwarded to every sub-session's `KISSAgent`). Returns YAML with `success` and `summary`.
 
 ### Module helpers
 
@@ -97,4 +99,5 @@ SorcarAgent that isolates every task in a git worktree.
 - **`run(prompt_template='', **kwargs) -> str`** — Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Any previously pending branch is auto-committed and squash-merged first. Falls back to direct execution when `use_worktree=False`, when `work_dir` is not in a git repo, when the repo has no commits, or when HEAD is detached.
 - **merge() -> str** — Merge the task branch into the original branch. Idempotent; auto-commits uncommitted worktree changes and stashes/restores user edits on main.
 - **discard() -> str** — Throw away the task branch and worktree, checkout the original branch. Idempotent.
+- **leave_as_is() -> str** — Detach from the pending worktree, leaving the branch, directory, and uncommitted changes untouched on disk (the "Do nothing" button of the post-task worktree bar); a preserve-for-review marker keeps future processes from silently publishing it.
 - **new_chat()** — Reset to a new chat session, auto-merging any pending worktree first.

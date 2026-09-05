@@ -8,7 +8,7 @@ Regression: the settings action buttons once lacked
 ``white-space: nowrap`` and could shrink until multi-word labels wrapped
 onto a second line, making the row 46px tall with ragged, half-height
 neighbours.  The current row contains "Tips", "Git Commit", "Update",
-and "Reset Server".
+"Reset Server", and "Update Models".
 
 The fix has two halves, both exercised here:
 
@@ -41,12 +41,13 @@ _MAIN_CSS = _MEDIA_DIR / "main.css"
 _REMOTE_CSS = _MEDIA_DIR / "remote-codex.css"
 _HTML = _MEDIA_DIR / "chat.html"
 
-#: Ids of the four buttons of ``.config-update-row``, in DOM order.
+#: Ids of the five buttons of ``.config-update-row``, in DOM order.
 _BUTTON_IDS = (
     "tips-btn",
     "autocommit-btn",
     "cfg-update-btn",
     "cfg-server-reset-btn",
+    "cfg-update-models-btn",
 )
 
 #: Desktop mode only applies at >= 900px wide (see remote-codex.css).
@@ -190,7 +191,7 @@ def _measure_action_row(viewport: ViewportSize, body_class: str) -> dict:
 
     Returns:
         The drawer geometry plus a per-button record for each of the
-        four action buttons (see ``_MEASURE_JS``).
+        five action buttons (see ``_MEASURE_JS``).
     """
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -219,8 +220,8 @@ def _phone_measurements():
     return _measure_action_row(_PHONE_VIEWPORT, "remote-chat")
 
 
-def test_all_four_action_buttons_share_one_line(_measurements) -> None:
-    """Tips / Git Commit / Update / Reset Server must share a row.
+def test_all_five_action_buttons_share_one_line(_measurements) -> None:
+    """Tips / Git Commit / Update / Reset Server / Update Models share a row.
 
     Every button's top edge has to land at the same y; a wrapped row
     would push the later buttons down.

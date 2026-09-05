@@ -43,6 +43,7 @@
     'autocommitAction',
     'auth',
     'runUpdate',
+    'updateModels',
     'snoozeUpdate',
     'serverReset',
     'voiceTranscribe',
