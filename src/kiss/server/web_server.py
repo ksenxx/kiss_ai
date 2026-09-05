@@ -1540,11 +1540,18 @@ def _get_ntfy_url() -> str:
 
 _NTFY_BASE_URL = "https://ntfy.sh"
 
+# A same-URL ntfy message younger than this many seconds suppresses a
+# repost (anti-spam for watchdog restarts and named-tunnel
+# re-registrations).  An *older* same-URL message is reposted anyway so
+# a daemon restart bumps the URL back to the top of the subscriber's
+# feed and restarts ntfy.sh's 12h message-cache clock.
+_NTFY_REPOST_MAX_AGE = 3600.0
+
 
 def _fetch_last_ntfy_message(
     topic: str, base_url: str = _NTFY_BASE_URL,
-) -> str | None:
-    """Return the most recent message body posted to ``{base_url}/{topic}``.
+) -> tuple[str, float] | None:
+    """Return the most recent message posted to ``{base_url}/{topic}``.
 
     Queries ntfy.sh's poll endpoint (``/{topic}/json?poll=1``) which
     returns cached messages (default retention 12h) as newline-
@@ -1557,9 +1564,11 @@ def _fetch_last_ntfy_message(
         base_url: Override the ntfy server URL (used by tests).
 
     Returns:
-        The body (``message`` field) of the most recent cached
-        message, or ``None`` if the topic has no cached messages or
-        the request fails.
+        A ``(message, time)`` tuple for the most recent cached
+        message, where ``time`` is the message's publish time in epoch
+        seconds (``0.0`` when the server omits or mangles the field),
+        or ``None`` if the topic has no cached messages or the request
+        fails.
     """
     try:
         req = urllib.request.Request(
@@ -1571,7 +1580,7 @@ def _fetch_last_ntfy_message(
     except Exception:
         logger.debug("Failed to fetch last ntfy message", exc_info=True)
         return None
-    last: str | None = None
+    last: tuple[str, float] | None = None
     for line in body.splitlines():
         line = line.strip()
         if not line:
@@ -1584,7 +1593,12 @@ def _fetch_last_ntfy_message(
             continue
         msg = obj.get("message")
         if isinstance(msg, str):
-            last = msg
+            raw_time = obj.get("time")
+            posted_at = (
+                float(raw_time)
+                if isinstance(raw_time, (int, float)) else 0.0
+            )
+            last = (msg, posted_at)
     return last
 
 
@@ -1598,10 +1612,14 @@ def _post_url_to_message_board(
     message is posted with a title indicating it is a KISS Sorcar
     remote URL update.  Before posting, the most recent cached
     message on the topic is fetched via :func:`_fetch_last_ntfy_message`;
-    if it already matches ``url`` the post is skipped so subscribers
+    if it already matches ``url`` *and* is younger than
+    :data:`_NTFY_REPOST_MAX_AGE`, the post is skipped so subscribers
     are not woken up by duplicate notifications when a watchdog
     restart or named-tunnel re-registration produces the same public
-    hostname.  Failures are logged but never raised.
+    hostname.  An older same-URL message no longer suppresses the
+    post: reposting bumps the URL back to the top of the subscriber's
+    ntfy feed after a daemon restart and restarts ntfy.sh's 12h
+    message-cache clock.  Failures are logged but never raised.
 
     Args:
         url: The ``https://`` URL to publish.
@@ -1612,12 +1630,19 @@ def _post_url_to_message_board(
     try:
         topic = _get_machine_topic()
         last = _fetch_last_ntfy_message(topic, base_url=base_url)
-        if last is not None and last.strip() == url.strip():
+        if last is not None and last[0].strip() == url.strip():
+            age = time.time() - last[1]
+            if age < _NTFY_REPOST_MAX_AGE:
+                logger.info(
+                    "Skipping ntfy.sh post for %s; last message on "
+                    "topic %s already has the same URL "
+                    "(posted %.0fs ago)", url, topic, age,
+                )
+                return
             logger.info(
-                "Skipping ntfy.sh post for %s; last message on "
-                "topic %s already has the same URL", url, topic,
+                "Reposting %s to ntfy.sh topic %s; last same-URL "
+                "message is stale (posted %.0fs ago)", url, topic, age,
             )
-            return
         data = url.encode("utf-8")
         req = urllib.request.Request(
             f"{base_url}/{topic}",
