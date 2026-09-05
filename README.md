@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.9.4-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.9.5-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -121,7 +121,7 @@ To install only the KISS Sorcar extension, open Visual Studio Code, search for *
 
 ## Using KISS Sorcar
 
-KISS Sorcar has three client interfaces, all served by one local daemon: the **VS Code extension**, the **remote web/mobile app**, and the **Python client API**.
+KISS Sorcar has three client interfaces, all served by one local daemon: the **VS Code extension**, the **remote web/mobile app**, and the **Python client API**. A fourth interface, the **`sorcar` terminal command**, runs a SorcarAgent directly in the current directory without the daemon: `sorcar -t "Summarize README.md"` runs an inline task, `sorcar -f task.txt` runs the file's content as the task (exactly one of `-t`/`-f` is required; see `sorcar --help` for the model and budget flags).
 
 ### VS Code extension and web/mobile app
 
@@ -190,7 +190,7 @@ def get_max_budget() -> float:
 def get_use_worktree() -> bool:
     return False  # no repo changes expected
 
-def get_append_basic_tools() -> bool:
+def get_if_append_basic_tools() -> bool:
     return False  # restrict the agent to finish + our tools
 
 def get_system_prompt() -> str:
@@ -223,7 +223,7 @@ result = sorcar.run(
 
 Key points:
 
-- **Overridable parameters.** Every `sorcar.run()` parameter except `timeout`, `stop_on_timeout`, `sock_path`, `scope_work_dir`, and `extension_agent_path` itself has a getter: `get_prompt()`, `get_work_dir()`, `get_model()`, `get_chat_id()`, `get_system_prompt()`, `get_tools()`, `get_use_worktree()`, `get_auto_commit()`, `get_max_budget()`, `get_model_config()`, `get_web_tools()`, `get_is_parallel()`, `get_append_basic_tools()`, `get_append_to_system_prompt()`, and `get_append_to_prompt()`.
+- **Overridable parameters.** Every `sorcar.run()` parameter except `timeout`, `stop_on_timeout`, `sock_path`, `scope_work_dir`, `web_tools`, `is_parallel`, and `extension_agent_path` itself has a getter: `get_prompt()`, `get_work_dir()`, `get_model()`, `get_chat_id()`, `get_system_prompt()`, `get_tools()`, `get_use_worktree()`, `get_auto_commit()`, `get_max_budget()`, `get_model_config()`, `get_if_append_basic_tools()` (overrides `append_basic_tools`), `get_append_to_system_prompt()`, and `get_append_to_prompt()`. `web_tools` and `is_parallel` always keep the values passed to `run()` (their defaults when the caller passed none).
 - **Atomic, type-checked overrides.** Getters run in the daemon process and are re-imported from source on every run. Each return value is type-checked; overrides apply only after every getter succeeds, and a broken getter fails the task with a diagnostic in `TaskResult.text`.
 - **Tools, two ways.** `get_tools()` may return a list of callables — making the script its own tools file — or the path of a separate Python file whose `get_tools()` returns the callables. Either way the tools execute in the daemon process; nothing is serialized over the socket. `get_tools()` overrides (does not append to) the caller's `tools` argument.
 - **Hook getters.** `get_llm_call_hook()` and `get_tool_call_hook()` return functions with no `run()` equivalent (callables can't travel the wire). `llm_call_hook(new_messages)` runs before every LLM call and its return value replaces the outgoing messages; `tool_call_hook(name, args)` runs before every tool call — returning `"OK"` lets the tool execute, any other string suppresses the call and is given to the model as the tool's result:

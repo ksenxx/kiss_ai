@@ -423,7 +423,10 @@ def run(
             uses its return value for ``X``, replacing the value passed
             to this call.  A parameter whose ``get_X()`` the script
             does not define keeps the value passed here, which is the
-            parameter's default when the caller did not pass one.
+            parameter's default when the caller did not pass one.  One
+            getter is named differently from its parameter:
+            ``get_if_append_basic_tools()`` overrides
+            *append_basic_tools*.
 
             Script format: a plain Python file defining any subset of
             these zero-argument top-level functions, each returning a
@@ -439,9 +442,7 @@ def run(
                 def get_auto_commit() -> bool: ...
                 def get_max_budget() -> float | None: ...   # finite
                 def get_model_config() -> dict | None: ...
-                def get_web_tools() -> bool | None: ...
-                def get_is_parallel() -> bool: ...
-                def get_append_basic_tools() -> bool: ...
+                def get_if_append_basic_tools() -> bool: ...
                 def get_append_to_system_prompt() -> str: ...
                 def get_append_to_prompt() -> str: ...
 
@@ -480,15 +481,18 @@ def run(
             *tools*; a ``get_tools()`` that instead returns a *list*
             of tool callables (the tools-file contract, as in the
             channel agent modules) makes the script its own tools
-            file.  ``timeout``, *stop_on_timeout*, *sock_path*, and
-            *scope_work_dir* have no getters by design: the first
-            three are client-transport parameters — the script only
-            runs on the daemon that *sock_path* selects, *timeout*
-            bounds this client's local wait, and *stop_on_timeout*
-            picks this client's timeout behavior — and
-            *scope_work_dir* is the CALLING
+            file.  ``timeout``, *stop_on_timeout*, *sock_path*,
+            *scope_work_dir*, *web_tools*, and *is_parallel* have no
+            getters by design: the first three are client-transport
+            parameters — the script only runs on the daemon that
+            *sock_path* selects, *timeout* bounds this client's local
+            wait, and *stop_on_timeout* picks this client's timeout
+            behavior — *scope_work_dir* is the CALLING
             client's tab-bar scope, which the dispatched script must
-            not be able to repoint at another workspace.  The
+            not be able to repoint at another workspace, and
+            *web_tools* / *is_parallel* always keep the values passed
+            to this call (their defaults when the caller passed
+            none).  The
             *extension_agent_path* itself is resolved against this process's
             working directory and validated eagerly, like *tools*.  A
             broken agent script (deleted before the daemon reads it,
