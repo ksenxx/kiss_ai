@@ -713,6 +713,9 @@
     // visibletask-coverage:end
     tab.welcomeVisible = welcome ? welcome.style.display !== 'none' : true;
     if (welcome && welcome.parentNode === O) O.removeChild(welcome);
+    // autoscroll-coverage:start
+    saveLockedSubpanelOffsets();
+    // autoscroll-coverage:end
     tab.outputFragment = document.createDocumentFragment();
     while (O.firstChild) tab.outputFragment.appendChild(O.firstChild);
     // visibletask-coverage:start
@@ -850,8 +853,12 @@
       tab.outputFragment = null;
       reviveActivePanelTimes(O);
       // autoscroll-coverage:start
-      // Events may have streamed into the fragment while the tab was
-      // hidden: land the restored chat at the end of its latest panel.
+      // The detach reset the scroll offsets of the transcript's
+      // subpanels (real browsers destroy detached scrollers): put the
+      // locked ones back where the user was reading, then land the
+      // restored chat at the end of its latest panel — events may have
+      // streamed into the fragment while the tab was hidden.
+      restoreLockedSubpanelOffsets();
       autoScrollLatestEventPanel(O.lastElementChild);
       // autoscroll-coverage:end
     }
@@ -4474,7 +4481,7 @@
   // follows the tail of the latest event panel — unless the user
   // scroll lock below is engaged — and every scrollable subpanel of an
   // event panel follows its own tail as streamed text appears inside
-  // it.
+  // it, unless that subpanel's own user scroll lock is engaged.
   const AUTO_SCROLL_SUBPANEL_SEL =
     '.think, .bash-panel-content, .llm-panel, .tc-b, .tr, ' +
     '.prompt-body, .system-prompt-body';
@@ -4491,16 +4498,77 @@
   // land at the bottom, so they never engage the lock.
   let userScrollLock = false;
 
-  function chatDistanceFromBottom() {
-    return Math.max(0, O.scrollHeight - O.clientHeight - O.scrollTop);
+  function distanceFromBottom(el) {
+    return Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop);
   }
 
   function updateUserScrollLock() {
-    userScrollLock = chatDistanceFromBottom() > 1;
+    userScrollLock = distanceFromBottom(O) > 1;
   }
 
   function resetUserScrollLock() {
     userScrollLock = false;
+  }
+
+  // Per-subpanel user scroll lock: the same override applies to every
+  // scrollable subpanel of an event panel (thinking, thoughts, bash
+  // output, tool bodies…).  A user scroll away from a subpanel's
+  // bottom disables that subpanel's auto-scroll; it resumes once the
+  // user scrolls the subpanel back to its bottom (1px tolerance for
+  // fractional scroll positions, as for the chat).  The lock lives on
+  // the element itself, so it travels with a background tab's detached
+  // fragment and disappears with the element when a transcript is
+  // rebuilt (replay/clear).  Scroll events do not bubble, but they do
+  // pass ancestor CAPTURE listeners, so one listener on the chat
+  // container serves every subpanel, present and future.
+  function updateSubpanelScrollLock(el) {
+    el._userScrollLock = distanceFromBottom(el) > 1;
+  }
+
+  O.addEventListener(
+    'scroll',
+    e => {
+      const el = e.target;
+      if (el !== O && el.matches && el.matches(AUTO_SCROLL_SUBPANEL_SEL))
+        updateSubpanelScrollLock(el);
+    },
+    true,
+  );
+
+  function autoScrollSubpanel(el) {
+    // Mirrors autoScrollChat: a locked subpanel is left where the user
+    // put it, but a lock observed at the bottom is stale (a content
+    // shrink can land the subpanel at its bottom without any scroll
+    // event) and is re-derived; an engaged lock is never created here.
+    if (el._userScrollLock) updateSubpanelScrollLock(el);
+    if (!el._userScrollLock) scrollPanelToEnd(el);
+  }
+
+  // Real browsers destroy an element's scroller when it leaves the
+  // document, silently resetting its scroll offset to 0 — so a tab
+  // switch (which detaches the transcript into a fragment) would bring
+  // a LOCKED subpanel back at its top instead of where the user was
+  // reading.  The offsets of locked subpanels are saved right before
+  // the detach and reapplied right after the reattach; unlocked
+  // subpanels need no saving, the restore pass scrolls them to their
+  // end anyway.
+  function saveLockedSubpanelOffsets() {
+    const subs = O.querySelectorAll(AUTO_SCROLL_SUBPANEL_SEL);
+    for (let i = 0; i < subs.length; i++) {
+      const sp = subs[i];
+      if (sp._userScrollLock) sp._savedScrollTop = sp.scrollTop;
+    }
+  }
+
+  function restoreLockedSubpanelOffsets() {
+    const subs = O.querySelectorAll(AUTO_SCROLL_SUBPANEL_SEL);
+    for (let i = 0; i < subs.length; i++) {
+      const sp = subs[i];
+      if (sp._userScrollLock && sp._savedScrollTop !== undefined) {
+        sp.scrollTop = sp._savedScrollTop;
+        delete sp._savedScrollTop;
+      }
+    }
   }
 
   function autoScrollChat() {
@@ -4524,7 +4592,8 @@
     if (!el || !O.contains(el)) return;
     let n = el;
     while (n && n !== O) {
-      if (n.matches && n.matches(AUTO_SCROLL_SUBPANEL_SEL)) scrollPanelToEnd(n);
+      if (n.matches && n.matches(AUTO_SCROLL_SUBPANEL_SEL))
+        autoScrollSubpanel(n);
       n = n.parentElement;
     }
     autoScrollChat();
@@ -4535,9 +4604,9 @@
     // end, then the outer chat to the end of that panel.
     if (panel && O.contains(panel)) {
       if (panel.matches && panel.matches(AUTO_SCROLL_SUBPANEL_SEL))
-        scrollPanelToEnd(panel);
+        autoScrollSubpanel(panel);
       const subs = panel.querySelectorAll(AUTO_SCROLL_SUBPANEL_SEL);
-      for (let i = 0; i < subs.length; i++) scrollPanelToEnd(subs[i]);
+      for (let i = 0; i < subs.length; i++) autoScrollSubpanel(subs[i]);
     }
     autoScrollChat();
   }
