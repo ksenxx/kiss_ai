@@ -117,6 +117,85 @@
     }
   }
 
+  // sharetheme-coverage:start
+  // Light / dark mode for the shared page.  The page ships dark (the
+  // inlined :root palette); the floating #share-theme-btn switches the
+  // whole document to the Light Modern palette by toggling the
+  // `light-theme` class on <html> (which the inlined
+  // `html.light-theme` variable overrides key off) and flips the
+  // active highlight.js theme through the two inlined style elements'
+  // media attributes.  The choice persists in localStorage.
+  const SHARE_THEME_KEY = 'kissShareTheme';
+
+  const THEME_SUN_SVG =
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true">' +
+    '<circle cx="12" cy="12" r="5"/>' +
+    '<line x1="12" y1="1" x2="12" y2="3"/>' +
+    '<line x1="12" y1="21" x2="12" y2="23"/>' +
+    '<line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>' +
+    '<line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>' +
+    '<line x1="1" y1="12" x2="3" y2="12"/>' +
+    '<line x1="21" y1="12" x2="23" y2="12"/>' +
+    '<line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>' +
+    '<line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
+
+  const THEME_MOON_SVG =
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+
+  /**
+   * Apply *theme* ('light' or 'dark') to the shared page: toggle the
+   * root element's `light-theme` class, enable the matching inlined
+   * highlight.js stylesheet, and repaint the toggle button (which
+   * shows the theme it switches TO: a sun in dark mode, a moon in
+   * light mode).
+   *
+   * @param {string} theme 'light' or 'dark'.
+   */
+  function applyShareTheme(theme) {
+    const light = theme === 'light';
+    document.documentElement.classList.toggle('light-theme', light);
+    const darkStyle = document.getElementById('hljs-style-dark');
+    const lightStyle = document.getElementById('hljs-style-light');
+    if (darkStyle) darkStyle.setAttribute('media', light ? 'not all' : 'all');
+    if (lightStyle) lightStyle.setAttribute('media', light ? 'all' : 'not all');
+    const btn = document.getElementById('share-theme-btn');
+    if (btn) {
+      btn.innerHTML = light ? THEME_MOON_SVG : THEME_SUN_SVG;
+      const label = light ? 'Switch to dark mode' : 'Switch to light mode';
+      btn.title = label;
+      btn.setAttribute('aria-label', label);
+    }
+  }
+
+  (function initShareTheme() {
+    let saved = 'dark';
+    try {
+      if (localStorage.getItem(SHARE_THEME_KEY) === 'light') saved = 'light';
+    } catch (_e) {
+      /* file:// or private browsing: default to dark */
+    }
+    applyShareTheme(saved);
+    const btn = document.getElementById('share-theme-btn');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      const next = document.documentElement.classList.contains('light-theme')
+        ? 'dark'
+        : 'light';
+      try {
+        localStorage.setItem(SHARE_THEME_KEY, next);
+      } catch (_e) {
+        /* the theme simply won't persist */
+      }
+      applyShareTheme(next);
+    });
+  })();
+  // sharetheme-coverage:end
+
   document.addEventListener('click', e => {
     const target = e.target;
     if (!target || typeof target.closest !== 'function') return;

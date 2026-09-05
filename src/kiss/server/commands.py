@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import queue
 import subprocess
 import sys
@@ -1281,6 +1282,11 @@ class _CommandsMixin:
         api_keys = get_current_api_keys()
         event: dict[str, Any] = {
             "type": "configData", "config": cfg, "apiKeys": api_keys,
+            # The server machine's hostname, shown centered in the
+            # webview's status bar (both the VS Code webview and the
+            # remote webapp) so the user always sees which machine the
+            # agent runs on.
+            "machine": platform.node(),
         }
         conn_id = cmd.get("connId", "")
         if conn_id:
