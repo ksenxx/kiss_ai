@@ -2984,9 +2984,14 @@
    * @param {Array<object>} events The transcript to replay.
    * @param {string|undefined} ownerTabId The tab the transcript
    *     belongs to; file links are cached and stamped against it.
+   * @param {?function} onFollowupClick Click handler for replayed
+   *     "Suggested next" bars (renderAdjacentTask passes
+   *     copyFollowupToInput so bars of earlier tasks spliced into the
+   *     chat stay clickable after a reload); omitted by the share
+   *     export, whose serialized HTML cannot carry listeners.
    * @returns {Element} The detached container.
    */
-  function replayDetachedTranscript(events, ownerTabId) {
+  function replayDetachedTranscript(events, ownerTabId, onFollowupClick) {
     const container = mkEl('div', 'adjacent-task');
     const savedTokens = statusTokens ? statusTokens.textContent : '';
     const savedBudget = statusBudget ? statusBudget.textContent : '';
@@ -3008,6 +3013,7 @@
       // tableak-coverage:start
       replayEventsInto(container, events, {
         ownerTabId: ownerTabId || activeTabId,
+        onFollowupClick: onFollowupClick || null,
       });
       // tableak-coverage:end
     }
@@ -3050,7 +3056,11 @@
 
     const taskLabel = task || '(untitled task)';
 
-    const container = replayDetachedTranscript(events, ownerTabId);
+    const container = replayDetachedTranscript(
+      events,
+      ownerTabId,
+      copyFollowupToInput,
+    );
     container.dataset.task = taskLabel;
     if (hasTaskId) container.dataset.taskId = String(taskId);
     if (!container.firstChild) {
@@ -6699,11 +6709,7 @@
         // tableak-coverage:start
         if (!isForActiveTab(ev)) break;
         // tableak-coverage:end
-        const fu = mkFollowupBar(ev.text, () => {
-          inp.value = ev.text;
-          syncClearBtn();
-          inp.focus();
-        });
+        const fu = mkFollowupBar(ev.text, copyFollowupToInput);
         O.appendChild(fu);
         // autoscroll-coverage:start
         autoScrollLatestEventPanel(fu);
@@ -6827,11 +6833,7 @@
                 if (statusSteps && statusSteps.textContent)
                   teTab.statusStepsText = statusSteps.textContent;
               },
-              onFollowupClick: function (text) {
-                inp.value = text;
-                syncClearBtn();
-                inp.focus();
-              },
+              onFollowupClick: copyFollowupToInput,
             });
           } catch (e) {
             teTab.outputFragment = teOldFrag;
@@ -8140,11 +8142,7 @@
         '<span class="chip-text">' +
         esc(s.text) +
         '</span>';
-      chip.addEventListener('click', () => {
-        inp.value = s.text;
-        syncClearBtn();
-        inp.focus();
-      });
+      chip.addEventListener('click', () => copyFollowupToInput(s.text));
       container.appendChild(chip);
     });
   }
@@ -8182,11 +8180,27 @@
   }
 
   /**
+   * Copy a suggested follow-up prompt into the chat input box and
+   * focus it — the one behavior every clickable "Suggested next" bar
+   * (live stream, active-tab replay, background-tab replay, spliced-in
+   * adjacent transcripts) and welcome suggestion chip shares.
+   *
+   * @param {string} text The prompt to place in the input box.
+   */
+  function copyFollowupToInput(text) {
+    inp.value = text;
+    syncClearBtn();
+    inp.focus();
+  }
+
+  /**
    * Build the "Suggested next" bar shown for a followup_suggestion
    * event, identical for live streams and history replays.
    *
    * @param {string} text The suggested follow-up prompt.
-   * @param {?function} onClick Click handler, or null for a static bar.
+   * @param {?function} onClick Click handler, called with *text*, or
+   *     null for a static bar (share-page export, whose serialized
+   *     HTML cannot carry listeners).
    * @returns {HTMLElement} The bar, ready to append.
    */
   function mkFollowupBar(text, onClick) {
@@ -8196,7 +8210,7 @@
       '<span class="fu-text">' +
       esc(text) +
       '</span>';
-    if (onClick) fu.addEventListener('click', onClick);
+    if (onClick) fu.addEventListener('click', () => onClick(text));
     return fu;
   }
 
@@ -8223,10 +8237,7 @@
           return;
         }
         if (t === 'followup_suggestion') {
-          const onClick =
-            opts && opts.onFollowupClick
-              ? () => opts.onFollowupClick(ev.text)
-              : null;
+          const onClick = (opts && opts.onFollowupClick) || null;
           container.appendChild(mkFollowupBar(ev.text, onClick));
           return;
         }
@@ -8261,11 +8272,7 @@
     clearUsageMetrics();
     const rSteps = replayEventsInto(O, events, {
       ownerTabId: activeTabId,
-      onFollowupClick: function (text) {
-        inp.value = text;
-        syncClearBtn();
-        inp.focus();
-      },
+      onFollowupClick: copyFollowupToInput,
     });
     if (rSteps > 0) updateStepCount(rSteps);
     // autoscroll-coverage:start
