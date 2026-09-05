@@ -36,7 +36,7 @@ def get_max_budget() -> float:
 def get_use_worktree() -> bool:
     return False  # no repo changes expected
 
-def get_append_basic_tools() -> bool:
+def get_if_append_basic_tools() -> bool:
     return False  # only finish + our tools
 
 def get_system_prompt() -> str:
@@ -127,9 +127,11 @@ on the daemon.
 ## Overridable parameters
 
 Every parameter of `sorcar.run()` except `timeout`, `stop_on_timeout`,
-`sock_path`, `scope_work_dir`, and `extension_agent_path` itself has a
-corresponding `get_X()` getter the extension agent may define.  The
-table below lists them all.
+`sock_path`, `scope_work_dir`, `web_tools`, `is_parallel`, and
+`extension_agent_path` itself has a corresponding getter the extension
+agent may define.  The getter is named `get_X()` for parameter `X`,
+except `append_basic_tools`, whose getter is
+`get_if_append_basic_tools()`.  The table below lists them all.
 
 | Getter function              | Return type                     | `run()` default           | Wire field          |
 |------------------------------|---------------------------------|---------------------------|---------------------|
@@ -143,16 +145,14 @@ table below lists them all.
 | `get_auto_commit()`          | `bool`                          | `True`                    | `autoCommit`        |
 | `get_max_budget()`           | `float` (finite) or `None`      | `None` (daemon default)   | `maxBudget`         |
 | `get_model_config()`         | `dict` or `None`                | `None`                    | `modelConfig`       |
-| `get_web_tools()`            | `bool` or `None`                | `None` (daemon default)   | `webTools`          |
-| `get_is_parallel()`          | `bool`                          | `True`                    | `useParallel`       |
-| `get_append_basic_tools()`   | `bool`                          | `True`                    | `appendBasicTools`  |
+| `get_if_append_basic_tools()` | `bool`                         | `True`                    | `appendBasicTools`  |
 | `get_append_to_system_prompt()` | `str`                        | `""` (append nothing)     | `appendToSystemPrompt` |
 | `get_append_to_prompt()`     | `str`                           | `""` (append nothing)     | `appendToPrompt`    |
 
 When a getter is absent, the caller's value is used (which is the
 `run()` default when the caller did not pass one).
 
-The five parameters without getters:
+The seven parameters without getters:
 
 - **`timeout`** — bounds the *client's* local wait (`None` waits
   indefinitely); the daemon never sees it.
@@ -164,6 +164,10 @@ The five parameters without getters:
 - **`scope_work_dir`** — the CALLING client's tab-bar visibility
   scope (wire field `tabScopeWorkDir`), which a dispatched script
   must not be able to repoint at another workspace.
+- **`web_tools`** — always the value the caller passed to `run()`
+  (default `None`: the daemon's configured default).
+- **`is_parallel`** — always the value the caller passed to `run()`
+  (default `True`).
 - **`extension_agent_path`** — the script cannot override its own path.
 
 ### Getter semantics
@@ -177,8 +181,9 @@ The five parameters without getters:
   default `SYSTEM.md` system prompt.  A non-empty string replaces it.
 - **`get_tools()`** — **overrides** (does not append to) the caller's
   `tools` argument.  Returning `None` clears any caller-supplied tools.
-- **`get_web_tools()`** — `None` uses the daemon's configured
-  default; `True`/`False` forces browser tools on or off.
+- **`get_if_append_basic_tools()`** — overrides the
+  `append_basic_tools` parameter; `False` strips the run down to
+  `finish` plus the supplied tools.
 - **`get_append_to_system_prompt()`** — extra text **appended** to
   the run's system prompt (the default `SYSTEM.md` prompt or the
   `get_system_prompt()` replacement) when the agent is executed.
@@ -341,7 +346,7 @@ call, among other things).  Pass a custom `get_system_prompt()` that
 matches the tools you provide:
 
 ```python
-def get_append_basic_tools() -> bool:
+def get_if_append_basic_tools() -> bool:
     return False
 
 def get_system_prompt() -> str:
@@ -632,7 +637,7 @@ class TaskResult:
 | Aspect | Extension agent (`extension_agent_path`) | Tools file (`tools`) |
 |--------|------------------------------------------|----------------------|
 | **Purpose** | Override run parameters AND supply tools | Supply tools only |
-| **Getter functions** | `get_prompt()`, `get_model()`, `get_system_prompt()`, `get_tools()`, etc. (15 total) | `get_tools()` only |
+| **Getter functions** | `get_prompt()`, `get_model()`, `get_system_prompt()`, `get_tools()`, etc. (13 total) | `get_tools()` only |
 | **Required function** | None — define only the getters you need | Must define `get_tools()` |
 | **Can be combined** | Yes — `get_tools()` can point to a separate tools file | N/A |
 | **Can be self-contained** | Yes — return a list from `get_tools()` and the script becomes its own tools file | Always self-contained |
