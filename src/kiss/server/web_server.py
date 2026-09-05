@@ -4525,7 +4525,12 @@ class RemoteAccessServer:
     ) -> tuple[subprocess.Popen[bytes], int] | None:
         """Start the updater detached, logging to the update log.
 
-        With *script* set, runs that ``install.sh``; with ``None`` (no
+        With *script* set, runs the clone's committed
+        ``scripts/install.sh`` when present — it synchronizes the
+        checkout with origin under the update lock before handing over
+        to the root ``install.sh``, which itself never touches git —
+        and falls back to running *script* directly for clones that
+        predate the bootstrap.  With ``None`` (no
         ``~/.kiss/kiss_ai/install.sh`` on this machine), runs the curl
         bootstrap from :func:`_bootstrap_install_url`, which clones the
         repo into ``~/.kiss/kiss_ai`` and hands over to its
@@ -4536,7 +4541,7 @@ class RemoteAccessServer:
         the event loop.  ``start_new_session=True`` keeps the updater
         alive when ``install.sh`` restarts this very daemon.
         ``--non-interactive`` / ``KISS_NONINTERACTIVE=1`` make the
-        script answer its ``[Y/n]`` upgrade questions with their
+        script answer its ``[Y/n]`` questions with their
         defaults (it would anyway, having no terminal to ask on), and
         ``stdin=DEVNULL`` detaches it from the daemon's stdin.
         Failures are emitted as ``error`` events instead of raised,
@@ -4555,9 +4560,25 @@ class RemoteAccessServer:
             the spawn failed.
         """
         if script is not None:
-            argv = ["bash", str(script), "--non-interactive"]
-            cwd = str(script.parent)
-            env = None
+            bootstrap = script.parent / "scripts" / "install.sh"
+            if bootstrap.is_file():
+                # scripts/install.sh (the curl bootstrap committed in the
+                # clone) synchronizes the checkout with origin under the
+                # cross-process update lock and hands over to the root
+                # install.sh — which itself never touches git, so running
+                # the root script directly would rebuild the stale
+                # checkout as-is.  The extension's ``runUpdate()`` prefers
+                # the bootstrap the same way; ``KISS_NONINTERACTIVE=1`` is
+                # what both installers read in place of
+                # ``--non-interactive``.
+                argv = ["bash", str(bootstrap)]
+                cwd = str(script.parent)
+                env = dict(os.environ)
+                env["KISS_NONINTERACTIVE"] = "1"
+            else:
+                argv = ["bash", str(script), "--non-interactive"]
+                cwd = str(script.parent)
+                env = None
         else:
             argv = [
                 "bash", "-c",

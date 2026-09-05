@@ -6,9 +6,12 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
+import math
 import os
+import sys
 import threading
 import time
 import uuid
@@ -1019,6 +1022,7 @@ class SorcarAgent(RelentlessAgent):
                 system_prompt_suffix=str(
                     getattr(self, "_system_prompt_suffix", "") or ""
                 ),
+                web_tools=self._use_web_tools,
             )
         finally:
             # stop() joins the monitor BEFORE the offsets bump below so a
@@ -1849,6 +1853,7 @@ def run_tasks_parallel(
     parent_tab_id: str = "",
     base_system_prompt: str = "",
     system_prompt_suffix: str = "",
+    web_tools: bool = True,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -1937,6 +1942,10 @@ def run_tasks_parallel(
             :meth:`SorcarAgent.run`'s *system_prompt*) passes it on so
             the extra instructions constrain the whole task tree,
             mirroring *base_system_prompt*.  ``""`` appends nothing.
+        web_tools: Whether each sub-agent gets browser/web tools,
+            forwarded to each sub-agent's ``run``.  A parent running
+            without web tools (``run(web_tools=False)``) passes False
+            so its children cannot re-acquire the browser it was denied.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -2020,6 +2029,7 @@ def run_tasks_parallel(
                 model_config=model_config,
                 base_system_prompt=base_system_prompt,
                 system_prompt=system_prompt_suffix or None,
+                web_tools=web_tools,
             )
             return result
         except KeyboardInterrupt:
@@ -2119,3 +2129,152 @@ def run_tasks_parallel(
                 totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)
                 totals_out["total_steps"] = sum(u[2] for u in sub_usage)
     return results
+
+
+def _budget_arg(text: str) -> float:
+    """Parse and validate a ``--max-budget`` command-line value.
+
+    Plain ``float`` would accept ``nan`` and infinities, and the budget
+    checks compare with ``>=`` / ``<= 0`` — a NaN cap makes both
+    comparisons false and silently disables budget enforcement, so
+    non-finite and non-positive values are rejected here.
+
+    Args:
+        text: The raw command-line value.
+
+    Returns:
+        The budget as a positive finite float.
+
+    Raises:
+        argparse.ArgumentTypeError: If *text* is not a number or is not
+            a positive finite value.
+    """
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid budget value: {text!r}") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(
+            f"budget must be a positive finite number, got {text!r}"
+        )
+    return value
+
+
+def _ask_user_in_terminal(question: str) -> str:
+    """Print *question* on the terminal and return the user's typed reply.
+
+    Used as the ``ask_user_question_callback`` of :func:`main` so the
+    agent's ``ask_user_question`` tool works when the agent runs from a
+    shell instead of the kiss-web UI.
+
+    Args:
+        question: The question the agent wants the user to answer.
+
+    Returns:
+        The line the user typed, or an empty string on end-of-file.
+    """
+    print(f"\n{question}")
+    try:
+        return input("> ")
+    except EOFError:
+        return ""
+
+
+def main() -> None:
+    """Run a :class:`SorcarAgent` on a task given on the command line.
+
+    Installed as the ``sorcar`` console script.  The task comes from
+    exactly one of two required, mutually exclusive options: ``-t
+    TASK`` runs the given string, and ``-f FILE`` runs the file's
+    content as the task.  The agent works in ``$KISS_WORKDIR`` —
+    exported by the ``~/.local/bin/sorcar`` wrapper the VS Code
+    extension installs, so the agent acts on the directory the user
+    invoked ``sorcar`` from — falling back to the current directory.
+    Exits with status 0 when the agent reports success and 1 otherwise.
+    """
+    parser = argparse.ArgumentParser(
+        prog="sorcar",
+        description="Run the KISS SorcarAgent on a task.",
+        epilog='example: sorcar -t "Summarize README.md"',
+    )
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "-t",
+        "--task",
+        default=None,
+        help="the task for the agent",
+    )
+    source.add_argument(
+        "-f",
+        "--file",
+        default=None,
+        help="file whose content is used as the task",
+    )
+    parser.add_argument(
+        "-m",
+        "--model",
+        default="",
+        help="LLM model name (default: best model for the configured API keys)",
+    )
+    parser.add_argument(
+        "-b",
+        "--max-budget",
+        type=_budget_arg,
+        default=None,
+        help="maximum budget in USD for the task",
+    )
+    parser.add_argument(
+        "--work-dir",
+        default="",
+        help="directory the agent works in (default: $KISS_WORKDIR or the"
+        " current directory)",
+    )
+    args = parser.parse_args()
+
+    if args.file is not None:
+        try:
+            task = Path(args.file).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            # UnicodeError too: a non-UTF-8 file must surface as the
+            # same status-2 usage error as an unreadable one, not as an
+            # uncaught UnicodeDecodeError traceback with exit status 1.
+            parser.error(f"cannot read task file {args.file!r}: {exc}")
+        if not task:
+            parser.error(f"task file {args.file!r} is empty")
+    else:
+        task = args.task.strip()
+        if not task:
+            parser.error(
+                'task must not be empty, e.g.: sorcar -t "Summarize README.md"'
+            )
+
+    model_name = args.model or get_default_model()
+    if model_name == "No model":
+        parser.exit(
+            1,
+            "sorcar: no model available — set at least one API key"
+            " (e.g. ANTHROPIC_API_KEY) in the environment\n",
+        )
+
+    work_dir = args.work_dir or os.environ.get("KISS_WORKDIR") or os.getcwd()
+    # Interactive terminals get the verbose console printer, which
+    # already displays the formatted result at the end of the run —
+    # printing the raw YAML again would show it twice.  Piped/redirected
+    # stdout gets exactly the raw YAML result and nothing else.
+    verbose = sys.stdout.isatty()
+    agent = SorcarAgent("Sorcar CLI")
+    result = agent.run(
+        model_name=model_name,
+        prompt_template=task,
+        work_dir=work_dir,
+        max_budget=args.max_budget,
+        verbose=verbose,
+        ask_user_question_callback=_ask_user_in_terminal,
+    )
+    if not verbose:
+        print(result)
+    try:
+        success = bool(yaml.safe_load(result).get("success"))
+    except Exception:
+        success = False
+    raise SystemExit(0 if success else 1)

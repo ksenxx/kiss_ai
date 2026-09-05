@@ -640,6 +640,204 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
         assert stt_b is not None
         self.assertEqual(stt_b.get("text"), "Mirror this task text")
 
+    async def test_api_run_task_text_arrives_after_tab_adoption(self) -> None:
+        """[3b] A run that CREATES its tab re-echoes ``setTaskText``.
+
+        ``sorcar.run`` (the Python client) submits with a synthetic
+        ``api-…`` tab id no client has yet, so the submit-ack
+        ``setTaskText`` reaches every client BEFORE the ``tabs_state``
+        snapshot that registers the tab — clients drop a task-panel
+        echo for a tab they have not adopted, and the tab then showed
+        its transcript without the fixed task panel at the top.  The
+        daemon must broadcast the task text again AFTER the
+        registration so an already-connected client can apply it to
+        the freshly adopted tab.
+        """
+        ws_b = await self._connect_ok()
+        await self._ready(ws_b)
+
+        # Submit exactly like ``kiss.server.sorcar.run``: raw
+        # newline-delimited JSON over the daemon's UDS, with a
+        # synthetic ``api-…`` tab no client knows about.
+        tab_id = "api-panel-e2e"
+        reader, writer = await asyncio.open_unix_connection(
+            str(Path(self.tmpdir) / "sorcar.sock"),
+        )
+        try:
+            writer.write(json.dumps({
+                "type": "run",
+                "prompt": "Panel me please",
+                "tabId": tab_id,
+                "model": "definitely-not-a-real-model",
+                "workDir": self.tmpdir,
+                "useWorktree": False,
+                "useParallel": False,
+                "autoCommit": False,
+            }).encode("utf-8") + b"\n")
+            await writer.drain()
+
+            # Client B must observe, IN ORDER: a ``tabs_state``
+            # snapshot containing the tab, then a ``setTaskText`` for
+            # it — only that one can land on the adopted tab.
+            adopted = False
+            stt_after_adoption: dict[str, Any] | None = None
+            deadline = time.monotonic() + 8.0
+            while time.monotonic() < deadline:
+                remaining = max(0.05, deadline - time.monotonic())
+                try:
+                    raw = await asyncio.wait_for(
+                        ws_b.recv(), timeout=remaining,
+                    )
+                except TimeoutError:
+                    break
+                ev = json.loads(raw)
+                etype = ev.get("type", "")
+                if etype == "tabs_state" and tab_id in _tab_ids(ev):
+                    adopted = True
+                elif (
+                    etype == "setTaskText"
+                    and ev.get("tabId") == tab_id
+                    and adopted
+                ):
+                    stt_after_adoption = dict(ev)
+                    break
+            self.assertTrue(
+                adopted,
+                "the api tab was never registered in the shared registry",
+            )
+            self.assertIsNotNone(
+                stt_after_adoption,
+                "no setTaskText for the api tab arrived after the tab "
+                "was adopted — the fixed task panel stays hidden",
+            )
+            assert stt_after_adoption is not None
+            self.assertEqual(
+                stt_after_adoption.get("text"), "Panel me please",
+            )
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def test_ready_replay_carries_prompt_before_history_row(
+        self,
+    ) -> None:
+        """[3c] A reconnect during task setup still repaints the panel.
+
+        A run spends its whole setup (worktree, tools file, agent
+        script) BEFORE allocating its ``task_history`` row, so a client
+        that connects in that window replays the run through
+        ``_replay_session``'s pre-history-row branch.  That branch used
+        to broadcast ``task_events`` with ``task: ""`` — blanking the
+        fixed task panel of the freshly adopted tab.  It must carry the
+        submitted prompt (stamped on the agent state at submit time).
+        """
+        from kiss.core import config as kiss_config
+        from kiss.core.models.model_info import get_available_models
+
+        # The run must survive ``_run_task``'s model validation to
+        # reach its (slow) tools-file import, so a REAL catalog model
+        # is needed.  On a keyless machine, fake one provider
+        # credential on the daemon-shared config; the run is stopped
+        # while still blocked in the tools import, so no LLM is ever
+        # actually called.
+        cfg = kiss_config.DEFAULT_CONFIG
+        saved_key = cfg.OPENAI_API_KEY
+        if not get_available_models():
+            cfg.OPENAI_API_KEY = "sk-kiss-e2e-fake"
+        try:
+            available = get_available_models()
+            self.assertTrue(available)
+            model = available[0]
+            # A tools file that blocks its import (interruptibly, with
+            # a 60 s failsafe) holds the run in the pre-history-row
+            # setup window while the late client connects.
+            tools_py = Path(self.tmpdir) / "slow_tools.py"
+            tools_py.write_text(
+                "import time\n"
+                "for _ in range(1200):\n"
+                "    time.sleep(0.05)\n"
+                "def get_tools():\n"
+                "    return []\n",
+                encoding="utf-8",
+            )
+            tab_id = "api-panel-window"
+            ws_a = await self._connect_ok()
+            await self._ready(ws_a)
+            reader, writer = await asyncio.open_unix_connection(
+                str(Path(self.tmpdir) / "sorcar.sock"),
+            )
+            try:
+                writer.write(json.dumps({
+                    "type": "run",
+                    "prompt": "Panel me during setup",
+                    "tabId": tab_id,
+                    "model": model,
+                    "workDir": self.tmpdir,
+                    "toolsFile": str(tools_py),
+                    "useWorktree": False,
+                    "useParallel": False,
+                    "autoCommit": False,
+                }).encode("utf-8") + b"\n")
+                await writer.drain()
+                # The tab is registered + chat-bound synchronously
+                # before the worker thread starts; wait for the
+                # snapshot so the late client's ready is guaranteed to
+                # find the binding.
+                self.assertIsNotNone(
+                    await self._wait_for_snapshot_with(
+                        ws_a, present={tab_id},
+                    ),
+                )
+
+                ws_b = await self._connect_ok()
+                await self._ready(ws_b)
+                replay = await self._wait_for_event(
+                    ws_b, "task_events",
+                    pred=lambda ev: ev.get("tabId") == tab_id,
+                )
+                self.assertIsNotNone(
+                    replay,
+                    "the late client never received the running tab's "
+                    "replay",
+                )
+                assert replay is not None
+                self.assertEqual(
+                    replay.get("task"),
+                    "Panel me during setup",
+                    "the pre-history-row replay blanked the task panel "
+                    "text",
+                )
+            finally:
+                # Stop the task while it is still blocked in the tools
+                # import (the daemon force-interrupts a non-cooperating
+                # setup after ~1 s) and wait for the terminal status so
+                # teardown never overlaps a live worker — and, on a
+                # machine with real keys, no LLM call is ever made.
+                try:
+                    writer.write(json.dumps({
+                        "type": "stop", "tabId": tab_id,
+                    }).encode("utf-8") + b"\n")
+                    await writer.drain()
+                    await self._wait_for_event(
+                        ws_a, "status", timeout=15.0,
+                        pred=lambda ev: (
+                            ev.get("tabId") == tab_id
+                            and not ev.get("running", True)
+                        ),
+                    )
+                except Exception:
+                    pass
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+        finally:
+            cfg.OPENAI_API_KEY = saved_key
+
     @unittest.skipIf(
         hasattr(os, "geteuid") and os.geteuid() == 0,
         "root bypasses directory permissions",
