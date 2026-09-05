@@ -63,6 +63,162 @@
     return out;
   }
 
+  // fmtcopy-coverage:start
+  // Tags that read as a paragraph-level block: a blank line separates
+  // them in the copied text.
+  const PARA_TAGS = {
+    P: 1,
+    H1: 1,
+    H2: 1,
+    H3: 1,
+    H4: 1,
+    H5: 1,
+    H6: 1,
+    UL: 1,
+    OL: 1,
+    PRE: 1,
+    BLOCKQUOTE: 1,
+    TABLE: 1,
+  };
+  // Tags that read as one line of their own: a single newline
+  // separates them.
+  const LINE_TAGS = {
+    DIV: 1,
+    LI: 1,
+    TR: 1,
+    DT: 1,
+    DD: 1,
+    DL: 1,
+    SECTION: 1,
+    ARTICLE: 1,
+    HEADER: 1,
+    FOOTER: 1,
+    ASIDE: 1,
+    MAIN: 1,
+    FIGURE: 1,
+    FIGCAPTION: 1,
+    DETAILS: 1,
+    SUMMARY: 1,
+    ADDRESS: 1,
+  };
+
+  /**
+   * Convert a rendered DOM subtree into readable plain text — what
+   * the panel LOOKS like, not its HTML source.  Block elements become
+   * line / paragraph breaks, `<li>` items get "- " or "N. " markers
+   * (nested lists indent two spaces per level), `<pre>` text keeps
+   * its own line breaks and inner spacing (only whitespace at block
+   * edges is trimmed; the copy path additionally collapses runs of
+   * 3+ newlines), images reduce to their alt text, table cells are
+   * joined with " | ", and the chrome elements copy always skips
+   * (SKIP_CLASSES) are left out.  Used by the Result panel so its
+   * copy button copies formatted text instead of the summary's raw
+   * HTML.
+   *
+   * @param {Element} root The rendered element to serialize.
+   * @returns {string} The formatted plain text (untrimmed; callers
+   *     normalise it).
+   */
+  function formattedTextFromNode(root) {
+    const st = {out: ''};
+
+    function breakLine(want) {
+      if (!st.out) return;
+      st.out = st.out.replace(/[ \t]+$/, '');
+      let have = 0;
+      for (
+        let i = st.out.length - 1;
+        i >= 0 && st.out.charAt(i) === '\n';
+        i--
+      ) {
+        have++;
+      }
+      while (have < want) {
+        st.out += '\n';
+        have++;
+      }
+    }
+
+    function addText(text, pre) {
+      if (pre) {
+        st.out += text;
+        return;
+      }
+      let t = String(text).replace(/\s+/g, ' ');
+      if (!t) return;
+      if (st.out === '' || /\s$/.test(st.out)) t = t.replace(/^ /, '');
+      st.out += t;
+    }
+
+    function walk(node, ctx) {
+      if (node.nodeType === 3) {
+        addText(node.textContent || '', ctx.pre);
+        return;
+      }
+      if (node.nodeType !== 1) return;
+      if (shouldSkip(node)) return;
+      const tag = node.tagName;
+      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TEMPLATE') return;
+      if (tag === 'BR') {
+        st.out += '\n';
+        return;
+      }
+      if (tag === 'IMG') {
+        addText(node.getAttribute('alt') || '', false);
+        return;
+      }
+      if (tag === 'HR') {
+        breakLine(1);
+        st.out += '---';
+        breakLine(1);
+        return;
+      }
+      const para = PARA_TAGS[tag] === 1;
+      const line = LINE_TAGS[tag] === 1;
+      if (para) breakLine(2);
+      else if (line) breakLine(1);
+      let childCtx = ctx;
+      if (tag === 'PRE') {
+        childCtx = {pre: true, lists: ctx.lists};
+      } else if (tag === 'UL') {
+        childCtx = {pre: ctx.pre, lists: ctx.lists.concat([{ordered: false}])};
+      } else if (tag === 'OL') {
+        let start = parseInt(node.getAttribute('start') || '1', 10);
+        if (!isFinite(start)) start = 1;
+        childCtx = {
+          pre: ctx.pre,
+          lists: ctx.lists.concat([{ordered: true, n: start}]),
+        };
+      } else if (tag === 'LI') {
+        const depth = ctx.lists.length;
+        let indent = '';
+        for (let i = 1; i < depth; i++) indent += '  ';
+        const top = depth > 0 ? ctx.lists[depth - 1] : null;
+        let marker = '- ';
+        if (top && top.ordered) {
+          marker = top.n + '. ';
+          top.n++;
+        }
+        st.out += indent + marker;
+      } else if (
+        (tag === 'TD' || tag === 'TH') &&
+        node.previousElementSibling
+      ) {
+        st.out = st.out.replace(/[ \t]+$/, '');
+        st.out += ' | ';
+      }
+      for (let i = 0; i < node.childNodes.length; i++) {
+        walk(node.childNodes[i], childCtx);
+      }
+      if (para) breakLine(2);
+      else if (line) breakLine(1);
+    }
+
+    walk(root, {pre: false, lists: []});
+    return st.out;
+  }
+  // fmtcopy-coverage:end
+
   function normalise(text) {
     return String(text == null ? '' : text)
       .replace(/[ \t]+\n/g, '\n')
@@ -211,6 +367,7 @@
 
   const api = {
     getRawText: getRawText,
+    formattedTextFromNode: formattedTextFromNode,
     addCopyButton: addCopyButton,
     fallbackCopyText: fallbackCopyText,
     formatEventTs: formatEventTs,

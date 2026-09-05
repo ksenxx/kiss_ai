@@ -170,6 +170,19 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
             reader_b, self._config_data_with_work_dir(str(self.dir_b)),
         )
 
+    async def test_get_config_reports_the_server_machine_name(self) -> None:
+        """Every ``configData`` reply carries the server machine's
+        hostname — the webview shows it centered in the status bar so
+        the user always sees which machine the agent runs on."""
+        import platform
+
+        reader, writer = await self._connect()
+        await self._send(writer, {"type": "getConfig"})
+        msg = await self._drain_until(
+            reader, lambda m: m.get("type") == "configData",
+        )
+        self.assertEqual(msg.get("machine"), platform.node())
+
     async def test_get_config_prefers_connection_work_dir_over_persisted(
         self,
     ) -> None:
