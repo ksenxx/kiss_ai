@@ -457,6 +457,14 @@ class _CommandsMixin:
                 )
                 state.user_answer_queue = queue.Queue(maxsize=1)
                 state.client_run_token = _client_task_id_of(cmd)
+                # Stamp the submitted prompt NOW: ``_run_task`` only
+                # sets ``last_user_prompt`` once its per-subtask loop
+                # starts, which is AFTER the worktree/tools/agent-
+                # script setup — a client that reconnects during that
+                # window replays this run through the pre-history-row
+                # branch of ``_replay_session``, whose ``task`` field
+                # (the fixed task panel's text) reads this attribute.
+                state.last_user_prompt = str(cmd.get("prompt", "") or "")
                 if prev is not None:
                     # Carry the previous task's agent (it may hold a
                     # pending worktree) over to the new run's state.
@@ -500,6 +508,26 @@ class _CommandsMixin:
                 task_id="",
                 create=True,
             )
+            # The submit-ack ``setTaskText`` at the top of this method
+            # raced ahead of the tab's registration when the run
+            # CREATES its tab — a Python client's synthetic ``api-…``
+            # tab (``sorcar.run`` and the ``run_agent`` dispatch): no
+            # client had adopted the tab yet, so every client dropped
+            # the task-panel text and the tab showed its transcript
+            # WITHOUT the fixed task panel at the top.  Re-echo the
+            # text now that the registration's ``tabs_state`` snapshot
+            # has handed every client the tab.  Unconditional on
+            # purpose: gating it on a pre-registration ``has_tab``
+            # probe is a TOCTOU (a concurrent ``closeTab`` between
+            # probe and registration recreates the tab yet suppresses
+            # the echo), and clients apply a repeated ``setTaskText``
+            # idempotently — the daemon already echoes one per queued
+            # follow-up as well.
+            self.printer.broadcast({
+                "type": "setTaskText",
+                "text": str(cmd.get("prompt", "") or ""),
+                "tabId": tab_id,
+            })
             self.printer.broadcast({
                 "type": "clear",
                 "chat_id": chat_id,

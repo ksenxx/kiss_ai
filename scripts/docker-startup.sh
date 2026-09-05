@@ -74,8 +74,10 @@ export KISS_CODE_CLI=code-server
 # binds port 8080, racing the entrypoint's code-server — whichever loses dies
 # with EADDRINUSE and crashes the container.
 export KISS_SKIP_LAUNCH=1
-# --non-interactive: a container started with `docker run -it` has a terminal,
-# and install.sh would otherwise stop at its [Y/n] upgrade questions.
+# --non-interactive: automation must never sit at a prompt.  install.sh's
+# only remaining [Y/n] question (the macOS Homebrew install) is out of
+# reach in a Linux container, but the flag also keeps the run on the
+# detached-session (setsid) path and covers any future question.
 bash "$REPO_DIR/install.sh" --non-interactive
 info "install.sh completed"
 

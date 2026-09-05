@@ -33,11 +33,10 @@ the daemon's invocation -- against a throwaway ``$HOME``, with a whitelist
 these stubs:
 
 * ``git``: ``git --version`` (the first external command the script's body
-  runs, before ``update_repo``) records that it started and blocks until the
-  test creates a release file; that is how the first run is held while
-  contenders are launched.  Every other git invocation fails, and
-  ``KISS_SKIP_UPDATE=1`` additionally keeps ``update_repo`` from touching
-  the checkout.
+  runs) records that it started and blocks until the test creates a release
+  file; that is how the first run is held while contenders are launched.
+  Every other git invocation fails — harmless, because the script never
+  touches the checkout before the Node.js stage where these tests end.
 * ``curl``: blocks on a second release file, then fails.  With no ``node``
   on the PATH the script reaches ``install_node``, whose download fails, and
   exits 1 at "[2/5] Checking Node.js" -- before any step that could reach
@@ -239,8 +238,6 @@ class RootInstallLockTest(unittest.TestCase):
             "KISS_TEST_RELEASE": str(self.release),
             "KISS_TEST_RELEASE2": str(self.release2),
             "KISS_TEST_DEVDIR": str(self.devdir),
-            # Belt and braces: never let update_repo touch this checkout.
-            "KISS_SKIP_UPDATE": "1",
             "LANG": "C",
         }
         self.lock_file = self.home / ".kiss" / ".update.lock"
@@ -463,13 +460,15 @@ class RootInstallLockTest(unittest.TestCase):
                 capture_output=True,
             )
 
-    def test_exit_trap_restores_stash_and_exit_releases_lock(self) -> None:
-        # ``update_repo`` installs its own EXIT trap when it stashes a dirty
-        # tree.  The lock must not depend on any EXIT trap: it goes away
-        # with the process whatever trap ran last.  Run a committed COPY of
-        # install.sh from a throwaway git checkout (PROJECT_DIR is dirname
-        # "$0") with the real git, dirty it, and hold the run at the curl
-        # stub instead of the git stub.
+    def test_dirty_checkout_is_left_untouched_and_exit_releases_lock(self) -> None:
+        # install.sh must never touch the git checkout it runs from: no
+        # pull, no stash, no reset (converging with origin is owned by the
+        # callers — the Update button's preflight and scripts/install.sh).
+        # Run a committed COPY of install.sh from a throwaway git checkout
+        # (PROJECT_DIR is dirname "$0") with the real git, dirty it, and
+        # hold the run at the curl stub instead of the git stub.  The dirty
+        # file must survive the whole run untouched, and the lock must be
+        # released on exit.
         real_git = shutil.which("git")
         assert real_git is not None
         checkout = self.tmp / "checkout"
@@ -483,10 +482,13 @@ class RootInstallLockTest(unittest.TestCase):
             "GIT_COMMITTER_EMAIL": "t@example.com",
         }
         (self.stubs / "git").unlink()
-        del git_env["KISS_SKIP_UPDATE"]
         self._seed_checkout(checkout, git_env)
         dirty = checkout / "local-edit.txt"
         dirty.write_text("uncommitted\n")
+        head_before = subprocess.run(
+            [real_git, "rev-parse", "HEAD"],
+            cwd=checkout, env=git_env, check=True, capture_output=True, text=True,
+        ).stdout
 
         first = subprocess.Popen(
             ["bash", str(checkout / "install.sh"), "--non-interactive"],
@@ -500,14 +502,18 @@ class RootInstallLockTest(unittest.TestCase):
         self._procs.append(first)
         self._wait_for(lambda: self._count("curl-started") == 1, "curl stage")
         self.assertFalse(_lock_is_free(self.lock_file), "lock not held while installing")
-        self.assertFalse(dirty.exists(), "the dirty file was not stashed")
+        self.assertTrue(dirty.exists(), "install.sh stashed or removed the dirty file")
         self.release2.write_text("")
         out, _ = first.communicate(timeout=30)
         self.assertEqual(first.returncode, 1, out)
-        self.assertIn("Repository is dirty — stashing local changes", out)
-        self.assertIn("Restoring stashed local changes", out)
-        self.assertEqual(dirty.read_text(), "uncommitted\n", "stash was not popped")
-        self.assertTrue(_lock_is_free(self.lock_file), "lock survived the stash-restoring exit")
+        self.assertNotIn("stash", out)
+        self.assertEqual(dirty.read_text(), "uncommitted\n", "the dirty file was modified")
+        head_after = subprocess.run(
+            [real_git, "rev-parse", "HEAD"],
+            cwd=checkout, env=git_env, check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(head_before, head_after, "install.sh moved HEAD")
+        self.assertTrue(_lock_is_free(self.lock_file), "lock survived the exit")
 
     def test_nested_run_under_a_held_lock_neither_blocks_nor_releases(self) -> None:
         # scripts/install.sh exports KISS_UPDATE_LOCK_HELD=1 before handing
