@@ -235,6 +235,81 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
         self.assertTrue(marker.exists(), "install.sh was not executed")
 
+    async def test_run_update_prefers_clone_bootstrap_over_root_script(
+        self,
+    ) -> None:
+        """runUpdate runs the clone's ``scripts/install.sh`` when present.
+
+        The root ``install.sh`` never touches git, so running it directly
+        against an existing clone would rebuild the stale checkout as-is;
+        the committed bootstrap synchronizes with origin first and hands
+        over.  Mirrors the VS Code extension's ``runUpdate()``, which
+        prefers the bootstrap the same way.  ``KISS_NONINTERACTIVE=1``
+        must reach the bootstrap (it takes no ``--non-interactive`` flag).
+        """
+        root = self.server._install_root
+        (root / "scripts").mkdir(parents=True, exist_ok=True)
+        root_marker = root / "root-ran.marker"
+        boot_marker = root / "bootstrap-ran.marker"
+        (root / "install.sh").write_text(
+            f"#!/bin/bash\necho done > {root_marker}\n",
+        )
+        (root / "scripts" / "install.sh").write_text(
+            f'#!/bin/bash\necho "$KISS_NONINTERACTIVE" > {boot_marker}\n',
+        )
+        reader, writer = await self._connect_uds()
+        await self._send(writer, {"type": "runUpdate"})
+        notice = await self._drain_until(reader, "notice")
+        self.assertIn("update of KISS Sorcar", str(notice.get("text")))
+        for _ in range(200):
+            if boot_marker.exists():
+                break
+            await asyncio.sleep(0.05)
+        self.assertTrue(
+            boot_marker.exists(), "scripts/install.sh was not executed",
+        )
+        self.assertEqual(boot_marker.read_text().strip(), "1")
+        await asyncio.sleep(0.2)
+        self.assertFalse(
+            root_marker.exists(), "root install.sh ran despite the bootstrap",
+        )
+
+    async def test_run_update_unreadable_scripts_dir_falls_back(
+        self,
+    ) -> None:
+        """An unreadable ``scripts`` dir degrades to the root script.
+
+        On Python 3.13+ ``Path.is_file()`` suppresses ``OSError`` (e.g.
+        the ``PermissionError`` an unreadable ``scripts`` directory
+        raises underneath) and returns False, so the probe treats the
+        bootstrap as absent: the update must fall back to running the
+        root ``install.sh`` directly rather than erroring out or leaving
+        ``_update_starting`` wedged.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("permission bits do not bind root")
+        root = self.server._install_root
+        scripts = root / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(scripts.chmod, 0o755)
+        marker = root / "fallback.marker"
+        (root / "install.sh").write_text(
+            f"#!/bin/bash\necho done > {marker}\n",
+        )
+        (scripts / "install.sh").write_text("#!/bin/bash\ntrue\n")
+        scripts.chmod(0o000)
+        reader, writer = await self._connect_uds()
+        await self._send(writer, {"type": "runUpdate"})
+        notice = await self._drain_until(reader, "notice")
+        self.assertIn("update of KISS Sorcar", str(notice.get("text")))
+        for _ in range(200):
+            if marker.exists():
+                break
+            await asyncio.sleep(0.05)
+        self.assertTrue(
+            marker.exists(), "root install.sh fallback was not executed",
+        )
+
     async def test_stop_async_cancels_background_tasks(self) -> None:
         """stop_async cancels the watchdog and version-check tasks."""
         watchdog = self.server._watchdog_task

@@ -412,7 +412,12 @@ async function run() {
           command: 'ls',
           ts: oldTs,
         },
-        {type: 'tool_result', content: 'ok', is_error: false, ts: oldTs},
+        {
+          type: 'tool_result',
+          content: 'ok',
+          is_error: false,
+          ts: oldTs + 2500,
+        },
         {
           type: 'result',
           summary: 'done long ago',
@@ -435,10 +440,46 @@ async function run() {
     const rc = output.querySelector('.ev.rc');
     assert.ok(rc, 'replayed result panel exists');
     assertBadge(rc, oldTs, 'replayed result');
+    // Replayed panels derive their durations from the persisted event
+    // timestamps: the Thoughts panel was closed by the tool_call at the
+    // same instant it opened (0ms), the tool_call by its tool_result
+    // 2.5s later. Panels no event closes (prompt, result) carry none.
+    const thoughtsElapsed = thoughts.querySelectorAll('.panel-elapsed');
     assert.strictEqual(
-      thoughts.querySelectorAll('.panel-elapsed').length,
+      thoughtsElapsed.length,
+      1,
+      'replayed Thoughts panel shows a timestamp-derived elapsed label',
+    );
+    assert.strictEqual(
+      thoughtsElapsed[0].textContent,
+      '0ms',
+      'Thoughts duration is the gap to the tool_call that closed it',
+    );
+    const tcReplayElapsed = tc.querySelectorAll('.panel-elapsed');
+    assert.strictEqual(
+      tcReplayElapsed.length,
+      1,
+      'replayed tool_call panel shows a timestamp-derived elapsed label',
+    );
+    assert.strictEqual(
+      tcReplayElapsed[0].textContent,
+      '2.5s',
+      'tool_call duration is the gap to its tool_result',
+    );
+    assert.strictEqual(
+      promptPanel.querySelectorAll('.panel-elapsed').length,
       0,
-      'replayed panels show no elapsed label',
+      'a replayed prompt panel has no duration',
+    );
+    assert.strictEqual(
+      rc.querySelectorAll('.panel-elapsed').length,
+      0,
+      'a replayed result panel has no duration',
+    );
+    assert.strictEqual(
+      output.querySelectorAll('[data-start-ms]').length,
+      0,
+      'a finished replay must not put any panel on the live tick',
     );
     const label = promptPanel.querySelector(
       ':scope > .panel-time > .panel-ts',

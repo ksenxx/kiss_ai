@@ -7,33 +7,17 @@
 Background — the bug
 ====================
 When users press *Update* in the settings panel the extension spawns a
-terminal that runs ``bash install.sh``.  Before
-commit ``993a997b`` ("fix: handle diverged branches when updating
-repositories") the script's ``update_repo`` step did a plain
-``git pull`` and crashed with::
+terminal that runs ``bash install.sh``.  ``install.sh`` itself never
+touches the git checkout — it builds and installs whatever is on disk —
+so converging with ``origin`` is owned entirely by ``runUpdate``
+(``SorcarSidebarView.ts``): it runs a pre-flight ``git fetch`` /
+``stash`` / ``reset --hard`` *before* invoking ``bash install.sh``, so a
+force-pushed upstream (e.g. a release retag) is picked up and a stale
+``install.sh`` is replaced on disk *before* bash reads it
+(chicken-and-egg fix).
 
-    fatal: Not possible to fast-forward, aborting.
-    hint: You have divergent branches and need to specify how to
-          reconcile them.
-       WARNING: git pull failed (offline or diverged); continuing
-       with the current checkout.
-
-This left the user stuck on the stale checkout — the rebuild then
-reinstalled the *same* stale source forever.  Two independent
-mechanisms must therefore guarantee that *Update* always converges to
-``origin`` even after a force-push, even on machines whose extension
-shipped with the OLD ``install.sh``:
-
-1. The current ``install.sh``'s :func:`update_repo` (running in shell
-   under ``set -eo pipefail``) detects fast-forward failure and falls
-   back to ``git reset --hard '@{upstream}'``.
-2. The *VS Code* extension's ``runUpdate`` (``SorcarSidebarView.ts``)
-   runs a pre-flight ``git fetch``/``stash``/``reset --hard`` *before*
-   invoking ``bash install.sh``, so a stale ``install.sh`` is replaced
-   on disk *before* bash reads it (chicken-and-egg fix).
-
-Both paths are exercised end-to-end here against a real ``git`` and a
-real bare upstream that has been force-pushed (no mocks, no
+That pre-flight is exercised end-to-end here against a real ``git`` and
+a real bare upstream that has been force-pushed (no mocks, no
 monkeypatching) — exactly the failure mode reported by users.
 """
 
@@ -42,13 +26,11 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[5]
-INSTALL_SH = REPO / "install.sh"
 SIDEBAR_TS = REPO / "src" / "kiss" / "agents" / "vscode" / "src" / "SorcarSidebarView.ts"
 
 HERMETIC_GIT_ENV = {
@@ -146,132 +128,6 @@ def _make_diverged_clone(
         _run(["git", "commit", "-m", "local-only commit"], cwd=local)
 
     return remote, local
-
-
-def _extract_function(install_sh_text: str, name: str) -> str:
-    """Return the source of bash function *name* from *install_sh_text*.
-
-    ``install.sh`` uses top-level function definitions formatted as
-    ``name() {`` on one line and ``}`` alone at column 0 on the closing
-    line.  An ``awk`` range pattern on this convention is the same way
-    the harness shell extracts them in :func:`_run_update_repo`.
-    """
-    proc = subprocess.run(
-        ["awk", f"/^{name}\\(\\) {{/,/^}}$/"],
-        input=install_sh_text,
-        stdout=subprocess.PIPE,
-        text=True,
-        check=True,
-        timeout=10,
-    )
-    body = proc.stdout
-    assert f"{name}() {{" in body, f"could not extract {name}() from install.sh"
-    return body
-
-
-def _run_update_repo(local: Path) -> subprocess.CompletedProcess:
-    """Execute ``install.sh``'s ``update_repo`` against the *local* clone.
-
-    The function is sliced out of the current ``install.sh`` and sourced
-    in a fresh bash so this test fails exactly when the file's
-    divergence-handling regresses — no copy of the logic lives in the
-    test itself.
-    """
-    install_text = INSTALL_SH.read_text(encoding="utf-8")
-    update_fn = _extract_function(install_text, "update_repo")
-    restore_fn = _extract_function(install_text, "restore_stashed_changes")
-    # update_repo normalizes the release VSIX before its dirty check, so
-    # the guard it calls must be defined here too (verbatim, like the rest).
-    guard_fn = _extract_function(install_text, "guard_vsix_tracking")
-    harness = textwrap.dedent(
-        f"""
-        set -eo pipefail
-        PROJECT_DIR={local!s}
-        STASHED_CHANGES=0
-        {guard_fn}
-        {restore_fn}
-        {update_fn}
-        update_repo
-        """
-    )
-    return subprocess.run(
-        ["bash", "-c", harness],
-        env=_git_env(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-
-
-def _head_sha(repo: Path, ref: str = "HEAD") -> str:
-    """Return the commit SHA of *ref* in *repo*."""
-    return str(_run(["git", "rev-parse", ref], cwd=repo).stdout).strip()
-
-
-
-def test_update_repo_recovers_from_diverged_upstream(tmp_path: Path) -> None:
-    """``update_repo`` must reset to upstream when ``--ff-only`` fails.
-
-    Reproduces the user's report: ``git pull`` returns "Not possible to
-    fast-forward, aborting." because both sides have unique commits.
-    The fix must (a) print the diverged-resetting banner, (b) succeed
-    (returncode 0), and (c) leave ``HEAD`` pointing at the new
-    ``origin/main`` tip.
-    """
-    _, local = _make_diverged_clone(
-        tmp_path,
-        seed_install_sh="echo SEED\n",
-        upstream_install_sh="echo NEW_UPSTREAM\n",
-    )
-    diverged = subprocess.run(
-        ["git", "-C", str(local), "pull", "--ff-only"],
-        env=_git_env(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    assert diverged.returncode != 0, (
-        "test setup did not actually create a diverged state:\n"
-        f"{diverged.stdout}"
-    )
-
-    result = _run_update_repo(local)
-    assert result.returncode == 0, result.stdout
-    assert "Branches diverged" in result.stdout, result.stdout
-    upstream_sha = _head_sha(local, "origin/main")
-    head_sha = _head_sha(local, "HEAD")
-    assert head_sha == upstream_sha, (
-        f"HEAD ({head_sha}) did not reset to origin/main ({upstream_sha}) "
-        f"after update_repo:\n{result.stdout}"
-    )
-    assert "NEW_UPSTREAM" in (local / "install.sh").read_text(encoding="utf-8")
-
-
-def test_update_repo_preserves_dirty_working_tree(tmp_path: Path) -> None:
-    """A dirty working tree is stashed before reset and popped after.
-
-    Otherwise the user's uncommitted edits would silently vanish whenever
-    the divergence path runs — the exact failure mode that made the
-    earlier "just always reset" patch unacceptable.
-    """
-    _, local = _make_diverged_clone(
-        tmp_path,
-        seed_install_sh="echo SEED\n",
-        upstream_install_sh="echo NEW_UPSTREAM\n",
-    )
-    dirty_path = local / "user_edit.txt"
-    dirty_path.write_text("user's uncommitted work\n", encoding="utf-8")
-
-    result = _run_update_repo(local)
-    assert result.returncode == 0, result.stdout
-    assert "stashing local changes" in result.stdout, result.stdout
-    assert "Restoring stashed local changes" in result.stdout, result.stdout
-    assert dirty_path.read_text(encoding="utf-8") == "user's uncommitted work\n"
-
 
 
 def _extract_runupdate_preflight(ts_text: str, esc_dir: str, esc_script: str) -> str:
