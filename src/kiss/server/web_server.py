@@ -2728,6 +2728,34 @@ this block — one copy, so the two pages can never disagree on the
 palette.
 """
 
+_SHARE_PAGE_LIGHT_VARS_CSS = (
+    "html.light-theme {\n"
+    "      --vscode-editor-background: #ffffff;\n"
+    "      --vscode-editor-foreground: #3b3b3b;\n"
+    "      --vscode-input-background: #ffffff;\n"
+    "      --vscode-button-foreground: #ffffff;\n"
+    "      --vscode-sideBar-background: #f8f8f8;\n"
+    "      --vscode-textLink-foreground: #005fb8;\n"
+    "      --vscode-descriptionForeground: #616161;\n"
+    "      --vscode-panel-border: #e5e5e5;\n"
+    "      --vscode-terminal-ansiRed: #cd3131;\n"
+    "      --vscode-terminal-ansiGreen: #107c10;\n"
+    "      --vscode-terminal-ansiYellow: #949800;\n"
+    "      --vscode-terminal-ansiMagenta: #bc05bc;\n"
+    "      --vscode-terminal-ansiCyan: #0598bc;\n"
+    "    }\n"
+)
+"""Light-mode overrides for a shared chat page's theme toggle.
+
+The values mirror VS Code's "Light Modern" palette (the same ones the
+remote webapp's light theme uses, see ``media/remote-codex.css``).
+They are declared on ``html.light-theme`` — the same element the
+``:root`` block of :data:`_VSCODE_THEME_VARS_CSS` targets but with
+higher specificity — so ``main.css``'s ``:root``-level derived
+variables (``--bg``, ``--fg``, ...) pick them up when ``share.js``
+toggles the ``light-theme`` class on ``<html>``.
+"""
+
 _SHARE_PAGE_CSS = """\
 /* A shared chat page is a normal scrolling document, not the
    fixed-height webview app shell that main.css lays out. */
@@ -2736,6 +2764,24 @@ html, body { height: auto; overflow: auto; }
 #output { overflow: visible; }
 /* Chrome that only works inside the live chat webview. */
 .panel-copy-btn, #task-panel-copy { display: none !important; }
+/* The floating light/dark theme toggle (wired up by share.js). */
+#share-theme-btn {
+  position: fixed;
+  top: 10px;
+  right: 14px;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg2);
+  color: var(--fg);
+  cursor: pointer;
+}
+#share-theme-btn:hover { border-color: var(--accent); color: var(--accent); }
 /* One .share-task section per task of the chat, oldest first. */
 .share-task + .share-task {
   margin-top: 14px;
@@ -2767,9 +2813,11 @@ def _build_share_page(title: str, body_html: str) -> str:
     of the chat (see ``buildShareableHtml`` in ``media/main.js``) —
     in a complete HTML document that needs no
     server: ``media/main.css`` (the exact stylesheet the webview
-    uses), the highlight.js theme, the VS Code palette variables and
-    ``media/share.js`` (collapse / expand behaviour for the event
-    panels and the static task panel) are all inlined.
+    uses), both highlight.js themes, the VS Code palette variables
+    (dark plus the light-mode overrides behind the page's theme
+    toggle) and ``media/share.js`` (collapse / expand behaviour for
+    the event panels, the static task panel, and the light/dark
+    toggle) are all inlined.
 
     Args:
         title: Page title; falls back to "KISS Sorcar chat".
@@ -2781,11 +2829,17 @@ def _build_share_page(title: str, body_html: str) -> str:
         The complete HTML document string.
     """
     main_css = (MEDIA_DIR / "main.css").read_text(encoding="utf-8")
-    hljs_css = (MEDIA_DIR / "highlight-github-dark.min.css").read_text(
+    hljs_dark_css = (MEDIA_DIR / "highlight-github-dark.min.css").read_text(
+        encoding="utf-8",
+    )
+    hljs_light_css = (MEDIA_DIR / "highlight-github-light.min.css").read_text(
         encoding="utf-8",
     )
     share_js = (MEDIA_DIR / "share.js").read_text(encoding="utf-8")
     page_title = html.escape(title.strip()) or "KISS Sorcar chat"
+    # Both highlight.js themes ship inline; share.js's theme toggle
+    # flips which one applies through the style elements' media
+    # attribute (dark is the default).
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en">\n'
@@ -2795,11 +2849,17 @@ def _build_share_page(title: str, body_html: str) -> str:
         'initial-scale=1.0">\n'
         f"<title>{page_title}</title>\n"
         "<style>\n" + _VSCODE_THEME_VARS_CSS + "</style>\n"
-        "<style>\n" + hljs_css + "\n</style>\n"
+        "<style>\n" + _SHARE_PAGE_LIGHT_VARS_CSS + "</style>\n"
+        '<style id="hljs-style-dark">\n' + hljs_dark_css + "\n</style>\n"
+        '<style id="hljs-style-light" media="not all">\n'
+        + hljs_light_css + "\n</style>\n"
         "<style>\n" + main_css + "\n</style>\n"
         "<style>\n" + _SHARE_PAGE_CSS + "</style>\n"
         "</head>\n"
         "<body>\n"
+        '<button id="share-theme-btn" type="button" '
+        'title="Switch to light mode" '
+        'aria-label="Switch to light mode"></button>\n'
         '<div id="app">\n' + body_html + "\n</div>\n"
         "<script>\n" + share_js + "</script>\n"
         "</body>\n"
