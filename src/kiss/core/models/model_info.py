@@ -801,14 +801,15 @@ def _openai_charges_cache_writes(bare: str) -> bool:
     """Return True when the OpenAI model bills prompt-cache writes.
 
     Cache writes are free on OpenAI models before the GPT-5.6 family.  For
-    GPT-5.6 models and later model families, cache writes are billed at
-    1.25x the uncached input token rate and reported in
+    GPT-5.6 models and later model families (including GPT-6), cache writes
+    are billed at 1.25x the uncached input token rate and reported in
     ``prompt_tokens_details.cache_write_tokens`` (Chat Completions) /
     ``input_tokens_details.cache_write_tokens`` (Responses).  Verified at
     https://developers.openai.com/api/docs/guides/prompt-caching and the
-    OpenAI pricing page (gpt-5.6-sol $6.25, -terra $3.125, -luna $1.25
-    per MTok cache write = exactly 1.25x their input prices).  ``-pro``
-    variants publish no cache pricing, so they stay on free writes.
+    OpenAI pricing page (gpt-6-astra $12.50, gpt-5.6-sol $5.00, -terra
+    $2.50, -luna $0.25 per MTok cache write = exactly 1.25x their input
+    prices).  ``-pro`` variants publish no cache pricing, so they stay on
+    free writes.
 
     Args:
         bare: An OpenAI model name without any provider prefix.
@@ -816,7 +817,7 @@ def _openai_charges_cache_writes(bare: str) -> bool:
     Returns:
         True when cache-write tokens are billed at 1.25x the input price.
     """
-    return bare.startswith("gpt-5.6") and "-pro" not in bare
+    return bare.startswith(("gpt-5.6", "gpt-6")) and "-pro" not in bare
 
 
 def _openai_cache_read_multiplier(bare: str) -> float:
@@ -825,8 +826,9 @@ def _openai_cache_read_multiplier(bare: str) -> float:
     OpenAI bills prompt-cache reads at a per-model fraction of the base input
     price (cache writes are free before the GPT-5.6 family; see
     :func:`_openai_charges_cache_writes`). The multipliers below match
-    OpenAI's published pricing: GPT-5.x is 0.10x when a cached-input price is
-    published, GPT-4.1 and o3/o4-mini are 0.25x, while GPT-4o, GPT-4,
+    OpenAI's published pricing: GPT-5.x and GPT-6.x are 0.10x when a
+    cached-input price is published (gpt-6-astra: $1.00 cached vs $10.00
+    input), GPT-4.1 and o3/o4-mini are 0.25x, while GPT-4o, GPT-4,
     GPT-3.5, o1 and o3-mini are 0.50x. GPT-5 ``pro`` variants currently show
     no cached-input discount, so cached tokens are charged at the full input
     price rather than silently undercounted.
@@ -842,7 +844,7 @@ def _openai_cache_read_multiplier(bare: str) -> float:
         return 1.0
     if bare in ("gpt-latest", "gpt-mini-latest"):
         return 0.10
-    if bare.startswith("gpt-5") or "chat-latest" in bare:
+    if bare.startswith(("gpt-5", "gpt-6")) or "chat-latest" in bare:
         return 0.10
     if bare.startswith("gpt-image-1-mini"):
         return 0.10
@@ -1333,54 +1335,52 @@ def get_default_model() -> str:
     )
 
 
-def _openai_long_context_prices(
-    model_name: str,
-) -> tuple[int, float, float, float, float | None] | None:
-    """Return ``(threshold, input, output, cached, cache_write)`` long-context prices.
+def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
+    """Return ``(threshold, input_multiplier, output_multiplier)`` for long prompts.
 
-    The last element is the long-context cache-write price per 1M tokens,
-    or ``None`` for models whose cache writes are free (pre-GPT-5.6
-    families).  Prices verified against the OpenAI pricing page
-    (https://developers.openai.com/api/docs/pricing).
+    OpenAI and Google both price long-context requests as a uniform
+    uplift over each model's own short-context rates: prompts above the
+    threshold bill the FULL request at ``input_multiplier`` x the input
+    and cache rates and ``output_multiplier`` x the output rate.
+
+    Verified against the OpenAI pricing page
+    (https://developers.openai.com/api/docs/pricing: gpt-6-astra
+    $10/$1/$12.50/$50 -> $20/$2/$25/$75, gpt-5.6-sol $4/$0.40/$5/$20 ->
+    $8/$0.80/$10/$30, and likewise terra/luna/5.5/5.4 at exactly
+    2x/1.5x) and https://ai.google.dev/gemini-api/docs/pricing
+    (gemini-3-pro $2/$12 -> $4/$18, gemini-2.5-pro $1.25/$10 ->
+    $2.50/$15).
+
+    Multipliers (not absolute prices) are returned so OpenRouter
+    passthrough entries, whose base prices follow OpenRouter's own
+    listings rather than the provider's direct rates, scale from their
+    own catalog prices instead of inheriting direct-OpenAI dollar
+    amounts.
+
+    Args:
+        model_name: The MODEL_INFO key (with or without provider prefix).
+
+    Returns:
+        ``(prompt-token threshold, input/cache multiplier, output
+        multiplier)``, or ``None`` when the model has no long-context
+        tier.
     """
     bare = _strip_thinking_alias(_strip_provider_prefix(model_name))
-    if bare.startswith(_OPENAI_OPENROUTER_PREFIXES):
+    if bare.startswith(_OPENAI_OPENROUTER_PREFIXES + _GOOGLE_OPENROUTER_PREFIXES):
         bare = bare.split("/", 2)[2]
-    if bare.startswith("gpt-5.6-sol"):
-        return 272_000, 10.00, 45.00, 1.00, 12.50
-    if bare.startswith("gpt-5.6-terra"):
-        return 272_000, 5.00, 22.50, 0.50, 6.25
-    if bare.startswith("gpt-5.6-luna"):
-        return 272_000, 2.00, 9.00, 0.20, 2.50
+    if bare.startswith(("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")):
+        return 272_000, 2.0, 1.5
     if bare.startswith("gpt-5.5") and "-pro" not in bare:
-        return 272_000, 10.00, 45.00, 1.00, None
+        return 272_000, 2.0, 1.5
     if (
         bare.startswith("gpt-5.4")
         and "-pro" not in bare
         and "-mini" not in bare
         and "-nano" not in bare
     ):
-        return 272_000, 5.00, 22.50, 0.50, None
-    return None
-
-
-def _gemini_long_context_prices(
-    model_name: str,
-) -> tuple[int, float, float, float, float | None] | None:
-    """Return ``(threshold, input, output, cached, cache_write)`` long-context prices.
-
-    The last element is always ``None`` for Gemini (context-cache writes
-    are free; only storage-per-hour is billed, which KISS's implicit
-    caching never incurs).  Prices verified against
-    https://ai.google.dev/gemini-api/docs/pricing.
-    """
-    bare = _strip_thinking_alias(_strip_provider_prefix(model_name))
-    if bare.startswith(_GOOGLE_OPENROUTER_PREFIXES):
-        bare = bare.split("/", 2)[2]
-    if bare.startswith(("gemini-3-pro", "gemini-3.1-pro")):
-        return 200_000, 4.00, 18.00, 0.40, None
-    if bare.startswith("gemini-2.5-pro"):
-        return 200_000, 2.50, 15.00, 0.25, None
+        return 272_000, 2.0, 1.5
+    if bare.startswith(("gemini-3-pro", "gemini-3.1-pro", "gemini-2.5-pro")):
+        return 200_000, 2.0, 1.5
     return None
 
 
@@ -1454,14 +1454,15 @@ def calculate_cost(
     )
     input_price = info.input_price_per_1M
     output_price = info.output_price_per_1M
-    long_prices = _openai_long_context_prices(model_name) or _gemini_long_context_prices(
-        model_name
-    )
+    uplift = _long_context_uplift(model_name)
     prompt_tokens = total_tokens - num_output_tokens - num_audio_output_tokens
-    if long_prices is not None and prompt_tokens > long_prices[0]:
-        _, input_price, output_price, cr_price, long_cw_price = long_prices
-        if long_cw_price is not None:
-            cw_price = long_cw_price
+    if uplift is not None and prompt_tokens > uplift[0]:
+        _, input_mult, output_mult = uplift
+        input_price *= input_mult
+        output_price *= output_mult
+        cr_price *= input_mult
+        cw_price *= input_mult
+        cw1h_price *= input_mult
     audio_in_price = (
         info.audio_input_price_per_1M
         if info.audio_input_price_per_1M is not None

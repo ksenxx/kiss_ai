@@ -48,7 +48,7 @@ _TOKEN_PROFILES: tuple[tuple[int, int, int, int, int], ...] = (
     (0, 0, 1_000_000, 0, 0),
     (0, 0, 0, 1_000_000, 0),
     (0, 0, 0, 0, 1_000_000),
-    # Above the 200k OpenAI long-context tier, in every dimension at once.
+    # Above the 272k OpenAI long-context threshold, in every dimension at once.
     (250_000, 250_000, 250_000, 0, 0),
     (1_000_000, 1_000_000, 1_000_000, 0, 0),
 )
@@ -81,9 +81,10 @@ def test_xhigh_alias_calculate_cost_matches_base(
 ) -> None:
     """``calculate_cost`` must agree on every alias/base pair and profile.
 
-    This includes long-context tier thresholds: at >200k tokens, an
-    OpenAI base like ``gpt-5.5`` switches from the standard tier to the
-    long-context tier (10.00/45.00/1.00). The alias must do the same.
+    This includes long-context tier thresholds: at >272k prompt tokens,
+    an OpenAI base like ``gpt-5.5`` switches from the standard tier to
+    the long-context tier (2x input/cache, 1.5x output). The alias must
+    do the same.
     """
     in_t, out_t, cr_t, cw_t, cw1h_t = profile
     base_cost = calculate_cost(base, in_t, out_t, cr_t, cw_t, cw1h_t)

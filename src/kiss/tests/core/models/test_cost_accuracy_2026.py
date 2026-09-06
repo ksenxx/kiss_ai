@@ -31,11 +31,15 @@ from kiss.core.models.model_info import MODEL_INFO, calculate_cost
 
 class TestOpenAIGpt56CacheWritePricing:
     def test_gpt56_models_bill_cache_writes_at_1_25x_input(self):
-        """gpt-5.6-* cache writes are 1.25x input ($6.25/$3.125/$1.25 per MTok)."""
+        """gpt-5.6-* cache writes are 1.25x input ($5.00/$2.50/$0.25 per MTok).
+
+        Promotional prices from the Sep 2026 pricing page (sol $4, terra $2,
+        luna $0.20 per MTok input; promo runs through at least Nov 21, 2026).
+        """
         expected = {
-            "gpt-5.6-sol": 6.25,
-            "gpt-5.6-terra": 3.125,
-            "gpt-5.6-luna": 1.25,
+            "gpt-5.6-sol": 5.00,
+            "gpt-5.6-terra": 2.50,
+            "gpt-5.6-luna": 0.25,
         }
         for name, cw in expected.items():
             info = MODEL_INFO[name]
@@ -68,7 +72,7 @@ class TestOpenAIGpt56CacheWritePricing:
 
     def test_gpt56_short_context_cost_matches_published_rates(self):
         cost = calculate_cost("gpt-5.6-sol", 100_000, 10_000, 20_000, 30_000)
-        expected = (100_000 * 5.0 + 10_000 * 30.0 + 20_000 * 0.50 + 30_000 * 6.25) / 1e6
+        expected = (100_000 * 4.0 + 10_000 * 20.0 + 20_000 * 0.40 + 30_000 * 5.0) / 1e6
         assert cost == pytest.approx(expected)
 
 
@@ -76,17 +80,17 @@ class TestOpenAIGpt56LongContextPricing:
     def test_gpt56_terra_long_context_cost(self):
         cost = calculate_cost("gpt-5.6-terra", 300_000, 10_000, 50_000, 40_000)
         expected = (
-            300_000 * 5.0 + 10_000 * 22.50 + 50_000 * 0.50 + 40_000 * 6.25
+            300_000 * 4.0 + 10_000 * 18.0 + 50_000 * 0.40 + 40_000 * 5.0
         ) / 1e6
         assert cost == pytest.approx(expected)
 
     def test_gpt56_sol_long_context_cost(self):
         cost = calculate_cost("gpt-5.6-sol", 300_000, 5_000, 0, 0)
-        assert cost == pytest.approx((300_000 * 10.0 + 5_000 * 45.0) / 1e6)
+        assert cost == pytest.approx((300_000 * 8.0 + 5_000 * 30.0) / 1e6)
 
     def test_gpt56_luna_long_context_cost(self):
         cost = calculate_cost("gpt-5.6-luna", 300_000, 5_000, 10_000, 10_000)
-        expected = (300_000 * 2.0 + 5_000 * 9.0 + 10_000 * 0.20 + 10_000 * 2.50) / 1e6
+        expected = (300_000 * 0.40 + 5_000 * 1.80 + 10_000 * 0.04 + 10_000 * 0.50) / 1e6
         assert cost == pytest.approx(expected)
 
     def test_gpt56_xhigh_alias_gets_long_context_pricing(self):
@@ -94,19 +98,99 @@ class TestOpenAIGpt56LongContextPricing:
             calculate_cost("gpt-5.6-sol", 300_000, 5_000)
         )
 
+    def test_openrouter_long_context_scales_openrouter_prices(self):
+        """OpenRouter passthrough scales its OWN listed prices, not OpenAI's.
+
+        openrouter/openai/gpt-5.6-sol lists $2/$10 per MTok on
+        openrouter.ai (vs $4/$20 direct), so its long-context tier is
+        2x/1.5x of $2/$10 — not the direct-OpenAI $8/$30 dollar rates.
+        """
+        info = MODEL_INFO["openrouter/openai/gpt-5.6-sol"]
+        assert info.input_price_per_1M == pytest.approx(2.0)
+        cost = calculate_cost("openrouter/openai/gpt-5.6-sol", 300_000, 10_000, 50_000, 40_000)
+        expected = (
+            300_000 * 4.0 + 10_000 * 15.0 + 50_000 * 0.40 + 40_000 * 5.0
+        ) / 1e6
+        assert cost == pytest.approx(expected)
+
     def test_gpt55_long_context_cache_writes_stay_free(self):
         cost = calculate_cost("gpt-5.5", 300_000, 5_000, 0, 40_000)
         assert cost == pytest.approx((300_000 * 10.0 + 5_000 * 45.0) / 1e6)
 
     def test_openai_threshold_is_272k_not_200k(self):
         cost = calculate_cost("gpt-5.6-sol", 250_000, 5_000)
-        assert cost == pytest.approx((250_000 * 5.0 + 5_000 * 30.0) / 1e6)
+        assert cost == pytest.approx((250_000 * 4.0 + 5_000 * 20.0) / 1e6)
         assert calculate_cost("gpt-5.5", 272_000, 0) == pytest.approx(
             272_000 * 5.0 / 1e6
         )
         assert calculate_cost("gpt-5.5", 272_001, 0) == pytest.approx(
             272_001 * 10.0 / 1e6
         )
+
+
+class TestGpt6AstraPricing:
+    """gpt-6-astra rates from https://developers.openai.com/api/docs/models/gpt-6-astra.
+
+    Standard tier: $10 input / $1 cached input / $12.50 cache writes /
+    $50 output per MTok.  Prompts with more than 272K input tokens are
+    priced at 2x input and cache rates and 1.5x output ($20/$2/$25/$75)
+    for the full request.
+    """
+
+    def test_base_prices_match_published_rates(self):
+        for name in ("gpt-6-astra", "openrouter/openai/gpt-6-astra"):
+            info = MODEL_INFO[name]
+            assert info.input_price_per_1M == 10.0, name
+            assert info.output_price_per_1M == 50.0, name
+
+    def test_cache_read_billed_at_0_1x_input(self):
+        info = MODEL_INFO["gpt-6-astra"]
+        assert info.cache_read_price_per_1M == pytest.approx(1.00)
+
+    def test_cache_writes_billed_at_1_25x_input(self):
+        for name in ("gpt-6-astra", "gpt-6-astra-xhigh", "openrouter/openai/gpt-6-astra"):
+            info = MODEL_INFO[name]
+            assert info.cache_write_price_per_1M == pytest.approx(12.50), name
+
+    def test_codex_subscription_astra_stays_free(self):
+        assert calculate_cost("codex/gpt-6-astra", 1_000_000, 100_000, 50_000, 50_000) == 0.0
+
+    def test_short_context_cost_matches_official_caching_formula(self):
+        """Mirrors the cost formula in the OpenAI prompt-caching guide."""
+        cost = calculate_cost("gpt-6-astra", 50_000, 10_000, 30_000, 20_000)
+        expected = (
+            50_000 * 10.0 + 10_000 * 50.0 + 30_000 * 1.00 + 20_000 * 12.50
+        ) / 1e6
+        assert cost == pytest.approx(expected)
+
+    def test_long_context_reprices_full_request(self):
+        """280K in + 20K out is ~$7.10; trimmed to 272K it is ~$3.72."""
+        assert calculate_cost("gpt-6-astra", 280_000, 20_000) == pytest.approx(7.10)
+        assert calculate_cost("gpt-6-astra", 272_000, 20_000) == pytest.approx(3.72)
+
+    def test_long_context_cache_rates_doubled(self):
+        cost = calculate_cost("gpt-6-astra", 200_000, 5_000, 80_000, 10_000)
+        expected = (
+            200_000 * 20.0 + 5_000 * 75.0 + 80_000 * 2.00 + 10_000 * 25.00
+        ) / 1e6
+        assert cost == pytest.approx(expected)
+
+    def test_thinking_aliases_price_like_base(self):
+        for level in ("low", "medium", "high", "xhigh"):
+            assert calculate_cost(
+                f"gpt-6-astra-{level}", 300_000, 5_000, 10_000, 10_000
+            ) == pytest.approx(
+                calculate_cost("gpt-6-astra", 300_000, 5_000, 10_000, 10_000)
+            ), level
+
+    def test_context_length_stays_at_intentional_500k_cap(self):
+        """The catalog caps >=1M context windows at 500K by design.
+
+        gpt-6-astra's real window is 1,050,000 tokens, but
+        ``update_models._cap_context_length`` deliberately caps every
+        >=1M context at 500,000 in the on-disk catalog.
+        """
+        assert MODEL_INFO["gpt-6-astra"].context_length == 500_000
 
 
 class TestGeminiLongContextPricing:
@@ -195,11 +279,11 @@ class TestDirectMoonshotCachePricing:
 class TestLongContextTierUsesPromptTokens:
     def test_large_output_does_not_trigger_long_context_tier(self):
         cost = calculate_cost("gpt-5.6-sol", 250_000, 100_000)
-        assert cost == pytest.approx((250_000 * 5.0 + 100_000 * 30.0) / 1e6)
+        assert cost == pytest.approx((250_000 * 4.0 + 100_000 * 20.0) / 1e6)
 
     def test_prompt_side_cache_tokens_count_toward_tier(self):
         cost = calculate_cost("gpt-5.6-sol", 250_000, 1_000, 60_000, 0)
-        expected = (250_000 * 10.0 + 1_000 * 45.0 + 60_000 * 1.00) / 1e6
+        expected = (250_000 * 8.0 + 1_000 * 30.0 + 60_000 * 0.80) / 1e6
         assert cost == pytest.approx(expected)
 
     def test_gemini_output_excluded_from_tier_decision(self):

@@ -2403,10 +2403,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
 
         Returns:
             ``(input_tokens, output_tokens, cache_read_tokens,
-            cache_write_tokens)``.  ``cache_write_tokens`` is 0 for
-            api.openai.com (no cache write fees) but is passed through
-            when a gateway (e.g. OpenRouter Anthropic passthrough)
-            reports ``input_tokens_details.cache_write_tokens``.
+            cache_write_tokens)``.  ``cache_write_tokens`` comes from
+            ``input_tokens_details.cache_write_tokens``: api.openai.com
+            reports it for GPT-5.6-and-later models (billed at 1.25x the
+            input rate; free and reported as 0 for earlier families), and
+            gateways (e.g. OpenRouter Anthropic passthrough) report it
+            for their cache-write-billing upstreams.
         """
         usage = self._get_attr_or_key(response, "usage")
         if usage is None:
