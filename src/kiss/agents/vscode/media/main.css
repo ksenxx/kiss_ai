@@ -228,7 +228,32 @@ body {
   background: var(--bg2);
   flex-shrink: 0;
 }
+
+/* The server's machine name sits in the true middle of the status
+   bar: two equal-width side groups (status text left, the tokens /
+   cost / steps metrics right, each flex: 1 1 0) flank it.  Each side
+   refuses to shrink below its own content (min-width: max-content),
+   so on a cramped pane the machine name — a plain flex item between
+   them — gives way first, ellipsized, and can NEVER paint over its
+   neighbours. */
+#status-machine {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .status { display: flex; align-items: center; gap: 6px; font-size: var(--fs-base); color: var(--dim); width: 100%; }
+
+.status-side {
+  display: flex;
+  flex: 1 1 0;
+  gap: 6px;
+  align-items: center;
+  min-width: max-content;
+}
+.status-side-right { justify-content: flex-end; }
 
 .status-metric {
   font-size: var(--fs-sm);
@@ -236,7 +261,6 @@ body {
   white-space: nowrap;
 }
 .status-metric:not(:empty)::before { content: '·'; margin-right: 2px; }
-#status-tokens { margin-left: auto; }
 #status-text { color: var(--green); }
 
 
