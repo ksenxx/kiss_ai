@@ -132,7 +132,7 @@ class TestCalculateCostAudioTokens:
             num_audio_input_tokens=1_000,
             num_audio_output_tokens=1_000,
         )
-        assert cost == pytest.approx((1_000 * 5.0 + 1_000 * 30.0) / 1e6)
+        assert cost == pytest.approx((1_000 * 4.0 + 1_000 * 20.0) / 1e6)
 
     def test_zero_audio_tokens_matches_legacy_arithmetic(self) -> None:
         assert calculate_cost("gpt-audio-1.5", 1_000, 2_000) == pytest.approx(
