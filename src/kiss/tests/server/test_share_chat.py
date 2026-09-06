@@ -195,6 +195,27 @@ class TestShareChatOverUds(_UdsServerTestCase):
         self.assertIn(".closest('.collapse-header')", page)
         self.assertNotIn("{{", page.split("</title>")[0])
 
+    def test_share_page_carries_a_working_light_dark_toggle(self) -> None:
+        """The written page ships the light/dark mode toggle: the
+        floating button, both inlined highlight.js themes (light one
+        parked behind ``media="not all"``), the ``html.light-theme``
+        palette overrides and share.js's theme wiring."""
+        event = self._share(chatId="chat-theme", html=self.BODY)
+        self.assertTrue(event["ok"], event)
+        page = Path(event["path"]).read_text(encoding="utf-8")
+        self.assertIn('id="share-theme-btn"', page)
+        self.assertIn('aria-label="Switch to light mode"', page)
+        self.assertIn('<style id="hljs-style-dark">', page)
+        self.assertIn('<style id="hljs-style-light" media="not all">', page)
+        # Light Modern variable overrides keyed off the toggled class.
+        self.assertIn("html.light-theme {", page)
+        self.assertIn("--vscode-editor-background: #ffffff", page)
+        # share.js's toggle logic (markers that appear in the script
+        # only, never in this test's transcript body).
+        self.assertIn("kissShareTheme", page)
+        self.assertIn("Switch to dark mode", page)
+        self.assertIn("#share-theme-btn {", page)  # _SHARE_PAGE_CSS
+
     def test_chat_id_is_sanitized_into_the_filename(self) -> None:
         event = self._share(chatId="a/b c!*", html=self.BODY)
         self.assertTrue(event["ok"], event)
