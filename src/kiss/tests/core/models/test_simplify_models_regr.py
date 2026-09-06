@@ -204,7 +204,7 @@ def test_anthropic_and_openai_cache_multipliers() -> None:
 
 
 def test_long_context_pricing_gpt55() -> None:
-    """gpt-5.5 (non-pro) switches to long-context prices above 200k tokens."""
+    """gpt-5.5 (non-pro) switches to long-context prices above 272k prompt tokens."""
     name = next(
         (n for n in MODEL_INFO
          if n.startswith("gpt-5.5") and "-pro" not in n
