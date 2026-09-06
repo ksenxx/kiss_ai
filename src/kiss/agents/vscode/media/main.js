@@ -4308,6 +4308,7 @@
 
   const addCopyButton = window.PanelCopy.addCopyButton;
   const addPanelTimestamp = window.PanelCopy.addPanelTimestamp;
+  const formattedTextFromNode = window.PanelCopy.formattedTextFromNode;
   const PANEL_COPY_SVG = window.PanelCopy.PANEL_COPY_SVG;
   const PANEL_CHECK_SVG = window.PanelCopy.PANEL_CHECK_SVG;
 
@@ -4470,6 +4471,24 @@
       '">' +
       rb +
       '</div>';
+    // fmtcopy-coverage:start
+    // An HTML summary's source went into dataset.rawText above only as
+    // a placeholder: the copy button must copy the panel as the reader
+    // SEES it (formatted text), never the raw HTML markup, so the
+    // rendered body is serialized back into readable plain text.
+    if (!usePre) {
+      const bodyForCopy = rc.querySelector('.rc-body');
+      if (bodyForCopy) {
+        // Unconditional: even an empty result (say, an image-only
+        // summary reduced to its alt text) must not fall back to the
+        // raw HTML source.
+        rc.dataset.rawText = formattedTextFromNode(bodyForCopy).replace(
+          /^\n+|\n+$/g,
+          '',
+        );
+      }
+    }
+    // fmtcopy-coverage:end
     hlBlock(rc);
     addCopyButton(rc);
     addPanelTimestamp(rc, ev.ts);
@@ -6604,6 +6623,14 @@
         break;
       // modelpick-coverage:end
       case 'configData':
+        // The daemon stamps the server's machine name into every
+        // configData reply; it names the machine the agent runs ON
+        // (which may be remote), so it sits in the status bar for the
+        // extension webview and the remote webapp alike.
+        if (typeof ev.machine === 'string') {
+          const statusMachine = document.getElementById('status-machine');
+          if (statusMachine) statusMachine.textContent = ev.machine;
+        }
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
         break;
       case 'history':
