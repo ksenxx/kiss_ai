@@ -275,6 +275,8 @@ type ToWebviewMessageBody =
       type: 'configData';
       config: Record<string, unknown>;
       apiKeys?: Record<string, string>;
+      /** The server machine's hostname, shown in the status bar. */
+      machine?: string;
     }
   | {
       type: 'history';
