@@ -1445,6 +1445,29 @@ body.remote-chat #theme-btn { display: flex; }
 
 #sidebar.open { transform: translateX(0); }
 
+/* Editor-tabs mode: the burger is gone — the editor-title KS button
+   shows the real history panel in the primary sidebar instead. */
+body.editor-tab-mode #menu-btn { display: none; }
+
+/* History-panel mode (the primary-sidebar history view): this webview
+   IS the history sidebar. Everything else stays hidden, the sidebar
+   fills the whole view, and the drawer affordances (close button,
+   resizer, overlay) go — the hosting VS Code sidebar already provides
+   both. */
+body.history-panel-mode #app > :not(#sidebar) { display: none !important; }
+
+body.history-panel-mode #sidebar {
+  width: auto;
+  inset: 0;
+  transform: none;
+  transition: none;
+  border-right: none;
+  padding: 10px;
+}
+
+body.history-panel-mode #sidebar-close,
+body.history-panel-mode #sidebar-resizer { display: none !important; }
+
 /* The dimming backdrop behind every side panel -- history sidebar,
    settings, frequent tasks, tricks: one rule, four ids. */
 #sidebar-overlay,

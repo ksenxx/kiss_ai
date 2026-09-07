@@ -52,8 +52,15 @@
     "views": {
       "kissSorcarContainer": [
         {
+          "type": "webview",
+          "id": "kissSorcar.historyView",
+          "name": "History",
+          "when": "config.kissSorcar.editorTabsMode"
+        },
+        {
           "id": "kissSorcar.chatView",
-          "name": "Chat"
+          "name": "Chat",
+          "when": "!config.kissSorcar.editorTabsMode"
         }
       ],
       "kissSorcarSecondary": [
@@ -114,9 +121,24 @@
       {
         "command": "kissSorcar.insertSelectionToChat",
         "title": "KISS: Insert Selection into Chat"
+      },
+      {
+        "command": "kissSorcar.showHistory",
+        "title": "KISS: Show Chat History",
+        "icon": {
+          "light": "media/kiss-icon.svg",
+          "dark": "media/kiss-icon.svg"
+        }
       }
     ],
     "menus": {
+      "editor/title": [
+        {
+          "command": "kissSorcar.showHistory",
+          "group": "navigation@-1",
+          "when": "config.kissSorcar.editorTabsMode"
+        }
+      ],
       "scm/title": [
         {
           "command": "kissSorcar.generateCommitMessage",

@@ -515,6 +515,14 @@ body.remote-chat .running-item-ids::before {
  * main.css and ``#app`` reclaims the freed width.
  */
 @media (width >= 900px) {
+  /* Non-mobile remote: the panel is permanently docked (main.js keeps
+     it open whenever .remote-desktop is set), so the burger — which
+     only toggled it — and the drawer's close button go. */
+  body.remote-chat.remote-desktop #menu-btn,
+  body.remote-chat.remote-desktop #sidebar-close {
+    display: none;
+  }
+
   body.remote-chat.remote-desktop #sidebar.open {
     transform: none;
     width: var(--sidebar-w, var(--sidebar-default-w));

@@ -54,10 +54,14 @@ let editorTabsMode = false;
 const commands = new Map();
 const executedCommands = [];
 const configListeners = [];
+const viewProviders = new Map();
 
 const vscodeStub = {
   window: {
-    registerWebviewViewProvider: () => makeDisposable(),
+    registerWebviewViewProvider: (id, provider) => {
+      viewProviders.set(id, provider);
+      return makeDisposable();
+    },
     createTreeView: () => ({
       onDidChangeVisibility: () => makeDisposable(),
       dispose: () => {},
@@ -135,6 +139,7 @@ const calls = {
     openSettings: 0,
     enterMode: [],
     closeAll: 0,
+    openChat: [],
   },
   controller: {
     focusChatInput: 0,
@@ -148,9 +153,17 @@ const registryEntries = [
   {tabId: 't1', chatId: 'c1', title: 'one', workDir: '/ws/project', scopeWorkDir: ''},
 ];
 
+const sidebarInstances = [];
+
 class FakeSidebarView {
-  constructor() {
+  constructor(_uri, panelHooks) {
     this.hasFocus = false;
+    this.panelHooks = panelHooks;
+    this.resolvedViews = [];
+    sidebarInstances.push(this);
+  }
+  resolveWebviewView(view) {
+    this.resolvedViews.push(view);
   }
   syncWorkDir() {}
   focusChatInput() {
@@ -215,16 +228,25 @@ class FakeController {
 
 const fakeController = new FakeController();
 
+let fakePanelCount = 0;
+
 class FakePanelManager {
   static modeEnabled() {
     return editorTabsMode;
+  }
+  get panelCount() {
+    return fakePanelCount;
   }
   registerSerializer() {
     return makeDisposable();
   }
   openNewChat() {
     calls.manager.openNewChat += 1;
+    fakePanelCount += 1;
     return fakeController;
+  }
+  openChat(event) {
+    calls.manager.openChat.push(event);
   }
   revealActiveOrCreate() {
     calls.manager.revealActiveOrCreate += 1;
@@ -242,6 +264,7 @@ class FakePanelManager {
   }
   closeAll() {
     calls.manager.closeAll += 1;
+    fakePanelCount = 0;
   }
   markShutdown() {}
   dispose() {}
@@ -286,6 +309,10 @@ stubModule(path.join(OUT_DIR, 'UpdateChecker.js'), {
 });
 stubModule(path.join(OUT_DIR, 'SorcarTab.js'), {
   resetTipsOnExtensionUpdate: () => {},
+  HISTORY_PANEL_TAB_ID: 'history-panel',
+  historyPanelBodyAttrs: () =>
+    ' class="editor-tab-mode history-panel-mode"' +
+    ' data-kiss-tab-id="history-panel"',
 });
 
 delete require.cache[require.resolve(extensionPath)];
@@ -326,6 +353,16 @@ async function runTest() {
   await commands.get('kissSorcar.stopTask')();
   assert.strictEqual(calls.sidebar.stopTask, 1);
 
+  // The KS button's command in sidebar mode: just focus the chat.
+  const sidebarFocusBefore = calls.sidebar.focusChatInput;
+  await commands.get('kissSorcar.showHistory')();
+  assert.strictEqual(
+    calls.sidebar.focusChatInput,
+    sidebarFocusBefore + 1,
+    'sidebar mode: showHistory focuses the chat',
+  );
+  assert.strictEqual(calls.manager.openNewChat, 0);
+
   // --- flip the mode ON: registry tabs migrate to panels ---------------
   editorTabsMode = true;
   await fireConfigChange();
@@ -364,12 +401,106 @@ async function runTest() {
   assert.deepStrictEqual(calls.controller.appendToInput, ['selected text']);
   assert.deepStrictEqual(calls.sidebar.appendToInput, []);
 
+  // --- the KS button: showHistory in editor-tabs mode -------------------
+  // A chat panel is open (newConversation above): only focus the view.
+  executedCommands.length = 0;
+  await commands.get('kissSorcar.showHistory')();
+  assert.deepStrictEqual(
+    executedCommands.map(e => e.cmd),
+    ['kissSorcar.historyView.focus'],
+    'showHistory focuses the primary-sidebar history view',
+  );
+  assert.strictEqual(
+    calls.manager.openNewChat,
+    1,
+    'a chat tab is already open: no extra chat',
+  );
+
+  // With no chat tab open, the same click also opens a fresh chat.
+  fakePanelCount = 0;
+  executedCommands.length = 0;
+  await commands.get('kissSorcar.showHistory')();
+  assert.deepStrictEqual(executedCommands.map(e => e.cmd), [
+    'kissSorcar.historyView.focus',
+  ]);
+  assert.strictEqual(calls.manager.openNewChat, 2, 'no chat tab: one opened');
+  assert.strictEqual(calls.controller.focusChatInput, 3);
+
+  // --- the history view: resolve + visibility both ensure a chat --------
+  const historyProvider = viewProviders.get('kissSorcar.historyView');
+  assert.ok(historyProvider, 'history view provider registered');
+  const historyController = sidebarInstances.find(
+    v => v.panelHooks && v.panelHooks.rootTabId === 'history-panel',
+  );
+  assert.ok(historyController, 'history controller owns the fixed root tab');
+  assert.ok(
+    historyController.panelHooks.bodyAttrs.includes('history-panel-mode'),
+    'history controller carries the history-panel body attrs',
+  );
+
+  const visibilityListeners = [];
+  const fakeView = {
+    webview: {},
+    visible: true,
+    show: () => {},
+    onDidChangeVisibility: cb => {
+      visibilityListeners.push(cb);
+      return makeDisposable();
+    },
+    onDidDispose: () => makeDisposable(),
+  };
+  fakePanelCount = 0;
+  historyProvider.resolveWebviewView(fakeView, {}, {});
+  assert.deepStrictEqual(
+    historyController.resolvedViews,
+    [fakeView],
+    'provider delegates to the history controller',
+  );
+  assert.strictEqual(
+    calls.manager.openNewChat,
+    3,
+    'resolving with no chat tab opens one',
+  );
+
+  // Visible again with a panel open: no duplicate chat.
+  for (const cb of visibilityListeners) cb();
+  assert.strictEqual(calls.manager.openNewChat, 3);
+
+  // Visible again with none open: a fresh chat.
+  fakePanelCount = 0;
+  for (const cb of visibilityListeners) cb();
+  assert.strictEqual(calls.manager.openNewChat, 4);
+
+  // A hidden view must not open chats.
+  fakePanelCount = 0;
+  fakeView.visible = false;
+  for (const cb of visibilityListeners) cb();
+  assert.strictEqual(calls.manager.openNewChat, 4);
+  fakeView.visible = true;
+  fakePanelCount = 1;
+
+  // A history click routes through the panel manager's openChat; other
+  // panel events are not the history hook's business.
+  historyController.panelHooks.onEvent({
+    kind: 'openChat',
+    chatId: 'c9',
+    taskId: 7,
+    title: 'resumed',
+  });
+  assert.deepStrictEqual(calls.manager.openChat, [
+    {kind: 'openChat', chatId: 'c9', taskId: 7, title: 'resumed'},
+  ]);
+  historyController.panelHooks.onEvent({kind: 'title', title: 'ignored'});
+  assert.strictEqual(calls.manager.openChat.length, 1);
+
   // --- flip the mode OFF: panels close, sidebar comes back --------------
+  const focusBeforeModeOff = calls.sidebar.focusChatInput;
   editorTabsMode = false;
   await fireConfigChange();
   assert.strictEqual(calls.manager.closeAll, 1);
-  assert.ok(
-    calls.sidebar.focusChatInput >= 1,
+  assert.strictEqual(
+    calls.sidebar.focusChatInput,
+    focusBeforeModeOff + 1,
     'mode off refocuses the sidebar chat',
   );
 

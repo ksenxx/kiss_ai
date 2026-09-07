@@ -283,6 +283,22 @@ async function runTest() {
     () => panelB.reveals >= 1,
     'the existing chat panel must be revealed instead',
   );
+  assert.ok(
+    !panelB._posted.some(m => m.type === 'showTask'),
+    'an open without a task id must not ask the panel to move',
+  );
+
+  // --- ... and a task-carrying repeat open shows that task --------------
+  panelA._recv.fire({type: 'openChatPanel', chatId: 'chat-B', taskId: 7});
+  await waitFor(
+    () => panelB._posted.some(m => m.type === 'showTask' && m.taskId === '7'),
+    'the revealed panel must be told to show the clicked task',
+  );
+  assert.strictEqual(
+    createdPanels.length,
+    2,
+    'the task-carrying open must still not create a panel',
+  );
 
   // --- a user close retires the chat tab -------------------------------
   panelB.dispose();

@@ -15,6 +15,14 @@
   // — see SorcarTab.editorTabBodyAttrs / SorcarPanelManager.
   const EDITOR_TAB_MODE = document.body.classList.contains('editor-tab-mode');
 
+  // History-panel mode: this webview is the PRIMARY-sidebar history
+  // panel of editor-tabs mode. It runs as an editor-tab surface (so a
+  // history click posts `openChatPanel` and the host opens the chat as
+  // an editor tab) but shows ONLY the history sidebar, permanently
+  // open — see body.history-panel-mode in main.css.
+  const HISTORY_PANEL_MODE =
+    document.body.classList.contains('history-panel-mode');
+
   // Host-only messages (never daemon commands, so not in api.js's
   // whitelist): everything the webview asks of its hosting editor tab.
   function postToHost(msg) {
@@ -6891,6 +6899,30 @@
       case 'openSettings':
         openSettingsPanel();
         break;
+      // The primary-sidebar history panel clicked a task of THIS
+      // panel's chat: mirror the in-webview history-click behavior —
+      // scroll the task's region into view, or replay the tab at that
+      // task when its events are not spliced into the transcript.
+      case 'showTask': {
+        if (!EDITOR_TAB_MODE) break;
+        const stRoot = editorRootTab();
+        if (!stRoot) break;
+        if (activeTabId !== stRoot.id) switchToTab(stRoot.id);
+        if (
+          !scrollChatToTask(ev.taskId) &&
+          ev.taskId !== undefined &&
+          ev.taskId !== null &&
+          ev.taskId !== '' &&
+          stRoot.backendChatId
+        ) {
+          api.resumeSession({
+            id: stRoot.backendChatId,
+            taskId: ev.taskId,
+            tabId: stRoot.id,
+          });
+        }
+        break;
+      }
       case 'clearChat': {
         const ccTab = getTab(activeTabId);
         const ccWelcome =
@@ -9424,6 +9456,21 @@
     if (menuBtn) {
       menuBtn.addEventListener('click', toggleHistorySidebar);
     }
+    if (HISTORY_PANEL_MODE) {
+      // The panel is born open and loads history right away; daemon
+      // broadcasts (status / tasks_updated / reconnect) keep an OPEN
+      // sidebar fresh via refreshHistory, and a webview re-shown after
+      // being hidden re-syncs whatever it missed.
+      sidebar.classList.add('open');
+      resetHistoryPagination();
+      api.getHistory({
+        query: historySearch ? historySearch.value : '',
+        generation: historyGeneration,
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') refreshHistory();
+      });
+    }
     const newChatBtn = document.getElementById('new-chat-btn');
     if (newChatBtn) {
       newChatBtn.addEventListener('click', () => {
@@ -9538,22 +9585,37 @@
       const SB_MAX = cssPxVar('--sidebar-max-w', 820);
       const CHAT_MIN = cssPxVar('--chat-min-w', 360);
       const SB_KEY = 'kiss-sidebar-w';
-      // Widest the panel may become on the CURRENT window: a wide
-      // panel dragged on a big monitor must not squeeze the chat into
-      // an unusable sliver after the window shrinks.
+      // Widest the panel may become on the CURRENT window: a drag may
+      // take the panel as wide as it likes as long as the chat keeps
+      // its minimum usable width — and a wide panel dragged on a big
+      // monitor must not squeeze the chat into an unusable sliver
+      // after the window shrinks. (--sidebar-max-w caps only the
+      // DEFAULT width below, never a drag.)
       const sidebarWindowMax = () =>
-        Math.max(SB_MIN, Math.min(SB_MAX, window.innerWidth - CHAT_MIN));
+        Math.max(SB_MIN, window.innerWidth - CHAT_MIN);
       const sidebarDefaultW = () =>
         Math.max(
           SB_MIN,
-          Math.min(sidebarWindowMax(), Math.round(window.innerWidth * 0.34)),
+          Math.min(
+            SB_MAX,
+            sidebarWindowMax(),
+            Math.round(window.innerWidth * 0.34),
+          ),
         );
+      // The PREFERRED width (`sidebarW`, what the user last asked for
+      // and what localStorage keeps) is tracked separately from the
+      // RENDERED width (`sidebarRenderedW`, the preference clamped to
+      // the current window): a wide preference loaded — or kept — on a
+      // narrow window renders clamped but must survive as-is, so the
+      // panel springs back once the window is wide enough again.
+      let sidebarRenderedW = sidebarDefaultW();
       const setSidebarW = px => {
         const max = sidebarWindowMax();
         const w = Math.max(SB_MIN, Math.min(max, Math.round(px)));
         document.documentElement.style.setProperty('--sidebar-w', w + 'px');
         sidebarResizer.setAttribute('aria-valuemax', String(max));
         sidebarResizer.setAttribute('aria-valuenow', String(w));
+        sidebarRenderedW = w;
         return w;
       };
       sidebarResizer.setAttribute('aria-valuemin', String(SB_MIN));
@@ -9565,7 +9627,8 @@
         persisted = window.localStorage.getItem(SB_KEY);
       } catch {}
       if (persisted !== null && /^\d+$/.test(persisted)) {
-        sidebarW = setSidebarW(parseInt(persisted, 10));
+        sidebarW = parseInt(persisted, 10);
+        setSidebarW(sidebarW);
       }
       const persistSidebarW = () => {
         try {
@@ -9620,7 +9683,13 @@
         if (!document.body.classList.contains('remote-desktop')) return;
         if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
         e.preventDefault();
-        sidebarW = setSidebarW(sidebarW + (e.key === 'ArrowRight' ? 16 : -16));
+        // Step from the RENDERED width, not the preference: with a
+        // wide preference clamped by a narrow window, stepping from
+        // the preference would neither move the panel nor mean
+        // anything to the user looking at it.
+        sidebarW = setSidebarW(
+          sidebarRenderedW + (e.key === 'ArrowRight' ? 16 : -16),
+        );
         persistSidebarW();
       });
       // Re-apply the width whenever the window changes size so a wide
@@ -11337,6 +11406,10 @@
   }
 
   function closeSidebar(force) {
+    // The history panel IS the sidebar: it never closes (refreshHistory
+    // only refreshes an OPEN sidebar, so dropping the class would also
+    // freeze the panel's contents).
+    if (HISTORY_PANEL_MODE) return;
     if (force !== true && document.body.classList.contains('remote-desktop')) {
       sidebarOverlay.classList.remove('open');
       return;
