@@ -535,17 +535,49 @@
 
   let capture = null;
 
+  // Rolling ring of the most recent pre-wake audio (16kHz Int16Array
+  // chunks). When the wake word fires, the ring ends with the audio of
+  // the wake word itself; it is prepended to the capture so the server
+  // can re-confirm the wake word from the transcript (dual wake check).
+  const WAKE_PREAMBLE_MS = 2000;
+  let preambleChunks = [];
+  let preambleMs = 0;
+
+  function rememberPreamble(samples, sourceRate, blockMs) {
+    preambleChunks.push({
+      chunk: downsampleTo16k(samples, sourceRate),
+      ms: blockMs,
+    });
+    preambleMs += blockMs;
+    // Keep at least one chunk, and never evict below the cap: the wake
+    // word must not be trimmed away by a block boundary.
+    while (
+      preambleChunks.length > 1 &&
+      preambleMs - preambleChunks[0].ms >= WAKE_PREAMBLE_MS
+    ) {
+      preambleMs -= preambleChunks[0].ms;
+      preambleChunks.shift();
+    }
+  }
+
+  function clearPreamble() {
+    preambleChunks = [];
+    preambleMs = 0;
+  }
+
   function beginCapture() {
     // The browser pipeline captures, transcribes and answers one round at a
     // time in this closure, so there is no id to carry: the round is unkeyed.
     markSpeechStart(null);
     capture = {
+      preamble: preambleChunks.map(entry => entry.chunk),
       chunks: [],
       sinceWakeMs: 0,
       elapsedMs: 0,
       speechStarted: false,
       trailingSilenceMs: 0,
     };
+    clearPreamble();
   }
 
   function downsampleTo16k(samples, sourceRate) {
@@ -604,7 +636,21 @@
       return;
     }
     flash('voice-transcribing', 60000);
-    postToHost({type: 'voiceTranscribe', audio: pcmBase64(done.chunks)});
+    // The wake word's own audio goes first: the server-side transcript
+    // check (wakePrefixed) re-confirms the wake word before accepting
+    // the rest of the utterance as a command. wakeSamples tells the
+    // server where the preamble ends so speaker identification can use
+    // the capture alone (the pre-wake ring may carry another voice).
+    let wakeSamples = 0;
+    for (let i = 0; i < done.preamble.length; i++) {
+      wakeSamples += done.preamble[i].length;
+    }
+    postToHost({
+      type: 'voiceTranscribe',
+      audio: pcmBase64(done.preamble.concat(done.chunks)),
+      wakePrefixed: true,
+      wakeSamples: wakeSamples,
+    });
   }
 
   function feedCapture(samples, rms, blockMs, sourceRate) {
@@ -650,6 +696,7 @@
 
   function stopBrowserPipeline() {
     capture = null;
+    clearPreamble();
     if (processorNode) {
       try {
         processorNode.disconnect();
@@ -832,6 +879,7 @@
             feedCapture(samples, rms, blockMs, event.inputBuffer.sampleRate);
             return;
           }
+          rememberPreamble(samples, event.inputBuffer.sampleRate, blockMs);
           try {
             recognizer.acceptWaveform(event.inputBuffer);
             if (freeRecognizer)
