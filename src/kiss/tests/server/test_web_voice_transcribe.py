@@ -101,8 +101,15 @@ def _tts_pcm_base64(directory: Path, text: str) -> str:
     long silent padding empirically makes gpt-audio deny hearing any
     audio — so the padded payload also exercises that trimming).
     """
-    aiff = directory / "speech.aiff"
-    wav = directory / "speech.wav"
+    pcm = _tts_pcm(directory, "speech", text)
+    pcm += b"\x00" * (2 * 2 * 16000)
+    return base64.b64encode(pcm).decode("ascii")
+
+
+def _tts_pcm(directory: Path, name: str, text: str) -> bytes:
+    """Return 16kHz mono s16le PCM of *text* spoken by macOS TTS."""
+    aiff = directory / f"{name}.aiff"
+    wav = directory / f"{name}.wav"
     subprocess.run(["say", text, "-o", str(aiff)], check=True)
     subprocess.run(
         ["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
@@ -110,9 +117,7 @@ def _tts_pcm_base64(directory: Path, text: str) -> str:
         check=True,
     )
     with wave.open(str(wav), "rb") as wf:
-        pcm = wf.readframes(wf.getnframes())
-    pcm += b"\x00" * (2 * 2 * 16000)
-    return base64.b64encode(pcm).decode("ascii")
+        return wf.readframes(wf.getnframes())
 
 
 class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
@@ -168,17 +173,25 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
         return ws
 
     async def _voice_speech_reply(
-        self, ws: ClientConnection, audio_b64: str, timeout: float,
+        self,
+        ws: ClientConnection,
+        audio_b64: str,
+        timeout: float,
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Send a ``voiceTranscribe`` and await its ``voiceSpeech`` reply.
 
-        Unrelated broadcast messages arriving on the same socket are
-        skipped.  Fails the test when no reply arrives in *timeout*
-        seconds — the reproduced bug: the server never answered.
+        *extra* fields (e.g. ``wakePrefixed``/``wakeSamples``) are
+        merged into the message.  Unrelated broadcast messages
+        arriving on the same socket are skipped.  Fails the test when
+        no reply arrives in *timeout* seconds — the reproduced bug:
+        the server never answered.
         """
-        await ws.send(
-            json.dumps({"type": "voiceTranscribe", "audio": audio_b64}),
-        )
+        message: dict[str, Any] = {
+            "type": "voiceTranscribe", "audio": audio_b64,
+        }
+        message.update(extra or {})
+        await ws.send(json.dumps(message))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while True:
@@ -253,6 +266,52 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
             speaker is None or (isinstance(speaker, int) and speaker >= 1),
             f"speaker must be None or a positive int, got {speaker!r}",
         )
+
+    @unittest.skipUnless(
+        HAVE_MAC_TTS, "requires macOS `say` and `afconvert`",
+    )
+    @unittest.skipUnless(
+        HAVE_OPENAI_KEY, "requires OPENAI_API_KEY (real gpt-audio call)",
+    )
+    async def test_wake_prefixed_audio_confirms_and_strips_the_wake(
+        self,
+    ) -> None:
+        """The dual wake check over the real WSS + gpt-audio route.
+
+        Sends what browser-mode voice.js posts after a wake with the
+        wake word's own audio prepended (``wakePrefixed`` +
+        ``wakeSamples``): the transcript must confirm the wake word,
+        the reply text must carry only the command, and the same
+        command WITHOUT wake audio must be rejected as a false wake
+        (empty text).
+        """
+        ws = await self._connect_ok()
+        wake_pcm = _tts_pcm(Path(self.tmpdir), "wake", "Sorcar")
+        gap = b"\x00" * (2 * 16000)
+        command_pcm = _tts_pcm(
+            Path(self.tmpdir), "command", "open the readme file",
+        )
+        wake_samples = (len(wake_pcm) + len(gap)) // 2
+        prefixed = base64.b64encode(
+            wake_pcm + gap + command_pcm + b"\x00" * (2 * 2 * 16000)
+        ).decode("ascii")
+        msg = await self._voice_speech_reply(
+            ws, prefixed, timeout=180,
+            extra={"wakePrefixed": True, "wakeSamples": wake_samples},
+        )
+        text = msg["text"].lower()
+        self.assertIn("readme", text)
+        self.assertNotIn("sorcar", text)
+        self.assertEqual(msg["language"], "en")
+
+        unprefixed = base64.b64encode(
+            command_pcm + b"\x00" * (2 * 2 * 16000)
+        ).decode("ascii")
+        rejected = await self._voice_speech_reply(
+            ws, unprefixed, timeout=180, extra={"wakePrefixed": True},
+        )
+        self.assertEqual(rejected["text"], "")
+        self.assertIsNone(rejected["language"])
 
 
 if __name__ == "__main__":
