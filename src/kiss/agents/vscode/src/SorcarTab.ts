@@ -280,6 +280,31 @@ export function editorTabBodyAttrs(init: EditorTabInit): string {
   return attrs.join('');
 }
 
+/**
+ * Root chat tab id of the primary-sidebar history panel's webview.
+ *
+ * The id is fixed (not random) so a reloaded window's history panel is
+ * the same client as before; the tab itself never runs a task, never
+ * binds to a chat and is never announced to the daemon's registry.
+ */
+export const HISTORY_PANEL_TAB_ID = 'history-panel';
+
+/**
+ * The `<body>` attribute string for the PRIMARY-sidebar history panel
+ * (editor-tabs mode). The webview reuses the editor-tab chat surface —
+ * so every history click already travels to the host as an
+ * `openChatPanel` message — but `history-panel-mode` (main.js /
+ * main.css) shows only the history sidebar, permanently open.
+ *
+ * @returns An attribute string ready for `<body{{BODY_CLASS_ATTR}}>`.
+ */
+export function historyPanelBodyAttrs(): string {
+  return (
+    ' class="editor-tab-mode history-panel-mode"' +
+    ` data-kiss-tab-id="${HISTORY_PANEL_TAB_ID}"`
+  );
+}
+
 export function buildChatHtml(
   webview: vscode.Webview,
   extensionUri: vscode.Uri,

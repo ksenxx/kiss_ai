@@ -254,6 +254,13 @@ export interface PanelHooks {
   rootTabId: string;
   /** Receives the panel-directed events listed in PanelEvent. */
   onEvent: (event: PanelEvent) => void;
+  /**
+   * `<body>` attributes for a surface attached through
+   * resolveWebviewView (the primary-sidebar history panel, which is a
+   * WebviewView rather than a WebviewPanel); editor-tab panels pass
+   * theirs to attachWebviewHost directly.
+   */
+  bodyAttrs?: string;
 }
 
 const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
@@ -762,15 +769,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     _context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken,
   ): void {
-    this.attachWebviewHost({
-      webview: webviewView.webview,
-      get visible() {
-        return webviewView.visible;
+    this.attachWebviewHost(
+      {
+        webview: webviewView.webview,
+        get visible() {
+          return webviewView.visible;
+        },
+        show: () => webviewView.show(true),
+        onDidChangeVisibility: webviewView.onDidChangeVisibility,
+        onDidDispose: webviewView.onDidDispose,
       },
-      show: () => webviewView.show(true),
-      onDidChangeVisibility: webviewView.onDidChangeVisibility,
-      onDidDispose: webviewView.onDidDispose,
-    });
+      this._panelHooks?.bodyAttrs,
+    );
   }
 
   /**
@@ -1752,6 +1762,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       await new Promise(r => setTimeout(r, 200));
     }
     this._sendToWebview({type: 'openSettings'});
+  }
+
+  /**
+   * Ask the webview to bring one of its chat's tasks on screen —
+   * scroll to the task's transcript region or replay it (editor-tabs
+   * mode: a history-panel click on a chat whose panel already exists).
+   *
+   * @param taskId The task's history-row id.
+   */
+  public showTask(taskId: string): void {
+    this._sendToWebview({type: 'showTask', taskId});
   }
 
   public stopTask(): void {
