@@ -74,10 +74,11 @@ function testSidebarWebview() {
   assert.strictEqual(msgs.length, 1);
   assert.strictEqual(msgs[0].enabled, true);
 
-  // Sidebar mode keeps its internal tab bar chrome untouched.
+  // Sidebar mode keeps its internal tab bar and the footer's new-chat
+  // and settings controls (the latter inside the "..." menu).
   assert.strictEqual(win.document.getElementById('tab-bar').style.display, '');
-  assert.ok(win.document.querySelector('#tab-bar .chat-tab-add'));
-  assert.ok(win.document.querySelector('#tab-bar .chat-tab-settings'));
+  assert.ok(win.document.getElementById('new-chat-btn'));
+  assert.ok(win.document.getElementById('settings-btn'));
 
   // No stray panel-title reports outside editor-tabs mode.
   assert.strictEqual(

@@ -29,18 +29,18 @@ _MEDIA_DIR = (
 class TestGitCommitButtonWiring(unittest.TestCase):
     """The webview carries the button and posts the command."""
 
-    def test_button_markup_in_settings_row(self) -> None:
+    def test_button_markup_in_more_menu(self) -> None:
         html = (_MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
-        i_row = html.find('class="config-update-row"')
+        i_menu = html.find('id="more-menu"')
         i_btn = html.find('id="autocommit-btn"')
-        self.assertGreater(i_row, -1)
+        self.assertGreater(i_menu, -1)
         self.assertGreater(i_btn, -1)
-        self.assertLess(i_row, i_btn, "button must be in the settings row")
+        self.assertLess(i_menu, i_btn, 'button must be in the "..." menu')
         tag = html[html.rfind("<button", 0, i_btn) : html.index(">", i_btn) + 1]
         self.assertIn('data-tooltip="git commit"', tag)
-        self.assertIn("config-gitcommit-btn", tag)
+        self.assertIn("more-menu-item", tag)
         btn_block = html[i_btn : html.index("</button>", i_btn)]
-        self.assertIn("<span>Git Commit</span>", btn_block)
+        self.assertIn('<span class="more-item-label">Git Commit</span>', btn_block)
 
     def test_main_js_posts_autocommit_action(self) -> None:
         js = (_MEDIA_DIR / "main.js").read_text(encoding="utf-8")
@@ -63,8 +63,8 @@ class TestGitCommitButtonWiring(unittest.TestCase):
         remote_css = (
             _MEDIA_DIR / "remote-codex.css"
         ).read_text(encoding="utf-8")
-        self.assertIn(".config-gitcommit-btn", main_css)
-        self.assertIn(".config-gitcommit-btn", remote_css)
+        self.assertIn(".more-menu-item", main_css)
+        self.assertIn(".more-menu-item", remote_css)
 
 
 class TestGitCommitCommandCatalog(unittest.TestCase):
