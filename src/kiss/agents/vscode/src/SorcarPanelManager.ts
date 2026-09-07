@@ -339,31 +339,57 @@ export class SorcarPanelManager {
         if (event.retire) this._retire(cp);
         cp.panel.dispose();
         break;
-      case 'openChat': {
-        const chatId = event.chatId ? String(event.chatId) : '';
-        if (chatId) {
-          // One chat, one panel: a history open of a chat that already
-          // has an editor tab reveals that tab (the daemon registry
-          // enforces the same one-tab-per-chat invariant).
-          for (const other of this._panels.values()) {
-            if (other.chatId === chatId) {
-              other.panel.reveal();
-              return;
-            }
-          }
-        }
-        this._createPanel({
-          tabId: randomTabId(),
-          title: event.title,
-          resumeChatId: chatId || undefined,
-          resumeTaskId:
-            event.taskId === undefined || event.taskId === null
-              ? undefined
-              : String(event.taskId),
-        });
+      case 'openChat':
+        this.openChat(event);
         break;
+    }
+  }
+
+  /**
+   * Open a chat as an editor tab: reveal the panel already bound to
+   * `event.chatId`, or create a new panel resuming it (a fresh
+   * conversation when the id is empty). Serves both an editor-tab
+   * webview's own history opens and the primary-sidebar history
+   * panel's clicks.
+   *
+   * @param event The chat to open — backend chat id ('' or absent for
+   *     a fresh one), the task to scroll to, and the panel title.
+   */
+  public openChat(event: {
+    chatId?: string;
+    taskId?: string | number | null;
+    title?: string;
+  }): void {
+    const chatId = event.chatId ? String(event.chatId) : '';
+    if (chatId) {
+      // One chat, one panel: a history open of a chat that already
+      // has an editor tab reveals that tab (the daemon registry
+      // enforces the same one-tab-per-chat invariant) and brings the
+      // clicked task on screen instead of leaving the panel parked on
+      // whatever task it was showing.
+      for (const other of this._panels.values()) {
+        if (other.chatId === chatId) {
+          other.panel.reveal();
+          if (
+            event.taskId !== undefined &&
+            event.taskId !== null &&
+            event.taskId !== ''
+          ) {
+            other.controller.showTask(String(event.taskId));
+          }
+          return;
+        }
       }
     }
+    this._createPanel({
+      tabId: randomTabId(),
+      title: event.title,
+      resumeChatId: chatId || undefined,
+      resumeTaskId:
+        event.taskId === undefined || event.taskId === null
+          ? undefined
+          : String(event.taskId),
+    });
   }
 
   /**

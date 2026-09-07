@@ -362,6 +362,36 @@ function testResumeOnBoot() {
   );
 }
 
+function testShowTaskMessage() {
+  const {win, posted} = makeWebview(editorAttrs());
+  // Bind the root tab to a backend chat, like a real panel would be.
+  send(win, {
+    type: 'tabs_state',
+    tabs: [{tabId: ROOT, chatId: 'chat-9', title: 'My chat', workDir: ''}],
+  });
+  // The clicked task has no rendered transcript region in this fresh
+  // panel, so the webview must replay the chat at that task.
+  send(win, {type: 'showTask', taskId: 7});
+  const resumes = byType(posted, 'resumeSession');
+  assert.strictEqual(
+    resumes.length,
+    1,
+    "the host's showTask must replay the task when it is not on screen",
+  );
+  assert.strictEqual(resumes[0].id, 'chat-9');
+  assert.strictEqual(resumes[0].taskId, 7);
+  assert.strictEqual(resumes[0].tabId, ROOT);
+
+  // Without a chat binding there is nothing to replay: no resume.
+  const bare = makeWebview(editorAttrs());
+  send(bare.win, {type: 'showTask', taskId: 3});
+  assert.strictEqual(
+    byType(bare.posted, 'resumeSession').length,
+    0,
+    'showTask on an unbound panel must not post a bogus resume',
+  );
+}
+
 function main() {
   const {win, posted, getState} = testBootAdoptsRootTab();
   testReconcileFollowsOwnEntryOnly(win, posted, getState);
@@ -373,6 +403,7 @@ function main() {
   testOpenSettingsMessage();
   testSettingsToggle();
   testResumeOnBoot();
+  testShowTaskMessage();
   console.log('editorTabsModeWebview: all tests passed');
 }
 

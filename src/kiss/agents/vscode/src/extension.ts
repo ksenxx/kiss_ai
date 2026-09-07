@@ -7,14 +7,18 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import {SorcarSidebarView} from './SorcarSidebarView';
-import {SorcarPanelManager} from './SorcarPanelManager';
+import {CHAT_PANEL_VIEW_TYPE, SorcarPanelManager} from './SorcarPanelManager';
 import {getGitApi} from './gitApi';
 import {isReloadReady} from './reloadGuard';
 
 import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
 import {findKissProject} from './kissPaths';
 import {kissHomeDir, sorcarSockPath} from './userAssets';
-import {resetTipsOnExtensionUpdate} from './SorcarTab';
+import {
+  HISTORY_PANEL_TAB_ID,
+  historyPanelBodyAttrs,
+  resetTipsOnExtensionUpdate,
+} from './SorcarTab';
 import {
   checkForExtensionUpdate,
   snoozeUpdateNotification,
@@ -27,6 +31,7 @@ import {
 
 let sidebarView: SorcarSidebarView | undefined;
 let panelManager: SorcarPanelManager | undefined;
+let historyView: SorcarSidebarView | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   ensureLocalBinInPath();
@@ -97,6 +102,78 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   sidebarView.syncWorkDir();
+
+  // True when ANY editor tab hosts a chat panel. The workbench's
+  // restored chat tabs count too: after a window reload they exist as
+  // serialized placeholders long before the panel manager adopts them,
+  // and opening a "first" chat next to them would be a duplicate.
+  const hasChatEditorTab = (): boolean => {
+    // Guarded like the other optional host APIs (absent in test stubs).
+    const groups = vscode.window.tabGroups?.all;
+    if (!groups) return panelManager!.panelCount > 0;
+    for (const group of groups) {
+      for (const tab of group.tabs) {
+        const viewType = (tab.input as {viewType?: unknown} | null)?.viewType;
+        if (
+          typeof viewType === 'string' &&
+          viewType.includes(CHAT_PANEL_VIEW_TYPE)
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  // A KS button brought the history panel on screen; an editor window
+  // with no chat tab at all also gets a fresh conversation.
+  const openChatIfNoneOpen = (): void => {
+    if (!editorTabsMode()) return;
+    if (panelManager!.panelCount > 0 || hasChatEditorTab()) return;
+    void panelManager!.openNewChat().focusChatInput();
+  };
+
+  // The primary-sidebar history panel (editor-tabs mode): the same
+  // chat webview in history-only mode (see historyPanelBodyAttrs), so
+  // search, filters, deletes and live refreshes all come from main.js
+  // unchanged. Its history clicks arrive as `openChatPanel` messages
+  // and open editor tabs through the panel manager.
+  historyView = new SorcarSidebarView(context.extensionUri, {
+    rootTabId: HISTORY_PANEL_TAB_ID,
+    bodyAttrs: historyPanelBodyAttrs(),
+    onEvent: event => {
+      if (event.kind === 'openChat') panelManager?.openChat(event);
+    },
+  });
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      'kissSorcar.historyView',
+      {
+        resolveWebviewView: (view, resolveContext, token) => {
+          historyView!.resolveWebviewView(view, resolveContext, token);
+          view.onDidChangeVisibility(() => {
+            if (view.visible) openChatIfNoneOpen();
+          });
+          openChatIfNoneOpen();
+        },
+      },
+      {webviewOptions: {retainContextWhenHidden: true}},
+    ),
+  );
+  context.subscriptions.push({dispose: () => historyView?.dispose()});
+
+  // The editor-title KS button (editor-tabs mode): show the history
+  // panel in the primary sidebar, and make sure a chat tab is open.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.showHistory', async () => {
+      if (!editorTabsMode()) {
+        await sidebarView!.focusChatInput();
+        return;
+      }
+      await vscode.commands.executeCommand('kissSorcar.historyView.focus');
+      openChatIfNoneOpen();
+    }),
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.openPanel', () => {
@@ -554,5 +631,7 @@ export function deactivate(): void {
   panelManager = undefined;
   sidebarView?.dispose();
   sidebarView = undefined;
+  historyView?.dispose();
+  historyView = undefined;
   console.log('KISS Sorcar extension deactivated');
 }

@@ -418,6 +418,11 @@ type ToWebviewMessageBody =
   // Host (editor-tabs mode): open the webview's settings panel — the
   // editor-title gear button's action.
   | {type: 'openSettings'}
+  // Host (editor-tabs mode): bring one of the panel's own chat's tasks
+  // on screen — a history-panel click on a task of a chat whose editor
+  // tab is already open. The webview scrolls to the task's transcript
+  // region, or replays the task when it is not rendered.
+  | {type: 'showTask'; taskId: string}
   // Daemon: answer to a `complete` command (the input-box ghost /
   // autocomplete list), scoped to the requesting connection and tab.
   | {

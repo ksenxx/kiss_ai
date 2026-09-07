@@ -325,9 +325,11 @@ async function runTests() {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-cmde-ws-'));
   workspaceFolders = [{uri: makeUri(ws)}];
 
+  // The extension registers one provider per view id (the chat view
+  // AND the editor-tabs history panel); this test drives the CHAT one.
   let provider = null;
-  vscodeStub.window.registerWebviewViewProvider = (_id, p) => {
-    provider = p;
+  vscodeStub.window.registerWebviewViewProvider = (id, p) => {
+    if (id === 'kissSorcar.chatViewSecondary') provider = p;
     return makeDisposable();
   };
 
@@ -459,8 +461,8 @@ async function runTests() {
 
   registeredCommands.clear();
   let provider2 = null;
-  vscodeStub.window.registerWebviewViewProvider = (_id, p) => {
-    provider2 = p;
+  vscodeStub.window.registerWebviewViewProvider = (id, p) => {
+    if (id === 'kissSorcar.chatViewSecondary') provider2 = p;
     return makeDisposable();
   };
   const context2 = {
@@ -520,8 +522,8 @@ async function runTests() {
 
   registeredCommands.clear();
   let provider3 = null;
-  vscodeStub.window.registerWebviewViewProvider = (_id, p) => {
-    provider3 = p;
+  vscodeStub.window.registerWebviewViewProvider = (id, p) => {
+    if (id === 'kissSorcar.chatViewSecondary') provider3 = p;
     return makeDisposable();
   };
   const context3 = {
