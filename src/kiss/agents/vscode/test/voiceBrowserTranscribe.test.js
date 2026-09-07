@@ -14,6 +14,9 @@ const {JSDOM} = require('jsdom');
 
 const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
 const BLOCK = 4096;
+// v.wake() feeds ceil(0.3s) of pre-wake audio before triggering the wake;
+// at 16kHz output that is 4800 samples of wake preamble in every post.
+const PREAMBLE = Math.ceil(0.3 * 16000);
 
 let passed = 0;
 const failures = [];
@@ -181,11 +184,25 @@ async function main() {
         'browser mode must post the captured speech for transcription ' +
           '(the reproduced bug: nothing is ever posted)',
       );
+      assert.strictEqual(
+        msgs[0].wakePrefixed,
+        true,
+        'the posted audio must be flagged as wake-word-prefixed',
+      );
+      assert.strictEqual(
+        msgs[0].wakeSamples,
+        PREAMBLE,
+        'wakeSamples must mark where the preamble ends',
+      );
       const pcm = decodePcm(msgs[0].audio);
-      assert.strictEqual(pcm.length, 10 * BLOCK);
+      // v.wake() fed 0.3s (4800 samples) of pre-wake audio: the wake
+      // preamble is prepended to the 10 capture blocks.
+      assert.strictEqual(pcm.length, PREAMBLE + 10 * BLOCK);
+      assert.strictEqual(pcm[0], 0, 'the preamble here is silence');
       assert.ok(
-        Math.abs(pcm[0] - Math.round(0.1 * 0x7fff)) <= 1,
-        `first sample ${pcm[0]} must encode the 0.1 amplitude`,
+        Math.abs(pcm[PREAMBLE] - Math.round(0.1 * 0x7fff)) <= 1,
+        `sample ${pcm[PREAMBLE]} after the preamble must encode the ` +
+          '0.1 amplitude',
       );
       assert.ok(
         v.btn.classList.contains('voice-transcribing'),
@@ -336,12 +353,85 @@ async function main() {
     const msgs = v.posted.filter(m => m.type === 'voiceTranscribe');
     assert.strictEqual(msgs.length, 1);
     const pcm = decodePcm(msgs[0].audio);
-    assert.strictEqual(pcm.length, (48000 + 96000) / 3);
+    // wake() fed ceil(0.3 * 48000) = 14400 pre-wake samples -> 4800 at
+    // 16kHz, prepended to the (48000 + 96000) / 3 downsampled capture.
+    assert.strictEqual(pcm.length, PREAMBLE + (48000 + 96000) / 3);
+    assert.strictEqual(pcm[0], 0, 'the preamble here is silence');
     assert.ok(
-      Math.abs(pcm[0] - Math.round(0.2 * 0x7fff)) <= 1,
-      `first sample ${pcm[0]} must encode the 0.2 amplitude`,
+      Math.abs(pcm[PREAMBLE] - Math.round(0.2 * 0x7fff)) <= 1,
+      `sample ${pcm[PREAMBLE]} after the preamble must encode the ` +
+        '0.2 amplitude',
     );
   });
+
+  await test(
+    'pre-wake audio (the wake word) is prepended to the posted capture',
+    async () => {
+      const v = await makeBrowserVoice();
+      v.feed(loudBlock(v.win, 0.05));
+      v.wake();
+      v.feed(loudBlock(v.win, 0.1));
+      for (let i = 0; i < 8; i++) v.feed(new v.win.Float32Array(BLOCK));
+      const msgs = v.posted.filter(m => m.type === 'voiceTranscribe');
+      assert.strictEqual(msgs.length, 1);
+      assert.strictEqual(msgs[0].wakePrefixed, true);
+      assert.strictEqual(msgs[0].wakeSamples, BLOCK + PREAMBLE);
+      const pcm = decodePcm(msgs[0].audio);
+      assert.strictEqual(pcm.length, BLOCK + PREAMBLE + 9 * BLOCK);
+      assert.ok(
+        Math.abs(pcm[0] - Math.round(0.05 * 0x7fff)) <= 1,
+        `first sample ${pcm[0]} must carry the pre-wake 0.05 amplitude`,
+      );
+      assert.ok(
+        Math.abs(pcm[BLOCK + PREAMBLE] - Math.round(0.1 * 0x7fff)) <= 1,
+        'the capture must follow the preamble',
+      );
+    },
+  );
+
+  await test(
+    'the wake preamble ring keeps only the most recent ~2s',
+    async () => {
+      const v = await makeBrowserVoice();
+      // 12 blocks x 256ms = 3072ms of pre-wake audio; the 2000ms ring
+      // keeps 8 (evict while dropping the oldest still leaves >= 2000ms),
+      // and wake()'s 300ms silence block then evicts one more.
+      for (let i = 0; i < 12; i++) v.feed(loudBlock(v.win, 0.05));
+      v.wake();
+      v.feed(loudBlock(v.win, 0.1));
+      for (let i = 0; i < 8; i++) v.feed(new v.win.Float32Array(BLOCK));
+      const msgs = v.posted.filter(m => m.type === 'voiceTranscribe');
+      assert.strictEqual(msgs.length, 1);
+      const pcm = decodePcm(msgs[0].audio);
+      assert.strictEqual(pcm.length, 7 * BLOCK + PREAMBLE + 9 * BLOCK);
+    },
+  );
+
+  await test(
+    'a second round does not reuse the first round\'s preamble',
+    async () => {
+      const v = await makeBrowserVoice();
+      v.feed(loudBlock(v.win, 0.05));
+      v.wake();
+      v.feed(loudBlock(v.win, 0.1));
+      for (let i = 0; i < 8; i++) v.feed(new v.win.Float32Array(BLOCK));
+      assert.strictEqual(
+        v.posted.filter(m => m.type === 'voiceTranscribe').length,
+        1,
+      );
+      v.advance(2500);
+      v.wake();
+      v.feed(loudBlock(v.win, 0.1));
+      for (let i = 0; i < 8; i++) v.feed(new v.win.Float32Array(BLOCK));
+      const msgs = v.posted.filter(m => m.type === 'voiceTranscribe');
+      assert.strictEqual(msgs.length, 2);
+      const pcm = decodePcm(msgs[1].audio);
+      // Only wake()'s own 0.3s block is in the second preamble: the
+      // ring was cleared when the first capture began.
+      assert.strictEqual(pcm.length, PREAMBLE + 9 * BLOCK);
+      assert.strictEqual(pcm[0], 0);
+    },
+  );
 
   await test('actual voice: real TTS speech is captured and posted', async () => {
     const hasSay =
