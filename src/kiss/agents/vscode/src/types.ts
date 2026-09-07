@@ -117,7 +117,27 @@ export type FromWebviewMessage =
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
   | {type: 'voiceSensitivity'; value: number}
   | {type: 'voiceAck'}
-  | {type: 'voiceDropped'; tabId?: string; text: string};
+  | {type: 'voiceDropped'; tabId?: string; text: string}
+  // Editor-tabs mode (host-only, never forwarded to the daemon): the
+  // webview's root chat tab renamed itself, so the hosting editor tab
+  // should follow.
+  | {type: 'panelTitle'; title: string; tabId?: string}
+  // Editor-tabs mode: open another chat as a new editor tab — a fresh
+  // conversation when chatId is absent, a history resume otherwise.
+  | {
+      type: 'openChatPanel';
+      chatId?: string;
+      taskId?: string | number | null;
+      title?: string;
+    }
+  // Editor-tabs mode: close this panel — because the daemon's registry
+  // no longer lists its chat tab (another client closed it; retire
+  // absent/false), or because the user closed the root chat inside the
+  // panel (retire true: the host must also retire the tab from the
+  // registry).
+  | {type: 'closePanel'; retire?: boolean}
+  // The settings UI's editor-tabs toggle (both modes).
+  | {type: 'setEditorTabsMode'; enabled: boolean};
 
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
 
@@ -395,6 +415,9 @@ type ToWebviewMessageBody =
   // Daemon: a plain informational line for one connection (e.g. "an
   // update is already running").
   | {type: 'notice'; text: string}
+  // Host (editor-tabs mode): open the webview's settings panel — the
+  // editor-title gear button's action.
+  | {type: 'openSettings'}
   // Daemon: answer to a `complete` command (the input-box ghost /
   // autocomplete list), scoped to the requesting connection and tab.
   | {

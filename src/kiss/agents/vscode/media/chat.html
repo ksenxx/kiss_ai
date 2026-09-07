@@ -208,6 +208,14 @@
             <input type="checkbox" id="cfg-use-worktree" checked>
             Use worktree
           </label>
+          <!-- VS Code only (main.js unhides it outside the remote web
+               app): chats as editor tabs instead of the sidebar view.
+               Not part of the daemon config — the change posts
+               setEditorTabsMode straight to the extension host. -->
+          <label class="config-label config-checkbox" id="cfg-editor-tabs-mode-label" style="display:none;">
+            <input type="checkbox" id="cfg-editor-tabs-mode">
+            Open chats as editor tabs
+          </label>
           <label class="config-label">Auto submit spoken task
             <select id="cfg-voice-auto-submit">
               <option value="on">Yes &mdash; send it right away</option>

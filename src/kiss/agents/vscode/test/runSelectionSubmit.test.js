@@ -165,6 +165,7 @@ stubModule(path.join(OUT_DIR, 'UpdateChecker.js'), {
 });
 stubModule(path.join(OUT_DIR, 'WebviewNotifications.js'), {
   setWebviewNotificationPoster: () => {},
+  clearWebviewNotificationPoster: () => {},
   resolveWebviewNotificationAction: () => {},
   showInformationNotification: msg => {
     notifications.push(msg);
