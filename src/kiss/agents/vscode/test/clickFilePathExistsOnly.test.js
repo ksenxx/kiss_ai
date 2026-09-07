@@ -574,7 +574,7 @@ function testBackgroundTabResolvesAgainstItsOwnWorkDir() {
   const tabIdsBefore = Array.from(
     doc.querySelectorAll('.chat-tab[data-tab-id]'),
   ).map(el => el.dataset.tabId);
-  const addBtn = doc.querySelector('.chat-tab-add');
+  const addBtn = doc.querySelector('#new-chat-btn');
   assert.ok(addBtn, 'tab add button must exist');
   clickEl(win, addBtn);
   const tabIdsAfter = Array.from(

@@ -117,17 +117,6 @@
       }
     ],
     "menus": {
-      "editor/title": [
-        {
-          "command": "kissSorcar.openSettings",
-          "group": "navigation@-2",
-          "when": "config.kissSorcar.editorTabsMode"
-        },
-        {
-          "command": "kissSorcar.newConversation",
-          "group": "navigation@-1"
-        }
-      ],
       "scm/title": [
         {
           "command": "kissSorcar.generateCommitMessage",

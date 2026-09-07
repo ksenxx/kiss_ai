@@ -135,19 +135,27 @@ function tabEls(win) {
 }
 
 function testAddTabControlIsAccessibleButton() {
-  // The "+" control must be a real accessible button with the name
-  // "New chat", and Enter/Space must create exactly one new tab per
-  // activation, exactly like a click does.
+  // The "+" (new chat) control now lives in the input footer.  It must
+  // be a NATIVE <button> (native buttons activate on Enter/Space in a
+  // real browser -- JSDOM does not synthesize that click, so keyboard
+  // activation is guaranteed by the element type rather than emulated
+  // here) named "New chat", and a click must create exactly one tab.
   const {win} = makeWebview(undefined);
-  const addBtn = win.document.querySelector('.chat-tab-add');
-  assert.ok(addBtn, 'add-tab control missing');
+  const addBtn = win.document.getElementById('new-chat-btn');
+  assert.ok(addBtn, 'new-chat control missing from the input footer');
 
-  const role = assertFocusable(addBtn, 'the add-tab control');
-  assert.strictEqual(role, 'button', 'add-tab control must be a button');
+  assert.strictEqual(
+    addBtn.tagName,
+    'BUTTON',
+    'the new-chat control must be a native <button> so Enter/Space ' +
+      'activate it without bespoke keydown handlers',
+  );
+  const role = assertFocusable(addBtn, 'the new-chat control');
+  assert.strictEqual(role, 'button', 'new-chat control must be a button');
   assert.strictEqual(
     addBtn.getAttribute('aria-label'),
     'New chat',
-    'add-tab control must be named "New chat" for screen readers',
+    'new-chat control must be named "New chat" for screen readers',
   );
 
   const before = tabBarIds(win).length;
@@ -155,53 +163,66 @@ function testAddTabControlIsAccessibleButton() {
   assert.strictEqual(
     tabBarIds(win).length,
     before + 1,
-    'a click on + must create exactly one tab (baseline, no double-fire)',
-  );
-
-  pressKey(win, win.document.querySelector('.chat-tab-add'), 'Enter');
-  assert.strictEqual(
-    tabBarIds(win).length,
-    before + 2,
-    'Enter on the + control must create exactly one new tab like a click',
-  );
-
-  const spaceEv = pressKey(win, win.document.querySelector('.chat-tab-add'), ' ');
-  assert.strictEqual(
-    tabBarIds(win).length,
-    before + 3,
-    'Space on the + control must create exactly one new tab like a click',
-  );
-  assert.ok(
-    spaceEv.defaultPrevented,
-    'Space on the + control must preventDefault (or the page scrolls)',
+    'a click on + must create exactly one tab (no double-fire)',
   );
 }
 
 function testSettingsControlIsAccessibleButton() {
-  // FINDING 1: the Settings gear must be a real accessible button --
-  // focusable, named "Settings", opening the settings panel on
-  // Enter/Space exactly once per activation, exactly like a click.
+  // The Settings control now lives in the "..." overflow menu.  It must
+  // be a real accessible NATIVE <button> (so Enter/Space activate it in
+  // a real browser without bespoke keydown handlers) named "Settings",
+  // reachable through the "..." button, and a click must open the
+  // settings panel exactly once and close the overflow menu.
   const {win, posted} = makeWebview(undefined);
   const panel = win.document.getElementById('settings-panel');
   assert.ok(panel, 'settings panel missing from chat.html');
   const getConfigCount = () =>
     posted.filter(m => m && m.type === 'getConfig').length;
-  const closePanel = () => panel.classList.remove('open');
 
-  const settingsBtn = win.document.querySelector('.chat-tab-settings');
-  assert.ok(settingsBtn, 'settings control missing');
-
-  const role = assertFocusable(settingsBtn, 'the settings control');
-  assert.strictEqual(role, 'button', 'settings control must be a button');
+  const moreBtn = win.document.getElementById('more-btn');
+  assert.ok(moreBtn, 'the "..." button missing from the input footer');
   assert.strictEqual(
-    settingsBtn.getAttribute('aria-label'),
-    'Settings',
-    'settings control must be named "Settings" for screen readers',
+    moreBtn.tagName,
+    'BUTTON',
+    'the "..." control must be a native <button>',
+  );
+  assert.strictEqual(
+    moreBtn.getAttribute('aria-haspopup'),
+    'true',
+    'the "..." control must announce its popup menu',
   );
 
-  // Click baseline: opens the panel and requests the config exactly
-  // once (openSettingsPanel calls api.getConfig(), so the posted
-  // getConfig count is the activation count).
+  const moreMenu = win.document.getElementById('more-menu');
+  assert.ok(moreMenu, 'the "..." menu missing');
+  moreBtn.click();
+  assert.ok(
+    moreMenu.classList.contains('open'),
+    'clicking "..." must open the overflow menu',
+  );
+  assert.strictEqual(
+    moreBtn.getAttribute('aria-expanded'),
+    'true',
+    'the "..." control must report the open menu via aria-expanded',
+  );
+
+  const settingsBtn = win.document.getElementById('settings-btn');
+  assert.ok(settingsBtn, 'settings control missing from the "..." menu');
+  assert.strictEqual(
+    settingsBtn.tagName,
+    'BUTTON',
+    'the settings control must be a native <button> so Enter/Space ' +
+      'activate it without bespoke keydown handlers',
+  );
+  const role = assertFocusable(settingsBtn, 'the settings control');
+  assert.strictEqual(role, 'button', 'settings control must be a button');
+  assert.ok(
+    (settingsBtn.textContent || '').indexOf('Settings') !== -1,
+    'settings control must be named "Settings"',
+  );
+
+  // Click: opens the panel, requests the config exactly once
+  // (openSettingsPanel calls api.getConfig(), so the posted getConfig
+  // count is the activation count) and closes the overflow menu.
   const base = getConfigCount();
   settingsBtn.click();
   assert.ok(
@@ -213,33 +234,9 @@ function testSettingsControlIsAccessibleButton() {
     base + 1,
     'a click must activate the settings handler exactly once',
   );
-
-  closePanel();
-  pressKey(win, settingsBtn, 'Enter');
   assert.ok(
-    panel.classList.contains('open'),
-    'Enter on the settings control must open the settings panel',
-  );
-  assert.strictEqual(
-    getConfigCount(),
-    base + 2,
-    'Enter must activate the settings handler exactly once',
-  );
-
-  closePanel();
-  const spaceEv = pressKey(win, settingsBtn, ' ');
-  assert.ok(
-    panel.classList.contains('open'),
-    'Space on the settings control must open the settings panel',
-  );
-  assert.strictEqual(
-    getConfigCount(),
-    base + 3,
-    'Space must activate the settings handler exactly once',
-  );
-  assert.ok(
-    spaceEv.defaultPrevented,
-    'Space on the settings control must preventDefault (or the page scrolls)',
+    !moreMenu.classList.contains('open'),
+    'activating a menu item must close the "..." menu',
   );
 }
 
@@ -623,26 +620,38 @@ function testSubagentTabsGetTabSemantics() {
 }
 
 function testRemoteControlOrderAndThemeAccessibility() {
-  // In the remote web app the bar must read, in order: the tab list,
-  // then New chat (+), then the theme toggle, then Settings -- and the
-  // theme toggle must be a named, keyboard-activatable button too.
+  // The footer must read, in order: burger menu, New chat (+), inject,
+  // then the "..." overflow control on the left; model picker, spinner,
+  // send, stop on the right.  The theme toggle lives in the "..." menu
+  // and must be a named, keyboard-activatable native button.
   const {win} = makeWebview(undefined, {remote: true});
 
-  const children = Array.from(win.document.getElementById('tab-bar').children);
-  const order = children.map(el => {
-    if (el.id === 'tab-list') return 'tab-list';
-    if (el.classList.contains('chat-tab-add')) return 'add';
-    if (el.classList.contains('chat-tab-theme')) return 'theme';
-    if (el.classList.contains('chat-tab-settings')) return 'settings';
-    return el.id || el.className;
-  });
+  const tools = Array.from(
+    win.document.getElementById('footer-tools').children,
+  ).map(el => el.id);
   assert.deepStrictEqual(
-    order,
-    ['tab-list', 'add', 'theme', 'settings'],
-    'remote tab bar controls must keep the order tab-list, add, theme, settings',
+    tools,
+    ['menu-btn', 'new-chat-btn', 'tricks-btn', 'more-menu-wrap'],
+    'footer tools must keep the order burger, +, inject, "..."',
   );
 
-  const themeBtn = win.document.querySelector('.chat-tab-theme');
+  const actions = Array.from(
+    win.document.getElementById('input-actions').children,
+  ).map(el => el.id);
+  assert.deepStrictEqual(
+    actions,
+    ['model-picker', 'wait-spinner', 'send-btn', 'stop-btn'],
+    'the model picker must sit right of the footer, before the ' +
+      'spinner, send and stop controls',
+  );
+
+  const themeBtn = win.document.getElementById('theme-btn');
+  assert.ok(themeBtn, 'theme toggle missing from the "..." menu');
+  assert.strictEqual(
+    themeBtn.tagName,
+    'BUTTON',
+    'theme toggle must be a native <button> so Enter/Space activate it',
+  );
   const role = assertFocusable(themeBtn, 'the theme toggle');
   assert.strictEqual(role, 'button', 'theme toggle must be a button');
   assert.ok(
@@ -651,15 +660,11 @@ function testRemoteControlOrderAndThemeAccessibility() {
   );
 
   const wasLight = win.document.body.classList.contains('light-theme');
-  const spaceEv = pressKey(win, themeBtn, ' ');
+  themeBtn.click();
   assert.notStrictEqual(
     win.document.body.classList.contains('light-theme'),
     wasLight,
-    'Space on the theme toggle must switch the theme like a click',
-  );
-  assert.ok(
-    spaceEv.defaultPrevented,
-    'Space on the theme toggle must preventDefault (or the page scrolls)',
+    'a click on the theme toggle must switch the theme',
   );
 }
 

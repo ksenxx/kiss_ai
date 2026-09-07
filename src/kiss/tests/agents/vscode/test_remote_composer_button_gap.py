@@ -5,11 +5,12 @@
 """E2E tests: composer buttons are spread out and never overlap.
 
 The composer row below the input textbox (``#input-footer`` in
-``media/chat.html``) holds the left button group (``#model-picker``:
-burger menu ``#menu-btn``, model pill ``#model-btn``, attach files
-``#upload-btn``, inject promptlet ``#tricks-btn``, mic ``#voice-btn``
-and share ``#share-btn``) and the right group (``#input-actions``:
-send/stop).
+``media/chat.html``) holds the left button group (``#footer-tools``:
+burger menu ``#menu-btn``, new chat ``#new-chat-btn``, inject promptlet
+``#tricks-btn`` and the "..." overflow menu ``#more-btn``) and the
+right group (``#input-actions``: model pill ``#model-btn``, then
+send/stop).  Mic, share and attach live inside the "..." menu and are
+not part of the idle row.
 
 Historically ``remote-codex.css`` pulled the remote webapp's 36px
 circular controls together with ``margin-left/right: -8px``, so the
@@ -60,13 +61,11 @@ from kiss.tests.agents.vscode.test_remote_composer_full_width import (
 
 _LEFT_GROUP_IDS = [
     "menu-btn",
-    "model-btn",
-    "upload-btn",
+    "new-chat-btn",
     "tricks-btn",
-    "voice-btn",
-    "share-btn",
+    "more-btn",
 ]
-_ALL_IDS = _LEFT_GROUP_IDS + ["send-btn"]
+_ALL_IDS = _LEFT_GROUP_IDS + ["model-btn", "send-btn"]
 # While a task runs, main.js shows send AND stop plus the wait spinner
 # (setRunningState: sendBtn stays flex, stopBtn becomes flex, spinner
 # turns active), so the running footer holds two more controls.
@@ -131,10 +130,15 @@ def _assert_buttons_spread_out(geometry: dict, min_gap: float) -> None:
             f"input textbox must be spread out by at least "
             f"{min_gap:.0f}px and must not overlap"
         )
-    send_gap = boxes["send-btn"]["left"] - boxes["share-btn"]["right"]
-    assert send_gap >= min_gap, (
-        f"gap share-btn -> send-btn is {send_gap:.2f}px; the left and "
+    model_gap = boxes["model-btn"]["left"] - boxes["more-btn"]["right"]
+    assert model_gap >= min_gap, (
+        f"gap more-btn -> model-btn is {model_gap:.2f}px; the left and "
         "right button groups must not overlap"
+    )
+    send_gap = boxes["send-btn"]["left"] - boxes["model-btn"]["right"]
+    assert send_gap >= min_gap, (
+        f"gap model-btn -> send-btn is {send_gap:.2f}px; the model pill "
+        "and the send button must not overlap"
     )
     centers = [
         (boxes[i]["top"] + boxes[i]["bottom"]) / 2 for i in _ALL_IDS
@@ -296,10 +300,9 @@ def test_remote_composer_buttons_spread_out(tmp_path: Path) -> None:
     boxes = geometry["boxes"]
     for bid in (
         "menu-btn",
-        "upload-btn",
+        "new-chat-btn",
         "tricks-btn",
-        "voice-btn",
-        "share-btn",
+        "more-btn",
     ):
         assert boxes[bid]["width"] == 36, boxes
         assert boxes[bid]["height"] == 36, boxes

@@ -119,24 +119,27 @@ function testTabBarPlusAndSettingsAreBigger() {
   const {win} = makeWebview();
   const doc = win.document;
 
-  const addBtn = doc.querySelector('.chat-tab-add');
-  assert.ok(addBtn, 'tab bar must render the "+" button');
-  const add = cssRule(win, '.chat-tab-add');
-  assert.ok(add, 'main.css must style .chat-tab-add');
-  assertAtLeast(add.minWidth, 28, '.chat-tab-add min-width');
-  assertAtLeast(add.fontSize, 20, '.chat-tab-add font-size');
+  const addBtn = doc.getElementById('new-chat-btn');
+  assert.ok(addBtn, 'input footer must render the "+" (new chat) button');
+  const plus = addBtn.querySelector('svg');
+  assert.ok(plus, 'new-chat button must contain the plus svg');
+  assertAtLeast(plus.getAttribute('width'), 16, 'new-chat svg width');
+  assertAtLeast(plus.getAttribute('height'), 16, 'new-chat svg height');
 
-  const settingsBtn = doc.querySelector('.chat-tab-settings');
-  assert.ok(settingsBtn, 'tab bar must render the settings button');
-  const settings = cssRule(win, '.chat-tab-settings');
-  assert.ok(settings, 'main.css must style .chat-tab-settings');
-  assertAtLeast(settings.minWidth, 28, '.chat-tab-settings min-width');
+  const moreBtn = doc.getElementById('more-btn');
+  assert.ok(moreBtn, 'input footer must render the "..." button');
+  const dots = moreBtn.querySelector('svg');
+  assert.ok(dots, 'the "..." button must contain the ellipsis svg');
+  assertAtLeast(dots.getAttribute('width'), 16, 'more-btn svg width');
+
+  const settingsBtn = doc.getElementById('settings-btn');
+  assert.ok(settingsBtn, 'the "..." menu must render the settings button');
   const gear = settingsBtn.querySelector('svg');
   assert.ok(gear, 'settings button must contain the gear svg');
-  assertAtLeast(gear.getAttribute('width'), 18, 'settings gear svg width');
-  assertAtLeast(gear.getAttribute('height'), 18, 'settings gear svg height');
+  assertAtLeast(gear.getAttribute('width'), 16, 'settings gear svg width');
+  assertAtLeast(gear.getAttribute('height'), 16, 'settings gear svg height');
   win.close();
-  console.log('  ok - tab-bar "+" and settings buttons are bigger');
+  console.log('  ok - footer "+", "..." and settings buttons are sized');
 }
 
 function testCloseButtonsAreBigger() {
@@ -217,12 +220,13 @@ function testButtonsLoseFocusAfterClick() {
   }
 
   for (const sel of [
-    '.chat-tab-add',
-    '.chat-tab-settings',
+    '#new-chat-btn',
+    '#more-btn',
+    '#settings-btn',
     '.chat-tab-close',
   ]) {
     const el = doc.querySelector(sel);
-    assert.ok(el, sel + ' must exist in the tab bar');
+    assert.ok(el, sel + ' must exist');
     clickAndAssertBlurred(win, el, sel);
   }
   win.close();

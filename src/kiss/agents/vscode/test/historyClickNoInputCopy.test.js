@@ -285,7 +285,7 @@ function testSwitchBranchLeavesInputEmpty(mode) {
     task: 'Already open task',
     events: [],
   });
-  win.document.querySelector('.chat-tab-add').click();
+  win.document.querySelector('#new-chat-btn').click();
   assert.strictEqual(chatTabs(win).length, 2, 'sanity: two tabs are open');
   assert.strictEqual(activeTabLabel(win), 'new chat', 'sanity: new tab active');
 

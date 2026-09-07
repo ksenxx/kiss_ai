@@ -204,7 +204,7 @@ function testNewTabScrollsIntoView() {
   // so the new tab must be brought into view.
   const {win, tabScrolls} = makeThreeTabs();
 
-  clickEl(win, win.document.querySelector('.chat-tab-add'));
+  clickEl(win, win.document.querySelector('#new-chat-btn'));
   const newId = activeTabId(win);
   assert.ok(newId && newId !== 't1', 'a new tab must become active');
   assert.ok(

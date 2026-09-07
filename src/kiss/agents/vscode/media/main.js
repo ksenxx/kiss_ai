@@ -1071,11 +1071,17 @@
   }
 
   // The button shows the theme it switches TO: a sun while in dark
-  // mode, a moon while in light mode.
+  // mode, a moon while in light mode.  The button is the "..." overflow
+  // menu's #theme-btn item, so the icon goes in its icon span and the
+  // label in its text span.
   function updateThemeButton(btn) {
     const light = document.body.classList.contains('light-theme');
-    btn.innerHTML = light ? THEME_MOON_SVG : THEME_SUN_SVG;
     const label = light ? 'Switch to dark mode' : 'Switch to light mode';
+    const icon = btn.querySelector('.more-item-icon');
+    const text = btn.querySelector('.more-item-label');
+    if (icon) icon.innerHTML = light ? THEME_MOON_SVG : THEME_SUN_SVG;
+    else btn.innerHTML = light ? THEME_MOON_SVG : THEME_SUN_SVG;
+    if (text) text.textContent = label;
     btn.title = label;
     btn.setAttribute('aria-label', label);
   }
@@ -1088,7 +1094,7 @@
     if (hljsLink && hljsUrls && hljsUrls[theme]) {
       hljsLink.setAttribute('href', hljsUrls[theme]);
     }
-    const btn = document.querySelector('#tab-bar .chat-tab-theme');
+    const btn = document.getElementById('theme-btn');
     if (btn) updateThemeButton(btn);
   }
 
@@ -1291,74 +1297,9 @@
       tabList.appendChild(el);
     });
 
-    const existingAdd = tabBar.querySelector('.chat-tab-add');
-    // Editor-tabs mode: new chats are new EDITOR tabs (the editor-title
-    // KS button / Ctrl+T) and settings open from the editor-title gear,
-    // so the internal bar carries neither button — it only ever shows
-    // sub-agent tabs next to the root chat.
-    if (!existingAdd && !document.body.classList.contains('editor-tab-mode')) {
-      const addBtn = document.createElement('div');
-      addBtn.className = 'chat-tab chat-tab-add';
-      addBtn.textContent = '+';
-      addBtn.title = 'New chat';
-      addBtn.setAttribute('role', 'button');
-      addBtn.setAttribute('tabindex', '0');
-      addBtn.setAttribute('aria-label', 'New chat');
-      addBtn.addEventListener('click', () => {
-        createNewTab();
-      });
-      addBtn.addEventListener('keydown', e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          createNewTab();
-        }
-      });
-      tabBar.appendChild(addBtn);
-    }
-
-    if (
-      document.body.classList.contains('remote-chat') &&
-      !tabBar.querySelector('.chat-tab-theme')
-    ) {
-      const themeBtn = document.createElement('div');
-      themeBtn.className = 'chat-tab chat-tab-theme';
-      themeBtn.setAttribute('role', 'button');
-      themeBtn.setAttribute('tabindex', '0');
-      themeBtn.addEventListener('click', toggleRemoteTheme);
-      themeBtn.addEventListener('keydown', e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          toggleRemoteTheme();
-        }
-      });
-      tabBar.appendChild(themeBtn);
-      updateThemeButton(themeBtn);
-    }
-
-    const existingSettings = tabBar.querySelector('.chat-tab-settings');
-    if (
-      !existingSettings &&
-      !document.body.classList.contains('editor-tab-mode')
-    ) {
-      const settingsBtn = document.createElement('div');
-      settingsBtn.className = 'chat-tab chat-tab-settings';
-      settingsBtn.title = 'Settings';
-      settingsBtn.setAttribute('role', 'button');
-      settingsBtn.setAttribute('tabindex', '0');
-      settingsBtn.setAttribute('aria-label', 'Settings');
-      settingsBtn.innerHTML =
-        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
-      settingsBtn.addEventListener('click', () => {
-        openSettingsPanel();
-      });
-      settingsBtn.addEventListener('keydown', e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          openSettingsPanel();
-        }
-      });
-      tabBar.appendChild(settingsBtn);
-    }
+    // The "+" (new chat), settings and theme controls used to live in
+    // this bar; they are now in the input footer (#new-chat-btn and the
+    // "..." overflow menu), so the bar carries only the tabs.
 
     const activeEl = tabList.querySelector('.chat-tab.active');
     if (activeEl && activeTabId !== lastScrolledTabId)
@@ -2086,6 +2027,7 @@
 
   const BLUR_AFTER_CLICK_SELECTOR = [
     '#menu-btn',
+    '#new-chat-btn',
     '#model-btn',
     '#upload-btn',
     '#tricks-btn',
@@ -2093,8 +2035,10 @@
     '#share-btn',
     '#send-btn',
     '#stop-btn',
-    '.chat-tab-add',
-    '.chat-tab-settings',
+    '#more-btn',
+    '#settings-btn',
+    '#theme-btn',
+    '#autocommit-btn',
     '.chat-tab-close',
     '#input-clear-btn',
     '.search-clear-btn',
@@ -9407,6 +9351,8 @@
         closeModelDD();
         return;
       }
+      // Only one composer popup at a time (see the #more-btn handler).
+      closeMoreMenu();
       modelDropdown.classList.add('open');
       modelSearch.value = '';
       if (modelSearchClear) modelSearchClear.style.display = 'none';
@@ -9477,6 +9423,78 @@
     }
     if (menuBtn) {
       menuBtn.addEventListener('click', toggleHistorySidebar);
+    }
+    const newChatBtn = document.getElementById('new-chat-btn');
+    if (newChatBtn) {
+      newChatBtn.addEventListener('click', () => {
+        createNewTab();
+      });
+    }
+    // The "..." overflow menu: mic, share, attach, git commit, settings
+    // and (remote only) the theme toggle live here.
+    const moreBtn = document.getElementById('more-btn');
+    const moreMenu = document.getElementById('more-menu');
+    function closeMoreMenu() {
+      if (moreMenu) moreMenu.classList.remove('open');
+      if (moreBtn) moreBtn.setAttribute('aria-expanded', 'false');
+    }
+    if (moreBtn && moreMenu) {
+      moreBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        // Only one composer popup at a time: the trigger's
+        // stopPropagation keeps this click from reaching the model
+        // dropdown's document-level outside-click closer, so close the
+        // peer popup explicitly.
+        closeModelDD();
+        const open = !moreMenu.classList.contains('open');
+        moreMenu.classList.toggle('open', open);
+        moreBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+      // Close on any menu item click.  Capture phase, so items whose
+      // own handlers stopPropagation (Git Commit) still close it.
+      moreMenu.addEventListener(
+        'click',
+        e => {
+          if (
+            e.target &&
+            typeof e.target.closest === 'function' &&
+            e.target.closest('.more-menu-item')
+          ) {
+            closeMoreMenu();
+          }
+        },
+        true,
+      );
+      document.addEventListener('click', e => {
+        if (
+          !e.target ||
+          typeof e.target.closest !== 'function' ||
+          !e.target.closest('#more-menu-wrap')
+        ) {
+          closeMoreMenu();
+        }
+      });
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && moreMenu.classList.contains('open')) {
+          closeMoreMenu();
+          // The focused menu item just went display:none; without a
+          // hand-off, keyboard focus would be stranded on an invisible
+          // control.
+          try {
+            moreBtn.focus();
+          } catch (_e) {}
+        }
+      });
+    }
+    const settingsBtn = document.getElementById('settings-btn');
+    if (settingsBtn) {
+      settingsBtn.addEventListener('click', () => {
+        openSettingsPanel();
+      });
+    }
+    const themeBtn = document.getElementById('theme-btn');
+    if (themeBtn) {
+      themeBtn.addEventListener('click', toggleRemoteTheme);
     }
     sidebarClose.addEventListener('click', () => closeSidebar(true));
     sidebarOverlay.addEventListener('click', closeSidebar);

@@ -123,15 +123,33 @@ function testBootAdoptsRootTab() {
     'none',
     'single conversation: internal tab bar hidden',
   );
+  // The + and settings controls live in the input footer on every
+  // surface now.  In editor-tabs mode the + must open a NEW EDITOR TAB
+  // (createNewTab posts openChatPanel) instead of stacking a second
+  // internal chat tab, and the "..." menu's settings item must open
+  // the settings sheet.
+  const addBtn = win.document.getElementById('new-chat-btn');
+  assert.ok(addBtn, 'footer + button must exist in editor-tabs mode');
+  const tabsBefore = chatTabStrips(win).length;
+  addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.strictEqual(
-    win.document.querySelector('#tab-bar .chat-tab-add'),
-    null,
-    'no + button in editor-tabs mode',
+    byType(posted, 'openChatPanel').length,
+    1,
+    'the + button must ask the host for a new editor tab',
   );
   assert.strictEqual(
-    win.document.querySelector('#tab-bar .chat-tab-settings'),
-    null,
-    'no settings button in editor-tabs mode',
+    chatTabStrips(win).length,
+    tabsBefore,
+    'the + button must not create an internal chat tab in editor-tabs mode',
+  );
+  const settingsBtn = win.document.getElementById('settings-btn');
+  assert.ok(settingsBtn, 'footer settings button must exist');
+  settingsBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(
+    win.document
+      .getElementById('settings-panel')
+      .classList.contains('open'),
+    'the settings menu item must open the settings sheet',
   );
 
   const titles = byType(posted, 'panelTitle');

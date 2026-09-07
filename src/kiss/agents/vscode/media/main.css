@@ -340,7 +340,7 @@ body {
 
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
 
-/* Tips / Git Commit / Update / Reset Server / Update Models.  ``flex-wrap`` + the
+/* Tips / Update / Reset Server / Update Models.  ``flex-wrap`` + the
    ``white-space: nowrap`` on the buttons below make the row break
    BETWEEN buttons when it is too narrow, never inside a label. */
 .config-update-row {
@@ -351,8 +351,7 @@ body {
   margin-bottom: 12px;
 }
 
-.config-update-btn,
-.config-gitcommit-btn {
+.config-update-btn {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
@@ -368,17 +367,13 @@ body {
   cursor: pointer;
 }
 
-.config-update-btn:hover:not(:disabled),
-.config-gitcommit-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 10%, transparent); border-color: color-mix(in srgb, var(--fg) 24%, transparent); }
+.config-update-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 10%, transparent); border-color: color-mix(in srgb, var(--fg) 24%, transparent); }
 
-.config-update-btn:focus-visible,
-.config-gitcommit-btn:focus-visible { outline: 1px solid var(--accent); }
+.config-update-btn:focus-visible { outline: 1px solid var(--accent); }
 
-.config-update-btn:disabled,
-.config-gitcommit-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.config-update-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-.config-update-btn svg,
-.config-gitcommit-btn svg { flex-shrink: 0; }
+.config-update-btn svg { flex-shrink: 0; }
 
 .config-update-btn.has-update {
   border-color: color-mix(in srgb, #2ea043 60%, var(--border));
@@ -485,29 +480,6 @@ body {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
-
-.chat-tab-add {
-  justify-content: center;
-  font-size: 22px;
-  font-weight: bold;
-  color: var(--dim);
-  min-width: 30px;
-  max-width: 30px;
-  padding: 4px 0;
-  margin-right: 8px;
-  flex-shrink: 0;
-}
-
-.chat-tab-settings {
-  justify-content: center;
-  color: var(--dim);
-  min-width: 30px;
-  max-width: 30px;
-  padding: 4px 8px 4px 0;
-  margin-right: 10px;
-  flex-shrink: 0;
-}
-.chat-tab-settings svg { display: block; }
 
 .chat-tab.subagent-tab {
   border-bottom-color: color-mix(in srgb, var(--purple) 55%, transparent);
@@ -1213,7 +1185,9 @@ body.remote-chat #welcome-config { display: none !important; }
   flex-wrap: wrap; gap: 4px 8px;
 }
 
-#model-picker { position: relative; display: flex; align-items: center; gap: 6px; min-width: 0; overflow: visible; flex-wrap: wrap; }
+#footer-tools { position: relative; display: flex; align-items: center; gap: 6px; min-width: 0; overflow: visible; flex-wrap: wrap; }
+
+#model-picker { position: relative; display: flex; align-items: center; min-width: 0; overflow: visible; }
 
 #model-btn {
   display: flex; align-items: center; gap: 6px;
@@ -1228,17 +1202,11 @@ body.remote-chat #welcome-config { display: none !important; }
 #model-btn:disabled { opacity: 0.45; cursor: default; pointer-events: none; }
 #model-btn svg { flex-shrink: 0; opacity: 0.55; }
 
-#upload-btn {
-  background: color-mix(in srgb, var(--fg) 3%, transparent); color: color-mix(in srgb, var(--fg) 58%, transparent);
-  border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent); border-radius: 6px;
-  padding: 2px 3px; cursor: pointer; flex-shrink: 0;
-  transition: color 0.15s, border-color 0.2s;
-  display: flex; align-items: center; justify-content: center;
-}
-#upload-btn:hover { color: color-mix(in srgb, var(--fg) 70%, transparent); border-color: color-mix(in srgb, var(--fg) 16%, transparent); background: color-mix(in srgb, var(--fg) 5%, transparent); }
 #upload-btn svg { width: 16px; height: 16px; }
 
 #menu-btn,
+#new-chat-btn,
+#more-btn,
 .toggle-btn {
   background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
@@ -1247,9 +1215,13 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 
 #menu-btn:hover:not(:disabled),
+#new-chat-btn:hover:not(:disabled),
+#more-btn:hover:not(:disabled),
 .toggle-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
 
 #menu-btn:disabled,
+#new-chat-btn:disabled,
+#more-btn:disabled,
 .toggle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 .toggle-btn.active { color: var(--accent); }
 .toggle-btn.active:hover:not(:disabled) { color: color-mix(in srgb, var(--accent) 80%, transparent); }
@@ -1274,8 +1246,43 @@ body.remote-chat #welcome-config { display: none !important; }
   50% { opacity: 0.35; }
 }
 
+#more-menu-wrap { position: relative; display: flex; align-items: center; }
+
+#more-menu {
+  position: absolute; bottom: 100%; left: 0;
+  min-width: 180px; max-width: min(280px, calc(100vw - 24px));
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  display: none; flex-direction: column; padding: 4px;
+  z-index: 100; box-shadow: 0 -6px 28px rgb(0 0 0 / 50%); margin-bottom: 4px;
+}
+#more-menu.open { display: flex; }
+
+.more-menu-item {
+  display: flex; align-items: center; gap: 8px;
+  background: none; border: none; border-radius: 6px;
+  padding: 6px 8px; cursor: pointer; text-align: left;
+  font-size: var(--fs-base); font-family: inherit;
+  color: color-mix(in srgb, var(--fg) 66%, transparent);
+  transition: background 0.08s, color 0.15s;
+  white-space: nowrap;
+}
+
+.more-menu-item:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: color-mix(in srgb, var(--fg) 85%, transparent);
+}
+.more-menu-item:disabled { opacity: 0.3; cursor: not-allowed; }
+.more-item-icon { display: flex; align-items: center; flex-shrink: 0; }
+.more-item-icon svg { width: 16px; height: 16px; }
+.more-item-label { overflow: hidden; text-overflow: ellipsis; }
+
+/* The theme toggle only exists on the remote webapp; the VS Code
+   webview always follows the editor theme. */
+#theme-btn { display: none; }
+body.remote-chat #theme-btn { display: flex; }
+
 #model-dropdown {
-  position: absolute; bottom: 100%; left: 0; min-width: min(280px, calc(100vw - 24px)); max-width: min(380px, calc(100vw - 24px));
+  position: absolute; bottom: 100%; right: 0; min-width: min(280px, calc(100vw - 24px)); max-width: min(380px, calc(100vw - 24px));
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   max-height: 320px; display: none; flex-direction: column;
   z-index: 100; box-shadow: 0 -6px 28px rgb(0 0 0 / 50%); margin-bottom: 4px;

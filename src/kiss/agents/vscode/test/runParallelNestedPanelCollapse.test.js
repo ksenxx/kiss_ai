@@ -300,7 +300,7 @@ function sendSummary(st) {
  * @param {object} st Boot state from bootParallelRun.
  */
 function openNewChat(st) {
-  const addBtn = st.win.document.querySelector('#tab-bar .chat-tab-add');
+  const addBtn = st.win.document.querySelector('#new-chat-btn');
   assert.ok(addBtn, 'the tab bar must offer a "+" new-chat button');
   addBtn.dispatchEvent(new st.win.MouseEvent('click', {bubbles: true}));
   if (st.drain) st.drain();
