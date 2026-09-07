@@ -199,6 +199,7 @@ stubModule(path.join(OUT_DIR, 'WebviewNotifications.js'), {
   showWarningNotification: () => Promise.resolve(undefined),
   showErrorNotification: () => Promise.resolve(undefined),
   setWebviewNotificationPoster: () => {},
+  clearWebviewNotificationPoster: () => {},
 });
 stubModule(path.join(OUT_DIR, 'UpdateChecker.js'), {
   checkForExtensionUpdate: async () => ({

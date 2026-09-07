@@ -192,6 +192,7 @@ import {
   AgentCommand,
 } from './types';
 import {
+  clearWebviewNotificationPoster,
   resolveWebviewNotificationAction,
   setWebviewNotificationPoster,
   showErrorNotification,
@@ -199,6 +200,61 @@ import {
   showWarningNotification,
   withWebviewNotificationProgress,
 } from './WebviewNotifications';
+
+/**
+ * The webview surface a chat controller drives, abstracting over the
+ * secondary-sidebar `WebviewView` and an editor tab's `WebviewPanel`
+ * (editor-tabs mode): the handful of members the controller actually
+ * uses, with `show` mapping to `WebviewView.show(preserveFocus)` /
+ * `WebviewPanel.reveal(...)`.
+ */
+export interface ChatWebviewHost {
+  readonly webview: vscode.Webview;
+  readonly visible: boolean;
+  show(): void;
+  onDidChangeVisibility: vscode.Event<unknown>;
+  onDidDispose: vscode.Event<void>;
+}
+
+/**
+ * Editor-tabs-mode notifications a per-panel controller raises for its
+ * panel manager: everything the webview asks of its hosting EDITOR TAB
+ * rather than of the daemon.
+ */
+export type PanelEvent =
+  // The root chat tab renamed itself; retitle the editor tab.
+  | {kind: 'title'; title: string}
+  // Open another chat as a new editor tab (fresh when chatId is '').
+  | {
+      kind: 'openChat';
+      chatId?: string;
+      taskId?: string | number | null;
+      title?: string;
+    }
+  // Close this panel. retire=true means the USER closed the root chat
+  // inside the panel, so the host must also retire the tab from the
+  // daemon registry; without it the registry already dropped the tab.
+  | {kind: 'closeSelf'; retire?: boolean}
+  // The root chat tab bound to a backend chat id (dedupe key for
+  // history opens).
+  | {kind: 'chatBound'; chatId: string};
+
+/** One tab of the daemon's canonical `tabs_state` registry snapshot. */
+export interface RegistryTabEntry {
+  tabId: string;
+  chatId: string;
+  title: string;
+  workDir: string;
+  scopeWorkDir: string;
+}
+
+/** Editor-tabs mode wiring handed to a per-panel chat controller. */
+export interface PanelHooks {
+  /** The panel's single root chat tab id (owned from the start). */
+  rootTabId: string;
+  /** Receives the panel-directed events listed in PanelEvent. */
+  onEvent: (event: PanelEvent) => void;
+}
 
 const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   appendUserMessage: ['prompt', 'tabId'],
@@ -241,7 +297,12 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
 };
 
 export class SorcarSidebarView implements vscode.WebviewViewProvider {
-  private _view?: vscode.WebviewView;
+  private _view?: ChatWebviewHost;
+  private _panelHooks?: PanelHooks;
+  // The notification poster this controller installed, if any, so
+  // teardown clears only its own installation (see
+  // clearWebviewNotificationPoster).
+  private _installedPoster?: (message: ToWebviewMessage) => void;
   private _client: AgentClient | null = null;
   private _api: SorcarApi | null = null;
   private _daemonConnected: boolean = false;
@@ -282,6 +343,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   // host releases the tab's resources (worktree fallback dir,
   // running/commit flags) instead of holding them forever.
   private _registryTabs: Set<string> = new Set();
+  // The last canonical snapshot's full entries, so the extension can
+  // materialize editor-tab panels for the registry's tabs when the
+  // user switches editor-tabs mode on (see getRegistryTabEntries).
+  private _registryEntries: Map<string, RegistryTabEntry> = new Map();
   private _worktreeActionResolves: Map<string, () => void> = new Map();
   private _worktreeProgresses: Map<
     string,
@@ -373,8 +438,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._getClient();
   }
 
-  constructor(extensionUri: vscode.Uri) {
+  constructor(extensionUri: vscode.Uri, panelHooks?: PanelHooks) {
     this._extensionUri = extensionUri;
+    this._panelHooks = panelHooks;
+    if (panelHooks) {
+      // The panel's root chat tab is this controller's own from the
+      // start: broadcasts stamped with it (commit messages, worktree
+      // results) must be treated as this window's even before the
+      // webview has sent any message carrying the id.
+      this._ownTabs.add(panelHooks.rootTabId);
+    }
     this._selectedModel =
       vscode.workspace
         .getConfiguration('kissSorcar')
@@ -549,8 +622,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // snapshots, so only ids seen in a previous snapshot are
         // eligible for pruning.
         const listed = new Set<string>();
+        const entries = new Map<string, RegistryTabEntry>();
         for (const t of msg.tabs) {
-          if (t && t.tabId) listed.add(t.tabId);
+          if (t && t.tabId) {
+            listed.add(t.tabId);
+            entries.set(t.tabId, {
+              tabId: t.tabId,
+              chatId: t.chatId || '',
+              title: t.title || '',
+              workDir: t.workDir || '',
+              scopeWorkDir: t.scopeWorkDir || '',
+            });
+          }
         }
         for (const staleId of this._registryTabs) {
           if (!listed.has(staleId)) {
@@ -559,6 +642,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           }
         }
         this._registryTabs = listed;
+        this._registryEntries = entries;
+        if (this._panelHooks) {
+          // Report the root tab's chat binding so the panel manager
+          // can route a history open of the same chat to this panel
+          // instead of stacking a second one.
+          const own = entries.get(this._panelHooks.rootTabId);
+          if (own?.chatId) {
+            this._panelHooks.onEvent({kind: 'chatBound', chatId: own.chatId});
+          }
+        }
       }
       if (msg.type === 'worktree_progress') {
         const wpTabId = msg.tabId;
@@ -669,16 +762,48 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     _context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken,
   ): void {
+    this.attachWebviewHost({
+      webview: webviewView.webview,
+      get visible() {
+        return webviewView.visible;
+      },
+      show: () => webviewView.show(true),
+      onDidChangeVisibility: webviewView.onDidChangeVisibility,
+      onDidDispose: webviewView.onDidDispose,
+    });
+  }
+
+  /**
+   * Bind this controller to a chat webview surface — the secondary
+   * sidebar's view (via resolveWebviewView) or an editor tab's panel
+   * (editor-tabs mode) — building the chat HTML and wiring message,
+   * visibility and dispose handling.
+   *
+   * @param host The surface to drive.
+   * @param bodyAttrs Extra `<body>` attributes for the chat HTML
+   *     (editor-tabs mode's class and data attributes).
+   */
+  attachWebviewHost(host: ChatWebviewHost, bodyAttrs?: string): void {
     if (this._terminated) return;
     for (const sub of this._viewSubs) sub.dispose();
     this._viewSubs = [];
+    const webviewView = host;
     this._view = webviewView;
     this._webviewReady = false;
     // A fresh webview has not reported focus yet; a stale true here
     // (left by a disposed webview) would make toggleFocus believe the
     // chat is focused and never focus it.
     this._webviewHasFocus = false;
-    setWebviewNotificationPoster(message => this._sendToWebview(message));
+    if (!this._panelHooks) {
+      // In editor-tabs mode the panel manager owns the shared toast
+      // poster (it routes to the active panel); a per-panel controller
+      // installing its own would steal every other panel's toasts.
+      const poster = (message: ToWebviewMessage) => {
+        this._sendToWebview(message);
+      };
+      this._installedPoster = poster;
+      setWebviewNotificationPoster(poster);
+    }
     this._disposed = false;
     this._lastSentUrl = '';
 
@@ -694,6 +819,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       webviewView.webview,
       this._extensionUri,
       this._selectedModel,
+      bodyAttrs,
     );
 
     this._viewSubs.push(
@@ -738,7 +864,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           // view disposed while focused leaves hasFocus stuck true and
           // the toggleFocus keybinding can never refocus the chat.
           this._webviewHasFocus = false;
-          setWebviewNotificationPoster(undefined);
+          if (this._installedPoster) {
+            clearWebviewNotificationPoster(this._installedPoster);
+            this._installedPoster = undefined;
+          }
           this._voiceWakeSuspendedByHide = false;
           // Voice stays off until the next webview toggles it back on:
           // without this a fresh webview's first voiceSensitivity would
@@ -1343,8 +1472,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'focusEditor':
+        // In editor-tabs mode the chat IS an editor in the first group,
+        // so "back to the editor" means the previously used one.
         vscode.commands.executeCommand(
-          'workbench.action.focusFirstEditorGroup',
+          this._panelHooks
+            ? 'workbench.action.openPreviousRecentlyUsedEditor'
+            : 'workbench.action.focusFirstEditorGroup',
         );
         break;
 
@@ -1368,7 +1501,65 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
         break;
       }
+
+      case 'panelTitle':
+        this._panelHooks?.onEvent({kind: 'title', title: message.title});
+        break;
+
+      case 'openChatPanel':
+        this._panelHooks?.onEvent({
+          kind: 'openChat',
+          chatId: message.chatId,
+          taskId: message.taskId,
+          title: message.title,
+        });
+        break;
+
+      case 'closePanel':
+        this._panelHooks?.onEvent({
+          kind: 'closeSelf',
+          retire: !!message.retire,
+        });
+        break;
+
+      case 'setEditorTabsMode': {
+        // The settings UI's editor-tabs toggle. Handled in BOTH modes
+        // (the sidebar switches the mode on, a panel switches it off);
+        // extension.ts reacts to the configuration change. Written to
+        // the most specific scope that already holds a value, so a
+        // workspace override cannot silently swallow the toggle.
+        const cfg = vscode.workspace.getConfiguration('kissSorcar');
+        const info = cfg.inspect?.<boolean>('editorTabsMode');
+        const target =
+          info?.workspaceFolderValue !== undefined
+            ? vscode.ConfigurationTarget.WorkspaceFolder
+            : info?.workspaceValue !== undefined
+              ? vscode.ConfigurationTarget.Workspace
+              : vscode.ConfigurationTarget.Global;
+        await cfg.update('editorTabsMode', !!message.enabled, target);
+        break;
+      }
     }
+  }
+
+  /**
+   * The daemon registry's last canonical tab snapshot, one entry per
+   * chat tab; empty before the first `tabs_state` arrives.
+   */
+  public getRegistryTabEntries(): RegistryTabEntry[] {
+    return [...this._registryEntries.values()];
+  }
+
+  /**
+   * Retire *tabId* from the daemon's shared tab registry — the host
+   * counterpart of the webview's own `closeTab` message, used when the
+   * USER closes an editor-tab panel (the panel's webview is torn down
+   * before it could send anything itself).
+   */
+  public closeChatTab(tabId: string): void {
+    if (this._terminated || !tabId) return;
+    this._cleanupTabResources(tabId);
+    this._getApi().closeTab(tabId);
   }
 
   /** Release every host-side resource owned by a closed tab. */
@@ -1549,6 +1740,20 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     );
   }
 
+  /**
+   * Reveal the chat and open its settings panel — the editor-title
+   * gear button's action in editor-tabs mode (also usable in sidebar
+   * mode). Waits briefly for a freshly created webview to report
+   * `ready` so the message is not dropped by a still-loading page.
+   */
+  public async openSettingsUI(): Promise<void> {
+    await this.focusChatInput();
+    for (let i = 0; i < 15 && this._view && !this._webviewReady; i++) {
+      await new Promise(r => setTimeout(r, 200));
+    }
+    this._sendToWebview({type: 'openSettings'});
+  }
+
   public stopTask(): void {
     if (this._view && this._webviewReady) {
       this._sendToWebview({type: 'triggerStop'});
@@ -1561,7 +1766,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   public async focusChatInput(): Promise<void> {
-    if (!this._view) {
+    if (!this._view && !this._panelHooks) {
       await vscode.commands.executeCommand(
         'kissSorcar.chatViewSecondary.focus',
       );
@@ -1570,7 +1775,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
     }
     if (this._view) {
-      this._view.show(true);
+      this._view.show();
       await new Promise(r => setTimeout(r, 150));
       this._sendToWebview({type: 'focusInput'});
     }
@@ -1805,7 +2010,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     for (const sub of this._viewSubs) sub.dispose();
     this._viewSubs = [];
     this._view = undefined;
-    setWebviewNotificationPoster(undefined);
+    if (this._installedPoster) {
+      clearWebviewNotificationPoster(this._installedPoster);
+      this._installedPoster = undefined;
+    }
     this._voiceWakeSuspendedByHide = false;
     // audit0903-coverage:start
     this._voiceEnabled = false;
