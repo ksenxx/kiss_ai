@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import {SorcarSidebarView} from './SorcarSidebarView';
+import {SorcarPanelManager} from './SorcarPanelManager';
 import {getGitApi} from './gitApi';
 import {isReloadReady} from './reloadGuard';
 
@@ -25,6 +26,7 @@ import {
 } from './WebviewNotifications';
 
 let sidebarView: SorcarSidebarView | undefined;
+let panelManager: SorcarPanelManager | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   ensureLocalBinInPath();
@@ -40,16 +42,85 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   context.subscriptions.push({dispose: () => sidebarView?.dispose()});
 
+  // Panel closes retire their chat tabs through the sidebar
+  // controller's long-lived daemon client: a panel's own client dies
+  // with the panel, which could lose a closeTab queued while the
+  // daemon was briefly unreachable.
+  panelManager = new SorcarPanelManager(context.extensionUri, tabId =>
+    sidebarView?.closeChatTab(tabId),
+  );
+  context.subscriptions.push(panelManager.registerSerializer());
+  context.subscriptions.push({
+    dispose: () => {
+      panelManager?.dispose();
+      panelManager = undefined;
+    },
+  });
+
+  const editorTabsMode = () => SorcarPanelManager.modeEnabled();
+
+  // The chat surface commands act on: in editor-tabs mode the active
+  // chat panel (opening one when asked to), otherwise the sidebar view.
+  const chatController = (createIfMissing: boolean) => {
+    if (!editorTabsMode()) return sidebarView!;
+    if (createIfMissing) return panelManager!.revealActiveOrCreate();
+    return panelManager!.activeController();
+  };
+
+  const workspaceDir = (): string => {
+    const folders = vscode.workspace.workspaceFolders;
+    return folders && folders.length > 0 ? folders[0].uri.fsPath : '';
+  };
+
+  // Switching the editor-tabs mode (from the settings UI toggle or
+  // settings.json): ON migrates the registry's chats of this workspace
+  // into editor tabs (the sidebar view hides via its `when` clause);
+  // OFF closes the panels without retiring their chats and brings the
+  // sidebar view back, which re-adopts them from `tabs_state`.
+  // Guarded like the other optional host APIs (see
+  // registerWebviewPanelSerializer): absent only in test stubs.
+  if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration(e => {
+        if (!e.affectsConfiguration('kissSorcar.editorTabsMode')) return;
+        if (editorTabsMode()) {
+          panelManager!.enterMode(
+            sidebarView!.getRegistryTabEntries(),
+            workspaceDir(),
+          );
+        } else {
+          panelManager!.closeAll();
+          void sidebarView!.focusChatInput();
+        }
+      }),
+    );
+  }
+
   sidebarView.syncWorkDir();
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.openPanel', () => {
-      void sidebarView!.focusChatInput();
+      void chatController(true)!.focusChatInput();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.openSettings', () => {
+      if (editorTabsMode()) {
+        void panelManager!.openSettings();
+      } else {
+        void sidebarView!.openSettingsUI();
+      }
     }),
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.newConversation', async () => {
+      if (editorTabsMode()) {
+        // Every conversation is its own editor tab in this mode.
+        await panelManager!.openNewChat().focusChatInput();
+        return;
+      }
       await sidebarView!.focusChatInput();
       sidebarView!.newConversation();
     }),
@@ -57,7 +128,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.stopTask', () => {
-      sidebarView!.stopTask();
+      chatController(false)?.stopTask();
     }),
   );
 
@@ -70,7 +141,7 @@ export function activate(context: vscode.ExtensionContext): void {
         showInformationNotification('No text selected');
         return;
       }
-      await sidebarView!.submitTask(sel.trim());
+      await chatController(true)!.submitTask(sel.trim());
     }),
   );
 
@@ -84,7 +155,7 @@ export function activate(context: vscode.ExtensionContext): void {
         showInformationNotification('No text selected');
         return;
       }
-      void sidebarView!.appendToInput(text);
+      void chatController(true)!.appendToInput(text);
     }),
   );
 
@@ -94,12 +165,18 @@ export function activate(context: vscode.ExtensionContext): void {
       if (_focusToggling) return;
       _focusToggling = true;
       try {
-        if (sidebarView!.hasFocus) {
+        const controller = chatController(false);
+        if (controller?.hasFocus) {
+          // In editor-tabs mode the chat IS an editor, so "back to the
+          // editor" means the previously used one; in sidebar mode the
+          // first editor group.
           await vscode.commands.executeCommand(
-            'workbench.action.focusFirstEditorGroup',
+            editorTabsMode()
+              ? 'workbench.action.openPreviousRecentlyUsedEditor'
+              : 'workbench.action.focusFirstEditorGroup',
           );
         } else {
-          await sidebarView!.focusChatInput();
+          await chatController(true)!.focusChatInput();
         }
       } finally {
         _focusToggling = false;
@@ -109,7 +186,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.focusEditor', () => {
-      vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');
+      // In editor-tabs mode the chat IS an editor in the first group;
+      // "focus the editor" then means the previously used one.
+      vscode.commands.executeCommand(
+        editorTabsMode()
+          ? 'workbench.action.openPreviousRecentlyUsedEditor'
+          : 'workbench.action.focusFirstEditorGroup',
+      );
     }),
   );
 
@@ -391,7 +474,7 @@ export function activate(context: vscode.ExtensionContext): void {
   treeView.onDidChangeVisibility(async e => {
     if (e.visible) {
       await vscode.commands.executeCommand('workbench.view.explorer');
-      await sidebarView!.focusChatInput();
+      await chatController(true)!.focusChatInput();
     }
   });
 
@@ -400,6 +483,8 @@ export function activate(context: vscode.ExtensionContext): void {
       const widenTimer = setTimeout(async () => {
         // The extension may have been deactivated before this fires.
         if (!sidebarView) return;
+        // The one-time widening belongs to the sidebar surface only.
+        if (editorTabsMode()) return;
         await vscode.commands.executeCommand(
           'workbench.action.focusAuxiliaryBar',
         );
@@ -423,7 +508,7 @@ export function activate(context: vscode.ExtensionContext): void {
   if (shouldAutoOpen) {
     const autoOpenTimer = setTimeout(async () => {
       if (!sidebarView) return;
-      await sidebarView.focusChatInput();
+      await chatController(true)!.focusChatInput();
       await context.workspaceState.update('firstLaunchDone', true);
     }, 1000);
     context.subscriptions.push({dispose: () => clearTimeout(autoOpenTimer)});
@@ -462,6 +547,11 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
+  // Shutdown first: the panel disposals below (and any the workbench
+  // triggers) must not retire chats from the daemon's registry.
+  panelManager?.markShutdown();
+  panelManager?.dispose();
+  panelManager = undefined;
   sidebarView?.dispose();
   sidebarView = undefined;
   console.log('KISS Sorcar extension deactivated');

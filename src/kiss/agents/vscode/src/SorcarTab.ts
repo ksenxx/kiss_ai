@@ -229,10 +229,62 @@ function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/**
+ * Initial state of a chat hosted in an editor tab (editor-tabs mode).
+ *
+ * Travels into the webview as `data-kiss-*` attributes on `<body>`
+ * (via the existing BODY_CLASS_ATTR substitution, so the daemon's
+ * remote web app — which builds from the same chat.html — needs no new
+ * placeholder): main.js adopts `tabId` as its single root chat tab's
+ * id and, when `resumeChatId`/`resumeTaskId` are present, resumes that
+ * history entry into the tab right after `ready`.
+ */
+export interface EditorTabInit {
+  tabId: string;
+  title?: string;
+  resumeChatId?: string;
+  resumeTaskId?: string;
+  /**
+   * The tab is already in the daemon's registry (a panel materialized
+   * from a `tabs_state` entry on mode switch-on), so the webview may
+   * treat its disappearance from the first snapshot it sees as a close
+   * by another client.
+   */
+  inRegistry?: boolean;
+}
+
+/**
+ * The `<body>` attribute string for a chat webview hosted in an editor
+ * tab: the `editor-tab-mode` class plus the tab's initial state as
+ * `data-kiss-*` attributes (see EditorTabInit).
+ *
+ * @param init The panel's initial tab state.
+ * @returns An attribute string starting with a space, ready to splice
+ *     into `<body{{BODY_CLASS_ATTR}}>`.
+ */
+export function editorTabBodyAttrs(init: EditorTabInit): string {
+  const attrs = [' class="editor-tab-mode"'];
+  attrs.push(` data-kiss-tab-id="${escapeHtml(init.tabId)}"`);
+  if (init.title) {
+    attrs.push(` data-kiss-tab-title="${escapeHtml(init.title)}"`);
+  }
+  if (init.resumeChatId) {
+    attrs.push(` data-kiss-resume-chat-id="${escapeHtml(init.resumeChatId)}"`);
+  }
+  if (init.resumeTaskId) {
+    attrs.push(` data-kiss-resume-task-id="${escapeHtml(init.resumeTaskId)}"`);
+  }
+  if (init.inRegistry) {
+    attrs.push(' data-kiss-in-registry="1"');
+  }
+  return attrs.join('');
+}
+
 export function buildChatHtml(
   webview: vscode.Webview,
   extensionUri: vscode.Uri,
   selectedModel: string,
+  bodyAttrs?: string,
 ): string {
   const nonce = getNonce();
   const version = getVersion();
@@ -282,7 +334,7 @@ export function buildChatHtml(
     STYLE_HREF: u('main.css'),
     HLJS_CSS_HREF: u('highlight-github-dark.min.css'),
     HEAD_STYLE: '',
-    BODY_CLASS_ATTR: '',
+    BODY_CLASS_ATTR: bodyAttrs || '',
     INPUT_PLACEHOLDER: placeholder,
     ENTERKEYHINT: '',
     // The model name can come from user settings or the daemon; escape it

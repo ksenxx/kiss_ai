@@ -8,6 +8,19 @@
   const vscode = acquireVsCodeApi();
   const api = createSorcarApi(msg => vscode.postMessage(msg));
 
+  // Editor-tabs mode: this webview is hosted in a VS Code EDITOR TAB
+  // (WebviewPanel) pinned to a single root chat tab, instead of the
+  // secondary-sidebar view with its internal tab bar. The hosting
+  // extension marks the mode (and the tab's initial state) on <body>
+  // — see SorcarTab.editorTabBodyAttrs / SorcarPanelManager.
+  const EDITOR_TAB_MODE = document.body.classList.contains('editor-tab-mode');
+
+  // Host-only messages (never daemon commands, so not in api.js's
+  // whitelist): everything the webview asks of its hosting editor tab.
+  function postToHost(msg) {
+    vscode.postMessage(msg);
+  }
+
   function fmtN(n) {
     return Number(n).toLocaleString('en-US');
   }
@@ -1119,12 +1132,37 @@
     target.focus();
   }
 
+  // The panel title last reported to the host, so renderTabBar (which
+  // runs on many unrelated events) only posts real renames.
+  let lastNotifiedPanelTitle = '';
+
   function renderTabBar() {
     const tabList = document.getElementById('tab-list');
     const tabBar = document.getElementById('tab-bar');
     if (!tabList || !tabBar) return;
 
-    tabBar.style.display = '';
+    // Checked on <body> inline — not via EDITOR_TAB_MODE — so the
+    // function stays self-contained for the harness that replays it in
+    // isolation (see test_subagent_tab_done_solid_indicator.py).
+    if (document.body.classList.contains('editor-tab-mode')) {
+      // The EDITOR TAB is this chat's tab: mirror the root chat tab's
+      // title onto it through the host.
+      const root = editorRootTab();
+      if (root) {
+        const title = root.title || 'new chat';
+        if (title !== lastNotifiedPanelTitle) {
+          lastNotifiedPanelTitle = title;
+          postToHost({type: 'panelTitle', title: title, tabId: root.id});
+        }
+      }
+      // The internal bar only appears when there is something beyond
+      // the root chat to switch to (a run_parallel fan-out's sub-agent
+      // tabs); a single conversation needs no second tab strip under
+      // the editor's own.
+      tabBar.style.display = tabs.length > 1 ? '' : 'none';
+    } else {
+      tabBar.style.display = '';
+    }
 
     // Chat tabs are proper a11y tabs: keyboard users reach them with
     // Tab, screen readers announce "<title>, tab, selected", and
@@ -1254,7 +1292,11 @@
     });
 
     const existingAdd = tabBar.querySelector('.chat-tab-add');
-    if (!existingAdd) {
+    // Editor-tabs mode: new chats are new EDITOR tabs (the editor-title
+    // KS button / Ctrl+T) and settings open from the editor-title gear,
+    // so the internal bar carries neither button — it only ever shows
+    // sub-agent tabs next to the root chat.
+    if (!existingAdd && !document.body.classList.contains('editor-tab-mode')) {
       const addBtn = document.createElement('div');
       addBtn.className = 'chat-tab chat-tab-add';
       addBtn.textContent = '+';
@@ -1294,7 +1336,10 @@
     }
 
     const existingSettings = tabBar.querySelector('.chat-tab-settings');
-    if (!existingSettings) {
+    if (
+      !existingSettings &&
+      !document.body.classList.contains('editor-tab-mode')
+    ) {
       const settingsBtn = document.createElement('div');
       settingsBtn.className = 'chat-tab chat-tab-settings';
       settingsBtn.title = 'Settings';
@@ -1393,6 +1438,22 @@
     if (origIdx < 0) return;
     if (tabs[origIdx].isContentTab) {
       closeContentTab(tabId);
+      return;
+    }
+    if (
+      EDITOR_TAB_MODE &&
+      !tabs[origIdx].isSubagentTab &&
+      !tabs[origIdx].isContentTab
+    ) {
+      // Closing the ROOT chat closes the whole editor tab: the host
+      // disposes the panel and — unless the close came FROM the daemon
+      // — retires the chat from the registry through its long-lived
+      // client (this webview's own connection dies with the panel
+      // before a queued closeTab could flush). The sub-agent tabs die
+      // with the panel. Without this, the root close reached
+      // createNewTab's openChatPanel post, which OPENED a fresh panel
+      // while this one lingered rootless.
+      postToHost({type: 'closePanel', retire: !fromServer});
       return;
     }
     const toClose = new Set([tabId]);
@@ -2126,6 +2187,15 @@
   }
 
   function createNewTab() {
+    // Editor-tabs mode: a new conversation is a new EDITOR tab, never a
+    // second internal chat tab in this panel. (Checked on <body> inline
+    // — not via EDITOR_TAB_MODE — so the function stays self-contained
+    // for the harness that replays it in isolation, see
+    // test_history_click_creates_new_tab_each_time.py.)
+    if (document.body.classList.contains('editor-tab-mode')) {
+      vscode.postMessage({type: 'openChatPanel'});
+      return;
+    }
     // Opening a chat is the user taking over: the launch is over, and no
     // backend event may move them off the tab they just asked for.
     closeLaunchSwitch();
@@ -2163,8 +2233,14 @@
   // state persisted locally is what stays client-local by design: the
   // selected tab and the drawer preferences.
   function persistTabState() {
+    const root = EDITOR_TAB_MODE ? editorRootTab() : null;
     vscode.setState({
       chatId: activeTabId,
+      // Editor-tabs mode: the panel serializer re-adopts THIS chat tab
+      // after a window reload (SorcarPanelManager.registerSerializer).
+      // The active tab id will not do — a sub-agent tab may be on
+      // screen when the window goes down.
+      editorRootTabId: root ? root.id : undefined,
       taskDrawerCollapsed: taskDrawerCollapsed,
       inputDrawerCollapsed: inputDrawerCollapsed,
       taskDrawerUserSet: taskDrawerUserSet,
@@ -2258,7 +2334,22 @@
   // for restart recovery — it just has no strip in the tab bar and
   // can never become the active tab.
   function isTabHidden(tab) {
+    // An editor-tab panel shows exactly the chat it was opened for
+    // (plus its sub-agent tabs); workspace scoping already happened
+    // when the panel was created, and hiding the root tab here would
+    // only spawn a placeholder over a perfectly good conversation.
+    if (EDITOR_TAB_MODE) return false;
     return !!tab && !tabMatchesWorkspace(tabScopeWorkDir(tab));
+  }
+
+  // Editor-tabs mode: the panel's single top-level chat tab. Sub-agent
+  // and content tabs hang off it; nothing else exists in the panel.
+  function editorRootTab() {
+    return (
+      tabs.find(t => {
+        return !t.isSubagentTab && !t.isContentTab;
+      }) || null
+    );
   }
 
   function firstVisibleTab() {
@@ -2316,7 +2407,66 @@
   // (the remote web app's stand-in for the VS Code editor — editors
   // are per-user surfaces on every client, so file views are not
   // mirrored).
+  // Whether this panel already asked its host to close it; a snapshot
+  // storm must not dispose the same panel twice.
+  let editorClosePosted = false;
+
+  // Editor-tabs mode's reconcile: the snapshot is still canonical, but
+  // this panel mirrors exactly ONE of its tabs — the root chat tab.
+  // Entries for other tabs belong to other panels (or other windows)
+  // and are never adopted; the root entry's title / chat binding /
+  // work dirs are followed; and a snapshot that no longer lists a
+  // root the registry had confirmed means another client closed the
+  // chat, so the panel asks its host to close it.
+  function reconcileTabsEditor(list) {
+    const root = editorRootTab();
+    if (!root) return;
+    const entry = list.find(e => {
+      return !!e && e.tabId === root.id;
+    });
+    if (entry) {
+      pendingOpenTabs.delete(root.id);
+      root.inRegistry = true;
+      if (entry.title) root.title = clipTabTitle(entry.title);
+      if (
+        entry.chatId &&
+        String(root.backendChatId || '') !== String(entry.chatId)
+      ) {
+        root.backendChatId = String(entry.chatId);
+      }
+      if (entry.workDir && !root.workDir) root.workDir = entry.workDir;
+      if (typeof entry.workDir === 'string') {
+        root.registryWorkDir = entry.workDir;
+      }
+      if (typeof entry.scopeWorkDir === 'string') {
+        root.registryScopeWorkDir = entry.scopeWorkDir;
+      }
+    } else {
+      // Same pending-open expiry as the shared reconcile: an id the
+      // daemon never confirms stops being treated as registered, but
+      // the local tab lives on as this panel's placeholder.
+      const misses = pendingOpenTabs.get(root.id);
+      if (misses !== undefined) {
+        if (misses + 1 >= PENDING_OPEN_MAX_MISSES) {
+          pendingOpenTabs.delete(root.id);
+        } else {
+          pendingOpenTabs.set(root.id, misses + 1);
+        }
+      } else if (root.inRegistry && !editorClosePosted) {
+        editorClosePosted = true;
+        postToHost({type: 'closePanel'});
+        return;
+      }
+    }
+    renderTabBar();
+    persistTabState();
+  }
+
   function reconcileTabs(list) {
+    if (EDITOR_TAB_MODE) {
+      reconcileTabsEditor(list);
+      return;
+    }
     const byId = new Map(
       tabs.map(t => {
         return [t.id, t];
@@ -2543,6 +2693,19 @@
     }
     if (saved && saved.chatId) savedActiveTabId = String(saved.chatId);
     const initial = makeTab('new chat');
+    if (EDITOR_TAB_MODE) {
+      // The hosting editor tab pins this webview to one root chat tab:
+      // adopt the id (and title) the extension stamped on <body>, so
+      // the daemon's registry / replays address this panel directly.
+      const ds = document.body.dataset;
+      if (ds.kissTabId) initial.id = ds.kissTabId;
+      if (ds.kissTabTitle) initial.title = clipTabTitle(ds.kissTabTitle);
+      // A panel materialized FROM a registry entry (mode switch-on)
+      // starts out registered: if another client closes the tab before
+      // this webview's first snapshot arrives, the root is already
+      // eligible for the vanished-from-registry closePanel path.
+      if (ds.kissInRegistry) initial.inRegistry = true;
+    }
     tabs.push(initial);
     activeTabId = initial.id;
   })();
@@ -6779,6 +6942,11 @@
         renderTabBar();
         break;
       }
+      // The extension host's editor-title gear button (editor-tabs
+      // mode) — same panel the tab bar's own gear opens elsewhere.
+      case 'openSettings':
+        openSettingsPanel();
+        break;
       case 'clearChat': {
         const ccTab = getTab(activeTabId);
         const ccWelcome =
@@ -7371,6 +7539,12 @@
       case 'new_tab': {
         if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
           break;
+        // Editor-tabs mode: a parentless spawn (e.g. a run_agent
+        // sub-task) belongs to no particular panel, and EVERY panel
+        // receives the broadcast — each adopting it would open the
+        // same orphan tab (and post duplicate resumeSessions) in every
+        // editor tab. Only spawns owned by this panel's chats join it.
+        if (EDITOR_TAB_MODE && !ev.parent_tab_id) break;
         if (ev.task_id === undefined || ev.task_id === null) break;
         const parentTabBeforeNew = ev.parent_tab_id || '';
         // One sub-agent, one tab: a re-delivered spawn for a sub-agent
@@ -8849,10 +9023,55 @@
     // readychat-coverage:end
   }
 
+  // The settings panel's "Open chats as editor tabs" toggle. VS Code
+  // only: the remote web app's browser tabs already are its chat
+  // surfaces, so the label stays hidden there. The value is the
+  // extension's own configuration, not daemon config — the change goes
+  // straight to the host, which flips kissSorcar.editorTabsMode and
+  // swaps the chat surface.
+  function initEditorTabsToggle() {
+    const label = document.getElementById('cfg-editor-tabs-mode-label');
+    const box = document.getElementById('cfg-editor-tabs-mode');
+    if (!label || !box) return;
+    if (document.body.classList.contains('remote-chat')) return;
+    label.style.display = '';
+    box.checked = EDITOR_TAB_MODE;
+    box.addEventListener('change', () => {
+      postToHost({type: 'setEditorTabsMode', enabled: box.checked});
+    });
+  }
+
   function init() {
     setupEventListeners();
+    initEditorTabsToggle();
     renderTabBar();
+    if (EDITOR_TAB_MODE) {
+      // Persist the root tab id right away: the panel serializer must
+      // be able to re-adopt this chat even if the window reloads
+      // before any tab activity (e.g. while the daemon is down).
+      persistTabState();
+    }
     sendReady();
+    if (EDITOR_TAB_MODE) {
+      // A panel opened from a history row resumes its chat as soon as
+      // the daemon knows about the tab (the `ready` just sent).
+      const ds = document.body.dataset;
+      if (ds.kissResumeChatId || ds.kissResumeTaskId) {
+        const rawTaskId = ds.kissResumeTaskId || '';
+        api.resumeSession({
+          id: ds.kissResumeChatId || undefined,
+          // History rows carry numeric task ids; the data attribute
+          // stringified it.
+          taskId:
+            rawTaskId === ''
+              ? undefined
+              : isNaN(Number(rawTaskId))
+                ? rawTaskId
+                : Number(rawTaskId),
+          tabId: activeTabId,
+        });
+      }
+    }
     api.getConfig();
   }
 
@@ -10697,6 +10916,20 @@
         // bind wins — the same designed flow any cross-client history
         // open uses) retires the old tab everywhere.
         const existingChatTab = getTabByBackendChatId(s.id);
+        // Editor-tabs mode: a chat that is not THIS panel's belongs in
+        // its own editor tab. The host either reveals the panel already
+        // bound to the chat or opens a new one that resumes it.
+        if (EDITOR_TAB_MODE && !existingChatTab) {
+          postToHost({
+            type: 'openChatPanel',
+            chatId: s.id && (s.has_events || s.is_running) ? s.id : undefined,
+            taskId:
+              s.task_id === undefined || s.task_id === null ? null : s.task_id,
+            title: taskText,
+          });
+          closeSidebar();
+          return;
+        }
         if (existingChatTab && !isTabHidden(existingChatTab)) {
           switchToTab(existingChatTab.id);
           // The tab may be parked on a different task of the same chat.
