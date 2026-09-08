@@ -45,15 +45,24 @@ body.remote-chat {
 
   /*
    * Docked task-history panel geometry (desktop mode only).  The
-   * minimum is the width the five status/scope toggle buttons of the
-   * history "Filters" section need to sit on ONE line: ~448px of
-   * chips plus the panel's 2 x 16px padding, rounded up so platforms
-   * with wider font metrics still fit.  main.js reads both bounds so
-   * the resizer can never drag the panel below the one-line width.
+   * resize floor (--sidebar-min-w) is deliberately tiny — 10px — so a
+   * drag can collapse the panel to a sliver when the user wants the
+   * chat to take (almost) the whole window; the panel's own
+   * overflow:hidden clips the content at any width.  The DEFAULT
+   * width still never drops below --sidebar-default-min-w: the width
+   * the five status/scope toggle buttons of the history "Filters"
+   * section need to sit on ONE line (~448px of chips plus the panel's
+   * 2 x 16px padding, rounded up so platforms with wider font metrics
+   * still fit).  main.js reads all of these bounds for the resizer.
    */
-  --sidebar-min-w: 520px;
+  --sidebar-min-w: 10px;
+  --sidebar-default-min-w: 520px;
   --sidebar-max-w: 820px;
-  --sidebar-default-w: clamp(var(--sidebar-min-w), 34vw, var(--sidebar-max-w));
+  --sidebar-default-w: clamp(
+    var(--sidebar-default-min-w),
+    34vw,
+    var(--sidebar-max-w)
+  );
 
   /* Chat width the docked panel may never eat into, so a panel widened
      on a big monitor cannot crush the chat on a smaller window. */
@@ -528,6 +537,15 @@ body.remote-chat .running-item-ids::before {
     transform: none;
     width: var(--sidebar-w, var(--sidebar-default-w));
     border-right: 1px solid var(--border-8);
+
+    /* The panel may be dragged as narrow as --sidebar-min-w (10px).
+       With box-sizing:border-box the fixed 2 x 16px padding of
+       main.css would force a 32px rendered floor (padding wins over
+       width), overlapping the chat, so the horizontal padding
+       collapses along with the panel: 16px down to a quarter of the
+       panel width. */
+    padding-left: min(16px, calc(var(--sidebar-w, var(--sidebar-default-w)) / 4));
+    padding-right: min(16px, calc(var(--sidebar-w, var(--sidebar-default-w)) / 4));
   }
 
   body.remote-chat.remote-desktop #sidebar-overlay {

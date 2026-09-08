@@ -238,6 +238,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("userAnswer", required=("answer",)),
     ApiCommand("newChat"),
     ApiCommand("openTab", required=("tabId",)),
+    ApiCommand("getTabsState"),
     ApiCommand("closeTab", required=("tabId",)),
     ApiCommand("resumeSession", handler="resume_session"),
     ApiCommand("ready", handler="ready"),

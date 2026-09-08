@@ -243,7 +243,12 @@ export type PanelEvent =
   | {kind: 'closeSelf'; retire?: boolean}
   // The root chat tab bound to a backend chat id (dedupe key for
   // history opens).
-  | {kind: 'chatBound'; chatId: string};
+  | {kind: 'chatBound'; chatId: string}
+  // The client gave up on the panel's own registry registration
+  // (`openTab`/`resumeSession` dropped after an outage): the daemon
+  // never saw it and the webview does not retry it, so the panel's
+  // chat claim is void.
+  | {kind: 'registrationDropped'};
 
 /** One tab of the daemon's canonical `tabs_state` registry snapshot. */
 export interface RegistryTabEntry {
@@ -252,6 +257,30 @@ export interface RegistryTabEntry {
   title: string;
   workDir: string;
   scopeWorkDir: string;
+}
+
+/** One `tabs_state` snapshot as seen by the extension host (see
+ * onRegistryTabsState). */
+export interface RegistryTabsDelta {
+  /**
+   * Tabs newly listed — or first bound to a chat — relative to the
+   * previous snapshot (ALL listed tabs when this is the first one).
+   */
+  added: RegistryTabEntry[];
+  /**
+   * Every entry the snapshot lists. The subscriber syncs open panels'
+   * chat bindings from it, and can tell a chat whose old tab was
+   * DISPLACED by the one-tab-per-chat invariant (old id no longer
+   * listed) from an ordinary duplicate.
+   */
+  listed: RegistryTabEntry[];
+  /**
+   * True for the controller's first snapshot. Its tabs predate this
+   * session, and a reloaded window may still hold some of them as
+   * serialized editor-tab placeholders the panel manager has not
+   * adopted yet — adopting is then unsafe (duplicate panels).
+   */
+  firstSnapshot: boolean;
 }
 
 /** Editor-tabs mode wiring handed to a per-panel chat controller. */
@@ -368,6 +397,22 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   // materialize editor-tab panels for the registry's tabs when the
   // user switches editor-tabs mode on (see getRegistryTabEntries).
   private _registryEntries: Map<string, RegistryTabEntry> = new Map();
+  // Whether a canonical `tabs_state` snapshot has been received yet.
+  // The FIRST snapshot is a baseline only: its tabs predate this
+  // session (a reloaded window may still hold them as serialized
+  // editor-tab placeholders the panel manager has not adopted yet);
+  // the delta's firstSnapshot flag tells the subscriber.
+  private _seenTabsState: boolean = false;
+  private _onRegistryTabsState = new vscode.EventEmitter<RegistryTabsDelta>();
+  /**
+   * Fires on every canonical `tabs_state` snapshot with the full list
+   * and the delta of tabs another client created — or first bound to
+   * a chat, which is how a task run in the remote web app surfaces on
+   * an idle tab. Editor-tabs mode mirrors added tabs as editor tabs
+   * the same way sidebar mode's webview adopts them into its internal
+   * strip, and syncs open panels' chat bindings from the full list.
+   */
+  public readonly onRegistryTabsState = this._onRegistryTabsState.event;
   private _worktreeActionResolves: Map<string, () => void> = new Map();
   private _worktreeProgresses: Map<
     string,
@@ -498,6 +543,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._installClientListener(client);
     client.on('connect', () => {
       this._getApi().setWorkDir(this._getWorkDir());
+      if (!this._panelHooks) {
+        // The window's ONE long-lived controller (the sidebar view;
+        // panels and the history panel carry panelHooks) asks for the
+        // canonical registry snapshot on every (re)connect. The daemon
+        // otherwise broadcasts one only after mutations and webview
+        // `ready`s, so without this an editor-tabs window with no open
+        // chat webview would have no baseline — the next remote task's
+        // own mutation would be its FIRST snapshot — and a reconnect
+        // would never learn of tabs created during the outage.
+        client.sendCommand({type: 'getTabsState'});
+      }
       this._daemonConnected = true;
       this._sendToWebview({type: 'daemonStatus', connected: true});
       if (this._view) {
@@ -571,6 +627,20 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         error: 'The agent was unreachable',
         tabId: tabId ?? '',
       });
+      return;
+    }
+    if (
+      this._panelHooks &&
+      tabId === this._panelHooks.rootTabId &&
+      (dropped.type === 'openTab' || dropped.type === 'resumeSession')
+    ) {
+      // The panel's registry registration is gone for good: the daemon
+      // never received it and the webview only re-sends `ready` (not
+      // the resume) on reconnect. The panel manager must release the
+      // panel's chat claim, or a registry tab another client bound to
+      // the same chat would be skipped forever as a "duplicate" of a
+      // panel that can never actually bind.
+      this._panelHooks.onEvent({kind: 'registrationDropped'});
     }
   }
 
@@ -662,8 +732,28 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             this._cleanupTabResources(staleId);
           }
         }
+        // Tabs another client created — or first bound to a chat (a
+        // task run allocates the chat id) — since the previous
+        // snapshot: e.g. a task run in the remote web app. On the
+        // first snapshot every listed tab counts as added (the daemon
+        // only broadcasts on mutations and webview `ready`s, so this
+        // may itself be the remote run's mutation); the subscriber
+        // uses the firstSnapshot flag to decide whether adopting is
+        // safe (see RegistryTabsDelta).
+        const added: RegistryTabEntry[] = [];
+        const firstSnapshot = !this._seenTabsState;
+        for (const [id, entry] of entries) {
+          const prev = this._registryEntries.get(id);
+          if (!prev || (entry.chatId && !prev.chatId)) added.push(entry);
+        }
+        this._seenTabsState = true;
         this._registryTabs = listed;
         this._registryEntries = entries;
+        this._onRegistryTabsState.fire({
+          added,
+          listed: [...entries.values()],
+          firstSnapshot,
+        });
         if (this._panelHooks) {
           // Report the root tab's chat binding so the panel manager
           // can route a history open of the same chat to this panel
@@ -1718,7 +1808,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         os.homedir(),
         `KISS_HOME='${escHome}' KISS_NONINTERACTIVE=1 ` +
           `KISS_BOOTSTRAP_URL='${escUrl}' bash -c ` +
-          `'set -o pipefail; curl -fsSL "$KISS_BOOTSTRAP_URL" | bash'`,
+          '\'set -o pipefail; curl -fsSL "$KISS_BOOTSTRAP_URL" | bash\'',
       );
       return;
     }
@@ -2123,6 +2213,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     // were ever used again, while a fresh _getClient() built a new one.
     this._api = null;
     this._onCommitMessage.dispose();
+    this._onRegistryTabsState.dispose();
     // Each panel's onDidDispose deletes its own map entry, so iterate a
     // snapshot and clear at the end.
     for (const panel of [...this._htmlPreviewPanels.values()]) {
