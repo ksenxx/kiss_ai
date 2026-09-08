@@ -230,6 +230,8 @@ export type PanelEvent =
       chatId?: string;
       taskId?: string | number | null;
       title?: string;
+      // Fresh chats: composer draft to seed the new panel's textarea.
+      pendingText?: string;
     }
   // Close this panel. retire=true means the USER closed the root chat
   // inside the panel, so the host must also retire the tab from the
@@ -1522,6 +1524,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           chatId: message.chatId,
           taskId: message.taskId,
           title: message.title,
+          pendingText: message.pendingText,
         });
         break;
 

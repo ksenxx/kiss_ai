@@ -300,6 +300,61 @@ async function runTest() {
     'the task-carrying open must still not create a panel',
   );
 
+  // --- a fresh openChatPanel carries the opener's composer draft --------
+  panelA._recv.fire({
+    type: 'openChatPanel',
+    pendingText: 'draft <with> "specials"\n& a second line',
+  });
+  await waitFor(
+    () => createdPanels.length === 3,
+    'fresh open with a draft must create a panel',
+  );
+  const panelDraft = createdPanels[2];
+  assert.ok(
+    panelDraft.webview.html.includes(
+      'data-kiss-pending-text="draft &lt;with&gt; &quot;specials&quot;\n' +
+        '&amp; a second line"',
+    ),
+    'the draft must be stamped (escaped) as data-kiss-pending-text',
+  );
+  assert.ok(
+    !panelDraft.webview.html.includes('data-kiss-resume-chat-id'),
+    'a fresh open resumes nothing',
+  );
+  panelDraft.dispose();
+
+  // --- an EMPTY draft and resume opens stamp no pending text ------------
+  panelA._recv.fire({type: 'openChatPanel', pendingText: ''});
+  await waitFor(
+    () => createdPanels.length === 4,
+    'fresh open with an empty draft must still create a panel',
+  );
+  assert.ok(
+    !createdPanels[3].webview.html.includes('data-kiss-pending-text'),
+    'an empty draft must not be stamped',
+  );
+  createdPanels[3].dispose();
+  panelA._recv.fire({
+    type: 'openChatPanel',
+    chatId: 'chat-C',
+    pendingText: 'must not leak into a resume',
+  });
+  await waitFor(
+    () => createdPanels.length === 5,
+    'resume open must create a panel',
+  );
+  assert.ok(
+    createdPanels[4].webview.html.includes(
+      'data-kiss-resume-chat-id="chat-C"',
+    ),
+    'the resume open resumes its chat',
+  );
+  assert.ok(
+    !createdPanels[4].webview.html.includes('data-kiss-pending-text'),
+    'a resume shows the resumed chat, never the opener draft',
+  );
+  createdPanels[4].dispose();
+
   // --- a user close retires the chat tab -------------------------------
   panelB.dispose();
   await waitFor(

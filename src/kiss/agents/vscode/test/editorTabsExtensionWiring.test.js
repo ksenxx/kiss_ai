@@ -153,6 +153,7 @@ const calls = {
   },
   controller: {
     focusChatInput: 0,
+    newConversation: 0,
     stopTask: 0,
     submitTask: [],
     appendToInput: [],
@@ -223,6 +224,9 @@ class FakeController {
     calls.controller.focusChatInput += 1;
     return Promise.resolve();
   }
+  newConversation() {
+    calls.controller.newConversation += 1;
+  }
   stopTask() {
     calls.controller.stopTask += 1;
   }
@@ -263,7 +267,8 @@ class FakePanelManager {
     return fakeController;
   }
   activeController() {
-    return fakeController;
+    // Mirrors the real manager: undefined when no panel exists.
+    return fakePanelCount > 0 ? fakeController : undefined;
   }
   openSettings() {
     calls.manager.openSettings += 1;
@@ -413,14 +418,33 @@ async function runTest() {
   assert.strictEqual(calls.manager.openSettings, 1);
   assert.strictEqual(calls.sidebar.openSettingsUI, 1, 'sidebar untouched');
 
+  // No chat panel open yet: Cmd+T opens a fresh editor tab directly.
   await commands.get('kissSorcar.newConversation')();
   assert.strictEqual(calls.manager.openNewChat, 1);
   assert.strictEqual(calls.controller.focusChatInput, 1);
   assert.strictEqual(calls.sidebar.newConversation, 1, 'sidebar untouched');
+  assert.strictEqual(
+    calls.controller.newConversation,
+    0,
+    'no panel to route through yet',
+  );
+
+  // With a panel open, Cmd+T routes through the ACTIVE panel's webview
+  // (clearChat -> createNewTab posts openChatPanel with the composer
+  // draft) so the drafted text is carried into the new editor tab.
+  await commands.get('kissSorcar.newConversation')();
+  assert.strictEqual(calls.controller.newConversation, 1);
+  assert.strictEqual(calls.controller.focusChatInput, 2);
+  assert.strictEqual(
+    calls.manager.openNewChat,
+    1,
+    'the panel webview opens the new tab, not openNewChat',
+  );
+  assert.strictEqual(calls.sidebar.newConversation, 1, 'sidebar untouched');
 
   await commands.get('kissSorcar.openPanel')();
   assert.strictEqual(calls.manager.revealActiveOrCreate, 1);
-  assert.strictEqual(calls.controller.focusChatInput, 2);
+  assert.strictEqual(calls.controller.focusChatInput, 3);
 
   await commands.get('kissSorcar.stopTask')();
   assert.strictEqual(calls.controller.stopTask, 1);
@@ -462,7 +486,7 @@ async function runTest() {
     'kissSorcar.historyView.focus',
   ]);
   assert.strictEqual(calls.manager.openNewChat, 2, 'no chat tab: one opened');
-  assert.strictEqual(calls.controller.focusChatInput, 3);
+  assert.strictEqual(calls.controller.focusChatInput, 4);
 
   // --- the history view: resolve + visibility both ensure a chat --------
   const historyProvider = viewProviders.get('kissSorcar.historyView');

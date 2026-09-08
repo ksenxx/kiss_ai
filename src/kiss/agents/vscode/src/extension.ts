@@ -201,7 +201,17 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.newConversation', async () => {
       if (editorTabsMode()) {
-        // Every conversation is its own editor tab in this mode.
+        // Every conversation is its own editor tab in this mode. Route
+        // through the active chat panel's webview when one exists: its
+        // createNewTab posts openChatPanel WITH the composer draft, so
+        // Cmd+T carries the drafted text into the new tab exactly like
+        // the sidebar path below does.
+        const active = panelManager!.activeController();
+        if (active) {
+          await active.focusChatInput();
+          active.newConversation();
+          return;
+        }
         await panelManager!.openNewChat().focusChatInput();
         return;
       }
