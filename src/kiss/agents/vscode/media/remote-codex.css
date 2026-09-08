@@ -297,7 +297,7 @@ body.remote-chat #model-btn {
 
   /* Cap the pill (its label truncates via #model-name) so the footer
      usually keeps every button on one row even at phone widths. */
-  max-width: clamp(122px, 36vw, 374px);
+  max-width: clamp(72px, 21vw, 220px);
 }
 
 body.remote-chat #model-btn:hover:not(:disabled) {
