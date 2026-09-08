@@ -110,6 +110,9 @@ class FakeSidebarView {
   appendToInput() {
     return Promise.resolve();
   }
+  onRegistryTabsState() {
+    return makeDisposable();
+  }
   onCommitMessage(cb) {
     this._onCommitListeners.push(cb);
     return makeDisposable();
@@ -170,8 +173,8 @@ assert.strictEqual(
   'compiled extension must export deactivate()',
 );
 
-function makeMemento() {
-  const store = new Map();
+function makeMemento(initial) {
+  const store = new Map(Object.entries(initial || {}));
   return {
     get: (key, def) => (store.has(key) ? store.get(key) : def),
     update: (key, value) => {
@@ -210,6 +213,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const WAIT_MS = 1500;
 
+const countCloseAux = from =>
+  executedCommands
+    .slice(from)
+    .filter(e => e.cmd === 'workbench.action.closeAuxiliaryBar').length;
+
 async function runTests() {
   let failures = 0;
 
@@ -218,6 +226,7 @@ async function runTests() {
   const ctx1 = makeContext(ws1State, globalState);
   const widenBefore1 = calls.widenToOneThird;
   const focusBefore1 = calls.focusChatInput;
+  const cmdMark1 = executedCommands.length;
   extension.activate(ctx1);
   await sleep(WAIT_MS);
   const widen1 = calls.widenToOneThird - widenBefore1;
@@ -231,6 +240,13 @@ async function runTests() {
     assert.ok(
       focus1 >= 1,
       `workspace 1: focusChatInput must fire at least once (got ${focus1})`,
+    );
+    assert.strictEqual(
+      countCloseAux(cmdMark1),
+      1,
+      `workspace 1: first launch must close the secondary sidebar the ` +
+        `workbench's default layout opened on the built-in Chat view ` +
+        `(got ${countCloseAux(cmdMark1)} closeAuxiliaryBar calls)`,
     );
     console.log('  ok - workspace 1 widens secondary sidebar and focuses chat');
   } catch (err) {
@@ -277,6 +293,7 @@ async function runTests() {
   const ctx2b = makeContext(ws2State, globalState);
   const widenBefore3 = calls.widenToOneThird;
   const focusBefore3 = calls.focusChatInput;
+  const cmdMark3 = executedCommands.length;
   extension.activate(ctx2b);
   await sleep(WAIT_MS);
   const widen3 = calls.widenToOneThird - widenBefore3;
@@ -296,6 +313,13 @@ async function runTests() {
         `again (got ${focus3}). The first-launch gate must persist ` +
         `per-workspace.`,
     );
+    assert.strictEqual(
+      countCloseAux(cmdMark3),
+      0,
+      `workspace 2 reopened: the secondary sidebar must NOT be closed ` +
+        `again (got ${countCloseAux(cmdMark3)} closeAuxiliaryBar calls) — ` +
+        `the user may have arranged it deliberately after the first launch.`,
+    );
     console.log('  ok - workspace 2 reopened does not re-bootstrap');
   } catch (err) {
     failures += 1;
@@ -303,6 +327,49 @@ async function runTests() {
   }
   extension.deactivate();
   disposeContext(ctx2b);
+
+  // --- extension-update replay: auto-open again, but never re-close ---
+  // The update marker re-arms the auto-open (shouldAutoOpen) on an
+  // already-initialized workspace; the aux-bar close belongs to the
+  // genuine first launch only.
+  const kissHome = path.join(os.tmpdir(), `kiss-home-${process.pid}`);
+  fs.mkdirSync(path.join(kissHome, '.kiss'), {recursive: true});
+  const prevHome = process.env.HOME;
+  const prevProfile = process.env.USERPROFILE;
+  process.env.HOME = kissHome;
+  process.env.USERPROFILE = kissHome;
+  const marker = path.join(kissHome, '.kiss', '.extension-updated');
+  fs.writeFileSync(marker, new Date().toISOString() + '\n');
+  const ws3State = makeMemento({firstLaunchDone: true, sidebarWidened: true});
+  const ctx3 = makeContext(ws3State, globalState);
+  const focusBefore4 = calls.focusChatInput;
+  const cmdMark4 = executedCommands.length;
+  extension.activate(ctx3);
+  await sleep(WAIT_MS);
+  const focus4 = calls.focusChatInput - focusBefore4;
+  try {
+    assert.ok(
+      focus4 >= 1,
+      `update replay: focusChatInput must fire again after an ` +
+        `extension update (got ${focus4})`,
+    );
+    assert.strictEqual(
+      countCloseAux(cmdMark4),
+      0,
+      `update replay: the secondary sidebar must NOT be closed on the ` +
+        `post-update auto-open (got ${countCloseAux(cmdMark4)} ` +
+        `closeAuxiliaryBar calls)`,
+    );
+    console.log('  ok - update replay reopens chat without closing aux bar');
+  } catch (err) {
+    failures += 1;
+    console.log(`  FAIL - update replay: ${err.message}`);
+  }
+  extension.deactivate();
+  disposeContext(ctx3);
+  process.env.HOME = prevHome;
+  process.env.USERPROFILE = prevProfile;
+  fs.rmSync(kissHome, {recursive: true, force: true});
 
   return failures;
 }

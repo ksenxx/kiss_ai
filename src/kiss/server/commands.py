@@ -945,6 +945,22 @@ class _CommandsMixin:
                 chat_id, cmd.get("tabId", ""), task_id=task_id,
             )
 
+    def _cmd_get_tabs_state(self, cmd: dict[str, Any]) -> None:
+        """Broadcast the canonical ``tabs_state`` snapshot on request.
+
+        Sent by the VS Code extension host's long-lived controller on
+        every daemon (re)connect.  The daemon otherwise emits snapshots
+        only after registry mutations and webview ``ready`` syncs, so a
+        host with no open chat webview would have no baseline — the
+        next remote-client mutation would be the FIRST snapshot it ever
+        sees, and a reconnecting host would never learn of tabs created
+        during the outage.  The reply is a normal broadcast: snapshots
+        are idempotent and every client reconciles against the full
+        list, so answering all clients is as cheap as answering one.
+        """
+        del cmd
+        self._broadcast_tabs_state()
+
     def _cmd_open_tab(self, cmd: dict[str, Any]) -> None:
         """Register a client-opened tab in the shared tab registry.
 
@@ -1440,6 +1456,7 @@ class _CommandsMixin:
         "appendUserMessage": _cmd_append_user_message,
         "resumeSession": _cmd_resume_session,
         "openTab": _cmd_open_tab,
+        "getTabsState": _cmd_get_tabs_state,
         "closeTab": _cmd_close_tab,
         "newChat": _cmd_new_chat,
         "complete": _cmd_complete,
