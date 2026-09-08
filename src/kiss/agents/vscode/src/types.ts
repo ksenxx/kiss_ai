@@ -129,6 +129,10 @@ export type FromWebviewMessage =
       chatId?: string;
       taskId?: string | number | null;
       title?: string;
+      // Fresh conversations only: the opening webview's composer draft,
+      // stamped onto the new panel as data-kiss-pending-text so the new
+      // chat's textarea starts out with the same text.
+      pendingText?: string;
     }
   // Editor-tabs mode: close this panel — because the daemon's registry
   // no longer lists its chat tab (another client closed it; retire

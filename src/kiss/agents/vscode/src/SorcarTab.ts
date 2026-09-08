@@ -245,6 +245,14 @@ export interface EditorTabInit {
   resumeChatId?: string;
   resumeTaskId?: string;
   /**
+   * Composer draft carried over from the panel that opened this one
+   * (its + button / Cmd+T posts `openChatPanel` with the draft), so
+   * the new chat's textarea starts out with the same text — parity
+   * with the sidebar webview, whose createNewTab copies the draft
+   * into the new internal tab.
+   */
+  pendingText?: string;
+  /**
    * The tab is already in the daemon's registry (a panel materialized
    * from a `tabs_state` entry on mode switch-on), so the webview may
    * treat its disappearance from the first snapshot it sees as a close
@@ -273,6 +281,9 @@ export function editorTabBodyAttrs(init: EditorTabInit): string {
   }
   if (init.resumeTaskId) {
     attrs.push(` data-kiss-resume-task-id="${escapeHtml(init.resumeTaskId)}"`);
+  }
+  if (init.pendingText) {
+    attrs.push(` data-kiss-pending-text="${escapeHtml(init.pendingText)}"`);
   }
   if (init.inRegistry) {
     attrs.push(' data-kiss-in-registry="1"');
