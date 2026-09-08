@@ -1,8 +1,23 @@
 # Tip
 
+## Update button in the settings
+
+If the Update button in settings fails, run the full installation command again.  It will not delete your history.
+
+```
+curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
+```
+
+# Tip
+
+For writing a Sorcar Extension Agent (SEA), see the README.md.  All communication agents, such as Slack agent, 
+are implemented in KISS Sorcar as SEA.
+
+# Tip
+
 ## Prompt KISS Sorcar like the Developer of KISS Sorcar
 
-**Always write precise 1-6 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. The waterfall model does not work that well in contemporary times.
+**Always write precise less than 10 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. The waterfall model does not work that well in contemporary times.
 
 **No need to use generic skills for debugging, code review, etc.** Frontier models have been trained on those skills.
 
