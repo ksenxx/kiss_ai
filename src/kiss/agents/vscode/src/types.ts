@@ -553,6 +553,7 @@ export interface AgentCommand {
     | 'complete'
     | 'newChat'
     | 'openTab'
+    | 'getTabsState'
     | 'closeTab'
     | 'ready'
     | 'generateCommitMessage'
