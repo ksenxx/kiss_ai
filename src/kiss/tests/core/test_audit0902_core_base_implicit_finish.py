@@ -2,15 +2,13 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Audit 2026-09-02 (core-base): the text-only implicit finish must obey the
-same rules as the stagnation implicit finish.
+"""Audit 2026-09-02 (core-base): the text-only implicit finish must consult
+the finish vetoes and honor the registered ``finish`` contract.
 
-``KISSAgent._execute_step`` has two "the model is done but never called
-``finish``" nets.  The stagnation net (identical tool calls with identical
-results) consults ``tool_call_guard`` / ``tool_call_hook`` and returns the
-registered ``finish`` tool's contract via ``_implicit_finish_result``.  The
-text-only net (``MAX_CONSECUTIVE_NO_TOOL_CALLS`` turns without any tool
-call) returned the raw response text unconditionally, which
+``KISSAgent._execute_step`` has a "the model is done but never called
+``finish``" net: the text-only net (``MAX_CONSECUTIVE_NO_TOOL_CALLS`` turns
+without any tool call).  It originally returned the raw response text
+unconditionally, which
 
 * bypassed a guard that blocks ``finish`` (Sorcar blocks it while a user
   follow-up is queued, so the follow-up was silently dropped), and
@@ -218,8 +216,7 @@ class TestTextOnlyImplicitFinishHonoursGuard:
 
     def test_tool_call_hook_can_veto_text_only_finish(self) -> None:
         """A ``tool_call_hook`` returning anything but ``"OK"`` for ``finish``
-        suppresses the text-only implicit finish, mirroring its documented
-        veto over the stagnation implicit finish.  Once it returns ``"OK"``
+        suppresses the text-only implicit finish.  Once it returns ``"OK"``
         the run ends with the text."""
         verdicts = iter(["not yet, keep going", "OK"])
         hook_calls: list[tuple[str, dict[str, Any]]] = []

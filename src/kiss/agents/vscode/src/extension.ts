@@ -7,13 +7,18 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import {SorcarSidebarView} from './SorcarSidebarView';
+import {CHAT_PANEL_VIEW_TYPE, SorcarPanelManager} from './SorcarPanelManager';
 import {getGitApi} from './gitApi';
 import {isReloadReady} from './reloadGuard';
 
 import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
 import {findKissProject} from './kissPaths';
 import {kissHomeDir, sorcarSockPath} from './userAssets';
-import {resetTipsOnExtensionUpdate} from './SorcarTab';
+import {
+  HISTORY_PANEL_TAB_ID,
+  historyPanelBodyAttrs,
+  resetTipsOnExtensionUpdate,
+} from './SorcarTab';
 import {
   checkForExtensionUpdate,
   snoozeUpdateNotification,
@@ -25,6 +30,8 @@ import {
 } from './WebviewNotifications';
 
 let sidebarView: SorcarSidebarView | undefined;
+let panelManager: SorcarPanelManager | undefined;
+let historyView: SorcarSidebarView | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   ensureLocalBinInPath();
@@ -40,16 +47,174 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   context.subscriptions.push({dispose: () => sidebarView?.dispose()});
 
+  // Panel closes retire their chat tabs through the sidebar
+  // controller's long-lived daemon client: a panel's own client dies
+  // with the panel, which could lose a closeTab queued while the
+  // daemon was briefly unreachable.
+  panelManager = new SorcarPanelManager(context.extensionUri, tabId =>
+    sidebarView?.closeChatTab(tabId),
+  );
+  context.subscriptions.push(panelManager.registerSerializer());
+  context.subscriptions.push({
+    dispose: () => {
+      panelManager?.dispose();
+      panelManager = undefined;
+    },
+  });
+
+  const editorTabsMode = () => SorcarPanelManager.modeEnabled();
+
+  // The chat surface commands act on: in editor-tabs mode the active
+  // chat panel (opening one when asked to), otherwise the sidebar view.
+  const chatController = (createIfMissing: boolean) => {
+    if (!editorTabsMode()) return sidebarView!;
+    if (createIfMissing) return panelManager!.revealActiveOrCreate();
+    return panelManager!.activeController();
+  };
+
+  const workspaceDir = (): string => {
+    const folders = vscode.workspace.workspaceFolders;
+    return folders && folders.length > 0 ? folders[0].uri.fsPath : '';
+  };
+
+  // Switching the editor-tabs mode (from the settings UI toggle or
+  // settings.json): ON migrates the registry's chats of this workspace
+  // into editor tabs (the sidebar view hides via its `when` clause);
+  // OFF closes the panels without retiring their chats and CLOSES the
+  // secondary sidebar — the sidebar view re-adopts the chats from
+  // `tabs_state` when a KS button (or anything else) next reveals it.
+  // Guarded like the other optional host APIs (see
+  // registerWebviewPanelSerializer): absent only in test stubs.
+  let modeSwitchAt = 0;
+  if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration(e => {
+        if (!e.affectsConfiguration('kissSorcar.editorTabsMode')) return;
+        modeSwitchAt = Date.now();
+        if (editorTabsMode()) {
+          panelManager!.enterMode(
+            sidebarView!.getRegistryTabEntries(),
+            workspaceDir(),
+          );
+        } else {
+          panelManager!.closeAll();
+          void vscode.commands.executeCommand(
+            'workbench.action.closeAuxiliaryBar',
+          );
+        }
+      }),
+    );
+  }
+
   sidebarView.syncWorkDir();
+
+  // True when ANY editor tab hosts a chat panel. The workbench's
+  // restored chat tabs count too: after a window reload they exist as
+  // serialized placeholders long before the panel manager adopts them,
+  // and opening a "first" chat next to them would be a duplicate.
+  const hasChatEditorTab = (): boolean => {
+    // Guarded like the other optional host APIs (absent in test stubs).
+    const groups = vscode.window.tabGroups?.all;
+    if (!groups) return panelManager!.panelCount > 0;
+    for (const group of groups) {
+      for (const tab of group.tabs) {
+        const viewType = (tab.input as {viewType?: unknown} | null)?.viewType;
+        if (
+          typeof viewType === 'string' &&
+          viewType.includes(CHAT_PANEL_VIEW_TYPE)
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  // A KS button brought the history panel on screen; an editor window
+  // with no chat tab at all also gets a fresh conversation.
+  const openChatIfNoneOpen = (): void => {
+    if (!editorTabsMode()) return;
+    if (panelManager!.panelCount > 0 || hasChatEditorTab()) return;
+    void panelManager!.openNewChat().focusChatInput();
+  };
+
+  // The primary-sidebar history panel (editor-tabs mode): the same
+  // chat webview in history-only mode (see historyPanelBodyAttrs), so
+  // search, filters, deletes and live refreshes all come from main.js
+  // unchanged. Its history clicks arrive as `openChatPanel` messages
+  // and open editor tabs through the panel manager.
+  historyView = new SorcarSidebarView(context.extensionUri, {
+    rootTabId: HISTORY_PANEL_TAB_ID,
+    bodyAttrs: historyPanelBodyAttrs(),
+    onEvent: event => {
+      if (event.kind === 'openChat') panelManager?.openChat(event);
+    },
+  });
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      'kissSorcar.historyView',
+      {
+        resolveWebviewView: (view, resolveContext, token) => {
+          historyView!.resolveWebviewView(view, resolveContext, token);
+          view.onDidChangeVisibility(() => {
+            if (view.visible) openChatIfNoneOpen();
+          });
+          openChatIfNoneOpen();
+        },
+      },
+      {webviewOptions: {retainContextWhenHidden: true}},
+    ),
+  );
+  context.subscriptions.push({dispose: () => historyView?.dispose()});
+
+  // The editor-title KS button (editor-tabs mode): show the history
+  // panel in the primary sidebar, and make sure a chat tab is open.
+  // In non-editor-tabs mode a KS button only reveals the chat in the
+  // secondary sidebar: no history panel, no new chat.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.showHistory', async () => {
+      if (!editorTabsMode()) {
+        await sidebarView!.focusChatInput();
+        return;
+      }
+      await vscode.commands.executeCommand('kissSorcar.historyView.focus');
+      openChatIfNoneOpen();
+    }),
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.openPanel', () => {
-      void sidebarView!.focusChatInput();
+      void chatController(true)!.focusChatInput();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.openSettings', () => {
+      if (editorTabsMode()) {
+        void panelManager!.openSettings();
+      } else {
+        void sidebarView!.openSettingsUI();
+      }
     }),
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.newConversation', async () => {
+      if (editorTabsMode()) {
+        // Every conversation is its own editor tab in this mode. Route
+        // through the active chat panel's webview when one exists: its
+        // createNewTab posts openChatPanel WITH the composer draft, so
+        // Cmd+T carries the drafted text into the new tab exactly like
+        // the sidebar path below does.
+        const active = panelManager!.activeController();
+        if (active) {
+          await active.focusChatInput();
+          active.newConversation();
+          return;
+        }
+        await panelManager!.openNewChat().focusChatInput();
+        return;
+      }
       await sidebarView!.focusChatInput();
       sidebarView!.newConversation();
     }),
@@ -57,7 +222,18 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.stopTask', () => {
-      sidebarView!.stopTask();
+      chatController(false)?.stopTask();
+    }),
+  );
+
+  // The editor-title git-commit button (editor-tabs mode): run the
+  // manual Git Commit of the active chat panel's working tree — the
+  // same daemon autocommitAction flow the settings drawer's Git
+  // Commit button uses. Also usable from the command palette in
+  // sidebar mode, where it acts on the sidebar chat.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.gitCommit', () => {
+      void chatController(true)!.gitCommit();
     }),
   );
 
@@ -70,7 +246,7 @@ export function activate(context: vscode.ExtensionContext): void {
         showInformationNotification('No text selected');
         return;
       }
-      await sidebarView!.submitTask(sel.trim());
+      await chatController(true)!.submitTask(sel.trim());
     }),
   );
 
@@ -84,7 +260,7 @@ export function activate(context: vscode.ExtensionContext): void {
         showInformationNotification('No text selected');
         return;
       }
-      void sidebarView!.appendToInput(text);
+      void chatController(true)!.appendToInput(text);
     }),
   );
 
@@ -94,12 +270,18 @@ export function activate(context: vscode.ExtensionContext): void {
       if (_focusToggling) return;
       _focusToggling = true;
       try {
-        if (sidebarView!.hasFocus) {
+        const controller = chatController(false);
+        if (controller?.hasFocus) {
+          // In editor-tabs mode the chat IS an editor, so "back to the
+          // editor" means the previously used one; in sidebar mode the
+          // first editor group.
           await vscode.commands.executeCommand(
-            'workbench.action.focusFirstEditorGroup',
+            editorTabsMode()
+              ? 'workbench.action.openPreviousRecentlyUsedEditor'
+              : 'workbench.action.focusFirstEditorGroup',
           );
         } else {
-          await sidebarView!.focusChatInput();
+          await chatController(true)!.focusChatInput();
         }
       } finally {
         _focusToggling = false;
@@ -109,7 +291,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.focusEditor', () => {
-      vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');
+      // In editor-tabs mode the chat IS an editor in the first group;
+      // "focus the editor" then means the previously used one.
+      vscode.commands.executeCommand(
+        editorTabsMode()
+          ? 'workbench.action.openPreviousRecentlyUsedEditor'
+          : 'workbench.action.focusFirstEditorGroup',
+      );
     }),
   );
 
@@ -388,11 +576,21 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   context.subscriptions.push(treeView);
 
+  // The KS activity-bar button in non-editor-tabs mode shows this
+  // dummy tree: never leave anything (history panel or otherwise) up
+  // in the primary sidebar — close it back and reveal the existing
+  // chat in the secondary sidebar instead, creating no new chat.
   treeView.onDidChangeVisibility(async e => {
-    if (e.visible) {
-      await vscode.commands.executeCommand('workbench.view.explorer');
-      await sidebarView!.focusChatInput();
-    }
+    if (!e.visible) return;
+    await vscode.commands.executeCommand('workbench.action.closeSidebar');
+    // The tree also pops up when editorTabsMode flips OFF while the
+    // KISS container is the active primary-sidebar view (the history
+    // panel hides, the tree takes its spot). That flip must leave the
+    // secondary sidebar CLOSED, so give its config handler — which may
+    // run in this same tick — a moment to record itself, then bail.
+    await new Promise(r => setTimeout(r, 50));
+    if (Date.now() - modeSwitchAt < 2000) return;
+    await sidebarView!.focusChatInput();
   });
 
   if (!context.workspaceState.get<boolean>('sidebarWidened')) {
@@ -400,6 +598,8 @@ export function activate(context: vscode.ExtensionContext): void {
       const widenTimer = setTimeout(async () => {
         // The extension may have been deactivated before this fires.
         if (!sidebarView) return;
+        // The one-time widening belongs to the sidebar surface only.
+        if (editorTabsMode()) return;
         await vscode.commands.executeCommand(
           'workbench.action.focusAuxiliaryBar',
         );
@@ -423,7 +623,7 @@ export function activate(context: vscode.ExtensionContext): void {
   if (shouldAutoOpen) {
     const autoOpenTimer = setTimeout(async () => {
       if (!sidebarView) return;
-      await sidebarView.focusChatInput();
+      await chatController(true)!.focusChatInput();
       await context.workspaceState.update('firstLaunchDone', true);
     }, 1000);
     context.subscriptions.push({dispose: () => clearTimeout(autoOpenTimer)});
@@ -462,7 +662,14 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
+  // Shutdown first: the panel disposals below (and any the workbench
+  // triggers) must not retire chats from the daemon's registry.
+  panelManager?.markShutdown();
+  panelManager?.dispose();
+  panelManager = undefined;
   sidebarView?.dispose();
   sidebarView = undefined;
+  historyView?.dispose();
+  historyView = undefined;
   console.log('KISS Sorcar extension deactivated');
 }

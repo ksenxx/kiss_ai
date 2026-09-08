@@ -161,7 +161,13 @@ def remote_port(tmp_path: Path) -> Iterator[int]:
 
 
 def _attach(page: Page, path: Path) -> None:
-    """Pick *path* through the webapp's own file picker."""
+    """Pick *path* through the webapp's own file picker.
+
+    The attach button lives inside the composer's "..." overflow menu,
+    so the menu is opened first.
+    """
+    page.click("#more-btn")
+    page.wait_for_selector("#more-menu.open", state="visible")
     with page.expect_file_chooser() as chooser:
         page.click("#upload-btn")
     chooser.value.set_files(str(path))
@@ -198,7 +204,7 @@ def _open_mobile_page(browser: Browser, port: int) -> Page:
         viewport={"width": 390, "height": 844},
     )
     page.goto(f"https://127.0.0.1:{port}/", wait_until="domcontentloaded")
-    page.wait_for_selector("#upload-btn", state="visible")
+    page.wait_for_selector("#more-btn", state="visible")
     assert page.evaluate("document.body.classList.contains('remote-chat')")
     return page
 

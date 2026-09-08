@@ -477,12 +477,25 @@ class RelentlessAgent(Base):
                     llm_call_hook=llm_call_hook,
                     tool_call_hook=tool_call_hook,
                 )
+                self._current_executor = None
+                self._accumulate_usage(executor)
             except BudgetExceededError:
                 self._current_executor = None
                 self._accumulate_usage(executor)
                 raise
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
+                # Bank the failed session's spend BEFORE any recovery
+                # work: a stop (``KeyboardInterrupt``) landing inside
+                # the trajectory summarizer below must not lose it —
+                # the runner's terminal ``result`` event and the
+                # persisted ``task_history`` row read these counters
+                # (``_subtask_metrics``). ``_summarize_failed_session``
+                # relies on this: its budget math subtracts only
+                # ``self.budget_used``, which now includes the failed
+                # executor's spend.
+                self._current_executor = None
+                self._accumulate_usage(executor)
                 is_context_overflow = isinstance(exc, ContextWindowExceededError)
                 if (
                     (
@@ -491,8 +504,6 @@ class RelentlessAgent(Base):
                     )
                     or executor.step_count <= 1
                 ):
-                    self._current_executor = None
-                    self._accumulate_usage(executor)
                     error_result = finish(False, False, f"{type(exc).__name__}: {exc}")
                     if self.printer:
                         self.printer.print(
@@ -517,9 +528,17 @@ class RelentlessAgent(Base):
                         True,
                         self._summarize_failed_session(executor, session, exc),
                     )
-
-            self._current_executor = None
-            self._accumulate_usage(executor)
+            except BaseException:
+                # A stop-injected ``KeyboardInterrupt`` (or any other
+                # non-``Exception`` exit) must not lose the live
+                # session's spend: the runner's terminal
+                # stopped/failed ``result`` event and the persisted
+                # ``task_history`` row read these counters
+                # (``_subtask_metrics``), which otherwise report a
+                # $0.0000 cost for a task that burned real money.
+                self._current_executor = None
+                self._accumulate_usage(executor)
+                raise
 
             try:
                 payload = yaml.safe_load(result)
@@ -612,9 +631,12 @@ class RelentlessAgent(Base):
             from kiss.agents.sorcar.useful_tools import UsefulTools
 
             shell_tools = UsefulTools(stop_event=_stop_ev)
-            summarizer_budget = max(
-                0.01, self.max_budget - self.budget_used - executor.budget_used
-            )
+            # The caller (``perform_task``'s failure handler) banked
+            # the failed executor's spend into ``self.budget_used``
+            # before calling here, so the remaining budget is a plain
+            # subtraction — subtracting ``executor.budget_used`` again
+            # would double-count it.
+            summarizer_budget = max(0.01, self.max_budget - self.budget_used)
             summarizer_agent = KISSAgent(f"{self.name} Summarizer")
             try:
                 summarizer_result = summarizer_agent.run(

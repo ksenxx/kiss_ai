@@ -341,7 +341,8 @@ def test_codex_pill_tabs_and_status() -> None:
 
 def test_task_panel_not_restyled_on_remote() -> None:
     """The pinned task panel must render EXACTLY like the VS Code
-    extension webview (full-width inverted panel from main.css), so
+    extension webview (full-width thinking-panel-styled panel from
+    main.css), so
     remote-codex.css must not target #task-panel at all."""
     css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
     assert "#task-panel" not in css

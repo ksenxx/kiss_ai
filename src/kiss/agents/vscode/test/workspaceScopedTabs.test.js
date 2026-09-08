@@ -284,7 +284,7 @@ function testPendingLocalTabSurvivesForeignSnapshot() {
   // out of scope for this workspace.
   const {win, posted} = makeWebview();
   setWorkspace(win, '/ws/a');
-  const plusBtn = win.document.querySelector('.chat-tab-add');
+  const plusBtn = win.document.querySelector('#new-chat-btn');
   assert.ok(plusBtn, 'the new-tab button must exist');
   clickEl(win, plusBtn);
   const opened = posted.filter(m => m && m.type === 'openTab');
@@ -315,7 +315,7 @@ function testRemoteWorkDirSaveRescopesImmediately() {
   });
   assert.deepStrictEqual(tabBarIds(win), ['a1']);
 
-  const settingsBtn = win.document.querySelector('.chat-tab-settings');
+  const settingsBtn = win.document.querySelector('#settings-btn');
   assert.ok(settingsBtn, 'the settings button must exist');
   clickEl(win, settingsBtn);
   // The daemon answers the panel's getConfig with the current config.
@@ -619,7 +619,7 @@ function testOpenTabRejectedKeepsSoleVisibleChat() {
     tabs: [entry('b1', '/ws/b', 'chat-1')],
   });
   const placeholderId = activeTabId(win);
-  const plusBtn = win.document.querySelector('.chat-tab-add');
+  const plusBtn = win.document.querySelector('#new-chat-btn');
   clickEl(win, plusBtn);
   const newId = activeTabId(win);
   assert.notStrictEqual(newId, placeholderId);

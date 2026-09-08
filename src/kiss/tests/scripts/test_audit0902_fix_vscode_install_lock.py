@@ -89,6 +89,28 @@ def _lock_is_free(lock_file: Path) -> bool:
     return True
 
 
+def _restore_signal_defaults() -> None:
+    """Reset HUP/INT/TERM to SIG_DFL in the child before exec.
+
+    The signal tests send SIGTERM/SIGHUP to the bootstrap bash and
+    assert its ``trap`` handlers run.  POSIX shells cannot trap a signal
+    that was ignored on entry, and dispositions of ignored signals are
+    inherited across exec: when the test harness itself runs under
+    ``nohup`` (SIGHUP -> SIG_IGN) — as parallel CI runners do — bash's
+    ``trap 'exit 129' HUP`` is silently a no-op, the delivered SIGHUP is
+    discarded, and the bootstrap exits 0 instead of 129.  Restoring the
+    defaults here (INT too, for symmetry with the bootstrap's INT trap)
+    pins the standalone contract these tests exist for: a user running
+    ``scripts/install.sh`` from a plain terminal, where all three
+    signals start at SIG_DFL.  (The VS Code sidebar wrapper is a
+    different, also-safe path: it launches the bootstrap with INT/TERM/
+    HUP already ignored, which keeps the lock alive without any trap.)
+    """
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+
 def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -173,6 +195,7 @@ class InstallLockTest(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            preexec_fn=_restore_signal_defaults,
         )
         self._procs.append(proc)
         return proc

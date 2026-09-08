@@ -252,7 +252,7 @@ Keyword options:
 | `append_to_system_prompt` | Append text to the system prompt instead of replacing it |
 | `append_to_prompt` | Append text to the task prompt |
 | `append_basic_tools` | Set `False` to restrict the agent to `finish` plus your `tools` file, dropping the built-in toolset (default `True`) |
-| `extension_agent_path` | Run a full extension agent — a Python file that computes the run's parameters and tools on the daemon (see below) |
+| `extension_agent_path` | Run a full Sorcar Extension Agent (SEA) — a Python file that computes the run's parameters and tools on the daemon (see below) |
 | `use_worktree` | Run the task in an isolated git worktree (default `True`) |
 | `auto_commit` | Auto-commit the task's changes on success (default `True`) |
 | `max_budget` | Per-task budget override in USD |
@@ -265,9 +265,9 @@ Keyword options:
 
 The returned `TaskResult` carries `text`, `success`, `cost`, `tokens`, `steps`, `chat_id`, and `task_id`.
 
-## Extension Agents
+## Sorcar Extension Agents (SEAs)
 
-An **extension agent** is a plain Python file whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports the file on every run and calls its top-level `get_X()` functions to compute the run's parameters; parameters without a getter keep whatever the caller passed. One file can define the task prompt, system prompt, model, budget, tools, and safety hooks — a complete custom agent.
+A **Sorcar Extension Agent (SEA)** is a plain Python file whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports the file on every run and calls its top-level `get_X()` functions to compute the run's parameters; parameters without a getter keep whatever the caller passed. One file can define the task prompt, system prompt, model, budget, tools, and safety hooks — a complete custom agent.
 
 - **Overridable parameters.** Every `sorcar.run()` parameter except `timeout`, `stop_on_timeout`, `sock_path`, `scope_work_dir`, `web_tools`, `is_parallel`, and `extension_agent_path` itself has a getter: `get_prompt()`, `get_work_dir()`, `get_model()`, `get_chat_id()`, `get_system_prompt()`, `get_tools()`, `get_use_worktree()`, `get_auto_commit()`, `get_max_budget()`, `get_model_config()`, `get_if_append_basic_tools()` (overrides `append_basic_tools`), `get_append_to_system_prompt()`, and `get_append_to_prompt()`. `web_tools` and `is_parallel` always keep the values passed to `run()` (their defaults when the caller passed none).
 - **Atomic, type-checked overrides.** Getters run in the daemon process and are re-imported from source on every run. Each return value is type-checked; overrides apply only after every getter succeeds, and a broken getter fails the task with a diagnostic in `TaskResult.text`.

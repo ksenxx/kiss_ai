@@ -85,8 +85,8 @@ function testParentHeaderTracksLiveAggregateUsage() {
     total_steps: 2,
     taskId: 'parent-task',
   });
-  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 1,000');
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.1000');
+  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 1.00K');
+  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.10');
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 2');
 
   api.createNewTab();
@@ -105,7 +105,7 @@ function testParentHeaderTracksLiveAggregateUsage() {
   });
   assert.strictEqual(
     headerText(win, 'status-budget'),
-    'Cost: $0.1000',
+    'Cost: $0.10',
     'a sub-agent usage_info must never clobber the parent header',
   );
 
@@ -117,21 +117,21 @@ function testParentHeaderTracksLiveAggregateUsage() {
     total_steps: 7,
     taskId: 'parent-task',
   });
-  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 31,000');
+  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 31.0K');
   assert.strictEqual(
     headerText(win, 'status-budget'),
-    'Cost: $0.4000',
+    'Cost: $0.40',
     'the parent header must reflect agent + all sub-agents cost',
   );
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 7');
 
   switchToTab(win, api, subTab);
-  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 30,000');
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.3000');
+  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 30.0K');
+  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.30');
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 5');
   switchToTab(win, api, parentTab);
-  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 31,000');
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.4000');
+  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 31.0K');
+  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.40');
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 7');
 
   win.close();
@@ -149,7 +149,7 @@ function testMisroutedParentUsageForOtherTaskDropped() {
     total_steps: 1,
     taskId: 'task-A',
   });
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.1110');
+  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.11');
   send(win, {
     type: 'usage_info',
     text: '',
@@ -160,7 +160,7 @@ function testMisroutedParentUsageForOtherTaskDropped() {
   });
   assert.strictEqual(
     headerText(win, 'status-budget'),
-    'Cost: $0.1110',
+    'Cost: $0.11',
     "another task's usage_info must not update this tab's header",
   );
   win.close();
@@ -175,8 +175,8 @@ function testUsageInfoFallbackAndNABranches() {
     text: 'Steps: 3/100, Tokens: 1,234/400,000, Budget: $0.5000/$10.00, ',
     taskId: 'parent-task',
   });
-  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 1,234');
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.5000');
+  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 1.23K');
+  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.50');
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 3');
 
   send(win, {
@@ -184,7 +184,7 @@ function testUsageInfoFallbackAndNABranches() {
     text: 'no metrics here',
     taskId: 'parent-task',
   });
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.5000');
+  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.50');
 
   send(win, {
     type: 'usage_info',
@@ -194,8 +194,8 @@ function testUsageInfoFallbackAndNABranches() {
     total_steps: 4,
     taskId: 'parent-task',
   });
-  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 2,000');
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.5000');
+  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 2.00K');
+  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.50');
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 4');
 
   send(win, {
@@ -206,7 +206,7 @@ function testUsageInfoFallbackAndNABranches() {
     taskId: 'parent-task',
   });
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 4');
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.6000');
+  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.60');
 
   win.close();
   console.log('  ok - usage_info fallback / N/A / missing-field branches');
@@ -225,8 +225,8 @@ function testResultEventHeaderBranches() {
     step_count: 12,
     taskId: 'parent-task',
   });
-  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 42,000');
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.7000');
+  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 42.0K');
+  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.70');
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 12');
 
   send(win, {
@@ -239,8 +239,8 @@ function testResultEventHeaderBranches() {
     step_count: 0,
     taskId: 'parent-task',
   });
-  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 42,000');
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.7000');
+  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 42.0K');
+  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.70');
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 12');
 
   win.close();

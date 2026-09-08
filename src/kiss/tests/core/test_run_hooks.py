@@ -12,9 +12,7 @@ The two hooks are ``run()`` parameters:
   LLM instead.
 * ``tool_call_hook`` is called before every tool call with the tool name and
   its arguments. A return of ``"OK"`` lets the tool execute as usual; any
-  other string suppresses execution and becomes the tool's result. A
-  stagnation-triggered implicit finish is likewise suppressed unless the hook
-  returns ``"OK"`` for ``("finish", {})``.
+  other string suppresses execution and becomes the tool's result.
 
 Every test runs the real ``KISSAgent.run`` against a local HTTP server
 speaking the OpenAI chat-completions protocol — no mocks or patches.
@@ -28,10 +26,7 @@ from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
-import pytest
-
-from kiss.core.kiss_agent import STAGNANT_TURNS_FINISH, KISSAgent
-from kiss.core.kiss_error import KISSError
+from kiss.core.kiss_agent import KISSAgent
 
 _USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 
@@ -574,50 +569,3 @@ class TestToolCallHook:
         ]
         assert any("build of stable" in c for c in tool_messages)
         assert any(rejection in c for c in tool_messages)
-
-    def test_implicit_finish_requires_hook_ok(self) -> None:
-        """The stagnation net must not bypass a hook that blocks ``finish``."""
-
-        def tool_call_hook(name: str, args: dict[str, Any]) -> str:
-            if name == "finish":
-                return "finish denied: never allowed"
-            return "OK"
-
-        def respond(turn: int, request: dict[str, Any]) -> dict[str, Any]:
-            return _tool_call_response("Still verifying.", "check_build", {})
-
-        max_steps = STAGNANT_TURNS_FINISH + 4
-        counter = _CountingTool()
-        server = _serve(respond)
-        try:
-            with pytest.raises(KISSError, match="exceeded"):
-                _run_agent(
-                    server,
-                    [counter.make()],
-                    max_steps=max_steps,
-                    tool_call_hook=tool_call_hook,
-                )
-        finally:
-            server.shutdown()
-        assert counter.executions == max_steps
-
-    def test_implicit_finish_proceeds_on_hook_ok(self) -> None:
-        """When the hook answers "OK" for finish, stagnation still finishes."""
-
-        def tool_call_hook(name: str, args: dict[str, Any]) -> str:
-            return "OK"
-
-        def respond(turn: int, request: dict[str, Any]) -> dict[str, Any]:
-            return _tool_call_response("Build is green.", "check_build", {})
-
-        counter = _CountingTool()
-        server = _serve(respond)
-        try:
-            result, agent = _run_agent(
-                server, [counter.make()], tool_call_hook=tool_call_hook
-            )
-        finally:
-            server.shutdown()
-
-        assert result == "Build is green."
-        assert agent.step_count == STAGNANT_TURNS_FINISH

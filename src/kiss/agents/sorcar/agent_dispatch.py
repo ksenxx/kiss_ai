@@ -291,7 +291,10 @@ def _dispatch(
             returned (see :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`).
         parent_agent: The agent calling ``run_agent``, when there is
             one: the sub-task's cost/tokens/steps are folded into its
-            task accounting (see :func:`_attribute_dispatch_usage`).
+            task accounting (see :func:`_attribute_dispatch_usage`),
+            and its persisted task id / frontend tab id make the
+            sub-task a nested sub-agent of the calling task (same tab
+            behavior as a ``run_parallel`` sub-task).
         scope_work_dir: The CALLING task's work directory, used as the
             sub-task's tab workspace-scope so its tab shows in the
             caller's tab bar even though the sub-task executes in
@@ -305,6 +308,28 @@ def _dispatch(
     """
     from kiss.agents.sorcar import daemon_client
 
+    # The calling task's identity, threaded through the daemon so the
+    # dispatched run is a SUB-AGENT of that task: its tab then behaves
+    # exactly like a ``run_parallel`` sub-task's (a nested sub-agent
+    # tab under the caller's tab via the run's own ``new_tab``
+    # broadcast, a history row nested under the calling task, and a
+    # ``subagentDone`` when it ends) instead of a top-level tab.
+    # Standalone use (no calling agent, or one that has not persisted
+    # a task row) dispatches an ordinary top-level task, unchanged.
+    from kiss.agents.sorcar.sorcar_agent import _persisted_task_id
+
+    parent_task_id = _persisted_task_id(parent_agent)
+    parent_tab_id = ""
+    if parent_task_id:
+        # The tab really watching the caller (its own tab id, or —
+        # when the caller is itself a sub-agent — the viewer tab the
+        # printer's fan-out registry knows), the same resolution
+        # nested ``run_parallel`` fan-outs use.  A persisted task id
+        # proves the caller is a ``ChatSorcarAgent``, which always has
+        # the resolver; the guard only covers duck-typed callers.
+        resolve_tab = getattr(parent_agent, "_subagent_parent_tab_id", None)
+        if callable(resolve_tab):
+            parent_tab_id = str(resolve_tab() or "")
     Path(work_dir).mkdir(parents=True, exist_ok=True)
     try:
         result = daemon_client.run(
@@ -312,6 +337,8 @@ def _dispatch(
             extension_agent_path=agent_path,
             work_dir=work_dir,
             scope_work_dir=scope_work_dir,
+            parent_task_id=parent_task_id,
+            parent_tab_id=parent_tab_id,
             model=model_name,
             max_budget=budget,
             timeout=timeout,
