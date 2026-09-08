@@ -694,7 +694,14 @@
   // modelpick-coverage:start
   /** Repaint the picker label from the active tab's model state. */
   function refreshModelLabel() {
-    if (modelName) modelName.textContent = agentModel || selectedModel;
+    // The pill truncates from the START (#model-name is an RTL line so
+    // the ellipsis lands on the left). The U+200E LRM marks pin the
+    // characters to LTR order even for names that begin or end with
+    // digits or punctuation, which the bidi algorithm would otherwise
+    // reorder inside the RTL line.
+    if (modelName)
+      modelName.textContent =
+        '\u200e' + (agentModel || selectedModel) + '\u200e';
   }
 
   /**
@@ -2613,7 +2620,10 @@
   {
     const _initialModelEl = document.getElementById('model-name');
     if (_initialModelEl && _initialModelEl.textContent) {
-      selectedModel = _initialModelEl.textContent;
+      // The template pill wraps {{MODEL_NAME}} in U+200E marks (the
+      // pill's leading-truncation rendering); the model NAME is the
+      // text between them.
+      selectedModel = _initialModelEl.textContent.replace(/\u200e/g, '');
     }
   }
 
@@ -10583,7 +10593,30 @@
       }
       modelList.appendChild(renderModelItem(m));
     });
+    // Content changes only ever happen through this render, so this is
+    // the one spot that must re-fit the open dropdown to the viewport.
+    if (modelDropdown.classList.contains('open')) positionModelDD();
   }
+
+  // Keep the open dropdown fully inside the viewport. It anchors to
+  // the pill's right edge (CSS `right: 0`), which pokes past the LEFT
+  // viewport edge when the pill sits mid-row on a narrow phone or in a
+  // narrow sidebar; shift it right just enough to fit, but never past
+  // the right margin.
+  function positionModelDD() {
+    modelDropdown.style.right = '';
+    const margin = 12;
+    const rect = modelDropdown.getBoundingClientRect();
+    let shift = rect.left < margin ? margin - rect.left : 0;
+    const room = Math.max(window.innerWidth - margin - rect.right, 0);
+    shift = Math.min(shift, room);
+    if (shift > 0) modelDropdown.style.right = -shift + 'px';
+  }
+
+  // A rotation/resize moves the anchor while the dropdown is open.
+  window.addEventListener('resize', () => {
+    if (modelDropdown.classList.contains('open')) positionModelDD();
+  });
 
   function selectModel(name) {
     selectedModel = name;
@@ -10604,6 +10637,7 @@
 
   function closeModelDD() {
     modelDropdown.classList.remove('open');
+    modelDropdown.style.right = '';
     modelSearch.value = '';
     if (modelSearchClear) modelSearchClear.style.display = 'none';
     modelDDIdx = -1;

@@ -82,7 +82,11 @@ function send(win, data) {
 }
 
 function label(win) {
-  return win.document.getElementById('model-name').textContent;
+  // Strip the U+200E marks refreshModelLabel adds for the pill's
+  // leading-truncation (RTL line) rendering.
+  return win.document
+    .getElementById('model-name')
+    .textContent.replace(/\u200e/g, '');
 }
 
 /** Deliver the daemon's model list with the user's pick as `selected`. */
