@@ -115,6 +115,17 @@ export type FromWebviewMessage =
   | {type: 'serverReset'}
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
+  // In-page (browser-mic) capture fallback: the webview recorded the
+  // post-wake utterance itself and ships it to the daemon for
+  // transcription — the exact message the remote webapp sends over its
+  // WebSocket. The host forwards it verbatim (FORWARDED_COMMANDS); the
+  // daemon answers with a `voiceSpeech` the client relay passes back.
+  | {
+      type: 'voiceTranscribe';
+      audio: string;
+      wakePrefixed?: boolean;
+      wakeSamples?: number;
+    }
   | {type: 'voiceSensitivity'; value: number}
   | {type: 'voiceAck'}
   | {type: 'voiceDropped'; tabId?: string; text: string}
@@ -154,12 +165,23 @@ type ToWebviewMessageBody =
   | {type: 'voiceTranscribing'}
   | {
       type: 'voiceSpeech';
-      roundId: number;
+      // The host's own listener stamps the round id; a daemon reply to a
+      // forwarded `voiceTranscribe` (in-page capture fallback) carries
+      // none — voice.js then answers its oldest unkeyed round.
+      roundId?: number;
       text: string;
-      speaker?: number;
-      language?: string;
+      speaker?: number | null;
+      language?: string | null;
     }
-  | {type: 'voiceState'; listening: boolean; error?: string}
+  // hostMicUnavailable: the host machine cannot run the wake listener at
+  // all (no microphone/PortAudio, uv missing — it died before READY).
+  // The webview shows a calm "unavailable" state instead of an error.
+  | {
+      type: 'voiceState';
+      listening: boolean;
+      error?: string;
+      hostMicUnavailable?: boolean;
+    }
   | {type: 'defaultModel'; model: string}
   | {type: 'kissConfig'; config: Record<string, unknown>}
   | {type: 'kissConfigSaved'; ok: boolean; error?: string}

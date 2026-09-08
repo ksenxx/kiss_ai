@@ -303,6 +303,14 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // panel's "Update Models" button behaves identically in the webview
   // and in a remote browser window.
   updateModels: [],
+  // In-page (browser-mic) capture fallback: when the host machine cannot
+  // run the wake listener (hostMicUnavailable) but the webview's embedder
+  // grants getUserMedia, voice.js records the utterance itself and ships
+  // it here exactly like the remote webapp does over its WebSocket. The
+  // daemon transcribes (`voice_transcribe`) and answers with a direct
+  // `voiceSpeech` that the client-listener relay above passes straight
+  // back to the webview.
+  voiceTranscribe: ['audio', 'wakePrefixed', 'wakeSamples'],
 };
 
 export class SorcarSidebarView implements vscode.WebviewViewProvider {
@@ -1398,8 +1406,28 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (!this._voiceWake) {
           this._voiceWake = new VoiceWakeService(
             roundId => this._sendToWebview({type: 'voiceWake', roundId}),
-            (listening, error) =>
-              this._sendToWebview({type: 'voiceState', listening, error}),
+            (listening, error, hostMicUnavailable) => {
+              if (hostMicUnavailable) {
+                // This machine cannot run the wake listener at all (it
+                // died before READY — e.g. `OSError: PortAudio library
+                // not found` on a mic-less remote host). That is a
+                // property of the machine, not a runtime error: the
+                // webview shows a calm "voice capture unavailable"
+                // state instead of a red error, and the user's voice
+                // intent is cleared so hide/show and sensitivity
+                // changes never respawn the doomed listener. The
+                // detail still goes to the extension-host log.
+                console.warn('KISS voice listener unavailable:', error);
+                this._voiceEnabled = false;
+                this._sendToWebview({
+                  type: 'voiceState',
+                  listening: false,
+                  hostMicUnavailable: true,
+                });
+                return;
+              }
+              this._sendToWebview({type: 'voiceState', listening, error});
+            },
             (roundId, text, speaker, language) =>
               this._sendToWebview({
                 type: 'voiceSpeech',

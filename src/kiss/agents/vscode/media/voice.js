@@ -69,6 +69,65 @@
   let lastWakeAt = 0;
   let outstandingRounds = 0;
 
+  // Generation stamp for the async voice lifecycle. Every transition that
+  // invalidates work still in flight — a mic toggle, or hiding/showing a
+  // webview page — bumps it; pending permission probes and pipeline-start
+  // continuations compare the value they captured and stand down when
+  // superseded, so an ON→OFF→ON burst can never start two capture paths
+  // or resurrect a cancelled one.
+  let voiceGen = 0;
+
+  // True while the in-page pipeline is parked because the webview page is
+  // hidden (VS Code retains hidden webviews, so scripts — and an open
+  // microphone — would keep running unseen). Mirrors the host listener's
+  // suspend-on-hide; cleared when the page shows again (the pipeline
+  // restarts) or on any explicit toggle.
+  let suspendedByHide = false;
+
+  // Whether capture runs IN THIS PAGE (the browser-mic pipeline).
+  // Browser-mode pages (the remote webapp) always capture in-page. A
+  // webview-mode page starts on the host listener but switches here the
+  // moment its embedder grants getUserMedia — the machine hosting the
+  // extension may have no microphone at all (a headless remote host),
+  // while the browser rendering this page does.
+  let usingBrowserPipeline = cfg.mode !== 'webview';
+
+  /**
+   * True when this page is even equipped to try in-page capture: the
+   * host handed it the vosk bundle + model URL and the browser exposes
+   * getUserMedia. Checked before probing so pages without the wiring
+   * (older hosts, test harnesses) keep the synchronous host-toggle path.
+   */
+  function browserCapturePossible() {
+    return !!(
+      cfg.voskSrc &&
+      cfg.modelUrl &&
+      navigator.mediaDevices &&
+      typeof navigator.mediaDevices.getUserMedia === 'function'
+    );
+  }
+
+  /**
+   * Ask the embedder for a microphone stream once, then release it.
+   *
+   * Resolves true when capture is permitted (the pipeline's own
+   * getUserMedia then reuses the fresh grant without a second prompt),
+   * false when it is refused — VS Code webviews currently reject with
+   * NotAllowedError ("Permissions policy violation: microphone is not
+   * allowed in this document", microsoft/vscode#323602), so the probe
+   * costs nothing there and never prompts.
+   */
+  function probeBrowserCapture() {
+    return navigator.mediaDevices.getUserMedia({audio: true}).then(
+      stream => {
+        const tracks = stream.getTracks();
+        for (let i = 0; i < tracks.length; i++) tracks[i].stop();
+        return true;
+      },
+      () => false,
+    );
+  }
+
   // How long a CANCELLED round entry is kept. A cancelled round's
   // transcript can only still arrive within the transcribe-flash window
   // (60s, see the flash('voice-transcribing', 60000) calls); entries older
@@ -264,6 +323,7 @@
       'voice-loading',
       'voice-listening',
       'voice-error',
+      'voice-unavailable',
       'active',
     );
     el.classList.add('voice-' + lastUiState);
@@ -300,6 +360,15 @@
       tip = 'Voice trigger: starting ...';
     } else if (state === 'error') {
       tip = 'Voice trigger error: ' + (message || 'unavailable');
+    } else if (state === 'unavailable') {
+      // Calm, non-error state: the machine running KISS has no
+      // microphone and this window's embedder refused in-page capture,
+      // so there is simply nothing to record with HERE — voice still
+      // works in the remote web app, which uses the browser's mic.
+      tip =
+        'Voice capture unavailable in this window: the machine running ' +
+        'KISS has no microphone. Use the remote web app to dictate with ' +
+        "your browser's microphone.";
     } else {
       tip = "Voice trigger: listen for the word 'Sorcar'";
     }
@@ -518,10 +587,13 @@
   }
 
   function speakWorkingOnIt() {
-    if (cfg.mode === 'webview') {
+    if (cfg.mode === 'webview' && !usingBrowserPipeline) {
       postToHost({type: 'voiceAck'});
       return;
     }
+    // In-page pipelines (remote webapp, webview browser-mic fallback)
+    // play the ack in the page: the fallback exists precisely because
+    // the host machine has no working audio hardware.
     try {
       if (cfg.ackAudioUrl && typeof window.Audio === 'function') {
         const audio = new window.Audio(cfg.ackAudioUrl);
@@ -681,6 +753,10 @@
     if (voskLoadPromise) return voskLoadPromise;
     voskLoadPromise = new Promise((resolve, reject) => {
       const s = document.createElement('script');
+      // Webview pages run under a nonce-gated CSP; the host passes the
+      // page nonce through the voice config so this injected tag is
+      // allowed to execute. Browser-mode pages have no CSP nonce.
+      if (cfg.nonce) s.nonce = cfg.nonce;
       s.src = cfg.voskSrc;
       s.onload = () => {
         resolve();
@@ -730,6 +806,14 @@
   }
 
   function startBrowserPipeline() {
+    // The generation this start belongs to. A later toggle or hide/show
+    // bumps voiceGen; every continuation below re-checks it and stands
+    // down instead of acting on a superseded intent.
+    const gen = voiceGen;
+    // Whether the catch below painted the red error state (and turned the
+    // mic off): the settle handler at the end must not repaint it as a
+    // calm "off".
+    let paintedError = false;
     busy = true;
     setUi('loading');
     return loadVosk()
@@ -741,6 +825,11 @@
         });
       })
       .then(() => {
+        if (gen !== voiceGen || !enabled) {
+          // Superseded while the engine/model loaded: never even ask for
+          // the microphone. The settle handler below fixes up the UI.
+          return null;
+        }
         return navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: true,
@@ -750,7 +839,10 @@
         });
       })
       .then(stream => {
-        if (!enabled) {
+        if (!stream) return;
+        if (gen !== voiceGen || !enabled) {
+          // Superseded while getUserMedia was pending: release the just
+          // granted microphone immediately.
           const tracks = stream.getTracks();
           for (let i = 0; i < tracks.length; i++) tracks[i].stop();
           return;
@@ -891,19 +983,37 @@
         setUi('listening');
       })
       .catch(err => {
-        enabled = false;
-        persist();
         stopBrowserPipeline();
-        setUi('error', err && err.message);
+        if (gen === voiceGen && enabled) {
+          // The failure belongs to an attempt the user still wants: turn
+          // the mic off and show why. A superseded attempt's failure is
+          // nobody's news — the settle handler below paints the state the
+          // newer intent asked for instead of a stale red error.
+          enabled = false;
+          persist();
+          paintedError = true;
+          setUi('error', err && err.message);
+        }
       })
       .then(() => {
+        // Settle handler: runs after success, supersession, or failure.
         busy = false;
-        if (!enabled && (mediaStream || audioContext)) {
-          stopBrowserPipeline();
-          setUi('off');
-        } else if (enabled && !processorNode) {
-          startBrowserPipeline();
+        if (gen === voiceGen && enabled) {
+          // Still current and still wanted: the stream handler above ran
+          // to completion (every path that could stop it either bumps the
+          // generation or clears `enabled`), so the pipeline is live.
+          return;
         }
+        stopBrowserPipeline();
+        if (enabled && !suspendedByHide) {
+          // A newer toggle-on arrived while this start was in flight (it
+          // deferred to `busy`); run it now under its own generation.
+          startBrowserPipeline();
+        } else if (!enabled && !paintedError) {
+          setUi('off');
+        }
+        // enabled && suspendedByHide: the page went hidden mid-start; the
+        // visibility handler restarts the pipeline on the next show.
       });
   }
 
@@ -943,7 +1053,10 @@
         localStorage.setItem(SENSITIVITY_KEY, String(sensitivity));
       } catch (_e) {}
       renderSensitivity();
-      if (cfg.mode === 'webview') {
+      // The in-page pipeline reads `sensitivity` live in its wake
+      // callbacks, so only a running HOST listener needs the value
+      // shipped over (it restarts with the new --sensitivity).
+      if (cfg.mode === 'webview' && !usingBrowserPipeline) {
         postToHost({type: 'voiceSensitivity', value: sensitivity});
       }
     });
@@ -975,6 +1088,11 @@
 
   function setEnabled(next) {
     if (enabled === next) return;
+    // An explicit toggle supersedes whatever async voice work is still in
+    // flight (a permission probe, a pipeline start) and overrides a
+    // pending hide-suspend resume.
+    const gen = ++voiceGen;
+    suspendedByHide = false;
     enabled = next;
     persist();
     if (!next) {
@@ -982,18 +1100,77 @@
       capture = null;
       flash(null);
     }
-    if (cfg.mode === 'webview') {
+    if (cfg.mode === 'webview' && !usingBrowserPipeline) {
+      if (next && browserCapturePossible()) {
+        // Try in-page capture first: the machine hosting the extension
+        // may have no microphone at all, while the browser rendering
+        // this page does. When the embedder grants the mic, the same
+        // in-page pipeline the remote webapp uses takes over and the
+        // host listener is never started (so a mic-less host can never
+        // throw). VS Code webviews currently refuse getUserMedia
+        // (microsoft/vscode#323602): the probe rejects instantly and
+        // falls through to the host listener exactly as before.
+        setUi('loading');
+        probeBrowserCapture().then(granted => {
+          // Only the newest toggle's probe may act: a stale one could
+          // otherwise start the host listener AND the in-page pipeline
+          // together, or double-post voiceToggle(true).
+          if (gen !== voiceGen || !enabled) return;
+          if (granted) {
+            usingBrowserPipeline = true;
+            if (document.visibilityState === 'hidden') {
+              // The page went hidden while the probe was pending: never
+              // open a microphone for a page nobody can see. The
+              // visibility handler starts the pipeline on the next show.
+              suspendedByHide = true;
+              return;
+            }
+            if (!busy) startBrowserPipeline();
+          } else {
+            postToHost({type: 'voiceToggle', enabled: true, sensitivity});
+          }
+        });
+        return;
+      }
       setUi(next ? 'loading' : 'off');
       postToHost({type: 'voiceToggle', enabled: next, sensitivity});
       return;
     }
     if (next) {
+      // When a superseded start is still unwinding (`busy`), its settle
+      // handler observes this newer generation and restarts the pipeline.
       if (!busy) startBrowserPipeline();
-    } else if (!busy) {
-      stopBrowserPipeline();
+      else setUi('loading');
+    } else {
+      if (!busy) stopBrowserPipeline();
+      // Paint off immediately even while a start is in flight; the
+      // superseded start's settle handler releases whatever it acquired.
       setUi('off');
     }
   }
+
+  // Webview pages outlive their visibility (VS Code retains them), so an
+  // in-page microphone would keep recording after the user hides the
+  // panel. Mirror the host listener's suspend-on-hide (see
+  // SorcarSidebarView's onDidChangeVisibility): park the pipeline when the
+  // page hides, restart it when the page shows again. Browser-mode pages
+  // (the remote webapp) are untouched — a backgrounded browser tab
+  // listening for its wake word is expected behavior there, and so is a
+  // host listener kept alive by the host across webview hides.
+  document.addEventListener('visibilitychange', () => {
+    if (cfg.mode !== 'webview' || !usingBrowserPipeline) return;
+    if (document.visibilityState === 'hidden') {
+      if (!enabled || suspendedByHide) return;
+      suspendedByHide = true;
+      ++voiceGen; // strand any in-flight start; its settle handler cleans up
+      if (!busy) stopBrowserPipeline();
+    } else if (suspendedByHide) {
+      suspendedByHide = false;
+      ++voiceGen;
+      if (enabled && !busy) startBrowserPipeline();
+      // When busy, the stranded start's settle handler restarts it.
+    }
+  });
 
   btn.addEventListener('click', () => {
     setEnabled(!enabled);
@@ -1034,7 +1211,20 @@
       );
       // tableak-coverage:end
     } else if (msg.type === 'voiceState') {
-      if (msg.error) {
+      if (msg.hostMicUnavailable) {
+        // The machine running KISS cannot capture audio and this
+        // window's embedder already refused in-page capture (the
+        // browser pipeline is tried BEFORE the host listener). Not an
+        // error — nothing is broken, there is just no microphone
+        // reachable from this window — so show a calm explanatory
+        // state instead of the red error the raw listener failure
+        // (e.g. "OSError: PortAudio library not found") used to paint.
+        resetSpeechRounds();
+        flash(null);
+        enabled = false;
+        persist();
+        setUi('unavailable');
+      } else if (msg.error) {
         resetSpeechRounds();
         flash(null);
         enabled = false;

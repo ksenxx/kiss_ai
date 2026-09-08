@@ -1247,6 +1247,10 @@ body.remote-chat #welcome-config { display: none !important; }
 #voice-btn.voice-loading, .ask-user-mic.voice-loading { opacity: 0.5; }
 #voice-btn.voice-listening, .ask-user-mic.voice-listening { animation: voice-pulse 1.6s ease-in-out infinite; }
 #voice-btn.voice-error, .ask-user-mic.voice-error { color: var(--error, #f48771); }
+
+/* Calm non-error state: neither this window nor the machine running KISS
+   can capture audio (see voice.js 'unavailable'); dimmed, not red. */
+#voice-btn.voice-unavailable, .ask-user-mic.voice-unavailable { opacity: 0.4; }
 #voice-btn.voice-triggered, .ask-user-mic.voice-triggered { color: var(--red, #f48771); animation: voice-flash 0.8s ease-in-out infinite; }
 #voice-btn.voice-transcribing, .ask-user-mic.voice-transcribing { color: var(--warning, #e5c07b); animation: voice-flash 0.8s ease-in-out infinite; }
 
