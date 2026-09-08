@@ -10,9 +10,9 @@
 //    translucent cyan tint standalone, and the same tint mixed over
 //    --bg when nested inside a .tc card (whose opaque --surface would
 //    otherwise make the translucent tint render lighter).
-// 2. The model picker pill (#model-btn) width caps, raised by 70%:
-//    min(510px, 85vw) in the extension webview and
-//    clamp(122px, 36vw, 374px) in the remote web app.
+// 2. The model picker pill (#model-btn) width caps:
+//    min(300px, 50vw) in the extension webview and
+//    clamp(72px, 21vw, 220px) in the remote web app.
 
 'use strict';
 
@@ -144,8 +144,8 @@ function testModelPillWidthCaps() {
     webview.win.getComputedStyle(
       webview.win.document.getElementById('model-btn'),
     ).maxWidth,
-    'min(510px, 85vw)',
-    'extension webview: the pill cap must be 70% above min(300px, 50vw)',
+    'min(300px, 50vw)',
+    'extension webview: the pill cap must be min(300px, 50vw)',
   );
   webview.win.close();
 
@@ -153,8 +153,8 @@ function testModelPillWidthCaps() {
   assert.strictEqual(
     remote.win.getComputedStyle(remote.win.document.getElementById('model-btn'))
       .maxWidth,
-    'clamp(122px, 36vw, 374px)',
-    'remote web app: the pill cap must be 70% above clamp(72px, 21vw, 220px)',
+    'clamp(72px, 21vw, 220px)',
+    'remote web app: the pill cap must be clamp(72px, 21vw, 220px)',
   );
   remote.win.close();
 }
