@@ -8,8 +8,61 @@
   const vscode = acquireVsCodeApi();
   const api = createSorcarApi(msg => vscode.postMessage(msg));
 
-  function fmtN(n) {
-    return Number(n).toLocaleString('en-US');
+  // Editor-tabs mode: this webview is hosted in a VS Code EDITOR TAB
+  // (WebviewPanel) pinned to a single root chat tab, instead of the
+  // secondary-sidebar view with its internal tab bar. The hosting
+  // extension marks the mode (and the tab's initial state) on <body>
+  // — see SorcarTab.editorTabBodyAttrs / SorcarPanelManager.
+  const EDITOR_TAB_MODE = document.body.classList.contains('editor-tab-mode');
+
+  // History-panel mode: this webview is the PRIMARY-sidebar history
+  // panel of editor-tabs mode. It runs as an editor-tab surface (so a
+  // history click posts `openChatPanel` and the host opens the chat as
+  // an editor tab) but shows ONLY the history sidebar, permanently
+  // open — see body.history-panel-mode in main.css.
+  const HISTORY_PANEL_MODE =
+    document.body.classList.contains('history-panel-mode');
+
+  // Host-only messages (never daemon commands, so not in api.js's
+  // whitelist): everything the webview asks of its hosting editor tab.
+  function postToHost(msg) {
+    vscode.postMessage(msg);
+  }
+
+  // Compact token count: exactly three significant digits followed by
+  // K/M/B/T (thousands/millions/billions/trillions); counts below one
+  // thousand are shown as-is (e.g. 999, 1.00K, 12.3K, 123K, 1.23M).
+  function fmtTokens(n) {
+    const v = Math.max(0, Math.round(Number(n) || 0));
+    if (v < 1000) return String(v);
+    const units = ['K', 'M', 'B', 'T'];
+    let x = v;
+    let ui = -1;
+    while (x >= 1000 && ui < units.length - 1) {
+      x /= 1000;
+      ui++;
+    }
+    // toPrecision(3) rounds 999.5+ up to 1000, which needs the next
+    // unit (999,950 -> 1.00M); past T there is no next unit, so fall
+    // back to a plain rounded number ("1000T").
+    if (x >= 999.5) {
+      if (ui < units.length - 1) {
+        x /= 1000;
+        ui++;
+      } else {
+        return String(Math.round(x)) + units[ui];
+      }
+    }
+    return x.toPrecision(3) + units[ui];
+  }
+
+  // Dollar cost with exactly two digits after the decimal point.
+  // Accepts numbers or server strings like "$0.4123"; non-numeric
+  // values (e.g. "N/A") pass through untouched.
+  function fmtCost(c) {
+    const n = Number(String(c).replace(/[$,\s]/g, ''));
+    if (!Number.isFinite(n)) return String(c);
+    return '$' + n.toFixed(2);
   }
 
   function fmtElapsedMs(ms) {
@@ -673,7 +726,14 @@
   // modelpick-coverage:start
   /** Repaint the picker label from the active tab's model state. */
   function refreshModelLabel() {
-    if (modelName) modelName.textContent = agentModel || selectedModel;
+    // The pill truncates from the START (#model-name is an RTL line so
+    // the ellipsis lands on the left). The U+200E LRM marks pin the
+    // characters to LTR order even for names that begin or end with
+    // digits or punctuation, which the bidi algorithm would otherwise
+    // reorder inside the RTL line.
+    if (modelName)
+      modelName.textContent =
+        '\u200e' + (agentModel || selectedModel) + '\u200e';
   }
 
   /**
@@ -1058,11 +1118,17 @@
   }
 
   // The button shows the theme it switches TO: a sun while in dark
-  // mode, a moon while in light mode.
+  // mode, a moon while in light mode.  The button is the "..." overflow
+  // menu's #theme-btn item, so the icon goes in its icon span and the
+  // label in its text span.
   function updateThemeButton(btn) {
     const light = document.body.classList.contains('light-theme');
-    btn.innerHTML = light ? THEME_MOON_SVG : THEME_SUN_SVG;
     const label = light ? 'Switch to dark mode' : 'Switch to light mode';
+    const icon = btn.querySelector('.more-item-icon');
+    const text = btn.querySelector('.more-item-label');
+    if (icon) icon.innerHTML = light ? THEME_MOON_SVG : THEME_SUN_SVG;
+    else btn.innerHTML = light ? THEME_MOON_SVG : THEME_SUN_SVG;
+    if (text) text.textContent = label;
     btn.title = label;
     btn.setAttribute('aria-label', label);
   }
@@ -1075,7 +1141,7 @@
     if (hljsLink && hljsUrls && hljsUrls[theme]) {
       hljsLink.setAttribute('href', hljsUrls[theme]);
     }
-    const btn = document.querySelector('#tab-bar .chat-tab-theme');
+    const btn = document.getElementById('theme-btn');
     if (btn) updateThemeButton(btn);
   }
 
@@ -1119,12 +1185,59 @@
     target.focus();
   }
 
+  // The panel title/status last reported to the host, so renderTabBar
+  // (which runs on many unrelated events) only posts real changes.
+  let lastNotifiedPanelTitle = '';
+  let lastNotifiedPanelState = null;
+
   function renderTabBar() {
     const tabList = document.getElementById('tab-list');
     const tabBar = document.getElementById('tab-bar');
     if (!tabList || !tabBar) return;
 
-    tabBar.style.display = '';
+    // Checked on <body> inline — not via EDITOR_TAB_MODE — so the
+    // function stays self-contained for the harness that replays it in
+    // isolation (see test_subagent_tab_done_solid_indicator.py).
+    if (document.body.classList.contains('editor-tab-mode')) {
+      // The EDITOR TAB is this chat's tab: mirror the root chat tab's
+      // title onto it through the host.
+      const root = editorRootTab();
+      if (root) {
+        const title = root.title || 'new chat';
+        // Mirror the internal tab strip's status dot onto the EDITOR
+        // tab: the host paints a pulsing green circle while the task
+        // runs and a solid green/red one after it ends (the same
+        // states .chat-tab-spinner / .chat-tab-ok / .chat-tab-fail
+        // render in sidebar mode).
+        const state = root.isRunning
+          ? 'running'
+          : root.hasRunTask
+            ? root.lastTaskFailed
+              ? 'fail'
+              : 'ok'
+            : '';
+        if (
+          title !== lastNotifiedPanelTitle ||
+          state !== lastNotifiedPanelState
+        ) {
+          lastNotifiedPanelTitle = title;
+          lastNotifiedPanelState = state;
+          postToHost({
+            type: 'panelTitle',
+            title: title,
+            tabId: root.id,
+            state: state,
+          });
+        }
+      }
+      // The internal bar only appears when there is something beyond
+      // the root chat to switch to (a run_parallel fan-out's sub-agent
+      // tabs); a single conversation needs no second tab strip under
+      // the editor's own.
+      tabBar.style.display = tabs.length > 1 ? '' : 'none';
+    } else {
+      tabBar.style.display = '';
+    }
 
     // Chat tabs are proper a11y tabs: keyboard users reach them with
     // Tab, screen readers announce "<title>, tab, selected", and
@@ -1253,67 +1366,9 @@
       tabList.appendChild(el);
     });
 
-    const existingAdd = tabBar.querySelector('.chat-tab-add');
-    if (!existingAdd) {
-      const addBtn = document.createElement('div');
-      addBtn.className = 'chat-tab chat-tab-add';
-      addBtn.textContent = '+';
-      addBtn.title = 'New chat';
-      addBtn.setAttribute('role', 'button');
-      addBtn.setAttribute('tabindex', '0');
-      addBtn.setAttribute('aria-label', 'New chat');
-      addBtn.addEventListener('click', () => {
-        createNewTab();
-      });
-      addBtn.addEventListener('keydown', e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          createNewTab();
-        }
-      });
-      tabBar.appendChild(addBtn);
-    }
-
-    if (
-      document.body.classList.contains('remote-chat') &&
-      !tabBar.querySelector('.chat-tab-theme')
-    ) {
-      const themeBtn = document.createElement('div');
-      themeBtn.className = 'chat-tab chat-tab-theme';
-      themeBtn.setAttribute('role', 'button');
-      themeBtn.setAttribute('tabindex', '0');
-      themeBtn.addEventListener('click', toggleRemoteTheme);
-      themeBtn.addEventListener('keydown', e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          toggleRemoteTheme();
-        }
-      });
-      tabBar.appendChild(themeBtn);
-      updateThemeButton(themeBtn);
-    }
-
-    const existingSettings = tabBar.querySelector('.chat-tab-settings');
-    if (!existingSettings) {
-      const settingsBtn = document.createElement('div');
-      settingsBtn.className = 'chat-tab chat-tab-settings';
-      settingsBtn.title = 'Settings';
-      settingsBtn.setAttribute('role', 'button');
-      settingsBtn.setAttribute('tabindex', '0');
-      settingsBtn.setAttribute('aria-label', 'Settings');
-      settingsBtn.innerHTML =
-        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
-      settingsBtn.addEventListener('click', () => {
-        openSettingsPanel();
-      });
-      settingsBtn.addEventListener('keydown', e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          openSettingsPanel();
-        }
-      });
-      tabBar.appendChild(settingsBtn);
-    }
+    // The "+" (new chat), settings and theme controls used to live in
+    // this bar; they are now in the input footer (#new-chat-btn and the
+    // "..." overflow menu), so the bar carries only the tabs.
 
     const activeEl = tabList.querySelector('.chat-tab.active');
     if (activeEl && activeTabId !== lastScrolledTabId)
@@ -1393,6 +1448,22 @@
     if (origIdx < 0) return;
     if (tabs[origIdx].isContentTab) {
       closeContentTab(tabId);
+      return;
+    }
+    if (
+      EDITOR_TAB_MODE &&
+      !tabs[origIdx].isSubagentTab &&
+      !tabs[origIdx].isContentTab
+    ) {
+      // Closing the ROOT chat closes the whole editor tab: the host
+      // disposes the panel and — unless the close came FROM the daemon
+      // — retires the chat from the registry through its long-lived
+      // client (this webview's own connection dies with the panel
+      // before a queued closeTab could flush). The sub-agent tabs die
+      // with the panel. Without this, the root close reached
+      // createNewTab's openChatPanel post, which OPENED a fresh panel
+      // while this one lingered rootless.
+      postToHost({type: 'closePanel', retire: !fromServer});
       return;
     }
     const toClose = new Set([tabId]);
@@ -2025,6 +2096,7 @@
 
   const BLUR_AFTER_CLICK_SELECTOR = [
     '#menu-btn',
+    '#new-chat-btn',
     '#model-btn',
     '#upload-btn',
     '#tricks-btn',
@@ -2032,8 +2104,10 @@
     '#share-btn',
     '#send-btn',
     '#stop-btn',
-    '.chat-tab-add',
-    '.chat-tab-settings',
+    '#more-btn',
+    '#settings-btn',
+    '#theme-btn',
+    '#autocommit-btn',
     '.chat-tab-close',
     '#input-clear-btn',
     '.search-clear-btn',
@@ -2126,6 +2200,18 @@
   }
 
   function createNewTab() {
+    // Editor-tabs mode: a new conversation is a new EDITOR tab, never a
+    // second internal chat tab in this panel. (Checked on <body> inline
+    // — not via EDITOR_TAB_MODE — so the function stays self-contained
+    // for the harness that replays it in isolation, see
+    // test_history_click_creates_new_tab_each_time.py.)
+    if (document.body.classList.contains('editor-tab-mode')) {
+      // Carry the composer draft into the new editor tab (the host
+      // stamps it back as data-kiss-pending-text), exactly like the
+      // in-webview path below copies it into the new internal tab.
+      vscode.postMessage({type: 'openChatPanel', pendingText: inp.value || ''});
+      return;
+    }
     // Opening a chat is the user taking over: the launch is over, and no
     // backend event may move them off the tab they just asked for.
     closeLaunchSwitch();
@@ -2163,8 +2249,14 @@
   // state persisted locally is what stays client-local by design: the
   // selected tab and the drawer preferences.
   function persistTabState() {
+    const root = EDITOR_TAB_MODE ? editorRootTab() : null;
     vscode.setState({
       chatId: activeTabId,
+      // Editor-tabs mode: the panel serializer re-adopts THIS chat tab
+      // after a window reload (SorcarPanelManager.registerSerializer).
+      // The active tab id will not do — a sub-agent tab may be on
+      // screen when the window goes down.
+      editorRootTabId: root ? root.id : undefined,
       taskDrawerCollapsed: taskDrawerCollapsed,
       inputDrawerCollapsed: inputDrawerCollapsed,
       taskDrawerUserSet: taskDrawerUserSet,
@@ -2242,9 +2334,12 @@
       t = up;
     }
     if (!t) return '';
-    // A run_agent sub-task runs in a channel/cron scratch directory
-    // (its registryWorkDir) but pins a SEPARATE scope to the calling
-    // workspace so its tab shows there; that scope wins when set.
+    // A standalone API sub-task (sorcar.run with a scope) runs in a
+    // channel/cron scratch directory (its registryWorkDir) but pins a
+    // SEPARATE scope to the calling workspace so its tab shows there;
+    // that scope wins when set. (A run_agent sub-task has no registry
+    // tab at all -- it is a client-local sub-agent tab that inherits
+    // its parent chain's scope above.)
     if (t.registryScopeWorkDir) return t.registryScopeWorkDir;
     if (typeof t.registryWorkDir === 'string') return t.registryWorkDir;
     return t.workDir || '';
@@ -2258,7 +2353,22 @@
   // for restart recovery — it just has no strip in the tab bar and
   // can never become the active tab.
   function isTabHidden(tab) {
+    // An editor-tab panel shows exactly the chat it was opened for
+    // (plus its sub-agent tabs); workspace scoping already happened
+    // when the panel was created, and hiding the root tab here would
+    // only spawn a placeholder over a perfectly good conversation.
+    if (EDITOR_TAB_MODE) return false;
     return !!tab && !tabMatchesWorkspace(tabScopeWorkDir(tab));
+  }
+
+  // Editor-tabs mode: the panel's single top-level chat tab. Sub-agent
+  // and content tabs hang off it; nothing else exists in the panel.
+  function editorRootTab() {
+    return (
+      tabs.find(t => {
+        return !t.isSubagentTab && !t.isContentTab;
+      }) || null
+    );
   }
 
   function firstVisibleTab() {
@@ -2316,7 +2426,72 @@
   // (the remote web app's stand-in for the VS Code editor — editors
   // are per-user surfaces on every client, so file views are not
   // mirrored).
+  // Whether this panel already asked its host to close it; a snapshot
+  // storm must not dispose the same panel twice.
+  let editorClosePosted = false;
+
+  // Editor-tabs mode's reconcile: the snapshot is still canonical, but
+  // this panel mirrors exactly ONE of its tabs — the root chat tab.
+  // Entries for other tabs belong to other panels (or other windows)
+  // and are never adopted; the root entry's title / chat binding /
+  // work dirs are followed; and a snapshot that no longer lists a
+  // root the registry had confirmed means another client closed the
+  // chat, so the panel asks its host to close it.
+  function reconcileTabsEditor(list) {
+    const root = editorRootTab();
+    if (!root) return;
+    const entry = list.find(e => {
+      return !!e && e.tabId === root.id;
+    });
+    if (entry) {
+      pendingOpenTabs.delete(root.id);
+      root.inRegistry = true;
+      if (entry.title) root.title = clipTabTitle(entry.title);
+      if (
+        entry.chatId &&
+        String(root.backendChatId || '') !== String(entry.chatId)
+      ) {
+        root.backendChatId = String(entry.chatId);
+      }
+      // A chat binding proves a task ran in this chat (chat ids are
+      // allocated by the first run) — the same inference the shared
+      // reconcile makes for tabs it adopts — so a revived or migrated
+      // panel gets its status circle back without waiting for a
+      // replay.
+      if (entry.chatId) root.hasRunTask = true;
+      if (entry.workDir && !root.workDir) root.workDir = entry.workDir;
+      if (typeof entry.workDir === 'string') {
+        root.registryWorkDir = entry.workDir;
+      }
+      if (typeof entry.scopeWorkDir === 'string') {
+        root.registryScopeWorkDir = entry.scopeWorkDir;
+      }
+    } else {
+      // Same pending-open expiry as the shared reconcile: an id the
+      // daemon never confirms stops being treated as registered, but
+      // the local tab lives on as this panel's placeholder.
+      const misses = pendingOpenTabs.get(root.id);
+      if (misses !== undefined) {
+        if (misses + 1 >= PENDING_OPEN_MAX_MISSES) {
+          pendingOpenTabs.delete(root.id);
+        } else {
+          pendingOpenTabs.set(root.id, misses + 1);
+        }
+      } else if (root.inRegistry && !editorClosePosted) {
+        editorClosePosted = true;
+        postToHost({type: 'closePanel'});
+        return;
+      }
+    }
+    renderTabBar();
+    persistTabState();
+  }
+
   function reconcileTabs(list) {
+    if (EDITOR_TAB_MODE) {
+      reconcileTabsEditor(list);
+      return;
+    }
     const byId = new Map(
       tabs.map(t => {
         return [t.id, t];
@@ -2361,10 +2536,10 @@
       // (see tabScopeWorkDir) without disturbing tab.workDir, which
       // client features (file links, commit, submit) keep using.
       if (typeof e.workDir === 'string') tab.registryWorkDir = e.workDir;
-      // A run_agent sub-task pins a distinct visibility scope (the
-      // calling workspace) so its tab shows there even though it runs
-      // in a channel/cron scratch directory (registryWorkDir). Empty
-      // means "no override — scope by registryWorkDir" (see
+      // A standalone API sub-task pins a distinct visibility scope
+      // (the calling workspace) so its tab shows there even though it
+      // runs in a channel/cron scratch directory (registryWorkDir).
+      // Empty means "no override — scope by registryWorkDir" (see
       // tabScopeWorkDir).
       if (typeof e.scopeWorkDir === 'string') {
         tab.registryScopeWorkDir = e.scopeWorkDir;
@@ -2485,10 +2660,9 @@
   // panel the user never opened.
   let taskDrawerCollapsed = true;
   let taskDrawerUserSet = false;
-  // The composer stays reachable by default. On a phone it folds away while
-  // a task is running (see syncMobileInputDrawer) because the transcript
-  // needs the whole screen, but with nothing running the textbox and its
-  // buttons are the only thing worth showing.
+  // The composer stays reachable by default. On a phone the textbox folds
+  // away while a task is running (see syncMobileInputDrawer) to give the
+  // transcript more room; the button bar below it stays visible either way.
   let inputDrawerCollapsed = false;
   let inputDrawerUserSet = false;
   {
@@ -2511,7 +2685,10 @@
   {
     const _initialModelEl = document.getElementById('model-name');
     if (_initialModelEl && _initialModelEl.textContent) {
-      selectedModel = _initialModelEl.textContent;
+      // The template pill wraps {{MODEL_NAME}} in U+200E marks (the
+      // pill's leading-truncation rendering); the model NAME is the
+      // text between them.
+      selectedModel = _initialModelEl.textContent.replace(/\u200e/g, '');
     }
   }
 
@@ -2543,6 +2720,24 @@
     }
     if (saved && saved.chatId) savedActiveTabId = String(saved.chatId);
     const initial = makeTab('new chat');
+    if (EDITOR_TAB_MODE) {
+      // The hosting editor tab pins this webview to one root chat tab:
+      // adopt the id (and title) the extension stamped on <body>, so
+      // the daemon's registry / replays address this panel directly.
+      const ds = document.body.dataset;
+      if (ds.kissTabId) initial.id = ds.kissTabId;
+      if (ds.kissTabTitle) initial.title = clipTabTitle(ds.kissTabTitle);
+      // A panel materialized FROM a registry entry (mode switch-on)
+      // starts out registered: if another client closes the tab before
+      // this webview's first snapshot arrives, the root is already
+      // eligible for the vanished-from-registry closePanel path.
+      if (ds.kissInRegistry) initial.inRegistry = true;
+      // A composer draft carried over from the panel whose + / Cmd+T
+      // opened this one (createNewTab's openChatPanel post). init()
+      // copies it into the textarea — restoreTab never runs for the
+      // boot tab — and tab switches then round-trip it as usual.
+      if (ds.kissPendingText) initial.inputValue = ds.kissPendingText;
+    }
     tabs.push(initial);
     activeTabId = initial.id;
   })();
@@ -2818,10 +3013,11 @@
   }
   applyDrawerState();
 
-  // A phone screen holds either the transcript or the composer, not both.
-  // While a task runs the transcript wins; the moment nothing is running the
-  // input textbox and its buttons come back so the user can start the next
-  // task. Once the user works the handle themselves that choice is final.
+  // A phone screen is too small for the transcript and the input textbox
+  // at once. While a task runs the transcript wins and the textbox folds
+  // away (the button bar stays); the moment nothing is running the textbox
+  // comes back so the user can start the next task. Once the user works
+  // the handle themselves that choice is final.
   function syncMobileInputDrawer() {
     if (!isMobileRemote || inputDrawerUserSet) return;
     const wantCollapsed = tabs.some(isLaunchRunning);
@@ -4461,10 +4657,10 @@
       esc(titleOverride || 'Result') +
       '</h3><div class="rs">' +
       '<span>Tokens <b>' +
-      fmtN(ev.total_tokens || 0) +
+      fmtTokens(ev.total_tokens || 0) +
       '</b></span>' +
       '<span>Cost <b>' +
-      esc(ev.cost || 'N/A') +
+      esc(fmtCost(ev.cost || 'N/A')) +
       '</b></span>' +
       '</div></div><div class="rc-body md-body' +
       (usePre ? ' pre' : '') +
@@ -5124,9 +5320,9 @@
           );
         }
         if (statusTokens && ev.total_tokens)
-          statusTokens.textContent = 'Tokens: ' + fmtN(ev.total_tokens);
+          statusTokens.textContent = 'Tokens: ' + fmtTokens(ev.total_tokens);
         if (statusBudget && ev.cost && ev.cost !== 'N/A')
-          statusBudget.textContent = 'Cost: ' + ev.cost;
+          statusBudget.textContent = 'Cost: ' + fmtCost(ev.cost);
         if (ev.step_count) updateStepCount(ev.step_count);
         break;
       }
@@ -5176,9 +5372,9 @@
       case 'usage_info': {
         if (ev.total_tokens != null && ev.cost != null) {
           if (statusTokens)
-            statusTokens.textContent = 'Tokens: ' + fmtN(ev.total_tokens);
+            statusTokens.textContent = 'Tokens: ' + fmtTokens(ev.total_tokens);
           if (statusBudget && ev.cost !== 'N/A')
-            statusBudget.textContent = 'Cost: ' + ev.cost;
+            statusBudget.textContent = 'Cost: ' + fmtCost(ev.cost);
           if (statusSteps && ev.total_steps != null)
             statusSteps.textContent = 'Steps: ' + ev.total_steps;
         } else {
@@ -5429,9 +5625,16 @@
       // The daemon's own count is the authoritative one.
       if (ev.step_count) ctx.stepCount = ev.step_count;
       collapseAllExceptResult(ctx.container, ctx.tabId);
-      if (ev.success === false && !ev.is_continue) {
-        const rTab = getTab(ctx.tabId);
-        if (rTab) rTab.lastTaskFailed = true;
+      const rTab = getTab(ctx.tabId);
+      if (rTab) {
+        // A result proves this tab ran a task — set on replays too
+        // (task_events / resumed panels), where no `clear` ever ran,
+        // so the status dot (and the editor tab's title circle) can
+        // describe the replayed task.
+        rTab.hasRunTask = true;
+        if (ev.success === false && !ev.is_continue) {
+          rTab.lastTaskFailed = true;
+        }
       }
       ctx.pendingPanel = true;
     }
@@ -6104,8 +6307,10 @@
       text.match(/Tokens:\s*([\d,]+)\/[\d,]+/);
     const bm = text.match(/Budget:\s*(\$[0-9.]+)\/\$[0-9.]+/);
     const sm = STEPS_TEXT_RE.exec(text);
-    if (tm) statusTokens.textContent = 'Tokens: ' + tm[1];
-    if (bm) statusBudget.textContent = 'Cost: ' + bm[1];
+    if (tm)
+      statusTokens.textContent =
+        'Tokens: ' + fmtTokens(parseInt(tm[1].replace(/,/g, ''), 10));
+    if (bm) statusBudget.textContent = 'Cost: ' + fmtCost(bm[1]);
     if (sm) updateStepCount(parseInt(sm[1], 10));
   }
 
@@ -6779,6 +6984,41 @@
         renderTabBar();
         break;
       }
+      // The extension host's editor-title gear button (editor-tabs
+      // mode) — same panel the tab bar's own gear opens elsewhere.
+      case 'openSettings':
+        openSettingsPanel();
+        break;
+      // The extension host's editor-title git-commit button
+      // (editor-tabs mode) — same manual-commit flow the settings
+      // drawer's Git Commit button runs.
+      case 'gitCommit':
+        triggerManualGitCommit();
+        break;
+      // The primary-sidebar history panel clicked a task of THIS
+      // panel's chat: mirror the in-webview history-click behavior —
+      // scroll the task's region into view, or replay the tab at that
+      // task when its events are not spliced into the transcript.
+      case 'showTask': {
+        if (!EDITOR_TAB_MODE) break;
+        const stRoot = editorRootTab();
+        if (!stRoot) break;
+        if (activeTabId !== stRoot.id) switchToTab(stRoot.id);
+        if (
+          !scrollChatToTask(ev.taskId) &&
+          ev.taskId !== undefined &&
+          ev.taskId !== null &&
+          ev.taskId !== '' &&
+          stRoot.backendChatId
+        ) {
+          api.resumeSession({
+            id: stRoot.backendChatId,
+            taskId: ev.taskId,
+            tabId: stRoot.id,
+          });
+        }
+        break;
+      }
       case 'clearChat': {
         const ccTab = getTab(activeTabId);
         const ccWelcome =
@@ -7001,6 +7241,10 @@
           }
           if (bgCtx.stepCount > 0)
             teTab.statusStepsText = 'Steps: ' + bgCtx.stepCount;
+          // Same as the visible-tab replay below: the replayed
+          // transcript recomputed this tab's verdict, so the dot must
+          // repaint even when no title change re-rendered the bar.
+          renderTabBar();
           break;
         }
         if (ev.task) {
@@ -7043,6 +7287,10 @@
         // must not survive a replay that carries none.
         setTaskSettings(null);
         replayTaskEvents(ev.events || []);
+        // The replay recomputed the tab's verdict (hasRunTask /
+        // lastTaskFailed in streamEnd); repaint the status dot and, in
+        // editor-tabs mode, repost the panel title's state.
+        renderTabBar();
         break;
       }
       case 'adjacent_task_events':
@@ -7371,6 +7619,12 @@
       case 'new_tab': {
         if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
           break;
+        // Editor-tabs mode: a parentless spawn (e.g. a run_agent
+        // sub-task) belongs to no particular panel, and EVERY panel
+        // receives the broadcast — each adopting it would open the
+        // same orphan tab (and post duplicate resumeSessions) in every
+        // editor tab. Only spawns owned by this panel's chats join it.
+        if (EDITOR_TAB_MODE && !ev.parent_tab_id) break;
         if (ev.task_id === undefined || ev.task_id === null) break;
         const parentTabBeforeNew = ev.parent_tab_id || '';
         // One sub-agent, one tab: a re-delivered spawn for a sub-agent
@@ -7760,8 +8014,14 @@
 
   function focusFinishedTab(tabId) {
     if (tabId === undefined || tabId === null) return;
-    if (tabId === activeTabId) return;
     if (!getTab(tabId)) return;
+    // Editor-tabs mode: the chat's tab is the EDITOR tab itself, so a
+    // finishing task brings its panel forward through the host — the
+    // same "switch to the tab that just finished" the internal strip
+    // performs below in sidebar mode. Foreign panels never get here:
+    // their tabs are not in this panel's `tabs` (getTab above).
+    if (EDITOR_TAB_MODE) postToHost({type: 'revealPanel'});
+    if (tabId === activeTabId) return;
     // switchToTab refuses hidden tabs, so a task finishing in another
     // workspace's tab never yanks this client onto it.
     switchToTab(tabId);
@@ -8777,6 +9037,39 @@
   // own instead of staying wedged forever.
   let autocommitRearmTimer = null;
 
+  // Run the manual Git Commit: ask the daemon to commit the active
+  // chat tab's working tree (autocommitAction). Shared by the settings
+  // drawer's Git Commit button and the extension host's editor-title
+  // git-commit button (the `gitCommit` message). A no-op while a
+  // manual commit is already in flight (the daemon silently drops
+  // duplicates; see setAutocommitInFlight).
+  function triggerManualGitCommit() {
+    if (autocommitBtn && autocommitBtn.disabled) return;
+    const commitTabId = autocommitTargetTabId();
+    // readychat-coverage:start
+    if (!commitTabId) {
+      // A toast, not a transcript banner: with a content tab on
+      // screen the shared #output is hidden.
+      showNotification({
+        severity: 'warning',
+        message:
+          'Git Commit needs a chat tab: no chat tab is open in this ' +
+          'window, so there is no conversation to commit for.',
+      });
+      return;
+    }
+    // readychat-coverage:end
+    setAutocommitInFlight(true);
+    // Close the drawer so the transcript's autocommit_progress /
+    // autocommit_done lines are visible instead of hidden behind
+    // the opaque settings sheet.
+    closeSettingsPanel();
+    api.autocommitAction({
+      tabId: commitTabId,
+      workDir: workDirForTab(commitTabId),
+    });
+  }
+
   function setAutocommitInFlight(pending) {
     if (autocommitRearmTimer) {
       clearTimeout(autocommitRearmTimer);
@@ -8849,10 +9142,66 @@
     // readychat-coverage:end
   }
 
+  // The settings panel's "Chat in the editor" toggle. VS Code
+  // only: the remote web app's browser tabs already are its chat
+  // surfaces, so the label stays hidden there. The value is the
+  // extension's own configuration, not daemon config — the change goes
+  // straight to the host, which flips kissSorcar.editorTabsMode and
+  // swaps the chat surface.
+  function initEditorTabsToggle() {
+    const label = document.getElementById('cfg-editor-tabs-mode-label');
+    const box = document.getElementById('cfg-editor-tabs-mode');
+    if (!label || !box) return;
+    if (document.body.classList.contains('remote-chat')) return;
+    label.style.display = '';
+    box.checked = EDITOR_TAB_MODE;
+    box.addEventListener('change', () => {
+      postToHost({type: 'setEditorTabsMode', enabled: box.checked});
+    });
+  }
+
   function init() {
     setupEventListeners();
+    initEditorTabsToggle();
     renderTabBar();
+    if (EDITOR_TAB_MODE) {
+      // Persist the root tab id right away: the panel serializer must
+      // be able to re-adopt this chat even if the window reloads
+      // before any tab activity (e.g. while the daemon is down).
+      persistTabState();
+      // Show the composer draft carried over from the opening panel
+      // (data-kiss-pending-text, adopted into the boot tab's
+      // inputValue): the boot tab is put on screen without restoreTab,
+      // so the textarea must be seeded here.
+      const bootTab = getTab(activeTabId);
+      if (bootTab && bootTab.inputValue && !inp.value) {
+        inp.value = bootTab.inputValue;
+        syncClearBtn();
+        inp.style.height = 'auto';
+        inp.style.height = inp.scrollHeight + 'px';
+      }
+    }
     sendReady();
+    if (EDITOR_TAB_MODE) {
+      // A panel opened from a history row resumes its chat as soon as
+      // the daemon knows about the tab (the `ready` just sent).
+      const ds = document.body.dataset;
+      if (ds.kissResumeChatId || ds.kissResumeTaskId) {
+        const rawTaskId = ds.kissResumeTaskId || '';
+        api.resumeSession({
+          id: ds.kissResumeChatId || undefined,
+          // History rows carry numeric task ids; the data attribute
+          // stringified it.
+          taskId:
+            rawTaskId === ''
+              ? undefined
+              : isNaN(Number(rawTaskId))
+                ? rawTaskId
+                : Number(rawTaskId),
+          tabId: activeTabId,
+        });
+      }
+    }
     api.getConfig();
   }
 
@@ -9067,30 +9416,7 @@
       autocommitBtn.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
-        if (autocommitBtn.disabled) return;
-        const commitTabId = autocommitTargetTabId();
-        // readychat-coverage:start
-        if (!commitTabId) {
-          // A toast, not a transcript banner: with a content tab on
-          // screen the shared #output is hidden.
-          showNotification({
-            severity: 'warning',
-            message:
-              'Git Commit needs a chat tab: no chat tab is open in this ' +
-              'window, so there is no conversation to commit for.',
-          });
-          return;
-        }
-        // readychat-coverage:end
-        setAutocommitInFlight(true);
-        // Close the drawer so the transcript's autocommit_progress /
-        // autocommit_done lines are visible instead of hidden behind
-        // the opaque settings sheet.
-        closeSettingsPanel();
-        api.autocommitAction({
-          tabId: commitTabId,
-          workDir: workDirForTab(commitTabId),
-        });
+        triggerManualGitCommit();
       });
     }
 
@@ -9188,6 +9514,8 @@
         closeModelDD();
         return;
       }
+      // Only one composer popup at a time (see the #more-btn handler).
+      closeMoreMenu();
       modelDropdown.classList.add('open');
       modelSearch.value = '';
       if (modelSearchClear) modelSearchClear.style.display = 'none';
@@ -9259,6 +9587,93 @@
     if (menuBtn) {
       menuBtn.addEventListener('click', toggleHistorySidebar);
     }
+    if (HISTORY_PANEL_MODE) {
+      // The panel is born open and loads history right away; daemon
+      // broadcasts (status / tasks_updated / reconnect) keep an OPEN
+      // sidebar fresh via refreshHistory, and a webview re-shown after
+      // being hidden re-syncs whatever it missed.
+      sidebar.classList.add('open');
+      resetHistoryPagination();
+      api.getHistory({
+        query: historySearch ? historySearch.value : '',
+        generation: historyGeneration,
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') refreshHistory();
+      });
+    }
+    const newChatBtn = document.getElementById('new-chat-btn');
+    if (newChatBtn) {
+      newChatBtn.addEventListener('click', () => {
+        createNewTab();
+      });
+    }
+    // The "..." overflow menu: mic, share, attach, git commit, settings
+    // and (remote only) the theme toggle live here.
+    const moreBtn = document.getElementById('more-btn');
+    const moreMenu = document.getElementById('more-menu');
+    function closeMoreMenu() {
+      if (moreMenu) moreMenu.classList.remove('open');
+      if (moreBtn) moreBtn.setAttribute('aria-expanded', 'false');
+    }
+    if (moreBtn && moreMenu) {
+      moreBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        // Only one composer popup at a time: the trigger's
+        // stopPropagation keeps this click from reaching the model
+        // dropdown's document-level outside-click closer, so close the
+        // peer popup explicitly.
+        closeModelDD();
+        const open = !moreMenu.classList.contains('open');
+        moreMenu.classList.toggle('open', open);
+        moreBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+      // Close on any menu item click.  Capture phase, so items whose
+      // own handlers stopPropagation (Git Commit) still close it.
+      moreMenu.addEventListener(
+        'click',
+        e => {
+          if (
+            e.target &&
+            typeof e.target.closest === 'function' &&
+            e.target.closest('.more-menu-item')
+          ) {
+            closeMoreMenu();
+          }
+        },
+        true,
+      );
+      document.addEventListener('click', e => {
+        if (
+          !e.target ||
+          typeof e.target.closest !== 'function' ||
+          !e.target.closest('#more-menu-wrap')
+        ) {
+          closeMoreMenu();
+        }
+      });
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && moreMenu.classList.contains('open')) {
+          closeMoreMenu();
+          // The focused menu item just went display:none; without a
+          // hand-off, keyboard focus would be stranded on an invisible
+          // control.
+          try {
+            moreBtn.focus();
+          } catch (_e) {}
+        }
+      });
+    }
+    const settingsBtn = document.getElementById('settings-btn');
+    if (settingsBtn) {
+      settingsBtn.addEventListener('click', () => {
+        openSettingsPanel();
+      });
+    }
+    const themeBtn = document.getElementById('theme-btn');
+    if (themeBtn) {
+      themeBtn.addEventListener('click', toggleRemoteTheme);
+    }
     sidebarClose.addEventListener('click', () => closeSidebar(true));
     sidebarOverlay.addEventListener('click', closeSidebar);
     applyRemoteTheme(getSavedRemoteTheme());
@@ -9301,22 +9716,37 @@
       const SB_MAX = cssPxVar('--sidebar-max-w', 820);
       const CHAT_MIN = cssPxVar('--chat-min-w', 360);
       const SB_KEY = 'kiss-sidebar-w';
-      // Widest the panel may become on the CURRENT window: a wide
-      // panel dragged on a big monitor must not squeeze the chat into
-      // an unusable sliver after the window shrinks.
+      // Widest the panel may become on the CURRENT window: a drag may
+      // take the panel as wide as it likes as long as the chat keeps
+      // its minimum usable width — and a wide panel dragged on a big
+      // monitor must not squeeze the chat into an unusable sliver
+      // after the window shrinks. (--sidebar-max-w caps only the
+      // DEFAULT width below, never a drag.)
       const sidebarWindowMax = () =>
-        Math.max(SB_MIN, Math.min(SB_MAX, window.innerWidth - CHAT_MIN));
+        Math.max(SB_MIN, window.innerWidth - CHAT_MIN);
       const sidebarDefaultW = () =>
         Math.max(
           SB_MIN,
-          Math.min(sidebarWindowMax(), Math.round(window.innerWidth * 0.34)),
+          Math.min(
+            SB_MAX,
+            sidebarWindowMax(),
+            Math.round(window.innerWidth * 0.34),
+          ),
         );
+      // The PREFERRED width (`sidebarW`, what the user last asked for
+      // and what localStorage keeps) is tracked separately from the
+      // RENDERED width (`sidebarRenderedW`, the preference clamped to
+      // the current window): a wide preference loaded — or kept — on a
+      // narrow window renders clamped but must survive as-is, so the
+      // panel springs back once the window is wide enough again.
+      let sidebarRenderedW = sidebarDefaultW();
       const setSidebarW = px => {
         const max = sidebarWindowMax();
         const w = Math.max(SB_MIN, Math.min(max, Math.round(px)));
         document.documentElement.style.setProperty('--sidebar-w', w + 'px');
         sidebarResizer.setAttribute('aria-valuemax', String(max));
         sidebarResizer.setAttribute('aria-valuenow', String(w));
+        sidebarRenderedW = w;
         return w;
       };
       sidebarResizer.setAttribute('aria-valuemin', String(SB_MIN));
@@ -9328,7 +9758,8 @@
         persisted = window.localStorage.getItem(SB_KEY);
       } catch {}
       if (persisted !== null && /^\d+$/.test(persisted)) {
-        sidebarW = setSidebarW(parseInt(persisted, 10));
+        sidebarW = parseInt(persisted, 10);
+        setSidebarW(sidebarW);
       }
       const persistSidebarW = () => {
         try {
@@ -9383,7 +9814,13 @@
         if (!document.body.classList.contains('remote-desktop')) return;
         if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
         e.preventDefault();
-        sidebarW = setSidebarW(sidebarW + (e.key === 'ArrowRight' ? 16 : -16));
+        // Step from the RENDERED width, not the preference: with a
+        // wide preference clamped by a narrow window, stepping from
+        // the preference would neither move the panel nor mean
+        // anything to the user looking at it.
+        sidebarW = setSidebarW(
+          sidebarRenderedW + (e.key === 'ArrowRight' ? 16 : -16),
+        );
         persistSidebarW();
       });
       // Re-apply the width whenever the window changes size so a wide
@@ -10232,10 +10669,15 @@
       'model-item' + (m.name === selectedModel ? ' active' : ''),
     );
     const price = '$' + m.inp.toFixed(2) + ' / $' + m.out.toFixed(2);
+    // The name span ellipsizes from the START (RTL line, like the
+    // pill label) so the distinctive end of a long name stays visible
+    // and the list never scrolls horizontally on narrow screens; the
+    // U+200E (&lrm;) wrapping keeps digits at either end from being
+    // bidi-reordered.
     d.innerHTML =
-      '<span>' +
+      '<span class="model-item-name">&lrm;' +
       esc(m.name) +
-      '</span><span class="model-cost">' +
+      '&lrm;</span><span class="model-cost">' +
       price +
       '</span>';
     d.addEventListener('click', () => {
@@ -10277,7 +10719,30 @@
       }
       modelList.appendChild(renderModelItem(m));
     });
+    // Content changes only ever happen through this render, so this is
+    // the one spot that must re-fit the open dropdown to the viewport.
+    if (modelDropdown.classList.contains('open')) positionModelDD();
   }
+
+  // Keep the open dropdown fully inside the viewport. It anchors to
+  // the pill's right edge (CSS `right: 0`), which pokes past the LEFT
+  // viewport edge when the pill sits mid-row on a narrow phone or in a
+  // narrow sidebar; shift it right just enough to fit, but never past
+  // the right margin.
+  function positionModelDD() {
+    modelDropdown.style.right = '';
+    const margin = 12;
+    const rect = modelDropdown.getBoundingClientRect();
+    let shift = rect.left < margin ? margin - rect.left : 0;
+    const room = Math.max(window.innerWidth - margin - rect.right, 0);
+    shift = Math.min(shift, room);
+    if (shift > 0) modelDropdown.style.right = -shift + 'px';
+  }
+
+  // A rotation/resize moves the anchor while the dropdown is open.
+  window.addEventListener('resize', () => {
+    if (modelDropdown.classList.contains('open')) positionModelDD();
+  });
 
   function selectModel(name) {
     selectedModel = name;
@@ -10298,6 +10763,7 @@
 
   function closeModelDD() {
     modelDropdown.classList.remove('open');
+    modelDropdown.style.right = '';
     modelSearch.value = '';
     if (modelSearchClear) modelSearchClear.style.display = 'none';
     modelDDIdx = -1;
@@ -10617,9 +11083,9 @@
       metrics.textContent =
         steps +
         ' steps • ' +
-        tokens.toLocaleString() +
-        ' tok • $' +
-        cost.toFixed(4) +
+        fmtTokens(tokens) +
+        ' tok • ' +
+        fmtCost(cost) +
         dur +
         when;
       info.appendChild(metrics);
@@ -10697,6 +11163,20 @@
         // bind wins — the same designed flow any cross-client history
         // open uses) retires the old tab everywhere.
         const existingChatTab = getTabByBackendChatId(s.id);
+        // Editor-tabs mode: a chat that is not THIS panel's belongs in
+        // its own editor tab. The host either reveals the panel already
+        // bound to the chat or opens a new one that resumes it.
+        if (EDITOR_TAB_MODE && !existingChatTab) {
+          postToHost({
+            type: 'openChatPanel',
+            chatId: s.id && (s.has_events || s.is_running) ? s.id : undefined,
+            taskId:
+              s.task_id === undefined || s.task_id === null ? null : s.task_id,
+            title: taskText,
+          });
+          closeSidebar();
+          return;
+        }
         if (existingChatTab && !isTabHidden(existingChatTab)) {
           switchToTab(existingChatTab.id);
           // The tab may be parked on a different task of the same chat.
@@ -11086,6 +11566,10 @@
   }
 
   function closeSidebar(force) {
+    // The history panel IS the sidebar: it never closes (refreshHistory
+    // only refreshes an OPEN sidebar, so dropping the class would also
+    // freeze the panel's contents).
+    if (HISTORY_PANEL_MODE) return;
     if (force !== true && document.body.classList.contains('remote-desktop')) {
       sidebarOverlay.classList.remove('open');
       return;

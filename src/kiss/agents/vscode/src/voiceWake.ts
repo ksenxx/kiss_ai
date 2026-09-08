@@ -13,7 +13,18 @@ import {findKissProject, findUvPath} from './kissPaths';
 // when those particular words were spoken.
 export type WakeCallback = (roundId: number) => void;
 
-export type StateCallback = (listening: boolean, error?: string) => void;
+// `hostMicUnavailable` is set when the listener could not run on this
+// machine at all — it failed before ever reaching READY (PortAudio /
+// microphone missing on a headless host, uv or the KISS project absent,
+// spawn failure). Such a failure is a property of the machine, not a
+// runtime error, so the UI must not paint it as one: the webview falls
+// back to in-page capture where its embedder permits, or shows a calm
+// "voice capture unavailable" state (never the raw OSError).
+export type StateCallback = (
+  listening: boolean,
+  error?: string,
+  hostMicUnavailable?: boolean,
+) => void;
 
 export type SpeechCallback = (
   roundId: number,
@@ -96,6 +107,7 @@ export class VoiceWakeService {
       this._onState(
         false,
         'KISS project or uv binary not found; cannot start voice listener',
+        true,
       );
       return;
     }
@@ -125,10 +137,21 @@ export class VoiceWakeService {
         },
       );
     } catch (err) {
-      this._onState(false, `voice listener failed to start: ${String(err)}`);
+      this._onState(
+        false,
+        `voice listener failed to start: ${String(err)}`,
+        true,
+      );
       return;
     }
     this._proc = proc;
+
+    // Whether the child ever reached READY. A child that dies BEFORE
+    // READY never owned a working microphone: the machine cannot host
+    // the listener (e.g. `OSError: PortAudio library not found` on a
+    // headless VM), which is reported as hostMicUnavailable instead of
+    // an error (see StateCallback).
+    let sawReady = false;
 
     // Output from a listener whose stop has been requested is stale:
     // the process may keep printing while it shuts down (or while it
@@ -148,8 +171,10 @@ export class VoiceWakeService {
         if (line === 'WAKE') {
           this._speechRoundId = ++this._roundId;
           this._onWake(this._speechRoundId);
-        } else if (line === 'READY') this._onState(true);
-        else if (line === 'TRANSCRIBING') this._onTranscribing();
+        } else if (line === 'READY') {
+          sawReady = true;
+          this._onState(true);
+        } else if (line === 'TRANSCRIBING') this._onTranscribing();
         else if (line === 'NO_SPEECH') this._onSpeech(this._speechRoundId, '');
         else if (line.startsWith('SPEECH ')) {
           let text = '';
@@ -195,7 +220,11 @@ export class VoiceWakeService {
       if (requested) {
         this._onState(false);
       } else {
-        this._onState(false, `voice listener error: ${err.message}`);
+        // Same classification as 'exit': only a child that never reached
+        // READY proves the machine cannot host the listener. An 'error'
+        // after READY (e.g. a kill failure) is a runtime failure and
+        // keeps the descriptive red state.
+        this._onState(false, `voice listener error: ${err.message}`, !sawReady);
       }
       // audit0902-coverage:end
     });
@@ -213,6 +242,7 @@ export class VoiceWakeService {
         this._onState(
           false,
           `voice listener exited (${reason})${detail ? ': ' + detail : ''}`,
+          !sawReady,
         );
       }
     });
