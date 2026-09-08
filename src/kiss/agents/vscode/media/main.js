@@ -6986,6 +6986,12 @@
       case 'openSettings':
         openSettingsPanel();
         break;
+      // The extension host's editor-title git-commit button
+      // (editor-tabs mode) — same manual-commit flow the settings
+      // drawer's Git Commit button runs.
+      case 'gitCommit':
+        triggerManualGitCommit();
+        break;
       // The primary-sidebar history panel clicked a task of THIS
       // panel's chat: mirror the in-webview history-click behavior —
       // scroll the task's region into view, or replay the tab at that
@@ -9028,6 +9034,39 @@
   // own instead of staying wedged forever.
   let autocommitRearmTimer = null;
 
+  // Run the manual Git Commit: ask the daemon to commit the active
+  // chat tab's working tree (autocommitAction). Shared by the settings
+  // drawer's Git Commit button and the extension host's editor-title
+  // git-commit button (the `gitCommit` message). A no-op while a
+  // manual commit is already in flight (the daemon silently drops
+  // duplicates; see setAutocommitInFlight).
+  function triggerManualGitCommit() {
+    if (autocommitBtn && autocommitBtn.disabled) return;
+    const commitTabId = autocommitTargetTabId();
+    // readychat-coverage:start
+    if (!commitTabId) {
+      // A toast, not a transcript banner: with a content tab on
+      // screen the shared #output is hidden.
+      showNotification({
+        severity: 'warning',
+        message:
+          'Git Commit needs a chat tab: no chat tab is open in this ' +
+          'window, so there is no conversation to commit for.',
+      });
+      return;
+    }
+    // readychat-coverage:end
+    setAutocommitInFlight(true);
+    // Close the drawer so the transcript's autocommit_progress /
+    // autocommit_done lines are visible instead of hidden behind
+    // the opaque settings sheet.
+    closeSettingsPanel();
+    api.autocommitAction({
+      tabId: commitTabId,
+      workDir: workDirForTab(commitTabId),
+    });
+  }
+
   function setAutocommitInFlight(pending) {
     if (autocommitRearmTimer) {
       clearTimeout(autocommitRearmTimer);
@@ -9374,30 +9413,7 @@
       autocommitBtn.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
-        if (autocommitBtn.disabled) return;
-        const commitTabId = autocommitTargetTabId();
-        // readychat-coverage:start
-        if (!commitTabId) {
-          // A toast, not a transcript banner: with a content tab on
-          // screen the shared #output is hidden.
-          showNotification({
-            severity: 'warning',
-            message:
-              'Git Commit needs a chat tab: no chat tab is open in this ' +
-              'window, so there is no conversation to commit for.',
-          });
-          return;
-        }
-        // readychat-coverage:end
-        setAutocommitInFlight(true);
-        // Close the drawer so the transcript's autocommit_progress /
-        // autocommit_done lines are visible instead of hidden behind
-        // the opaque settings sheet.
-        closeSettingsPanel();
-        api.autocommitAction({
-          tabId: commitTabId,
-          workDir: workDirForTab(commitTabId),
-        });
+        triggerManualGitCommit();
       });
     }
 
