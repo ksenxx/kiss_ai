@@ -7,8 +7,9 @@
 Features on the remote webapp (served by ``RemoteAccessServer``):
 
 1. The pinned task panel (``#task-panel``) inherits main.css's
-   inverted look verbatim (the remote page merely swaps the palette
-   variables), sized by the page's injected 16px
+   thinking-panel look verbatim (same background and foreground as
+   ``.think``, plus a thick cyan border; the remote page merely swaps
+   the palette variables), sized by the page's injected 16px
    ``--vscode-editor-font-size``.  The event panels likewise inherit
    the extension's main.css typography — that extension-parity
    contract is pinned end to end by
@@ -381,6 +382,20 @@ _SHIELD_HISTORY_JS = r"""
 _PROBE_STYLES_JS = r"""(() => {
   const tp = getComputedStyle(document.getElementById('task-panel'));
 
+  // The thinking panel injected by _INJECT_TRANSCRIPT_JS: the task
+  // panel must paint the SAME background and foreground.
+  const think = document.querySelector('#output .think');
+  const thinkCs = think ? getComputedStyle(think) : null;
+  const thinkCnt = think ? think.querySelector('.cnt') : null;
+  const thinkCntCs = thinkCnt ? getComputedStyle(thinkCnt) : null;
+
+  // Resolve var(--cyan) (the task panel's border color) to rgb().
+  const cyanProbe = document.createElement('div');
+  cyanProbe.style.color = 'var(--cyan)';
+  document.body.appendChild(cyanProbe);
+  const cyanColor = getComputedStyle(cyanProbe).color;
+  cyanProbe.remove();
+
   // Expected per-chat accent: same djb2 hash as chatIdBgColor,
   // resolved to an rgb() string via a probe element.
   const id = 'chat-abc123';
@@ -420,6 +435,12 @@ _PROBE_STYLES_JS = r"""(() => {
     taskPanelFontSize: tp.fontSize,
     taskPanelColor: tp.color,
     taskPanelBg: tp.backgroundColor,
+    taskPanelBorderWidth: tp.borderTopWidth,
+    taskPanelBorderStyle: tp.borderTopStyle,
+    taskPanelBorderColor: tp.borderTopColor,
+    thinkBg: thinkCs ? thinkCs.backgroundColor : 'MISSING',
+    thinkColor: thinkCntCs ? thinkCntCs.color : 'MISSING',
+    cyanColor,
     infoLineRects,
     infoClipped,
     expectedAccent,
@@ -497,7 +518,8 @@ def test_live_task_panel_typography_and_history_rows(
     tmp_path: Path,
 ) -> None:
     """Served page + real Chromium: the pinned task panel keeps the
-    extension's inverted look under the remote palette; history rows
+    extension's thinking-panel look (same background/foreground as
+    .think, thick cyan border) under the remote palette; history rows
     paint the per-chat color on the left border over a neutral
     background; all metadata flows as one wrapping line."""
     ready = threading.Event()
@@ -742,14 +764,24 @@ def test_live_task_panel_typography_and_history_rows(
         "the task panel must size itself from the injected 16px "
         "--vscode-editor-font-size: " + repr(probes)
     )
-    assert probes["taskPanelColor"] == "rgb(13, 13, 13)", (
-        "the task panel text must use the inverted #0d0d0d foreground "
-        "(main.css --panel-fg: var(--bg) under the remote palette): " + repr(probes)
+    assert probes["thinkColor"] != "MISSING", (
+        "the injected transcript must render a .think panel: " + repr(probes)
     )
-    assert probes["taskPanelBg"] == "rgb(236, 236, 236)", (
-        "the task panel background must be the inverted light #ececec "
-        "surface (main.css --panel-bg: var(--fg) under the remote "
-        "palette): " + repr(probes)
+    assert probes["taskPanelColor"] == probes["thinkColor"], (
+        "the task panel text must use the SAME foreground as the "
+        "thinking panel (main.css --panel-fg: var(--dim)): " + repr(probes)
+    )
+    assert probes["taskPanelBg"] == probes["thinkBg"], (
+        "the task panel background must be the SAME as the thinking "
+        "panel (main.css --panel-bg: the .think cyan tint): " + repr(probes)
+    )
+    assert probes["taskPanelBorderStyle"] == "solid", probes
+    assert probes["taskPanelBorderWidth"] == "4px", (
+        "the task panel must carry a thick 4px border: " + repr(probes)
+    )
+    assert probes["taskPanelBorderColor"] == probes["cyanColor"], (
+        "the task panel border must be the cyan theme color "
+        "(var(--cyan)): " + repr(probes)
     )
 
     row = probes["row"]
