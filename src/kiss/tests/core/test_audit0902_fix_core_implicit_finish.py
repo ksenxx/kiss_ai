@@ -15,8 +15,7 @@ Review findings #1 and #9 against the audit's implicit-finish change in
   the sub-session cap.  The documented contract is "treat the last
   response as an implicit finish and return it": the text-only net is
   TERMINAL (``success=True, is_continue=False`` with the text as the
-  summary).  The stagnation net stays resumable
-  (``success=False, is_continue=True``).
+  summary).
 * **#9** — ``_implicit_finish_allowed`` consulted ``tool_call_guard``
   before ``tool_call_hook``; a real ``finish`` call runs the hook first
   and skips the guard when the hook rejects (``test_run_hooks.py``).
@@ -39,7 +38,6 @@ import yaml
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.core.kiss_agent import (
     MAX_CONSECUTIVE_NO_TOOL_CALLS,
-    STAGNANT_TURNS_FINISH,
     KISSAgent,
 )
 from kiss.core.utils import finish as structured_finish
@@ -57,32 +55,6 @@ def _text_response(text: str) -> dict[str, Any]:
                 "index": 0,
                 "message": {"role": "assistant", "content": text},
                 "finish_reason": "stop",
-            }
-        ],
-        "usage": _USAGE,
-    }
-
-
-def _tool_call_response(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """OpenAI-compatible response calling one tool."""
-    return {
-        "id": "chatcmpl-test",
-        "object": "chat.completion",
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {"name": name, "arguments": json.dumps(arguments)},
-                        }
-                    ],
-                },
-                "finish_reason": "tool_calls",
             }
         ],
         "usage": _USAGE,
@@ -138,11 +110,6 @@ def _run(
         model_config=_model_config(server),
         tool_call_hook=tool_call_hook,
     )
-
-
-def check_build() -> str:
-    """Deterministic read-only tool whose result never changes."""
-    return "build: green"
 
 
 class TestTextOnlyImplicitFinishIsTerminal:
@@ -205,21 +172,6 @@ class TestTextOnlyImplicitFinishIsTerminal:
         finally:
             server.shutdown()
 
-    def test_stagnation_structured_contract_stays_resumable(self) -> None:
-        """The stagnation net is unchanged: ``success=False, is_continue=True``
-        with the explanation in the summary."""
-        server = _serve(lambda turn, request: _tool_call_response("check_build", {}))
-        try:
-            agent = KISSAgent("audit-fix-stagnation-contract")
-            payload = yaml.safe_load(_run(server, agent, tools=[structured_finish, check_build]))
-            assert payload["success"] is False
-            assert payload["is_continue"] is True
-            assert "stalled" in payload["summary"]
-            assert agent.step_count == STAGNANT_TURNS_FINISH
-        finally:
-            server.shutdown()
-
-
 class _VetoRecorder:
     """Real ``tool_call_hook`` + ``tool_call_guard`` pair that records call order."""
 
@@ -257,33 +209,5 @@ class TestImplicitFinishHookBeforeGuard:
                 f"guard consulted before / despite the hook's rejection: {recorder.calls}"
             )
             assert result == "Text 2."
-        finally:
-            server.shutdown()
-
-    def test_stagnation_net_skips_guard_when_hook_rejects(self) -> None:
-        """Same precedence for the stagnation net.  Every real ``check_build``
-        call goes hook-then-guard; the implicit finish at
-        ``STAGNANT_TURNS_FINISH`` is vetoed by the hook (no guard call) and
-        allowed one turn later (hook, then guard)."""
-        verdicts = ["OK"] * STAGNANT_TURNS_FINISH + ["not yet", "OK", "OK"]
-        recorder = _VetoRecorder(verdicts)
-        server = _serve(lambda turn, request: _tool_call_response("check_build", {}))
-        try:
-            agent = KISSAgent("audit-fix-veto-order-stagnant")
-            agent.tool_call_guard = recorder.guard
-            result = _run(
-                server, agent, tools=[structured_finish, check_build], tool_call_hook=recorder.hook
-            )
-            per_call = ["hook:check_build", "guard:check_build"]
-            expected = (
-                per_call * STAGNANT_TURNS_FINISH
-                + ["hook:finish"]
-                + per_call
-                + ["hook:finish", "guard:finish"]
-            )
-            assert recorder.calls == expected, recorder.calls
-            payload = yaml.safe_load(result)
-            assert payload["is_continue"] is True
-            assert agent.step_count == STAGNANT_TURNS_FINISH + 1
         finally:
             server.shutdown()
