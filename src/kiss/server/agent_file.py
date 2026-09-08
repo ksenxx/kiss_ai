@@ -93,6 +93,11 @@ scope, which the dispatched script must not be able to repoint at
 another workspace — and its absence here is what lets the scope
 survive a ``get_work_dir()`` override (the ``workDir`` re-pin in
 ``_run_task`` touches only the execution directory).
+``parent_task_id`` / ``parent_tab_id`` (wire fields ``parentTaskId``
+/ ``parentTabId``) are absent for the same reason: they are the
+CALLING task's identity — what marks the dispatched run as that
+task's sub-agent — which the dispatched script must not be able to
+forge or re-parent.
 """
 
 HOOK_FIELDS: tuple[tuple[str, str], ...] = (
