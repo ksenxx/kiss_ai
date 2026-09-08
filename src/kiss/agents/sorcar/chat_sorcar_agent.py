@@ -72,24 +72,13 @@ def _dir_inside_worktree(work_dir: str, wt_dir: object) -> bool:
 
 
 def summary(description: str) -> str:
-    """MANDATORY every 5 steps: summarize your last 6 steps of work.
-
-    Your tool call on every step that is a multiple of 5 (step 5, 10,
-    15, ...) MUST be this tool, BEFORE any other tool call (including
-    finish).  This requirement applies to every task, no matter how
-    simple, and is never overridden by the task prompt.
-
-    The tool itself performs no action: the chat webview groups the
-    preceding six event panels under this call's panel and collapses
-    them, hiding the step-by-step detail while keeping the
-    description visible as a running digest for the user.  The
-    description is rendered as formatted Markdown in the panel.
+    """Every 10 steps: summarize your steps since the last `summary` call.
 
     Args:
         description: Natural language summary in 5-10 sentences of
-            what the agent did in the last 6 steps, written in
+            what the agent since the last call to `summary`, written in
             Markdown format (use bullet lists for the steps, and
-            ``**bold**`` / backtick code spans where helpful).
+            ``**bold**`` / backtick code spans).
 
     Returns:
         A short confirmation string.
