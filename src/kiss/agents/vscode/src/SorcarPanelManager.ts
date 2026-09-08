@@ -47,6 +47,13 @@ interface ChatPanel {
   tabId: string;
   /** The backend chat id once the tab bound to one ('' before). */
   chatId: string;
+  /**
+   * True once a `tabs_state` snapshot confirmed the panel's root tab
+   * bound to its chat (chatBound). A resume-born chatId without this
+   * flag means the registration is still in flight, so the tab's
+   * absence from a snapshot is not yet meaningful.
+   */
+  registryBound: boolean;
   /** The webview-reported chat title WITHOUT the status prefix. */
   baseTitle: string;
   /** Root task status: '', 'running', 'ok' or 'fail'. */
@@ -91,6 +98,17 @@ function isDirInside(dir: string, root: string): boolean {
 export class SorcarPanelManager {
   private _panels: Map<string, ChatPanel> = new Map();
   private _active: ChatPanel | undefined;
+  // Registry tabs whose adoption a same-chat panel with an
+  // UNCONFIRMED registration blocked, keyed by chat id. If that
+  // panel's registration goes through, the daemon displaces these
+  // tabs and the next snapshot prunes them; if it never does (the
+  // queued command was dropped) or the panel closes, the remembered
+  // tab is adopted — otherwise the chat's real tab would be skipped
+  // forever on the strength of a claim that can no longer bind.
+  private _pendingAdoptions: Map<
+    string,
+    {entry: RegistryTabEntry; workspaceDir: string}
+  > = new Map();
   private _poster: ((message: NotificationMessage) => void) | undefined;
   // Shared pulse clock for every running panel's title circle; live
   // only while at least one panel is in the 'running' state.
@@ -108,10 +126,23 @@ export class SorcarPanelManager {
    *     panel's own client dies with the panel, so a closeTab queued
    *     on it while the daemon is briefly unreachable would be lost.
    *     Optional: without it the panel's own controller is used.
+   * @param _recordPanelTab Called with (tabId, true) when a panel
+   *     opens and (tabId, false) when one closes — except during
+   *     terminal teardown, which leaves the editor tabs standing for
+   *     the serializer. The extension keeps a persistent record of
+   *     the open panels' root tab ids in workspaceState so the NEXT
+   *     session knows which registry tabs its serialized placeholders
+   *     hold (see extension.ts registry adoption). Per-tab deltas
+   *     rather than whole-set snapshots: serializer revival rebuilds
+   *     the set one panel at a time, and a whole-set write mid-revival
+   *     would replace the record with a partial one — a crash right
+   *     then would let the next session adopt tabs whose placeholders
+   *     still exist.
    */
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _retireTab?: (tabId: string) => void,
+    private readonly _recordPanelTab?: (tabId: string, open: boolean) => void,
   ) {}
 
   /** Whether editor-tabs mode is currently switched on. */
@@ -156,6 +187,15 @@ export class SorcarPanelManager {
           typeof s.editorRootTabId === 'string' && s.editorRootTabId
             ? s.editorRootTabId
             : randomTabId();
+        if (this._panels.has(tabId)) {
+          // The registry adoption path opened this tab before the
+          // workbench revived its serialized placeholder (possible
+          // only when the persisted panel-id record missed it, e.g.
+          // after a crash): the husk duplicates a live panel — drop
+          // it instead of corrupting the id-keyed panel map.
+          panel.dispose();
+          return Promise.resolve();
+        }
         // The workbench persisted the decorated title; the status it
         // carried belongs to the previous session.
         this._adoptPanel(panel, {tabId, title: stripStatusPrefix(panel.title)});
@@ -224,11 +264,101 @@ export class SorcarPanelManager {
   }
 
   /**
+   * Materialize editor-tab panels for registry tabs another client
+   * created — or first bound to a chat — since the last snapshot: a
+   * task run in the remote web app (or another window) opens as an
+   * editor tab here, exactly like sidebar mode adopts the tab into
+   * its internal strip. Tabs already open as a panel (by id or by
+   * chat) are left alone, tabs scoped to another workspace are
+   * skipped (same scoping as enterMode), and the new panel never
+   * steals the user's keyboard focus.
+   *
+   * @param entries The snapshot's newly added tabs (see
+   *     RegistryTabsDelta.added), possibly filtered by the caller.
+   * @param workspaceDir This window's workspace root ('' = adopt all).
+   * @param listed EVERY tab the snapshot lists (not just the added
+   *     ones) — the source of truth for the displacement decision.
+   */
+  public adoptRegistryTabs(
+    entries: RegistryTabEntry[],
+    workspaceDir: string,
+    listed?: RegistryTabEntry[],
+  ): void {
+    let listedIds: Set<string> | undefined;
+    if (listed) {
+      // Sync open panels' chat bindings from THIS snapshot before
+      // deciding anything. Each panel's own daemon socket reports the
+      // same binding as a `chatBound` event, but that is a separate
+      // connection with no ordering guarantee against this snapshot
+      // stream: if it lags, a panel whose tab an earlier snapshot
+      // already confirmed would still read registryBound=false here,
+      // and a displaced chat's replacement tab would be skipped for
+      // good while the stale panel closes itself.
+      listedIds = new Set();
+      for (const entry of listed) {
+        listedIds.add(entry.tabId);
+        const cp = this._panels.get(entry.tabId);
+        if (cp && entry.chatId) {
+          cp.chatId = entry.chatId;
+          cp.registryBound = true;
+        }
+      }
+      // A remembered tab the registry no longer lists was displaced
+      // or closed remotely; forget it.
+      for (const [chatId, pending] of this._pendingAdoptions) {
+        if (!listedIds.has(pending.entry.tabId)) {
+          this._pendingAdoptions.delete(chatId);
+        }
+      }
+    }
+    for (const entry of entries) {
+      if (this._panels.has(entry.tabId)) continue;
+      if (entry.chatId) {
+        const dup = [...this._panels.values()].find(
+          cp => cp.chatId === entry.chatId,
+        );
+        // Skip a chat some open panel already shows — UNLESS the
+        // registry DISPLACED that panel's tab (one tab per chat, the
+        // newest bind wins: the panel's registry-confirmed tab is no
+        // longer listed and its webview is about to close the panel),
+        // in which case the replacement tab must be adopted or the
+        // chat would lose its editor tab. A panel whose registration
+        // is still in flight (resume-born chatId, never yet listed in
+        // a snapshot) is not displaced — its absence from the list
+        // means nothing yet, and its own pending bind will displace
+        // this entry's tab in a moment.
+        if (
+          dup &&
+          (!dup.registryBound || !listedIds || listedIds.has(dup.tabId))
+        ) {
+          if (!dup.registryBound) {
+            // Remember the skip: the panel's claim may never bind
+            // (see _pendingAdoptions).
+            this._pendingAdoptions.set(entry.chatId, {entry, workspaceDir});
+          }
+          continue;
+        }
+      }
+      const scope = entry.scopeWorkDir || entry.workDir;
+      if (scope && workspaceDir && !isDirInside(scope, workspaceDir)) continue;
+      this._createPanel(
+        {tabId: entry.tabId, title: entry.title, inRegistry: true},
+        {preserveFocus: true},
+      );
+    }
+  }
+
+  /**
    * Close every chat panel WITHOUT retiring the chats from the daemon
    * registry — used when the user switches the mode off (the sidebar
    * view re-adopts the same tabs from the next `tabs_state`).
    */
   public closeAll(): void {
+    // Tabs remembered for adoption belong to the editor-tab surface;
+    // once the mode is off the sidebar webview re-adopts everything
+    // from `tabs_state`, and a stale memory could otherwise open a
+    // long-vanished tab when the mode comes back.
+    this._pendingAdoptions.clear();
     for (const cp of [...this._panels.values()]) {
       cp.suppressCloseTab = true;
       cp.panel.dispose();
@@ -254,6 +384,7 @@ export class SorcarPanelManager {
       cp.controller.dispose();
     }
     this._panels.clear();
+    this._pendingAdoptions.clear();
     this._syncPulseTimer();
     this._active = undefined;
     this._refreshPoster();
@@ -266,11 +397,19 @@ export class SorcarPanelManager {
     return this._panels.values().next().value;
   }
 
-  private _createPanel(init: EditorTabInit): ChatPanel {
+  private _createPanel(
+    init: EditorTabInit,
+    opts?: {preserveFocus?: boolean},
+  ): ChatPanel {
     const panel = vscode.window.createWebviewPanel(
       CHAT_PANEL_VIEW_TYPE,
       init.title || DEFAULT_PANEL_TITLE,
-      vscode.ViewColumn.Active,
+      // Adopted remote tabs open without stealing the user's keyboard
+      // focus; user-initiated opens take it as any new editor would.
+      {
+        viewColumn: vscode.ViewColumn.Active,
+        preserveFocus: !!opts?.preserveFocus,
+      },
       {
         enableScripts: true,
         // A backgrounded chat keeps its transcript, composer draft and
@@ -297,6 +436,7 @@ export class SorcarPanelManager {
     const cp: ChatPanel = {
       tabId: init.tabId,
       chatId: init.resumeChatId || '',
+      registryBound: false,
       baseTitle: init.title || '',
       status: '',
       panel,
@@ -328,6 +468,7 @@ export class SorcarPanelManager {
     );
     cp.controller.syncWorkDir();
     this._panels.set(cp.tabId, cp);
+    if (this._recordPanelTab) this._recordPanelTab(cp.tabId, true);
     // A revived background panel must not steal the "active" slot from
     // the panel the user is actually on.
     if (panel.active !== false) this._active = cp;
@@ -336,6 +477,11 @@ export class SorcarPanelManager {
     });
     panel.onDidDispose(() => {
       this._panels.delete(cp.tabId);
+      // During terminal teardown the editor tabs stay open for the
+      // serializer, so the persisted record must keep their ids.
+      if (!this._shuttingDown && this._recordPanelTab) {
+        this._recordPanelTab(cp.tabId, false);
+      }
       this._syncPulseTimer();
       if (this._active === cp) this._active = undefined;
       // A user close retires the chat (the sidebar webview does the
@@ -343,12 +489,28 @@ export class SorcarPanelManager {
       // or extension teardown must not.
       if (!this._shuttingDown && !cp.suppressCloseTab) {
         this._retire(cp);
+        // The closed panel may have been the unconfirmed claim that
+        // blocked a same-chat registry tab; that tab may open now.
+        this._adoptPendingFor(cp.chatId);
       }
       cp.controller.dispose();
       this._refreshPoster();
     });
     this._refreshPoster();
     return cp;
+  }
+
+  /**
+   * Adopt the registry tab remembered for *chatId*, if any — called
+   * when the same-chat panel that blocked its adoption released the
+   * claim (registration dropped) or closed.
+   */
+  private _adoptPendingFor(chatId: string): void {
+    if (!chatId) return;
+    const pending = this._pendingAdoptions.get(chatId);
+    if (!pending) return;
+    this._pendingAdoptions.delete(chatId);
+    this.adoptRegistryTabs([pending.entry], pending.workspaceDir);
   }
 
   /** Retire *cp*'s chat tab from the daemon's shared registry. */
@@ -423,7 +585,26 @@ export class SorcarPanelManager {
         break;
       case 'chatBound':
         cp.chatId = event.chatId;
+        cp.registryBound = true;
+        // The daemon accepted THIS panel's binding, so any same-chat
+        // tab remembered for adoption was displaced by it. The next
+        // controller snapshot prunes it too, but a user close racing
+        // that snapshot must not resurrect the displaced tab.
+        this._pendingAdoptions.delete(event.chatId);
         break;
+      case 'registrationDropped': {
+        // The panel's registry registration never reached the daemon
+        // (its queued command was dropped after an outage) and the
+        // webview does not retry it: the chat claim is void. Release
+        // it and open any same-chat registry tab the claim blocked —
+        // otherwise this window would keep an editor tab that can
+        // never bind while the chat's real tab never opens.
+        if (cp.registryBound) break;
+        const claimed = cp.chatId;
+        cp.chatId = '';
+        this._adoptPendingFor(claimed);
+        break;
+      }
       case 'closeSelf':
         // The dispose handler must not send a second close; when the
         // USER closed the root chat inside the panel (retire), the
