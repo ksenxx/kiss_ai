@@ -2,14 +2,17 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for ChatSorcarAgent's no-op ``summary`` tool.
+"""End-to-end tests for SorcarAgent's no-op ``summary`` tool.
 
 Feature: the agent may periodically summarize what it did in the last
 6 steps by calling ``summary(description=...)``, as requested by the
-SYSTEM.md instructions.  The tool itself does nothing (the chat
-webview reacts to the ``tool_call`` event by nesting and collapsing
-the preceding panels — covered by the jsdom suite in
-``src/kiss/agents/vscode/test/summaryToolCollapse.test.js``).
+SYSTEM.md instructions.  The tool lives on the base ``SorcarAgent``
+toolset (so every subclass, including ``ChatSorcarAgent``, exposes
+it).  The tool itself does nothing (the chat webview reacts to the
+``tool_call`` event by nesting and collapsing the preceding panels —
+covered by the jsdom suite in
+``src/kiss/agents/vscode/test/summaryToolCollapse.test.js``; outside
+a webview the call is a harmless no-op).
 
 There is deliberately NO mechanical enforcement of the every-5-steps
 cadence: ``ChatSorcarAgent`` installs no ``tool_call_guard`` and no
@@ -19,7 +22,7 @@ every other tool call on steps divisible by 5 has been removed).
 This module verifies the Python side end-to-end:
 
 * the ``summary`` tool function is a no-op returning a confirmation;
-* ``ChatSorcarAgent`` registers the tool;
+* ``SorcarAgent`` (and therefore ``ChatSorcarAgent``) registers the tool;
 * ``ChatSorcarAgent`` leaves ``tool_call_guard`` / ``pre_step_hook``
   as the plain inherited attributes — no summary gate, no reminder
   hook, no rejection of other tools;
@@ -35,7 +38,8 @@ import shutil
 import tempfile
 from typing import Any
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent, summary
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, summary
 
 
 def test_summary_tool_is_noop() -> None:
@@ -43,8 +47,19 @@ def test_summary_tool_is_noop() -> None:
     assert summary("Did six things, then six more.") == "Summary recorded."
 
 
+def test_sorcar_agent_registers_summary_tool() -> None:
+    """The base SorcarAgent toolset must include the ``summary`` tool."""
+    agent = SorcarAgent("summary-tool-registration-base")
+    agent._use_web_tools = False
+    tools = agent._get_tools()
+    names = [getattr(t, "__name__", "") for t in tools]
+    assert "summary" in names
+    tool = tools[names.index("summary")]
+    assert tool("one. two. three. four. five.") == "Summary recorded."
+
+
 def test_chat_agent_registers_summary_tool() -> None:
-    """ChatSorcarAgent's toolset must include the ``summary`` tool."""
+    """ChatSorcarAgent inherits the ``summary`` tool from SorcarAgent."""
     agent = ChatSorcarAgent("summary-tool-registration")
     agent._use_web_tools = False
     tools = agent._get_tools()

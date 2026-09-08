@@ -44,6 +44,22 @@ from kiss.core.printer import Printer
 logger = logging.getLogger(__name__)
 
 
+def summary(description: str) -> str:
+    """Every 10 steps: summarize your steps since the last `summary` call.
+
+    Args:
+        description: Natural language summary in 5-10 sentences of
+            what the agent since the last call to `summary`, written in
+            Markdown format (use bullet lists for the steps, and
+            ``**bold**`` / backtick code spans).
+
+    Returns:
+        A short confirmation string.
+    """
+    del description
+    return "Summary recorded."
+
+
 def _generate_commit_message(
     commit_dir: Path,
     user_prompt: str | None = None,
@@ -1434,6 +1450,14 @@ class SorcarAgent(RelentlessAgent):
         tools.append(ask_user_question)
         tools.append(talk)
         tools.append(set_model)
+        # No-op tool letting the model periodically condense its recent
+        # activity.  Chat-webview runs react to the persisted
+        # ``tool_call`` event by nesting and collapsing the preceding
+        # event panels (see ``media/main.js``); outside a webview the
+        # call is a harmless no-op.  The every-N-steps cadence is
+        # requested by the SYSTEM.md instructions and this tool's
+        # docstring only — there is no mechanical enforcement.
+        tools.append(summary)
         if self._is_parallel:
             tools.append(run_parallel)
             tools.append(number_of_cores)

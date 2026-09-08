@@ -71,22 +71,6 @@ def _dir_inside_worktree(work_dir: str, wt_dir: object) -> bool:
         return False
 
 
-def summary(description: str) -> str:
-    """Every 10 steps: summarize your steps since the last `summary` call.
-
-    Args:
-        description: Natural language summary in 5-10 sentences of
-            what the agent since the last call to `summary`, written in
-            Markdown format (use bullet lists for the steps, and
-            ``**bold**`` / backtick code spans).
-
-    Returns:
-        A short confirmation string.
-    """
-    del description
-    return "Summary recorded."
-
-
 def _extract_result_summary(result: str) -> str:
     """Return the persistable summary text for a finished run's *result*.
 
@@ -174,21 +158,6 @@ class ChatSorcarAgent(SorcarAgent):
         """
         with self._task_id_lock:
             return self._last_task_id or ""
-
-    def _get_tools(self) -> list:
-        """Extend the base toolset with the no-op ``summary`` tool.
-
-        The ``summary`` tool lets the model periodically condense its
-        recent activity; the chat webview reacts to the persisted
-        ``tool_call`` event by nesting and collapsing the preceding
-        event panels (see ``media/main.js``).  The every-5-steps
-        cadence is requested by the SYSTEM.md instructions and this
-        tool's docstring only — there is no mechanical enforcement.
-
-        Returns:
-            The base tools plus :func:`summary`.
-        """
-        return [*super()._get_tools(), summary]
 
     def new_chat(self) -> None:
         """Reset to a new chat session (equivalent to VS Code 'Clear').

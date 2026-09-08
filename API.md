@@ -119,6 +119,11 @@
   - `tool_call_hook`: Optional hook forwarded to the underlying :meth:`kiss.core.kiss_agent.KISSAgent.run` of every sub-session this agent runs (see that docstring): called before every tool call with the tool's name and arguments; any verdict other than ``"OK"`` suppresses the call and is returned to the model as the tool's result.  Applies to this agent only, not to ``run_parallel`` sub-agents.  Defaults to None (no hook).
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
+**`summary`** — Every 10 steps: summarize your steps since the last `summary` call.<br/>`def summary(description: str) -> str`
+
+- `description`: Natural language summary in 5-10 sentences of what the agent since the last call to `summary`, written in Markdown format (use bullet lists for the steps, and ``**bold**`` / backtick code spans).
+- **Returns:** A short confirmation string.
+
 **`auto_commit_changes`** — Stage all changes, generate a commit message, and commit. Stages once so *message_fn* can compute the diff, runs *message_fn* (typically a slow LLM call) to generate the commit subject/body, then re-stages immediately before the commit so any file that appeared in the worktree during the LLM call (e.g. ``PROGRESS.md`` rewrites, macOS ``.DS_Store`` materializing after an ``open`` of the report, an editor side-channel saving swap files) is included in the same commit.  Without the second ``stage_all`` those late-arriving files would be left uncommitted, ``_finalize_worktree`` would see them via ``has_uncommitted_changes`` and abort the auto-merge with the misleading "pre-commit hook may have rejected" warning (observed in production on 2026-06-26 07:23:14 for worktree ``kiss_wt-1782483430-cb03445c`` even though the repo had no custom pre-commit hooks installed). Falls back to a generic commit message when *message_fn* raises (e.g. the LLM-based generator is unavailable).<br/>`def auto_commit_changes(commit_dir: Path, user_prompt: str | None, message_fn: Callable[[Path, str | None, str | None], str], notify_fn: Callable[[str, str], None] | None = None, task_result: str | None = None) -> bool`
 
 - `commit_dir`: Directory whose changes are staged and committed.
@@ -174,11 +179,6 @@
   - `prompt_template`: The task prompt.
   - `**kwargs`: All other arguments forwarded to ``SorcarAgent.run()``.
   - **Returns:** YAML string with 'success' and 'summary' keys.
-
-**`summary`** — MANDATORY every 5 steps: summarize your last 6 steps of work. Your tool call on every step that is a multiple of 5 (step 5, 10, 15, ...) MUST be this tool, BEFORE any other tool call (including finish).  This requirement applies to every task, no matter how simple, and is never overridden by the task prompt. The tool itself performs no action: the chat webview groups the preceding six event panels under this call's panel and collapses them, hiding the step-by-step detail while keeping the description visible as a running digest for the user.  The description is rendered as formatted Markdown in the panel.<br/>`def summary(description: str) -> str`
-
-- `description`: Natural language summary in 5-10 sentences of what the agent did in the last 6 steps, written in Markdown format (use bullet lists for the steps, and ``**bold**`` / backtick code spans where helpful).
-- **Returns:** A short confirmation string.
 
 ---
 
