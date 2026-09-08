@@ -467,7 +467,7 @@ function testCloseTabDiscardsQueuedReport() {
   const {win} = makeWebview({withMarked: true});
   const firstTabEl = win.document.querySelector('#tab-list .chat-tab');
   const firstTabId = firstTabEl.dataset.tabId;
-  const addBtn = win.document.querySelector('.chat-tab-add');
+  const addBtn = win.document.querySelector('#new-chat-btn');
   addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   // The (now background) first tab confirms a report...
   writeReport(win, 'reports/closed.md', '# never shown', {tabId: firstTabId});
@@ -678,7 +678,7 @@ function testBackgroundTabReportOpensAtItsTaskDone() {
   const firstTabEl = win.document.querySelector('#tab-list .chat-tab');
   assert.ok(firstTabEl, 'expected an initial chat tab');
   const firstTabId = firstTabEl.dataset.tabId;
-  const addBtn = win.document.querySelector('.chat-tab-add');
+  const addBtn = win.document.querySelector('#new-chat-btn');
   assert.ok(addBtn, 'expected the add-tab button');
   addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   const activeChat = win.document.querySelector('#tab-list .chat-tab.active');
@@ -723,7 +723,7 @@ function testBackgroundTabReportOpensAtItsTaskDone() {
 // was standing on the sub-agent tab that is now being closed.
 function testSubagentDoneOpensReportInTheBackground() {
   const {win} = makeWebview({withMarked: true});
-  const addBtn = win.document.querySelector('.chat-tab-add');
+  const addBtn = win.document.querySelector('#new-chat-btn');
   addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   const subTabId = win.document.querySelector('#tab-list .chat-tab.active')
     .dataset.tabId;

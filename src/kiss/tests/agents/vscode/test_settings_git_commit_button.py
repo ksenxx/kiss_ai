@@ -29,20 +29,23 @@ _MEDIA_DIR = (
 class TestGitCommitButtonWiring(unittest.TestCase):
     """The webview carries the button and posts the command."""
 
-    def test_button_markup_in_settings_row(self) -> None:
+    def test_button_markup_in_more_menu(self) -> None:
         html = (_MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
-        i_row = html.find('class="config-update-row"')
+        i_menu = html.find('id="more-menu"')
         i_btn = html.find('id="autocommit-btn"')
-        self.assertGreater(i_row, -1)
+        self.assertGreater(i_menu, -1)
         self.assertGreater(i_btn, -1)
-        self.assertLess(i_row, i_btn, "button must be in the settings row")
+        self.assertLess(i_menu, i_btn, 'button must be in the "..." menu')
         tag = html[html.rfind("<button", 0, i_btn) : html.index(">", i_btn) + 1]
         self.assertIn('data-tooltip="git commit"', tag)
-        self.assertIn("config-gitcommit-btn", tag)
+        self.assertIn("more-menu-item", tag)
         btn_block = html[i_btn : html.index("</button>", i_btn)]
-        self.assertIn("<span>Git Commit</span>", btn_block)
+        self.assertIn('<span class="more-item-label">Git Commit</span>', btn_block)
 
     def test_main_js_posts_autocommit_action(self) -> None:
+        # Since 81905ace3 (editor-title git-commit button) the click
+        # handler delegates to the shared triggerManualGitCommit()
+        # helper instead of posting autocommitAction inline.
         js = (_MEDIA_DIR / "main.js").read_text(encoding="utf-8")
         self.assertIn("getElementById('autocommit-btn')", js)
         wiring = re.search(
@@ -52,19 +55,27 @@ class TestGitCommitButtonWiring(unittest.TestCase):
         )
         self.assertIsNotNone(wiring, "button click handler must exist")
         assert wiring is not None
-        self.assertIn("api.autocommitAction(", wiring.group(1))
-        self.assertIn("autocommitTargetTabId()", wiring.group(1))
-        self.assertIn("setAutocommitInFlight(true)", wiring.group(1))
-        self.assertIn("closeSettingsPanel()", wiring.group(1))
-        self.assertIn("workDirForTab(commitTabId)", wiring.group(1))
+        self.assertIn("triggerManualGitCommit()", wiring.group(1))
+        helper = re.search(
+            r"function triggerManualGitCommit\(\) \{(.*?)\n  \}",
+            js,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(helper, "triggerManualGitCommit helper must exist")
+        assert helper is not None
+        self.assertIn("api.autocommitAction(", helper.group(1))
+        self.assertIn("autocommitTargetTabId()", helper.group(1))
+        self.assertIn("setAutocommitInFlight(true)", helper.group(1))
+        self.assertIn("closeSettingsPanel()", helper.group(1))
+        self.assertIn("workDirForTab(commitTabId)", helper.group(1))
 
     def test_gitcommit_css_present(self) -> None:
         main_css = (_MEDIA_DIR / "main.css").read_text(encoding="utf-8")
         remote_css = (
             _MEDIA_DIR / "remote-codex.css"
         ).read_text(encoding="utf-8")
-        self.assertIn(".config-gitcommit-btn", main_css)
-        self.assertIn(".config-gitcommit-btn", remote_css)
+        self.assertIn(".more-menu-item", main_css)
+        self.assertIn(".more-menu-item", remote_css)
 
 
 class TestGitCommitCommandCatalog(unittest.TestCase):

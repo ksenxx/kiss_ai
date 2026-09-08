@@ -343,6 +343,8 @@ def run(
     *,
     work_dir: str = "",
     scope_work_dir: str = "",
+    parent_task_id: str = "",
+    parent_tab_id: str = "",
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -375,12 +377,34 @@ def run(
             tab in the daemon's shared tab registry — the directory a
             client's tab bar matches against to decide whether to show
             the tab — kept separate from *work_dir* (the execution
-            directory) so a ``run_agent`` sub-task that runs in a
+            directory) so a standalone dispatch that runs in a
             channel/cron scratch directory can still appear in the
             CALLING workspace's tab bar.  Empty (the default) leaves
             the tab's scope falling back to *work_dir*, unchanged from
-            ordinary runs.  Like *timeout* and *sock_path* it is a
+            ordinary runs.  Irrelevant for a sub-agent run (non-empty
+            *parent_task_id*), which gets no registry tab at all.
+            Like *timeout* and *sock_path* it is a
             client/UI-transport parameter with no agent-script getter.
+        parent_task_id: The persisted ``task_history`` row id of the
+            CALLING task, when this run is dispatched on behalf of one
+            (the ``run_agent`` tool).  Non-empty marks the run as a
+            SUB-AGENT of that task, giving its tab the same frontend
+            behavior as a ``run_parallel`` sub-task: no top-level tab
+            of its own — instead every client viewing the parent gets
+            a nested sub-agent tab (via the run's ``new_tab``
+            broadcast), the run's history row nests under the parent
+            task, and a ``subagentDone`` broadcast stops the tab's
+            running indicator when the run ends.  Empty (the default)
+            runs as an ordinary top-level task.  Like *scope_work_dir*
+            it is a client/UI-transport parameter with no agent-script
+            getter: a dispatched script must not be able to re-parent
+            itself under an unrelated task.
+        parent_tab_id: Frontend tab id of the calling task's tab,
+            forwarded on the sub-agent's ``new_tab`` broadcast so the
+            webview knows which tab spawned it (nested placement and
+            cascade-close).  Only meaningful with *parent_task_id*;
+            empty spawns a parentless sub-agent tab, exactly like a
+            headless ``run_parallel`` fan-out.  No agent-script getter.
         model: Model name; the daemon's selected default when empty.
         chat_id: Optional existing chat session id to continue.  Pass
             the ``chat_id`` of a previous :class:`TaskResult` to run
@@ -414,8 +438,9 @@ def run(
             and the returned :class:`TaskResult` carries the
             diagnostic error in its ``text`` with ``success=False``.
         extension_agent_path: Optional path — a string — to a Python
-            *agent script* that computes this run's parameters **on the
-            daemon**.  When non-empty, the daemon imports the file and,
+            *agent script*, also called a Sorcar Extension Agent (SEA),
+            that computes this run's parameters **on the daemon**.
+            When non-empty, the daemon imports the file and,
             for each parameter ``X`` of this function except
             ``extension_agent_path`` itself (and the getter-less
             parameters noted below), calls the script's top-level
@@ -482,14 +507,17 @@ def run(
             of tool callables (the tools-file contract, as in the
             channel agent modules) makes the script its own tools
             file.  ``timeout``, *stop_on_timeout*, *sock_path*,
-            *scope_work_dir*, *web_tools*, and *is_parallel* have no
+            *scope_work_dir*, *parent_task_id*, *parent_tab_id*,
+            *web_tools*, and *is_parallel* have no
             getters by design: the first three are client-transport
             parameters — the script only runs on the daemon that
             *sock_path* selects, *timeout* bounds this client's local
             wait, and *stop_on_timeout* picks this client's timeout
             behavior — *scope_work_dir* is the CALLING
             client's tab-bar scope, which the dispatched script must
-            not be able to repoint at another workspace, and
+            not be able to repoint at another workspace,
+            *parent_task_id* / *parent_tab_id* are the CALLING task's
+            identity, which the script must not be able to forge, and
             *web_tools* / *is_parallel* always keep the values passed
             to this call (their defaults when the caller passed
             none).  The
@@ -653,6 +681,8 @@ def run(
             "chatId": chat_id,
             "workDir": work_dir,
             "tabScopeWorkDir": scope_work_dir,
+            "parentTaskId": parent_task_id,
+            "parentTabId": parent_tab_id,
             "model": model,
             "systemPrompt": system_prompt,
             "toolsFile": tools_file,

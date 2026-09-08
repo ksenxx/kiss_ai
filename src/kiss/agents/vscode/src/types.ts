@@ -115,9 +115,49 @@ export type FromWebviewMessage =
   | {type: 'serverReset'}
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
+  // In-page (browser-mic) capture fallback: the webview recorded the
+  // post-wake utterance itself and ships it to the daemon for
+  // transcription — the exact message the remote webapp sends over its
+  // WebSocket. The host forwards it verbatim (FORWARDED_COMMANDS); the
+  // daemon answers with a `voiceSpeech` the client relay passes back.
+  | {
+      type: 'voiceTranscribe';
+      audio: string;
+      wakePrefixed?: boolean;
+      wakeSamples?: number;
+    }
   | {type: 'voiceSensitivity'; value: number}
   | {type: 'voiceAck'}
-  | {type: 'voiceDropped'; tabId?: string; text: string};
+  | {type: 'voiceDropped'; tabId?: string; text: string}
+  // Editor-tabs mode (host-only, never forwarded to the daemon): the
+  // webview's root chat tab renamed itself or its task's status
+  // changed, so the hosting editor tab should follow. `state` mirrors
+  // the internal tab strip's status dot: '' (no task yet), 'running',
+  // 'ok' or 'fail'.
+  | {type: 'panelTitle'; title: string; tabId?: string; state?: string}
+  // Editor-tabs mode: a task in this panel just finished — bring the
+  // hosting editor tab forward (sidebar mode's finished-task switch).
+  | {type: 'revealPanel'}
+  // Editor-tabs mode: open another chat as a new editor tab — a fresh
+  // conversation when chatId is absent, a history resume otherwise.
+  | {
+      type: 'openChatPanel';
+      chatId?: string;
+      taskId?: string | number | null;
+      title?: string;
+      // Fresh conversations only: the opening webview's composer draft,
+      // stamped onto the new panel as data-kiss-pending-text so the new
+      // chat's textarea starts out with the same text.
+      pendingText?: string;
+    }
+  // Editor-tabs mode: close this panel — because the daemon's registry
+  // no longer lists its chat tab (another client closed it; retire
+  // absent/false), or because the user closed the root chat inside the
+  // panel (retire true: the host must also retire the tab from the
+  // registry).
+  | {type: 'closePanel'; retire?: boolean}
+  // The settings UI's editor-tabs toggle (both modes).
+  | {type: 'setEditorTabsMode'; enabled: boolean};
 
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
 
@@ -130,12 +170,23 @@ type ToWebviewMessageBody =
   | {type: 'voiceTranscribing'}
   | {
       type: 'voiceSpeech';
-      roundId: number;
+      // The host's own listener stamps the round id; a daemon reply to a
+      // forwarded `voiceTranscribe` (in-page capture fallback) carries
+      // none — voice.js then answers its oldest unkeyed round.
+      roundId?: number;
       text: string;
-      speaker?: number;
-      language?: string;
+      speaker?: number | null;
+      language?: string | null;
     }
-  | {type: 'voiceState'; listening: boolean; error?: string}
+  // hostMicUnavailable: the host machine cannot run the wake listener at
+  // all (no microphone/PortAudio, uv missing — it died before READY).
+  // The webview shows a calm "unavailable" state instead of an error.
+  | {
+      type: 'voiceState';
+      listening: boolean;
+      error?: string;
+      hostMicUnavailable?: boolean;
+    }
   | {type: 'defaultModel'; model: string}
   | {type: 'kissConfig'; config: Record<string, unknown>}
   | {type: 'kissConfigSaved'; ok: boolean; error?: string}
@@ -395,6 +446,18 @@ type ToWebviewMessageBody =
   // Daemon: a plain informational line for one connection (e.g. "an
   // update is already running").
   | {type: 'notice'; text: string}
+  // Host (editor-tabs mode): open the webview's settings panel — the
+  // editor-title gear button's action.
+  | {type: 'openSettings'}
+  // Host (editor-tabs mode): run the manual Git Commit of the active
+  // chat tab's working tree — the editor-title git-commit button's
+  // action (same flow as the settings drawer's Git Commit button).
+  | {type: 'gitCommit'}
+  // Host (editor-tabs mode): bring one of the panel's own chat's tasks
+  // on screen — a history-panel click on a task of a chat whose editor
+  // tab is already open. The webview scrolls to the task's transcript
+  // region, or replays the task when it is not rendered.
+  | {type: 'showTask'; taskId: string}
   // Daemon: answer to a `complete` command (the input-box ghost /
   // autocomplete list), scoped to the requesting connection and tab.
   | {

@@ -16,9 +16,11 @@ Covered behavior:
 * The task-history panel is wide enough that the five status/scope
   toggle buttons inside the collapsible ``Filters`` section all sit on
   a single line.
-* The burger button (``#menu-btn``) really shows and hides the docked
-  history panel: the panel slides off screen and the chat area
-  reclaims the freed horizontal space.
+* The docked history panel is permanent on desktop: the burger button
+  (``#menu-btn``) and the drawer close button (``#sidebar-close``) are
+  hidden, and both come back below the 900px (mobile) breakpoint.
+* The panel resizer is limited only by the chat's minimum width — a
+  drag on a wide window may pass the 820px default cap.
 * The settings panel stays narrow — like the VS Code extension's
   sidebar — instead of covering 90% of a wide desktop window.
 
@@ -225,12 +227,12 @@ def test_widened_panel_never_crushes_the_chat(
 
 
 @pytest.mark.parametrize("width", (1000, 1440))
-def test_burger_button_hides_and_shows_the_history_panel(
+def test_burger_hidden_and_panel_permanently_docked(
     browser: Browser,
     remote_url: str,
     width: int,
 ) -> None:
-    """#menu-btn slides the docked panel out of view and back."""
+    """Desktop has no burger and no close button: the panel is fixed."""
     page = _open_desktop_page(browser, remote_url, width)
     try:
         docked = page.evaluate(_LAYOUT_JS)
@@ -238,35 +240,46 @@ def test_burger_button_hides_and_shows_the_history_panel(
         assert docked["sidebarRight"] > 0, docked
         assert docked["appLeft"] == pytest.approx(docked["sidebarWidth"]), docked
 
-        page.click("#menu-btn")
-        page.wait_for_function("() => !document.getElementById('sidebar')"
-                              ".classList.contains('open')")
-        page.wait_for_timeout(400)
-        hidden = page.evaluate(_LAYOUT_JS)
-        assert hidden["open"] is False
-        assert hidden["sidebarRight"] <= 0, (
-            "burger click must move the history panel off screen, "
-            f"its right edge is still at {hidden['sidebarRight']}px"
+        assert page.locator("#menu-btn").is_hidden(), (
+            "the burger only toggled the docked panel; on desktop the "
+            "panel is permanent so the button must be gone"
         )
-        assert hidden["appLeft"] == 0, (
-            "chat area must reclaim the space freed by the hidden panel, "
-            f"left offset is still {hidden['appLeft']}px"
+        assert page.locator("#sidebar-close").is_hidden(), (
+            "without the burger there would be no way to reopen a panel "
+            "dismissed by the drawer close button, so it must be gone too"
         )
 
-        page.click("#menu-btn")
-        page.wait_for_function("() => document.getElementById('sidebar')"
-                              ".classList.contains('open')")
-        page.wait_for_timeout(400)
-        reshown = page.evaluate(_LAYOUT_JS)
-        assert reshown["open"] is True
-        assert reshown["sidebarRight"] == pytest.approx(docked["sidebarRight"])
-        assert reshown["appLeft"] == pytest.approx(docked["appLeft"])
-        assert (
-            page.eval_on_selector(
-                "#sidebar-overlay",
-                "el => el.classList.contains('open')",
-            )
-            is False
+        # Below the 900px breakpoint the panel is a drawer again, so
+        # both controls come back.
+        page.set_viewport_size({"width": 420, "height": 900})
+        page.wait_for_selector("#menu-btn", state="visible")
+        page.wait_for_function(
+            "() => !document.body.classList.contains('remote-desktop')"
+        )
+    finally:
+        page.close()
+
+
+def test_panel_can_grow_beyond_the_old_default_cap(
+    browser: Browser,
+    remote_url: str,
+) -> None:
+    """A drag may widen the panel past 820px; only MIN_CHAT_W limits it."""
+    page = _open_desktop_page(browser, remote_url, 1920)
+    try:
+        _drag_resizer_to(page, 1000)
+        grown = page.evaluate(_LAYOUT_JS)
+        assert grown["sidebarWidth"] == pytest.approx(1000, abs=2), (
+            "the resizer used to clamp at --sidebar-max-w (820px); a "
+            f"drag to 1000px left the panel at {grown['sidebarWidth']}px"
+        )
+        _drag_resizer_to(page, 1910)
+        maxed = page.evaluate(_LAYOUT_JS)
+        assert maxed["sidebarWidth"] == pytest.approx(
+            1920 - MIN_CHAT_W, abs=2
+        ), (
+            "dragging fully right must stop where the chat keeps its "
+            f"minimum width, got {maxed['sidebarWidth']}px"
         )
     finally:
         page.close()
