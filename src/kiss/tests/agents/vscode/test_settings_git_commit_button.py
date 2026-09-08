@@ -43,6 +43,9 @@ class TestGitCommitButtonWiring(unittest.TestCase):
         self.assertIn('<span class="more-item-label">Git Commit</span>', btn_block)
 
     def test_main_js_posts_autocommit_action(self) -> None:
+        # Since 81905ace3 (editor-title git-commit button) the click
+        # handler delegates to the shared triggerManualGitCommit()
+        # helper instead of posting autocommitAction inline.
         js = (_MEDIA_DIR / "main.js").read_text(encoding="utf-8")
         self.assertIn("getElementById('autocommit-btn')", js)
         wiring = re.search(
@@ -52,11 +55,19 @@ class TestGitCommitButtonWiring(unittest.TestCase):
         )
         self.assertIsNotNone(wiring, "button click handler must exist")
         assert wiring is not None
-        self.assertIn("api.autocommitAction(", wiring.group(1))
-        self.assertIn("autocommitTargetTabId()", wiring.group(1))
-        self.assertIn("setAutocommitInFlight(true)", wiring.group(1))
-        self.assertIn("closeSettingsPanel()", wiring.group(1))
-        self.assertIn("workDirForTab(commitTabId)", wiring.group(1))
+        self.assertIn("triggerManualGitCommit()", wiring.group(1))
+        helper = re.search(
+            r"function triggerManualGitCommit\(\) \{(.*?)\n  \}",
+            js,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(helper, "triggerManualGitCommit helper must exist")
+        assert helper is not None
+        self.assertIn("api.autocommitAction(", helper.group(1))
+        self.assertIn("autocommitTargetTabId()", helper.group(1))
+        self.assertIn("setAutocommitInFlight(true)", helper.group(1))
+        self.assertIn("closeSettingsPanel()", helper.group(1))
+        self.assertIn("workDirForTab(commitTabId)", helper.group(1))
 
     def test_gitcommit_css_present(self) -> None:
         main_css = (_MEDIA_DIR / "main.css").read_text(encoding="utf-8")
