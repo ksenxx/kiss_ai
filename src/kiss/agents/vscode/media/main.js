@@ -1185,9 +1185,10 @@
     target.focus();
   }
 
-  // The panel title last reported to the host, so renderTabBar (which
-  // runs on many unrelated events) only posts real renames.
+  // The panel title/status last reported to the host, so renderTabBar
+  // (which runs on many unrelated events) only posts real changes.
   let lastNotifiedPanelTitle = '';
+  let lastNotifiedPanelState = null;
 
   function renderTabBar() {
     const tabList = document.getElementById('tab-list');
@@ -1203,9 +1204,30 @@
       const root = editorRootTab();
       if (root) {
         const title = root.title || 'new chat';
-        if (title !== lastNotifiedPanelTitle) {
+        // Mirror the internal tab strip's status dot onto the EDITOR
+        // tab: the host paints a pulsing green circle while the task
+        // runs and a solid green/red one after it ends (the same
+        // states .chat-tab-spinner / .chat-tab-ok / .chat-tab-fail
+        // render in sidebar mode).
+        const state = root.isRunning
+          ? 'running'
+          : root.hasRunTask
+            ? root.lastTaskFailed
+              ? 'fail'
+              : 'ok'
+            : '';
+        if (
+          title !== lastNotifiedPanelTitle ||
+          state !== lastNotifiedPanelState
+        ) {
           lastNotifiedPanelTitle = title;
-          postToHost({type: 'panelTitle', title: title, tabId: root.id});
+          lastNotifiedPanelState = state;
+          postToHost({
+            type: 'panelTitle',
+            title: title,
+            tabId: root.id,
+            state: state,
+          });
         }
       }
       // The internal bar only appears when there is something beyond
@@ -2428,6 +2450,12 @@
       ) {
         root.backendChatId = String(entry.chatId);
       }
+      // A chat binding proves a task ran in this chat (chat ids are
+      // allocated by the first run) — the same inference the shared
+      // reconcile makes for tabs it adopts — so a revived or migrated
+      // panel gets its status circle back without waiting for a
+      // replay.
+      if (entry.chatId) root.hasRunTask = true;
       if (entry.workDir && !root.workDir) root.workDir = entry.workDir;
       if (typeof entry.workDir === 'string') {
         root.registryWorkDir = entry.workDir;
@@ -5594,9 +5622,16 @@
       // The daemon's own count is the authoritative one.
       if (ev.step_count) ctx.stepCount = ev.step_count;
       collapseAllExceptResult(ctx.container, ctx.tabId);
-      if (ev.success === false && !ev.is_continue) {
-        const rTab = getTab(ctx.tabId);
-        if (rTab) rTab.lastTaskFailed = true;
+      const rTab = getTab(ctx.tabId);
+      if (rTab) {
+        // A result proves this tab ran a task — set on replays too
+        // (task_events / resumed panels), where no `clear` ever ran,
+        // so the status dot (and the editor tab's title circle) can
+        // describe the replayed task.
+        rTab.hasRunTask = true;
+        if (ev.success === false && !ev.is_continue) {
+          rTab.lastTaskFailed = true;
+        }
       }
       ctx.pendingPanel = true;
     }
@@ -7197,6 +7232,10 @@
           }
           if (bgCtx.stepCount > 0)
             teTab.statusStepsText = 'Steps: ' + bgCtx.stepCount;
+          // Same as the visible-tab replay below: the replayed
+          // transcript recomputed this tab's verdict, so the dot must
+          // repaint even when no title change re-rendered the bar.
+          renderTabBar();
           break;
         }
         if (ev.task) {
@@ -7239,6 +7278,10 @@
         // must not survive a replay that carries none.
         setTaskSettings(null);
         replayTaskEvents(ev.events || []);
+        // The replay recomputed the tab's verdict (hasRunTask /
+        // lastTaskFailed in streamEnd); repaint the status dot and, in
+        // editor-tabs mode, repost the panel title's state.
+        renderTabBar();
         break;
       }
       case 'adjacent_task_events':
@@ -7962,8 +8005,14 @@
 
   function focusFinishedTab(tabId) {
     if (tabId === undefined || tabId === null) return;
-    if (tabId === activeTabId) return;
     if (!getTab(tabId)) return;
+    // Editor-tabs mode: the chat's tab is the EDITOR tab itself, so a
+    // finishing task brings its panel forward through the host — the
+    // same "switch to the tab that just finished" the internal strip
+    // performs below in sidebar mode. Foreign panels never get here:
+    // their tabs are not in this panel's `tabs` (getTab above).
+    if (EDITOR_TAB_MODE) postToHost({type: 'revealPanel'});
+    if (tabId === activeTabId) return;
     // switchToTab refuses hidden tabs, so a task finishing in another
     // workspace's tab never yanks this client onto it.
     switchToTab(tabId);

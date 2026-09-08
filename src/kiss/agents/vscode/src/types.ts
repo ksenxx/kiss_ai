@@ -130,9 +130,14 @@ export type FromWebviewMessage =
   | {type: 'voiceAck'}
   | {type: 'voiceDropped'; tabId?: string; text: string}
   // Editor-tabs mode (host-only, never forwarded to the daemon): the
-  // webview's root chat tab renamed itself, so the hosting editor tab
-  // should follow.
-  | {type: 'panelTitle'; title: string; tabId?: string}
+  // webview's root chat tab renamed itself or its task's status
+  // changed, so the hosting editor tab should follow. `state` mirrors
+  // the internal tab strip's status dot: '' (no task yet), 'running',
+  // 'ok' or 'fail'.
+  | {type: 'panelTitle'; title: string; tabId?: string; state?: string}
+  // Editor-tabs mode: a task in this panel just finished — bring the
+  // hosting editor tab forward (sidebar mode's finished-task switch).
+  | {type: 'revealPanel'}
   // Editor-tabs mode: open another chat as a new editor tab — a fresh
   // conversation when chatId is absent, a history resume otherwise.
   | {
