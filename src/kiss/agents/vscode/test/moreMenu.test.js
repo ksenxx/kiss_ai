@@ -95,6 +95,20 @@ function testMenuHoldsEveryMovedAction() {
   console.log('  ok - the "..." menu holds every moved action');
 }
 
+function testSettingsIsTheLastMenuItem() {
+  const {win} = makeWebview();
+  const menu = win.document.getElementById('more-menu');
+  const items = Array.from(menu.querySelectorAll('.more-menu-item'));
+  assert.ok(items.length >= 2, 'the menu must hold several items');
+  assert.strictEqual(
+    items[items.length - 1].id,
+    'settings-btn',
+    'Settings must be the LAST item of the "..." menu on every surface',
+  );
+  win.close();
+  console.log('  ok - Settings is the last "..." menu item');
+}
+
 function testOnlyOneComposerPopupAtATime() {
   const {win} = makeWebview();
   const doc = win.document;
@@ -185,6 +199,7 @@ function testOutsideClickAndItemClickCloseMenu() {
 function main() {
   console.log('moreMenu.test.js');
   testMenuHoldsEveryMovedAction();
+  testSettingsIsTheLastMenuItem();
   testOnlyOneComposerPopupAtATime();
   testEscapeClosesMenuAndRestoresFocus();
   testOutsideClickAndItemClickCloseMenu();
