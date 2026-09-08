@@ -90,7 +90,7 @@
       {
         "command": "kissSorcar.newConversation",
         "title": "KISS: New Conversation",
-        "icon": "media/kiss-icon.png"
+        "icon": "$(add)"
       },
       {
         "command": "kissSorcar.openSettings",
@@ -105,6 +105,11 @@
         "command": "kissSorcar.generateCommitMessage",
         "title": "KISS: Generate Commit Message",
         "icon": "$(sparkle)"
+      },
+      {
+        "command": "kissSorcar.gitCommit",
+        "title": "KISS: Git Commit",
+        "icon": "$(git-commit)"
       },
       {
         "command": "kissSorcar.toggleFocus",
@@ -130,6 +135,16 @@
     ],
     "menus": {
       "editor/title": [
+        {
+          "command": "kissSorcar.newConversation",
+          "group": "navigation@-4",
+          "when": "config.kissSorcar.editorTabsMode"
+        },
+        {
+          "command": "kissSorcar.gitCommit",
+          "group": "navigation@-3",
+          "when": "config.kissSorcar.editorTabsMode"
+        },
         {
           "command": "kissSorcar.openSettings",
           "group": "navigation@-2",

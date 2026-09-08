@@ -226,6 +226,17 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
+  // The editor-title git-commit button (editor-tabs mode): run the
+  // manual Git Commit of the active chat panel's working tree — the
+  // same daemon autocommitAction flow the settings drawer's Git
+  // Commit button uses. Also usable from the command palette in
+  // sidebar mode, where it acts on the sidebar chat.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.gitCommit', () => {
+      void chatController(true)!.gitCommit();
+    }),
+  );
+
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.runSelection', async () => {
       const editor = vscode.window.activeTextEditor;

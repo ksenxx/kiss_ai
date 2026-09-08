@@ -4,7 +4,10 @@
 // add your name here
 
 // The editor-title (top-right of every editor window) buttons in
-// editor-tabs mode:
+// editor-tabs mode, left to right:
+//  - a + button (kissSorcar.newConversation) opens a new chat tab
+//  - a git-commit button (kissSorcar.gitCommit) runs the manual Git
+//    Commit (the settings drawer's autocommitAction flow)
 //  - a settings gear (kissSorcar.openSettings) sits left of the KS
 //    button and opens the settings UI
 //  - the KS button (kissSorcar.showHistory) uses the colorful brand
@@ -26,6 +29,26 @@ const manifest = JSON.parse(
 const editorTitle = manifest.contributes.menus['editor/title'];
 assert.ok(Array.isArray(editorTitle), 'editor/title menu contributions exist');
 
+// --- + (new chat) button -------------------------------------------------
+const newChat = editorTitle.find(
+  e => e.command === 'kissSorcar.newConversation',
+);
+assert.ok(newChat, 'newConversation contributed to editor/title');
+assert.strictEqual(
+  newChat.when,
+  'config.kissSorcar.editorTabsMode',
+  '+ button shows only in editor-tabs mode',
+);
+
+// --- git-commit button ---------------------------------------------------
+const gitCommit = editorTitle.find(e => e.command === 'kissSorcar.gitCommit');
+assert.ok(gitCommit, 'gitCommit contributed to editor/title');
+assert.strictEqual(
+  gitCommit.when,
+  'config.kissSorcar.editorTabsMode',
+  'git-commit button shows only in editor-tabs mode',
+);
+
 // --- settings button ---------------------------------------------------
 const settings = editorTitle.find(
   e => e.command === 'kissSorcar.openSettings',
@@ -42,18 +65,38 @@ const ks = editorTitle.find(e => e.command === 'kissSorcar.showHistory');
 assert.ok(ks, 'showHistory (KS button) contributed to editor/title');
 assert.strictEqual(ks.when, 'config.kissSorcar.editorTabsMode');
 
-// The gear sorts before the KS button (navigation@-2 < navigation@-1).
-const settingsOrder = Number(settings.group.split('@')[1]);
-const ksOrder = Number(ks.group.split('@')[1]);
+// Left-to-right order: + , git commit, gear, KS (ascending navigation@N).
+const orderOf = entry => {
+  assert.ok(
+    entry.group.startsWith('navigation@'),
+    `${entry.command} sits in the navigation group (${entry.group})`,
+  );
+  return Number(entry.group.split('@')[1]);
+};
+const newChatOrder = orderOf(newChat);
+const gitCommitOrder = orderOf(gitCommit);
+const settingsOrder = orderOf(settings);
+const ksOrder = orderOf(ks);
 assert.ok(
-  settings.group.startsWith('navigation@') &&
-    ks.group.startsWith('navigation@') &&
+  newChatOrder < gitCommitOrder &&
+    gitCommitOrder < settingsOrder &&
     settingsOrder < ksOrder,
-  `gear (${settings.group}) must sort left of KS (${ks.group})`,
+  `editor-title order must be + (${newChat.group}) < git commit ` +
+    `(${gitCommit.group}) < gear (${settings.group}) < KS (${ks.group})`,
 );
 
-// Both commands are declared with icons.
+// All four commands are declared with icons.
 const commands = new Map(manifest.contributes.commands.map(c => [c.command, c]));
+const newChatCmd = commands.get('kissSorcar.newConversation');
+assert.strictEqual(newChatCmd.icon, '$(add)', '+ button uses the add codicon');
+
+const gitCommitCmd = commands.get('kissSorcar.gitCommit');
+assert.strictEqual(
+  gitCommitCmd.icon,
+  '$(git-commit)',
+  'git-commit button uses the git-commit codicon',
+);
+
 const gearCmd = commands.get('kissSorcar.openSettings');
 assert.strictEqual(gearCmd.icon, '$(settings-gear)', 'gear uses codicon');
 

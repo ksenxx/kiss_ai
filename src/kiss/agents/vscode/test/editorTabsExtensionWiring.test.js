@@ -142,6 +142,7 @@ const calls = {
     submitTask: [],
     appendToInput: [],
     openSettingsUI: 0,
+    gitCommit: 0,
   },
   manager: {
     openNewChat: 0,
@@ -157,6 +158,7 @@ const calls = {
     stopTask: 0,
     submitTask: [],
     appendToInput: [],
+    gitCommit: 0,
   },
 };
 
@@ -199,6 +201,10 @@ class FakeSidebarView {
     calls.sidebar.openSettingsUI += 1;
     return Promise.resolve();
   }
+  gitCommit() {
+    calls.sidebar.gitCommit += 1;
+    return Promise.resolve();
+  }
   getRegistryTabEntries() {
     return registryEntries;
   }
@@ -236,6 +242,10 @@ class FakeController {
   }
   appendToInput(text) {
     calls.controller.appendToInput.push(text);
+    return Promise.resolve();
+  }
+  gitCommit() {
+    calls.controller.gitCommit += 1;
     return Promise.resolve();
   }
 }
@@ -368,6 +378,10 @@ async function runTest() {
   await commands.get('kissSorcar.stopTask')();
   assert.strictEqual(calls.sidebar.stopTask, 1);
 
+  await commands.get('kissSorcar.gitCommit')();
+  assert.strictEqual(calls.sidebar.gitCommit, 1);
+  assert.strictEqual(calls.controller.gitCommit, 0);
+
   // The KS button's command in sidebar mode: just focus the chat.
   const sidebarFocusBefore = calls.sidebar.focusChatInput;
   await commands.get('kissSorcar.showHistory')();
@@ -449,6 +463,13 @@ async function runTest() {
   await commands.get('kissSorcar.stopTask')();
   assert.strictEqual(calls.controller.stopTask, 1);
   assert.strictEqual(calls.sidebar.stopTask, 1, 'sidebar untouched');
+
+  // The editor-title git-commit button: reveal (or open) a chat panel
+  // and run its manual Git Commit through that panel's controller.
+  await commands.get('kissSorcar.gitCommit')();
+  assert.strictEqual(calls.controller.gitCommit, 1);
+  assert.strictEqual(calls.manager.revealActiveOrCreate, 2);
+  assert.strictEqual(calls.sidebar.gitCommit, 1, 'sidebar untouched');
 
   vscodeStub.window.activeTextEditor = {
     document: {getText: () => 'selected text'},
