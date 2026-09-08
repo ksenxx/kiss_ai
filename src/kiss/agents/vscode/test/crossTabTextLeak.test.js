@@ -764,7 +764,7 @@ test('an unowned visible tab still shows its own header counters', () => {
 
   assert.strictEqual(
     win.document.getElementById('status-tokens').textContent,
-    'Tokens: 7,000',
+    'Tokens: 7.00K',
     'a pre-adoption usage_info must still drive the header of the tab it ' +
       'is reported for',
   );

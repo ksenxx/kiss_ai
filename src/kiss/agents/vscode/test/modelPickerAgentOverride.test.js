@@ -120,7 +120,9 @@ function pickFromDropdown(win, model) {
   const items = Array.from(
     win.document.querySelectorAll('#model-list .model-item'),
   );
-  const wanted = items.find(el => el.textContent.indexOf(model) === 0);
+  const wanted = items.find(
+    el => el.textContent.replace(/\u200e/g, '').indexOf(model) === 0,
+  );
   assert.ok(wanted, 'the model list must offer ' + model);
   wanted.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
@@ -408,14 +410,15 @@ test('an open dropdown follows the model change under it', () => {
   assert.strictEqual(label(win), AGENT_MODEL);
   const shown = Array.from(
     win.document.querySelectorAll('#model-list .model-item'),
-  ).map(el => el.textContent);
+  ).map(el => el.textContent.replace(/\u200e/g, ''));
   assert.ok(
     shown.length > 0 && shown.every(t => t.indexOf('g') >= 0),
     `the typed filter must survive the repaint; got ${JSON.stringify(shown)}`,
   );
   const active = win.document.querySelector('#model-list .model-item.active');
   assert.ok(
-    !active || active.textContent.indexOf(USER_MODEL) !== 0,
+    !active ||
+      active.textContent.replace(/\u200e/g, '').indexOf(USER_MODEL) !== 0,
     'the tick must not still claim the user model is in use',
   );
   win.close();
