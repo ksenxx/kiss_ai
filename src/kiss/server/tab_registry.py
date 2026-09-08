@@ -366,13 +366,13 @@ class TabRegistry:
             work_dir: New working directory (``None``/empty keeps it).
             scope_work_dir: The directory that scopes the tab to a
                 client workspace, distinct from *work_dir* (the tab's
-                execution/display directory): a ``run_agent`` sub-task
-                executes in a channel/cron scratch directory but must
-                appear in the CALLING workspace's tab bar, so its scope
-                is pinned to that workspace while *work_dir* stays the
-                scratch directory.  ``None``/empty keeps the current
-                value; clients fall back to *work_dir* when it is
-                empty, preserving the pre-scope behaviour.
+                execution/display directory): a standalone API
+                dispatch executes in a channel/cron scratch directory
+                but must appear in the CALLING workspace's tab bar, so
+                its scope is pinned to that workspace while *work_dir*
+                stays the scratch directory.  ``None``/empty keeps the
+                current value; clients fall back to *work_dir* when it
+                is empty, preserving the pre-scope behaviour.
             task_id: The specific historical task the tab shows.
                 ``None`` keeps the current value; ``""`` clears it (the
                 tab tracks the chat's latest task again).

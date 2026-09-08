@@ -17,7 +17,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:kissSorcar.chatTab"
   ],
   "icon": "media/thumbnail.jpeg",
   "enabledApiProposals": [
@@ -51,15 +52,23 @@
     "views": {
       "kissSorcarContainer": [
         {
+          "type": "webview",
+          "id": "kissSorcar.historyView",
+          "name": "History",
+          "when": "config.kissSorcar.editorTabsMode"
+        },
+        {
           "id": "kissSorcar.chatView",
-          "name": "Chat"
+          "name": "Chat",
+          "when": "!config.kissSorcar.editorTabsMode"
         }
       ],
       "kissSorcarSecondary": [
         {
           "type": "webview",
           "id": "kissSorcar.chatViewSecondary",
-          "name": "Chat"
+          "name": "Chat",
+          "when": "!config.kissSorcar.editorTabsMode"
         }
       ]
     },
@@ -81,7 +90,12 @@
       {
         "command": "kissSorcar.newConversation",
         "title": "KISS: New Conversation",
-        "icon": "media/kiss-icon.png"
+        "icon": "$(add)"
+      },
+      {
+        "command": "kissSorcar.openSettings",
+        "title": "KISS: Open Sorcar Settings",
+        "icon": "$(settings-gear)"
       },
       {
         "command": "kissSorcar.stopTask",
@@ -91,6 +105,11 @@
         "command": "kissSorcar.generateCommitMessage",
         "title": "KISS: Generate Commit Message",
         "icon": "$(sparkle)"
+      },
+      {
+        "command": "kissSorcar.gitCommit",
+        "title": "KISS: Git Commit",
+        "icon": "$(git-commit)"
       },
       {
         "command": "kissSorcar.toggleFocus",
@@ -107,13 +126,34 @@
       {
         "command": "kissSorcar.insertSelectionToChat",
         "title": "KISS: Insert Selection into Chat"
+      },
+      {
+        "command": "kissSorcar.showHistory",
+        "title": "KISS: Show Chat History",
+        "icon": "media/kiss-icon.png"
       }
     ],
     "menus": {
       "editor/title": [
         {
           "command": "kissSorcar.newConversation",
-          "group": "navigation@-1"
+          "group": "navigation@-4",
+          "when": "config.kissSorcar.editorTabsMode"
+        },
+        {
+          "command": "kissSorcar.gitCommit",
+          "group": "navigation@-3",
+          "when": "config.kissSorcar.editorTabsMode"
+        },
+        {
+          "command": "kissSorcar.openSettings",
+          "group": "navigation@-2",
+          "when": "config.kissSorcar.editorTabsMode"
+        },
+        {
+          "command": "kissSorcar.showHistory",
+          "group": "navigation@-1",
+          "when": "config.kissSorcar.editorTabsMode"
         }
       ],
       "scm/title": [
@@ -167,6 +207,11 @@
           "type": "string",
           "default": "",
           "description": "Path to KISS project root (auto-detected if empty)"
+        },
+        "kissSorcar.editorTabsMode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open each KISS Sorcar chat as an editor tab instead of the secondary-sidebar chat view (toggleable from the chat's settings panel)"
         }
       }
     }

@@ -5,9 +5,9 @@
 """Agent-script loading for ``kiss.server.sorcar.run``'s ``extension_agent_path``.
 
 The caller of :func:`kiss.server.sorcar.run` may supply an *agent
-script* — a Python file whose top-level ``get_X()`` functions compute
-the run's parameters — as a file path on the ``run`` command's
-``agentPath`` field.  The client validates and resolves the path
+script* — a Sorcar Extension Agent (SEA), a Python file whose top-level
+``get_X()`` functions compute the run's parameters — as a file path on
+the ``run`` command's ``agentPath`` field.  The client validates and resolves the path
 (:func:`resolve_agent_path`); the daemon imports the file and, for
 every ``run`` parameter ``X`` the script defines a ``get_X()`` for,
 calls that function and overrides the command's corresponding wire
@@ -83,7 +83,7 @@ client-transport parameters — the script only runs on the daemon that
 ``sock_path`` selects, ``timeout`` bounds the client's local wait, and
 ``stop_on_timeout`` picks the client's timeout behavior — so a
 daemon-side getter could never take effect.  ``web_tools`` and
-``is_parallel`` have no getters either: an extension-agent run always
+``is_parallel`` have no getters either: an SEA run always
 uses the values the client passed to ``run()`` (the parameters'
 defaults when the caller passed none), so a script defining
 ``get_web_tools()`` or ``get_is_parallel()`` is simply not consulted
@@ -93,6 +93,11 @@ scope, which the dispatched script must not be able to repoint at
 another workspace — and its absence here is what lets the scope
 survive a ``get_work_dir()`` override (the ``workDir`` re-pin in
 ``_run_task`` touches only the execution directory).
+``parent_task_id`` / ``parent_tab_id`` (wire fields ``parentTaskId``
+/ ``parentTabId``) are absent for the same reason: they are the
+CALLING task's identity — what marks the dispatched run as that
+task's sub-agent — which the dispatched script must not be able to
+forge or re-parent.
 """
 
 HOOK_FIELDS: tuple[tuple[str, str], ...] = (

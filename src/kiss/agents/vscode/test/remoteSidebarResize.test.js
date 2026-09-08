@@ -113,14 +113,15 @@ function drag(win, resizer, x0, x1) {
 // Resize bounds declared as --sidebar-min-w / --sidebar-max-w /
 // --chat-min-w in remote-codex.css.  The minimum is the width at which
 // every history filter toggle fits on a single line; jsdom never loads
-// that stylesheet, so main.js falls back to the same numbers.  The
-// effective maximum also leaves CHAT_MIN for the chat column, and
-// jsdom reports window.innerWidth === 1024.
+// that stylesheet, so main.js falls back to the same numbers.  A drag
+// has no upper cap of its own: the panel may grow as long as the chat
+// column keeps CHAT_MIN (--sidebar-max-w bounds only the DEFAULT
+// width).  jsdom reports window.innerWidth === 1024.
 const MIN_W = 520;
-const HARD_MAX_W = 820;
+const DEFAULT_MAX_W = 820;
 const CHAT_MIN = 360;
 const WINDOW_W = 1024;
-const MAX_W = Math.min(HARD_MAX_W, WINDOW_W - CHAT_MIN);
+const MAX_W = WINDOW_W - CHAT_MIN;
 
 function testResizerExistsAndIsAccessible() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
@@ -460,9 +461,95 @@ function testDragKeepsDockAndMarksBody() {
   console.log('PASS drag marks the body and keeps the sidebar docked');
 }
 
+function testWideWindowAllowsBeyondDefaultCap() {
+  const {win} = makeWebview({remote: true, desktopMatches: true});
+  const resizer = win.document.getElementById('sidebar-resizer');
+  Object.defineProperty(win, 'innerWidth', {value: 2500, configurable: true});
+  win.dispatchEvent(new win.Event('resize'));
+  drag(win, resizer, 600, 1500);
+  assert.strictEqual(
+    sidebarW(win),
+    '1500px',
+    'a drag may pass the old 820px cap; only the chat minimum limits it',
+  );
+  assert.strictEqual(resizer.getAttribute('aria-valuenow'), '1500');
+  drag(win, resizer, 1500, 2400);
+  assert.strictEqual(
+    sidebarW(win),
+    `${2500 - CHAT_MIN}px`,
+    'the chat column always keeps its minimum width',
+  );
+  // The DEFAULT width still honours --sidebar-max-w: 34% of 2500px
+  // would be 850px, so the cap decides.
+  resizer.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
+  assert.strictEqual(
+    sidebarW(win),
+    `${DEFAULT_MAX_W}px`,
+    'double-click default stays capped at --sidebar-max-w',
+  );
+  win.close();
+  console.log('PASS wide windows may drag the panel past the default cap');
+}
+
+function testWidePreferenceSurvivesNarrowWindow() {
+  const {win} = makeWebview({
+    remote: true,
+    desktopMatches: true,
+    storedWidth: '1500',
+  });
+  assert.strictEqual(
+    sidebarW(win),
+    `${MAX_W}px`,
+    'a persisted width wider than the window renders clamped',
+  );
+  Object.defineProperty(win, 'innerWidth', {value: 2500, configurable: true});
+  win.dispatchEvent(new win.Event('resize'));
+  assert.strictEqual(
+    sidebarW(win),
+    '1500px',
+    'the persisted preference must spring back once the window holds it',
+  );
+  assert.strictEqual(
+    win.localStorage.getItem('kiss-sidebar-w'),
+    '1500',
+    'no user action happened: the stored preference stays untouched',
+  );
+  win.close();
+  console.log('PASS a wide persisted width survives a narrow window');
+}
+
+function testKeyboardStepsFromRenderedWidth() {
+  const {win} = makeWebview({
+    remote: true,
+    desktopMatches: true,
+    storedWidth: '1500',
+  });
+  const resizer = win.document.getElementById('sidebar-resizer');
+  assert.strictEqual(sidebarW(win), `${MAX_W}px`);
+  resizer.dispatchEvent(
+    new win.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}),
+  );
+  assert.strictEqual(
+    sidebarW(win),
+    `${MAX_W - 16}px`,
+    'ArrowLeft must step from the RENDERED width the user sees, not ' +
+      'from the (clamped-away) stored preference',
+  );
+  assert.strictEqual(
+    win.localStorage.getItem('kiss-sidebar-w'),
+    String(MAX_W - 16),
+    'the keyboard resize persists exactly what is on screen',
+  );
+  win.close();
+  console.log('PASS keyboard resize steps from the rendered width');
+}
+
 testResizerExistsAndIsAccessible();
 testDragResizesSidebar();
 testDragClampsWidth();
+testWideWindowAllowsBeyondDefaultCap();
+testWidePreferenceSurvivesNarrowWindow();
+testKeyboardStepsFromRenderedWidth();
 testWidthPersistsAndRestores();
 testPersistedGarbageSanitized();
 testKeyboardResize();

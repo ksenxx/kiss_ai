@@ -20,13 +20,13 @@
 #    or committed to origin
 # 6. Commit changes with "Version bumped"
 # 7. Push to origin
-# 8. Push to kiss_ai repo (excluding paths listed in scripts/exclude.json,
-#    including the built .vsix) and tag with version
+# 8. Push the full development history to the kiss_ai repo, rewritten so that
+#    paths listed in scripts/exclude.json never existed in any commit, with a
+#    release tip commit adding the built .vsix, and tag with version
 # 9. Create GitHub release and upload VSIX asset
 # 10. Publish to PyPI
 # 11. Publish VS Code extension to marketplace
-# 12. Install extension into local VS Code and Cursor IDE (if installed)
-# 13. Restore stashed changes
+# 12. Restore stashed changes
 
 set -e  # Exit on error
 
@@ -48,13 +48,13 @@ PYPI_PACKAGE_NAME="kiss-agent-framework"
 VSCODE_EXT_DIR="src/kiss/agents/vscode"
 # The packaged extension built by build_vscode_extension. It matches the *.vsix
 # rule in .gitignore, so it is never added to or committed in origin; instead
-# tree_with_vsix injects it into the snapshot pushed to the public kiss_ai repo
-# so every release there ships the installable extension file.
+# tree_with_vsix injects it into the release tip commit pushed to the public
+# kiss_ai repo so every release there ships the installable extension file.
 VSIX_FILE="${VSCODE_EXT_DIR}/kiss-sorcar.vsix"
 # JSON list of literal file/folder paths (repo-relative, no globs) that MUST
 # NOT be pushed to the public kiss_ai repo. Everything listed here is stripped
-# from the snapshot pushed to $PUBLIC_REPO_URL while remaining tracked in
-# origin. The file is required; use [] to exclude nothing.
+# from every commit of the history pushed to $PUBLIC_REPO_URL while remaining
+# tracked in origin. The file is required; use [] to exclude nothing.
 # Purging the public repo's existing history (see purge_public_history) matches
 # these paths literally too and does not follow renames, so a file that was
 # published under an earlier path must list that old path as well.
@@ -70,6 +70,11 @@ PUBLIC_TAG_NS="refs/kiss-public-tags"
 # neither branches nor tags (GitHub's read-only refs/pull/*). Each run fetches
 # into its own child namespace and deletes it again once scanned.
 PUBLIC_OTHER_NS="refs/kiss-public-other"
+# Local ref holding the rewritten development history that the public repo's
+# main is built from: every commit of origin's current branch with the excluded
+# paths stripped (see build_filtered_history). Kept between releases so the
+# rewritten objects stay reachable and the next fetch of them is incremental.
+FILTERED_REF="refs/kiss-filtered/main"
 
 # Colors for output
 RED='\033[0;31m'
@@ -411,43 +416,138 @@ tree_without_vsix() {
     return $status
 }
 
-# Decide whether <filtered-tree> (origin's HEAD minus excluded paths) must be
-# published on top of the public repo's main <public-head>. Returns 0 (release
-# needed) unless public main already carries exactly that content together with
-# a vsix: a snapshot published before the vsix was bundled is re-released even
-# when its source is current, so the extension file appears in kiss_ai. A public
-# tree that cannot be inspected counts as needing a release rather than being
-# skipped silently. Returns 1 when there is nothing to release.
+# Decide whether <filtered-head> (origin's HEAD rewritten by
+# build_filtered_history so the excluded paths never existed) must be published
+# as the public repo's main, whose tip is <public-head>. Public main is a
+# "Release X.Y.Z" commit that adds only the vsix on top of the rewritten
+# development history, so the repo is in sync exactly when the tip carries a
+# vsix, the tip's tree minus that vsix is the rewritten head's tree, and the
+# tip's sole parent IS the rewritten head. Comparing the parent's commit id -
+# not merely its tree - releases history-only changes (a change plus its
+# revert, an intentionally empty commit) and replaces a pre-history-publication
+# squashed snapshot whose source is otherwise current with the full filtered
+# history. A public tip that cannot be inspected counts as needing a release
+# rather than being skipped silently. Returns 1 when there is nothing to
+# release.
 release_needed() {
-    local filtered_tree="$1" public_head="$2" stripped
+    local filtered_head="$1" public_head="$2" stripped parent
     if ! git rev-parse --verify --quiet "${public_head}:${VSIX_FILE}" >/dev/null; then
         print_info "kiss_ai main has no $VSIX_FILE yet - proceeding with release"
         return 0
     fi
     stripped=$(tree_without_vsix "${public_head}^{tree}") || return 0
-    if [[ "$stripped" != "$filtered_tree" ]]; then
+    if [[ "$stripped" != "$(git rev-parse "${filtered_head}^{tree}")" ]]; then
         print_info "Origin differs from kiss_ai - proceeding with release"
+        return 0
+    fi
+    if git rev-parse --verify --quiet "${public_head}^2" >/dev/null; then
+        print_info "kiss_ai main tip is a merge, not a release commit - proceeding with release"
+        return 0
+    fi
+    if ! parent=$(git rev-parse --verify --quiet "${public_head}^1"); then
+        print_info "kiss_ai main has no development history yet - proceeding with release"
+        return 0
+    fi
+    if [[ "$parent" != "$(git rev-parse "${filtered_head}^{commit}")" ]]; then
+        print_info "kiss_ai main lacks the filtered development history - proceeding with release"
         return 0
     fi
     return 1
 }
 
-# Create a commit for the public repo: the tree of <source-commit> minus the
-# excluded paths plus the built vsix, parented on the public repo's current
-# main (passed as <parent>, may be empty for the first release) so that
-# excluded content is never reachable from public history. Sets PUBLIC_COMMIT
-# to the new sha.
-create_public_commit() {
-    local source_commit="$1" version="$2" parent="$3"
-    local tree
-    tree=$(filtered_tree "$source_commit")
-    tree=$(tree_with_vsix "$tree")
-    if [[ -n "$parent" ]]; then
-        PUBLIC_COMMIT=$(git commit-tree "$tree" -p "$parent" -m "Release $version")
-    else
-        PUBLIC_COMMIT=$(git commit-tree "$tree" -m "Release $version")
+# Rewrite the full history of <source-commit> so that the paths listed in
+# $EXCLUDE_FILE never existed in any commit: every commit keeps its author,
+# dates and message (except that commit-hash references inside messages are
+# remapped to the rewritten shas) but loses the excluded paths, commits whose
+# only content was excluded paths are dropped (their children re-parented on
+# the nearest surviving ancestor), and the result is stored under
+# $FILTERED_REF. Sets FILTERED_HEAD to the rewritten tip. The rewrite runs
+# git-filter-repo in a throwaway bare repo, exactly like purge_public_history,
+# so this checkout is never touched. For a given git-filter-repo version the
+# rewrite is deterministic, so unchanged history rewrites to the same shas and
+# consecutive public mains share their commits; should the tool ever rewrite
+# differently, release_needed merely triggers one extra release that replaces
+# public main with an equivalent rewritten history.
+build_filtered_history() {
+    local source_commit="$1"
+    local paths mirror_dir mirror_repo leaks
+    if ! paths=$(read_exclude_paths); then
+        print_error "Failed to read $EXCLUDE_FILE - aborting"
+        return 1
     fi
-    print_info "Created filtered public commit $PUBLIC_COMMIT (source $source_commit)"
+    if [[ -z "$paths" ]]; then
+        FILTERED_HEAD=$(git rev-parse --verify "${source_commit}^{commit}") || return 1
+        git update-ref "$FILTERED_REF" "$FILTERED_HEAD"
+        print_info "Nothing to exclude - publishing origin history as is"
+        return 0
+    fi
+
+    if ! resolve_filter_repo; then
+        print_error "git-filter-repo is required to publish filtered history but was not found"
+        print_info "Install it with: uv tool install git-filter-repo (or brew install git-filter-repo)"
+        return 1
+    fi
+
+    mirror_dir=$(mktemp -d)
+    mirror_repo="$mirror_dir/filtered.git"
+    if ! git init --quiet --bare "$mirror_repo" ||
+        ! git push --quiet "$mirror_repo" "+${source_commit}:refs/heads/main"; then
+        print_error "Failed to stage origin history for filtering"
+        rm -rf "$mirror_dir"
+        return 1
+    fi
+
+    local filter_args=(--force --invert-paths --prune-empty auto) name
+    while IFS= read -r name; do
+        filter_args+=(--path "$name")
+    done <<< "$paths"
+    if ! (cd "$mirror_repo" && "${FILTER_REPO_CMD[@]}" "${filter_args[@]}" >/dev/null); then
+        print_error "git-filter-repo failed to filter origin history"
+        rm -rf "$mirror_dir"
+        return 1
+    fi
+
+    if ! git -C "$mirror_repo" rev-parse --verify --quiet refs/heads/main >/dev/null; then
+        print_error "Every commit of origin's history consists of excluded paths only"
+        print_error "Nothing would be left to publish - shorten $EXCLUDE_FILE"
+        rm -rf "$mirror_dir"
+        return 1
+    fi
+    if ! leaks=$(excluded_paths_in_history "$mirror_repo" refs/heads/main); then
+        rm -rf "$mirror_dir"
+        return 1
+    fi
+    if [[ -n "$leaks" ]]; then
+        print_error "Filtering left excluded paths in the rewritten history - aborting:"
+        printf '%s\n' "$leaks" | head -20
+        rm -rf "$mirror_dir"
+        return 1
+    fi
+
+    if ! git fetch --quiet --no-tags "$mirror_repo" "+refs/heads/main:${FILTERED_REF}"; then
+        print_error "Failed to fetch the filtered history from the staging repo"
+        rm -rf "$mirror_dir"
+        return 1
+    fi
+    rm -rf "$mirror_dir"
+    FILTERED_HEAD=$(git rev-parse --verify "$FILTERED_REF") || return 1
+    print_info "Filtered $(git rev-list --count "$source_commit") origin commit(s) into $(git rev-list --count "$FILTERED_HEAD") public commit(s), tip $FILTERED_HEAD"
+}
+
+# Create the commit published as the public repo's main: the full development
+# history of <source-commit> rewritten so the excluded paths never existed
+# (build_filtered_history), topped by a "Release <version>" commit that adds
+# only the built vsix. The tip is parented on the rewritten history - never on
+# origin's own commits - so excluded content is never reachable from public
+# history while every development commit (message, author, dates) is. Sets
+# PUBLIC_COMMIT to the new tip sha.
+create_public_commit() {
+    local source_commit="$1" version="$2"
+    local tree
+    build_filtered_history "$source_commit" || return 1
+    tree=$(tree_with_vsix "${FILTERED_HEAD}^{tree}") || return 1
+    PUBLIC_COMMIT=$(git commit-tree "$tree" -p "$FILTERED_HEAD" -m "Release $version") || return 1
+    print_info "Created public release commit $PUBLIC_COMMIT (filtered history of $source_commit)"
 }
 
 # Fail if any excluded path is still present in <commit>'s tree. Matches each
@@ -478,6 +578,23 @@ verify_no_excluded_paths() {
         fi
     done <<< "$paths"
     print_info "Verified: no excluded paths present in public commit"
+}
+
+# Fail if any commit reachable from <commit> contains an excluded path. The
+# public repo receives the whole filtered development history, so checking the
+# tip's tree alone (verify_no_excluded_paths) is not enough: a path must not
+# appear in any ancestor either.
+verify_no_excluded_paths_in_history() {
+    local commit="$1" leaks
+    if ! leaks=$(excluded_paths_in_history "$(pwd)" "$commit"); then
+        return 1
+    fi
+    if [[ -n "$leaks" ]]; then
+        print_error "Excluded paths reachable from public commit $commit - not pushing:"
+        printf '%s\n' "$leaks" | head -20
+        return 1
+    fi
+    print_info "Verified: no excluded paths in any commit reachable from the public tip"
 }
 
 # Print "<commit>:<path>" for every commit that is reachable from the given
@@ -738,9 +855,11 @@ verify_public_history_clean() {
     print_info "Verified: no excluded paths in any kiss_ai branch or tag"
 }
 
-# Publish <commit> as the public repo's main branch and <tag> as its tag in one
-# atomic push, leased on main still being at <expected-main> ("" when the public
-# repo has no main yet) and on <tag> not existing yet. Anything pushed to the
+# Publish <commit> (with its whole filtered history) as the public repo's main
+# branch and <tag> as its tag in one atomic push, leased on main still being at
+# <expected-main> ("" when the public repo has no main yet) and on <tag> not
+# existing yet. The lease doubles as the force that replacing a squashed
+# pre-history-publication main (a non-fast-forward update) needs. Anything pushed to the
 # public repo since fetch_public_refs therefore aborts the release instead of
 # being silently overwritten, and a rejected ref leaves the repo untouched.
 push_public_snapshot() {
@@ -950,18 +1069,23 @@ main() {
     ORIGIN_HEAD=$(git rev-parse HEAD)
     PUBLIC_HEAD=$(git rev-parse --verify --quiet "${PUBLIC_BRANCH_NS}/main" || echo "")
 
-    # Compute the filtered tree up front so a broken exclude.json aborts the
-    # release here, before any side effects (set -e catches the failure; a
-    # failure inside the [[ ]] condition below would be silently swallowed).
-    FILTERED_ORIGIN_TREE=$(filtered_tree "$ORIGIN_HEAD")
+    # Build the filtered development history up front: a broken exclude.json
+    # or a missing git-filter-repo aborts the release here, before any side
+    # effects (set -e catches the failure), and release_needed can compare the
+    # public tip's parent against the rewritten head itself, so history-only
+    # changes (a change plus its revert, an intentionally empty commit) are
+    # released even though they leave origin's tree unchanged.
+    build_filtered_history "$ORIGIN_HEAD"
 
-    # The public repo holds filtered snapshots (excluded paths stripped, built
-    # vsix added), so release_needed compares the filtered tree of origin's
-    # HEAD with the public tree minus the vsix that origin never carries, and
-    # also insists that the public tree has a vsix at all.
+    # The public repo holds the filtered development history (excluded paths
+    # stripped from every commit) topped by a release commit that adds the
+    # built vsix, so release_needed compares the public tree minus the vsix
+    # that origin never carries against the rewritten head's tree, insists that
+    # the public tree has a vsix at all, and checks that the tip really sits on
+    # the filtered history rather than on a squashed snapshot.
     if [[ -z "$PUBLIC_HEAD" ]]; then
         print_info "Public repo has no main branch yet - will create it"
-    elif ! release_needed "$FILTERED_ORIGIN_TREE" "$PUBLIC_HEAD"; then
+    elif ! release_needed "$FILTERED_HEAD" "$PUBLIC_HEAD"; then
         print_info "kiss_ai already matches origin (minus excluded paths, plus vsix) - nothing to release"
         exit 0
     fi
@@ -1008,17 +1132,19 @@ main() {
     done
     print_info "Pushed to origin"
 
-    # Step 8: Push filtered snapshot to kiss_ai repo. The pushed commit is
-    # parented on the public repo's current main (not on origin's history),
-    # so paths listed in scripts/exclude.json are never reachable from any
-    # commit in the public repo. Its tree also carries the vsix built in
-    # step 5, which origin's history never does.
-    print_step "Pushing to kiss_ai repo (excluding paths listed in $EXCLUDE_FILE, adding $VSIX_FILE)..."
-    create_public_commit "$(git rev-parse HEAD)" "$VERSION" "$PUBLIC_HEAD"
+    # Step 8: Push the filtered development history to the kiss_ai repo. The
+    # pushed tip is a "Release $VERSION" commit adding the vsix built in step 5
+    # (which origin's history never carries), parented on origin's history
+    # rewritten by git-filter-repo so that paths listed in scripts/exclude.json
+    # never existed in any commit. Every development commit is public, none of
+    # the excluded content is reachable.
+    print_step "Pushing development history to kiss_ai repo (excluding paths listed in $EXCLUDE_FILE, adding $VSIX_FILE)..."
+    create_public_commit "$(git rev-parse HEAD)" "$VERSION"
     verify_no_excluded_paths "$PUBLIC_COMMIT"
+    verify_no_excluded_paths_in_history "$PUBLIC_COMMIT"
     git tag -a "$TAG_NAME" -m "Release $VERSION" "$PUBLIC_COMMIT"
     push_public_snapshot "$PUBLIC_COMMIT" "$TAG_NAME" "$PUBLIC_HEAD"
-    print_info "Pushed filtered commit (with $VSIX_FILE) and tag $TAG_NAME to kiss_ai repo"
+    print_info "Pushed filtered history (with $VSIX_FILE) and tag $TAG_NAME to kiss_ai repo"
 
     # Step 9: Create GitHub release and upload VSIX
     print_step "Creating GitHub release..."

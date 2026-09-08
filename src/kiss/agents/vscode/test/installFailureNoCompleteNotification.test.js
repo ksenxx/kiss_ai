@@ -89,6 +89,7 @@ function stubModule(filePath, exports) {
 
 stubModule(path.join(OUT_DIR, 'WebviewNotifications.js'), {
   setWebviewNotificationPoster: () => {},
+  clearWebviewNotificationPoster: () => {},
   resolveWebviewNotificationAction: () => {},
   showInformationNotification: (message, ...actions) => {
     notifications.push({kind: 'info', message, actions});

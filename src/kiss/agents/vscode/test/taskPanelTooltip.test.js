@@ -225,7 +225,7 @@ function testTabRestoreKeepsTooltipInSync() {
     'sub tab tooltip must be ITS task, not the stale parent task',
   );
 
-  const addBtn = win.document.querySelector('#tab-bar .chat-tab-add');
+  const addBtn = win.document.querySelector('#new-chat-btn');
   assert.ok(addBtn, 'the "+" new-chat tab button must exist');
   addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.strictEqual(

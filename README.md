@@ -38,7 +38,7 @@ ______________________________________________________________________
   - [VS Code extension and web/mobile app](#vs-code-extension-and-webmobile-app)
   - [The `kiss-web` daemon](#the-kiss-web-daemon)
   - [Python client API](#python-client-api)
-  - [Extension agents](#extension-agents)
+  - [Sorcar Extension Agents (SEAs)](#sorcar-extension-agents-seas)
   - [Skills, MCP servers, and customization](#skills-mcp-servers-and-customization)
 - [Messaging & Third-Party Agents](#messaging--third-party-agents)
 - [Models Supported](#models-supported)
@@ -62,7 +62,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 643 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 641 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -84,7 +84,7 @@ Note: **Sorcar** also means government in Bengali.
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
 ```
-
+If the Update button in the settings UI fails, run the full installation command again.  It will not delete your history.
 The installer targets macOS and Linux on `x86_64`, `aarch64`, and `arm64`. It installs or checks the tools needed to run KISS Sorcar and build/install the VS Code extension.
 
 ### Python package install
@@ -171,14 +171,14 @@ follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 - `tools="/path/to/my_tools.py"` — a Python file whose `get_tools()` function returns the functions the daemon registers as extra agent tools. The functions are never serialized: only the path travels over the socket, and the daemon imports the file, calls `get_tools()`, and runs the tools in its own process.
 - `system_prompt` — replace the default system prompt for the run (and its sub-agents); `append_to_system_prompt` / `append_to_prompt` — append text to the system prompt or task prompt instead of replacing them.
 - `append_basic_tools=False` — restrict the agent to `finish` plus your `tools` file, dropping the built-in toolset.
-- `extension_agent_path` — run a full extension agent, a Python file that computes the run's parameters and tools on the daemon; see [Extension agents](#extension-agents) below.
+- `extension_agent_path` — run a full Sorcar Extension Agent (SEA), a Python file that computes the run's parameters and tools on the daemon; see [Sorcar Extension Agents (SEAs)](#sorcar-extension-agents-seas) below.
 
-### Extension agents
+### Sorcar Extension Agents (SEAs)
 
-An **extension agent** is a plain Python file whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports the file on every run and calls its top-level `get_X()` functions to compute the run's parameters; parameters without a getter keep whatever the caller passed. One file can define the task prompt, system prompt, model, budget, tools, and safety hooks — a complete custom agent:
+A **Sorcar Extension Agent (SEA)** is a plain Python file whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports the file on every run and calls its top-level `get_X()` functions to compute the run's parameters; parameters without a getter keep whatever the caller passed. One file can define the task prompt, system prompt, model, budget, tools, and safety hooks — a complete custom agent:
 
 ```python
-# weather_agent.py — a minimal extension agent
+# weather_agent.py — a minimal SEA
 import requests
 
 def get_prompt() -> str:
@@ -262,7 +262,7 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **643 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **641 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -272,14 +272,14 @@ KISS Sorcar ships a catalog of **643 models** across **9 provider categories**, 
 | Together AI | 91 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 360 |
+| OpenRouter | 358 |
 | Claude Code CLI (`cc/*`) | 14 |
 | Codex CLI (`codex/*`) | 9 |
 
 Current catalog capability totals:
 
-- **623** generation-capable models
-- **464** function-calling-capable models
+- **621** generation-capable models
+- **463** function-calling-capable models
 - **11** embedding models
 
 Full model list:
@@ -576,7 +576,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (360)</strong></summary>
+<summary><strong>OpenRouter (358)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
