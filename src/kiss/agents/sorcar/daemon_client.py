@@ -414,8 +414,9 @@ def run(
             and the returned :class:`TaskResult` carries the
             diagnostic error in its ``text`` with ``success=False``.
         extension_agent_path: Optional path — a string — to a Python
-            *agent script* that computes this run's parameters **on the
-            daemon**.  When non-empty, the daemon imports the file and,
+            *agent script*, also called a Sorcar Extension Agent (SEA),
+            that computes this run's parameters **on the daemon**.
+            When non-empty, the daemon imports the file and,
             for each parameter ``X`` of this function except
             ``extension_agent_path`` itself (and the getter-less
             parameters noted below), calls the script's top-level

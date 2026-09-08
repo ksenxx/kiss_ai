@@ -38,7 +38,7 @@ ______________________________________________________________________
   - [VS Code extension and web/mobile app](#vs-code-extension-and-webmobile-app)
   - [The `kiss-web` daemon](#the-kiss-web-daemon)
   - [Python client API](#python-client-api)
-  - [Extension agents](#extension-agents)
+  - [Sorcar Extension Agents (SEAs)](#sorcar-extension-agents-seas)
   - [Skills, MCP servers, and customization](#skills-mcp-servers-and-customization)
 - [Messaging & Third-Party Agents](#messaging--third-party-agents)
 - [Models Supported](#models-supported)
@@ -171,14 +171,14 @@ follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 - `tools="/path/to/my_tools.py"` — a Python file whose `get_tools()` function returns the functions the daemon registers as extra agent tools. The functions are never serialized: only the path travels over the socket, and the daemon imports the file, calls `get_tools()`, and runs the tools in its own process.
 - `system_prompt` — replace the default system prompt for the run (and its sub-agents); `append_to_system_prompt` / `append_to_prompt` — append text to the system prompt or task prompt instead of replacing them.
 - `append_basic_tools=False` — restrict the agent to `finish` plus your `tools` file, dropping the built-in toolset.
-- `extension_agent_path` — run a full extension agent, a Python file that computes the run's parameters and tools on the daemon; see [Extension agents](#extension-agents) below.
+- `extension_agent_path` — run a full Sorcar Extension Agent (SEA), a Python file that computes the run's parameters and tools on the daemon; see [Sorcar Extension Agents (SEAs)](#sorcar-extension-agents-seas) below.
 
-### Extension agents
+### Sorcar Extension Agents (SEAs)
 
-An **extension agent** is a plain Python file whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports the file on every run and calls its top-level `get_X()` functions to compute the run's parameters; parameters without a getter keep whatever the caller passed. One file can define the task prompt, system prompt, model, budget, tools, and safety hooks — a complete custom agent:
+A **Sorcar Extension Agent (SEA)** is a plain Python file whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports the file on every run and calls its top-level `get_X()` functions to compute the run's parameters; parameters without a getter keep whatever the caller passed. One file can define the task prompt, system prompt, model, budget, tools, and safety hooks — a complete custom agent:
 
 ```python
-# weather_agent.py — a minimal extension agent
+# weather_agent.py — a minimal SEA
 import requests
 
 def get_prompt() -> str:

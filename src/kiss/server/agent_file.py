@@ -5,9 +5,9 @@
 """Agent-script loading for ``kiss.server.sorcar.run``'s ``extension_agent_path``.
 
 The caller of :func:`kiss.server.sorcar.run` may supply an *agent
-script* — a Python file whose top-level ``get_X()`` functions compute
-the run's parameters — as a file path on the ``run`` command's
-``agentPath`` field.  The client validates and resolves the path
+script* — a Sorcar Extension Agent (SEA), a Python file whose top-level
+``get_X()`` functions compute the run's parameters — as a file path on
+the ``run`` command's ``agentPath`` field.  The client validates and resolves the path
 (:func:`resolve_agent_path`); the daemon imports the file and, for
 every ``run`` parameter ``X`` the script defines a ``get_X()`` for,
 calls that function and overrides the command's corresponding wire
@@ -83,7 +83,7 @@ client-transport parameters — the script only runs on the daemon that
 ``sock_path`` selects, ``timeout`` bounds the client's local wait, and
 ``stop_on_timeout`` picks the client's timeout behavior — so a
 daemon-side getter could never take effect.  ``web_tools`` and
-``is_parallel`` have no getters either: an extension-agent run always
+``is_parallel`` have no getters either: an SEA run always
 uses the values the client passed to ``run()`` (the parameters'
 defaults when the caller passed none), so a script defining
 ``get_web_tools()`` or ``get_is_parallel()`` is simply not consulted
