@@ -125,14 +125,16 @@
       {
         "command": "kissSorcar.showHistory",
         "title": "KISS: Show Chat History",
-        "icon": {
-          "light": "media/kiss-icon.svg",
-          "dark": "media/kiss-icon.svg"
-        }
+        "icon": "media/kiss-icon.png"
       }
     ],
     "menus": {
       "editor/title": [
+        {
+          "command": "kissSorcar.openSettings",
+          "group": "navigation@-2",
+          "when": "config.kissSorcar.editorTabsMode"
+        },
         {
           "command": "kissSorcar.showHistory",
           "group": "navigation@-1",
