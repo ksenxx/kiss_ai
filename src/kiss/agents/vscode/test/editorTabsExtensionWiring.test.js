@@ -149,6 +149,7 @@ const calls = {
     revealActiveOrCreate: 0,
     openSettings: 0,
     enterMode: [],
+    adoptRegistryTabs: [],
     closeAll: 0,
     openChat: [],
   },
@@ -165,6 +166,8 @@ const calls = {
 const registryEntries = [
   {tabId: 't1', chatId: 'c1', title: 'one', workDir: '/ws/project', scopeWorkDir: ''},
 ];
+
+const registryTabsAddedListeners = [];
 
 const sidebarInstances = [];
 
@@ -207,6 +210,10 @@ class FakeSidebarView {
   }
   getRegistryTabEntries() {
     return registryEntries;
+  }
+  onRegistryTabsState(cb) {
+    registryTabsAddedListeners.push(cb);
+    return makeDisposable();
   }
   onCommitMessage() {
     return makeDisposable();
@@ -255,6 +262,11 @@ const fakeController = new FakeController();
 let fakePanelCount = 0;
 
 class FakePanelManager {
+  constructor(_uri, _retireTab, recordPanelTab) {
+    // The extension's workspaceState-backed panel-id recorder, so the
+    // test can drive its add/remove semantics directly.
+    calls.manager.recordPanelTab = recordPanelTab;
+  }
   static modeEnabled() {
     return editorTabsMode;
   }
@@ -286,6 +298,9 @@ class FakePanelManager {
   }
   enterMode(entries, workspaceDir) {
     calls.manager.enterMode.push({entries, workspaceDir});
+  }
+  adoptRegistryTabs(entries, workspaceDir, listed) {
+    calls.manager.adoptRegistryTabs.push({entries, workspaceDir, listed});
   }
   closeAll() {
     calls.manager.closeAll += 1;
@@ -362,6 +377,10 @@ async function runTest() {
   // The one-time flows (auto-open, widen) are not under test here.
   await ctx.workspaceState.update('firstLaunchDone', true);
   await ctx.workspaceState.update('sidebarWidened', true);
+  // The previous session persisted its open panel tab ids: first
+  // snapshots may then be FILTERED against them instead of being
+  // suppressed wholesale (see the first-snapshot scenarios below).
+  await ctx.workspaceState.update('kissSorcar.editorPanelTabIds', ['t-prior']);
 
   extension.activate(ctx);
   assert.ok(commands.has('kissSorcar.openSettings'), 'openSettings command');
@@ -420,12 +439,140 @@ async function runTest() {
   assert.deepStrictEqual(executedCommands, []);
   assert.strictEqual(calls.sidebar.focusChatInput, treeFocusBefore + 1);
 
+  // --- registry tabs other clients create: sidebar mode ignores them
+  // (its webview adopts them itself), editor-tabs mode materializes
+  // them through the panel manager, scoped to this workspace.
+  const remoteEntries = [
+    {tabId: 'rt', chatId: 'rc', title: 'remote', workDir: '/ws/project', scopeWorkDir: ''},
+  ];
+  // The tab behind the previous session's persisted panel id: on a
+  // first snapshot it may be a serialized placeholder of this window.
+  const priorEntry = {
+    tabId: 't-prior',
+    chatId: 'pc',
+    title: 'prior',
+    workDir: '/ws/project',
+    scopeWorkDir: '',
+  };
+  const remoteListed = [remoteEntries[0], priorEntry];
+  const fireDelta = (firstSnapshot, added = remoteEntries) => {
+    for (const cb of registryTabsAddedListeners) {
+      cb({added, listed: remoteListed, firstSnapshot});
+    }
+  };
+  assert.strictEqual(
+    registryTabsAddedListeners.length,
+    1,
+    'activation subscribes to the sidebar controller registry deltas',
+  );
+  fireDelta(false);
+  assert.strictEqual(
+    calls.manager.adoptRegistryTabs.length,
+    0,
+    'sidebar mode: a remote tab must not open an editor tab',
+  );
+
   // --- flip the mode ON: registry tabs migrate to panels ---------------
   editorTabsMode = true;
   await fireConfigChange();
   assert.strictEqual(calls.manager.enterMode.length, 1);
   assert.deepStrictEqual(calls.manager.enterMode[0].entries, registryEntries);
   assert.strictEqual(calls.manager.enterMode[0].workspaceDir, '/ws/project');
+
+  fireDelta(false);
+  assert.strictEqual(
+    calls.manager.adoptRegistryTabs.length,
+    1,
+    'editor-tabs mode: a remote tab opens through the panel manager',
+  );
+  assert.deepStrictEqual(calls.manager.adoptRegistryTabs[0], {
+    entries: remoteEntries,
+    workspaceDir: '/ws/project',
+    listed: remoteListed,
+  });
+
+  // A FIRST snapshot may duplicate this window's own chat tabs
+  // (serialized placeholders the panel manager has not revived yet).
+  // With no chat tab anywhere it is adopted wholesale; with one, only
+  // the tabs the previous session's persisted panel ids do NOT cover
+  // survive the filter — a remote tab registered before this window's
+  // baseline snapshot still opens.
+  fireDelta(true, [remoteEntries[0], priorEntry]);
+  assert.strictEqual(
+    calls.manager.adoptRegistryTabs.length,
+    2,
+    'first snapshot with no chat tabs anywhere: adopted wholesale',
+  );
+  assert.deepStrictEqual(calls.manager.adoptRegistryTabs[1].entries, [
+    remoteEntries[0],
+    priorEntry,
+  ]);
+  vscodeStub.window.tabGroups = {
+    all: [{tabs: [{input: {viewType: 'mainThreadWebview-kissSorcar.chatTab'}}]}],
+  };
+  fireDelta(true, [remoteEntries[0], priorEntry]);
+  assert.strictEqual(
+    calls.manager.adoptRegistryTabs.length,
+    3,
+    'first snapshot with a serialized chat placeholder: filtered',
+  );
+  assert.deepStrictEqual(
+    calls.manager.adoptRegistryTabs[2].entries,
+    remoteEntries,
+    "the previous session's own tab is filtered out, the remote one kept",
+  );
+  vscodeStub.window.tabGroups = {all: []};
+  fakePanelCount = 1;
+  fireDelta(true, [priorEntry]);
+  assert.strictEqual(
+    calls.manager.adoptRegistryTabs.length,
+    4,
+    'open chat panel: the filtered snapshot still syncs the manager',
+  );
+  assert.deepStrictEqual(
+    calls.manager.adoptRegistryTabs[3].entries,
+    [],
+    'nothing beyond the previous session tabs: nothing to adopt',
+  );
+  // Every chat editor tab is a LIVE panel (tab count == panel count):
+  // no placeholder can duplicate anything, so the first snapshot is
+  // adopted wholesale and the manager dedupes against open panels.
+  vscodeStub.window.tabGroups = {
+    all: [{tabs: [{input: {viewType: 'mainThreadWebview-kissSorcar.chatTab'}}]}],
+  };
+  fireDelta(true, [remoteEntries[0], priorEntry]);
+  assert.strictEqual(
+    calls.manager.adoptRegistryTabs.length,
+    5,
+    'live-panels-only window: first snapshot adopted',
+  );
+  assert.deepStrictEqual(
+    calls.manager.adoptRegistryTabs[4].entries,
+    [remoteEntries[0], priorEntry],
+    'live-panels-only window: nothing is filtered out',
+  );
+  vscodeStub.window.tabGroups = {all: []};
+  fakePanelCount = 0;
+
+  // --- the persisted panel-id record: per-tab add/remove deltas --------
+  const record = calls.manager.recordPanelTab;
+  assert.strictEqual(typeof record, 'function');
+  record('x1', true);
+  record('x2', true);
+  record('x1', true); // idempotent
+  record('x1', false);
+  assert.deepStrictEqual(
+    ctx.workspaceState.get('kissSorcar.editorPanelTabIds'),
+    ['t-prior', 'x2'],
+    'opens append (once), closes remove, other ids are untouched',
+  );
+  record('t-prior', false);
+  record('x2', false);
+  assert.deepStrictEqual(
+    ctx.workspaceState.get('kissSorcar.editorPanelTabIds'),
+    [],
+    'closing every panel empties the record',
+  );
 
   // --- editor-tabs mode routing ----------------------------------------
   await commands.get('kissSorcar.openSettings')();
@@ -611,6 +758,66 @@ async function runTest() {
     focusBeforeModeOff,
     'tree shown by the mode flip: secondary sidebar stays closed',
   );
+
+  // --- a session with NO persisted panel-id record (pre-upgrade
+  // workspace state): while any chat tab exists the ids behind the
+  // serialized placeholders are unknowable, so nothing of a first
+  // snapshot is adopted (the manager is still called so the snapshot
+  // syncs open panels' bindings); later snapshots adopt normally.
+  editorTabsMode = true;
+  registryTabsAddedListeners.length = 0;
+  const ctx2 = {
+    extensionUri: vscodeStub.Uri.file(tmpExtPath),
+    extensionPath: tmpExtPath,
+    subscriptions: [],
+    workspaceState: makeMemento(),
+    globalState: makeMemento(),
+  };
+  await ctx2.workspaceState.update('firstLaunchDone', true);
+  await ctx2.workspaceState.update('sidebarWidened', true);
+  extension.activate(ctx2);
+  vscodeStub.window.tabGroups = {
+    all: [{tabs: [{input: {viewType: 'mainThreadWebview-kissSorcar.chatTab'}}]}],
+  };
+  fakePanelCount = 0;
+  const adoptCallsBefore = calls.manager.adoptRegistryTabs.length;
+  fireDelta(true);
+  assert.strictEqual(
+    calls.manager.adoptRegistryTabs.length,
+    adoptCallsBefore + 1,
+    'no persisted record: the snapshot still reaches the manager',
+  );
+  assert.deepStrictEqual(
+    calls.manager.adoptRegistryTabs[adoptCallsBefore].entries,
+    [],
+    'no persisted record: nothing of a first snapshot is adopted while ' +
+      'a chat tab exists',
+  );
+  fireDelta(false);
+  assert.strictEqual(
+    calls.manager.adoptRegistryTabs.length,
+    adoptCallsBefore + 2,
+    'a later snapshot is adopted normally',
+  );
+  assert.deepStrictEqual(
+    calls.manager.adoptRegistryTabs[adoptCallsBefore + 1].entries,
+    remoteEntries,
+  );
+  // The recorder starts from an EMPTY record when none was persisted.
+  calls.manager.recordPanelTab('y1', true);
+  assert.deepStrictEqual(
+    ctx2.workspaceState.get('kissSorcar.editorPanelTabIds'),
+    ['y1'],
+    'the first recorded open seeds the record',
+  );
+  vscodeStub.window.tabGroups = {all: []};
+  for (const d of ctx2.subscriptions) {
+    try {
+      if (d && typeof d.dispose === 'function') d.dispose();
+    } catch {
+      /* fs watchers on tmp dirs */
+    }
+  }
 
   for (const d of ctx.subscriptions) {
     try {

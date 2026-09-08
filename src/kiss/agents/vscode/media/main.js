@@ -9709,10 +9709,12 @@
     }
     const sidebarResizer = document.getElementById('sidebar-resizer');
     if (document.body.classList.contains('remote-chat') && sidebarResizer) {
-      // Bounds come from remote-codex.css: the minimum is the width at
-      // which every history filter toggle fits on one line, so neither
-      // a drag nor a stale persisted value can wrap them again.
-      const SB_MIN = cssPxVar('--sidebar-min-w', 520);
+      // Bounds come from remote-codex.css: a drag may collapse the
+      // panel to a 10px sliver (--sidebar-min-w), while the DEFAULT
+      // width never drops below --sidebar-default-min-w — the width at
+      // which every history filter toggle fits on one line.
+      const SB_MIN = cssPxVar('--sidebar-min-w', 10);
+      const SB_DEFAULT_MIN = cssPxVar('--sidebar-default-min-w', 520);
       const SB_MAX = cssPxVar('--sidebar-max-w', 820);
       const CHAT_MIN = cssPxVar('--chat-min-w', 360);
       const SB_KEY = 'kiss-sidebar-w';
@@ -9725,12 +9727,11 @@
       const sidebarWindowMax = () =>
         Math.max(SB_MIN, window.innerWidth - CHAT_MIN);
       const sidebarDefaultW = () =>
-        Math.max(
-          SB_MIN,
-          Math.min(
-            SB_MAX,
-            sidebarWindowMax(),
-            Math.round(window.innerWidth * 0.34),
+        Math.min(
+          sidebarWindowMax(),
+          Math.max(
+            SB_DEFAULT_MIN,
+            Math.min(SB_MAX, Math.round(window.innerWidth * 0.34)),
           ),
         );
       // The PREFERRED width (`sidebarW`, what the user last asked for
