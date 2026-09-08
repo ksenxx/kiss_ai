@@ -84,7 +84,7 @@ Note: **Sorcar** also means government in Bengali.
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
 ```
-
+If the Update button in the settings UI fails, run the full installation command again.  It will not delete your history.
 The installer targets macOS and Linux on `x86_64`, `aarch64`, and `arm64`. It installs or checks the tools needed to run KISS Sorcar and build/install the VS Code extension.
 
 ### Python package install
