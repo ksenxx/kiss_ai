@@ -316,6 +316,25 @@ export function historyPanelBodyAttrs(): string {
   );
 }
 
+/**
+ * Public URL of the browser wake-word model archive.
+ *
+ * Documented twin of ``VOICE_MODEL_URL`` in
+ * ``kiss/server/web_server.py`` (which proxies the same archive to the
+ * remote webapp as ``/voice-model.tar.gz``). The webview's in-page
+ * voice pipeline fetches it directly — inside its blob Worker — because
+ * a webview cannot reach the daemon's HTTPS port, and the browser's
+ * HTTP cache keeps repeat downloads cheap.
+ */
+export const VOICE_MODEL_URL =
+  'https://ccoreilly.github.io/vosk-browser/models/' +
+  'vosk-model-small-en-us-0.15.tar.gz';
+
+/** Origin of {@link VOICE_MODEL_URL}, for the webview CSP connect-src. */
+function voiceModelOrigin(): string {
+  return new URL(VOICE_MODEL_URL).origin;
+}
+
 export function buildChatHtml(
   webview: vscode.Webview,
   extensionUri: vscode.Uri,
@@ -348,10 +367,16 @@ export function buildChatHtml(
   };
 
   /* eslint-disable quotes */
+  // 'wasm-unsafe-eval', `worker-src blob:` and the model-origin
+  // connect-src exist for the in-page voice pipeline (voice.js browser
+  // fallback): vosk.js spawns its recognizer as a blob Worker that
+  // fetches the wake-word model archive and runs a Kaldi WASM build.
   const csp =
     `<meta http-equiv="Content-Security-Policy" content="default-src 'none';` +
     ` style-src ${webview.cspSource} 'unsafe-inline';` +
-    ` script-src 'nonce-${nonce}';` +
+    ` script-src 'nonce-${nonce}' 'wasm-unsafe-eval';` +
+    ` worker-src blob:;` +
+    ` connect-src ${voiceModelOrigin()};` +
     ` img-src ${webview.cspSource} data: https:;` +
     ` font-src ${webview.cspSource};` +
     ` media-src data: ${webview.cspSource};` +
@@ -390,9 +415,17 @@ export function buildChatHtml(
     TIPS_JSON: tipsJson,
     TIPS_SRC: u('tips.js'),
     VOICE_SRC: u('voice.js'),
+    // voskSrc/modelUrl/nonce power the in-page capture fallback: when
+    // the machine hosting this extension has no microphone, voice.js
+    // records with the BROWSER's mic (embedder permitting) exactly like
+    // the remote webapp, instead of erroring. The nonce lets voice.js
+    // inject the vosk.js script tag under this page's CSP.
     VOICE_CONFIG: JSON.stringify({
       mode: 'webview',
       ackAudioUrl: u('working-on-it.mp3'),
+      voskSrc: u('vosk.js'),
+      modelUrl: VOICE_MODEL_URL,
+      nonce,
     }),
   };
 
