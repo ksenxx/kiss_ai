@@ -9100,7 +9100,7 @@
     // readychat-coverage:end
   }
 
-  // The settings panel's "Open chats as editor tabs" toggle. VS Code
+  // The settings panel's "Chat in the editor" toggle. VS Code
   // only: the remote web app's browser tabs already are its chat
   // surfaces, so the label stays hidden there. The value is the
   // extension's own configuration, not daemon config — the change goes
