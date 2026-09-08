@@ -946,13 +946,19 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 
 .bash-panel {
-  background: rgb(0 0 0 / 35%); border: 1px solid var(--border);
+  /* Same background as the thinking panel (.think). */
+  background: color-mix(in srgb, var(--cyan) 4%, transparent); border: 1px solid var(--border);
   border-radius: 8px; margin: 2px 0 8px; padding: 8px 10px;
 }
 
 .tc > .bash-panel {
   border: none; border-radius: 0; margin: 0;
   border-top: 1px solid var(--border);
+
+  /* The parent .tc paints the opaque --surface, so the translucent
+     cyan tint alone would render lighter here than the thinking panel
+     (which sits over --bg). Mix over --bg to keep the pixels equal. */
+  background: color-mix(in srgb, var(--cyan) 4%, var(--bg));
 }
 
 .tc > .tr {
@@ -1090,12 +1096,15 @@ body.remote-chat #welcome-config { display: none !important; }
 #input-drawer-btn svg { transition: transform 0.2s ease; }
 #input-drawer-btn[aria-expanded="false"] svg { transform: rotate(180deg); }
 
-#input-area.drawer-collapsed > :not(#input-drawer-btn) { display: none !important; }
+/* Collapsing the composer hides the textarea (and file chips /
+   autocomplete) but keeps #input-footer -- the button bar below the
+   text area -- visible. */
+#input-area.drawer-collapsed > :not(#input-drawer-btn, #input-container) { display: none !important; }
+#input-area.drawer-collapsed #input-container > :not(#input-footer) { display: none !important; }
 
 #input-area.drawer-collapsed {
   min-height: 12px;
   padding-top: 12px;
-  padding-bottom: 2px;
 }
 #file-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 #file-chips:empty { display: none; margin-bottom: 0; }
@@ -1194,7 +1203,7 @@ body.remote-chat #welcome-config { display: none !important; }
   background: color-mix(in srgb, var(--fg) 3%, transparent); border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
   border-radius: 6px; padding: 4px 8px; font-size: var(--fs-base); font-family: inherit;
   color: color-mix(in srgb, var(--fg) 58%, transparent); cursor: pointer; transition: border-color 0.2s;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: min(300px, 50vw);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: min(510px, 85vw);
   outline: none;
 }
 

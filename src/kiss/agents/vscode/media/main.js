@@ -2626,10 +2626,9 @@
   // panel the user never opened.
   let taskDrawerCollapsed = true;
   let taskDrawerUserSet = false;
-  // The composer stays reachable by default. On a phone it folds away while
-  // a task is running (see syncMobileInputDrawer) because the transcript
-  // needs the whole screen, but with nothing running the textbox and its
-  // buttons are the only thing worth showing.
+  // The composer stays reachable by default. On a phone the textbox folds
+  // away while a task is running (see syncMobileInputDrawer) to give the
+  // transcript more room; the button bar below it stays visible either way.
   let inputDrawerCollapsed = false;
   let inputDrawerUserSet = false;
   {
@@ -2975,10 +2974,11 @@
   }
   applyDrawerState();
 
-  // A phone screen holds either the transcript or the composer, not both.
-  // While a task runs the transcript wins; the moment nothing is running the
-  // input textbox and its buttons come back so the user can start the next
-  // task. Once the user works the handle themselves that choice is final.
+  // A phone screen is too small for the transcript and the input textbox
+  // at once. While a task runs the transcript wins and the textbox folds
+  // away (the button bar stays); the moment nothing is running the textbox
+  // comes back so the user can start the next task. Once the user works
+  // the handle themselves that choice is final.
   function syncMobileInputDrawer() {
     if (!isMobileRemote || inputDrawerUserSet) return;
     const wantCollapsed = tabs.some(isLaunchRunning);
