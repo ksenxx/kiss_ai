@@ -110,14 +110,17 @@ function drag(win, resizer, x0, x1) {
   pointer(win, resizer, 'pointerup', {clientX: x1, pointerId: 1});
 }
 
-// Resize bounds declared as --sidebar-min-w / --sidebar-max-w /
-// --chat-min-w in remote-codex.css.  The minimum is the width at which
-// every history filter toggle fits on a single line; jsdom never loads
-// that stylesheet, so main.js falls back to the same numbers.  A drag
-// has no upper cap of its own: the panel may grow as long as the chat
-// column keeps CHAT_MIN (--sidebar-max-w bounds only the DEFAULT
-// width).  jsdom reports window.innerWidth === 1024.
-const MIN_W = 520;
+// Resize bounds declared as --sidebar-min-w / --sidebar-default-min-w /
+// --sidebar-max-w / --chat-min-w in remote-codex.css.  A drag may take
+// the panel down to a 10px sliver; the DEFAULT width never drops below
+// the width at which every history filter toggle fits on a single
+// line.  jsdom never loads that stylesheet, so main.js falls back to
+// the same numbers.  A drag has no upper cap of its own: the panel may
+// grow as long as the chat column keeps CHAT_MIN (--sidebar-max-w
+// bounds only the DEFAULT width).  jsdom reports
+// window.innerWidth === 1024.
+const MIN_W = 10;
+const DEFAULT_W = 520;
 const DEFAULT_MAX_W = 820;
 const CHAT_MIN = 360;
 const WINDOW_W = 1024;
@@ -151,7 +154,7 @@ function testResizerExistsAndIsAccessible() {
   assert.strictEqual(resizer.getAttribute('aria-valuemax'), String(MAX_W));
   assert.strictEqual(
     resizer.getAttribute('aria-valuenow'),
-    String(MIN_W),
+    String(DEFAULT_W),
     'default width must be reflected in aria-valuenow',
   );
   assert.strictEqual(
@@ -195,9 +198,14 @@ function testDragClampsWidth() {
   drag(win, resizer, 600, 80);
   assert.strictEqual(
     sidebarW(win),
+    '80px',
+    'a drag may collapse the panel far below the default width',
+  );
+  drag(win, resizer, 80, 2);
+  assert.strictEqual(
+    sidebarW(win),
     `${MIN_W}px`,
-    `drag far left clamps to ${MIN_W}px so the filter toggles stay on ` +
-      'one line',
+    `drag far left clamps to the ${MIN_W}px sliver floor`,
   );
   assert.strictEqual(resizer.getAttribute('aria-valuenow'), String(MIN_W));
   drag(win, resizer, MIN_W, 1600);
@@ -264,15 +272,26 @@ function testPersistedGarbageSanitized() {
     'over-wide persisted width must be clamped down',
   );
   huge.win.close();
-  const tiny = makeWebview({
+  const narrow = makeWebview({
     remote: true,
     desktopMatches: true,
     storedWidth: '240',
   });
   assert.strictEqual(
+    sidebarW(narrow.win),
+    '240px',
+    'a persisted sliver width above the 10px floor is honoured as-is',
+  );
+  narrow.win.close();
+  const tiny = makeWebview({
+    remote: true,
+    desktopMatches: true,
+    storedWidth: '4',
+  });
+  assert.strictEqual(
     sidebarW(tiny.win),
     `${MIN_W}px`,
-    'a width persisted before the panel was widened must be clamped up',
+    'a persisted width below the sliver floor must be clamped up',
   );
   tiny.win.close();
   console.log('PASS garbage / out-of-range persisted widths are sanitized');
@@ -299,15 +318,8 @@ function testKeyboardResize() {
     '584',
     'keyboard resize must persist too',
   );
-  resizer.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}),
-  );
-  resizer.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}),
-  );
-  resizer.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}),
-  );
+  drag(win, resizer, 584, 20);
+  assert.strictEqual(sidebarW(win), '20px');
   resizer.dispatchEvent(
     new win.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}),
   );
@@ -317,7 +329,7 @@ function testKeyboardResize() {
   assert.strictEqual(
     sidebarW(win),
     `${MIN_W}px`,
-    'ArrowLeft must stop at the one-line filter width',
+    'ArrowLeft must stop at the sliver floor',
   );
   win.close();
   console.log('PASS ArrowLeft/ArrowRight resize the sidebar by 16px steps');
@@ -331,10 +343,10 @@ function testDoubleClickResets() {
   resizer.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
   assert.strictEqual(
     sidebarW(win),
-    `${MIN_W}px`,
+    `${DEFAULT_W}px`,
     'double-click must reset to the default width',
   );
-  assert.strictEqual(resizer.getAttribute('aria-valuenow'), String(MIN_W));
+  assert.strictEqual(resizer.getAttribute('aria-valuenow'), String(DEFAULT_W));
   assert.strictEqual(
     win.localStorage.getItem('kiss-sidebar-w'),
     null,
@@ -365,8 +377,8 @@ function testShrinkingWindowNarrowsThePanel() {
   win.dispatchEvent(new win.Event('resize'));
   assert.strictEqual(
     sidebarW(win),
-    `${MIN_W}px`,
-    'the one-line filter width is still the hard floor',
+    `${700 - CHAT_MIN}px`,
+    'even below the default width the chat keeps its minimum',
   );
   win.close();
   console.log('PASS shrinking the window narrows the docked panel');

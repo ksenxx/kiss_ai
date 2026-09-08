@@ -117,8 +117,10 @@ function cssRule(selector) {
 }
 
 // jsdom reports window.innerWidth = 1024, so 34vw is 348px and the
-// --sidebar-min-w floor (the width at which every history filter
-// toggle fits on one line) wins.
+// --sidebar-default-min-w floor (the width at which every history
+// filter toggle fits on one line) wins.  A drag, however, may go all
+// the way down to the --sidebar-min-w sliver.
+const MIN_W = 10;
 const DEFAULT_W = 520;
 
 // The panel may never take so much of the window that the chat column
@@ -129,17 +131,29 @@ const MAX_W = 1024 - 360;
 function testCssSidebarWidthFitsTheFilterToggles() {
   const vars = cssRule('body.remote-chat');
   assert.ok(
-    vars.includes(`--sidebar-min-w: ${DEFAULT_W}px`),
-    `the docked panel floor must be the one-line filter width ` +
+    vars.includes(`--sidebar-min-w: ${MIN_W}px`),
+    `the docked panel resize floor must be the ${MIN_W}px sliver — ` +
+      `got: ${vars.trim()}`,
+  );
+  assert.ok(
+    vars.includes(`--sidebar-default-min-w: ${DEFAULT_W}px`),
+    `the DEFAULT width floor must be the one-line filter width ` +
       `(${DEFAULT_W}px) — got: ${vars.trim()}`,
   );
   assert.ok(
-    /--sidebar-default-w:\s*clamp\(\s*var\(--sidebar-min-w\),[^;]*var\(--sidebar-max-w\)\)/.test(
+    /--sidebar-default-w:\s*clamp\(\s*var\(--sidebar-default-min-w\),[^;]*var\(--sidebar-max-w\)\s*\)/.test(
       vars,
     ),
-    'the default width must clamp between the shared min/max bounds',
+    'the default width must clamp between the default-min/max bounds',
   );
   const sidebar = cssRule('body.remote-chat.remote-desktop #sidebar.open');
+  assert.ok(
+    /padding-left:\s*min\(16px,[^;]*\/\s*4\)/.test(sidebar) &&
+      /padding-right:\s*min\(16px,[^;]*\/\s*4\)/.test(sidebar),
+    `the docked panel's horizontal padding must collapse with the ` +
+      `panel so a 10px drag really renders 10px (border-box padding ` +
+      `would otherwise floor it at 32px) — got: ${sidebar.trim()}`,
+  );
   const app = cssRule(
     'body.remote-chat.remote-desktop:has(#sidebar.open) #app',
   );
@@ -297,15 +311,14 @@ function testPersistedWidthStillWins() {
   });
   assert.strictEqual(
     sidebarW(narrow.win),
-    `${DEFAULT_W}px`,
-    'a width persisted before the widening must be clamped back up so ' +
-      'the filter toggles stay on one line',
+    '240px',
+    'a persisted sliver width above the 10px floor is honoured as-is',
   );
   narrow.win.close();
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
-  drag(win, resizer, 300, 80);
-  assert.strictEqual(sidebarW(win), `${DEFAULT_W}px`, 'min clamp');
+  drag(win, resizer, 300, 2);
+  assert.strictEqual(sidebarW(win), `${MIN_W}px`, 'min clamp');
   drag(win, resizer, 520, 1600);
   assert.strictEqual(sidebarW(win), `${MAX_W}px`, 'max clamp');
   win.close();
