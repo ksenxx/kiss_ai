@@ -353,12 +353,15 @@ export class SorcarPanelManager {
    * panel's clicks.
    *
    * @param event The chat to open — backend chat id ('' or absent for
-   *     a fresh one), the task to scroll to, and the panel title.
+   *     a fresh one), the task to scroll to, the panel title, and (for
+   *     fresh chats) the opener's composer draft to seed the new
+   *     panel's textarea with.
    */
   public openChat(event: {
     chatId?: string;
     taskId?: string | number | null;
     title?: string;
+    pendingText?: string;
   }): void {
     const chatId = event.chatId ? String(event.chatId) : '';
     if (chatId) {
@@ -389,6 +392,9 @@ export class SorcarPanelManager {
         event.taskId === undefined || event.taskId === null
           ? undefined
           : String(event.taskId),
+      // Only a FRESH chat starts from the opener's draft; a resume
+      // shows the resumed chat's own composer state.
+      pendingText: chatId ? undefined : event.pendingText || undefined,
     });
   }
 

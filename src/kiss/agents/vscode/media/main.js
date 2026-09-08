@@ -2184,7 +2184,10 @@
     // for the harness that replays it in isolation, see
     // test_history_click_creates_new_tab_each_time.py.)
     if (document.body.classList.contains('editor-tab-mode')) {
-      vscode.postMessage({type: 'openChatPanel'});
+      // Carry the composer draft into the new editor tab (the host
+      // stamps it back as data-kiss-pending-text), exactly like the
+      // in-webview path below copies it into the new internal tab.
+      vscode.postMessage({type: 'openChatPanel', pendingText: inp.value || ''});
       return;
     }
     // Opening a chat is the user taking over: the launch is over, and no
@@ -2698,6 +2701,11 @@
       // this webview's first snapshot arrives, the root is already
       // eligible for the vanished-from-registry closePanel path.
       if (ds.kissInRegistry) initial.inRegistry = true;
+      // A composer draft carried over from the panel whose + / Cmd+T
+      // opened this one (createNewTab's openChatPanel post). init()
+      // copies it into the textarea — restoreTab never runs for the
+      // boot tab — and tab switches then round-trip it as usual.
+      if (ds.kissPendingText) initial.inputValue = ds.kissPendingText;
     }
     tabs.push(initial);
     activeTabId = initial.id;
@@ -9070,6 +9078,17 @@
       // be able to re-adopt this chat even if the window reloads
       // before any tab activity (e.g. while the daemon is down).
       persistTabState();
+      // Show the composer draft carried over from the opening panel
+      // (data-kiss-pending-text, adopted into the boot tab's
+      // inputValue): the boot tab is put on screen without restoreTab,
+      // so the textarea must be seeded here.
+      const bootTab = getTab(activeTabId);
+      if (bootTab && bootTab.inputValue && !inp.value) {
+        inp.value = bootTab.inputValue;
+        syncClearBtn();
+        inp.style.height = 'auto';
+        inp.style.height = inp.scrollHeight + 'px';
+      }
     }
     sendReady();
     if (EDITOR_TAB_MODE) {
