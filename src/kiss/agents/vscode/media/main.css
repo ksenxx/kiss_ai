@@ -1317,7 +1317,7 @@ body.remote-chat #theme-btn { display: flex; }
   font-size: var(--fs-base); padding: 8px 28px 8px 12px; outline: none; font-family: inherit;
 }
 #model-search::placeholder { color: color-mix(in srgb, var(--fg) 50%, transparent); }
-#model-list { overflow-y: auto; flex: 1; }
+#model-list { overflow-y: auto; overflow-x: hidden; flex: 1; }
 
 .model-item {
   padding: 5px 10px; font-size: var(--fs-base); color: color-mix(in srgb, var(--fg) 66%, transparent);
@@ -1325,6 +1325,15 @@ body.remote-chat #theme-btn { display: flex; }
   border-bottom: 1px solid rgb(255 255 255 / 2%); transition: background 0.08s;
 }
 .model-item:hover, .model-item.sel { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+
+/* Never let a long model name push the list into horizontal
+   scrolling: the name shrinks (min-width: 0 overrides the flex
+   min-width:auto default) and ellipsizes from the beginning
+   (rtl direction, matching the pill label). */
+.model-item-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; text-align: left;
+}
 .model-item.active { color: var(--accent); font-weight: 500; }
 .model-cost { font-size: var(--fs-sm); color: color-mix(in srgb, var(--fg) 50%, transparent); flex-shrink: 0; margin-left: 12px; }
 

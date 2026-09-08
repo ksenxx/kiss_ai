@@ -29,8 +29,40 @@
     vscode.postMessage(msg);
   }
 
-  function fmtN(n) {
-    return Number(n).toLocaleString('en-US');
+  // Compact token count: exactly three significant digits followed by
+  // K/M/B/T (thousands/millions/billions/trillions); counts below one
+  // thousand are shown as-is (e.g. 999, 1.00K, 12.3K, 123K, 1.23M).
+  function fmtTokens(n) {
+    const v = Math.max(0, Math.round(Number(n) || 0));
+    if (v < 1000) return String(v);
+    const units = ['K', 'M', 'B', 'T'];
+    let x = v;
+    let ui = -1;
+    while (x >= 1000 && ui < units.length - 1) {
+      x /= 1000;
+      ui++;
+    }
+    // toPrecision(3) rounds 999.5+ up to 1000, which needs the next
+    // unit (999,950 -> 1.00M); past T there is no next unit, so fall
+    // back to a plain rounded number ("1000T").
+    if (x >= 999.5) {
+      if (ui < units.length - 1) {
+        x /= 1000;
+        ui++;
+      } else {
+        return String(Math.round(x)) + units[ui];
+      }
+    }
+    return x.toPrecision(3) + units[ui];
+  }
+
+  // Dollar cost with exactly two digits after the decimal point.
+  // Accepts numbers or server strings like "$0.4123"; non-numeric
+  // values (e.g. "N/A") pass through untouched.
+  function fmtCost(c) {
+    const n = Number(String(c).replace(/[$,\s]/g, ''));
+    if (!Number.isFinite(n)) return String(c);
+    return '$' + n.toFixed(2);
   }
 
   function fmtElapsedMs(ms) {
@@ -4586,10 +4618,10 @@
       esc(titleOverride || 'Result') +
       '</h3><div class="rs">' +
       '<span>Tokens <b>' +
-      fmtN(ev.total_tokens || 0) +
+      fmtTokens(ev.total_tokens || 0) +
       '</b></span>' +
       '<span>Cost <b>' +
-      esc(ev.cost || 'N/A') +
+      esc(fmtCost(ev.cost || 'N/A')) +
       '</b></span>' +
       '</div></div><div class="rc-body md-body' +
       (usePre ? ' pre' : '') +
@@ -5249,9 +5281,9 @@
           );
         }
         if (statusTokens && ev.total_tokens)
-          statusTokens.textContent = 'Tokens: ' + fmtN(ev.total_tokens);
+          statusTokens.textContent = 'Tokens: ' + fmtTokens(ev.total_tokens);
         if (statusBudget && ev.cost && ev.cost !== 'N/A')
-          statusBudget.textContent = 'Cost: ' + ev.cost;
+          statusBudget.textContent = 'Cost: ' + fmtCost(ev.cost);
         if (ev.step_count) updateStepCount(ev.step_count);
         break;
       }
@@ -5301,9 +5333,9 @@
       case 'usage_info': {
         if (ev.total_tokens != null && ev.cost != null) {
           if (statusTokens)
-            statusTokens.textContent = 'Tokens: ' + fmtN(ev.total_tokens);
+            statusTokens.textContent = 'Tokens: ' + fmtTokens(ev.total_tokens);
           if (statusBudget && ev.cost !== 'N/A')
-            statusBudget.textContent = 'Cost: ' + ev.cost;
+            statusBudget.textContent = 'Cost: ' + fmtCost(ev.cost);
           if (statusSteps && ev.total_steps != null)
             statusSteps.textContent = 'Steps: ' + ev.total_steps;
         } else {
@@ -6229,8 +6261,10 @@
       text.match(/Tokens:\s*([\d,]+)\/[\d,]+/);
     const bm = text.match(/Budget:\s*(\$[0-9.]+)\/\$[0-9.]+/);
     const sm = STEPS_TEXT_RE.exec(text);
-    if (tm) statusTokens.textContent = 'Tokens: ' + tm[1];
-    if (bm) statusBudget.textContent = 'Cost: ' + bm[1];
+    if (tm)
+      statusTokens.textContent =
+        'Tokens: ' + fmtTokens(parseInt(tm[1].replace(/,/g, ''), 10));
+    if (bm) statusBudget.textContent = 'Cost: ' + fmtCost(bm[1]);
     if (sm) updateStepCount(parseInt(sm[1], 10));
   }
 
@@ -10548,10 +10582,15 @@
       'model-item' + (m.name === selectedModel ? ' active' : ''),
     );
     const price = '$' + m.inp.toFixed(2) + ' / $' + m.out.toFixed(2);
+    // The name span ellipsizes from the START (RTL line, like the
+    // pill label) so the distinctive end of a long name stays visible
+    // and the list never scrolls horizontally on narrow screens; the
+    // U+200E (&lrm;) wrapping keeps digits at either end from being
+    // bidi-reordered.
     d.innerHTML =
-      '<span>' +
+      '<span class="model-item-name">&lrm;' +
       esc(m.name) +
-      '</span><span class="model-cost">' +
+      '&lrm;</span><span class="model-cost">' +
       price +
       '</span>';
     d.addEventListener('click', () => {
@@ -10957,9 +10996,9 @@
       metrics.textContent =
         steps +
         ' steps • ' +
-        tokens.toLocaleString() +
-        ' tok • $' +
-        cost.toFixed(4) +
+        fmtTokens(tokens) +
+        ' tok • ' +
+        fmtCost(cost) +
         dur +
         when;
       info.appendChild(metrics);
