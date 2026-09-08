@@ -190,9 +190,10 @@ body.remote-chat #input-drawer-btn:hover {
   border-color: var(--border-30);
 }
 
+/* The button bar (#input-footer) stays visible while collapsed, so the
+   bottom padding keeps its expanded value. */
 body.remote-chat #input-area.drawer-collapsed {
   padding-top: 10px;
-  padding-bottom: calc(2px + env(safe-area-inset-bottom, 0px));
 }
 
 body.remote-chat #welcome h2 { color: var(--fg); }
@@ -296,7 +297,7 @@ body.remote-chat #model-btn {
 
   /* Cap the pill (its label truncates via #model-name) so the footer
      usually keeps every button on one row even at phone widths. */
-  max-width: clamp(72px, 21vw, 220px);
+  max-width: clamp(122px, 36vw, 374px);
 }
 
 body.remote-chat #model-btn:hover:not(:disabled) {
