@@ -326,7 +326,7 @@ function testMetricsFollowTheVisibleTask() {
   assert.strictEqual(panelText(win), 'Main task');
   assert.deepStrictEqual(metrics(win), {
     tokens: 'Tokens: 999',
-    budget: 'Cost: 0.50',
+    budget: 'Cost: $0.50',
     steps: 'Steps: 3',
   });
   win.close();
@@ -507,7 +507,7 @@ function testTabRoundTripKeepsTheTabsOwnTask() {
   );
   assert.deepStrictEqual(metrics(win), {
     tokens: 'Tokens: 999',
-    budget: 'Cost: 0.50',
+    budget: 'Cost: $0.50',
     steps: 'Steps: 3',
   });
   win.close();
@@ -574,7 +574,7 @@ function testMetricsDoNotLeakBetweenTabs() {
   assert.strictEqual(panelText(win), 'Main task');
   assert.deepStrictEqual(
     metrics(win),
-    {tokens: 'Tokens: 999', budget: 'Cost: 0.50', steps: 'Steps: 3'},
+    {tokens: 'Tokens: 999', budget: 'Cost: $0.50', steps: 'Steps: 3'},
     "the tab must show its own metrics, not the other tab's",
   );
   win.close();
@@ -611,7 +611,7 @@ function testLiveMetricsDoNotOverrideTheVisibleTask() {
   assert.strictEqual(panelText(win), 'Main task');
   assert.deepStrictEqual(
     metrics(win),
-    {tokens: 'Tokens: 1,234', budget: 'Cost: 1.20', steps: 'Steps: 12'},
+    {tokens: 'Tokens: 1.23K', budget: 'Cost: $1.20', steps: 'Steps: 12'},
     'the live task shows its fresh numbers once it is back on screen',
   );
   win.close();
@@ -639,7 +639,7 @@ function testPartialLiveMetricsKeepTheLiveTasksOwnNumbers() {
   scrollTo(win, O, 0);
   assert.deepStrictEqual(
     metrics(win),
-    {tokens: 'Tokens: 1,234', budget: 'Cost: 1.20', steps: 'Steps: 3'},
+    {tokens: 'Tokens: 1.23K', budget: 'Cost: $1.20', steps: 'Steps: 3'},
     "an event without a step count must not adopt the neighbour's",
   );
   win.close();
@@ -752,7 +752,7 @@ function testHiddenTabStreamLeavesTheVisibleRowAlone() {
   assert.strictEqual(panelText(win), 'Main task');
   assert.deepStrictEqual(
     metrics(win),
-    {tokens: 'Tokens: 999', budget: 'Cost: 0.50', steps: 'Steps: 3'},
+    {tokens: 'Tokens: 999', budget: 'Cost: $0.50', steps: 'Steps: 3'},
     'the visible tab keeps its own numbers while another tab streams',
   );
   win.close();
@@ -799,7 +799,7 @@ function testHiddenTabReplayLeavesTheVisibleRowAlone() {
   scrollTo(win, back, 0);
   assert.deepStrictEqual(
     metrics(win),
-    {tokens: 'Tokens: 999', budget: 'Cost: 0.50', steps: 'Steps: 3'},
+    {tokens: 'Tokens: 999', budget: 'Cost: $0.50', steps: 'Steps: 3'},
     'the visible tab keeps its own numbers after the replay',
   );
   win.close();
@@ -846,7 +846,7 @@ function testHiddenReplayThatSwitchesTabsKeepsTheNewTabsNumbers() {
   });
   assert.deepStrictEqual(metrics(win), {
     tokens: 'Tokens: 222',
-    budget: 'Cost: 2.22',
+    budget: 'Cost: $2.22',
     steps: 'Steps: 22',
   });
 
@@ -872,7 +872,7 @@ function testHiddenReplayThatSwitchesTabsKeepsTheNewTabsNumbers() {
   );
   assert.deepStrictEqual(
     metrics(win),
-    {tokens: 'Tokens: 111', budget: 'Cost: 1.11', steps: 'Steps: 11'},
+    {tokens: 'Tokens: 111', budget: 'Cost: $1.11', steps: 'Steps: 11'},
     'the tab that came on screen must keep its own numbers',
   );
   win.close();

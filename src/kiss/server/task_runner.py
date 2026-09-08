@@ -39,6 +39,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
+from kiss.agents.sorcar.sorcar_agent import _broadcast_subagent_done
 from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
     _WorktreeCleanupOutcome,
@@ -960,6 +961,46 @@ class _TaskRunnerMixin:
                 self.printer.broadcast(payload)
                 self._restore_user_model_pick(viewer_tab_id)
 
+    def _broadcast_dispatch_subagent_done(
+        self,
+        task_id: str | None,
+        tab_id: str,
+        model: str,
+    ) -> None:
+        """Broadcast ``subagentDone`` for a finished ``run_agent`` child.
+
+        The completion signal a ``run_tasks_parallel`` worker sends
+        for its sub-agent, emitted here for a daemon-dispatched
+        sub-agent instead (a run submitted with ``parentTaskId``):
+        every tab watching the child's task stream — subscribed via
+        ``resumeSession`` after the child's ``new_tab`` broadcast —
+        stops its running indicator and gets the user's model pick
+        back.  Best-effort UI signalling: never raises.
+
+        Args:
+            task_id: The child's ``task_history`` row id, whose
+                fan-out subscribers are the watching tabs.  ``None``
+                (no row was allocated, so no ``new_tab`` was ever
+                broadcast) fans out to nothing.
+            tab_id: The dispatch's own synthetic ``api-…`` tab id,
+                included like the fan-out engine includes the child's
+                synthetic tab id.
+            model: The model the run was launched with, restored into
+                the watching tabs' pickers.
+        """
+        try:
+            viewer_ids: list[str] = []
+            fanout = getattr(self.printer, "_fanout_targets", None)
+            if callable(fanout) and task_id:
+                found = fanout(task_id)
+                if isinstance(found, list):
+                    viewer_ids = [v for v in found if v]
+            if tab_id and tab_id not in viewer_ids:
+                viewer_ids.append(tab_id)
+            _broadcast_subagent_done(self.printer, viewer_ids, model or "")
+        except Exception:
+            logger.debug("subagentDone broadcast failed", exc_info=True)
+
     def _broadcast_early_prompts(
         self,
         prompt: str,
@@ -1146,6 +1187,41 @@ class _TaskRunnerMixin:
             agent = state.agent
         agent._tab_id = tab_id
         agent._task_start_ms = start_ms
+        # A ``run_agent`` dispatch on behalf of a calling task (wire
+        # fields ``parentTaskId`` / ``parentTabId``, see
+        # ``daemon_client.run``) runs as that task's SUB-AGENT — the
+        # exact marking ``run_tasks_parallel`` gives its children, so
+        # the run inherits their whole frontend contract for free:
+        # ``ChatSorcarAgent.run`` self-broadcasts ``new_tab`` (every
+        # client viewing the parent opens a nested sub-agent tab), the
+        # history row nests under the parent task via the persisted
+        # ``subagent`` extra (restore included), and ``task_settings``
+        # reports ``is_subagent``.  Set unconditionally: a reused
+        # agent must not carry a previous run's parentage.
+        _raw_parent_task_id = cmd.get("parentTaskId")
+        parent_task_id = (
+            _raw_parent_task_id.strip()
+            if isinstance(_raw_parent_task_id, str) else ""
+        )
+        _raw_parent_tab_id = cmd.get("parentTabId")
+        parent_tab_id = (
+            _raw_parent_tab_id if isinstance(_raw_parent_tab_id, str) else ""
+        )
+        agent._subagent_info = (
+            {
+                "parent_task_id": parent_task_id,
+                "parent_tab_id": parent_tab_id,
+            }
+            if parent_task_id
+            else None
+        )
+        # Mirror the marking onto the server state:
+        # ``state.is_subagent`` gates the parent-tab resolution for
+        # NESTED spawns (``_resolve_parent_tab_id_for_sub`` skips
+        # sub-agent states), and the pre-registered server-owned state
+        # is re-keyed — never re-created — by the printer bridge, so
+        # nothing else ever stamps it.
+        state.parent_task_id = parent_task_id or None
         if state.chat_id:
             agent._chat_id = state.chat_id
         state.chat_id = getattr(agent, "chat_id", "") or state.chat_id
@@ -1475,6 +1551,16 @@ class _TaskRunnerMixin:
                             task_history_id,
                         )
                         run_task_ids.append(str(task_history_id))
+                        if parent_task_id:
+                            # A multi-``<task>`` dispatch allocates one
+                            # child row (and broadcasts one ``new_tab``)
+                            # per subtask: complete each intermediate
+                            # row's sub-agent tab as its subtask ends —
+                            # the end-of-run signal below covers only
+                            # the LAST row.
+                            self._broadcast_dispatch_subagent_done(
+                                task_history_id, "", model,
+                            )
                     self._persist_subtask_row(
                         state,
                         task_id=task_history_id,
@@ -1514,6 +1600,11 @@ class _TaskRunnerMixin:
             )
         finally:
             end_event_broadcast = False
+            # Whether the LAST child row's ``subagentDone`` went out on
+            # the normal path below; the mandatory-cleanup finally
+            # backstops it on exception paths so a watching sub-agent
+            # tab can never keep spinning forever.
+            subagent_done_sent = False
             try:
                 _agent_parsed = parse_result_yaml(agent_returned) if agent_returned else None
                 _agent_reported_failure = bool(
@@ -1685,6 +1776,17 @@ class _TaskRunnerMixin:
                         _append_chat_event(
                             dict(followup_event), task_id=hist_id, task=prompt,
                         )
+                    if parent_task_id:
+                        # After the follow-up broadcast — the frontend
+                        # may close the sub-agent tab on this signal —
+                        # and before ``cleanup_task`` drops the task's
+                        # state.  (The fan-out subscriber registry the
+                        # viewer list is read from outlives the
+                        # cleanup by design.)
+                        self._broadcast_dispatch_subagent_done(
+                            hist_id, tab_id, model,
+                        )
+                        subagent_done_sent = True
                     self.printer.cleanup_task(hist_id)
                     task_history_id = None
             except BaseException:  # pragma: no cover — cleanup interrupted
@@ -1721,6 +1823,14 @@ class _TaskRunnerMixin:
                         state.is_running_non_wt = False
                         state.non_wt_repo_root = None
                 if task_history_id is not None:
+                    if parent_task_id and not subagent_done_sent:
+                        # The normal path above was interrupted (e.g.
+                        # a persistence failure) before it sent the
+                        # completion signal: send it here so the
+                        # watching sub-agent tab still stops spinning.
+                        self._broadcast_dispatch_subagent_done(
+                            task_history_id, tab_id, model,
+                        )
                     try:
                         self.printer.cleanup_task(task_history_id)
                     except BaseException:

@@ -80,7 +80,7 @@ function lastMsg(posted, type) {
 }
 
 function openSettings(win) {
-  const gear = win.document.querySelector('.chat-tab-settings');
+  const gear = win.document.querySelector('#settings-btn');
   assert.ok(gear, 'the tab bar must render the settings gear');
   gear.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }

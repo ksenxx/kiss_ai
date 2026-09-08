@@ -615,8 +615,8 @@ write_exclude reports
 echo "code" > app.py
 mkdir reports
 echo "<html>x</html>" > reports/x.html
-# create_public_commit adds the built extension to the public snapshot; like the
-# real repo, the scratch origin gitignores it so "git add -A" never commits it.
+# create_public_commit adds the built extension to the public release tip; like
+# the real repo, the scratch origin gitignores it so "git add -A" never commits it.
 echo "*.vsix" > .gitignore
 mkdir -p "$(dirname "$VSIX_FILE")"
 printf 'PK fake vsix' > "$VSIX_FILE"
@@ -630,11 +630,13 @@ PARENT=$(git rev-parse "${PUBLIC_BRANCH_NS}/main")
 echo "release change" >> app.py
 git add -A
 git commit -q -m "release commit"
-create_public_commit "$(git rev-parse HEAD)" "1.0.0" "$PARENT" > /dev/null
+create_public_commit "$(git rev-parse HEAD)" "1.0.0" > /dev/null
 git tag -a v1.0.0 -m "Release 1.0.0" "$PUBLIC_COMMIT"
 push_public_snapshot "$PUBLIC_COMMIT" v1.0.0 "$PARENT" > /dev/null ||
     fail "publishing a release snapshot failed"
 [[ "$(git -C "$PUB" rev-parse main)" == "$PUBLIC_COMMIT" ]] || fail "main was not published"
+git -C "$PUB" log --format='%s' main | grep -qx "release commit" ||
+    fail "development commit missing from published history"
 [[ "$(git -C "$PUB" cat-file -t refs/tags/v1.0.0)" == "tag" ]] ||
     fail "release tag missing or not annotated"
 [[ -z "$(commits_containing "$PUB" reports)" ]] || fail "release push published excluded paths"
@@ -651,7 +653,7 @@ BEFORE_TAG=$(git -C "$PUB" rev-parse refs/tags/v1.0.0)
 echo "sneaky change" >> app.py
 git add -A
 git commit -q -m "sneaky commit"
-create_public_commit "$(git rev-parse HEAD)" "1.0.0" "$(git -C "$PUB" rev-parse main)" > /dev/null
+create_public_commit "$(git rev-parse HEAD)" "1.0.0" > /dev/null
 git tag -f -a v1.0.0 -m "Release 1.0.0 again" "$PUBLIC_COMMIT" > /dev/null
 if push_public_snapshot "$PUBLIC_COMMIT" v1.0.0 "$(git -C "$PUB" rev-parse main)" \
     > "$WORK/snapshot2.log" 2>&1; then
@@ -674,7 +676,7 @@ CONCURRENT_HEAD=$(git -C "$PUB" rev-parse main)
 echo "later change" >> app.py
 git add -A
 git commit -q -m "later release commit"
-create_public_commit "$(git rev-parse HEAD)" "1.0.1" "$PARENT" > /dev/null
+create_public_commit "$(git rev-parse HEAD)" "1.0.1" > /dev/null
 git tag -a v1.0.1 -m "Release 1.0.1" "$PUBLIC_COMMIT"
 if push_public_snapshot "$PUBLIC_COMMIT" v1.0.1 "$PARENT" > "$WORK/snapshot3.log" 2>&1; then
     fail "release push overwrote a concurrent push"

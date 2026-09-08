@@ -203,23 +203,23 @@ function testDurationAppearsAfterCost() {
 
   assert.match(
     a,
-    /\$0\.1234 • 00:00:10\b/,
-    `row A metrics must read "$0.1234 • 00:00:10 …"; got: ${a}`,
+    /\$0\.12 • 00:00:10\b/,
+    `row A metrics must read "$0.12 • 00:00:10 …"; got: ${a}`,
   );
   assert.match(
     b,
-    /\$0\.0100 • 00:01:05\b/,
-    `row B metrics must read "$0.0100 • 00:01:05 …"; got: ${b}`,
+    /\$0\.01 • 00:01:05\b/,
+    `row B metrics must read "$0.01 • 00:01:05 …"; got: ${b}`,
   );
   assert.match(
     c,
-    /\$1\.2345 • 01:02:05\b/,
-    `row C metrics must read "$1.2345 • 01:02:05 …"; got: ${c}`,
+    /\$1\.23 • 01:02:05\b/,
+    `row C metrics must read "$1.23 • 01:02:05 …"; got: ${c}`,
   );
   assert.match(
     d,
-    /\$0\.0000 • 00:01:05\b/,
-    `row D (running) metrics must read "$0.0000 • 00:01:05 …" using ` +
+    /\$0\.00 • 00:01:05\b/,
+    `row D (running) metrics must read "$0.00 • 00:01:05 …" using ` +
       `Date.now()-startTs; got: ${d}`,
   );
 
@@ -250,7 +250,7 @@ function testDurationBeforeDateSuffix() {
   const rows = rowsByTitle(win);
   const c = metricsText(rows['long hour task']);
 
-  const costIdx = c.indexOf('$1.2345');
+  const costIdx = c.indexOf('$1.23');
   const durIdx = c.indexOf('01:02:05');
   assert.ok(costIdx >= 0, `cost must appear; got: ${c}`);
   assert.ok(durIdx > costIdx, `duration must follow cost; got: ${c}`);

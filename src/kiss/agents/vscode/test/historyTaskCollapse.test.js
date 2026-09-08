@@ -66,8 +66,8 @@ function testCollapsedByDefaultAndToggles() {
   const metrics = info.querySelector('.running-item-metrics');
   assert.ok(metrics, 'metrics rendered inside metadata block');
   assert.ok(/7 steps/.test(metrics.textContent), 'metrics show steps');
-  assert.ok(/1,234 tok/.test(metrics.textContent), 'metrics show tokens');
-  assert.ok(/\$0\.5678/.test(metrics.textContent), 'metrics show cost');
+  assert.ok(/1\.23K tok/.test(metrics.textContent), 'metrics show tokens');
+  assert.ok(/\$0\.57/.test(metrics.textContent), 'metrics show cost');
   const workspace = info.querySelector('.running-item-workspace');
   assert.ok(workspace, 'workspace metadata rendered');
   assert.ok(

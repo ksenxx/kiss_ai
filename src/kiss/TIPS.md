@@ -1,8 +1,23 @@
 # Tip
 
+## Update button in the settings
+
+If the Update button in settings fails, run the full installation command again.  It will not delete your history.
+
+```
+curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
+```
+
+# Tip
+
+For writing a Sorcar Extension Agent (SEA), see the README.md.  All communication agents, such as Slack agent, 
+are implemented in KISS Sorcar as SEA.
+
+# Tip
+
 ## Prompt KISS Sorcar like the Developer of KISS Sorcar
 
-**Always write precise 1-6 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. The waterfall model does not work that well in contemporary times.
+**Always write precise less than 10 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. The waterfall model does not work that well in contemporary times.
 
 **No need to use generic skills for debugging, code review, etc.** Frontier models have been trained on those skills.
 
@@ -14,14 +29,14 @@
 - Add the following text to your prompt:
 
 ```
-Use 'claude-fable-5-1' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) with `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the model to not invent new problems. Use the model names literally without hallucinating new model names.
+Use 'claude-fable-5-1' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) with `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
 ```
 
 # Tip
 
-## What is the status of an agent perfoeming a task?
+## What is the status of an agent performing a task?
 
-If you want to get the status of a task, you can open a new chat and ask KISS Sorcar what is the status of the task doing …
+If you want to get the status of a task, you can open a new chat and ask KISS Sorcar what the status is of the task being done…
 
 # Tip
 
@@ -29,7 +44,7 @@ If you want to get the status of a task, you can open a new chat and ask KISS So
 
 You can **instantaneously inject a user message** into a running agent and make the agent take the message into account in the rest of its execution.
 
-Moreover, while an agent is running, you can ask it to **dynamically change its model** for the rest of the execution of the agent.
+Moreover, while an agent is running, you can ask it to **dynamically change its model** for the rest of the agent's execution.
 
 These are unique features of KISS Sorcar. These two **IPs (intellectual properties)** make KISS Sorcar super powerful for multi-model reasoning and dynamic steering of tasks running for hours to days. Model routing intelligence can be expressed in a few sentences.
 
@@ -138,7 +153,7 @@ Can you AI discover the lightest and fastest AI model that will give >95% accura
 All you need to do is use a variant of the following prompt with KISS Sorcar:
 
 ```
-Can you run the command \<<command>> in the background and monitor its output in real time to optimize the code at \<<folder_name_or_url>> with respect to the following metrics: \<<speed, accuracy, recall, cost>>. Then use AI discovery to optimize.  You can add a diagnostic code that prints metrics, such as running time, at a finer granularity.  Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values: \<<give_concrete_values_for_metrics>>. Create a report.
+Can you run the command \<<command>> in the background and monitor its output in real time to optimize the code at \<<folder_name_or_url>> with respect to the following metrics: \<<speed, accuracy, recall, cost>>. Then use AI discovery to optimize.  You can add diagnostic code that prints metrics, such as running time, at a finer granularity.  Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values: \<<give_concrete_values_for_metrics>>. Create a report.
 ```
 
 # Tip

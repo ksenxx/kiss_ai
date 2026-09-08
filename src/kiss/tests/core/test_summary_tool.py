@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for ChatSorcarAgent's no-op ``summary`` tool.
+"""End-to-end tests for SorcarAgent's no-op ``summary`` tool.
 
 Core-only tests (depending only on ``kiss.core``) moved here from
 ``kiss.tests.agents.sorcar.test_summary_tool``; the non-core tests remain there.

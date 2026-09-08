@@ -229,10 +229,117 @@ function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/**
+ * Initial state of a chat hosted in an editor tab (editor-tabs mode).
+ *
+ * Travels into the webview as `data-kiss-*` attributes on `<body>`
+ * (via the existing BODY_CLASS_ATTR substitution, so the daemon's
+ * remote web app — which builds from the same chat.html — needs no new
+ * placeholder): main.js adopts `tabId` as its single root chat tab's
+ * id and, when `resumeChatId`/`resumeTaskId` are present, resumes that
+ * history entry into the tab right after `ready`.
+ */
+export interface EditorTabInit {
+  tabId: string;
+  title?: string;
+  resumeChatId?: string;
+  resumeTaskId?: string;
+  /**
+   * Composer draft carried over from the panel that opened this one
+   * (its + button / Cmd+T posts `openChatPanel` with the draft), so
+   * the new chat's textarea starts out with the same text — parity
+   * with the sidebar webview, whose createNewTab copies the draft
+   * into the new internal tab.
+   */
+  pendingText?: string;
+  /**
+   * The tab is already in the daemon's registry (a panel materialized
+   * from a `tabs_state` entry on mode switch-on), so the webview may
+   * treat its disappearance from the first snapshot it sees as a close
+   * by another client.
+   */
+  inRegistry?: boolean;
+}
+
+/**
+ * The `<body>` attribute string for a chat webview hosted in an editor
+ * tab: the `editor-tab-mode` class plus the tab's initial state as
+ * `data-kiss-*` attributes (see EditorTabInit).
+ *
+ * @param init The panel's initial tab state.
+ * @returns An attribute string starting with a space, ready to splice
+ *     into `<body{{BODY_CLASS_ATTR}}>`.
+ */
+export function editorTabBodyAttrs(init: EditorTabInit): string {
+  const attrs = [' class="editor-tab-mode"'];
+  attrs.push(` data-kiss-tab-id="${escapeHtml(init.tabId)}"`);
+  if (init.title) {
+    attrs.push(` data-kiss-tab-title="${escapeHtml(init.title)}"`);
+  }
+  if (init.resumeChatId) {
+    attrs.push(` data-kiss-resume-chat-id="${escapeHtml(init.resumeChatId)}"`);
+  }
+  if (init.resumeTaskId) {
+    attrs.push(` data-kiss-resume-task-id="${escapeHtml(init.resumeTaskId)}"`);
+  }
+  if (init.pendingText) {
+    attrs.push(` data-kiss-pending-text="${escapeHtml(init.pendingText)}"`);
+  }
+  if (init.inRegistry) {
+    attrs.push(' data-kiss-in-registry="1"');
+  }
+  return attrs.join('');
+}
+
+/**
+ * Root chat tab id of the primary-sidebar history panel's webview.
+ *
+ * The id is fixed (not random) so a reloaded window's history panel is
+ * the same client as before; the tab itself never runs a task, never
+ * binds to a chat and is never announced to the daemon's registry.
+ */
+export const HISTORY_PANEL_TAB_ID = 'history-panel';
+
+/**
+ * The `<body>` attribute string for the PRIMARY-sidebar history panel
+ * (editor-tabs mode). The webview reuses the editor-tab chat surface —
+ * so every history click already travels to the host as an
+ * `openChatPanel` message — but `history-panel-mode` (main.js /
+ * main.css) shows only the history sidebar, permanently open.
+ *
+ * @returns An attribute string ready for `<body{{BODY_CLASS_ATTR}}>`.
+ */
+export function historyPanelBodyAttrs(): string {
+  return (
+    ' class="editor-tab-mode history-panel-mode"' +
+    ` data-kiss-tab-id="${HISTORY_PANEL_TAB_ID}"`
+  );
+}
+
+/**
+ * Public URL of the browser wake-word model archive.
+ *
+ * Documented twin of ``VOICE_MODEL_URL`` in
+ * ``kiss/server/web_server.py`` (which proxies the same archive to the
+ * remote webapp as ``/voice-model.tar.gz``). The webview's in-page
+ * voice pipeline fetches it directly — inside its blob Worker — because
+ * a webview cannot reach the daemon's HTTPS port, and the browser's
+ * HTTP cache keeps repeat downloads cheap.
+ */
+export const VOICE_MODEL_URL =
+  'https://ccoreilly.github.io/vosk-browser/models/' +
+  'vosk-model-small-en-us-0.15.tar.gz';
+
+/** Origin of {@link VOICE_MODEL_URL}, for the webview CSP connect-src. */
+function voiceModelOrigin(): string {
+  return new URL(VOICE_MODEL_URL).origin;
+}
+
 export function buildChatHtml(
   webview: vscode.Webview,
   extensionUri: vscode.Uri,
   selectedModel: string,
+  bodyAttrs?: string,
 ): string {
   const nonce = getNonce();
   const version = getVersion();
@@ -260,10 +367,16 @@ export function buildChatHtml(
   };
 
   /* eslint-disable quotes */
+  // 'wasm-unsafe-eval', `worker-src blob:` and the model-origin
+  // connect-src exist for the in-page voice pipeline (voice.js browser
+  // fallback): vosk.js spawns its recognizer as a blob Worker that
+  // fetches the wake-word model archive and runs a Kaldi WASM build.
   const csp =
     `<meta http-equiv="Content-Security-Policy" content="default-src 'none';` +
     ` style-src ${webview.cspSource} 'unsafe-inline';` +
-    ` script-src 'nonce-${nonce}';` +
+    ` script-src 'nonce-${nonce}' 'wasm-unsafe-eval';` +
+    ` worker-src blob:;` +
+    ` connect-src ${voiceModelOrigin()};` +
     ` img-src ${webview.cspSource} data: https:;` +
     ` font-src ${webview.cspSource};` +
     ` media-src data: ${webview.cspSource};` +
@@ -282,7 +395,7 @@ export function buildChatHtml(
     STYLE_HREF: u('main.css'),
     HLJS_CSS_HREF: u('highlight-github-dark.min.css'),
     HEAD_STYLE: '',
-    BODY_CLASS_ATTR: '',
+    BODY_CLASS_ATTR: bodyAttrs || '',
     INPUT_PLACEHOLDER: placeholder,
     ENTERKEYHINT: '',
     // The model name can come from user settings or the daemon; escape it
@@ -302,9 +415,17 @@ export function buildChatHtml(
     TIPS_JSON: tipsJson,
     TIPS_SRC: u('tips.js'),
     VOICE_SRC: u('voice.js'),
+    // voskSrc/modelUrl/nonce power the in-page capture fallback: when
+    // the machine hosting this extension has no microphone, voice.js
+    // records with the BROWSER's mic (embedder permitting) exactly like
+    // the remote webapp, instead of erroring. The nonce lets voice.js
+    // inject the vosk.js script tag under this page's CSP.
     VOICE_CONFIG: JSON.stringify({
       mode: 'webview',
       ackAudioUrl: u('working-on-it.mp3'),
+      voskSrc: u('vosk.js'),
+      modelUrl: VOICE_MODEL_URL,
+      nonce,
     }),
   };
 

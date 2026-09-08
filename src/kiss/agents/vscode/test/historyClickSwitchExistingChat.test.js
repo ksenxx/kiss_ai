@@ -110,7 +110,7 @@ function testHistoryClickSwitchesToExistingChatTab() {
     'sanity: the first tab displays the existing chat',
   );
 
-  win.document.querySelector('.chat-tab-add').click();
+  win.document.querySelector('#new-chat-btn').click();
   assert.strictEqual(chatTabs(win).length, 2, 'sanity: plus opens one new tab');
   assert.strictEqual(activeTabLabel(win), 'new chat', 'sanity: new tab is active');
 

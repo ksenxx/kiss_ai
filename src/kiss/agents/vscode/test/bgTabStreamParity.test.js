@@ -308,7 +308,7 @@ function testBothUsageFormsAreReadTheSameWayByBothTranscripts() {
       `the ${form} form of the usage report carries the daemon's step ` +
         'count and the header must show it',
     );
-    assert.strictEqual(visible.tokens, 'Tokens: 12,345', form);
+    assert.strictEqual(visible.tokens, 'Tokens: 12.3K', form);
     assert.strictEqual(visible.budget, 'Cost: $0.42', form);
     assert.strictEqual(hidden.steps, visible.steps, form);
     assert.strictEqual(hidden.tokens, visible.tokens, form);
@@ -479,7 +479,7 @@ function testBackgroundReplayKeepsTokensAndCost() {
   const replayed = snapshot(win);
   assert.strictEqual(
     replayed.tokens,
-    'Tokens: 12,345',
+    'Tokens: 12.3K',
     'switching to a tab whose transcript was replayed while hidden ' +
       'must show the tokens the replay carried',
   );
@@ -540,7 +540,7 @@ function testMetricFreeReplayDoesNotStealTheVisibleTabsNumbers() {
   const hidden = snapshot(win);
   assert.strictEqual(
     hidden.tokens,
-    'Tokens: 12,345',
+    'Tokens: 12.3K',
     'a metric-free replay must not inherit the visible tab\u2019s ' +
       'token count -- the tab keeps its own',
   );
@@ -628,7 +628,7 @@ function testHiddenReplayThatClosesTheVisibleTabKeepsItsNumbers() {
   const shown = snapshot(win);
   assert.strictEqual(
     shown.tokens,
-    'Tokens: 12,345',
+    'Tokens: 12.3K',
     'a hidden replay that closed the tab on screen must still hand ' +
       'its tokens to the parent tab',
   );

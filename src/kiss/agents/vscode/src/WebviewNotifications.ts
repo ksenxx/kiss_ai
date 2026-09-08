@@ -32,6 +32,26 @@ export function setWebviewNotificationPoster(
   poster = notificationPoster;
 }
 
+/**
+ * Clear the poster only when *notificationPoster* is the one installed.
+ *
+ * Two surfaces can hold the poster in turn (the sidebar chat view and
+ * the editor-tabs panel manager); an unconditional clear on one
+ * surface's teardown would silence toasts the other surface had just
+ * claimed — e.g. the sidebar webview disposing right after the mode
+ * switch to editor tabs installed the panels' poster.
+ *
+ * @param notificationPoster The poster the caller installed earlier.
+ */
+export function clearWebviewNotificationPoster(
+  notificationPoster: NotificationPost,
+): void {
+  if (poster === notificationPoster) {
+    resolveAllPendingActions();
+    poster = undefined;
+  }
+}
+
 export function resolveWebviewNotificationAction(
   id: string,
   action: string | undefined,

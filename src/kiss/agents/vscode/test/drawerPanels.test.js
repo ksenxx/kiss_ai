@@ -8,8 +8,9 @@
 //
 // The static task panel is a header, not content: it opens collapsed
 // everywhere and only a click on its own chevron may expand it. The composer
-// is the opposite -- it opens reachable, and folds away only on a phone while
-// a task is running, where the transcript needs the whole screen.
+// is the opposite -- it opens reachable, and its textbox folds away only on
+// a phone while a task is running, where the transcript needs the room.
+// Collapsing never hides the button bar (#input-footer) below the textbox.
 
 'use strict';
 
@@ -182,16 +183,32 @@ function assertInputDrawer(win, collapsed, why) {
     `input drawer must ${collapsed ? '' : 'NOT '}be collapsed: ${why}`,
   );
   assertBtnState(win, 'input-drawer-btn', !collapsed);
-  const display = cs(win, 'input-container').display;
+  // Collapsing folds away the text area but never the button bar
+  // (#input-footer) below it.
+  const wrapDisplay = cs(win, 'input-wrap').display;
   if (collapsed) {
-    assert.strictEqual(display, 'none', `the composer must be hidden: ${why}`);
+    assert.strictEqual(
+      wrapDisplay,
+      'none',
+      `the text area must be hidden: ${why}`,
+    );
   } else {
     assert.notStrictEqual(
-      display,
+      wrapDisplay,
       'none',
-      `the composer must be visible: ${why}`,
+      `the text area must be visible: ${why}`,
     );
   }
+  assert.notStrictEqual(
+    cs(win, 'input-container').display,
+    'none',
+    `the composer container must stay visible: ${why}`,
+  );
+  assert.notStrictEqual(
+    cs(win, 'input-footer').display,
+    'none',
+    `the button bar below the text area must stay visible: ${why}`,
+  );
 }
 
 // The shipped defaults: task panel folded into its slim header, composer
