@@ -33,6 +33,10 @@ let sidebarView: SorcarSidebarView | undefined;
 let panelManager: SorcarPanelManager | undefined;
 let historyView: SorcarSidebarView | undefined;
 
+// workspaceState key: root tab ids of the chat editor panels open at
+// the previous session's shutdown (see priorPanelTabIds in activate).
+const PANEL_TAB_IDS_KEY = 'kissSorcar.editorPanelTabIds';
+
 export function activate(context: vscode.ExtensionContext): void {
   ensureLocalBinInPath();
   console.log('KISS Sorcar extension activating...');
@@ -47,12 +51,37 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   context.subscriptions.push({dispose: () => sidebarView?.dispose()});
 
+  // Root tab ids of the chat panels open when the previous session
+  // shut down — the registry tabs behind whatever serialized chat
+  // placeholders the workbench restores after a reload. Read BEFORE
+  // the manager can persist this session's first value; undefined
+  // until a session of this extension version has recorded one.
+  const priorPanelTabIds =
+    context.workspaceState.get<string[]>(PANEL_TAB_IDS_KEY);
+
+  // Fold one panel open/close into the persisted record. Per-tab
+  // deltas, not whole-set writes: see the manager's _recordPanelTab
+  // contract (a whole-set write mid-revival would replace the record
+  // with a partial one).
+  const recordPanelTab = (tabId: string, open: boolean): void => {
+    const stored = context.workspaceState.get<string[]>(PANEL_TAB_IDS_KEY);
+    const ids = stored ?? [];
+    const next = open
+      ? ids.includes(tabId)
+        ? ids
+        : [...ids, tabId]
+      : ids.filter(id => id !== tabId);
+    void context.workspaceState.update(PANEL_TAB_IDS_KEY, next);
+  };
+
   // Panel closes retire their chat tabs through the sidebar
   // controller's long-lived daemon client: a panel's own client dies
   // with the panel, which could lose a closeTab queued while the
   // daemon was briefly unreachable.
-  panelManager = new SorcarPanelManager(context.extensionUri, tabId =>
-    sidebarView?.closeChatTab(tabId),
+  panelManager = new SorcarPanelManager(
+    context.extensionUri,
+    tabId => sidebarView?.closeChatTab(tabId),
+    recordPanelTab,
   );
   context.subscriptions.push(panelManager.registerSerializer());
   context.subscriptions.push({
@@ -108,14 +137,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   sidebarView.syncWorkDir();
 
-  // True when ANY editor tab hosts a chat panel. The workbench's
-  // restored chat tabs count too: after a window reload they exist as
-  // serialized placeholders long before the panel manager adopts them,
-  // and opening a "first" chat next to them would be a duplicate.
-  const hasChatEditorTab = (): boolean => {
-    // Guarded like the other optional host APIs (absent in test stubs).
+  // How many editor tabs host a chat — live panels AND the serialized
+  // placeholders a window reload restores (indistinguishable in the
+  // tabGroups API). -1 when the API is absent (test stubs).
+  const chatEditorTabCount = (): number => {
     const groups = vscode.window.tabGroups?.all;
-    if (!groups) return panelManager!.panelCount > 0;
+    if (!groups) return -1;
+    let count = 0;
     for (const group of groups) {
       for (const tab of group.tabs) {
         const viewType = (tab.input as {viewType?: unknown} | null)?.viewType;
@@ -123,12 +151,69 @@ export function activate(context: vscode.ExtensionContext): void {
           typeof viewType === 'string' &&
           viewType.includes(CHAT_PANEL_VIEW_TYPE)
         ) {
-          return true;
+          count += 1;
         }
       }
     }
-    return false;
+    return count;
   };
+
+  // True when ANY editor tab hosts a chat panel. The workbench's
+  // restored chat tabs count too: after a window reload they exist as
+  // serialized placeholders long before the panel manager adopts them,
+  // and opening a "first" chat next to them would be a duplicate.
+  const hasChatEditorTab = (): boolean => {
+    const count = chatEditorTabCount();
+    // Guarded like the other optional host APIs (absent in test stubs).
+    if (count < 0) return panelManager!.panelCount > 0;
+    return count > 0;
+  };
+
+  // A chat tab another client created — or first ran a task in — since
+  // the last registry snapshot (e.g. a task run in the remote web app)
+  // opens as an editor tab. Sidebar mode needs no host help: its
+  // webview adopts the tab from the same `tabs_state` snapshot. The
+  // long-lived sidebar controller is the listener because it is
+  // connected to the daemon from activation on, panels or not (and it
+  // requests a baseline snapshot on every daemon connect, so remote
+  // tabs created before activation or during an outage arrive too).
+  // The FIRST snapshot's tabs may be duplicated by this window's own
+  // chat editor tabs — serialized placeholders are invisible to the
+  // panel manager until the workbench revives them — so while any
+  // chat tab exists, only first-snapshot tabs the previous session
+  // verifiably did NOT hold (per the persisted panel tab ids) may
+  // open: exactly the tabs a remote client created in the meantime.
+  context.subscriptions.push(
+    sidebarView.onRegistryTabsState(delta => {
+      if (!editorTabsMode()) return;
+      let toAdopt = delta.added;
+      if (
+        delta.firstSnapshot &&
+        (panelManager!.panelCount > 0 || hasChatEditorTab())
+      ) {
+        const tabCount = chatEditorTabCount();
+        if (tabCount >= 0 && tabCount === panelManager!.panelCount) {
+          // Every chat editor tab is a LIVE panel the manager already
+          // knows — no serialized placeholder is pending revival, so
+          // nothing a first-snapshot tab could duplicate exists;
+          // adoptRegistryTabs dedupes against the open panels by tab
+          // and chat id. (A window that opened a fresh chat while the
+          // daemon was down still adopts a remote tab from its late
+          // first snapshot this way.)
+        } else if (priorPanelTabIds) {
+          const prior = new Set(priorPanelTabIds);
+          toAdopt = delta.added.filter(e => !prior.has(e.tabId));
+        } else {
+          // Unrevived placeholders whose ids are unknowable (no
+          // persisted record — first session of this version): adopt
+          // nothing rather than risk duplicating them, but still let
+          // the snapshot sync the open panels' chat bindings below.
+          toAdopt = [];
+        }
+      }
+      panelManager!.adoptRegistryTabs(toAdopt, workspaceDir(), delta.listed);
+    }),
+  );
 
   // A KS button brought the history panel on screen; an editor window
   // with no chat tab at all also gets a fresh conversation.
@@ -613,7 +698,10 @@ export function activate(context: vscode.ExtensionContext): void {
     });
   }
 
-  let shouldAutoOpen = !context.workspaceState.get<boolean>('firstLaunchDone');
+  // A genuine first launch in this workspace — as opposed to the
+  // auto-open replayed after an extension update (markerPath below).
+  const firstLaunch = !context.workspaceState.get<boolean>('firstLaunchDone');
+  let shouldAutoOpen = firstLaunch;
   if (fs.existsSync(markerPath)) {
     shouldAutoOpen = true;
     void context.workspaceState.update('firstLaunchDone', undefined);
@@ -623,6 +711,18 @@ export function activate(context: vscode.ExtensionContext): void {
   if (shouldAutoOpen) {
     const autoOpenTimer = setTimeout(async () => {
       if (!sidebarView) return;
+      if (firstLaunch) {
+        // The workbench's default layout (code-server and recent VS
+        // Code) starts with the secondary sidebar open on the built-in
+        // Chat view. KISS Sorcar's chat replaces it: close the bar
+        // before opening the chat surface. In sidebar mode the
+        // focusChatInput below reopens it on the KISS chat view; in
+        // editor-tabs mode the chat is an editor tab and the bar
+        // stays closed.
+        await vscode.commands.executeCommand(
+          'workbench.action.closeAuxiliaryBar',
+        );
+      }
       await chatController(true)!.focusChatInput();
       await context.workspaceState.update('firstLaunchDone', true);
     }, 1000);
