@@ -228,6 +228,74 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     assert captured[0]["stop_on_timeout"] is True
 
 
+def test_dispatch_forwards_parent_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dispatch on behalf of a calling task marks it as the parent.
+
+    ``_dispatch`` forwards the calling agent's persisted task id and
+    frontend tab id as ``daemon_client.run``'s ``parent_task_id`` /
+    ``parent_tab_id``, which is what gives the sub-task the
+    ``run_parallel`` sub-agent tab semantics (nested tab, nested
+    history row, ``subagentDone``) instead of a top-level tab.  The
+    real dispatch path is exercised up to the daemon-client boundary;
+    only that boundary call is captured.  The duck-typed-caller guard
+    (a ``parent_agent`` with a persisted ``last_task_id`` but no
+    ``_subagent_parent_tab_id``) stays untested by design: every real
+    persisting agent is a ``ChatSorcarAgent``, which always has the
+    resolver, and covering it would need a fabricated stand-in object.
+    """
+    from kiss.agents.sorcar import daemon_client
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+
+    captured: list[dict[str, Any]] = []
+
+    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        captured.append(kwargs)
+        return daemon_client.TaskResult(
+            text="ok", success=True, cost=0.0, tokens=0, steps=0,
+        )
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
+
+    caller = tmp_path / "caller_project"
+    caller.mkdir()
+    script = caller / "helper.py"
+    script.write_text("def get_model() -> str:\n    return 'm'\n")
+
+    # A calling agent with a persisted task row: its task id and its
+    # frontend tab id ride along, so the daemon runs the sub-task as
+    # that task's sub-agent.
+    parent = ChatSorcarAgent("Dispatch parent")
+    parent._last_task_id = "a" * 32
+    parent._tab_id = "webtab-7"
+    tool = make_run_agent_tool(str(caller), parent)
+    tool(str(script), "say hi")
+    assert captured[0]["parent_task_id"] == "a" * 32
+    assert captured[0]["parent_tab_id"] == "webtab-7"
+
+    # The same caller identity rides along in channel mode too.
+    captured.clear()
+    tool("ntfy", "say hi")
+    assert captured[0]["parent_task_id"] == "a" * 32
+    assert captured[0]["parent_tab_id"] == "webtab-7"
+
+    # A calling agent that has not persisted a row yet (before its
+    # first run) dispatches an ordinary top-level task.
+    fresh = ChatSorcarAgent("Fresh parent")
+    fresh._tab_id = "webtab-8"
+    captured.clear()
+    make_run_agent_tool(str(caller), fresh)(str(script), "say hi")
+    assert captured[0]["parent_task_id"] == ""
+    assert captured[0]["parent_tab_id"] == ""
+
+    # Standalone tools-file use: no calling agent at all.
+    captured.clear()
+    make_run_agent_tool(str(caller))(str(script), "say hi")
+    assert captured[0]["parent_task_id"] == ""
+    assert captured[0]["parent_tab_id"] == ""
+
+
 def test_cron_dispatch_unreachable_daemon_is_a_clean_error(
     tmp_path: Path,
 ) -> None:

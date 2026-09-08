@@ -121,7 +121,7 @@ test('duplicate stamped copies of one talk() call play only once', () => {
 
 test('copies stamped for two DIFFERENT owned tabs play only once', () => {
   const {win, posted, played, spoken, tabId} = makeWebview();
-  win.document.querySelector('.chat-tab-add').click();
+  win.document.querySelector('#new-chat-btn').click();
   const newChat = posted.filter(m => m.type === 'newChat').pop();
   assert.ok(newChat && newChat.tabId && newChat.tabId !== tabId);
   assert.strictEqual(spoken.length, 0, 'no unlock primer any more');
@@ -153,7 +153,7 @@ test("a copy stamped for another window's tab stays silent", () => {
 
 test('a copy for an own BACKGROUND tab still plays', () => {
   const {win, posted, played, spoken} = makeWebview();
-  win.document.querySelector('.chat-tab-add').click();
+  win.document.querySelector('#new-chat-btn').click();
   const newChat = posted.filter(m => m.type === 'newChat').pop();
   assert.ok(newChat && newChat.tabId, 'new tab must post newChat');
   const firstTabId = posted.find(m => m.type === 'ready').tabId;

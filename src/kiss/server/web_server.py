@@ -104,6 +104,7 @@ from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
 from kiss.server.voice_wake import (
+    DEFAULT_AUDIO_MODEL,
     MODEL_NAME,
     SpeakerIdentifier,
     default_models_dir,
@@ -4895,6 +4896,17 @@ class RemoteAccessServer:
         payload or a failed translation replies with an empty ``text``
         so the page can clear its transcribing indicator.
 
+        A client that prepended the wake word's own audio to the
+        capture marks the message ``wakePrefixed: true``; the
+        transcript must then re-confirm the wake word (the dual wake
+        check of :func:`transcribe_pcm`) or the utterance is rejected
+        with an empty ``text``.  Such a client also sends
+        ``wakeSamples`` — the sample count of the prepended audio —
+        so speaker identification runs on the capture alone (the
+        pre-wake ring may carry another voice).  Messages without the
+        flag (older clients, plain dictation) keep the lenient
+        behavior.
+
         Args:
             cmd: The parsed ``voiceTranscribe`` command.
             endpoint: The client connection to reply to.
@@ -4911,9 +4923,14 @@ class RemoteAccessServer:
         speaker: int | None = None
         if pcm:
             assert self._loop is not None
+            expect_wake_prefix = bool(cmd.get("wakePrefixed"))
             try:
                 result = await self._loop.run_in_executor(
-                    None, transcribe_pcm, pcm,
+                    None,
+                    transcribe_pcm,
+                    pcm,
+                    DEFAULT_AUDIO_MODEL,
+                    expect_wake_prefix,
                 )
                 text = result["text"]
                 language = result["language"]
@@ -4927,8 +4944,19 @@ class RemoteAccessServer:
                 text = ""
                 language = None
             if text:
+                # Speaker identification uses the capture alone: the
+                # client's wakeSamples marks where the prepended
+                # pre-wake ring (which may carry another voice) ends.
+                wake_samples = cmd.get("wakeSamples")
+                speaker_pcm = pcm
+                if (
+                    isinstance(wake_samples, int)
+                    and not isinstance(wake_samples, bool)
+                    and 0 < wake_samples < len(pcm) // 2
+                ):
+                    speaker_pcm = pcm[2 * wake_samples:]
                 speaker = await self._loop.run_in_executor(
-                    None, self._identify_voice_speaker, pcm,
+                    None, self._identify_voice_speaker, speaker_pcm,
                 )
         await self._endpoint_send(
             endpoint,

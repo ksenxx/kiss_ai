@@ -50,7 +50,7 @@ function run() {
   assert.ok(!isOpen(win, 'frequent-panel'), 'close button closes panel');
   assert.ok(!isOpen(win, 'frequent-overlay'), 'frequent overlay closes');
 
-  const gear = doc.querySelector('.chat-tab-settings');
+  const gear = doc.querySelector('#settings-btn');
   assert.ok(gear, 'tab bar renders the settings gear button');
   gear.click();
   assert.ok(isOpen(win, 'settings-panel'), 'settings panel opens');

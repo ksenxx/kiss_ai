@@ -163,36 +163,6 @@ body.remote-chat #tab-bar .chat-tab.active {
 
 body.remote-chat #tab-bar .chat-tab-close { border-radius: 999px; }
 
-body.remote-chat #tab-bar .chat-tab-add {
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--dim);
-}
-
-body.remote-chat #tab-bar .chat-tab-settings,
-body.remote-chat #tab-bar .chat-tab-theme {
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--dim);
-  padding: 5px 8px;
-  min-width: 36px;
-  max-width: 36px;
-}
-
-body.remote-chat #tab-bar .chat-tab-theme {
-  justify-content: center;
-  margin-right: 8px;
-  flex-shrink: 0;
-}
-
-body.remote-chat #tab-bar .chat-tab-settings svg,
-body.remote-chat #tab-bar .chat-tab-theme svg {
-  display: block;
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-}
-
 body.remote-chat #tab-status-bar {
   background: var(--bg);
   border-bottom: none;
@@ -220,9 +190,10 @@ body.remote-chat #input-drawer-btn:hover {
   border-color: var(--border-30);
 }
 
+/* The button bar (#input-footer) stays visible while collapsed, so the
+   bottom padding keeps its expanded value. */
 body.remote-chat #input-area.drawer-collapsed {
   padding-top: 10px;
-  padding-bottom: calc(2px + env(safe-area-inset-bottom, 0px));
 }
 
 body.remote-chat #welcome h2 { color: var(--fg); }
@@ -264,13 +235,12 @@ body.remote-chat #input-footer {
    overlap; when a row cannot hold them all (narrow phones, or the
    running state's spinner + send + stop) the buttons wrap onto the
    next row instead of colliding. */
-body.remote-chat #model-picker { gap: 2px; }
+body.remote-chat #footer-tools { gap: 2px; }
 
 body.remote-chat #menu-btn,
-body.remote-chat #upload-btn,
+body.remote-chat #new-chat-btn,
 body.remote-chat #tricks-btn,
-body.remote-chat #voice-btn,
-body.remote-chat #share-btn {
+body.remote-chat #more-btn {
   width: 36px;
   height: 36px;
   min-width: 36px;
@@ -286,10 +256,9 @@ body.remote-chat #share-btn {
 }
 
 body.remote-chat #menu-btn:hover:not(:disabled),
-body.remote-chat #upload-btn:hover:not(:disabled),
+body.remote-chat #new-chat-btn:hover:not(:disabled),
 body.remote-chat #tricks-btn:hover:not(:disabled),
-body.remote-chat #voice-btn:hover:not(:disabled),
-body.remote-chat #share-btn:hover:not(:disabled) {
+body.remote-chat #more-btn:hover:not(:disabled) {
   background: var(--hover-strong);
   color: var(--fg);
 }
@@ -298,6 +267,24 @@ body.remote-chat #tricks-btn.active,
 body.remote-chat #voice-btn.active {
   background: var(--hover-strong);
   color: var(--fg-strong);
+}
+
+body.remote-chat #more-menu {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 8px 24px var(--shadow);
+}
+
+body.remote-chat .more-menu-item {
+  color: var(--icon);
+  padding: 8px 10px;
+  border-radius: 10px;
+}
+
+body.remote-chat .more-menu-item:hover:not(:disabled) {
+  background: var(--hover-strong);
+  color: var(--fg);
 }
 
 body.remote-chat #model-btn {
@@ -432,8 +419,7 @@ body.remote-chat .config-label textarea {
   color: var(--fg);
 }
 
-body.remote-chat .config-update-btn,
-body.remote-chat .config-gitcommit-btn {
+body.remote-chat .config-update-btn {
   border-radius: 999px;
 }
 
@@ -530,6 +516,14 @@ body.remote-chat .running-item-ids::before {
  * main.css and ``#app`` reclaims the freed width.
  */
 @media (width >= 900px) {
+  /* Non-mobile remote: the panel is permanently docked (main.js keeps
+     it open whenever .remote-desktop is set), so the burger — which
+     only toggled it — and the drawer's close button go. */
+  body.remote-chat.remote-desktop #menu-btn,
+  body.remote-chat.remote-desktop #sidebar-close {
+    display: none;
+  }
+
   body.remote-chat.remote-desktop #sidebar.open {
     transform: none;
     width: var(--sidebar-w, var(--sidebar-default-w));

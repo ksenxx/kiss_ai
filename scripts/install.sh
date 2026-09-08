@@ -178,9 +178,18 @@ if [ -d ~/.kiss/kiss_ai ]; then
       # succeeded (an offline reset would rewind to a stale cached
       # upstream, discarding local commits for nothing), and an upstream
       # actually exists.
+      # ``--force`` on the fetch is what keeps this bootstrap backward
+      # compatible with pre-rewrite installs (v2026.9.0 and earlier):
+      # each release rewrites the public history and re-points every
+      # existing tag (purge_public_history in scripts/release.sh), so on
+      # such a clone a plain ``--tags`` fetch dies with "would clobber
+      # existing tag", the reset below would be skipped, and the handover
+      # would re-run the OLD checkout's install.sh — the update would
+      # silently never happen.  This tree is a managed install mirror of
+      # the public repo, so re-pointing its local tags is always correct.
       if [ -n "$_kiss_stash_failed" ]; then
         echo "WARNING: could not stash local changes; skipping the reset to keep them safe."
-      elif ! git fetch --tags --prune origin; then
+      elif ! git fetch --tags --prune --force origin; then
         echo "WARNING: git fetch failed (offline?); continuing with the current checkout."
       elif git rev-parse --abbrev-ref '@{upstream}' &>/dev/null; then
         git reset --hard '@{upstream}' \

@@ -2,29 +2,23 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E tests: the tab-bar Settings gear button on the remote webapp.
+"""E2E tests: the Settings entry of the composer's "..." menu on the
+remote webapp.
 
-Bug: on the remote webapp the tab-bar's Settings button (the gear
-icon appended by ``renderTabBar()`` in ``main.js``) renders as a tiny
-dot instead of the 18x18 gear the VS Code extension shows.
+The Settings control used to be a gear pill that ``renderTabBar()``
+appended to ``#tab-bar`` (and once regressed into rendering as a tiny
+dot there).  It now lives as a labelled item inside the input footer's
+"..." overflow menu (``#more-btn`` / ``#more-menu`` / ``#settings-btn``
+in ``chat.html``), together with mic, share, attach, Git Commit and the
+remote-only theme toggle.
 
-Root cause: ``main.css`` caps ``.chat-tab-settings`` at
-``min/max-width: 30px`` with ``padding: 4px 8px 4px 0`` (~22px of
-content space for the 18x18 SVG).  ``remote-codex.css`` has a higher-
-specificity ``body.remote-chat #tab-bar .chat-tab`` rule that
-overrides the padding to ``5px 12px``, collapsing the 30px-wide flex
-item to ~6px of content and shrinking the SVG flex-child to a dot.
-
-Fix: ``remote-codex.css`` adds a ``body.remote-chat #tab-bar
-.chat-tab-settings`` pill rule (mirroring the ``.chat-tab-add``
-treatment) with enough padding/width for the gear, plus an SVG rule
-that pins the child SVG's intrinsic 18x18 size and disables
-``flex-shrink``.
-
-Static tests pin the CSS wiring; the live test boots the production
-``RemoteAccessServer`` + headless Chromium and asserts that
-``renderTabBar()``'s Settings tab and its gear SVG render at a
-plausible clickable size (not "a dot").
+Static tests pin the CSS wiring (the menu surface and item rules exist
+in ``remote-codex.css``, and the theme toggle stays hidden outside the
+remote webapp); the live test boots the production
+``RemoteAccessServer`` + headless Chromium, opens the "..." menu and
+asserts the Settings item renders at a clickable size with a visible
+gear icon, and that clicking it opens the settings panel and closes the
+menu.
 """
 
 from __future__ import annotations
@@ -57,75 +51,40 @@ def _find_rule(css: str, selector: str) -> str:
     return "\n".join(bodies)
 
 
-def _tab_bar_rule_pos(css: str, selector: str) -> int:
-    """Return where the ``#tab-bar`` rule styling *selector* starts.
-
-    The selector may head a grouped selector list (``.chat-tab-settings``
-    shares its rule with the theme-toggle button ``.chat-tab-theme``), so
-    it is matched up to the following ``,`` or ``{`` instead of assuming
-    the rule opens right after it.
-
-    Args:
-        css: Full text of ``remote-codex.css``.
-        selector: Class selector to locate, e.g. ``.chat-tab``.
-
-    Returns:
-        Character offset of the matching ``body.remote-chat #tab-bar``
-        rule, or ``-1`` when no such rule exists.
-    """
-    pattern = r"body\.remote-chat #tab-bar " + re.escape(selector) + r"\s*[,{]"
-    m = re.search(pattern, css)
-    return -1 if m is None else m.start()
-
-
-
-def test_remote_codex_defines_chat_tab_settings_pill() -> None:
-    """remote-codex.css must define an explicit .chat-tab-settings
-    override so the .chat-tab pill padding cannot collapse the gear."""
+def test_remote_codex_defines_more_menu_surface() -> None:
+    """remote-codex.css must restyle the "..." menu as a floating
+    surface (rounded, elevated, on the remote palette)."""
     css = CODEX_CSS.read_text(encoding="utf-8")
-    rule = _find_rule(css, ".chat-tab-settings")
-    assert "border-radius: 999px" in rule, (
-        ".chat-tab-settings must be a pill on the remote webapp; "
-        f"got: {rule!r}"
-    )
-    m_min = re.search(r"min-width:\s*(\d+)px", rule)
-    m_max = re.search(r"max-width:\s*(\d+)px", rule)
-    assert m_min and m_max, (
-        ".chat-tab-settings must pin min/max width so the gear has "
-        f"room; got: {rule!r}"
-    )
-    assert int(m_min.group(1)) >= 32, rule
-    assert int(m_max.group(1)) >= 32, rule
+    rule = _find_rule(css, "#more-menu")
+    assert "border-radius" in rule, rule
+    assert "background" in rule, rule
+    assert "box-shadow" in rule, rule
 
 
-def test_remote_codex_pins_settings_svg_size() -> None:
-    """remote-codex.css must pin the child SVG's intrinsic 18x18 size
-    and stop the flex layout from shrinking it."""
+def test_remote_codex_styles_more_menu_items() -> None:
+    """remote-codex.css must give the menu items comfortable touch
+    padding and a hover treatment."""
     css = CODEX_CSS.read_text(encoding="utf-8")
-    rule = _find_rule(css, ".chat-tab-settings svg")
-    assert "width: 18px" in rule, rule
-    assert "height: 18px" in rule, rule
-    assert "flex-shrink: 0" in rule, (
-        "the gear SVG must not be shrunk by the flex layout; "
-        f"got: {rule!r}"
+    rule = _find_rule(css, ".more-menu-item")
+    m_pad = re.search(r"padding:\s*(\d+)px", rule)
+    assert m_pad and int(m_pad.group(1)) >= 6, (
+        ".more-menu-item needs touch-friendly padding; " f"got: {rule!r}"
     )
+    hover = _find_rule(css, ".more-menu-item:hover:not(:disabled)")
+    assert "background" in hover, hover
 
 
-def test_remote_codex_settings_rule_comes_after_generic_chat_tab() -> None:
-    """The new .chat-tab-settings rule must live LATER in the file
-    than the generic ``body.remote-chat #tab-bar .chat-tab`` rule so
-    the cascade (equal specificity across id + 2 classes) resolves in
-    the settings rule's favor."""
-    css = CODEX_CSS.read_text(encoding="utf-8")
-    generic = _tab_bar_rule_pos(css, ".chat-tab")
-    settings = _tab_bar_rule_pos(css, ".chat-tab-settings")
-    assert generic != -1, "generic .chat-tab pill rule missing"
-    assert settings != -1, ".chat-tab-settings pill rule missing"
-    assert generic < settings, (
-        "the .chat-tab-settings override must appear after the "
-        "generic .chat-tab rule in remote-codex.css"
+def test_main_css_hides_theme_toggle_outside_remote() -> None:
+    """The theme toggle is remote-webapp-only: main.css must hide
+    ``#theme-btn`` by default and unhide it under ``body.remote-chat``
+    (the VS Code webview always follows the editor theme)."""
+    css = MAIN_CSS.read_text(encoding="utf-8")
+    assert re.search(r"#theme-btn\s*\{\s*display:\s*none;", css), (
+        "#theme-btn must be hidden outside the remote webapp"
     )
-
+    assert re.search(
+        r"body\.remote-chat\s+#theme-btn\s*\{\s*display:\s*flex;", css
+    ), "#theme-btn must be shown on the remote webapp"
 
 
 def _start_live_server(
@@ -182,42 +141,36 @@ def _start_live_server(
 
 _MEASURE_JS = r"""
 (() => {
-  const tab = document.querySelector('.chat-tab-settings');
-  const svg = tab ? tab.querySelector('svg') : null;
-  if (!tab || !svg) {
-    return {
-      hasTab: !!tab,
-      hasSvg: !!svg,
-    };
+  const menu = document.getElementById('more-menu');
+  const item = document.getElementById('settings-btn');
+  const svg = item ? item.querySelector('svg') : null;
+  if (!menu || !item || !svg) {
+    return {hasMenu: !!menu, hasItem: !!item, hasSvg: !!svg};
   }
-  const tabRect = tab.getBoundingClientRect();
+  const itemRect = item.getBoundingClientRect();
   const svgRect = svg.getBoundingClientRect();
-  const cs = getComputedStyle(tab);
-  const svgCs = getComputedStyle(svg);
   return {
-    hasTab: true,
+    hasMenu: true,
+    hasItem: true,
     hasSvg: true,
-    tabWidth: tabRect.width,
-    tabHeight: tabRect.height,
+    menuOpen: menu.classList.contains('open'),
+    itemWidth: itemRect.width,
+    itemHeight: itemRect.height,
     svgWidth: svgRect.width,
     svgHeight: svgRect.height,
-    tabDisplay: cs.display,
-    tabBorderRadius: cs.borderTopLeftRadius,
-    svgWidthCss: svgCs.width,
-    svgHeightCss: svgCs.height,
-    svgFlexShrink: svgCs.flexShrink,
-    tabVisible: tabRect.width > 0 && tabRect.height > 0,
+    label: (item.textContent || '').trim(),
   };
 })()
 """
 
 
 @pytest.mark.timeout(180)
-def test_live_remote_tab_settings_button_renders_gear(
+def test_live_remote_more_menu_settings_item(
     tmp_path: Path,
 ) -> None:
-    """The remote page's tab-bar Settings tab is a real clickable pill
-    that contains an 18x18 SVG — not a dot."""
+    """On the live remote page the "..." button opens the overflow menu,
+    whose Settings item is a real clickable row with a visible gear
+    icon; clicking it opens the settings panel and closes the menu."""
     ready = threading.Event()
     done = threading.Event()
     state: dict[str, object] = {}
@@ -249,15 +202,16 @@ def test_live_remote_tab_settings_button_renders_gear(
                     f"https://127.0.0.1:{port}/",
                     wait_until="domcontentloaded",
                 )
-                page.wait_for_selector("#tab-bar", state="attached")
-                page.wait_for_selector(
-                    ".chat-tab-settings", state="attached"
-                )
-                page.wait_for_selector(
-                    ".chat-tab-settings svg", state="attached"
-                )
+                page.wait_for_selector("#more-btn", state="attached")
                 page.wait_for_timeout(200)
+                page.click("#more-btn")
+                page.wait_for_selector("#more-menu.open", state="visible")
                 measured = page.evaluate(_MEASURE_JS)
+                page.click("#settings-btn")
+                page.wait_for_selector(
+                    "#settings-panel.open", state="attached"
+                )
+                after = page.evaluate(_MEASURE_JS)
             finally:
                 browser.close()
     finally:
@@ -270,28 +224,21 @@ def test_live_remote_tab_settings_button_renders_gear(
             "RemoteAccessServer thread failed"
         ) from thread_error
 
-    assert measured["hasTab"], (
-        "renderTabBar() must append .chat-tab-settings to #tab-bar; "
-        + repr(measured)
+    assert measured["hasMenu"] and measured["hasItem"], repr(measured)
+    assert measured["menuOpen"], (
+        'clicking "..." must open the overflow menu; ' + repr(measured)
     )
     assert measured["hasSvg"], (
-        ".chat-tab-settings must contain a gear SVG child; "
+        "the Settings item must contain a gear SVG child; "
         + repr(measured)
     )
-    assert measured["svgWidth"] >= 16 and measured["svgHeight"] >= 16, (
-        "settings gear SVG must render at ~18x18; got: "
-        + repr(measured)
+    assert measured["svgWidth"] >= 14 and measured["svgHeight"] >= 14, (
+        "settings gear SVG must render at ~16x16; got: " + repr(measured)
     )
-    assert measured["svgWidthCss"] == "18px", measured
-    assert measured["svgHeightCss"] == "18px", measured
-    assert measured["svgFlexShrink"] == "0", (
-        "the gear SVG must be flex-shrink:0 so it cannot be squeezed "
-        + repr(measured)
+    assert measured["itemWidth"] >= 100 and measured["itemHeight"] >= 24, (
+        "settings item must be a clickable row; got: " + repr(measured)
     )
-    assert measured["tabWidth"] >= 32, (
-        "settings pill must be a clickable size; got: " + repr(measured)
-    )
-    assert measured["tabHeight"] >= 22, (
-        "settings pill must be tall enough to hit; got: "
-        + repr(measured)
+    assert "Settings" in str(measured["label"]), repr(measured)
+    assert not after["menuOpen"], (
+        "activating the Settings item must close the menu; " + repr(after)
     )
