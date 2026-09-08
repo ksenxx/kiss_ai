@@ -58,6 +58,7 @@ _REVEAL_APP_JS = """
 """
 
 _MODEL_NAMES = [
+    "claude-ultra-long-model-name-with-many-qualifiers-20261199-128k",
     "claude-fable-5",
     "claude-opus-4-5-20260114",
     "gpt-5.6-sol",
@@ -94,6 +95,43 @@ _DROPDOWN_GEOMETRY_JS = """
     left: r.left, right: r.right, top: r.top, bottom: r.bottom,
     vw: window.innerWidth, vh: window.innerHeight,
     items: document.querySelectorAll('#model-list .model-item').length,
+  };
+}
+"""
+
+# Horizontal-scroll geometry of the model list: with overflow-x hidden
+# and every name shrinking inside its row (.model-item-name), the list
+# must never be horizontally scrollable, and a long name must ellipsize
+# from the START (its end character stays inside the row box).
+_LIST_GEOMETRY_JS = """
+() => {
+  const list = document.getElementById('model-list');
+  const dd = document.getElementById('model-dropdown');
+  const rows = Array.from(
+    document.querySelectorAll('#model-list .model-item'));
+  const longRow = rows.find(r =>
+    r.textContent.includes('claude-ultra-long-model-name'));
+  const name = longRow.querySelector('.model-item-name');
+  const tn = name.firstChild;
+  const at = (i) => {
+    const r = document.createRange();
+    r.setStart(tn, i); r.setEnd(tn, i + 1);
+    return r.getBoundingClientRect();
+  };
+  const nameBox = name.getBoundingClientRect();
+  return {
+    listClientWidth: list.clientWidth,
+    listScrollWidth: list.scrollWidth,
+    listOverflowX: getComputedStyle(list).overflowX,
+    ddWidth: dd.getBoundingClientRect().width,
+    maxRowWidth: Math.max(
+      ...rows.map(r => r.getBoundingClientRect().width)),
+    nameClipped: name.scrollWidth > name.clientWidth,
+    nameBoxLeft: nameBox.left, nameBoxRight: nameBox.right,
+    firstLeft: at(1).left,
+    lastRight: at(tn.length - 2).right,
+    priceVisible: longRow.querySelector('.model-cost')
+      .getBoundingClientRect().right <= dd.getBoundingClientRect().right,
   };
 }
 """
@@ -357,3 +395,79 @@ def test_model_pill_truncates_from_start(tmp_path: Path) -> None:
         f"bidi reorder: the trailing digit of 'claude-fable-5' must "
         f"render at the RIGHT end of the pill: {digits!r}"
     )
+
+
+@pytest.mark.timeout(180)
+def test_mobile_model_list_never_scrolls_horizontally(
+    tmp_path: Path,
+) -> None:
+    """At phone widths the open model list is never horizontally
+    scrollable: rows shrink long names (start-ellipsis) instead of
+    widening the scroller, and the price stays inside the dropdown."""
+    ready = threading.Event()
+    done = threading.Event()
+    state: dict[str, object] = {}
+    thread = threading.Thread(
+        target=_start_live_server,
+        args=(tmp_path, ready, done, state),
+        daemon=True,
+    )
+    thread.start()
+    geos: dict[str, dict] = {}
+    try:
+        assert ready.wait(30), "RemoteAccessServer failed to start"
+        startup_error = state.get("error")
+        if isinstance(startup_error, BaseException):
+            raise AssertionError(
+                "RemoteAccessServer startup failed"
+            ) from startup_error
+        port = state["port"]
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=["--ignore-certificate-errors"])
+            try:
+                for width, height in [(390, 844), (320, 700)]:
+                    page = browser.new_page(
+                        ignore_https_errors=True,
+                        viewport={"width": width, "height": height},
+                    )
+                    page.goto(
+                        f"https://127.0.0.1:{port}/",
+                        wait_until="domcontentloaded",
+                    )
+                    _open_dropdown(page)
+                    geos[f"{width}px"] = page.evaluate(_LIST_GEOMETRY_JS)
+                    page.close()
+            finally:
+                browser.close()
+    finally:
+        done.set()
+        thread.join(timeout=30)
+    assert not thread.is_alive(), "RemoteAccessServer failed to stop"
+
+    for label, geo in geos.items():
+        assert geo["listOverflowX"] == "hidden", f"{label}: {geo!r}"
+        assert geo["listScrollWidth"] <= geo["listClientWidth"], (
+            f"{label}: the model list is horizontally scrollable: {geo!r}"
+        )
+        assert geo["maxRowWidth"] <= geo["ddWidth"] + 1, (
+            f"{label}: a row is wider than the dropdown: {geo!r}"
+        )
+        assert geo["priceVisible"], (
+            f"{label}: the price fell off the dropdown's right edge: "
+            f"{geo!r}"
+        )
+        # The 64-char name cannot fit a phone-width row: it must be
+        # clipped, keeping its END on screen (leading ellipsis).
+        assert geo["nameClipped"], (
+            f"{label}: the long name unexpectedly fits, so this test "
+            f"no longer exercises truncation: {geo!r}"
+        )
+        assert geo["lastRight"] <= geo["nameBoxRight"] + 1, (
+            f"{label}: the END of the long name must stay visible: "
+            f"{geo!r}"
+        )
+        assert geo["firstLeft"] < geo["nameBoxLeft"], (
+            f"{label}: the START of the long name must be the clipped "
+            f"part: {geo!r}"
+        )

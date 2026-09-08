@@ -781,8 +781,8 @@ def test_live_task_panel_typography_and_history_rows(
         "the metadata flow must not be clipped horizontally: " + repr(probes)
     )
     assert "3 steps" in probes["metricsText"], probes
-    assert "1,234 tok" in probes["metricsText"], probes
-    assert "$0.5000" in probes["metricsText"], probes
+    assert "1.23K tok" in probes["metricsText"], probes
+    assert "$0.50" in probes["metricsText"], probes
     assert "00:01:01" in probes["metricsText"], probes
     assert re.search(r"Nov 1[45], 2023, \d{1,2}:\d{2}\s?[AP]M", probes["metricsText"]), probes
     assert (
