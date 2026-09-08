@@ -1,6 +1,6 @@
-# Writing Extension Agents for KISS Sorcar
+# Writing Sorcar Extension Agents (SEAs) for KISS Sorcar
 
-An **extension agent** is a plain Python file whose path you pass as
+A **Sorcar Extension Agent (SEA)** is a plain Python file whose path you pass as
 `extension_agent_path` to `kiss.server.sorcar.run()`.  The daemon
 imports the file, calls its top-level `get_X()` functions, and uses
 the return values to override the run's parameters.  Parameters
@@ -16,14 +16,14 @@ contract, error handling, and ends with a complete working example.
 - A running `kiss-web` daemon (start one with `kiss-web`).
 - At least one LLM provider API key configured (Anthropic, OpenAI,
   Google, OpenRouter, etc.).
-- Any Python packages your extension agent imports must be available
+- Any Python packages your SEA imports must be available
   in the daemon's Python environment.
 
 
 ## Quick start
 
 ```python
-# weather_agent.py — a minimal extension agent
+# weather_agent.py — a minimal SEA
 
 import requests
 
@@ -128,8 +128,8 @@ on the daemon.
 
 Every parameter of `sorcar.run()` except `timeout`, `stop_on_timeout`,
 `sock_path`, `scope_work_dir`, `web_tools`, `is_parallel`, and
-`extension_agent_path` itself has a corresponding getter the extension
-agent may define.  The getter is named `get_X()` for parameter `X`,
+`extension_agent_path` itself has a corresponding getter the SEA
+may define.  The getter is named `get_X()` for parameter `X`,
 except `append_basic_tools`, whose getter is
 `get_if_append_basic_tools()`.  The table below lists them all.
 
@@ -238,7 +238,7 @@ def get_tool_call_hook():
 
 ## Tools: two contracts
 
-An extension agent supplies tools to the LLM agent through one of two
+An SEA supplies tools to the LLM agent through one of two
 approaches.
 
 ### 1. Separate tools file (path return)
@@ -276,7 +276,7 @@ def get_tools():
 `get_tools()` returns a **list of callables** directly.  The daemon
 normalizes this to the agent script's own path and later re-imports
 the same file as the tools file, calling `get_tools()` again.  This
-makes the extension agent its own tools file — a single file provides
+makes the SEA its own tools file — a single file provides
 both parameter overrides and tools.
 
 Because the file is imported twice per run (once for parameter
@@ -401,7 +401,7 @@ result2 = sorcar.run(
 )
 ```
 
-An extension agent can also force a specific chat via `get_chat_id()`.
+An SEA can also force a specific chat via `get_chat_id()`.
 
 
 ## Model configuration
@@ -427,7 +427,7 @@ at that URL.
 
 ## Complete working example
 
-Below is a self-contained extension agent that gives the LLM tools for
+Below is a self-contained SEA that gives the LLM tools for
 managing a SQLite task database.  It uses the full basic toolset
 (`append_basic_tools` defaults to `True`), so the LLM can also use
 `Bash`, `Read`, `Write`, etc. alongside the custom database tools.
@@ -438,7 +438,7 @@ default model is used.
 
 ```python
 # task_manager_agent.py
-"""Extension agent for managing a SQLite task database.
+"""SEA for managing a SQLite task database.
 
 Gives the LLM three tools — add_task, list_tasks, complete_task — and
 a system prompt explaining how to use them.  The agent runs with the
@@ -632,9 +632,9 @@ class TaskResult:
 ```
 
 
-## Extension agent vs. tools file
+## SEA vs. tools file
 
-| Aspect | Extension agent (`extension_agent_path`) | Tools file (`tools`) |
+| Aspect | SEA (`extension_agent_path`) | Tools file (`tools`) |
 |--------|------------------------------------------|----------------------|
 | **Purpose** | Override run parameters AND supply tools | Supply tools only |
 | **Getter functions** | `get_prompt()`, `get_model()`, `get_system_prompt()`, `get_tools()`, etc. (13 total) | `get_tools()` only |
@@ -647,12 +647,12 @@ class TaskResult:
 
 - The client-side `prompt` argument must be **non-empty** even when
   `get_prompt()` overrides it; the client validates before connecting.
-- An extension agent **may define any subset** of the getters.  Only
+- An SEA **may define any subset** of the getters.  Only
   define the ones whose defaults you want to change.
 - Omit `get_model()` to use the daemon's configured default model
   rather than hard-coding one.
-- The `get_tools()` return value of a **list** makes the extension
-  agent its own tools file.  This is the most common pattern.
+- The `get_tools()` return value of a **list** makes the SEA its
+  own tools file.  This is the most common pattern.
 - **Use absolute paths** for the `get_tools()` path return — the
   daemon does not resolve paths against the client's working directory.
 - `get_tools()` **overrides** the caller's `tools` argument; it does
@@ -667,7 +667,7 @@ class TaskResult:
 - A `get_X = None` (a defined attribute that is not callable) is
   treated as a broken getter and stops the task — it is not treated
   as "absent".
-- The extension agent and its tools run **in the daemon process**
+- The SEA and its tools run **in the daemon process**
   with the daemon user's privileges and environment.  Any libraries
   your code imports must be installed in the daemon's Python
   environment.
