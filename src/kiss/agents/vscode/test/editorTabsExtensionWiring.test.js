@@ -11,8 +11,14 @@
 //    insertSelectionToChat go to the panel manager's controllers when
 //    the mode is ON and to the sidebar view when OFF;
 //  - flipping kissSorcar.editorTabsMode ON migrates the registry's
-//    tabs into panels (enterMode) and OFF closes all panels and
-//    refocuses the sidebar.
+//    tabs into panels (enterMode) and OFF closes all panels AND the
+//    secondary sidebar (workbench.action.closeAuxiliaryBar) without
+//    refocusing the chat;
+//  - the KS activity-bar button's dummy tree (non-editor mode): on
+//    becoming visible it closes the primary sidebar and reveals the
+//    chat in the secondary sidebar without creating a chat — except
+//    right after an editorTabsMode flip, which must leave the
+//    secondary sidebar closed.
 //
 // The panel manager and sidebar view are replaced by instrumented
 // fakes (the real ones have their own end-to-end suites:
@@ -55,6 +61,7 @@ const commands = new Map();
 const executedCommands = [];
 const configListeners = [];
 const viewProviders = new Map();
+const treeVisibilityListeners = [];
 
 const vscodeStub = {
   window: {
@@ -63,7 +70,10 @@ const vscodeStub = {
       return makeDisposable();
     },
     createTreeView: () => ({
-      onDidChangeVisibility: () => makeDisposable(),
+      onDidChangeVisibility: cb => {
+        treeVisibilityListeners.push(cb);
+        return makeDisposable();
+      },
       dispose: () => {},
     }),
     showInformationMessage: () => Promise.resolve(undefined),
@@ -363,6 +373,34 @@ async function runTest() {
   );
   assert.strictEqual(calls.manager.openNewChat, 0);
 
+  // --- the KS activity-bar button (sidebar mode): its dummy tree -------
+  // Becoming visible closes the primary sidebar (nothing — history
+  // panel included — may stay open there) and reveals the chat in the
+  // secondary sidebar, creating no chat.
+  assert.strictEqual(treeVisibilityListeners.length, 1, 'tree handler');
+  const treeFocusBefore = calls.sidebar.focusChatInput;
+  executedCommands.length = 0;
+  for (const cb of treeVisibilityListeners) cb({visible: true});
+  await new Promise(r => setTimeout(r, 120));
+  assert.deepStrictEqual(
+    executedCommands.map(e => e.cmd),
+    ['workbench.action.closeSidebar'],
+    'KS activity-bar click: the primary sidebar closes',
+  );
+  assert.strictEqual(
+    calls.sidebar.focusChatInput,
+    treeFocusBefore + 1,
+    'KS activity-bar click: the secondary-sidebar chat is revealed',
+  );
+  assert.strictEqual(calls.manager.openNewChat, 0, 'no chat created');
+
+  // A hidden tree does nothing.
+  executedCommands.length = 0;
+  for (const cb of treeVisibilityListeners) cb({visible: false});
+  await new Promise(r => setTimeout(r, 120));
+  assert.deepStrictEqual(executedCommands, []);
+  assert.strictEqual(calls.sidebar.focusChatInput, treeFocusBefore + 1);
+
   // --- flip the mode ON: registry tabs migrate to panels ---------------
   editorTabsMode = true;
   await fireConfigChange();
@@ -493,15 +531,40 @@ async function runTest() {
   historyController.panelHooks.onEvent({kind: 'title', title: 'ignored'});
   assert.strictEqual(calls.manager.openChat.length, 1);
 
-  // --- flip the mode OFF: panels close, sidebar comes back --------------
+  // --- flip the mode OFF: panels close, secondary sidebar closes --------
   const focusBeforeModeOff = calls.sidebar.focusChatInput;
+  executedCommands.length = 0;
   editorTabsMode = false;
   await fireConfigChange();
   assert.strictEqual(calls.manager.closeAll, 1);
+  assert.ok(
+    executedCommands.some(
+      e => e.cmd === 'workbench.action.closeAuxiliaryBar',
+    ),
+    'mode off closes the secondary sidebar',
+  );
   assert.strictEqual(
     calls.sidebar.focusChatInput,
-    focusBeforeModeOff + 1,
-    'mode off refocuses the sidebar chat',
+    focusBeforeModeOff,
+    'mode off must NOT reopen/refocus the sidebar chat',
+  );
+
+  // The flip pops the dummy tree up in the still-open primary sidebar
+  // (the history panel hides, the tree takes its spot): the handler
+  // closes the primary sidebar but must leave the secondary sidebar
+  // closed — this is a mode flip, not a KS click.
+  executedCommands.length = 0;
+  for (const cb of treeVisibilityListeners) cb({visible: true});
+  await new Promise(r => setTimeout(r, 120));
+  assert.deepStrictEqual(
+    executedCommands.map(e => e.cmd),
+    ['workbench.action.closeSidebar'],
+    'tree shown by the mode flip: primary sidebar closes',
+  );
+  assert.strictEqual(
+    calls.sidebar.focusChatInput,
+    focusBeforeModeOff,
+    'tree shown by the mode flip: secondary sidebar stays closed',
   );
 
   for (const d of ctx.subscriptions) {

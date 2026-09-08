@@ -116,7 +116,10 @@
             <div id="model-picker">
               <button id="model-btn" data-tooltip="Select model">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
-                <span id="model-name">{{MODEL_NAME}}</span>
+                <!-- The &lrm; marks pin the LTR character order inside
+                     the pill's RTL (leading-truncation) line, exactly
+                     like refreshModelLabel's U+200E wrapping. -->
+                <span id="model-name">&lrm;{{MODEL_NAME}}&lrm;</span>
               </button>
               <div id="model-dropdown">
                 <div class="search-wrap">

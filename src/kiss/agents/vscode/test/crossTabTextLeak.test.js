@@ -1435,8 +1435,12 @@ test('models still updates the model picker', () => {
     ],
     selected: 'model-QK70',
   });
+  // The pill wraps its label in U+200E marks (leading-truncation CSS
+  // keeps the line RTL; the marks pin the character order).
   assert.strictEqual(
-    win.document.getElementById('model-name').textContent,
+    win.document
+      .getElementById('model-name')
+      .textContent.replace(/\u200e/g, ''),
     'model-QK70',
     'the model list is app-global and must keep rendering',
   );

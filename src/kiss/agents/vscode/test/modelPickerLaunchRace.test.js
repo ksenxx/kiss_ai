@@ -67,8 +67,10 @@ function clickTab(win, tabId) {
 }
 
 function pickerText(win) {
+  // Strip the U+200E marks refreshModelLabel adds for the pill's
+  // leading-truncation (RTL line) rendering.
   const el = win.document.getElementById('model-name');
-  return (el && el.textContent) || '';
+  return ((el && el.textContent) || '').replace(/\u200e/g, '');
 }
 
 function testRestoredTabInheritsTemplateModelOnLaunch() {

@@ -80,14 +80,17 @@ export function activate(context: vscode.ExtensionContext): void {
   // Switching the editor-tabs mode (from the settings UI toggle or
   // settings.json): ON migrates the registry's chats of this workspace
   // into editor tabs (the sidebar view hides via its `when` clause);
-  // OFF closes the panels without retiring their chats and brings the
-  // sidebar view back, which re-adopts them from `tabs_state`.
+  // OFF closes the panels without retiring their chats and CLOSES the
+  // secondary sidebar — the sidebar view re-adopts the chats from
+  // `tabs_state` when a KS button (or anything else) next reveals it.
   // Guarded like the other optional host APIs (see
   // registerWebviewPanelSerializer): absent only in test stubs.
+  let modeSwitchAt = 0;
   if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
     context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration(e => {
         if (!e.affectsConfiguration('kissSorcar.editorTabsMode')) return;
+        modeSwitchAt = Date.now();
         if (editorTabsMode()) {
           panelManager!.enterMode(
             sidebarView!.getRegistryTabEntries(),
@@ -95,7 +98,9 @@ export function activate(context: vscode.ExtensionContext): void {
           );
         } else {
           panelManager!.closeAll();
-          void sidebarView!.focusChatInput();
+          void vscode.commands.executeCommand(
+            'workbench.action.closeAuxiliaryBar',
+          );
         }
       }),
     );
@@ -164,6 +169,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // The editor-title KS button (editor-tabs mode): show the history
   // panel in the primary sidebar, and make sure a chat tab is open.
+  // In non-editor-tabs mode a KS button only reveals the chat in the
+  // secondary sidebar: no history panel, no new chat.
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.showHistory', async () => {
       if (!editorTabsMode()) {
@@ -548,11 +555,21 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   context.subscriptions.push(treeView);
 
+  // The KS activity-bar button in non-editor-tabs mode shows this
+  // dummy tree: never leave anything (history panel or otherwise) up
+  // in the primary sidebar — close it back and reveal the existing
+  // chat in the secondary sidebar instead, creating no new chat.
   treeView.onDidChangeVisibility(async e => {
-    if (e.visible) {
-      await vscode.commands.executeCommand('workbench.view.explorer');
-      await chatController(true)!.focusChatInput();
-    }
+    if (!e.visible) return;
+    await vscode.commands.executeCommand('workbench.action.closeSidebar');
+    // The tree also pops up when editorTabsMode flips OFF while the
+    // KISS container is the active primary-sidebar view (the history
+    // panel hides, the tree takes its spot). That flip must leave the
+    // secondary sidebar CLOSED, so give its config handler — which may
+    // run in this same tick — a moment to record itself, then bail.
+    await new Promise(r => setTimeout(r, 50));
+    if (Date.now() - modeSwitchAt < 2000) return;
+    await sidebarView!.focusChatInput();
   });
 
   if (!context.workspaceState.get<boolean>('sidebarWidened')) {
