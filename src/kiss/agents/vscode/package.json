@@ -195,7 +195,7 @@
         },
         "kissSorcar.editorTabsMode": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "Open each KISS Sorcar chat as an editor tab instead of the secondary-sidebar chat view (toggleable from the chat's settings panel)"
         }
       }
