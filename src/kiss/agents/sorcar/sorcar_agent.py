@@ -963,10 +963,15 @@ class SorcarAgent(RelentlessAgent):
         """Return the frontend tab id sub-agents should call their parent.
 
         Normally this agent's own ``_tab_id``.  When this agent is
-        itself a sub-agent (nested ``run_parallel``), its ``_tab_id``
-        is the synthetic id its parent invented, which no webview may
-        have opened yet; the printer's viewer registry knows which tab
-        is really watching this task, so that one wins.
+        itself a sub-agent (nested ``run_parallel``, or a ``run_agent``
+        dispatch), its ``_tab_id`` is a synthetic id — the fan-out's
+        invented one, or the daemon dispatch's ``api-…`` id — which no
+        webview has opened; the printer's viewer registry knows which
+        tab is really watching this task, so that one wins.  The
+        agent's own synthetic id is excluded from the candidates: a
+        ``run_agent`` dispatch registers it as a subscriber too (see
+        ``register_task_ui``), and picking it would parent the nested
+        children under a tab no client has, dropping their tabs.
 
         Returns:
             The tab id, or ``""`` when running headless.
@@ -978,8 +983,10 @@ class SorcarAgent(RelentlessAgent):
         own_task_id = _persisted_task_id(self)
         if fanout is None or not own_task_id:
             return tab_id
-        viewer_ids = fanout(own_task_id)
-        return sorted(viewer_ids)[0] if viewer_ids else tab_id
+        viewer_ids = sorted(
+            v for v in fanout(own_task_id) if v and v != tab_id
+        )
+        return viewer_ids[0] if viewer_ids else tab_id
 
     def _run_tasks_parallel(
         self,
