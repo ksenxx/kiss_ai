@@ -22,6 +22,24 @@ export const CHAT_PANEL_VIEW_TYPE = 'kissSorcar.chatTab';
 
 const DEFAULT_PANEL_TITLE = 'KISS Sorcar';
 
+// Editor-tab title status prefixes — the editor-tab analogue of the
+// sidebar tab strip's status dot (.chat-tab-spinner / .chat-tab-ok /
+// .chat-tab-fail in main.css): a green circle while the task runs
+// (pulsed by alternating with a hollow circle), solid green after a
+// success, solid red after a failure.
+const STATUS_OK_PREFIX = '\u{1F7E2} '; // 🟢
+const STATUS_FAIL_PREFIX = '\u{1F534} '; // 🔴
+const STATUS_RUNNING_DIM_PREFIX = '\u{26AA} '; // ⚪ (pulse's dim phase)
+// Half the sidebar dot's 1.5s CSS pulse period: one bright + one dim
+// phase per cycle.
+const PULSE_INTERVAL_MS = 750;
+const STATUS_PREFIX_RE = /^(?:\u{1F7E2}|\u{1F534}|\u{26AA})\s+/u;
+
+/** Drop a status circle a previous session left in a panel title. */
+function stripStatusPrefix(title: string): string {
+  return (title || '').replace(STATUS_PREFIX_RE, '');
+}
+
 type NotificationMessage = Extract<ToWebviewMessage, {type: 'notification'}>;
 
 interface ChatPanel {
@@ -29,6 +47,10 @@ interface ChatPanel {
   tabId: string;
   /** The backend chat id once the tab bound to one ('' before). */
   chatId: string;
+  /** The webview-reported chat title WITHOUT the status prefix. */
+  baseTitle: string;
+  /** Root task status: '', 'running', 'ok' or 'fail'. */
+  status: string;
   panel: vscode.WebviewPanel;
   controller: SorcarSidebarView;
   /**
@@ -70,6 +92,10 @@ export class SorcarPanelManager {
   private _panels: Map<string, ChatPanel> = new Map();
   private _active: ChatPanel | undefined;
   private _poster: ((message: NotificationMessage) => void) | undefined;
+  // Shared pulse clock for every running panel's title circle; live
+  // only while at least one panel is in the 'running' state.
+  private _pulseTimer: ReturnType<typeof setInterval> | undefined;
+  private _pulseBright: boolean = true;
   // Terminal teardown (deactivate / window reload): panel disposals
   // after this are not user closes and must not retire chats from the
   // daemon's registry.
@@ -130,7 +156,9 @@ export class SorcarPanelManager {
           typeof s.editorRootTabId === 'string' && s.editorRootTabId
             ? s.editorRootTabId
             : randomTabId();
-        this._adoptPanel(panel, {tabId, title: panel.title});
+        // The workbench persisted the decorated title; the status it
+        // carried belongs to the previous session.
+        this._adoptPanel(panel, {tabId, title: stripStatusPrefix(panel.title)});
         return Promise.resolve();
       },
     });
@@ -226,6 +254,7 @@ export class SorcarPanelManager {
       cp.controller.dispose();
     }
     this._panels.clear();
+    this._syncPulseTimer();
     this._active = undefined;
     this._refreshPoster();
   }
@@ -268,10 +297,16 @@ export class SorcarPanelManager {
     const cp: ChatPanel = {
       tabId: init.tabId,
       chatId: init.resumeChatId || '',
+      baseTitle: init.title || '',
+      status: '',
       panel,
       controller: undefined as unknown as SorcarSidebarView,
       suppressCloseTab: false,
     };
+    // A revived panel may still carry the previous session's status
+    // circle in its persisted title (the serializer strips it from
+    // init.title); repaint from the clean slate.
+    this._applyPanelTitle(cp);
     cp.controller = new SorcarSidebarView(this._extensionUri, {
       rootTabId: init.tabId,
       onEvent: (event: PanelEvent) => this._onPanelEvent(cp, event),
@@ -301,6 +336,7 @@ export class SorcarPanelManager {
     });
     panel.onDidDispose(() => {
       this._panels.delete(cp.tabId);
+      this._syncPulseTimer();
       if (this._active === cp) this._active = undefined;
       // A user close retires the chat (the sidebar webview does the
       // same for its internal tabs); a mode switch, a closeSelf echo
@@ -321,13 +357,70 @@ export class SorcarPanelManager {
     else cp.controller.closeChatTab(cp.tabId);
   }
 
+  /**
+   * Paint *cp*'s editor tab title: the status circle (solid green /
+   * solid red / pulsing green while running) followed by the chat
+   * title — the editor-tab analogue of the sidebar strip's status dot.
+   */
+  private _applyPanelTitle(cp: ChatPanel): void {
+    let prefix = '';
+    if (cp.status === 'running') {
+      prefix = this._pulseBright ? STATUS_OK_PREFIX : STATUS_RUNNING_DIM_PREFIX;
+    } else if (cp.status === 'ok') {
+      prefix = STATUS_OK_PREFIX;
+    } else if (cp.status === 'fail') {
+      prefix = STATUS_FAIL_PREFIX;
+    }
+    cp.panel.title = prefix + (cp.baseTitle || DEFAULT_PANEL_TITLE);
+  }
+
+  /**
+   * Keep the shared pulse interval alive exactly while some panel is
+   * running: each tick flips the bright/dim phase and repaints every
+   * running panel's title circle.
+   */
+  private _syncPulseTimer(): void {
+    const anyRunning = [...this._panels.values()].some(
+      cp => cp.status === 'running',
+    );
+    if (anyRunning && this._pulseTimer === undefined) {
+      this._pulseTimer = setInterval(() => {
+        this._pulseBright = !this._pulseBright;
+        for (const cp of this._panels.values()) {
+          if (cp.status === 'running') this._applyPanelTitle(cp);
+        }
+      }, PULSE_INTERVAL_MS);
+    } else if (!anyRunning && this._pulseTimer !== undefined) {
+      clearInterval(this._pulseTimer);
+      this._pulseTimer = undefined;
+      this._pulseBright = true;
+    }
+  }
+
   private _onPanelEvent(cp: ChatPanel, event: PanelEvent): void {
     switch (event.kind) {
       case 'title': {
-        const title = (event.title || '').trim();
-        cp.panel.title = title || DEFAULT_PANEL_TITLE;
+        // The webview's title is authoritative and never decorated —
+        // a chat legitimately titled "🟢 deploy status" keeps its
+        // circle (only the serializer strips, and only the one prefix
+        // a previous session's decoration added).
+        cp.baseTitle = (event.title || '').trim();
+        cp.status = event.state || '';
+        // A fresh run always starts on the bright phase so the circle
+        // appears immediately, not half a period late.
+        if (cp.status === 'running' && this._pulseTimer === undefined) {
+          this._pulseBright = true;
+        }
+        this._applyPanelTitle(cp);
+        this._syncPulseTimer();
         break;
       }
+      case 'reveal':
+        // A finished task brings its editor tab forward the way
+        // sidebar mode switches its internal tab — without stealing
+        // the user's keyboard focus.
+        cp.panel.reveal(undefined, true);
+        break;
       case 'chatBound':
         cp.chatId = event.chatId;
         break;

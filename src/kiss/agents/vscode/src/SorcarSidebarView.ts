@@ -222,8 +222,12 @@ export interface ChatWebviewHost {
  * rather than of the daemon.
  */
 export type PanelEvent =
-  // The root chat tab renamed itself; retitle the editor tab.
-  | {kind: 'title'; title: string}
+  // The root chat tab renamed itself or its task's status changed;
+  // retitle the editor tab. `state` is '' (no task yet), 'running',
+  // 'ok' or 'fail' — the internal tab strip's status dot.
+  | {kind: 'title'; title: string; state?: string}
+  // A task in the panel just finished; bring the editor tab forward.
+  | {kind: 'reveal'}
   // Open another chat as a new editor tab (fresh when chatId is '').
   | {
       kind: 'openChat';
@@ -1543,7 +1547,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'panelTitle':
-        this._panelHooks?.onEvent({kind: 'title', title: message.title});
+        this._panelHooks?.onEvent({
+          kind: 'title',
+          title: message.title,
+          state: message.state,
+        });
+        break;
+
+      case 'revealPanel':
+        this._panelHooks?.onEvent({kind: 'reveal'});
         break;
 
       case 'openChatPanel':
