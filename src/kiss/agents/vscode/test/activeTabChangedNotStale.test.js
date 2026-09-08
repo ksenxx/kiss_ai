@@ -105,7 +105,7 @@ function clickTab(win, tabId) {
 }
 
 function clickNewTabButton(win) {
-  click(win, win.document.querySelector('.chat-tab-add'), 'new-tab button');
+  click(win, win.document.querySelector('#new-chat-btn'), 'new-tab button');
 }
 
 function closeTabByButton(win, tabId) {

@@ -487,48 +487,58 @@ class _CommandsMixin:
         # non-None thread guarantees the state.
         assert state is not None
         try:
-            # Register + title + bind the tab in the shared registry
-            # BEFORE the ``clear`` broadcast so every client has the
-            # tab by the time the run's first event reaches it.  A new
-            # run supersedes any historical task the tab was pinned to
-            # (``taskId`` cleared: the tab tracks the chat's latest
-            # task again — the one this run creates).
-            self._registry_update_tab(
-                tab_id,
-                chat_id=chat_id,
-                title=str(cmd.get("prompt", "") or ""),
-                work_dir=str(cmd.get("workDir", "") or ""),
-                # A ``run_agent`` sub-task (wire field
-                # ``tabScopeWorkDir``) executes in a channel/cron
-                # scratch directory but must appear in the CALLING
-                # workspace's tab bar, so its visibility scope is
-                # pinned to that workspace here while ``workDir`` stays
-                # the scratch directory.  Empty for ordinary runs,
-                # whose scope falls back to ``workDir`` unchanged.
-                scope_work_dir=str(cmd.get("tabScopeWorkDir", "") or ""),
-                task_id="",
-                create=True,
-            )
-            # The submit-ack ``setTaskText`` at the top of this method
-            # raced ahead of the tab's registration when the run
-            # CREATES its tab — a Python client's synthetic ``api-…``
-            # tab (``sorcar.run`` and the ``run_agent`` dispatch): no
-            # client had adopted the tab yet, so every client dropped
-            # the task-panel text and the tab showed its transcript
-            # WITHOUT the fixed task panel at the top.  Re-echo the
-            # text now that the registration's ``tabs_state`` snapshot
-            # has handed every client the tab.  Unconditional on
-            # purpose: gating it on a pre-registration ``has_tab``
-            # probe is a TOCTOU (a concurrent ``closeTab`` between
-            # probe and registration recreates the tab yet suppresses
-            # the echo), and clients apply a repeated ``setTaskText``
-            # idempotently — the daemon already echoes one per queued
-            # follow-up as well.
-            self.printer.broadcast({
-                "type": "setTaskText",
-                "text": str(cmd.get("prompt", "") or ""),
-                "tabId": tab_id,
-            })
+            # A sub-agent dispatch (wire field ``parentTaskId``, set by
+            # ``run_agent``'s daemon client on behalf of a calling
+            # task) gets NO top-level registry tab: like a
+            # ``run_parallel`` sub-task, its tab is client-local,
+            # created on every client viewing the parent by the run's
+            # own ``new_tab`` broadcast (see ``ChatSorcarAgent.run``)
+            # and nested under the parent's tab.  Registering it here
+            # would ALSO show it as an ordinary top-level tab.
+            is_subagent_run = bool(str(cmd.get("parentTaskId", "") or ""))
+            if not is_subagent_run:
+                # Register + title + bind the tab in the shared registry
+                # BEFORE the ``clear`` broadcast so every client has the
+                # tab by the time the run's first event reaches it.  A new
+                # run supersedes any historical task the tab was pinned to
+                # (``taskId`` cleared: the tab tracks the chat's latest
+                # task again — the one this run creates).
+                self._registry_update_tab(
+                    tab_id,
+                    chat_id=chat_id,
+                    title=str(cmd.get("prompt", "") or ""),
+                    work_dir=str(cmd.get("workDir", "") or ""),
+                    # A standalone ``sorcar.run`` sub-task (wire field
+                    # ``tabScopeWorkDir``) may execute in a channel/cron
+                    # scratch directory but must appear in the CALLING
+                    # workspace's tab bar, so its visibility scope is
+                    # pinned to that workspace here while ``workDir`` stays
+                    # the scratch directory.  Empty for ordinary runs,
+                    # whose scope falls back to ``workDir`` unchanged.
+                    scope_work_dir=str(cmd.get("tabScopeWorkDir", "") or ""),
+                    task_id="",
+                    create=True,
+                )
+                # The submit-ack ``setTaskText`` at the top of this method
+                # raced ahead of the tab's registration when the run
+                # CREATES its tab — a Python client's synthetic ``api-…``
+                # tab (``sorcar.run``): no
+                # client had adopted the tab yet, so every client dropped
+                # the task-panel text and the tab showed its transcript
+                # WITHOUT the fixed task panel at the top.  Re-echo the
+                # text now that the registration's ``tabs_state`` snapshot
+                # has handed every client the tab.  Unconditional on
+                # purpose: gating it on a pre-registration ``has_tab``
+                # probe is a TOCTOU (a concurrent ``closeTab`` between
+                # probe and registration recreates the tab yet suppresses
+                # the echo), and clients apply a repeated ``setTaskText``
+                # idempotently — the daemon already echoes one per queued
+                # follow-up as well.
+                self.printer.broadcast({
+                    "type": "setTaskText",
+                    "text": str(cmd.get("prompt", "") or ""),
+                    "tabId": tab_id,
+                })
             self.printer.broadcast({
                 "type": "clear",
                 "chat_id": chat_id,

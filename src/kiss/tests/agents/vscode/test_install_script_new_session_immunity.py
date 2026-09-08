@@ -133,6 +133,12 @@ def _spawn_harness(
     ``start_new_session=True`` places the harness's bash in a fresh
     session and process group so the test can ``os.killpg(proc.pid,
     signum)`` without touching the pytest worker process.
+
+    ``preexec_fn`` resets INT/HUP/TERM to SIG_DFL: dispositions of
+    ignored signals are inherited across exec, so under ``nohup``
+    (SIGHUP -> SIG_IGN, common for parallel CI runners) the harness
+    would survive the SIGHUP bursts even WITHOUT the re-exec block
+    under test, and the immunity assertions would pass vacuously.
     """
     env = os.environ.copy()
     if extra_env:
@@ -142,8 +148,16 @@ def _spawn_harness(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         start_new_session=True,
+        preexec_fn=_restore_signal_defaults,
         env=env,
     )
+
+
+def _restore_signal_defaults() -> None:
+    """Reset INT/HUP/TERM to SIG_DFL in the child before exec (see above)."""
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
 
 def _write_signal_harness(
