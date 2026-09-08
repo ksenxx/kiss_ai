@@ -1808,6 +1808,23 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Reveal the chat and run its manual Git Commit — the editor-title
+   * git-commit button's action in editor-tabs mode (also usable in
+   * sidebar mode). Same flow as the settings drawer's Git Commit
+   * button: the webview asks the daemon to commit the active chat
+   * tab's working tree (autocommitAction). Waits briefly for a
+   * freshly created webview to report `ready` so the message is not
+   * dropped by a still-loading page.
+   */
+  public async gitCommit(): Promise<void> {
+    await this.focusChatInput();
+    for (let i = 0; i < 15 && this._view && !this._webviewReady; i++) {
+      await new Promise(r => setTimeout(r, 200));
+    }
+    this._sendToWebview({type: 'gitCommit'});
+  }
+
+  /**
    * Ask the webview to bring one of its chat's tasks on screen —
    * scroll to the task's transcript region or replay it (editor-tabs
    * mode: a history-panel click on a chat whose panel already exists).
