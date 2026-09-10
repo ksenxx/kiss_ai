@@ -382,12 +382,7 @@ export function buildChatHtml(
     ` media-src data: ${webview.cspSource};` +
     ` form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none';">`;
 
-  const placeholder =
-    `Ask anything... (@ for files,` +
-    ` ${mod}D toggle between editor and chat,` +
-    ` ${mod}T new chat,` +
-    ` ${mod}E run selected text as task,` +
-    ` ${mod}L copy text to chat)`;
+  const placeholder = `Ask anything... (@ for files, ${mod}T new chat)`;
 
   const subs: Record<string, string> = {
     VIEWPORT: 'width=device-width, initial-scale=1.0',
