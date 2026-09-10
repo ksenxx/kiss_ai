@@ -73,6 +73,11 @@ class Reply:
             lines (which the SDK filters out before yielding), until this
             event fires or the client hangs up — a provider that accepted
             the request and then went quiet.
+        drop: When True, the handler closes the connection after reading
+            the request without writing any response bytes — a provider
+            (or a proxy in front of it) that received the request and then
+            reset the connection.  The SDK surfaces this as
+            ``APIConnectionError``.
     """
 
     status: int = 200
@@ -81,6 +86,7 @@ class Reply:
     truncate_after: int | None = None
     chunk_gate: threading.Event | None = None
     hold: threading.Event | None = None
+    drop: bool = False
 
 
 def chat_chunk(payload: dict[str, Any]) -> bytes:
@@ -130,6 +136,9 @@ class _ScriptedHandler(BaseHTTPRequestHandler):
         with server.lock:
             server.requests.append(request)
         reply = server.responder(request)
+        if reply.drop:
+            self.close_connection = True
+            return
         if reply.json_body is not None:
             self._write_json(reply)
             return

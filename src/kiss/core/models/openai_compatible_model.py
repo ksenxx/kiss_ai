@@ -12,7 +12,8 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from openai import BadRequestError, OpenAI
+import httpx
+from openai import APIConnectionError, BadRequestError, OpenAI
 from openai.resources.chat.completions import Completions
 
 if TYPE_CHECKING:  # pragma: no cover – import cycle avoided at runtime
@@ -39,6 +40,19 @@ logger = logging.getLogger(__name__)
 # The request parameters a Chat Completions call accepts, taken from the
 # SDK's own signature (keyword-only, no **kwargs).
 _CHAT_REQUEST_PARAMS = accepted_request_params(Completions.create)
+
+# Silent SDK-level retries on transport failures.  The SDK default (2)
+# re-sends the identical request without any log or callback; when the
+# provider had already received and processed the request but the
+# response was lost in transit (``APIConnectionError: Connection
+# error.``), every silent retry generates — and bills — the same answer
+# again.  Combined with the agent loop's own visible retries
+# (``MAX_CONSECUTIVE_ERRORS`` = 3), the default turned one logical turn
+# into up to 9 identical upstream request/response pairs (observed as
+# "repeated request and response" with ``openrouter/moonshotai`` models).
+# One retry keeps resilience against one-off connect failures while
+# bounding the duplication, matching ``anthropic_model._MAX_RETRIES``.
+_MAX_RETRIES = 1
 
 def _provider_model_name(model_name: str) -> str:
     """Return the upstream provider id for a KISS catalog ``model_name``.
@@ -457,6 +471,7 @@ class OpenAICompatibleBase(Model):
             base_url=self.base_url,
             api_key=self.api_key,
             timeout=1800.0,
+            max_retries=_MAX_RETRIES,
             default_headers=extra_headers,
         )
         self._client_inputs = inputs
@@ -1114,6 +1129,26 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                             )
                 if chunk.usage is not None:
                     response = chunk
+        except (httpx.HTTPError, APIConnectionError) as err:
+            # A transport failure AFTER ``finish_reason`` arrived lost only
+            # the stream's tail (the usage chunk / ``[DONE]``); the answer
+            # itself — text and tool-call arguments — is complete.  Raising
+            # here would make the agent loop re-send the whole conversation
+            # and the provider regenerate (and bill) the same answer, which
+            # the user sees as a repeated request and response.  A failure
+            # BEFORE ``finish_reason`` means real content was lost, so it
+            # still propagates for the agent-level retry.  Stops
+            # (``KeyboardInterrupt``) and stalls (``TimeoutError``) raised
+            # by ``stop_aware_events`` are not transport errors and are
+            # never swallowed.
+            if finish_reason is None:
+                raise
+            logger.warning(
+                "Stream connection lost after finish_reason=%r; keeping the "
+                "complete response instead of retrying: %s",
+                finish_reason,
+                err,
+            )
         finally:
             events.close()
             self._close_thinking_if_open()

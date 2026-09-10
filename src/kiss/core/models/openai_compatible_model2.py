@@ -1696,6 +1696,15 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             elif etype == "response.completed":
                 saw_completed = True
                 response = getattr(event, "response", None)
+                # Terminal event: the payload above carries the full output
+                # and usage, so nothing after it is needed.  Stop reading
+                # instead of draining the stream to EOF — a connection that
+                # drops (or stalls) while delivering those trailing bytes
+                # would otherwise discard this complete response, and the
+                # agent loop's retry would regenerate (and re-bill) the
+                # same answer: the "repeated request and response" the
+                # user sees with flaky provider connections.
+                break
 
         if in_reasoning:
             self._invoke_thinking_callback(False)
