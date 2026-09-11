@@ -5624,20 +5624,9 @@
       if (reported) ctx.stepCount = reported;
     }
     if (t === 'result') {
-      if (ctx.llmPanel && ctx.llmPanel._provisional)
-        discardProvisionalPanel(ctx.llmPanel);
-      else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel, ev.ts);
       ctx.llmPanel = null;
-      // The `finish` tool call produced this result, and the daemon
-      // deliberately emits no tool_result for finish — the result IS
-      // its close. Sealing the last tool panel here freezes finish's
-      // elapsed label; any other tool's panel was already sealed by
-      // its own tool_result (finalizePanelTime is idempotent).
-      if (ctx.state.lastToolCallEl)
-        finalizePanelTime(ctx.state.lastToolCallEl, ev.ts);
       // The daemon's own count is the authoritative one.
       if (ev.step_count) ctx.stepCount = ev.step_count;
-      collapseAllExceptResult(ctx.container, ctx.tabId);
       const rTab = getTab(ctx.tabId);
       if (rTab) {
         // A result proves this tab ran a task — set on replays too
