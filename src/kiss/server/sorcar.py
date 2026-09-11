@@ -999,7 +999,9 @@ class ServerApi:
 
         Args:
             cmd: The ``shareChatTasks`` command (``chatId``, optional
-                ``tabId``).
+                ``tabId``, optional ``taskId`` — a sub-agent tab's
+                share narrows the reply to that one task and its
+                sub-agents).
             ctx: The transport context of the current call.
         """
         await self._backend._handle_share_chat_tasks(cmd, ctx.endpoint)

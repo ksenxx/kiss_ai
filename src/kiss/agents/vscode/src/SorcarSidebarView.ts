@@ -323,8 +323,9 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // A share exports ALL of the chat's tasks; the daemon answers with a
   // direct `share_tasks` carrying every persisted transcript of the
   // chat, which the webview assembles into the page it then sends
-  // back via `shareChat`.
-  shareChatTasks: ['tabId', 'chatId'],
+  // back via `shareChat`. The optional taskId narrows the export to
+  // one task and its sub-agents (a sub-agent tab's share).
+  shareChatTasks: ['tabId', 'chatId', 'taskId'],
   // "Remind me later" on the webview's update toast: the daemon owns
   // the update_available broadcast, records the 24h snooze in the
   // update-check cache shared with this extension host, and

@@ -84,7 +84,11 @@ from websockets.http11 import Request, Response
 
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar._concurrency import pid_alive as _is_pid_alive
-from kiss.agents.sorcar.persistence import _load_all_chat_events_by_chat_id
+from kiss.agents.sorcar.persistence import (
+    _load_all_chat_events_by_chat_id,
+    _load_chat_events_by_task_id,
+    _load_subagent_rows_by_parent_task_id,
+)
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.models.model_info import get_default_model
@@ -363,6 +367,88 @@ _SHARE_TASKS_MAX_REPLY_BYTES = 24 * 1024 * 1024
 # Echoed identifiers ride in every ``share_tasks`` reply; a client
 # cannot make the reply overflow its frame by inflating them.
 _SHARE_TASKS_MAX_ID_CHARS = 256
+
+
+def _share_subagent_entries(
+    root_task_id: str,
+    max_bytes: int | None = None,
+    peek: Callable[[str], list[dict[str, Any]]] | None = None,
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Return every sub-agent transcript below *root_task_id*.
+
+    Feeds the ``subagents`` list of one task in a ``share_tasks``
+    reply (see :meth:`RemoteAccessServer._handle_share_chat_tasks`):
+    the chat webview's share export renders each sub-agent's
+    transcript into a hidden section of the shared page, which the
+    page's tab strip (``media/share.js``) opens and closes exactly
+    like the live webview's sub-agent tabs.
+
+    Walks the ``parent_task_id`` tree breadth-first starting at the
+    direct children of *root_task_id*
+    (:func:`~kiss.agents.sorcar.persistence._load_subagent_rows_by_parent_task_id`,
+    rowid order — the order the parent enqueued its sub-agents), so a
+    sub-agent's own fan-outs (grandchildren, ...) ride along too.  A
+    ``seen`` set guards against cycles and duplicate rows.
+
+    A STILL-RUNNING sub-agent's events reach the database through an
+    asynchronous writer, so its persisted transcript can lag the live
+    run; when *peek* (the printer's ``peek_recording_for_task``)
+    returns a live recording for a sub-agent, that recording replaces
+    the persisted events — the same safeguard the session replay's
+    ``_open_persisted_subagent_tabs`` applies.
+
+    Args:
+        root_task_id: ``task_history`` row id of the chat task.
+        max_bytes: Optional byte budget; each entry is charged the
+            UTF-8 length of its JSON encoding and the walk stops (the
+            overflow flag set) at the first entry that does not fit —
+            BEFORE loading the rest, so an oversized chat can never
+            make the daemon materialize transcripts it is going to
+            drop anyway.  ``None`` loads all.
+        peek: Optional live-recording lookup by task id.
+
+    Returns:
+        ``(entries, bytes_used, overflowed)``.  *entries* is a flat
+        list, parents before their children, each
+        ``{"task", "task_id", "parent_task_id", "events"}`` with the
+        events led by the ensured ``task_settings`` event; empty when
+        the task fanned out no sub-agents.  *bytes_used* is the JSON
+        byte total already charged against *max_bytes*.  *overflowed*
+        is True when the budget cut the walk short.
+    """
+    out: list[dict[str, Any]] = []
+    used = 0
+    seen = {str(root_task_id)}
+    frontier = [str(root_task_id)]
+    while frontier:
+        next_frontier: list[str] = []
+        for parent_id in frontier:
+            for row in _load_subagent_rows_by_parent_task_id(parent_id):
+                sub_id = str(row.get("task_id") or "")
+                if not sub_id or sub_id in seen:
+                    continue
+                seen.add(sub_id)
+                next_frontier.append(sub_id)
+                events = cast(
+                    "list[dict[str, Any]]", row.get("events") or [],
+                )
+                if peek is not None:
+                    live_events = peek(sub_id)
+                    if live_events:
+                        events = live_events
+                entry = {
+                    "task": row.get("task", ""),
+                    "task_id": sub_id,
+                    "parent_task_id": parent_id,
+                    "events": with_task_settings_event(events, row),
+                }
+                if max_bytes is not None:
+                    used += len(json.dumps(entry).encode("utf-8"))
+                    if used > max_bytes:
+                        return out, used, True
+                out.append(entry)
+        frontier = next_frontier
+    return out, used, False
 
 # ``websockets`` wraps the whole opening handshake - including a plain
 # HTTP reply produced by ``process_request`` - in ``open_timeout``.  Its
@@ -2765,6 +2851,20 @@ html, body { height: auto; overflow: auto; }
 #output { overflow: visible; }
 /* Chrome that only works inside the live chat webview. */
 .panel-copy-btn, #task-panel-copy { display: none !important; }
+/* The sub-agent tab strip (created and driven by share.js, styled by
+   the inlined main.css's #tab-bar / .chat-tab rules). It rides along
+   the top of the scrolling document, with room on the right for the
+   floating theme toggle. */
+#tab-bar {
+  position: sticky;
+  top: 0;
+  z-index: 900;
+  padding-right: 56px;
+}
+/* A hidden section (a sub-agent transcript whose tab is not open, or
+   the chat itself while a sub-agent tab is selected) must stay hidden
+   whatever display value other rules give it. */
+.share-task[hidden] { display: none !important; }
 /* The floating light/dark theme toggle (wired up by share.js). */
 #share-theme-btn {
   position: fixed;
@@ -2811,14 +2911,17 @@ def _build_share_page(title: str, body_html: str) -> str:
 
     Wraps *body_html* — the chat webview's serialized chat, one
     ``.share-task`` section (static task panel + transcript) per task
-    of the chat (see ``buildShareableHtml`` in ``media/main.js``) —
+    of the chat, plus one hidden ``.share-task.share-subagent``
+    section per sub-agent the chat fanned out (see
+    ``buildShareableHtml`` in ``media/main.js``) —
     in a complete HTML document that needs no
     server: ``media/main.css`` (the exact stylesheet the webview
     uses), both highlight.js themes, the VS Code palette variables
     (dark plus the light-mode overrides behind the page's theme
     toggle) and ``media/share.js`` (collapse / expand behaviour for
-    the event panels, the static task panel, and the light/dark
-    toggle) are all inlined.
+    the event panels, the static task panel, the sub-agent tab strip
+    that opens and closes the sub-agent sections like the live
+    webview's tabs, and the light/dark toggle) are all inlined.
 
     Args:
         title: Page title; falls back to "KISS Sorcar chat".
@@ -5348,8 +5451,22 @@ class RemoteAccessServer:
 
             {"type": "share_tasks", "tabId": <echo>, "chatId": <echo>,
              "tasks": [{"task": <str>, "task_id": <str>,
-                        "events": [<event>, ...]}, ...],
+                        "events": [<event>, ...],
+                        "subagents": [{"task": <str>, "task_id": <str>,
+                                       "parent_task_id": <str>,
+                                       "events": [...]}, ...]}, ...],
              "truncated": <bool>}
+
+        Each task's ``subagents`` list carries the transcripts of
+        every sub-agent the task fanned out (recursively, parents
+        before children — see :func:`_share_subagent_entries`), so the
+        shared page can open and close them as tabs exactly like the
+        live webview does.
+
+        An optional ``taskId`` narrows the reply to that ONE task (and
+        its sub-agents): a sub-agent tab's share takes this path — its
+        row is deliberately absent from the chat's task list, but its
+        own fan-outs must still reach its shared page.
 
         Every receiver caps one frame — this server at
         ``_MAX_LINE_BYTES``, the VS Code extension's UDS client at a
@@ -5364,11 +5481,15 @@ class RemoteAccessServer:
 
         Args:
             cmd: The parsed ``shareChatTasks`` command (``chatId``,
-                optional ``tabId``).
+                optional ``tabId``, optional ``taskId``).
             endpoint: The requesting connection (WSS or UDS).
         """
         tab_id = self._cmd_str(cmd, "tabId")[:_SHARE_TASKS_MAX_ID_CHARS]
         chat_id = self._cmd_str(cmd, "chatId")[:_SHARE_TASKS_MAX_ID_CHARS]
+        task_id_filter = self._cmd_str(cmd, "taskId")[
+            :_SHARE_TASKS_MAX_ID_CHARS
+        ]
+        peek = self._printer.peek_recording_for_task
 
         def _load_tasks() -> dict[str, Any]:
             reply: dict[str, Any] = {
@@ -5381,17 +5502,30 @@ class RemoteAccessServer:
             if not chat_id.strip():
                 return reply
             try:
-                rows, truncated = _load_all_chat_events_by_chat_id(
-                    chat_id, _SHARE_TASKS_MAX_REPLY_BYTES,
-                )
+                if task_id_filter.strip():
+                    row = _load_chat_events_by_task_id(task_id_filter)
+                    rows = [row] if row else []
+                    truncated = False
+                else:
+                    rows, truncated = _load_all_chat_events_by_chat_id(
+                        chat_id, _SHARE_TASKS_MAX_REPLY_BYTES,
+                    )
             except Exception as exc:
                 logger.warning("shareChatTasks: load failed", exc_info=True)
                 reply["error"] = f"Failed to load the chat history: {exc}"
                 return reply
-            reply["tasks"] = [
-                {
+            # The sub-agent transcripts ride along inside their task's
+            # entry, so they share the task's byte budget: the walk
+            # below re-charges each entry (task + sub-agents) newest
+            # first and drops the OLDEST entries that no longer fit —
+            # the same truncation rule the row loader applies.
+            entries: list[dict[str, Any]] = []
+            budget = _SHARE_TASKS_MAX_REPLY_BYTES
+            for row in reversed(rows):
+                task_id = str(row.get("task_id") or "")
+                entry = {
                     "task": row.get("task", ""),
-                    "task_id": row.get("task_id", ""),
+                    "task_id": task_id,
                     # The settings event lets the export's synthesized
                     # task panels carry the same settings info the live
                     # panel shows (see shareTaskPanel in media/main.js).
@@ -5400,8 +5534,26 @@ class RemoteAccessServer:
                         row,
                     ),
                 }
-                for row in rows
-            ]
+                budget -= len(json.dumps(entry).encode("utf-8"))
+                if budget < 0:
+                    truncated = True
+                    break
+                # Every sub-agent the task fanned out (recursively):
+                # the export renders them into the shared page's
+                # sub-agent tabs (see media/share.js).  The loader is
+                # handed the budget LEFT, so an oversized subtree stops
+                # loading at the first transcript that cannot ship.
+                subs, sub_bytes, overflowed = _share_subagent_entries(
+                    task_id, budget, peek,
+                )
+                if overflowed:
+                    truncated = True
+                    break
+                budget -= sub_bytes
+                entry["subagents"] = subs
+                entries.append(entry)
+            entries.reverse()
+            reply["tasks"] = entries
             reply["truncated"] = truncated
             return reply
 
