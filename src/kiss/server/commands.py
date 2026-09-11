@@ -23,7 +23,6 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
@@ -31,6 +30,7 @@ from kiss.agents.sorcar.persistence import (
 from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
+from kiss.server.merge_flow import _effective_commit_repo
 from kiss.server.tab_registry import OpenTabOutcome
 from kiss.server.task_runner import _client_task_id_of
 
@@ -303,7 +303,7 @@ class _CommandsMixin:
             scope_work_dir: str | None = None,
             task_id: str | None = None,
             create: bool = False,
-        ) -> None: ...
+        ) -> int: ...
         def _broadcast_to_conn(
             self, event: dict[str, Any], conn_id: str,
         ) -> None: ...
@@ -318,11 +318,20 @@ class _CommandsMixin:
         ) -> None: ...
         def _autocommit_changes(
             self, tab_id: str = "", *, work_dir: str = "",
-            manual: bool = False,
+            manual: bool = False, claimed_repo: Path | None = None,
+            own_state: AgentState | None = None,
         ) -> None: ...
         def _any_non_wt_running(
-            self, repo_root: Path | None = None,
+            self,
+            repo_root: Path | None = None,
+            *,
+            exclude: AgentState | None = None,
         ) -> bool: ...
+        def _claim_main_tree(
+            self, repo_root: Path, reason: str,
+            holder: list[Any] | None = None,
+        ) -> bool: ...
+        def _release_main_tree_claim(self, claim: Any) -> None: ...
         def _broadcast_autocommit_done(
             self, tab_id: str, *, success: bool, committed: bool,
             message: str, commit_message: str | None = None,
@@ -518,7 +527,7 @@ class _CommandsMixin:
                 # run supersedes any historical task the tab was pinned to
                 # (``taskId`` cleared: the tab tracks the chat's latest
                 # task again — the one this run creates).
-                self._registry_update_tab(
+                publish_generation = self._registry_update_tab(
                     tab_id,
                     chat_id=chat_id,
                     title=str(cmd.get("prompt", "") or ""),
@@ -554,6 +563,41 @@ class _CommandsMixin:
                     "text": str(cmd.get("prompt", "") or ""),
                     "tabId": tab_id,
                 })
+                # A ``closeTab`` dispatched on another connection can
+                # land between this run's state registration and the
+                # ``_registry_update_tab`` above: the close removes
+                # the canonical tab and defers state disposal (the
+                # pre-start worker counts as busy), then the
+                # publication resurrects the tab — which nothing ever
+                # removes again, while ``_dispose_if_closed`` retires
+                # the run's backend state at task end.  ``_close_tab``
+                # sets ``frontend_closed`` BEFORE its registry
+                # removal, so re-checking the flag AFTER the
+                # publication is race-free: whenever the close's
+                # removal misses the recreated tab, the flag is
+                # already visible here and the recreate is undone —
+                # every interleaving converges on the run→closeTab
+                # serial outcome (tab closed; the task still runs to
+                # completion, exactly as a close during a started run
+                # behaves).  (gpt-5.6-sol review, finding 4.)
+                #
+                # The undo must only ever delete THIS run's own
+                # publication: between the flag read below and the
+                # removal, a legitimate reopen (``resumeSession``
+                # clears the flag, then republishes the tab) can
+                # recreate the row, and the stale unconditional
+                # ``close_tab`` used here before deleted the reopen's
+                # tab.  ``close_tab_if_generation`` compares the
+                # captured publication token under the registry lock,
+                # so a row republished by anyone else survives the
+                # stale undo (gpt-5.6-sol review 2, introduced bug 1).
+                with self._state_lock:
+                    closed_while_publishing = state.frontend_closed
+                if closed_while_publishing:
+                    if self.tab_registry.close_tab_if_generation(
+                        tab_id, publish_generation,
+                    ):
+                        self._broadcast_tabs_state()
             self.printer.broadcast({
                 "type": "clear",
                 "chat_id": chat_id,
@@ -1224,7 +1268,21 @@ class _CommandsMixin:
         """
         tab_id = cmd.get("tabId", "")
         work_dir = cmd.get("workDir", "") or self.work_dir
-        repo = GitWorktreeOps.discover_repo(Path(work_dir))
+        # Resolve the repository the worker will ACTUALLY stage — the
+        # worker applies a stale-worktree fallback to a vanished
+        # ``.kiss-worktrees/kiss_wt-*`` path, so discovering from the
+        # raw path here claimed the wrong (or no) repository while the
+        # parent repository was mutated unprotected (gpt-5.6-sol
+        # review 2, missed wiring 1).  Should the path's target change
+        # again between this dispatch and the worker's own resolution,
+        # the worker re-runs the busy-check + claim on the repository
+        # it resolved (see ``_autocommit_changes``).
+        repo = _effective_commit_repo(work_dir)
+        # Release-armed before publication (``_claim_main_tree``
+        # appends to this list before it publishes) with the releasing
+        # handler installed first, so no injected-stop boundary can
+        # strand the claim (gpt-5.6-sol review 3, introduced bug 2).
+        dispatch_claims: list[Any] = []
         with self._state_lock:
             if repo is not None and self._any_non_wt_running(repo):
                 self._broadcast_autocommit_done(
@@ -1240,30 +1298,77 @@ class _CommandsMixin:
                     "ignoring duplicate request", tab_id,
                 )
                 return
+            # Publish the per-repo main-tree claim in the SAME locked
+            # section as the busy check above: without it, a direct
+            # non-worktree task could start (its admission saw no
+            # worktree merge and no claim) between this check and the
+            # worker's ``git add -A``, which would then stage the
+            # task's half-written intermediate state (gpt-5.6-sol
+            # review, finding 3).  Non-worktree task admission refuses
+            # to start while the claim is held; the worker's
+            # ``finally`` releases it.
+            if repo is not None and not self._claim_main_tree(
+                repo, "manual commit", holder=dispatch_claims,
+            ):
+                self._broadcast_autocommit_done(
+                    tab_id, success=False, committed=False,
+                    message="Another operation is modifying this "
+                            "repository; wait for it to finish before "
+                            "committing.",
+                    manual=True, work_dir=work_dir,
+                )
+                return
             self._autocommit_tabs.add(tab_id)
-        threading.Thread(
-            target=self._run_autocommit_job,
-            args=(tab_id, work_dir),
-            daemon=True,
-        ).start()
+        try:
+            threading.Thread(
+                target=self._run_autocommit_job,
+                args=(tab_id, work_dir, repo, dispatch_claims),
+                daemon=True,
+            ).start()
+        except BaseException:
+            # The worker never ran, so its ``finally`` cannot release
+            # the claims published above — release them here or the
+            # repo (and the tab's commit button) stay wedged.
+            with self._state_lock:
+                self._autocommit_tabs.discard(tab_id)
+                for claim in dispatch_claims:
+                    self._release_main_tree_claim(claim)
+            raise
 
-    def _run_autocommit_job(self, tab_id: str, work_dir: str) -> None:
+    def _run_autocommit_job(
+        self,
+        tab_id: str,
+        work_dir: str,
+        repo: Path | None,
+        dispatch_claims: list[Any] | None = None,
+    ) -> None:
         """Commit the tab's working tree and re-arm the button.
 
         Body of the daemon thread spawned by
         :meth:`_cmd_autocommit_action`; the ``finally`` releases the
-        tab's in-flight claim so a failed commit never wedges the tab
-        out of ever committing again.
+        tab's in-flight claim (so a failed commit never wedges the tab
+        out of ever committing again) and the repository's main-tree
+        claim (so tasks can start again).
 
         Args:
             tab_id: Frontend tab that requested the commit.
             work_dir: The tab's working directory.
+            repo: The repository whose main-tree claim the dispatcher
+                published (``None`` when *work_dir* is not in a repo).
+            dispatch_claims: The claim objects the dispatcher
+                published; released here conditionally (identity
+                check), so a stale release can never pop a successor's
+                claim.
         """
         try:
-            self._autocommit_changes(tab_id, work_dir=work_dir, manual=True)
+            self._autocommit_changes(
+                tab_id, work_dir=work_dir, manual=True, claimed_repo=repo,
+            )
         finally:
             with self._state_lock:
                 self._autocommit_tabs.discard(tab_id)
+                for claim in dispatch_claims or []:
+                    self._release_main_tree_claim(claim)
 
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""

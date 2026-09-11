@@ -1498,7 +1498,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           .filter(
             (p: string) => p && !p.startsWith('..') && !path.isAbsolute(p),
           );
-        this._sendToWebview({type: 'droppedPaths', paths} as ToWebviewMessage);
+        this._sendToWebview({
+          type: 'droppedPaths',
+          paths,
+          // Echo the owner: the webview rejects the reply if the user
+          // switched tabs during this round trip.
+          tabId: message.tabId,
+        } as ToWebviewMessage);
         break;
       }
 

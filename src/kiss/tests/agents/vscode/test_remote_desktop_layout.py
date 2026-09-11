@@ -13,14 +13,13 @@ JSDOM has no layout engine.
 
 Covered behavior:
 
-* The task-history panel is wide enough that the five status/scope
-  toggle buttons inside the collapsible ``Filters`` section all sit on
-  a single line.
+* The task-history panel's default width is one fifth of the browser
+  window, and a resizer double-click restores that fraction.
 * The docked history panel is permanent on desktop: the burger button
   (``#menu-btn``) and the drawer close button (``#sidebar-close``) are
   hidden, and both come back below the 900px (mobile) breakpoint.
-* The panel resizer is limited only by the chat's minimum width — a
-  drag on a wide window may pass the 820px default cap.
+* The panel resizer may collapse the panel to a 10px sliver and is
+  limited on the right only by the chat's minimum width.
 * The settings panel stays narrow — like the VS Code extension's
   sidebar — instead of covering 90% of a wide desktop window.
 
@@ -45,11 +44,15 @@ from kiss.server.web_server import MEDIA_DIR, _build_html
 # webapp uses to dock the history panel.
 DESKTOP_WIDTHS = (900, 1000, 1280, 1440, 1920)
 
-# --sidebar-min-w / --chat-min-w from remote-codex.css: the narrowest
-# the history panel may get (all filter toggles on one line) and the
-# chat width the panel may never eat into.
-MIN_PANEL_W = 520
+# --sidebar-min-w / --chat-min-w from remote-codex.css: the sliver a
+# drag may collapse the history panel down to, and the chat width the
+# panel may never eat into.
+SLIVER_W = 10
 MIN_CHAT_W = 360
+
+# The docked panel's default share of the browser window
+# (--sidebar-default-w: 20vw, mirrored by sidebarDefaultW in main.js).
+PANEL_FRACTION = 0.2
 
 # main.js only reveals #app once the websocket handshake succeeds,
 # which never happens against a static server: the shim keeps
@@ -71,24 +74,18 @@ _PREPARE_JS = """
 }
 """
 
-_FILTER_CHIP_ROWS_JS = """
-() => {
-  const chips = [...document.querySelectorAll('.history-filter-chips .hf-chip')];
-  const rows = new Set(chips.map(c => Math.round(c.getBoundingClientRect().top)));
-  return {count: chips.length, rows: rows.size};
-}
-"""
-
 _LAYOUT_JS = """
 () => {
   const sidebar = document.getElementById('sidebar');
   const app = document.getElementById('app');
   const sb = sidebar.getBoundingClientRect();
+  const ar = app.getBoundingClientRect();
   return {
     open: sidebar.classList.contains('open'),
     sidebarRight: sb.right,
     sidebarWidth: sb.width,
-    appLeft: app.getBoundingClientRect().left,
+    appLeft: ar.left,
+    appWidth: ar.width,
   };
 }
 """
@@ -152,48 +149,53 @@ def _open_desktop_page(browser: Browser, url: str, width: int) -> Page:
 
 
 @pytest.mark.parametrize("width", DESKTOP_WIDTHS)
-def test_filter_toggles_fit_on_one_line(
+def test_history_panel_takes_one_fifth_of_the_window(
     browser: Browser,
     remote_url: str,
     width: int,
 ) -> None:
-    """Every filter toggle button shares a single row of the panel."""
+    """The docked panel's default width is exactly window width / 5."""
     page = _open_desktop_page(browser, remote_url, width)
     try:
-        chips = page.evaluate(_FILTER_CHIP_ROWS_JS)
-        assert chips["count"] == 5, chips
-        assert chips["rows"] == 1, (
-            f"filter toggles wrapped into {chips['rows']} rows "
-            f"at viewport width {width}"
+        layout = page.evaluate(_LAYOUT_JS)
+        assert layout["open"] is True
+        assert layout["sidebarWidth"] == pytest.approx(
+            width * PANEL_FRACTION, abs=1,
+        ), (
+            f"the history panel must take one fifth of the {width}px "
+            f"window, got {layout['sidebarWidth']}px"
         )
+        assert layout["appLeft"] == pytest.approx(
+            layout["sidebarWidth"], abs=1,
+        ), layout
     finally:
         page.close()
 
 
-def test_narrowest_resizable_panel_still_fits_the_toggles(
+def test_resizer_collapses_to_a_sliver_and_dblclick_restores(
     browser: Browser,
     remote_url: str,
 ) -> None:
-    """Dragging the resizer fully left keeps the toggles on one line."""
+    """A drag may collapse the panel to the 10px sliver; a double-click
+    on the resizer restores the one-fifth default."""
     page = _open_desktop_page(browser, remote_url, 1440)
     try:
-        _drag_resizer_to(page, 900)
+        _drag_resizer_to(page, 700)
         widened = page.evaluate(_LAYOUT_JS)
-        assert widened["sidebarWidth"] > MIN_PANEL_W, widened
+        assert widened["sidebarWidth"] == pytest.approx(700, abs=2), widened
         _drag_resizer_to(page, 0)
         narrowed = page.evaluate(_LAYOUT_JS)
-        assert narrowed["sidebarWidth"] < widened["sidebarWidth"], (
-            "the drag must actually have narrowed the panel, it is still "
-            f"{narrowed['sidebarWidth']}px wide"
+        assert narrowed["sidebarWidth"] == pytest.approx(SLIVER_W, abs=2), (
+            "dragging fully left must collapse the panel to the "
+            f"{SLIVER_W}px sliver, got {narrowed['sidebarWidth']}px"
         )
-        assert narrowed["sidebarWidth"] == pytest.approx(MIN_PANEL_W), (
-            "dragging fully left must stop at the one-line filter width, "
-            f"got {narrowed['sidebarWidth']}px"
-        )
-        chips = page.evaluate(_FILTER_CHIP_ROWS_JS)
-        assert chips["rows"] == 1, (
-            "shrinking the panel to its minimum width must not wrap the "
-            f"filter toggles, got {chips['rows']} rows"
+        page.locator("#sidebar-resizer").dblclick()
+        restored = page.evaluate(_LAYOUT_JS)
+        assert restored["sidebarWidth"] == pytest.approx(
+            1440 * PANEL_FRACTION, abs=1,
+        ), (
+            "double-click must restore the one-fifth default width, "
+            f"got {restored['sidebarWidth']}px"
         )
     finally:
         page.close()
@@ -209,19 +211,19 @@ def test_widened_panel_never_crushes_the_chat(
     try:
         _drag_resizer_to(page, 1900)
         wide = page.evaluate(_LAYOUT_JS)
-        assert 1920 - wide["sidebarWidth"] >= MIN_CHAT_W, wide
+        # The ACTUAL chat column (between the two docked panels) keeps
+        # its minimum: the drag cap must reserve the right-hand
+        # task-info panel's fifth of the window too.
+        assert wide["appWidth"] >= MIN_CHAT_W - 1, wide
 
         page.set_viewport_size({"width": 900, "height": 900})
         page.wait_for_timeout(400)
         narrow = page.evaluate(_LAYOUT_JS)
-        assert narrow["sidebarWidth"] >= MIN_PANEL_W, narrow
-        assert 900 - narrow["sidebarWidth"] >= MIN_CHAT_W, (
+        assert narrow["appWidth"] >= MIN_CHAT_W - 1, (
             "after shrinking the window the chat must keep at least "
-            f"{MIN_CHAT_W}px, but the panel is {narrow['sidebarWidth']}px "
-            "of 900px"
+            f"{MIN_CHAT_W}px, but it is {narrow['appWidth']}px wide "
+            f"(panel {narrow['sidebarWidth']}px of 900px)"
         )
-        chips = page.evaluate(_FILTER_CHIP_ROWS_JS)
-        assert chips["rows"] == 1, chips
     finally:
         page.close()
 
@@ -275,12 +277,16 @@ def test_panel_can_grow_beyond_the_old_default_cap(
         )
         _drag_resizer_to(page, 1910)
         maxed = page.evaluate(_LAYOUT_JS)
+        # Fully right stops where the chat keeps MIN_CHAT_W between the
+        # history panel and the right task-info panel (a fifth of the
+        # window): 1920 * 0.8 - 360.
         assert maxed["sidebarWidth"] == pytest.approx(
-            1920 - MIN_CHAT_W, abs=2
+            1920 * (1 - PANEL_FRACTION) - MIN_CHAT_W, abs=2
         ), (
             "dragging fully right must stop where the chat keeps its "
             f"minimum width, got {maxed['sidebarWidth']}px"
         )
+        assert maxed["appWidth"] >= MIN_CHAT_W - 1, maxed
     finally:
         page.close()
 

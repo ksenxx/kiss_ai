@@ -30,8 +30,9 @@ import sqlite3
 import threading
 import time
 import uuid
+import weakref
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import IO, Any
 
@@ -71,56 +72,321 @@ def _immediate_txn(db: sqlite3.Connection) -> Iterator[None]:
     db.execute("COMMIT")
 
 
+class _Token:
+    """Per-acquisition ownership token for :class:`_RWLock`.
+
+    A plain ``object()`` cannot be weak-referenced; this can.  The
+    acquisition's generator frame holds the primary strong reference,
+    so in the common case the token dies with the frame and the lock's
+    weakref machinery observes the release.
+
+    Frames, however, can outlive their acquisition: an exception that
+    escapes the acquisition (e.g. an injected stop whose unwind skipped
+    the ``finally``) carries a traceback that retains the generator's
+    frame — and with it the token — for as long as any handler or
+    stored exception keeps the traceback alive.  ``gen`` therefore
+    records a WEAK reference to the acquisition's own generator: once
+    that generator is collected, or is CLOSED (``gi_frame is None`` no
+    matter who still retains the frame object),
+    :meth:`_RWLock._token_active` pronounces the acquisition over.  The
+    reference must be weak — a strong one would close the cycle
+    ``token → generator → frame → token``, and an acquisition leaked
+    WITHOUT ``__exit__`` (an injected stop can land between
+    ``__enter__`` returning and the ``with`` block installing, orphaning
+    the context manager) would then survive until a full garbage
+    collection instead of dying by refcount the moment its thread
+    unwinds.
+
+    ``owner`` records the acquiring thread.  A dead exception↔frame
+    reference CYCLE (the stop's traceback in a killed thread) can keep
+    even the weakly-referenced generator alive until a gc pass, so
+    liveness additionally requires the owning thread to still be alive
+    — the one fact about an abandoned acquisition that neither
+    refcounting nor gc timing can misreport.
+    """
+
+    __slots__ = ("gen", "owner", "__weakref__")
+
+    def __init__(self) -> None:
+        self.gen: weakref.ref[Any] | None = None
+        self.owner: threading.Thread = threading.current_thread()
+
+
 class _RWLock:
-    """Writer-preferring read-write lock.
+    """Writer-preferring read-write lock, safe against injected stops.
 
     Multiple readers can hold the lock concurrently.  A writer gets
     exclusive access — no readers or other writers may proceed while a
     write lock is held.  Pending writers block new readers to prevent
     writer starvation.
+
+    Interrupt safety.  The server stops a task by injecting
+    ``KeyboardInterrupt`` at an ARBITRARY bytecode boundary
+    (``PyThreadState_SetAsyncExc``) — including between a C-level
+    ``acquire()`` returning and the very next bytecode, and including
+    the boundary at a ``finally`` block's entry, where the injection
+    makes the interpreter skip the block's body entirely.  No
+    Python-level bookkeeping that must EXECUTE after the stop can
+    therefore be trusted; this lock is instead built so that every
+    stranded acquisition heals without its own code running:
+
+    * Ownership lives in per-acquisition :class:`_Token` objects held
+      by the acquisition's frame and tracked here through weak
+      references.  The wait predicates ignore tokens that are dead OR
+      whose acquisition generator has been closed
+      (:meth:`_token_active`): an escaped exception's traceback may
+      retain the acquisition frame — and so the token — indefinitely,
+      but the closed generator's ``gi_frame`` is ``None`` from the
+      moment the exception left it, so a stranded acquisition stops
+      blocking others within one bounded ``wait`` tick even when the
+      token object itself never dies.  Each weakref's callback also
+      re-checks waiters on token death, and the bounded ``wait``
+      timeout below covers a lost callback or a still-referenced
+      closed frame.
+    * Registration and withdrawal are SINGLE atomic C operations
+      (``set.add`` / ``set.discard`` / one ``STORE_ATTR``), each
+      idempotently reversible without knowing whether it executed, so
+      no state/flag pairing exists to tear.
+    * The condition's mutex is an ``RLock``: its C ``acquire`` records
+      the owning thread atomically, so :meth:`_teardown` consults
+      ``RLock._is_owned()`` — ground truth, not a flag a torn store
+      could miss — and releases every recursion level this thread
+      still holds.  Being reentrant, teardown can always re-enter the
+      mutex even when the injection landed while it was already held
+      (a plain ``Lock`` self-deadlocks there).  Teardown retries a
+      bounded number of times, re-raising a newly injected exception
+      only AFTER the repair committed.
+
+    Residual window, deliberate and documented: the mutex itself can
+    only be stranded if one injection interrupts an acquisition WHILE
+    the mutex is held and a SECOND, separately timed injection then
+    lands exactly on the unwinding ``finally``'s entry boundary —
+    skipping the teardown that would release it.  A single stop
+    (``task_runner.inject_keyboard_interrupt`` performs one injection
+    per attempt) can never wedge the lock, and the random-time stress
+    regression (hundreds of real injections over ~10⁵ acquisitions)
+    shows no deadlock.
     """
 
+    _REPAIR_ATTEMPTS = 8
+    # Upper bound on how long a waiter can oversleep a wakeup whose
+    # notify was lost (possible only when an injected stop lands inside
+    # a weakref callback); predicates re-check liveness on every tick.
+    _WAIT_RECHECK_S = 1.0
+
     def __init__(self) -> None:
-        self._cond = threading.Condition(threading.Lock())
-        self._readers = 0
-        self._writer = False
-        self._pending_writers = 0
+        self._mutex = threading.RLock()
+        self._cond = threading.Condition(self._mutex)
+        self._reader_refs: set[weakref.ref[_Token]] = set()
+        self._pending_refs: set[weakref.ref[_Token]] = set()
+        self._writer_ref: weakref.ref[_Token] | None = None
+
+    @staticmethod
+    def _token_active(ref: weakref.ref[_Token]) -> bool:
+        """Return True while *ref*'s acquisition is genuinely in progress.
+
+        Three conditions must hold: the token object is still alive,
+        its acquisition generator is still alive, and that generator
+        has not been closed.  The ``gi_frame`` check heals the
+        traceback-retention case — an escaped exception keeps the
+        acquisition frame (and token) reachable, but the generator's
+        ``gi_frame`` drops to ``None`` the moment the exception left
+        it, independent of garbage collection.  The generator weakref
+        heals the orphaned-context-manager case — a stop landing
+        between ``__enter__`` and the ``with`` block installation
+        leaks a SUSPENDED generator, which then dies by refcount with
+        its context manager.  A token without a recorded generator is
+        treated as active (fail-closed).
+
+        Args:
+            ref: The acquisition's weak reference.
+
+        Returns:
+            Whether the acquisition still owns or awaits the lock.
+        """
+        token = ref()
+        if token is None:
+            return False
+        if not token.owner.is_alive():
+            # The acquiring thread is gone; whatever retains the token
+            # (a dead thread's exception↔frame cycle awaiting gc) no
+            # longer represents a live acquisition.
+            return False
+        gen_ref = token.gen
+        if gen_ref is None:
+            return True
+        gen = gen_ref()
+        return gen is not None and gen.gi_frame is not None
+
+    @property
+    def _readers(self) -> int:
+        """Number of live acquisitions currently holding read access."""
+        with self._cond:
+            return sum(1 for ref in self._reader_refs if self._token_active(ref))
+
+    @property
+    def _pending_writers(self) -> int:
+        """Number of live writers waiting to acquire the lock."""
+        with self._cond:
+            return sum(1 for ref in self._pending_refs if self._token_active(ref))
+
+    @property
+    def _writer(self) -> bool:
+        """Whether a live writer currently holds exclusive access."""
+        with self._cond:
+            return self._writer_alive()
+
+    def _writer_alive(self) -> bool:
+        """Return True when a live writer token holds exclusive access."""
+        ref = self._writer_ref
+        return ref is not None and self._token_active(ref)
+
+    @classmethod
+    def _any_alive(cls, refs: set[weakref.ref[_Token]]) -> bool:
+        """Return True when any weakref in *refs* has an active token."""
+        return any(cls._token_active(ref) for ref in refs)
+
+    def _drop_reader_ref(self, ref: weakref.ref[_Token]) -> None:
+        """Withdraw a reader registration and wake waiters.
+
+        Doubles as the token's weakref callback: it runs even when an
+        injected stop skipped the acquisition's own teardown, as soon
+        as the acquisition frame — the only strong token holder — is
+        destroyed.
+
+        Args:
+            ref: The reader acquisition's weak reference.
+        """
+        with self._cond:
+            self._reader_refs.discard(ref)
+            self._cond.notify_all()
+
+    def _drop_writer_ref(self, ref: weakref.ref[_Token]) -> None:
+        """Withdraw a writer registration (pending or holding) and wake
+        waiters; also the writer token's weakref callback.
+
+        Args:
+            ref: The writer acquisition's weak reference.
+        """
+        with self._cond:
+            self._pending_refs.discard(ref)
+            if self._writer_ref is ref:
+                self._writer_ref = None
+            self._cond.notify_all()
+
+    def read_lock(self) -> AbstractContextManager[None]:
+        """Acquire shared read access (use as ``with lock.read_lock():``).
+
+        See the class docstring for why an injected stop landing at
+        any bytecode boundary here cannot wedge the lock.  The box
+        dance hands the acquisition generator to its own token BEFORE
+        any registration, so :meth:`_token_active` can pronounce the
+        acquisition over (``gi_frame is None``) even when an escaped
+        exception's traceback retains the frame and token forever.
+
+        Returns:
+            A context manager holding read access for its block.
+        """
+        box: list[Any] = []
+        cm = self._read_lock_gen(box)
+        box.append(getattr(cm, "gen", None))
+        return cm
 
     @contextmanager
-    def read_lock(self) -> Iterator[None]:
-        """Acquire shared read access."""
-        with self._cond:
-            while self._writer or self._pending_writers > 0:
-                self._cond.wait()
-            self._readers += 1
+    def _read_lock_gen(self, box: list[Any]) -> Iterator[None]:
+        """Generator body of :meth:`read_lock`; *box* carries its generator."""
+        token = _Token()
+        gen = box[0] if box else None
+        token.gen = weakref.ref(gen) if gen is not None else None
+        ref = weakref.ref(token, self._drop_reader_ref)
         try:
+            self._cond.acquire()
+            while self._writer_alive() or self._any_alive(self._pending_refs):
+                self._cond.wait(timeout=self._WAIT_RECHECK_S)
+            self._reader_refs.add(ref)
+            self._cond.release()
             yield
         finally:
-            with self._cond:
-                self._readers -= 1
-                if self._readers == 0:
-                    self._cond.notify_all()
+            self._teardown(ref, token, writer=False)
+
+    def write_lock(self) -> AbstractContextManager[None]:
+        """Acquire exclusive write access (use as ``with lock.write_lock():``).
+
+        See the class docstring for the interrupt-safety design.  The
+        writer publication (``_writer_ref = ref``) happens before the
+        pending-ref withdrawal; an injection between the two leaves a
+        state (writer + still pending) that only blocks others
+        conservatively until :meth:`_teardown` — idempotent for both
+        pieces — or the token's deactivation repairs it.  As in
+        :meth:`read_lock`, the token records its own acquisition
+        generator so traceback retention cannot prolong ownership.
+
+        Returns:
+            A context manager holding write access for its block.
+        """
+        box: list[Any] = []
+        cm = self._write_lock_gen(box)
+        box.append(getattr(cm, "gen", None))
+        return cm
 
     @contextmanager
-    def write_lock(self) -> Iterator[None]:
-        """Acquire exclusive write access."""
-        with self._cond:
-            self._pending_writers += 1
+    def _write_lock_gen(self, box: list[Any]) -> Iterator[None]:
+        """Generator body of :meth:`write_lock`; *box* carries its generator."""
+        token = _Token()
+        gen = box[0] if box else None
+        token.gen = weakref.ref(gen) if gen is not None else None
+        ref = weakref.ref(token, self._drop_writer_ref)
+        try:
+            self._cond.acquire()
+            self._pending_refs.add(ref)
+            while self._writer_alive() or self._any_alive(self._reader_refs):
+                self._cond.wait(timeout=self._WAIT_RECHECK_S)
+            self._writer_ref = ref
+            self._pending_refs.discard(ref)
+            self._cond.release()
+            yield
+        finally:
+            self._teardown(ref, token, writer=True)
+
+    def _teardown(
+        self, ref: weakref.ref[_Token], token: _Token, writer: bool,
+    ) -> None:
+        """Withdraw *ref* from every piece of lock state and wake waiters.
+
+        Every operation is idempotent, so it is safe regardless of how
+        far the acquisition got before an injected stop unwound it.
+        The bounded retry loop absorbs FURTHER exceptions injected
+        while the repair itself runs; the last one is re-raised once
+        the repair has committed (never swallowed: a stop aimed at the
+        surrounding task must still reach it).
+
+        Args:
+            ref: The acquisition's weak reference to withdraw.
+            token: The acquisition's token; the explicit parameter
+                keeps it alive so its weakref callback — the redundant
+                healing path — cannot run concurrently with this one.
+            writer: Whether the acquisition was a write acquisition.
+        """
+        caught: BaseException | None = None
+        for _ in range(self._REPAIR_ATTEMPTS):
             try:
-                while self._writer or self._readers > 0:
-                    self._cond.wait()
-            except BaseException:
-                self._pending_writers -= 1
-                self._cond.notify_all()
-                raise
-            self._pending_writers -= 1
-            self._writer = True
-        try:
-            yield
-        finally:
-            with self._cond:
-                self._writer = False
-                self._cond.notify_all()
+                try:
+                    if writer:
+                        self._drop_writer_ref(ref)
+                    else:
+                        self._drop_reader_ref(ref)
+                    break
+                finally:
+                    # Ground truth from the C RLock: releases whatever
+                    # this thread still holds — whether the injection
+                    # landed before, inside, or after the acquisition's
+                    # own release — and nothing when it holds nothing.
+                    while self._mutex._is_owned():  # type: ignore[attr-defined]
+                        self._cond.release()
+            except BaseException as exc:  # second injected stop mid-repair
+                caught = exc
+        if caught is not None:
+            raise caught
 
 
 _rw_lock = _RWLock()
@@ -825,6 +1091,17 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             count INTEGER NOT NULL DEFAULT 0,
             timestamp REAL NOT NULL DEFAULT 0
         );
+        -- Claimed failed-event journal snapshots whose rows have been
+        -- committed to ``events``.  The marker is inserted in the SAME
+        -- transaction as the rows, so a replayer that dies between the
+        -- commit and the snapshot file's unlink cannot cause the next
+        -- replayer to insert the rows again under fresh seqs (the
+        -- snapshot's unique ``.consumed-<pid>-<uuid>`` claim name is
+        -- the key).  Rows are pruned once the file is really gone.
+        CREATE TABLE IF NOT EXISTS replayed_journals (
+            snapshot TEXT PRIMARY KEY,
+            timestamp REAL NOT NULL DEFAULT 0
+        );
     """)
     _apply_index_ddl(conn)
     _add_missing_columns(conn)
@@ -1520,6 +1797,146 @@ def _log_orphaned_task_forensics(
         )
 
 
+_USAGE_STEPS_RE = re.compile(r"Steps:\s*(\d+)")
+_USAGE_TOKENS_RE = re.compile(r"Total tokens:\s*([\d,]+)")
+_USAGE_COST_RE = re.compile(r"Budget:\s*\$([0-9][\d,]*\.?\d*)")
+
+
+def _recovered_progress_from_events(
+    db: sqlite3.Connection, task_id: str,
+) -> dict[str, int | float]:
+    """Reconstruct a killed task's last known progress from its events.
+
+    When the owning process dies before the task runner's cleanup can
+    call ``_save_task_extra``, the ``steps``/``tokens``/``cost``/
+    ``end_ts`` columns keep their creation-time zeros and the history
+    UI shows "0 steps, 0 tok" for a task that may have run for hours.
+    The surviving ``events`` rows record how far the task actually
+    got: every ``usage_info`` event carries the per-task step, token,
+    and budget counters in its ``text`` field, and the newest event of
+    any type dates the last observed activity.
+
+    Args:
+        db: Active database connection (caller holds the write lock).
+        task_id: Task whose events should be inspected.
+
+    Only the per-task counter text emitted once per agent step
+    (``"Steps: 175/10000, ... Total tokens: 33,641,687, Budget:
+    $56.4682/$1000.00"``) is trusted.  The live-usage monitor's
+    ``usage_info`` events carry a different text form and structured
+    ``total_tokens``/``total_steps``/``cost`` fields, but those are
+    CROSS-TASK aggregates ("incl. parallel sub-agents") — writing them
+    into the per-task columns would overstate the task, so such events
+    are skipped and the scan continues to the newest per-step event.
+
+    Returns:
+        Mapping of the subset of ``steps``/``tokens``/``cost``/
+        ``end_ts`` columns that could be recovered — empty when the
+        task has no events.  Values are parsed defensively: a
+        malformed or foreign-format ``usage_info`` event contributes
+        nothing and never raises.
+    """
+    progress: dict[str, int | float] = {}
+    last = db.execute(
+        "SELECT MAX(timestamp) AS ts FROM events WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    last_ts = _safe_float(last["ts"] if last is not None else None, 0.0)
+    if last_ts <= 0:
+        return progress
+    progress["end_ts"] = int(last_ts * 1000)
+    usage_rows = db.execute(
+        "SELECT event_json FROM events "
+        "WHERE task_id = ? AND event_json LIKE '%\"usage_info\"%' "
+        "ORDER BY seq DESC",
+        (task_id,),
+    )
+    for usage_row in usage_rows:
+        try:
+            event = json.loads(usage_row["event_json"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(event, dict) or event.get("type") != "usage_info":
+            continue
+        text = str(event.get("text", ""))
+        steps_m = _USAGE_STEPS_RE.search(text)
+        if steps_m is None:
+            # Not the per-step counter form.  In particular the live
+            # monitor's "Tokens: N, Budget: $C (live, incl. parallel
+            # sub-agents)" text has no "Steps:" marker, and its Budget
+            # figure is a cross-task aggregate that must not be
+            # mistaken for this task's cost.
+            continue
+        found: dict[str, int | float] = {}
+        tokens_m = _USAGE_TOKENS_RE.search(text)
+        cost_m = _USAGE_COST_RE.search(text)
+        try:
+            found["steps"] = int(steps_m.group(1))
+            if tokens_m:
+                found["tokens"] = int(tokens_m.group(1).replace(",", ""))
+            if cost_m:
+                found["cost"] = float(cost_m.group(1).replace(",", ""))
+        except ValueError:
+            # The token/cost regexes admit comma-only or otherwise
+            # unconvertible digit groups; a corrupt event must not
+            # abort the recovery sweep.
+            continue
+        progress.update(found)
+        break
+    return progress
+
+
+def _backfill_orphan_progress(
+    db: sqlite3.Connection, rowids: list[int],
+) -> None:
+    """Backfill progress columns of just-recovered orphan rows.
+
+    Called by :func:`_recover_orphaned_tasks` (inside its write
+    transaction) for the rows whose ``result`` it rewrites.  Each
+    still-zero ``steps``/``tokens``/``cost``/``end_ts`` column is
+    filled from the evidence in the task's surviving events, so the
+    history sidebar shows the task's real last-known progress instead
+    of "0 steps, 0 tok".  A column that already holds a non-zero value
+    (written by a partial cleanup before the kill) is never
+    overwritten — the recorded value is more authoritative than a
+    reconstruction.
+
+    The backfill is best-effort by construction: any per-row failure
+    is logged and skipped, because an exception escaping here would
+    roll back the enclosing transaction and undo the sentinel rewrite
+    itself — losing the primary purpose of the sweep over a cosmetic
+    reconstruction.
+
+    Args:
+        db: Active database connection (caller holds the write lock).
+        rowids: The ``rowid``s whose sentinel result was rewritten.
+    """
+    for rid in rowids:
+        try:
+            row = db.execute(
+                "SELECT id FROM task_history WHERE rowid = ?", (rid,),
+            ).fetchone()
+            if row is None or not row["id"]:
+                continue
+            progress = _recovered_progress_from_events(db, str(row["id"]))
+            if not progress:
+                continue
+            sets = [
+                f"{col} = CASE WHEN {col} IS NULL OR {col} = 0 "
+                f"THEN ? ELSE {col} END"
+                for col in progress
+            ]
+            db.execute(
+                f"UPDATE task_history SET {', '.join(sets)} WHERE rowid = ?",
+                [*progress.values(), rid],
+            )
+        except Exception:
+            logger.warning(
+                "orphan progress backfill failed for rowid %s", rid,
+                exc_info=True,
+            )
+
+
 def _recover_orphaned_tasks(
     active_task_ids: set[str],
     created_before: float | None = None,
@@ -1541,7 +1958,11 @@ def _recover_orphaned_tasks(
     for any row that still carries the sentinel AND whose id is not
     in *active_task_ids* (the currently-running tasks in THIS
     process), and rewrite ``result`` to a diagnostic message that
-    truthfully describes what happened.
+    truthfully describes what happened.  The still-zero progress
+    columns of each rewritten row are then backfilled from the task's
+    surviving events (see :func:`_backfill_orphan_progress`) so the
+    history sidebar shows the real last-known step/token/cost state
+    instead of "0 steps, 0 tok".
 
     Liveness is decided from the DATABASE, not from process memory:
     every row records the ``owner`` token of the process that created
@@ -1611,6 +2032,7 @@ def _recover_orphaned_tasks(
                 ],
             )
             rowcount = cursor.rowcount or 0
+            _backfill_orphan_progress(db, dead_rowids)
     if rowcount:
         logger.warning(
             "Recovered %d orphaned task(s) from prior process kill",
@@ -2008,6 +2430,12 @@ def _failed_events_path(db_path: str) -> str:
 #: another process has appended to since.
 _JOURNAL_CONSUMED_SUFFIX = ".consumed-"
 
+# Zero-padded width of the monotonic claim key embedded in a claimed
+# snapshot's filename (see _claim_journal_snapshots).  Wide enough for
+# any time.time_ns() value; also what distinguishes a claim key from
+# the pid in a legacy ``.consumed-<pid>-<uuid>`` name.
+_CLAIM_KEY_WIDTH = 20
+
 
 @contextmanager
 def _journal_file_lock(sidecar: str) -> Iterator[None]:
@@ -2123,6 +2551,19 @@ def _replay_failed_events() -> None:
     therefore never destroy a batch a peer appended in the meantime —
     that batch goes to a fresh sidecar — and no batch is ever replayed
     by two processes at once.
+
+    A snapshot whose replay fails stays under its claimed name — it is
+    deliberately NOT renamed back to the live sidecar.  A restored
+    file would receive LATER appends, mixing the directory's oldest
+    and newest rows into one file whose last-append mtime postdates
+    snapshots holding middle-aged rows; no per-snapshot ordering can
+    replay such a mixture chronologically.  Claimed names are still
+    discovered by :func:`_journal_has_pending_rows` and
+    :func:`_claim_journal_snapshots`, so nothing is lost.  The loop
+    also stops at the first failure: replay fails only when the
+    database refuses the write, so every later (newer) snapshot would
+    fail too — and committing a newer snapshot before an older one
+    retries would hand newer rows the lower seqs.
     """
     path = _failed_events_path(_current_db_path())
     if not _journal_has_pending_rows(path):
@@ -2133,7 +2574,7 @@ def _replay_failed_events() -> None:
     with _journal_lock, _journal_file_lock(path):
         for snapshot in _claim_journal_snapshots(path):
             if not _replay_journal_snapshot(snapshot):
-                _restore_journal_snapshot(snapshot, path)
+                break
 
 
 def _journal_has_pending_rows(path: str) -> bool:
@@ -2156,62 +2597,120 @@ def _claim_journal_snapshots(path: str) -> list[str]:
     """Take ownership of *path* and return every snapshot to replay.
 
     The live sidecar is renamed to a unique
-    ``.consumed-<pid>-<uuid>`` sibling, which is what makes the later
-    delete safe.  Snapshots a previous replayer left behind — it
-    crashed, or the database was still refusing writes — are picked up
-    too, so a rename is never a way to lose events.
+    ``.consumed-<claim key>-<pid>-<uuid>`` sibling, which is what
+    makes the later delete safe.  Snapshots a previous replayer left
+    behind — it crashed, or the database was still refusing writes —
+    are picked up too, so a rename is never a way to lose events.
+
+    Replay assigns fresh monotonically increasing seqs in list order,
+    so the order must be CHRONOLOGICAL.  The claim key — a wall-clock
+    nanosecond timestamp forced past every claim key already in the
+    directory (claims are serialised by :func:`_journal_file_lock`, so
+    the maximum is race-free) — records exactly that: every row of an
+    earlier-claimed snapshot predates every row of a later-claimed one
+    because the earlier sidecar was renamed aside before the later
+    sidecar received its first append.  Unlike ``st_mtime_ns``, the
+    key is immutable once assigned, total (never a tie), and immune to
+    filesystem timestamp granularity.
 
     Args:
         path: The live sidecar path for the active database.
 
     Returns:
-        Snapshot paths to replay, oldest name first.  Caller holds
+        Snapshot paths to replay, oldest snapshot first.  Caller holds
         :func:`_journal_file_lock`.
     """
+    directory = os.path.dirname(path) or "."
+    prefix = os.path.basename(path) + _JOURNAL_CONSUMED_SUFFIX
     if os.path.exists(path):
-        claimed = (
-            f"{path}{_JOURNAL_CONSUMED_SUFFIX}{os.getpid()}-{uuid.uuid4().hex}"
-        )
+        claimed = os.path.join(directory, (
+            f"{prefix}{_next_claim_key(directory, prefix):020d}"
+            f"-{os.getpid()}-{uuid.uuid4().hex}"
+        ))
         try:
             os.replace(path, claimed)
         except OSError:  # pragma: no cover — unrenamable journal
             logger.warning("could not claim journal %s", path, exc_info=True)
-    directory = os.path.dirname(path) or "."
-    prefix = os.path.basename(path) + _JOURNAL_CONSUMED_SUFFIX
     try:
         names = os.listdir(directory)
     except OSError:  # pragma: no cover — unreadable journal directory
         return []
-    return [
-        os.path.join(directory, name)
-        for name in sorted(names)
-        if name.startswith(prefix)
-    ]
+    return sorted(
+        (
+            os.path.join(directory, name)
+            for name in names
+            if name.startswith(prefix)
+        ),
+        key=lambda snapshot: _snapshot_order_key(snapshot, prefix),
+    )
 
 
-def _restore_journal_snapshot(snapshot: str, path: str) -> None:
-    """Put a snapshot the database still refuses back under the live name.
-
-    ``<db>.failed_events.jsonl`` stays the single place an operator —
-    and the next replay — looks for pending rows, instead of the
-    pending transcript hiding under a ``.consumed-*`` name after every
-    failed attempt.
+def _parse_claim_key(name: str, prefix: str) -> int | None:
+    """Extract the monotonic claim key from a snapshot file *name*.
 
     Args:
-        snapshot: The claimed file whose replay failed.
-        path: The live sidecar path for the active database.
+        name: Basename of a ``.consumed-*`` snapshot file.
+        prefix: The live sidecar basename plus the consumed suffix.
+
+    Returns:
+        The claim key, or ``None`` for a legacy
+        ``.consumed-<pid>-<uuid>`` name that predates claim keys (a
+        pid never has the key's fixed 20-digit width).
     """
-    if os.path.exists(path):
-        # Another snapshot was restored first (a previous replayer
-        # died before it could restore its own).  Leaving this one as
-        # a snapshot loses nothing: the next replay claims it too.
-        return
+    head = name[len(prefix):].split("-", 1)[0]
+    if len(head) == _CLAIM_KEY_WIDTH and head.isdigit():
+        return int(head)
+    return None
+
+
+def _next_claim_key(directory: str, prefix: str) -> int:
+    """Return a claim key greater than every key already in *directory*.
+
+    Starts from ``time.time_ns()`` and bumps past any existing key, so
+    the sequence stays strictly increasing even across a wall-clock
+    step backwards.  Caller holds :func:`_journal_file_lock`.
+
+    Args:
+        directory: The journal directory.
+        prefix: The live sidecar basename plus the consumed suffix.
+    """
+    key = time.time_ns()
     try:
-        os.replace(snapshot, path)
-    except OSError:  # pragma: no cover — unrenamable snapshot
-        logger.warning(
-            "could not restore journal snapshot %s", snapshot, exc_info=True,
-        )
+        names = os.listdir(directory)
+    except OSError:  # pragma: no cover — unreadable journal directory
+        return key
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        existing = _parse_claim_key(name, prefix)
+        if existing is not None and existing >= key:
+            key = existing + 1
+    return key
+
+
+def _snapshot_order_key(snapshot: str, prefix: str) -> tuple[int, int, str]:
+    """Sort key ordering claimed journal snapshots oldest-first.
+
+    Args:
+        snapshot: Path of a ``.consumed-*`` snapshot file.
+        prefix: The live sidecar basename plus the consumed suffix.
+
+    Returns:
+        ``(claim key, mtime ns, path)``.  A legacy snapshot without a
+        claim key falls back to its last-append mtime, which compares
+        correctly against real claim keys: a snapshot's claim always
+        happens after its own last append and before any younger
+        sidecar's first append.  The path tie-breaks (only reachable
+        between legacy names on a coarse-timestamp filesystem, where
+        no chronology survives at all).  A vanished file sorts first;
+        replay tolerates it (an unreadable snapshot is skipped).
+    """
+    try:
+        mtime = os.stat(snapshot).st_mtime_ns
+    except OSError:  # pragma: no cover — concurrently removed snapshot
+        mtime = 0
+    claim = _parse_claim_key(os.path.basename(snapshot), prefix)
+    return (mtime if claim is None else claim, mtime, snapshot)
 
 
 def _replay_journal_snapshot(snapshot: str) -> bool:
@@ -2224,6 +2723,13 @@ def _replay_journal_snapshot(snapshot: str) -> bool:
         True when the snapshot was replayed (or held nothing usable)
         and removed; False when the database still refuses the write,
         in which case the snapshot is kept for the next attempt.
+
+    Exactly-once: the SQLite commit and the file unlink cannot be
+    atomic, so the batch is committed together with a marker row in
+    ``replayed_journals`` keyed by the snapshot's unique claim name.
+    A crash (or unlink failure) between the two steps leaves the file
+    behind, but the next replayer finds the marker and only removes
+    the file — the events are never inserted twice.
     """
     try:
         with open(snapshot, encoding="utf-8") as stream:
@@ -2242,9 +2748,10 @@ def _replay_journal_snapshot(snapshot: str) -> bool:
             ))
         except (ValueError, TypeError, KeyError):
             logger.warning("skipping malformed journal line", exc_info=True)
+    marker = os.path.basename(snapshot)
     if batch:
         try:
-            _write_event_batch(batch)
+            _write_event_batch(batch, replay_marker=marker)
         except Exception:
             logger.warning(
                 "replay of %d journalled events failed; keeping %s",
@@ -2255,11 +2762,41 @@ def _replay_journal_snapshot(snapshot: str) -> bool:
     try:
         os.unlink(snapshot)
     except OSError:  # pragma: no cover — concurrent unlink
-        pass
+        # The marker row stays: with the file still on disk, a later
+        # replay must keep skipping the already-committed rows.
+        return True
+    _delete_replay_marker(marker)
     return True
 
 
-def _write_event_batch(batch: list[tuple[str, str, float, str]]) -> None:
+def _delete_replay_marker(marker: str) -> None:
+    """Prune *marker* from ``replayed_journals`` (best-effort).
+
+    Called only AFTER the snapshot file it names was unlinked: from
+    that point no replayer can rediscover the snapshot, so the marker
+    has done its job.  A failure here merely leaves a stale row.
+
+    Args:
+        marker: The snapshot's basename, as stored by
+            :func:`_write_event_batch_locked`.
+    """
+    try:
+        db = _get_db()
+        with _rw_lock.write_lock(), _immediate_txn(db):
+            db.execute(
+                "DELETE FROM replayed_journals WHERE snapshot = ?",
+                (marker,),
+            )
+    except Exception:  # pragma: no cover — pruning is best-effort
+        logger.warning(
+            "could not prune replay marker %s", marker, exc_info=True,
+        )
+
+
+def _write_event_batch(
+    batch: list[tuple[str, str, float, str]],
+    replay_marker: str | None = None,
+) -> None:
     """Persist a batch of (task_id, event_json, timestamp, origin_db_path) rows.
 
     Rows whose ``origin_db_path`` no longer matches the active
@@ -2267,6 +2804,13 @@ def _write_event_batch(batch: list[tuple[str, str, float, str]]) -> None:
     database that was active when they were enqueued, so writing them
     into the current database would attach them to an unrelated task
     that merely shares the same row id.
+
+    Args:
+        batch: The rows to insert.
+        replay_marker: For journal replays, the claimed snapshot's
+            basename; committed with the rows so a replay is
+            exactly-once (see :func:`_replay_journal_snapshot`).
+            ``None`` on the ordinary event-writer path.
     """
     if not batch:
         return
@@ -2278,7 +2822,7 @@ def _write_event_batch(batch: list[tuple[str, str, float, str]]) -> None:
     task_ids = {tid for (tid, _ej, _ts, _op) in batch}
     with _rw_lock.write_lock(), _caches_lock:
         try:
-            _write_event_batch_locked(db, batch, task_ids)
+            _write_event_batch_locked(db, batch, task_ids, replay_marker)
         except sqlite3.IntegrityError:
             # ``idx_ev_task_seq`` refused a duplicate ``(task_id,
             # seq)``: another PROCESS (journal replay from a CLI run,
@@ -2288,7 +2832,7 @@ def _write_event_batch(batch: list[tuple[str, str, float, str]]) -> None:
             # real error and propagates like any other failure.
             _rollback_event_batch(db, task_ids)
             try:
-                _write_event_batch_locked(db, batch, task_ids)
+                _write_event_batch_locked(db, batch, task_ids, replay_marker)
             except Exception:
                 _rollback_event_batch(db, task_ids)
                 raise
@@ -2322,14 +2866,33 @@ def _write_event_batch_locked(
     db: sqlite3.Connection,
     batch: list[tuple[str, str, float, str]],
     task_ids: set[str],
+    replay_marker: str | None = None,
 ) -> None:
     """Insert *batch* inside one explicit transaction.
 
     Caller holds ``_rw_lock.write_lock()`` and ``_caches_lock`` and
     rolls back + invalidates the seq caches on any failure, so a
     mid-batch error can never diverge the cache from the database.
+
+    When *replay_marker* is given and already present in
+    ``replayed_journals``, a previous replayer committed this very
+    snapshot and died before removing its file: nothing is inserted,
+    so the transcript never gets duplicate events.
     """
     db.execute("BEGIN IMMEDIATE")
+    if replay_marker is not None:
+        seen = db.execute(
+            "SELECT 1 FROM replayed_journals WHERE snapshot = ?",
+            (replay_marker,),
+        ).fetchone()
+        if seen is not None:
+            db.execute("COMMIT")
+            return
+        db.execute(
+            "INSERT INTO replayed_journals (snapshot, timestamp) "
+            "VALUES (?, ?)",
+            (replay_marker, time.time()),
+        )
     for tid in task_ids:
         if tid not in _next_seq_cache:
             exists = db.execute(

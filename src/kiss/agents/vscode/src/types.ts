@@ -93,7 +93,15 @@ export type FromWebviewMessage =
       workDir?: string;
     }
   | {type: 'autocommitAction'; tabId?: string; workDir?: string}
-  | {type: 'resolveDroppedPaths'; uris: string[]; workDir?: string}
+  | {
+      type: 'resolveDroppedPaths';
+      uris: string[];
+      workDir?: string;
+      // The originating chat tab: echoed back on the droppedPaths reply
+      // so a tab switch during the round trip cannot leak the paths into
+      // another tab's composer.
+      tabId?: string;
+    }
   | {type: 'webviewFocusChanged'; focused: boolean}
   | {type: 'activeTabChanged'; tabId: string}
   | {
@@ -415,7 +423,7 @@ type ToWebviewMessageBody =
       manual?: boolean;
       workDir?: string;
     }
-  | {type: 'droppedPaths'; paths: string[]}
+  | {type: 'droppedPaths'; paths: string[]; tabId?: string}
   | {
       type: 'adjacent_task_events';
       direction: 'prev' | 'next';

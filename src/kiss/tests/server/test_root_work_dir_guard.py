@@ -190,12 +190,12 @@ class TestTabRegistryRootWorkDir(unittest.TestCase):
         directory still updates it (the normal per-tab repin)."""
         registry = TabRegistry(self.path)
         registry.open_tab("t1", "title", str(self.tmpdir))
-        changed, _ = registry.update_tab("t1", work_dir="/")
+        changed, _, _ = registry.update_tab("t1", work_dir="/")
         self.assertFalse(changed)
         self.assertEqual(registry.snapshot()[0]["workDir"], str(self.tmpdir))
         other = self.tmpdir / "sub"
         other.mkdir()
-        changed, _ = registry.update_tab(
+        changed, _, _ = registry.update_tab(
             "t1", work_dir=str(other), scope_work_dir="\\\\",
         )
         self.assertTrue(changed)

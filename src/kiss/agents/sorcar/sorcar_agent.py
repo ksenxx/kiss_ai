@@ -472,8 +472,22 @@ class _AbandonedSubagent:
         Returns:
             The ``(budget, tokens, steps)`` delta between the child's
             live figures and what the parent has already counted.
+            Never negative: a live snapshot can momentarily REGRESS —
+            RelentlessAgent detaches ``_current_executor`` BEFORE
+            ``_accumulate_usage`` folds its spend into the cumulative
+            counters at every session handoff, so a read in that
+            window sees neither.  Like ``_collect_unfinished_usage``
+            and ``_LiveUsageMonitor._emit``, the snapshot is clamped
+            to what was already counted; otherwise a reclaim would
+            SUBTRACT banked spend from the parent and reset
+            ``counted`` downward, double-counting it later.
         """
         live = _live_agent_usage(self.agent)
+        live = (
+            max(live[0], self.counted[0]),
+            max(live[1], self.counted[1]),
+            max(live[2], self.counted[2]),
+        )
         delta = (
             live[0] - self.counted[0],
             live[1] - self.counted[1],

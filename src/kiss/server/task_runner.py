@@ -592,10 +592,16 @@ class _TaskRunnerMixin:
             work_dir: str | None = None,
             task_id: str | None = None,
             create: bool = False,
-        ) -> None: ...
+        ) -> int: ...
         def _any_non_wt_running(
-            self, repo_root: Path | None = None,
+            self,
+            repo_root: Path | None = None,
+            *,
+            exclude: AgentState | None = None,
         ) -> bool: ...
+        def _main_tree_claim_reason(
+            self, repo_root: Path | None,
+        ) -> str | None: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _main_dirty_files(self, work_dir: str = "") -> list[str]: ...
         def _autocommit_changes(
@@ -603,6 +609,7 @@ class _TaskRunnerMixin:
             tab_id: str = "",
             *,
             work_dir: str = "",
+            own_state: AgentState | None = None,
         ) -> None: ...
         def _autocommit_changed_repos(
             self,
@@ -612,6 +619,7 @@ class _TaskRunnerMixin:
             task_id: str | None = None,
             extra_paths: set[str] | None = None,
             extra_task_ids: list[str] | None = None,
+            own_state: AgentState | None = None,
         ) -> None: ...
         def _handle_worktree_action(
             self,
@@ -1283,6 +1291,26 @@ class _TaskRunnerMixin:
                         }
                     )
                     return
+                # A main-tree mutator (Discard, manual Git Commit)
+                # publishes a per-repo claim in the same locked
+                # section as its own busy check; admitting a direct
+                # task while the claim is held would let ``git reset
+                # --hard`` / ``git add -A`` run over this task's
+                # half-written files (gpt-5.6-sol review, findings
+                # 2 and 3).
+                claim = self._main_tree_claim_reason(repo)
+                if claim is not None:
+                    state.is_task_active = False
+                    self.printer.broadcast(
+                        {
+                            "type": "error",
+                            "text": f"A {claim} is in progress on this "
+                            "repository. Wait for it to finish before "
+                            "starting a task.",
+                            "tabId": tab_id,
+                        }
+                    )
+                    return
                 state.is_running_non_wt = True
                 state.non_wt_repo_root = repo.resolve() if repo else None
 
@@ -1633,8 +1661,19 @@ class _TaskRunnerMixin:
                         if effective_auto_commit and self._main_dirty_files(
                             work_dir,
                         ):
+                            # The whole-repo auto-commit is a main-tree
+                            # mutation: ``_autocommit_changes`` runs the
+                            # atomic busy-check + per-repo claim itself
+                            # (no ``claimed_repo`` passed), refusing to
+                            # ``git add -A`` while ANOTHER task occupies
+                            # the repository and blocking new admissions
+                            # for the commit's duration.  This task's
+                            # own ``is_running_non_wt`` admission is
+                            # still active here, so its state is passed
+                            # for exclusion (gpt-5.6-sol review 2,
+                            # missed wiring 2).
                             self._autocommit_changes(
-                                tab_id, work_dir=work_dir,
+                                tab_id, work_dir=work_dir, own_state=state,
                             )
                         if effective_auto_commit:
                             # The action above commits the work_dir
@@ -1647,6 +1686,7 @@ class _TaskRunnerMixin:
                                 task_id=task_history_id,
                                 extra_paths=run_changed_paths,
                                 extra_task_ids=run_task_ids,
+                                own_state=state,
                             )
                     except BaseException:  # pragma: no cover — autocommit error handler
                         logger.debug("Post-task autocommit error", exc_info=True)

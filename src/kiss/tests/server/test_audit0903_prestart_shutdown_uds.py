@@ -109,7 +109,9 @@ class _ParkingTabRegistry(TabRegistry):
         self.parked = threading.Event()
         self.release = threading.Event()
 
-    def update_tab(self, tab_id: str, **kwargs: Any) -> tuple[bool, list[str]]:
+    def update_tab(
+        self, tab_id: str, **kwargs: Any,
+    ) -> tuple[bool, list[tuple[str, int]], int]:
         """Park the designated tab's first update, then delegate."""
         if tab_id == self.park_tab and not self.parked.is_set():
             self.parked.set()
@@ -130,7 +132,9 @@ class _RaisingTabRegistry(TabRegistry):
         super().__init__(path)
         self.fail_tab = fail_tab
 
-    def update_tab(self, tab_id: str, **kwargs: Any) -> tuple[bool, list[str]]:
+    def update_tab(
+        self, tab_id: str, **kwargs: Any,
+    ) -> tuple[bool, list[tuple[str, int]], int]:
         """Raise for the designated tab, else delegate."""
         if tab_id == self.fail_tab:
             raise RuntimeError("registry write failed")
