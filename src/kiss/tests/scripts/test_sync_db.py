@@ -247,7 +247,7 @@ def test_repeated_sync_is_a_no_op(tmp_path: Path) -> None:
     second = sync(str(source), str(target))
 
     assert second.returncode == 0
-    assert "0 task row(s) added, 0 updated, 0 event row(s) added" in second.stdout
+    assert "0 task row(s) added, 0 event row(s) added" in second.stdout
     assert event_keys(target) == [("a", 1), ("a", 2), ("a", 3)]
 
 
@@ -266,7 +266,7 @@ def test_repeated_sync_without_unique_index_does_not_duplicate(tmp_path: Path) -
 
 
 def test_incremental_sync_ships_only_new_rows(tmp_path: Path) -> None:
-    """After the first sync only later events and changed tasks travel."""
+    """After the first sync only new tasks and later events travel."""
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     src = make_db(source)
     add_task(src, "a", steps=2, events=2)
@@ -277,17 +277,13 @@ def test_incremental_sync_ships_only_new_rows(tmp_path: Path) -> None:
 
     src = sqlite3.connect(source, isolation_level=None)
     append_events(src, "a", 3, 2)
-    src.execute("UPDATE task_history SET steps = 9, result = 'done' WHERE id = 'a'")
     add_task(src, "c", steps=1, events=1)
     src.close()
     second = sync(str(source), str(target))
 
     assert second.returncode == 0
-    assert "1 task row(s) added, 1 updated, 3 event row(s) added" in second.stdout
+    assert "1 task row(s) added, 3 event row(s) added" in second.stdout
     assert task_ids(target) == ["a", "b", "c"]
-    assert rows(target, "SELECT steps, result FROM task_history WHERE id = 'a'") == [
-        (9, "done")
-    ]
     assert event_keys(target) == [
         ("a", 1),
         ("a", 2),
@@ -301,58 +297,63 @@ def test_incremental_sync_ships_only_new_rows(tmp_path: Path) -> None:
     ]
 
 
-def test_stale_source_task_does_not_clobber_target(tmp_path: Path) -> None:
-    """A less advanced source task row leaves the target's row intact."""
+def test_an_existing_task_row_is_never_modified(tmp_path: Path) -> None:
+    """A task id the target already has leaves the target's row intact.
+
+    Task ids are unique and a task row is immutable once created, so two
+    copies of one id are the same row; whatever the target recorded stays.
+    """
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     src = make_db(source)
-    add_task(src, "a", steps=2, result="early")
+    add_task(src, "a", steps=80, result="differs")
+    add_task(src, "b", steps=1)
     src.close()
     dst = make_db(target)
-    add_task(dst, "a", steps=40, result="late", end_ts=99)
+    add_task(dst, "a", steps=2, result="kept", end_ts=99)
     dst.close()
 
     done = sync(str(source), str(target))
 
     assert done.returncode == 0
-    assert rows(target, "SELECT steps, result FROM task_history") == [(40, "late")]
-    assert "0 task row(s) added, 0 updated" in done.stdout
-
-
-def test_force_overwrites_the_target_task_row(tmp_path: Path) -> None:
-    """``--force`` makes the source authoritative on conflict."""
-    source, target = tmp_path / "src.db", tmp_path / "dst.db"
-    src = make_db(source)
-    add_task(src, "a", steps=2, result="early")
-    src.close()
-    dst = make_db(target)
-    add_task(dst, "a", steps=40, result="late", end_ts=99)
-    dst.close()
-
-    done = sync(str(source), str(target), "--force")
-
-    assert done.returncode == 0
-    assert rows(target, "SELECT steps, result FROM task_history") == [(2, "early")]
-    assert "0 task row(s) added, 1 updated" in done.stdout
-
-
-def test_insert_only_keeps_existing_rows(tmp_path: Path) -> None:
-    """``--insert-only`` adds new rows but never updates existing ones."""
-    source, target = tmp_path / "src.db", tmp_path / "dst.db"
-    src = make_db(source)
-    add_task(src, "a", steps=80, result="newer")
-    add_task(src, "b", steps=1)
-    src.close()
-    dst = make_db(target)
-    add_task(dst, "a", steps=2, result="older")
-    dst.close()
-
-    done = sync(str(source), str(target), "--insert-only")
-
-    assert done.returncode == 0
     assert rows(
         target, "SELECT id, steps, result FROM task_history ORDER BY id"
-    ) == [("a", 2, "older"), ("b", 1, "ok")]
-    assert "1 task row(s) added, 0 updated" in done.stdout
+    ) == [("a", 2, "kept"), ("b", 1, "ok")]
+    assert "1 task row(s) added, 0 event row(s) added" in done.stdout
+
+
+def test_a_differing_copy_never_travels_again(tmp_path: Path) -> None:
+    """Row contents are never compared: a known id ships nothing.
+
+    Even ``--full``, which ships every source row, cannot overwrite a row
+    the target already has.
+    """
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    add_task(src, "a", steps=80, result="differs")
+    src.close()
+    dst = make_db(target)
+    add_task(dst, "a", steps=2, result="kept")
+    dst.close()
+
+    plain = sync(str(source), str(target))
+    full = sync(str(source), str(target), "--full")
+
+    assert plain.returncode == 0 and full.returncode == 0
+    assert "0 task row(s) added" in plain.stdout
+    assert "0 task row(s) added" in full.stdout
+    assert rows(target, "SELECT steps, result FROM task_history") == [(2, "kept")]
+
+
+def test_removed_mode_flags_are_rejected(tmp_path: Path) -> None:
+    """The retired ``--force`` and ``--insert-only`` flags are errors."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    make_db(source).close()
+    make_db(target).close()
+
+    for flag in ("--force", "--insert-only"):
+        done = sync(str(source), str(target), flag)
+        assert done.returncode == 2, done.stderr
+        assert "unrecognized arguments" in done.stderr
 
 
 def test_event_rowids_never_collide(tmp_path: Path) -> None:
@@ -408,7 +409,7 @@ def test_dry_run_writes_nothing(tmp_path: Path) -> None:
     done = sync(str(source), str(target), "--dry-run")
 
     assert done.returncode == 0
-    assert "would add 1 task row(s), update 0, add 2 event row(s)" in done.stdout
+    assert "would add 1 task row(s) and 2 event row(s)" in done.stdout
     assert task_ids(target) == []
     assert event_keys(target) == []
 
@@ -492,30 +493,6 @@ def test_missing_event_below_the_highest_one_is_healed(tmp_path: Path) -> None:
     assert "1 event row(s) added" in done.stdout
 
 
-def test_neighbouring_column_values_are_not_confused(tmp_path: Path) -> None:
-    """Shifting a byte between two columns still counts as a change."""
-    source, target = tmp_path / "src.db", tmp_path / "dst.db"
-    src = make_db(source)
-    add_task(src, "a")
-    src.execute("UPDATE task_history SET model = 'a', parent_task_id = char(0) || 'sb'")
-    src.close()
-    dst = make_db(target)
-    add_task(dst, "a")
-    dst.execute("UPDATE task_history SET model = 'a' || char(0) || 's', parent_task_id = 'b'")
-    dst.close()
-
-    # ``--force``: the two rows record the same progress, so the digest is
-    # the only thing that can tell them apart, and only a mode that writes
-    # an equally-far-along row makes the difference observable.
-    done = sync(str(source), str(target), "--force")
-
-    assert done.returncode == 0, done.stderr
-    assert "1 updated" in done.stdout
-    assert rows(target, "SELECT model, parent_task_id FROM task_history") == [
-        ("a", "\x00sb")
-    ]
-
-
 def test_schema_mismatch_is_refused(tmp_path: Path) -> None:
     """Databases whose columns differ are not synced at all."""
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
@@ -534,8 +511,8 @@ def test_schema_mismatch_is_refused(tmp_path: Path) -> None:
     assert task_ids(target) == []
 
 
-def test_dry_run_reports_what_the_mode_would_really_do(tmp_path: Path) -> None:
-    """A dry run applies the conflict rules instead of counting the delta."""
+def test_dry_run_reports_what_a_real_run_would_do(tmp_path: Path) -> None:
+    """A dry run applies the merge rules instead of counting the delta."""
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     src = make_db(source)
     add_task(src, "a", steps=2, result="early")
@@ -548,7 +525,7 @@ def test_dry_run_reports_what_the_mode_would_really_do(tmp_path: Path) -> None:
     done = sync(str(source), str(target), "--dry-run")
 
     assert done.returncode == 0, done.stderr
-    assert "would add 1 task row(s), update 0, add 2 event row(s)" in done.stdout
+    assert "would add 1 task row(s) and 2 event row(s)" in done.stdout
     assert task_ids(target) == ["a"]
     assert rows(target, "SELECT steps FROM task_history") == [(40,)]
     assert event_keys(target) == []
@@ -660,16 +637,8 @@ def test_reversed_unique_index_on_the_target(tmp_path: Path) -> None:
     assert event_keys(target) == [("a", 1)]
 
 
-def test_a_schema_without_progress_columns_keeps_the_targets_row(
-    tmp_path: Path,
-) -> None:
-    """With nothing that grows, neither copy of a task may win.
-
-    ``steps``, ``tokens``, ``cost`` and ``end_ts`` are what tell two
-    copies of one task apart.  A table with none of them cannot say
-    which copy came later, so the target's row stays as it is unless
-    ``--force`` says otherwise.
-    """
+def test_a_minimal_schema_still_syncs(tmp_path: Path) -> None:
+    """A schema with only the required columns syncs insert-only too."""
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     ddl = (
         "CREATE TABLE task_history (id TEXT PRIMARY KEY, task TEXT NOT NULL,"
@@ -692,16 +661,14 @@ def test_a_schema_without_progress_columns_keeps_the_targets_row(
     done = sync(str(source), str(target))
 
     assert done.returncode == 0, done.stderr
-    assert "1 task row(s) added, 0 updated" in done.stdout
+    assert "1 task row(s) added" in done.stdout
     assert rows(target, "SELECT result FROM task_history WHERE id = 'a'") == [
         ("from the target",)
     ]
-
-    forced = sync(str(source), str(target), "--force")
-
-    assert forced.returncode == 0, forced.stderr
-    assert rows(target, "SELECT result FROM task_history WHERE id = 'a'") == [
-        ("from the source",)
+    assert sorted(task_ids(target)) == [
+        "a",
+        "only from the source",
+        "only from the target",
     ]
 
 
@@ -838,11 +805,11 @@ def test_remote_round_trip(tmp_path: Path) -> None:
     try:
         push = sync(str(local), f"{REMOTE_HOST}:{remote_db}")
         assert push.returncode == 0, push.stderr
-        assert "2 task row(s) added, 0 updated, 4 event row(s) added" in push.stdout
+        assert "2 task row(s) added, 4 event row(s) added" in push.stdout
 
         again = sync(str(local), f"{REMOTE_HOST}:{remote_db}")
         assert again.returncode == 0, again.stderr
-        assert "0 task row(s) added, 0 updated, 0 event row(s) added" in again.stdout
+        assert "0 task row(s) added, 0 event row(s) added" in again.stdout
 
         pull = sync(f"{REMOTE_HOST}:{remote_db}", str(back))
         assert pull.returncode == 0, pull.stderr
