@@ -57,7 +57,10 @@ body.remote-chat {
   --sidebar-default-w: 20vw;
 
   /* The docked task-info panel on the RIGHT of the chat mirrors the
-     history panel's one-fifth share of the window. */
+     history panel's one-fifth share of the window.  Like the history
+     panel it is resizable: --meta-w, set by the #meta-resizer drag
+     logic in main.js, overrides this default, and shares the
+     --sidebar-min-w collapse floor. */
   --meta-panel-w: 20vw;
 
   /* Chat width the docked panel may never eat into, so a panel widened
@@ -453,6 +456,12 @@ body.remote-chat #sidebar-resizer {
   display: none;
 }
 
+body.remote-chat #meta-resizer {
+  display: none;
+}
+
+/* Set by main.js while EITHER docked panel — history or task-info —
+   is being dragged. */
 body.remote-chat.sidebar-resizing {
   user-select: none;
 }
@@ -553,7 +562,7 @@ body.remote-chat .running-item-ids::before {
        not jump ahead of it while the burger shows or hides it.  The
        right margin permanently clears the docked task-info panel. */
     margin-left: 0;
-    margin-right: var(--meta-panel-w);
+    margin-right: var(--meta-w, var(--meta-panel-w));
     transition: margin-left 0.2s ease;
   }
 
@@ -568,7 +577,10 @@ body.remote-chat .running-item-ids::before {
   /* The docked task-info panel: a permanent right-hand twin of the
      history panel that lists the live task metadata (tokens, cost,
      steps, time, machine) as bullet items.  The top status bar goes —
-     the panel replaces it on desktop. */
+     the panel replaces it on desktop.  Like the history panel it may
+     be dragged (via #meta-resizer on its left edge) down to the
+     --sidebar-min-w sliver, so its horizontal padding collapses with
+     the panel exactly like the history panel's does. */
   body.remote-chat.remote-desktop #meta-panel {
     display: flex;
     flex-direction: column;
@@ -576,11 +588,19 @@ body.remote-chat .running-item-ids::before {
     top: 0;
     right: 0;
     bottom: 0;
-    width: var(--meta-panel-w);
+    width: var(--meta-w, var(--meta-panel-w));
     background: var(--surface);
     border-left: 1px solid var(--border-8);
     padding: 16px;
-    overflow-y: auto;
+    padding-left: min(16px, calc(var(--meta-w, var(--meta-panel-w)) / 4));
+    padding-right: min(16px, calc(var(--meta-w, var(--meta-panel-w)) / 4));
+
+    /* The PANEL never scrolls — overflowing values scroll inside
+       #meta-list, exactly like #history-list inside the history
+       panel.  If the panel itself scrolled, the absolutely-positioned
+       #meta-resizer would scroll away with the content and the mouse
+       could no longer reach it. */
+    overflow: hidden;
     z-index: 150;
   }
 
@@ -595,6 +615,11 @@ body.remote-chat .running-item-ids::before {
     display: flex;
     flex-direction: column;
     gap: 10px;
+
+    /* Scrolling lives here, not on #meta-panel (see above). */
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
   }
 
   body.remote-chat.remote-desktop .meta-item {
@@ -624,9 +649,25 @@ body.remote-chat .running-item-ids::before {
     touch-action: none;
   }
 
+  /* The task-info panel's drag handle mirrors the history panel's,
+     riding the panel's LEFT edge (the edge facing the chat). */
+  body.remote-chat.remote-desktop #meta-panel #meta-resizer {
+    display: block;
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 6px;
+    cursor: col-resize;
+    touch-action: none;
+  }
+
   body.remote-chat.remote-desktop #sidebar-resizer:hover,
   body.remote-chat.remote-desktop #sidebar-resizer:active,
-  body.remote-chat.remote-desktop #sidebar-resizer:focus-visible {
+  body.remote-chat.remote-desktop #sidebar-resizer:focus-visible,
+  body.remote-chat.remote-desktop #meta-resizer:hover,
+  body.remote-chat.remote-desktop #meta-resizer:active,
+  body.remote-chat.remote-desktop #meta-resizer:focus-visible {
     background: var(--border-12);
   }
 }

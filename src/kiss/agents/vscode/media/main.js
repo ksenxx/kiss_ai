@@ -9981,123 +9981,220 @@
       }
       applyRemoteDesktop();
     }
+    // Docked panel resizers (remote desktop mode only).  The history
+    // panel (#sidebar) carries a drag handle on its RIGHT edge and the
+    // task-info panel (#meta-panel) one on its LEFT edge.  Both share
+    // the bounds declared in remote-codex.css: a drag may collapse
+    // either panel to a 10px sliver (--sidebar-min-w), and neither may
+    // grow so wide that the chat column between them drops below
+    // --chat-min-w.
     const sidebarResizer = document.getElementById('sidebar-resizer');
-    if (document.body.classList.contains('remote-chat') && sidebarResizer) {
-      // Bounds come from remote-codex.css: a drag may collapse the
-      // panel to a 10px sliver (--sidebar-min-w).
-      const SB_MIN = cssPxVar('--sidebar-min-w', 10);
+    const metaResizer = document.getElementById('meta-resizer');
+    if (
+      document.body.classList.contains('remote-chat') &&
+      sidebarResizer &&
+      metaResizer
+    ) {
+      const PANEL_MIN = cssPxVar('--sidebar-min-w', 10);
       const CHAT_MIN = cssPxVar('--chat-min-w', 360);
-      const SB_KEY = 'kiss-sidebar-w';
-      // Widest the panel may become on the CURRENT window: a drag may
-      // take the panel as wide as it likes as long as the chat keeps
-      // its minimum usable width — and a wide panel dragged on a big
-      // monitor must not squeeze the chat into an unusable sliver
-      // after the window shrinks.  The chat sits BETWEEN the history
-      // panel and the docked task-info panel, whose fifth of the
-      // window (--meta-panel-w: 20vw) must be reserved too.
-      const sidebarWindowMax = () =>
-        Math.max(SB_MIN, Math.floor(window.innerWidth * 0.8) - CHAT_MIN);
-      // The DEFAULT width is one fifth of the browser window — the
-      // same fraction as the --sidebar-default-w CSS fallback (20vw)
-      // in remote-codex.css.
-      const sidebarDefaultW = () =>
-        Math.min(sidebarWindowMax(), Math.round(window.innerWidth * 0.2));
-      // The PREFERRED width (`sidebarW`, what the user last asked for
-      // and what localStorage keeps) is tracked separately from the
-      // RENDERED width (`sidebarRenderedW`, the preference clamped to
-      // the current window): a wide preference loaded — or kept — on a
-      // narrow window renders clamped but must survive as-is, so the
-      // panel springs back once the window is wide enough again.
-      let sidebarRenderedW = sidebarDefaultW();
-      const setSidebarW = px => {
-        const max = sidebarWindowMax();
-        const w = Math.max(SB_MIN, Math.min(max, Math.round(px)));
-        document.documentElement.style.setProperty('--sidebar-w', w + 'px');
-        sidebarResizer.setAttribute('aria-valuemax', String(max));
-        sidebarResizer.setAttribute('aria-valuenow', String(w));
-        sidebarRenderedW = w;
-        return w;
+      // The fluid CSS default width: one fifth of the browser window,
+      // the same fraction as the 20vw fallbacks (--sidebar-default-w
+      // and --meta-panel-w) in remote-codex.css.
+      const fluidDefaultW = () => Math.round(window.innerWidth * 0.2);
+      // RENDERED width of each docked panel, shared between the two
+      // resizers: the chat sits BETWEEN the history panel and the
+      // task-info panel, so the widest one panel may grow is the
+      // window minus the chat's minimum usable width minus the OTHER
+      // panel's actual rendered width.  Until a panel is resized it
+      // renders at the fluid CSS default.
+      const panelRenderedW = {
+        sidebar: fluidDefaultW(),
+        meta: fluidDefaultW(),
       };
-      sidebarResizer.setAttribute('aria-valuemin', String(SB_MIN));
-      sidebarResizer.setAttribute('aria-valuemax', String(sidebarWindowMax()));
-      sidebarResizer.setAttribute('aria-valuenow', String(sidebarDefaultW()));
-      let sidebarW = sidebarDefaultW();
-      let persisted = null;
-      try {
-        persisted = window.localStorage.getItem(SB_KEY);
-      } catch {}
-      if (persisted !== null && /^\d+$/.test(persisted)) {
-        sidebarW = parseInt(persisted, 10);
-        setSidebarW(sidebarW);
-      }
-      const persistSidebarW = () => {
-        try {
-          window.localStorage.setItem(SB_KEY, String(sidebarW));
-        } catch {}
+      const panelResizers = [];
+      // A resize of one panel changes how wide the OTHER may become,
+      // so every width change refreshes both resizers' ARIA maxima.
+      const refreshPanelAriaMax = () => {
+        for (const p of panelResizers) {
+          p.resizer.setAttribute('aria-valuemax', String(p.windowMax()));
+        }
       };
-      let sidebarResizing = false;
-      const endSidebarResize = e => {
-        if (!sidebarResizing) return;
-        sidebarResizing = false;
-        document.body.classList.remove('sidebar-resizing');
+      /**
+       * Wires dragging, keyboard steps, double-click reset, ARIA and
+       * localStorage persistence for one docked panel resizer.
+       *
+       * resizer          the drag-handle element
+       * name, otherName  keys into panelRenderedW: this panel and the
+       *                  panel on the far side of the chat
+       * cssVar           custom property carrying the panel width
+       * storageKey       localStorage key for the preferred width
+       * pointerWidth(e)  pointer event -> candidate width in px
+       * growKey          the arrow key that widens the panel (the
+       *                  opposite arrow narrows it)
+       */
+      const setupPanelResizer = (
+        resizer,
+        name,
+        otherName,
+        cssVar,
+        storageKey,
+        pointerWidth,
+        growKey,
+      ) => {
+        const windowMax = () =>
+          Math.max(
+            PANEL_MIN,
+            window.innerWidth - CHAT_MIN - panelRenderedW[otherName],
+          );
+        const defaultW = () => Math.min(windowMax(), fluidDefaultW());
+        const setW = px => {
+          const w = Math.max(PANEL_MIN, Math.min(windowMax(), Math.round(px)));
+          document.documentElement.style.setProperty(cssVar, w + 'px');
+          resizer.setAttribute('aria-valuenow', String(w));
+          panelRenderedW[name] = w;
+          refreshPanelAriaMax();
+          return w;
+        };
+        resizer.setAttribute('aria-valuemin', String(PANEL_MIN));
+        resizer.setAttribute('aria-valuemax', String(windowMax()));
+        resizer.setAttribute('aria-valuenow', String(defaultW()));
+        // The PREFERRED width (`prefW`, what the user last asked for
+        // and what localStorage keeps) is tracked separately from the
+        // RENDERED width (the preference clamped to the current
+        // window): a wide preference loaded — or kept — on a narrow
+        // window renders clamped but must survive as-is, so the panel
+        // springs back once the window is wide enough again.  A null
+        // preference means the user never resized this panel: it
+        // renders at the fluid CSS default and keeps following the
+        // window fraction as the window changes size.
+        let prefW = null;
+        let persisted = null;
         try {
-          if (
-            e.pointerId !== undefined &&
-            typeof sidebarResizer.releasePointerCapture === 'function'
-          ) {
-            sidebarResizer.releasePointerCapture(e.pointerId);
-          }
+          persisted = window.localStorage.getItem(storageKey);
         } catch {}
-        persistSidebarW();
+        if (persisted !== null && /^\d+$/.test(persisted)) {
+          prefW = parseInt(persisted, 10);
+          setW(prefW);
+        }
+        const persistW = () => {
+          if (prefW === null) return;
+          try {
+            window.localStorage.setItem(storageKey, String(prefW));
+          } catch {}
+        };
+        let resizing = false;
+        const endResize = e => {
+          if (!resizing) return;
+          resizing = false;
+          document.body.classList.remove('sidebar-resizing');
+          try {
+            if (
+              e.pointerId !== undefined &&
+              typeof resizer.releasePointerCapture === 'function'
+            ) {
+              resizer.releasePointerCapture(e.pointerId);
+            }
+          } catch {}
+          persistW();
+        };
+        resizer.addEventListener('pointerdown', e => {
+          if (e.button !== 0) return;
+          if (!document.body.classList.contains('remote-desktop')) return;
+          e.preventDefault();
+          resizing = true;
+          document.body.classList.add('sidebar-resizing');
+          try {
+            if (
+              e.pointerId !== undefined &&
+              typeof resizer.setPointerCapture === 'function'
+            ) {
+              resizer.setPointerCapture(e.pointerId);
+            }
+          } catch {}
+        });
+        resizer.addEventListener('pointermove', e => {
+          if (!resizing) return;
+          if (!document.body.classList.contains('remote-desktop')) return;
+          prefW = setW(pointerWidth(e));
+        });
+        resizer.addEventListener('pointerup', endResize);
+        resizer.addEventListener('pointercancel', endResize);
+        resizer.addEventListener('dblclick', () => {
+          if (!document.body.classList.contains('remote-desktop')) return;
+          // Reset: to the default width right now, and back to the
+          // FLUID default (following the window fraction) from the
+          // next window resize on.
+          setW(defaultW());
+          prefW = null;
+          try {
+            window.localStorage.removeItem(storageKey);
+          } catch {}
+        });
+        resizer.addEventListener('keydown', e => {
+          if (!document.body.classList.contains('remote-desktop')) return;
+          if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+          e.preventDefault();
+          // Step from the RENDERED width, not the preference: with a
+          // wide preference clamped by a narrow window, stepping from
+          // the preference would neither move the panel nor mean
+          // anything to the user looking at it.
+          prefW = setW(panelRenderedW[name] + (e.key === growKey ? 16 : -16));
+          persistW();
+        });
+        panelResizers.push({
+          resizer,
+          windowMax,
+          hasPref: () => prefW !== null,
+          // A panel the user resized re-clamps to the new window so a
+          // wide panel narrows instead of crushing the chat; the
+          // preference in `prefW` is intentionally left untouched.
+          reclamp: () => setW(prefW),
+          // An untouched panel goes back to the fluid CSS default.
+          applyFluidDefault: () => {
+            document.documentElement.style.removeProperty(cssVar);
+            panelRenderedW[name] = fluidDefaultW();
+            resizer.setAttribute('aria-valuenow', String(defaultW()));
+          },
+        });
       };
-      sidebarResizer.addEventListener('pointerdown', e => {
-        if (e.button !== 0) return;
-        if (!document.body.classList.contains('remote-desktop')) return;
-        e.preventDefault();
-        sidebarResizing = true;
-        document.body.classList.add('sidebar-resizing');
-        try {
-          if (
-            e.pointerId !== undefined &&
-            typeof sidebarResizer.setPointerCapture === 'function'
-          ) {
-            sidebarResizer.setPointerCapture(e.pointerId);
-          }
-        } catch {}
-      });
-      sidebarResizer.addEventListener('pointermove', e => {
-        if (!sidebarResizing) return;
-        if (!document.body.classList.contains('remote-desktop')) return;
-        sidebarW = setSidebarW(e.clientX);
-      });
-      sidebarResizer.addEventListener('pointerup', endSidebarResize);
-      sidebarResizer.addEventListener('pointercancel', endSidebarResize);
-      sidebarResizer.addEventListener('dblclick', () => {
-        if (!document.body.classList.contains('remote-desktop')) return;
-        sidebarW = setSidebarW(sidebarDefaultW());
-        try {
-          window.localStorage.removeItem(SB_KEY);
-        } catch {}
-      });
-      sidebarResizer.addEventListener('keydown', e => {
-        if (!document.body.classList.contains('remote-desktop')) return;
-        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-        e.preventDefault();
-        // Step from the RENDERED width, not the preference: with a
-        // wide preference clamped by a narrow window, stepping from
-        // the preference would neither move the panel nor mean
-        // anything to the user looking at it.
-        sidebarW = setSidebarW(
-          sidebarRenderedW + (e.key === 'ArrowRight' ? 16 : -16),
-        );
-        persistSidebarW();
-      });
-      // Re-apply the width whenever the window changes size so a wide
-      // panel narrows instead of crushing the chat.  The preferred
-      // width in `sidebarW` is intentionally left untouched.
+      // History panel: the handle rides its RIGHT edge, so the
+      // pointer's distance from the window's LEFT edge is the
+      // candidate width and ArrowRight widens the panel.
+      setupPanelResizer(
+        sidebarResizer,
+        'sidebar',
+        'meta',
+        '--sidebar-w',
+        'kiss-sidebar-w',
+        e => e.clientX,
+        'ArrowRight',
+      );
+      // Task-info panel: the handle rides its LEFT edge, so the
+      // pointer's distance from the window's RIGHT edge is the
+      // candidate width and ArrowLeft widens the panel.
+      setupPanelResizer(
+        metaResizer,
+        'meta',
+        'sidebar',
+        '--meta-w',
+        'kiss-meta-w',
+        e => window.innerWidth - e.clientX,
+        'ArrowLeft',
+      );
+      // Re-apply widths whenever the window changes size.  Untouched
+      // panels first (they follow the window's one-fifth fraction),
+      // then user-resized ones, so the latter clamp against the
+      // up-to-date width of the panel across the chat and the chat
+      // always keeps --chat-min-w.
       window.addEventListener('resize', () => {
         if (!document.body.classList.contains('remote-desktop')) return;
-        setSidebarW(sidebarW);
+        for (const p of panelResizers) {
+          if (!p.hasPref()) p.applyFluidDefault();
+        }
+        for (const p of panelResizers) {
+          if (p.hasPref()) p.reclamp();
+        }
+        refreshPanelAriaMax();
       });
     }
     if (frequentTasksBtn) {
