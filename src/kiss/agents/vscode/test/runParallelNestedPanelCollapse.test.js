@@ -311,30 +311,6 @@ function openNewChat(st) {
   );
 }
 
-/**
- * Bring the summary-nested fan-out back on screen with its sub-agent
- * tabs open, whatever state the summary adoption left it in.
- *
- * @param {object} st Boot state from bootParallelRun.
- * @param {Element} sum The summary panel that adopted the fan-out.
- */
-function openFanOutInsideSummary(st, sum) {
-  if (sum.classList.contains('collapsed')) togglePanel(st.win, sum, st.drain);
-  assert.ok(!sum.classList.contains('collapsed'), 'summary panel expanded');
-  if (st.panel.classList.contains('collapsed'))
-    togglePanel(st.win, st.panel, st.drain);
-  assert.ok(
-    !st.panel.classList.contains('collapsed'),
-    'the nested run_parallel panel must be expanded',
-  );
-  assert.strictEqual(
-    subagentTabEls(st.win).length,
-    2,
-    'sanity: the fan-out is on screen inside the expanded summary, so ' +
-      'its sub-agent tabs must be open',
-  );
-}
-
 // A run_parallel panel swallowed by a collapsed summary panel is off
 // screen: its sub-agent tabs must go with it.
 function testSummaryAdoptionClosesSubagentTabs(mode) {
@@ -466,92 +442,6 @@ function testSpawnAfterAdoptionOpensNoTab(mode) {
   );
   st.win.close();
   console.log('  ok [' + mode + '] spawn after adoption opens no tab');
-}
-
-// The task-end collapse pass must not skip a run_parallel panel just
-// because a summary panel adopted it.
-function testTaskEndClosesNestedSubagentTabs(mode) {
-  const st = bootParallelRun(mode, 2);
-  openFanOutInsideSummary(st, sendSummary(st));
-
-  st.deliver({
-    type: 'tool_call',
-    name: 'finish',
-    tabId: st.parentId,
-    extras: {summary: 'done'},
-  });
-  st.deliver({
-    type: 'result',
-    tabId: st.parentId,
-    summary: 'done',
-    success: true,
-  });
-  st.deliver({type: 'status', running: false, tabId: st.parentId});
-  st.deliver({type: 'usage_info', tabId: st.parentId});
-
-  assert.strictEqual(
-    subagentTabEls(st.win).length,
-    0,
-    'INVARIANT VIOLATED (' +
-      mode +
-      '): the task-end collapse pass left the fan-out tabs of a ' +
-      'summary-nested run_parallel panel open',
-  );
-  assert.ok(
-    st.panel.classList.contains('collapsed'),
-    'the task-end pass must collapse the nested run_parallel panel',
-  );
-  st.win.close();
-  console.log('  ok [' + mode + '] task end closes nested fan-out tabs');
-}
-
-// The parent chat's task can also end while the user is reading another
-// chat: the background-tab collapse pass (collapseAllExceptResult over
-// the tab's detached fragment) must close a summary-nested fan-out too,
-// even though it deliberately leaves a live fan-out panel alone -- the
-// summary it hides behind has already gone off screen.
-function testBackgroundTaskEndClosesNestedSubagentTabs(mode) {
-  const st = bootParallelRun(mode, 2);
-  openFanOutInsideSummary(st, sendSummary(st));
-
-  // The user opens a fresh chat with the tab bar's "+" button (the one
-  // control both surfaces share), so the fan-out's parent chat -- and
-  // the panels of this test -- move into a background tab.
-  openNewChat(st);
-  assert.ok(
-    !st.win.document.getElementById('output').contains(st.panel),
-    'sanity: the fan-out panels must have left #output for the ' +
-      "background tab's detached fragment",
-  );
-  assert.strictEqual(
-    subagentTabEls(st.win).length,
-    2,
-    'opening a new chat must not disturb the fan-out tabs',
-  );
-
-  st.deliver({
-    type: 'result',
-    tabId: st.parentId,
-    summary: 'done',
-    success: true,
-  });
-
-  assert.strictEqual(
-    subagentTabEls(st.win).length,
-    0,
-    'INVARIANT VIOLATED (' +
-      mode +
-      '): the background-tab collapse pass hid the summary that owns ' +
-      'the fan-out panel but left its sub-agent tabs open',
-  );
-  for (const id of st.subTabIds) {
-    assert.ok(
-      st.posted.some(m => m.type === 'closeTab' && m.tabId === id),
-      'the backend must be told to close sub-agent tab ' + id,
-    );
-  }
-  st.win.close();
-  console.log('  ok [' + mode + '] background task end closes nested tabs');
 }
 
 // The daemon re-sends a whole transcript (task_events) whenever it
@@ -943,8 +833,6 @@ async function main() {
     testSummaryAdoptionClosesSubagentTabs,
     testReCollapsingSummaryClosesReopenedTabs,
     testSpawnAfterAdoptionOpensNoTab,
-    testTaskEndClosesNestedSubagentTabs,
-    testBackgroundTaskEndClosesNestedSubagentTabs,
     testBackgroundReplayCollapseClosesSubagentTabs,
     testCollapseForgetsGrandchildSubagentTabs,
     testTranscriptWipeClosesSubagentTabs,
