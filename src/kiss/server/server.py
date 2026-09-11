@@ -311,6 +311,24 @@ def _prewarm_task_dependencies() -> None:
         logger.debug("Prewarm of the model registry failed", exc_info=True)
 
 
+class MainTreeClaim:
+    """One published main-tree mutation claim (see ``_claim_main_tree``).
+
+    Carries the identity needed for interrupt-safe release: ``owner``
+    lets the admission check and later claimants heal a claim whose
+    thread died without releasing (an injected stop skipped its
+    ``finally``), and the object's own identity makes release
+    conditional — a stale cleanup can never pop a successor's claim.
+    """
+
+    __slots__ = ("key", "reason", "owner")
+
+    def __init__(self, key: Path, reason: str, owner: threading.Thread) -> None:
+        self.key = key
+        self.reason = reason
+        self.owner = owner
+
+
 class VSCodeServer(
     _CommandsMixin,
     _TaskRunnerMixin,
@@ -381,6 +399,17 @@ class VSCodeServer(
         self._tab_models: dict[str, str] = {}
         self._commit_msg_tabs: set[str] = set()
         self._autocommit_tabs: set[str] = set()
+        # Per-repository main-tree mutation claims (resolved repo root
+        # → ``MainTreeClaim``), guarded by ``_state_lock``.  A
+        # main-tree mutator (Discard, manual Git Commit) publishes its
+        # claim in the SAME locked section as its
+        # ``_any_non_wt_running`` busy check, and non-worktree task
+        # admission refuses to start while a claim is held — closing
+        # the check-without-claim TOCTOU in which a direct task could
+        # start (and begin writing) between the mutator's busy check
+        # and its ``git reset``/``git add`` (gpt-5.6-sol review,
+        # findings 2 and 3).
+        self._main_tree_claims: dict[Path, MainTreeClaim] = {}
         persisted = _load_last_model()
         self._default_model = persisted or os.environ.get("KISS_MODEL", "") or get_default_model()
         self._state_lock = agent_state.STATE_LOCK
@@ -521,13 +550,25 @@ class VSCodeServer(
         scope_work_dir: str | None = None,
         task_id: str | None = None,
         create: bool = False,
-    ) -> None:
+    ) -> int:
         """Update the shared registry and broadcast when it changed.
 
         Binding a chat displaces any other tab bound to the same chat
         (the registry enforces the one-tab-per-chat invariant); the
         displaced tabs' server-side state is released here exactly as
         an explicit ``closeTab`` would.
+
+        Returns:
+            This publication's OWN generation token, captured inside
+            the registry's locked update (``0`` when nothing was
+            published).  A caller that may need to UNDO its own
+            publication (``_cmd_run``'s compensating close) passes it
+            to ``TabRegistry.close_tab_if_generation`` so a later
+            publication by anyone else invalidates the undo.  A
+            post-hoc ``generation()`` lookup would be racy — it could
+            observe a LATER publisher's stamp and hand the undo a
+            token that deletes that publisher's tab (gpt-5.6-sol
+            review 3, introduced bug 1).
 
         Args:
             tab_id: The shared tab identifier.
@@ -542,16 +583,17 @@ class VSCodeServer(
                 (``None`` keeps the current value, ``""`` clears it).
             create: Register the tab first when it is unknown.
         """
-        changed, displaced = self.tab_registry.update_tab(
+        changed, displaced, generation = self.tab_registry.update_tab(
             tab_id, chat_id=chat_id, title=title,
             work_dir=work_dir, scope_work_dir=scope_work_dir,
             task_id=task_id, create=create,
         )
-        for old_tab_id in displaced:
+        for old_tab_id, removal_token in displaced:
             self._prune_local_uds_tab(old_tab_id)
-            self._drop_tab_state(old_tab_id)
+            self._drop_tab_state(old_tab_id, removal_token=removal_token)
         if changed:
             self._broadcast_tabs_state()
+        return generation
 
     def ready_tab_sync(
         self, restored: list[dict[str, str]],
@@ -597,7 +639,12 @@ class VSCodeServer(
         with self._state_lock:
             return self._tab_models.get(tab_id, "") or self._default_model
 
-    def _any_non_wt_running(self, repo_root: Path | None = None) -> bool:
+    def _any_non_wt_running(
+        self,
+        repo_root: Path | None = None,
+        *,
+        exclude: AgentState | None = None,
+    ) -> bool:
         """True if a non-worktree task is running on *repo_root*'s main tree.
 
         Must be called with ``_state_lock`` held.
@@ -616,6 +663,11 @@ class VSCodeServer(
                 stash/checkout/merge.  ``None`` means "any main tree"
                 and preserves the conservative pre-repo-aware behavior
                 (used when the caller cannot name its repository).
+            exclude: A state whose own admission must not count as
+                busy — the finishing task whose post-task auto-commit
+                runs while its ``is_running_non_wt`` is still set
+                checks only for OTHER occupants (gpt-5.6-sol review 2,
+                missed wiring 2).
 
         Returns:
             True if at least one state is running a non-worktree task
@@ -623,7 +675,7 @@ class VSCodeServer(
             *repo_root* is ``None``, any non-worktree task at all).
         """
         for s in agent_state.agent_states.values():
-            if not s.is_running_non_wt:
+            if s is exclude or not s.is_running_non_wt:
                 continue
             if repo_root is None:
                 return True
@@ -638,6 +690,110 @@ class VSCodeServer(
             except OSError:  # pragma: no cover — unresolvable path
                 return True
         return False
+
+    def _claim_main_tree(
+        self,
+        repo_root: Path,
+        reason: str,
+        holder: list[MainTreeClaim] | None = None,
+    ) -> bool:
+        """Publish an exclusive main-tree mutation claim for *repo_root*.
+
+        Must be called with ``_state_lock`` held, in the SAME locked
+        section as the caller's ``_any_non_wt_running`` busy check —
+        that is what makes the check-and-claim pair atomic against
+        non-worktree task admission (which refuses to start while a
+        claim is held, see ``_main_tree_claim_reason``).
+
+        Interrupt safety (gpt-5.6-sol review 3, introduced bug 2): the
+        server stops a task by injecting ``KeyboardInterrupt`` at an
+        arbitrary bytecode boundary of the task thread — including
+        between this call returning and the caller recording the claim
+        in a local for its ``finally``.  The claim is therefore
+        appended to *holder* BEFORE it is published: the caller
+        installs its releasing ``try``/``finally`` around this call,
+        so at every boundary the claim is either not yet published or
+        already release-armed.  A claim stranded anyway (an injection
+        that skips the caller's ``finally`` entirely) heals when its
+        owner thread dies — see the liveness checks below and in
+        :meth:`_main_tree_claim_reason`.
+
+        Args:
+            repo_root: The main repository root about to be mutated.
+            reason: Human-readable operation name for refusal messages
+                (e.g. ``"discard"``, ``"manual commit"``).
+            holder: Release-arming list owned by the caller's
+                ``finally``; the new claim is appended before
+                publication.
+
+        Returns:
+            True when the claim was published; False when another
+            main-tree mutation already holds a live claim on
+            *repo_root*.
+        """
+        try:
+            key = repo_root.resolve()
+        except OSError:  # pragma: no cover — unresolvable path
+            key = repo_root
+        existing = self._main_tree_claims.get(key)
+        if existing is not None:
+            if existing.owner.is_alive():
+                return False
+            # The claiming thread died without releasing (its finally
+            # was skipped by an injected stop): the claim is stale, and
+            # honouring it would wedge this repository until restart.
+            del self._main_tree_claims[key]
+        claim = MainTreeClaim(key, reason, threading.current_thread())
+        if holder is not None:
+            holder.append(claim)
+        self._main_tree_claims[key] = claim
+        return True
+
+    def _release_main_tree_claim(self, claim: MainTreeClaim) -> None:
+        """Withdraw *claim* if it is still the published one.
+
+        Must be called with ``_state_lock`` held.  The identity check
+        makes release conditional on the releasing operation: a stale
+        cleanup can never pop an unrelated successor's claim (the
+        successor may have healed and replaced a stranded claim).
+
+        Args:
+            claim: The claim object appended by ``_claim_main_tree``.
+        """
+        if self._main_tree_claims.get(claim.key) is claim:
+            del self._main_tree_claims[claim.key]
+
+    def _main_tree_claim_reason(self, repo_root: Path | None) -> str | None:
+        """Return the active main-tree claim on *repo_root*, if any.
+
+        Must be called with ``_state_lock`` held.  A claim whose owner
+        thread has died (its release was skipped by an injected stop)
+        is treated as released — and healed here — so a stranded claim
+        can never refuse task admission until restart.
+
+        Args:
+            repo_root: The main repository root a non-worktree task is
+                about to write, or ``None`` when the task's
+                ``work_dir`` is not inside a git repository (then no
+                main-tree mutation can conflict with it).
+
+        Returns:
+            The claiming operation's reason string, or ``None`` when
+            the main tree is unclaimed.
+        """
+        if repo_root is None:
+            return None
+        try:
+            key = repo_root.resolve()
+        except OSError:  # pragma: no cover — unresolvable path
+            key = repo_root
+        claim = self._main_tree_claims.get(key)
+        if claim is None:
+            return None
+        if not claim.owner.is_alive():
+            del self._main_tree_claims[key]
+            return None
+        return claim.reason
 
     def _handle_command(self, cmd: dict[str, Any]) -> None:
         """Dispatch a command from VS Code to the appropriate handler."""
@@ -1005,13 +1161,36 @@ class VSCodeServer(
     def _close_tab(self, tab_id: str) -> None:
         """Close a tab: remove it from the registry and drop its state.
 
+        The tab's state is marked ``frontend_closed`` BEFORE the
+        registry removal (``_drop_tab_state`` marks it again while
+        deciding busy/teardown).  Ordering matters: a concurrent
+        ``_cmd_run`` publishing this tab re-checks the flag right
+        after its ``_registry_update_tab(..., create=True)`` and
+        undoes the recreate when the flag is up.  Mark-then-remove
+        here plus recreate-then-recheck there makes every
+        interleaving converge on "tab closed" — with the old
+        remove-then-mark order a run could recreate the tab after the
+        removal yet re-check before the mark, leaving the registry
+        showing a tab whose backend state the deferred disposal later
+        retired (gpt-5.6-sol review, finding 4).
+
         Args:
             tab_id: The frontend tab identifier to close.
         """
-        if self.tab_registry.close_tab(tab_id):
+        with self._state_lock:
+            state = agent_state.find_by_tab(tab_id)
+            if state is not None:
+                state.frontend_closed = True
+        removal_token = self.tab_registry.close_tab(tab_id)
+        if removal_token:
             self._broadcast_tabs_state()
         self._prune_local_uds_tab(tab_id)
-        self._drop_tab_state(tab_id)
+        # The removal token lets the cleanup tail stand down when a
+        # later publication (a concurrent ``resumeSession`` reopen)
+        # has legitimately taken the tab over; a tab that was never in
+        # the registry (sub-agent tabs) has no token and is dropped
+        # unconditionally, as before.
+        self._drop_tab_state(tab_id, removal_token=removal_token or None)
 
     def _prune_local_uds_tab(self, tab_id: str) -> None:
         """Drop a closed tab from the printer's talk-playback bookkeeping.
@@ -1032,13 +1211,28 @@ class VSCodeServer(
         if prune is not None:
             prune(tab_id)
 
-    def _drop_tab_state(self, tab_id: str) -> None:
+    def _drop_tab_state(
+        self, tab_id: str, removal_token: int | None = None,
+    ) -> None:
         """Clean up all backend state for a tab no longer shown.
 
         Shared by :meth:`_close_tab` and the chat-bind displacement
         path in :meth:`_registry_update_tab` (the one-tab-per-chat
         invariant removes the previously bound tab from the registry;
         its backend state is released here).
+
+        *removal_token* carries the registry removal's identity: this
+        cleanup runs OUTSIDE the registry lock, so a later publication
+        (a ``resumeSession`` reopen, a chat takeover re-binding the
+        same id) can land in between and legitimately own the tab
+        again.  Retiring the backend state then would produce a
+        registry/state combination matching neither serial order
+        (gpt-5.6-sol review 3, missed wiring 1) — so the drop stands
+        down when :meth:`TabRegistry.republished_since` reports a
+        newer publication.  ``None`` (tabs that never were in the
+        registry, e.g. sub-agent tabs, and the deferred
+        ``_dispose_if_closed`` path guarded by ``frontend_closed``)
+        keeps the unconditional behaviour.
 
         Removes the tab from
         the agent-state registry, cleans up per-tab printer
@@ -1066,6 +1260,13 @@ class VSCodeServer(
         """
         busy = False
         with self._state_lock:
+            if removal_token is not None and self.tab_registry.republished_since(
+                tab_id, removal_token
+            ):
+                # A later publication reopened the tab between the
+                # registry removal and this cleanup; it owns the state
+                # now (its own rebind runs under this same lock).
+                return
             state = agent_state.find_by_tab(tab_id)
             is_subagent_tab = (
                 state is not None and state.is_subagent
@@ -1085,7 +1286,7 @@ class VSCodeServer(
             self._broadcast_subagent_close(tab_id)
         if busy:
             return
-        self._teardown_tab_resources(tab_id, state)
+        self._teardown_tab_resources(tab_id, state, removal_token=removal_token)
 
     def _broadcast_subagent_close(self, tab_id: str) -> None:
         """Tell every client to close the sub-agent tab *tab_id*.
@@ -1133,8 +1334,14 @@ class VSCodeServer(
         self,
         tab_id: str,
         state: AgentState | None,
+        removal_token: int | None = None,
     ) -> None:
         """Release worktree and per-tab printer state.
+
+        *removal_token* (when given) re-verifies before every
+        destructive step that no later publication has reopened the
+        tab; see :meth:`_drop_tab_state`.  The re-checks close the
+        window between that method's initial check and this tail.
 
         Shared cleanup tail used by both the immediate (:meth:`_close_tab`)
         and the deferred (:meth:`_dispose_if_closed`) disposal paths.
@@ -1184,6 +1391,12 @@ class VSCodeServer(
                     claim_retained = bool(getattr(wt_agent, "_wt_pending", False))
             with self._state_lock:
                 state.is_merging = False
+                if removal_token is not None and self.tab_registry.republished_since(
+                    tab_id, removal_token
+                ):
+                    # Reopened while the worktree was being retired:
+                    # the new publication owns this state from here on.
+                    return
                 if claim_retained:
                     logger.warning(
                         "Tab %s closed but its worktree's keep-for-review "
@@ -1193,8 +1406,12 @@ class VSCodeServer(
                     )
                 else:
                     agent_state.unregister(state.task_id, state)
-        self._printer_cleanup_tab(tab_id)
         with self._state_lock:
+            if removal_token is not None and self.tab_registry.republished_since(
+                tab_id, removal_token
+            ):
+                return
+            self._printer_cleanup_tab(tab_id)
             self._tab_chat_views.pop(tab_id, None)
             self._tab_opened_task_ids.pop(tab_id, None)
             self._tab_models.pop(tab_id, None)

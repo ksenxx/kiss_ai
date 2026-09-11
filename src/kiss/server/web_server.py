@@ -6986,9 +6986,17 @@ class RemoteAccessServer:
                             "Could not unlink stale UDS socket at %s",
                             self._uds_path, exc_info=True,
                         )
+                # ``cleanup_socket=False``: asyncio's own close-time
+                # cleanup (default since Python 3.13) stats the
+                # pathname and unlinks it WITHOUT the sidecar flock —
+                # the same non-atomic check-then-unlink this daemon's
+                # ``_unlink_own_uds_socket`` guards against, so it
+                # could remove a successor's freshly bound socket.
+                # All pathname cleanup goes through the flock-guarded
+                # ``_unlink_own_uds_socket`` instead.
                 self._uds_server = await asyncio.start_unix_server(
                     self._uds_handler, path=str(self._uds_path),
-                    limit=_MAX_LINE_BYTES,
+                    limit=_MAX_LINE_BYTES, cleanup_socket=False,
                 )
                 os.chmod(self._uds_path, 0o600)
                 try:
@@ -7091,23 +7099,74 @@ class RemoteAccessServer:
         A successor daemon may have already rebound the shared
         pathname; blindly unlinking would strand its live listener
         (F4-03).  The inode recorded right after our bind is the
-        ownership witness.
+        ownership witness — but the witness ``stat`` and the pathname
+        ``unlink`` are two separate syscalls, so the check-then-unlink
+        pair must run under the same exclusive sidecar flock that
+        serializes the startup probe → unlink → bind sequence (C-RC3).
+        Without it, a successor holding the flock can pass its own
+        liveness probe (our listener is already closed), rebind the
+        pathname, and have this cleanup unlink its brand-new live
+        socket between our ``stat`` and our ``unlink``.
+
+        The lock is taken non-blocking and the unlink is SKIPPED when
+        it is contended: a contender is inside the startup protocol
+        and unlinks any stale pathname itself, so failing closed here
+        never leaks a stale socket file that matters — while blocking
+        could stall this (possibly event-loop) thread behind a
+        successor's live-predecessor wait.
+
+        The inode witness alone is not sufficient even under the lock:
+        the filesystem can hand a successor's fresh socket the just
+        freed inode number of ours (observed in the regression test on
+        tmpfs/ext4).  Both callers close our own listener before this
+        cleanup, so a pathname that still ACCEPTS a connection is
+        never ours — a sync liveness probe under the lock therefore
+        disambiguates inode reuse.
         """
         if self._uds_inode is None:
             # No ownership witness — fail CLOSED: never unlink a
             # pathname a successor daemon may have rebound.
             return
+        import fcntl
+
+        lock_path = self._uds_path.with_name(self._uds_path.name + ".lock")
         try:
-            if os.stat(self._uds_path).st_ino != self._uds_inode:
-                return
+            uds_lock = open(lock_path, "w", encoding="utf-8")
         except OSError:
+            # Cannot participate in the lock protocol — fail CLOSED.
             return
         try:
-            self._uds_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            logger.debug("UDS unlink failed", exc_info=True)
+            try:
+                fcntl.flock(uds_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                # A concurrent daemon is inside probe → unlink → bind;
+                # it owns stale-pathname cleanup for the duration.
+                return
+            try:
+                if os.stat(self._uds_path).st_ino != self._uds_inode:
+                    return
+            except OSError:
+                return
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(0.5)
+            try:
+                probe.connect(str(self._uds_path))
+                # A live listener answered: the pathname belongs to a
+                # successor daemon (our own listener is closed before
+                # this cleanup runs) whose socket reused our inode.
+                return
+            except OSError:
+                pass  # dead socket file — ours to remove
+            finally:
+                probe.close()
+            try:
+                self._uds_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.debug("UDS unlink failed", exc_info=True)
+        finally:
+            uds_lock.close()
 
     async def _setup_server_after_uds(self) -> None:
         """Continue :meth:`_setup_server` after the UDS bind."""

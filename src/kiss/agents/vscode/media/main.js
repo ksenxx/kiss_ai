@@ -1661,47 +1661,63 @@
 
   function ensureMonaco() {
     if (_monacoPromise) return _monacoPromise;
-    _monacoPromise = new Promise((resolve, reject) => {
+    // Failure paths clear the single-flight slot so a later open can
+    // retry — but ONLY the flight that still owns the slot may clear it.
+    // A timed-out flight's script stays live and can report onload or
+    // onerror long after a NEWER flight has taken the slot; an
+    // unconditional reset there wiped out the newer registration and let
+    // a third loader start while the second was still in flight, two AMD
+    // bootstraps then contending for the same global window.require.
+    // `dead` retires this flight's callbacks once it has failed.
+    let dead = false;
+    const retire = () => {
+      dead = true;
+      if (_monacoPromise === flight) _monacoPromise = null;
+    };
+    const flight = new Promise((resolve, reject) => {
       if (window.monaco && window.monaco.editor) {
         resolve(window.monaco);
         return;
       }
       const base = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min';
       const timer = setTimeout(() => {
-        _monacoPromise = null;
+        retire();
         reject(new Error('Monaco load timeout'));
       }, 10000);
       const script = document.createElement('script');
       script.src = base + '/vs/loader.js';
       script.onload = () => {
+        if (dead) return;
         try {
           window.require.config({paths: {vs: base + '/vs'}});
           window.require(
             ['vs/editor/editor.main'],
             () => {
+              if (dead) return;
               clearTimeout(timer);
               resolve(window.monaco);
             },
             err => {
               clearTimeout(timer);
-              _monacoPromise = null;
+              retire();
               reject(err);
             },
           );
         } catch (e) {
           clearTimeout(timer);
-          _monacoPromise = null;
+          retire();
           reject(e);
         }
       };
       script.onerror = () => {
         clearTimeout(timer);
-        _monacoPromise = null;
+        retire();
         reject(new Error('Monaco loader failed'));
       };
       document.head.appendChild(script);
     });
-    return _monacoPromise;
+    _monacoPromise = flight;
+    return flight;
   }
 
   function renderCodeContent(tab, holder, text, language) {
@@ -7485,6 +7501,19 @@
       case 'commitMessage':
         break;
       case 'droppedPaths':
+        // The reply edits the VISIBLE composer, so it must still belong
+        // to the tab the files were dropped on: a tab switch during the
+        // host round trip would otherwise insert tab A's paths into tab
+        // B's draft.  (A reply without an owner predates the stamp and
+        // keeps the old visible-composer behavior.)
+        if (
+          ev.tabId !== undefined &&
+          ev.tabId !== null &&
+          ev.tabId !== '' &&
+          ev.tabId !== activeTabId
+        ) {
+          break;
+        }
         if (ev.paths && ev.paths.length > 0) {
           const pos = inp.selectionStart || inp.value.length;
           const before = inp.value.substring(0, pos);
@@ -9637,17 +9666,9 @@
       'welcome-cfg-remote-password-toggle',
       'welcome-cfg-remote-password',
     );
-    [
-      'cfg-key-GEMINI_API_KEY',
-      'cfg-key-OPENAI_API_KEY',
-      'cfg-key-ANTHROPIC_API_KEY',
-      'cfg-key-ANTHROPIC_WORKSPACE_ID',
-      'cfg-key-TOGETHER_API_KEY',
-      'cfg-key-OPENROUTER_API_KEY',
-      'cfg-key-ZAI_API_KEY',
-      'cfg-key-MOONSHOT_API_KEY',
-      'cfg-custom-api-key',
-    ].forEach(setupSecretInput);
+    FIRST_PARTY_KEY_IDS.map(k => 'cfg-key-' + k)
+      .concat(['cfg-custom-api-key'])
+      .forEach(setupSecretInput);
     const welcomePwInp = document.getElementById('welcome-cfg-remote-password');
     const settingsPwInp = document.getElementById('cfg-remote-password');
     function _flushPw() {
@@ -10425,6 +10446,11 @@
             api.resolveDroppedPaths({
               uris: uris,
               workDir: workDirForTab(activeTabId),
+              // The host round trip is asynchronous: stamp the owner so
+              // the reply can be rejected if the user switches tabs
+              // before it arrives (it would otherwise land in whichever
+              // composer is visible then).
+              tabId: activeTabId,
             });
             return;
           }
@@ -10738,6 +10764,14 @@
       data: '',
       pending: true,
     };
+    // A send waiting in attachmentsReady() may be parked on this slot's
+    // conversion when the user removes its chip; the removal signal lets
+    // that wait wake promptly even if the conversion never settles (a
+    // hung decoder).  It resolves true because a removed slot must not
+    // block the submit.
+    slot.removed = new Promise(resolve => {
+      slot.notifyRemoved = () => resolve(true);
+    });
     attachments.push(slot);
     slot.promise = fillAttachmentSlot(file, slot);
     updateInputDisabled();
@@ -10752,14 +10786,36 @@
   /**
    * Wait for every in-flight attachment of the active tab.
    *
+   * The composer stays open while a send waits here, so the user can add
+   * ANOTHER attachment after the wait starts.  A one-time snapshot of the
+   * pending promises would resolve without that late slot: the submit
+   * then shipped without it and resetComposerAfterSend() discarded it —
+   * silent data loss.  So the wait is a fixpoint over the owning tab's
+   * attachment list: it returns only once a pass finds no pending slot
+   * (or a conversion failed, which blocks the submit).
+   *
    * Returns:
    *   A promise for whether all of them arrived intact.
    */
   async function attachmentsReady() {
-    const results = await Promise.all(
-      attachments.filter(a => a.pending).map(a => a.promise),
-    );
-    return results.every(ok => ok);
+    // The array reference is per tab (saveCurrentTab/switchToTab move it
+    // in and out of `attachments`), so pin the owner: a tab switch during
+    // the wait must not make later passes watch another tab's composer.
+    const owner = attachments;
+    for (;;) {
+      const pending = owner.filter(a => a.pending);
+      if (pending.length === 0) return true;
+      // Each slot races its conversion against its removal signal:
+      // clicking the x on a pending chip must wake the wait even if the
+      // conversion never settles (a hung decoder).  The next pass
+      // re-reads the live list, so a removed slot is simply gone, while
+      // a conversion that FAILED for a still-present slot resolves false
+      // and blocks the submit as before.
+      const results = await Promise.all(
+        pending.map(a => Promise.race([a.promise, a.removed])),
+      );
+      if (!results.every(ok => ok)) return false;
+    }
   }
 
   // composerreset0903-coverage:start
@@ -11016,7 +11072,9 @@
         idx +
         '">&times;</span>';
       chip.querySelector('.fc-rm').addEventListener('click', () => {
-        attachments.splice(idx, 1);
+        const gone = attachments.splice(idx, 1)[0];
+        // Wake any send parked on this slot in attachmentsReady().
+        if (gone && gone.notifyRemoved) gone.notifyRemoved();
         updateInputDisabled();
         renderFileChips();
       });
@@ -12157,6 +12215,22 @@
     if (id) settingsEditedFields.add(id);
   }
 
+  // The one first-party API-key inventory: it drives the settings form's
+  // LOAD loop (populateConfigForm), SAVE loop (collectConfigForm) and the
+  // cfg-key-* secret-input listeners.  It was previously declared verbatim
+  // in each place, and an addition to one copy silently drifted out of the
+  // others (a key that displayed but never saved, or vice versa).
+  const FIRST_PARTY_KEY_IDS = [
+    'GEMINI_API_KEY',
+    'OPENAI_API_KEY',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_WORKSPACE_ID',
+    'TOGETHER_API_KEY',
+    'OPENROUTER_API_KEY',
+    'ZAI_API_KEY',
+    'MOONSHOT_API_KEY',
+  ];
+
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
     const setValue = (id, value) => {
@@ -12217,17 +12291,7 @@
       setValue('welcome-cfg-remote-password', cfg.remote_password || '');
     }
     configFormPopulated = true;
-    const keyIds = [
-      'GEMINI_API_KEY',
-      'OPENAI_API_KEY',
-      'ANTHROPIC_API_KEY',
-      'ANTHROPIC_WORKSPACE_ID',
-      'TOGETHER_API_KEY',
-      'OPENROUTER_API_KEY',
-      'ZAI_API_KEY',
-      'MOONSHOT_API_KEY',
-    ];
-    keyIds.forEach(k => {
+    FIRST_PARTY_KEY_IDS.forEach(k => {
       setValue('cfg-key-' + k, (apiKeys && apiKeys[k]) || '');
     });
   }
@@ -12282,17 +12346,7 @@
       cfg.work_dir = wdInp.value.trim();
     }
     const apiKeys = {};
-    const keyIds = [
-      'GEMINI_API_KEY',
-      'OPENAI_API_KEY',
-      'ANTHROPIC_API_KEY',
-      'ANTHROPIC_WORKSPACE_ID',
-      'TOGETHER_API_KEY',
-      'OPENROUTER_API_KEY',
-      'ZAI_API_KEY',
-      'MOONSHOT_API_KEY',
-    ];
-    keyIds.forEach(k => {
+    FIRST_PARTY_KEY_IDS.forEach(k => {
       const id = 'cfg-key-' + k;
       if (!want(id)) return;
       const v = el(id).value.trim();
