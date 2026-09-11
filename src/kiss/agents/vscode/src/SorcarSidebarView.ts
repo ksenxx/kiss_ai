@@ -648,7 +648,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _installClientListener(client: AgentClient): void {
     client.on('message', (msg: ToWebviewMessage) => {
       if (msg.type === 'configData' && msg.config) {
-        msg.config.work_dir = this._getWorkDir();
+        // Show this window's workspace folder in the settings panel.
+        // When the window has none (and the host cwd is a filesystem
+        // root, so _getWorkDir reports nothing), keep the daemon's own
+        // work_dir: that is where the window's tasks will actually run.
+        const wd = this._getWorkDir();
+        if (wd) msg.config.work_dir = wd;
       }
       if (msg.type === 'commitMessage' && this._isOwnTab(msg.tabId)) {
         this._onCommitMessage.fire({
@@ -1016,7 +1021,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     if (folders && folders.length > 0) {
       return folders[0].uri.fsPath;
     }
-    return process.cwd();
+    // No folder open: fall back to the extension host's cwd, which is
+    // useful when VS Code was launched from a terminal (`code file.txt`
+    // inherits the shell's directory).  A Dock/Finder-launched window
+    // instead inherits the filesystem root ('/'), and reporting THAT as
+    // the work dir would root every task started from this window — and
+    // the daemon's @-mention file picker — at the whole disk.  Report
+    // "no work dir" for a root cwd so the daemon falls back to its
+    // configured folder instead.
+    const cwd = process.cwd();
+    return path.parse(cwd).root === cwd ? '' : cwd;
   }
 
   /**
