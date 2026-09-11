@@ -10,8 +10,9 @@ curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install
 
 # Tip
 
-For writing a Sorcar Extension Agent (SEA), see the README.md.  All communication agents, such as Slack agent, 
-are implemented in KISS Sorcar as SEA.
+## Sorcar Extension Agents (SEAs)
+
+A **Sorcar Extension Agent (SEA)** is a plain Python file that defines a complete custom agent: its top-level `get_X()` functions compute the run's task prompt, system prompt, model, budget, tools, and safety hooks. Pass the file's path as `extension_agent_path` to `sorcar.run()` and the daemon imports it on every run. All third-party agents, such as the Slack and Gmail agents, are implemented in KISS Sorcar as SEAs. See the "Sorcar Extension Agents (SEAs)" section in README.md for a full example.
 
 # Tip
 
