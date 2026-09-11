@@ -2888,6 +2888,7 @@
   // getInfoFile every couple of seconds; the reply's sig (mtime+size
   // fingerprint) makes an unchanged file cost one stat per poll, and
   // a missing file renders as an empty subpanel.
+  const metaInfoEl = document.getElementById('meta-info');
   const metaInfoContent = document.getElementById('meta-info-content');
   let metaInfoSig = '';
   let metaInfoWorkDir = '';
@@ -2898,9 +2899,26 @@
   // echo would never string-match the poll target.
   let metaInfoGen = 0;
 
+  /**
+   * Paint *html* into the info subpanel's content div.  The `visible`
+   * class on #meta-info follows: while there is nothing to show the
+   * WHOLE subpanel — the tmp/info.md header included — stays hidden,
+   * so an idle tab or a missing file leaves no trace in the panel.
+   *
+   * @param {string} html Sanitized markup, '' to empty and hide.
+   */
+  function setMetaInfoHTML(html) {
+    if (!metaInfoContent) return;
+    metaInfoContent.innerHTML = html;
+    if (metaInfoEl) metaInfoEl.classList.toggle('visible', html !== '');
+  }
+
   /** Ask the daemon for tmp/info.md under the subpanel's workdir. */
   function requestInfoFile() {
     if (!metaInfoContent) return;
+    // Only a RUNNING task has a live tmp/info.md worth mirroring; an
+    // idle tab's subpanel stays empty and costs the daemon nothing.
+    if (!isRunning) return;
     if (!document.body.classList.contains('remote-desktop')) return;
     if (document.visibilityState === 'hidden') return;
     try {
@@ -2930,8 +2948,35 @@
     metaInfoWorkDir = wd;
     metaInfoSig = '';
     metaInfoGen++;
-    if (metaInfoContent) metaInfoContent.innerHTML = '';
+    setMetaInfoHTML('');
     requestInfoFile();
+  }
+
+  // Whether the last syncMetaInfoRunning call saw a running task, so
+  // the frequent setRunningState repaints only act on actual flips.
+  let metaInfoSawRunning = false;
+
+  /**
+   * Track the visible tab's running state for the info subpanel.
+   * Called by setRunningState on every repaint: when the task ends
+   * (or the user switches to an idle tab) the subpanel empties and
+   * hides right away — a late reply for the finished task no longer
+   * matches the bumped generation — and when one starts, the first
+   * poll fires immediately instead of waiting out the 2s interval.
+   *
+   * @param {boolean} running Whether the visible tab is now running.
+   */
+  function syncMetaInfoRunning(running) {
+    running = !!running;
+    if (running === metaInfoSawRunning) return;
+    metaInfoSawRunning = running;
+    if (running) {
+      requestInfoFile();
+    } else {
+      metaInfoSig = '';
+      metaInfoGen++;
+      setMetaInfoHTML('');
+    }
   }
 
   /** Paint one infoFile reply into the info subpanel. */
@@ -2946,13 +2991,14 @@
     metaInfoSig = typeof ev.sig === 'string' ? ev.sig : '';
     const text = ev.exists && typeof ev.content === 'string' ? ev.content : '';
     if (!text.trim()) {
-      metaInfoContent.innerHTML = '';
+      setMetaInfoHTML('');
       return;
     }
     if (typeof marked !== 'undefined') {
-      metaInfoContent.innerHTML = kissSanitize(marked.parse(text));
+      setMetaInfoHTML(kissSanitize(marked.parse(text)));
     } else {
       metaInfoContent.textContent = text;
+      if (metaInfoEl) metaInfoEl.classList.add('visible');
     }
   }
 
@@ -8210,6 +8256,7 @@
     if (!running) flushStreamTailSweep();
     // streamtail-coverage:end
     isRunning = running;
+    syncMetaInfoRunning(running);
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
     // A tab that is not running has nothing left to stop, so the

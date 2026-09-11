@@ -616,8 +616,11 @@ body.remote-chat .running-item-ids::before {
     flex-direction: column;
     gap: 10px;
 
-    /* Scrolling lives here, not on #meta-panel (see above). */
-    flex: 1 1 auto;
+    /* The list keeps its natural height so every row stays visible —
+       the info subpanel below takes ALL the remaining space — but it
+       may still shrink and scroll (here, not on #meta-panel, see
+       above) when the list ALONE is taller than the window. */
+    flex: 0 1 auto;
     min-height: 0;
     overflow-y: auto;
   }
@@ -639,19 +642,25 @@ body.remote-chat .running-item-ids::before {
   }
 
   /* The info subpanel below the task-info list mirrors the active
-     workdir's tmp/info.md (getInfoFile poll in main.js).  It never
-     takes more than the lower half of the panel and scrolls on its
-     own; while the file is missing the content div is empty and only
-     the header shows. */
+     workdir's tmp/info.md (getInfoFile poll in main.js).  Its flex
+     basis is 0 so its own content never squeezes the list above:
+     it grows into exactly the space the list leaves free — the rest
+     of the panel — and scrolls inside.  While there is nothing to
+     show (no running task, or the file is missing or empty) main.js
+     drops the `visible` class and the WHOLE subpanel disappears,
+     header included. */
   body.remote-chat.remote-desktop #meta-info {
-    display: flex;
+    display: none;
     flex-direction: column;
-    flex: 0 1 auto;
-    max-height: 50%;
+    flex: 1 1 0;
     min-height: 0;
     margin-top: 12px;
     padding-top: 12px;
     border-top: 1px solid var(--border-8);
+  }
+
+  body.remote-chat.remote-desktop #meta-info.visible {
+    display: flex;
   }
 
   body.remote-chat.remote-desktop #meta-info-content {

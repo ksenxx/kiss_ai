@@ -202,9 +202,12 @@
         <li class="meta-item"><span class="meta-label">Workdir:</span><span id="meta-workdir" class="meta-value">&mdash;</span></li>
         <li class="meta-item"><span class="meta-label">Max budget:</span><span id="meta-max-budget" class="meta-value">&mdash;</span></li>
       </ul>
-      <!-- Info subpanel: mirrors ./tmp/info.md under the active tab's
-           workdir (main.js polls getInfoFile every couple of seconds);
-           the content div stays empty while the file does not exist. -->
+      <!-- Info subpanel: mirrors the RUNNING task's ./tmp/info.md
+           (main.js polls getInfoFile every couple of seconds) and
+           fills all the panel space the list above leaves free.  While
+           there is nothing to show — no running task, or no file —
+           main.js keeps the `visible` class off and the whole
+           subpanel, header included, stays hidden. -->
       <div id="meta-info" aria-label="tmp/info.md">
         <div class="sidebar-hdr">tmp/info.md</div>
         <div id="meta-info-content" class="md-body"></div>

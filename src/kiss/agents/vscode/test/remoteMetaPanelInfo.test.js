@@ -9,12 +9,14 @@
 // * #meta-workdir / #meta-max-budget rows fall back to configData
 //   values (config.work_dir / config.max_budget) and adopt a live
 //   task's task_settings (work_dir / max_budget) when they arrive,
-// * the 2s getInfoFile poll runs only in remote desktop mode and
-//   carries the active workdir plus the last known signature,
+// * the 2s getInfoFile poll runs only in remote desktop mode and only
+//   while the visible tab has a RUNNING task, and carries the active
+//   workdir plus the last known signature,
 // * an infoFile reply paints #meta-info-content with the file's
-//   MARKDOWN-FORMATTED contents (marked + kissSanitize), clears it
-//   when the file does not exist, and ignores unchanged or
-//   stale-workdir replies.
+//   MARKDOWN-FORMATTED contents (marked + kissSanitize) and shows the
+//   subpanel (`visible` on #meta-info), hides the whole subpanel when
+//   the file does not exist or the task ends, and ignores unchanged
+//   or stale-workdir replies.
 
 'use strict';
 
@@ -110,6 +112,18 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/** Flip the visible tab's running state via a daemon status event. */
+function setRunning(win, running) {
+  send(win, {type: 'status', running});
+}
+
+/** Whether the #meta-info subpanel (header included) is shown. */
+function infoVisible(win) {
+  return win.document
+    .getElementById('meta-info')
+    .classList.contains('visible');
+}
+
 const EMDASH = '\u2014';
 
 async function main() {
@@ -168,6 +182,7 @@ async function main() {
         config: {work_dir: '/cfg/dir', max_budget: 42},
         apiKeys: {},
       });
+      setRunning(win, true);
       await sleep(2400);
       const polls = wv.posted.filter(m => m.type === 'getInfoFile');
       assert.ok(polls.length >= 1, 'a getInfoFile poll must have fired');
@@ -179,6 +194,7 @@ async function main() {
 
       const content = win.document.getElementById('meta-info-content');
       assert.strictEqual(content.innerHTML, '');
+      assert.ok(!infoVisible(win), 'subpanel starts hidden');
 
       send(win, {
         type: 'infoFile',
@@ -193,6 +209,7 @@ async function main() {
       assert.ok(html.includes('<h1'), 'markdown heading rendered: ' + html);
       assert.ok(html.includes('<strong>bold</strong>'), 'bold rendered');
       assert.ok(html.includes('<li>item'), 'list rendered');
+      assert.ok(infoVisible(win), 'content shows the subpanel');
 
       // The next poll must carry the adopted signature.
       await sleep(2100);
@@ -222,7 +239,8 @@ async function main() {
       });
       assert.strictEqual(content.innerHTML, html);
 
-      // The file vanished: the subpanel empties.
+      // The file vanished: the subpanel empties AND hides entirely —
+      // the tmp/info.md header must not linger over a blank body.
       send(win, {
         type: 'infoFile',
         workDir: '/cfg/dir',
@@ -232,6 +250,7 @@ async function main() {
         content: '',
       });
       assert.strictEqual(content.innerHTML, '');
+      assert.ok(!infoVisible(win), 'missing file hides the subpanel');
 
       // And it may reappear with new contents.
       send(win, {
@@ -243,6 +262,7 @@ async function main() {
         content: 'plain line',
       });
       assert.ok(content.textContent.includes('plain line'));
+      assert.ok(infoVisible(win), 'new content shows the subpanel again');
 
       // A workdir switch (a task pinned elsewhere) clears the shown
       // contents SYNCHRONOUSLY and polls the new workdir immediately
@@ -257,6 +277,7 @@ async function main() {
         taskId: 'task-9',
       });
       assert.strictEqual(content.innerHTML, '', 'switch clears the panel');
+      assert.ok(!infoVisible(win), 'switch hides the subpanel');
       const after = wv.posted.filter(m => m.type === 'getInfoFile');
       assert.strictEqual(after.length, before + 1, 'immediate poll fired');
       assert.strictEqual(after[after.length - 1].workDir, '/other/dir');
@@ -315,6 +336,7 @@ async function main() {
         config: {work_dir: '/cfg/dir', max_budget: 1},
         apiKeys: {},
       });
+      setRunning(win, true);
       await sleep(2400);
       const polls = wv.posted.filter(m => m.type === 'getInfoFile');
       assert.ok(polls.length > 0, 'poll must have fired');
@@ -430,13 +452,91 @@ async function main() {
     const wv = makeWebview({desktopMatches: false});
     const win = wv.win;
     assert.ok(!win.document.body.classList.contains('remote-desktop'));
+    setRunning(win, true);
     await sleep(2400);
     assert.strictEqual(
       wv.posted.filter(m => m.type === 'getInfoFile').length,
       0,
-      'a phone-sized remote webview must not poll',
+      'a phone-sized remote webview must not poll even while running',
     );
   });
+
+  await test('no getInfoFile poll while no task is running', async () => {
+    const wv = makeWebview();
+    const win = wv.win;
+    send(win, {
+      type: 'configData',
+      config: {work_dir: '/cfg/dir', max_budget: 42},
+      apiKeys: {},
+    });
+    await sleep(2400);
+    assert.strictEqual(
+      wv.posted.filter(m => m.type === 'getInfoFile').length,
+      0,
+      'an idle desktop webview must not poll',
+    );
+    assert.ok(!infoVisible(win), 'idle subpanel stays hidden');
+  });
+
+  await test(
+    'task end empties and hides the subpanel and invalidates late ' +
+      'replies; the next task repolls immediately',
+    async () => {
+      const wv = makeWebview();
+      const win = wv.win;
+      send(win, {
+        type: 'configData',
+        config: {work_dir: '/cfg/dir', max_budget: 42},
+        apiKeys: {},
+      });
+      setRunning(win, true);
+      const polls = wv.posted.filter(m => m.type === 'getInfoFile');
+      assert.ok(polls.length >= 1, 'a run start polls immediately');
+      const tok = polls[polls.length - 1].token;
+      send(win, {
+        type: 'infoFile',
+        workDir: '/cfg/dir',
+        token: tok,
+        exists: true,
+        sig: '10:4',
+        content: 'live notes',
+      });
+      const content = win.document.getElementById('meta-info-content');
+      assert.ok(content.textContent.includes('live notes'));
+      assert.ok(infoVisible(win));
+
+      // The task ends: the subpanel empties and hides at once …
+      setRunning(win, false);
+      assert.strictEqual(content.innerHTML, '');
+      assert.ok(!infoVisible(win), 'task end hides the subpanel');
+      // … a poll answered after the end must not resurrect it …
+      send(win, {
+        type: 'infoFile',
+        workDir: '/cfg/dir',
+        token: tok,
+        exists: true,
+        sig: '11:9',
+        content: 'post-mortem reply',
+      });
+      assert.strictEqual(content.innerHTML, '', 'late reply ignored');
+      // … and the poll loop stays quiet while idle.
+      const idleFrom = wv.posted.filter(m => m.type === 'getInfoFile').length;
+      await sleep(2400);
+      assert.strictEqual(
+        wv.posted.filter(m => m.type === 'getInfoFile').length,
+        idleFrom,
+        'no polls while idle',
+      );
+
+      // A new task starts: an immediate fresh-signature poll under a
+      // NEW token, so only replies to it can paint the subpanel.
+      setRunning(win, true);
+      const fresh = wv.posted.filter(m => m.type === 'getInfoFile');
+      assert.strictEqual(fresh.length, idleFrom + 1, 'restart repolls');
+      assert.strictEqual(fresh[fresh.length - 1].knownSig, '');
+      assert.notStrictEqual(fresh[fresh.length - 1].token, tok);
+    },
+  );
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   if (failures.length > 0) process.exit(1);
