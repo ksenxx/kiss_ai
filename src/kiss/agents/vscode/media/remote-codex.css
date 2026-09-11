@@ -49,20 +49,16 @@ body.remote-chat {
    * drag can collapse the panel to a sliver when the user wants the
    * chat to take (almost) the whole window; the panel's own
    * overflow:hidden clips the content at any width.  The DEFAULT
-   * width still never drops below --sidebar-default-min-w: the width
-   * the five status/scope toggle buttons of the history "Filters"
-   * section need to sit on ONE line (~448px of chips plus the panel's
-   * 2 x 16px padding, rounded up so platforms with wider font metrics
-   * still fit).  main.js reads all of these bounds for the resizer.
+   * width is exactly one fifth of the browser window
+   * (sidebarDefaultW() in main.js computes the same fraction for the
+   * resizer's double-click reset and ARIA seeding).
    */
   --sidebar-min-w: 10px;
-  --sidebar-default-min-w: 520px;
-  --sidebar-max-w: 820px;
-  --sidebar-default-w: clamp(
-    var(--sidebar-default-min-w),
-    34vw,
-    var(--sidebar-max-w)
-  );
+  --sidebar-default-w: 20vw;
+
+  /* The docked task-info panel on the RIGHT of the chat mirrors the
+     history panel's one-fifth share of the window. */
+  --meta-panel-w: 20vw;
 
   /* Chat width the docked panel may never eat into, so a panel widened
      on a big monitor cannot crush the chat on a smaller window. */
@@ -554,8 +550,10 @@ body.remote-chat .running-item-ids::before {
 
   body.remote-chat.remote-desktop #app {
     /* Matches the panel's own 0.2s slide in main.css so the chat does
-       not jump ahead of it while the burger shows or hides it. */
+       not jump ahead of it while the burger shows or hides it.  The
+       right margin permanently clears the docked task-info panel. */
     margin-left: 0;
+    margin-right: var(--meta-panel-w);
     transition: margin-left 0.2s ease;
   }
 
@@ -565,6 +563,54 @@ body.remote-chat .running-item-ids::before {
 
   body.remote-chat.remote-desktop #settings-panel {
     width: min(90vw, var(--settings-panel-w));
+  }
+
+  /* The docked task-info panel: a permanent right-hand twin of the
+     history panel that lists the live task metadata (tokens, cost,
+     steps, time, machine) as bullet items.  The top status bar goes —
+     the panel replaces it on desktop. */
+  body.remote-chat.remote-desktop #meta-panel {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: var(--meta-panel-w);
+    background: var(--surface);
+    border-left: 1px solid var(--border-8);
+    padding: 16px;
+    overflow-y: auto;
+    z-index: 150;
+  }
+
+  body.remote-chat.remote-desktop #tab-status-bar {
+    display: none;
+  }
+
+  body.remote-chat.remote-desktop #meta-list {
+    list-style: disc outside;
+    margin: 0;
+    padding-left: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  body.remote-chat.remote-desktop .meta-item {
+    display: list-item;
+    font-size: var(--fs-sm);
+    color: var(--fg);
+    overflow-wrap: anywhere;
+  }
+
+  body.remote-chat.remote-desktop .meta-item .meta-label {
+    color: var(--faint);
+    margin-right: 6px;
+  }
+
+  body.remote-chat.remote-desktop .meta-item .meta-value {
+    color: var(--dim);
   }
 
   body.remote-chat.remote-desktop #sidebar.open #sidebar-resizer {

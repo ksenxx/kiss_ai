@@ -187,6 +187,21 @@
     </div>
     <div id="sidebar-overlay"></div>
 
+    <!-- Docked task-info panel (remote desktop mode only): the
+         right-hand twin of the history panel.  main.js mirrors the
+         #tab-status-bar values into this bulleted list, which
+         replaces the status bar at the top of the chat. -->
+    <div id="meta-panel" aria-label="Task info">
+      <div class="sidebar-hdr">Task Info</div>
+      <ul id="meta-list">
+        <li class="meta-item"><span class="meta-label">Tokens:</span><span id="meta-tokens" class="meta-value">&mdash;</span></li>
+        <li class="meta-item"><span class="meta-label">Cost:</span><span id="meta-cost" class="meta-value">&mdash;</span></li>
+        <li class="meta-item"><span class="meta-label">Steps:</span><span id="meta-steps" class="meta-value">&mdash;</span></li>
+        <li class="meta-item"><span class="meta-label">Time:</span><span id="meta-time" class="meta-value">Ready</span></li>
+        <li class="meta-item"><span class="meta-label">Machine:</span><span id="meta-machine" class="meta-value">&mdash;</span></li>
+      </ul>
+    </div>
+
     <div id="frequent-panel">
       <button id="frequent-panel-close">&times;</button>
       <div class="sidebar-section sidebar-tab-panel">

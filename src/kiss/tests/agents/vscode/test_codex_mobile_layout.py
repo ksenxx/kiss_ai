@@ -524,25 +524,22 @@ def test_main_js_sidebar_resize_wiring() -> None:
     assert "pointercancel" in js
 
 
-def test_sidebar_default_width_fits_the_filter_toggles() -> None:
+def test_sidebar_default_width_is_one_fifth_of_the_window() -> None:
     """The docked sidebar (and #app's margin) share one width fallback,
-    whose floor is wide enough for every history filter toggle to sit on
-    a single line."""
+    whose default is one fifth of the browser window (20vw)."""
     css = _read_codex_css()
     variables = re.search(r"body\.remote-chat\s*\{([^}]*)\}", css)
     assert variables, "body.remote-chat variable block missing"
-    assert "--sidebar-min-w: 520px" in variables.group(1), (
-        "the panel floor must be the width where the five filter "
-        "toggles fit on one line"
+    assert "--sidebar-min-w: 10px" in variables.group(1), (
+        "a drag must still be able to collapse the panel to a sliver"
     )
     assert "--chat-min-w:" in variables.group(1), (
         "a chat-width floor is needed so a wide panel cannot crush the chat"
     )
     assert re.search(
-        r"--sidebar-default-w:\s*clamp\(\s*var\(--sidebar-min-w\),"
-        r"[^;]*var\(--sidebar-max-w\)\)",
+        r"--sidebar-default-w:\s*20vw",
         variables.group(1),
-    ), "the default width must clamp between the shared min/max bounds"
+    ), "the default width must be one fifth of the browser window (20vw)"
     m = re.search(
         r"@media \((?:min-width: 900px|width >= 900px)\)\s*\{(.*)\}\s*$",
         css,
@@ -597,14 +594,14 @@ def test_chat_column_spans_full_width() -> None:
 
 
 def test_main_js_reads_its_bounds_from_the_stylesheet() -> None:
-    """main.js seeds the resize default from a fraction of the window
-    width and takes its bounds from remote-codex.css, so the one-line
-    filter width lives in exactly one place."""
+    """main.js seeds the resize default from one fifth of the window
+    width and takes its bounds from remote-codex.css, so each bound
+    lives in exactly one place."""
     js = (MEDIA_DIR / "main.js").read_text(encoding="utf-8")
-    assert "window.innerWidth * 0.34" in js, (
-        "the resize default must be computed from the window width"
+    assert "window.innerWidth * 0.2" in js, (
+        "the resize default must be one fifth of the window width"
     )
-    for name in ("--sidebar-min-w", "--sidebar-max-w", "--chat-min-w"):
+    for name in ("--sidebar-min-w", "--chat-min-w"):
         assert f"cssPxVar('{name}'" in js, (
             f"{name} must be read from the stylesheet, not duplicated"
         )

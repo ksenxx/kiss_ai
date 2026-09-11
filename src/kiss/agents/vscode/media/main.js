@@ -2827,6 +2827,44 @@
   const statusBudget = document.getElementById('status-budget');
   const statusSteps = document.getElementById('status-steps');
 
+  /**
+   * Mirror one #tab-status-bar value into its bullet item inside the
+   * docked task-info panel (#meta-panel, remote desktop mode only).
+   *
+   * The status spans have a dozen independent writers (usage events,
+   * tab switches, config replies, the running timer), so the panel
+   * observes the DOM instead of patching every write site: whatever
+   * lands in the status bar lands in the list.  The status span keeps
+   * the "Tokens: " style prefix; the bullet item already carries its
+   * own label, so stripLabel drops the prefix from the mirrored text.
+   * #status-text also mirrors its inline color (red while running,
+   * green when done) onto the Time item.
+   */
+  function mirrorStatusIntoMetaPanel(srcId, dstId, stripLabel) {
+    const src = document.getElementById(srcId);
+    const dst = document.getElementById(dstId);
+    if (!src || !dst || typeof MutationObserver !== 'function') return;
+    const mirror = () => {
+      let text = (src.textContent || '').trim();
+      if (stripLabel) text = text.replace(/^[^:]*:\s*/, '');
+      dst.textContent = text || '\u2014';
+      dst.style.color = src.style.color || '';
+    };
+    mirror();
+    new MutationObserver(mirror).observe(src, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['style'],
+    });
+  }
+  mirrorStatusIntoMetaPanel('status-tokens', 'meta-tokens', true);
+  mirrorStatusIntoMetaPanel('status-budget', 'meta-cost', true);
+  mirrorStatusIntoMetaPanel('status-steps', 'meta-steps', true);
+  mirrorStatusIntoMetaPanel('status-text', 'meta-time', false);
+  mirrorStatusIntoMetaPanel('status-machine', 'meta-machine', false);
+
   // The welcome screen lives inside the scrolling chat container, so
   // whatever scroll offset the previous content left behind (a finished
   // conversation is parked at its bottom) would otherwise hide the
@@ -9946,30 +9984,24 @@
     const sidebarResizer = document.getElementById('sidebar-resizer');
     if (document.body.classList.contains('remote-chat') && sidebarResizer) {
       // Bounds come from remote-codex.css: a drag may collapse the
-      // panel to a 10px sliver (--sidebar-min-w), while the DEFAULT
-      // width never drops below --sidebar-default-min-w — the width at
-      // which every history filter toggle fits on one line.
+      // panel to a 10px sliver (--sidebar-min-w).
       const SB_MIN = cssPxVar('--sidebar-min-w', 10);
-      const SB_DEFAULT_MIN = cssPxVar('--sidebar-default-min-w', 520);
-      const SB_MAX = cssPxVar('--sidebar-max-w', 820);
       const CHAT_MIN = cssPxVar('--chat-min-w', 360);
       const SB_KEY = 'kiss-sidebar-w';
       // Widest the panel may become on the CURRENT window: a drag may
       // take the panel as wide as it likes as long as the chat keeps
       // its minimum usable width — and a wide panel dragged on a big
       // monitor must not squeeze the chat into an unusable sliver
-      // after the window shrinks. (--sidebar-max-w caps only the
-      // DEFAULT width below, never a drag.)
+      // after the window shrinks.  The chat sits BETWEEN the history
+      // panel and the docked task-info panel, whose fifth of the
+      // window (--meta-panel-w: 20vw) must be reserved too.
       const sidebarWindowMax = () =>
-        Math.max(SB_MIN, window.innerWidth - CHAT_MIN);
+        Math.max(SB_MIN, Math.floor(window.innerWidth * 0.8) - CHAT_MIN);
+      // The DEFAULT width is one fifth of the browser window — the
+      // same fraction as the --sidebar-default-w CSS fallback (20vw)
+      // in remote-codex.css.
       const sidebarDefaultW = () =>
-        Math.min(
-          sidebarWindowMax(),
-          Math.max(
-            SB_DEFAULT_MIN,
-            Math.min(SB_MAX, Math.round(window.innerWidth * 0.34)),
-          ),
-        );
+        Math.min(sidebarWindowMax(), Math.round(window.innerWidth * 0.2));
       // The PREFERRED width (`sidebarW`, what the user last asked for
       // and what localStorage keeps) is tracked separately from the
       // RENDERED width (`sidebarRenderedW`, the preference clamped to
