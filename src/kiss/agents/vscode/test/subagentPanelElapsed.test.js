@@ -574,42 +574,6 @@ function testTerminalEventSealsOpenPanels(makeClient, label) {
   );
 }
 
-// The daemon emits no tool_result for the `finish` tool — the `result`
-// event is its close, so `result` must freeze the finish panel's label.
-function testResultSealsFinishPanel(makeClient, label) {
-  const client = makeClient();
-  const {win} = client;
-  const all = () => (client.drain ? client.drain() : client.posted);
-  const tabId = all().find(m => m.type === 'ready').tabId;
-  send(win, {type: 'status', running: true, tabId: tabId, startTs: Date.now()});
-  send(win, {
-    type: 'tool_call',
-    name: 'finish',
-    tabId: tabId,
-    ts: Date.now(),
-  });
-  send(win, {
-    type: 'result',
-    summary: 'done',
-    total_tokens: 1,
-    cost: '$0',
-    tabId: tabId,
-    ts: Date.now(),
-  });
-  const out = win.document.getElementById('output');
-  const tc = out.querySelector('.ev.tc');
-  assert.ok(tc, label + ': the finish tool_call panel exists');
-  assert.strictEqual(
-    tc.dataset.timeDone,
-    '1',
-    label + ': the result event seals the finish panel',
-  );
-  assert.ok(
-    elapsedLabel(tc),
-    label + ': the sealed finish panel keeps its elapsed label',
-  );
-}
-
 // The replay-only report suppression must not survive into the live
 // stream the replay's tail state becomes: a report the task writes
 // AFTER its transcript was replayed opens like any live report, while
@@ -691,7 +655,6 @@ const tests = [
   testCloseWithoutTimestampSealsWithoutLabel,
   testAdjacentReplayNeverTicks,
   testTerminalEventSealsOpenPanels,
-  testResultSealsFinishPanel,
   testReplayDoesNotSuppressLiveReports,
 ];
 

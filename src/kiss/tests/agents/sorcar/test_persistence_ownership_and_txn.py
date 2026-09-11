@@ -328,6 +328,22 @@ class FailedEventReplayTest(_PersistenceTestCase):
         ).fetchone()
         return int(row["n"])
 
+    def _journal_line_count(self) -> int:
+        """Total pending journal rows: live sidecar plus claimed snapshots.
+
+        A snapshot whose replay failed stays under its claimed
+        ``.consumed-*`` name (restoring it to the live name would let
+        later appends mix into it and break replay chronology), so the
+        no-loss invariant is counted across both.
+        """
+        sidecar = Path(th._failed_events_path(th._current_db_path()))
+        total = 0
+        for path in sidecar.parent.glob(sidecar.name + "*"):
+            if path.suffix == ".lock":
+                continue
+            total += len(path.read_text(encoding="utf-8").splitlines())
+        return total
+
     def test_events_are_replayed_once_the_database_recovers(self) -> None:
         """A transient write outage must not lose the transcript."""
         task_id, _chat = th._add_task("replay target")
@@ -336,9 +352,9 @@ class FailedEventReplayTest(_PersistenceTestCase):
             th._queue_chat_event({"type": "text", "content": f"e{i}"}, task_id)
         th._flush_chat_events(task_id)
 
-        sidecar = Path(th._failed_events_path(th._current_db_path()))
-        self.assertTrue(sidecar.is_file())
-        self.assertEqual(len(sidecar.read_text().splitlines()), 10)
+        path = th._failed_events_path(th._current_db_path())
+        self.assertTrue(th._journal_has_pending_rows(path))
+        self.assertEqual(self._journal_line_count(), 10)
         self.assertEqual(self._event_count(task_id), 0)
 
         self._unblock_event_writes()
@@ -346,21 +362,26 @@ class FailedEventReplayTest(_PersistenceTestCase):
 
         self.assertTrue(th._task_has_events(task_id))
         self.assertEqual(self._event_count(task_id), 10)
-        self.assertFalse(sidecar.exists())
+        self.assertEqual(self._journal_line_count(), 0)
 
     def test_journal_stays_when_the_database_is_still_unwritable(self) -> None:
-        """A failing replay keeps the journal for the next attempt."""
+        """A failing replay keeps every journalled row for the next attempt."""
         task_id, _chat = th._add_task("still broken")
         self._block_event_writes()
         th._queue_chat_event({"type": "text", "content": "x"}, task_id)
         th._flush_chat_events(task_id)
-        sidecar = Path(th._failed_events_path(th._current_db_path()))
-        self.assertTrue(sidecar.is_file())
+        path = th._failed_events_path(th._current_db_path())
+        self.assertTrue(th._journal_has_pending_rows(path))
 
         th._replay_failed_events()
 
-        self.assertTrue(sidecar.is_file())
+        self.assertTrue(th._journal_has_pending_rows(path))
+        self.assertEqual(self._journal_line_count(), 1)
         self._unblock_event_writes()
+
+        th._replay_failed_events()
+        self.assertEqual(self._event_count(task_id), 1)
+        self.assertEqual(self._journal_line_count(), 0)
 
     def test_journal_is_written_next_to_its_origin_database(self) -> None:
         """Rows are journalled beside the DB they were produced against."""

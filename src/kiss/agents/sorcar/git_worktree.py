@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import threading
 import time
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -56,6 +57,51 @@ def _file_lock(handle: IO[Any]) -> Iterator[None]:
         _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
 
 
+_reclaim_lock_reentry = threading.local()
+
+
+class _ReclaimLockToken:
+    """Ownership token for one outer :func:`_reclaim_process_lock` hold.
+
+    The token OWNS the open lock-file handle, so for the whole life of
+    the token the kernel flock is held (the handle is closed only in
+    the same ``finally`` that withdraws the token from the re-entry
+    map).  The re-entry map stores only a weak reference: however the
+    acquisition frame ends — normal exit, an exception, or an injected
+    stop that skips the ``finally`` entirely — token and handle die
+    together, releasing the flock and invalidating the marker in one
+    step.  The marker can therefore never claim a hold the kernel no
+    longer grants (the round-3 review's fail-open bypass).
+    """
+
+    __slots__ = ("handle", "__weakref__")
+
+    def __init__(self, handle: IO[Any]) -> None:
+        self.handle: IO[Any] | None = handle
+
+
+def _held_reclaim_locks() -> dict[str, weakref.ref[_ReclaimLockToken]]:
+    """Return THIS thread's map of held reclaim-lock paths to tokens.
+
+    Backs :func:`_reclaim_process_lock`'s re-entrancy: ``flock(2)`` is
+    exclusive between open file descriptions, so a thread that already
+    holds the flock and re-enters through a nested taker (e.g.
+    ``WorktreeSorcarAgent._try_setup_worktree`` wrapping the reclaim /
+    sweep / create helpers, which each take the flock themselves)
+    would self-deadlock on a fresh descriptor of the same file.
+    Thread-local is sufficient: every production taker acquires
+    ``repo_lock`` first, so nested takes for one repo always happen on
+    the thread that already owns the outer hold.  Values are weak
+    references to :class:`_ReclaimLockToken`; a dead reference means
+    the hold is over regardless of whether its withdrawal code ran.
+    """
+    held = getattr(_reclaim_lock_reentry, "held", None)
+    if held is None:
+        held = {}
+        _reclaim_lock_reentry.held = held
+    return held
+
+
 @contextmanager
 def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     """Hold the cross-process orphan-reclaim lock for *repo*.
@@ -69,10 +115,24 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     empty index and reports SUCCESS, and ``cleanup_partial`` deletes
     the branch and directory — the orphan's work is lost.  An
     ``flock`` on ``<git_common_dir>/kiss-reclaim.lock`` serialises
-    :meth:`GitWorktreeOps.reclaim_orphaned_worktrees` and
-    :meth:`GitWorktreeOps.sweep_orphaned_state` across processes
+    every multi-command transaction that mutates the shared main
+    worktree across processes:
+    :meth:`GitWorktreeOps.reclaim_orphaned_worktrees`,
+    :meth:`GitWorktreeOps.sweep_orphaned_state`,
+    :meth:`GitWorktreeOps.create`, and the normal merge and discard
+    paths (``WorktreeSorcarAgent._do_merge`` / ``discard``, whose
+    failure paths run the very same ``git reset --hard``)
     (mirroring ``persistence._journal_file_lock``); the kernel
-    releases it if the holder dies.
+    releases it if the holder dies.  Takers that also hold
+    ``repo_lock`` acquire it FIRST — the flock is always the inner
+    lock.
+
+    Re-entrant per thread (see :func:`_held_reclaim_locks`): a nested
+    take of a lock file this thread already holds yields immediately,
+    which lets ``WorktreeSorcarAgent._try_setup_worktree`` hold the
+    flock across its whole main-tree baseline snapshot (branch read +
+    dirty-state copy) while still calling the reclaim / sweep / create
+    helpers that take the flock internally.
 
     Degrades to the previous in-process-only behaviour when ``fcntl``
     is unavailable (Windows), the common dir cannot be resolved, or
@@ -94,18 +154,44 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     git_common = Path(result.stdout.strip())
     if not git_common.is_absolute():  # pragma: no branch
         git_common = (repo / git_common).resolve()
-    try:
-        handle = open(
-            git_common / "kiss-reclaim.lock", "a+", encoding="utf-8",
-        )
-    except OSError:  # pragma: no cover — unwritable git dir
+    lock_path = str(git_common / "kiss-reclaim.lock")
+    held = _held_reclaim_locks()
+    prior = held.get(lock_path)
+    if prior is not None and prior() is not None:
+        # A live token means its handle is still open, so the kernel
+        # flock is genuinely held by this thread's outer acquisition.
         yield
         return
     try:
-        with _file_lock(handle):
+        handle = open(lock_path, "a+", encoding="utf-8")
+    except OSError:  # pragma: no cover — unwritable git dir
+        yield
+        return
+    if _fcntl is None:  # pragma: no cover — Windows has no fcntl
+        try:
             yield
+        finally:
+            handle.close()
+        return
+    # Marker registration and flock lifetime are fused into ONE frame:
+    # the re-entry marker is valid exactly while `token` (the handle's
+    # only owner besides this frame) is alive.  Whatever bytecode
+    # boundary an injected stop lands on, marker and flock stay
+    # consistent: skipping the finally leaves both held (the leaked
+    # token keeps the handle open) until the token dies, which releases
+    # both together; running the finally withdraws both in order.
+    token = _ReclaimLockToken(handle)
+    try:
+        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+        held[lock_path] = weakref.ref(token)
+        yield
     finally:
-        handle.close()
+        held.pop(lock_path, None)
+        try:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+        finally:
+            token.handle = None
+            handle.close()
 
 
 _repo_locks: dict[str, threading.RLock] = {}
