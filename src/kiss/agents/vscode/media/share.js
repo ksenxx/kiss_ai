@@ -95,12 +95,12 @@
   };
 
   /**
-   * Collapse every run_parallel panel inside *root*, mirroring the
-   * visual half of collapseNestedRunParallel in media/main.js: a
-   * collapsed panel hides its children, so a fan-out panel it
-   * swallowed must show as collapsed too when it is expanded again.
-   * (The live webview also closes the fan-out's sub-agent tabs; a
-   * static page has none.)
+   * Collapse every run_parallel panel inside *root*, mirroring
+   * collapseNestedRunParallel in media/main.js: a collapsed panel
+   * hides its children, so a fan-out panel it swallowed must show as
+   * collapsed too when it is expanded again — and, exactly like the
+   * live webview, the swallowed fan-out's sub-agent tabs close with
+   * it.
    *
    * @param {Element} root The panel that just collapsed.
    */
@@ -114,8 +114,415 @@
         p.classList.remove('user-pinned');
         collapsePreview(p);
       }
+      syncSubagentTabs(p);
     }
   }
+
+  // sharesub-coverage:start
+  // The shared page's sub-agent tabs.
+  //
+  // The export (buildShareableHtml in media/main.js) renders every
+  // sub-agent's transcript into a hidden .share-subagent section and
+  // stamps each run_parallel panel with the task ids of the
+  // sub-agents it fanned out (data-rp-subagents). This block
+  // re-creates the live webview's tab behaviour on top of that
+  // static data: expanding a fan-out panel opens its sub-agents'
+  // tabs, collapsing it closes them, a tab closed by hand stays
+  // closed until its panel is collapsed and expanded again, closing
+  // a tab takes its descendants' tabs with it, and selecting a tab
+  // swaps the transcript on screen (the root tab being the chat
+  // itself). The tab strip reuses the webview's own markup and
+  // classes (#tab-bar / .chat-tab..., styled by the inlined
+  // main.css).
+
+  // Ordered ids of the open sub-agent tabs (the root chat tab is
+  // always open and lives outside this list).
+  const openSubTabs = [];
+  // The selected tab: a sub-agent task id, or null for the root tab.
+  let activeSubTab = null;
+
+  /**
+   * The section holding *taskId*'s exported transcript, or null.
+   *
+   * @param {string} taskId The sub-agent's task id.
+   * @returns {Element|null} Its .share-subagent section.
+   */
+  function subagentSection(taskId) {
+    const sections = document.querySelectorAll('.share-subagent');
+    for (let i = 0; i < sections.length; i++) {
+      if (sections[i].getAttribute('data-task-id') === taskId)
+        return sections[i];
+    }
+    return null;
+  }
+
+  /**
+   * The sub-agent task ids a fan-out panel was stamped with.
+   *
+   * @param {Element} panelEl A .tc-run-parallel panel.
+   * @returns {Array<string>} The ids (possibly empty).
+   */
+  function panelSubagentIds(panelEl) {
+    const raw = panelEl.getAttribute('data-rp-subagents') || '';
+    return raw.split(/\s+/).filter(Boolean);
+  }
+
+  /**
+   * The tab strip, created on first use: the webview's own
+   * #tab-bar > #tab-list markup inserted above #app (so the inlined
+   * main.css styles it), holding the root chat tab.
+   *
+   * @returns {Element} The #tab-list element.
+   */
+  function ensureTabBar() {
+    let list = document.getElementById('tab-list');
+    if (list) return list;
+    const bar = document.createElement('div');
+    bar.id = 'tab-bar';
+    list = document.createElement('div');
+    list.id = 'tab-list';
+    list.setAttribute('role', 'tablist');
+    list.setAttribute('aria-label', 'Chat tabs');
+    bar.appendChild(list);
+    const app = document.getElementById('app');
+    document.body.insertBefore(bar, app || document.body.firstChild);
+    return list;
+  }
+
+  /**
+   * Show or hide *sectionEl* (also syncing the [hidden] attribute the
+   * page CSS keys on).
+   *
+   * @param {Element} sectionEl A .share-task section.
+   * @param {boolean} show Whether it may be visible.
+   */
+  function setSectionShown(sectionEl, show) {
+    if (show) sectionEl.removeAttribute('hidden');
+    else sectionEl.setAttribute('hidden', '');
+  }
+
+  /**
+   * Select the root chat tab (*taskId* null) or a sub-agent's tab:
+   * swap which sections are on screen, repaint the strip, and put the
+   * reader back at the top — the shared page's switchToTab.
+   *
+   * @param {string|null} taskId The tab to select.
+   */
+  function selectSubTab(taskId) {
+    activeSubTab = taskId;
+    const sections = document.querySelectorAll('.share-task');
+    for (let i = 0; i < sections.length; i++) {
+      const s = sections[i];
+      if (s.classList.contains('share-subagent')) {
+        setSectionShown(s, s.getAttribute('data-task-id') === taskId);
+      } else {
+        setSectionShown(s, taskId === null);
+      }
+    }
+    renderShareTabBar();
+    window.scrollTo(0, 0);
+  }
+
+  /**
+   * Rebuild the tab strip from the open-tab list, mirroring the
+   * webview's renderTabBar: the root chat tab first, then one
+   * .chat-tab.subagent-tab per open sub-agent (done indicator, title,
+   * close button), roving tabindex on the active tab. The bar only
+   * shows when there is something beyond the root chat to switch to.
+   */
+  function renderShareTabBar() {
+    const list = ensureTabBar();
+    const bar = list.parentElement;
+    bar.style.display = openSubTabs.length > 0 ? '' : 'none';
+    list.innerHTML = '';
+    const rootTitle = (document.title || '').trim() || 'Chat';
+
+    function makeTab(taskId, title) {
+      const el = document.createElement('div');
+      el.className =
+        'chat-tab' +
+        (taskId === null ? '' : ' subagent-tab') +
+        (taskId === activeSubTab ? ' active' : '');
+      el.setAttribute('role', 'tab');
+      el.setAttribute('tabindex', taskId === activeSubTab ? '0' : '-1');
+      el.setAttribute(
+        'aria-selected',
+        taskId === activeSubTab ? 'true' : 'false',
+      );
+      el.setAttribute('aria-label', title);
+      el.setAttribute('aria-controls', 'app');
+      if (taskId !== null) {
+        el.setAttribute('data-sub-tab-id', taskId);
+        const dot = document.createElement('span');
+        dot.className = 'subagent-indicator done';
+        dot.textContent = '\u25C9';
+        dot.title = 'Done';
+        el.appendChild(dot);
+      }
+      const label = document.createElement('span');
+      label.className = 'chat-tab-label';
+      label.textContent = title;
+      el.appendChild(label);
+      if (taskId !== null) {
+        const closeBtn = document.createElement('span');
+        closeBtn.className = 'chat-tab-close';
+        closeBtn.textContent = '\u00d7';
+        closeBtn.setAttribute('role', 'button');
+        closeBtn.setAttribute('tabindex', '0');
+        closeBtn.setAttribute('aria-label', 'Close tab');
+        el.appendChild(closeBtn);
+      }
+      list.appendChild(el);
+    }
+
+    makeTab(null, rootTitle.substring(0, 40));
+    for (let i = 0; i < openSubTabs.length; i++) {
+      const section = subagentSection(openSubTabs[i]);
+      const title = section
+        ? section.getAttribute('data-sub-title') || 'Sub-agent'
+        : 'Sub-agent';
+      makeTab(openSubTabs[i], title);
+    }
+  }
+
+  /**
+   * Open the tab of sub-agent *taskId* (a no-op when it has no
+   * exported section or is open already), then open the tabs of the
+   * expanded fan-outs INSIDE its transcript — the webview does the
+   * same for a sub-agent that ran fan-outs of its own.
+   *
+   * @param {string} taskId The sub-agent to open.
+   */
+  function openSubagentTab(taskId) {
+    const section = subagentSection(taskId);
+    if (!section || openSubTabs.indexOf(taskId) !== -1) return;
+    openSubTabs.push(taskId);
+    renderShareTabBar();
+    const nested = section.querySelectorAll(
+      '.tc-run-parallel[data-rp-subagents]',
+    );
+    for (let i = 0; i < nested.length; i++) {
+      if (!nested[i].classList.contains('collapsed'))
+        syncSubagentTabs(nested[i]);
+    }
+    openOrphanChildTabs(taskId);
+  }
+
+  /**
+   * Open the tabs of *taskId*'s orphan children — sub-agents no
+   * fan-out panel claims (`run_agent` sub-tasks, exported with
+   * `data-sub-orphan`). They have no panel to expand, so their tabs
+   * ride along with their parent's transcript, exactly like the live
+   * webview opens a tab for such spawns.
+   *
+   * @param {string} taskId The parent whose transcript just opened.
+   */
+  function openOrphanChildTabs(taskId) {
+    const orphans = document.querySelectorAll(
+      '.share-subagent[data-sub-orphan]',
+    );
+    for (let i = 0; i < orphans.length; i++) {
+      if (orphans[i].getAttribute('data-parent-task-id') !== taskId) continue;
+      openSubagentTab(orphans[i].getAttribute('data-task-id'));
+    }
+  }
+
+  /**
+   * True when *taskId* is *ancestorId* or a descendant of it, walked
+   * over the sections' data-parent-task-id chain (cycle-guarded).
+   *
+   * @param {string} taskId The candidate descendant.
+   * @param {string} ancestorId The candidate ancestor.
+   * @returns {boolean} Whether the chain passes through *ancestorId*.
+   */
+  function isSubagentDescendant(taskId, ancestorId) {
+    let cur = taskId;
+    const seen = {};
+    while (cur && !seen[cur]) {
+      if (cur === ancestorId) return true;
+      seen[cur] = true;
+      const section = subagentSection(cur);
+      cur = section ? section.getAttribute('data-parent-task-id') : '';
+    }
+    return false;
+  }
+
+  /**
+   * Close the tab of sub-agent *taskId* along with every open
+   * descendant's tab (closing a sub-agent also closes the tabs of the
+   * fan-outs that sub-agent ran itself — the webview's rule). A close
+   * the USER asked for is remembered on the owning panel, so the
+   * sub-agent stays closed until the panel is collapsed and expanded
+   * again; a close done by a collapsing panel is not.
+   *
+   * @param {string} taskId The sub-agent tab to close.
+   * @param {boolean} byUser Whether the user clicked the close button.
+   */
+  function closeSubagentTab(taskId, byUser) {
+    // Which tab takes over when the SELECTED tab is closed: a close
+    // the user asked for falls back to plain index adjacency (the
+    // webview's rule — whatever now sits where the tab was), while a
+    // close done by a collapsing panel returns to the root chat.
+    const before = [null].concat(openSubTabs);
+    const activeAt = before.indexOf(activeSubTab);
+    let activeClosed = false;
+    for (let i = openSubTabs.length - 1; i >= 0; i--) {
+      const open = openSubTabs[i];
+      if (!isSubagentDescendant(open, taskId)) continue;
+      openSubTabs.splice(i, 1);
+      if (activeSubTab === open) activeClosed = true;
+      const section = subagentSection(open);
+      if (!section) continue;
+      setSectionShown(section, false);
+      // A sub-agent tab the webview reopens replays its transcript
+      // with the fan-outs collapsed; fold this section's the same
+      // way, so reopening the tab never resurrects grandchild tabs
+      // on its own.
+      const panels = section.querySelectorAll(
+        '.tc-run-parallel[data-rp-subagents]',
+      );
+      for (let j = 0; j < panels.length; j++) {
+        panels[j].classList.add('collapsed');
+        panels[j].classList.remove('user-pinned');
+        collapsePreview(panels[j]);
+        panels[j]._shareClosedSubs = {};
+      }
+    }
+    if (byUser) {
+      const panels = document.querySelectorAll(
+        '.tc-run-parallel[data-rp-subagents]',
+      );
+      for (let i = 0; i < panels.length; i++) {
+        if (panelSubagentIds(panels[i]).indexOf(taskId) === -1) continue;
+        if (!panels[i]._shareClosedSubs) panels[i]._shareClosedSubs = {};
+        panels[i]._shareClosedSubs[taskId] = true;
+      }
+    }
+    if (activeClosed && byUser) {
+      const now = before.filter(
+        id => id === null || openSubTabs.indexOf(id) !== -1,
+      );
+      selectSubTab(now[Math.min(activeAt, now.length - 1)]);
+    } else if (activeClosed) {
+      selectSubTab(null);
+    } else {
+      renderShareTabBar();
+    }
+  }
+
+  /**
+   * Put a fan-out panel's sub-agent tabs in step with its collapsed
+   * state — the shared page's syncRunParallelPanel. A collapsed panel
+   * takes its sub-agents' tabs with it and forgives every hand-close
+   * (so expanding reopens them all); an expanded one opens a tab per
+   * sub-agent the user has not closed by hand.
+   *
+   * @param {Element} panelEl The .tc-run-parallel panel.
+   */
+  function syncSubagentTabs(panelEl) {
+    const ids = panelSubagentIds(panelEl);
+    if (ids.length === 0) return;
+    const collapsed = panelEl.classList.contains('collapsed');
+    if (collapsed) {
+      for (let i = 0; i < ids.length; i++) closeSubagentTab(ids[i], false);
+      panelEl._shareClosedSubs = {};
+      return;
+    }
+    const closed = panelEl._shareClosedSubs || {};
+    for (let i = 0; i < ids.length; i++) {
+      if (!closed[ids[i]]) openSubagentTab(ids[i]);
+    }
+  }
+
+  /**
+   * Move focus between tabs with the arrow / Home / End keys — the
+   * webview's roving-tabindex pattern.
+   *
+   * @param {Element} fromEl The tab that has focus.
+   * @param {string} key The pressed navigation key.
+   */
+  function moveShareTabFocus(fromEl, key) {
+    const list = document.getElementById('tab-list');
+    if (!list) return;
+    const els = Array.prototype.slice.call(list.querySelectorAll('.chat-tab'));
+    const at = els.indexOf(fromEl);
+    if (at === -1) return;
+    let to = at;
+    if (key === 'ArrowLeft') to = at > 0 ? at - 1 : els.length - 1;
+    else if (key === 'ArrowRight') to = at < els.length - 1 ? at + 1 : 0;
+    else if (key === 'Home') to = 0;
+    else if (key === 'End') to = els.length - 1;
+    if (!els[to]) return;
+    // Roving tabindex, exactly like the webview's moveTabFocus: the
+    // freshly focused tab becomes the tablist's one Tab stop.
+    for (let i = 0; i < els.length; i++) {
+      els[i].setAttribute('tabindex', i === to ? '0' : '-1');
+    }
+    els[to].focus();
+  }
+
+  /**
+   * Activate the tab element *tabEl* (the root tab has no
+   * data-sub-tab-id).
+   *
+   * @param {Element} tabEl The clicked or activated .chat-tab.
+   */
+  function activateShareTab(tabEl) {
+    const id = tabEl.getAttribute('data-sub-tab-id');
+    selectSubTab(id === null ? null : id);
+  }
+
+  document.addEventListener('keydown', e => {
+    const target = e.target;
+    if (!target || typeof target.closest !== 'function') return;
+    const closeEl = target.closest('.chat-tab-close');
+    if (closeEl && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      e.stopPropagation();
+      const tabEl = closeEl.closest('.chat-tab');
+      const id = tabEl && tabEl.getAttribute('data-sub-tab-id');
+      if (id) closeSubagentTab(id, true);
+      return;
+    }
+    const tabEl = target.closest('.chat-tab');
+    if (!tabEl) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      activateShareTab(tabEl);
+    } else if (
+      e.key === 'ArrowLeft' ||
+      e.key === 'ArrowRight' ||
+      e.key === 'Home' ||
+      e.key === 'End'
+    ) {
+      e.preventDefault();
+      moveShareTabFocus(tabEl, e.key);
+    }
+  });
+
+  // The exported page may hold fan-out panels the user left expanded:
+  // their sub-agent tabs open on load, exactly like the live layout
+  // the export captured (a collapsed panel's stay shut). A chat
+  // task's orphan children (run_agent sub-tasks, which no fan-out
+  // panel claims) open alongside, like the live webview's tabs for
+  // such spawns.
+  (function initShareSubagentTabs() {
+    const roots = document.querySelectorAll(
+      '.share-task:not(.share-subagent) .tc-run-parallel[data-rp-subagents]',
+    );
+    for (let i = 0; i < roots.length; i++) {
+      if (!roots[i].classList.contains('collapsed')) syncSubagentTabs(roots[i]);
+    }
+    const orphans = document.querySelectorAll(
+      '.share-subagent[data-sub-orphan]',
+    );
+    for (let i = 0; i < orphans.length; i++) {
+      const pid = orphans[i].getAttribute('data-parent-task-id');
+      if (subagentSection(pid)) continue; // opens with its parent's tab
+      openSubagentTab(orphans[i].getAttribute('data-task-id'));
+    }
+  })();
+  // sharesub-coverage:end
 
   // sharetheme-coverage:start
   // Light / dark mode for the shared page.  The page ships dark (the
@@ -200,6 +607,22 @@
     const target = e.target;
     if (!target || typeof target.closest !== 'function') return;
 
+    // sharesub-coverage:start
+    const closeEl = target.closest('.chat-tab-close');
+    if (closeEl) {
+      e.stopPropagation();
+      const closeTabEl = closeEl.closest('.chat-tab');
+      const closeId = closeTabEl && closeTabEl.getAttribute('data-sub-tab-id');
+      if (closeId) closeSubagentTab(closeId, true);
+      return;
+    }
+    const tabEl = target.closest('.chat-tab');
+    if (tabEl) {
+      activateShareTab(tabEl);
+      return;
+    }
+    // sharesub-coverage:end
+
     const drawerBtn = target.closest('#task-panel-drawer-btn');
     if (drawerBtn) {
       // The page holds one #task-panel per task of the chat, so the
@@ -228,6 +651,12 @@
       panelEl.classList.add('user-pinned');
     }
     collapsePreview(panelEl);
+    // sharesub-coverage:start
+    // A fan-out panel's sub-agent tabs follow its collapsed state,
+    // exactly like the live webview's syncRunParallelPanel.
+    if (panelEl.classList.contains('tc-run-parallel'))
+      syncSubagentTabs(panelEl);
+    // sharesub-coverage:end
     if (panelEl.classList.contains('collapsed')) {
       collapseNestedRunParallel(panelEl);
     }

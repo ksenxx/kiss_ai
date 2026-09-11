@@ -116,19 +116,20 @@ function cssRule(selector) {
   return body;
 }
 
-// jsdom reports window.innerWidth = 1024, so 34vw is 348px and the
-// --sidebar-default-min-w floor (the width at which every history
-// filter toggle fits on one line) wins.  A drag, however, may go all
-// the way down to the --sidebar-min-w sliver.
+// jsdom reports window.innerWidth = 1024; the default docked width is
+// one fifth of the window (the 20vw fallback of --sidebar-default-w),
+// so 205px.  A drag, however, may go all the way down to the
+// --sidebar-min-w sliver.
 const MIN_W = 10;
-const DEFAULT_W = 520;
+const DEFAULT_W = Math.round(1024 * 0.2);
 
 // The panel may never take so much of the window that the chat column
-// drops below --chat-min-w (360px), so on jsdom's 1024px window the
-// effective maximum is 664px rather than the 820px hard bound.
-const MAX_W = 1024 - 360;
+// — which sits beside the docked 20vw task-info panel — drops below
+// --chat-min-w (360px), so on jsdom's 1024px window the effective
+// maximum is floor(1024 * 0.8) - 360 = 459px.
+const MAX_W = Math.floor(1024 * 0.8) - 360;
 
-function testCssSidebarWidthFitsTheFilterToggles() {
+function testCssSidebarWidthIsOneFifthOfTheWindow() {
   const vars = cssRule('body.remote-chat');
   assert.ok(
     vars.includes(`--sidebar-min-w: ${MIN_W}px`),
@@ -136,15 +137,8 @@ function testCssSidebarWidthFitsTheFilterToggles() {
       `got: ${vars.trim()}`,
   );
   assert.ok(
-    vars.includes(`--sidebar-default-min-w: ${DEFAULT_W}px`),
-    `the DEFAULT width floor must be the one-line filter width ` +
-      `(${DEFAULT_W}px) — got: ${vars.trim()}`,
-  );
-  assert.ok(
-    /--sidebar-default-w:\s*clamp\(\s*var\(--sidebar-default-min-w\),[^;]*var\(--sidebar-max-w\)\s*\)/.test(
-      vars,
-    ),
-    'the default width must clamp between the default-min/max bounds',
+    /--sidebar-default-w:\s*20vw/.test(vars),
+    'the default width must be one fifth of the browser window (20vw)',
   );
   const sidebar = cssRule('body.remote-chat.remote-desktop #sidebar.open');
   assert.ok(
@@ -167,7 +161,7 @@ function testCssSidebarWidthFitsTheFilterToggles() {
     app.includes(`margin-left: ${fallback}`),
     '#app margin must be driven by the SAME width fallback',
   );
-  console.log('PASS CSS sizes the docked sidebar to fit the filter toggles');
+  console.log('PASS CSS sizes the docked sidebar to a fifth of the window');
 }
 
 function testCssDockedRulesRequireAnOpenSidebar() {
@@ -237,13 +231,13 @@ function testCssComposerFullWidth() {
   console.log('PASS CSS composer spans the full chat webview width');
 }
 
-function testDefaultSeededFromTheOneLineFloor() {
+function testDefaultSeededFromOneFifthOfTheWindow() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
   assert.strictEqual(
     resizer.getAttribute('aria-valuenow'),
     String(DEFAULT_W),
-    'default aria-valuenow must be the one-line filter width',
+    'default aria-valuenow must be one fifth of the window width',
   );
   assert.strictEqual(
     sidebarW(win),
@@ -251,7 +245,7 @@ function testDefaultSeededFromTheOneLineFloor() {
     'no inline --sidebar-w until the user resizes (CSS fallback rules)',
   );
   win.close();
-  console.log('PASS resize logic seeds its default from the one-line floor');
+  console.log('PASS resize logic seeds its default from a fifth of the window');
 }
 
 function testKeyboardBaselineIsTheDefaultWidth() {
@@ -272,8 +266,8 @@ function testKeyboardBaselineIsTheDefaultWidth() {
 function testDoubleClickResetsToTheDefaultWidth() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
-  drag(win, resizer, 300, 640);
-  assert.strictEqual(sidebarW(win), '640px');
+  drag(win, resizer, 300, 420);
+  assert.strictEqual(sidebarW(win), '420px');
   resizer.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
   assert.strictEqual(
     sidebarW(win),
@@ -290,18 +284,18 @@ function testPersistedWidthStillWins() {
   const stored = makeWebview({
     remote: true,
     desktopMatches: true,
-    storedWidth: '640',
+    storedWidth: '420',
   });
   assert.strictEqual(
     sidebarW(stored.win),
-    '640px',
+    '420px',
     'persisted width must override the default',
   );
   assert.strictEqual(
     stored.win.document
       .getElementById('sidebar-resizer')
       .getAttribute('aria-valuenow'),
-    '640',
+    '420',
   );
   stored.win.close();
   const narrow = makeWebview({
@@ -342,12 +336,12 @@ function testVsCodeWebviewIsolation() {
   console.log('PASS VS Code webview (no remote-chat) is unaffected');
 }
 
-testCssSidebarWidthFitsTheFilterToggles();
+testCssSidebarWidthIsOneFifthOfTheWindow();
 testCssDockedRulesRequireAnOpenSidebar();
 testCssSettingsPanelStaysNarrow();
 testCssChatPanelsNotRestyled();
 testCssComposerFullWidth();
-testDefaultSeededFromTheOneLineFloor();
+testDefaultSeededFromOneFifthOfTheWindow();
 testKeyboardBaselineIsTheDefaultWidth();
 testDoubleClickResetsToTheDefaultWidth();
 testPersistedWidthStillWins();

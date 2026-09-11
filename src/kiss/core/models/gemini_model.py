@@ -24,6 +24,7 @@ from kiss.core.models.model import (
     Model,
     ThinkingCallback,
     TokenCallback,
+    merge_system_texts,
     responses_items_to_chat_messages,
 )
 from kiss.core.models.stream_abort import stall_error, stop_aware_events
@@ -621,23 +622,10 @@ class GeminiModel(Model):
         Returns:
             str | None: The merged system instruction, or ``None``.
         """
-        configured = self.model_config.get("system_instruction")
-        system_texts: list[str] = [configured] if configured else []
-        for msg in (
-            chat_messages if chat_messages is not None else self._chat_messages()
-        ):
-            if msg.get("role") != "system":
-                continue
-            content = msg.get("content")
-            if isinstance(content, list):
-                content = "".join(
-                    p.get("text", "")
-                    for p in content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                )
-            if isinstance(content, str) and content.strip() and content not in system_texts:
-                system_texts.append(content)
-        return "\n\n".join(system_texts) if system_texts else None
+        return merge_system_texts(
+            self.model_config.get("system_instruction"),
+            chat_messages if chat_messages is not None else self._chat_messages(),
+        )
 
     def _build_config(
         self,

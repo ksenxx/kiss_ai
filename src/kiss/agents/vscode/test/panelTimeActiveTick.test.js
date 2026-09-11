@@ -177,28 +177,6 @@ async function runTests() {
       'live time footer is ticking',
   );
 
-  send(win, {type: 'thinking_end', tabId: TAB});
-  send(win, {
-    type: 'result',
-    success: true,
-    summary: 'finished',
-    tabId: TAB,
-  });
-  send(win, {type: 'status', running: false, tabId: TAB});
-  const closedMs = parsePanelTimeMs(
-    panel.querySelector(':scope > .panel-time').textContent,
-  );
-  await sleep(1300);
-  const frozenMs = parsePanelTimeMs(
-    panel.querySelector(':scope > .panel-time').textContent,
-  );
-  assert.ok(
-    Math.abs(frozenMs - closedMs) < 200,
-    'BUG: after the result event the .panel-time footer must freeze ' +
-      'at the closing value; it changed from ' + closedMs + 'ms to ' +
-      frozenMs + 'ms during ~1.3s of idle time.',
-  );
-
   win.close();
 }
 

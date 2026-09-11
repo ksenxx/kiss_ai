@@ -48,7 +48,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from kiss.core.utils import atomic_write_text
+from kiss.core.utils import atomic_write_text, is_root_dir
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,22 @@ def _clean_str(value: Any, max_len: int = 0) -> str:
     return out
 
 
+def _clean_work_dir(value: Any) -> str:
+    """Return *value* as a work dir: stripped, ``""`` for roots.
+
+    A filesystem root (``/``, ``C:\\`` — see
+    :func:`kiss.core.utils.is_root_dir`) is never a legitimate tab
+    work dir; one can only have been stamped by a client whose cwd
+    degenerated to the root (a no-folder Dock-launched VS Code
+    window).  Mapping it to ``""`` both refuses to adopt new roots
+    and HEALS entries already persisted in ``tabs.json`` on the next
+    load, so an old poisoned tab stops rooting its tasks and
+    ``@``-mention file scans at the whole disk.
+    """
+    out = _clean_str(value)
+    return "" if is_root_dir(out) else out
+
+
 def _sanitize_entries(
     entries: list[Any], *, keep_task_id: bool,
 ) -> list[dict[str, str]]:
@@ -142,8 +158,8 @@ def _sanitize_entries(
                 _clean_str(entry.get("title"), _MAX_TITLE_CHARS)
                 or "new chat"
             ),
-            "workDir": _clean_str(entry.get("workDir")),
-            "scopeWorkDir": _clean_str(entry.get("scopeWorkDir")),
+            "workDir": _clean_work_dir(entry.get("workDir")),
+            "scopeWorkDir": _clean_work_dir(entry.get("scopeWorkDir")),
             "taskId": (
                 _clean_str(entry.get("taskId")) if keep_task_id else ""
             ),
@@ -172,6 +188,18 @@ class TabRegistry:
         self._lock = threading.Lock()
         self._tabs: list[dict[str, str]] = []
         self._persist_failed = False
+        self._heal_pending = False
+        # In-memory (never persisted) per-tab publication tokens: every
+        # ``open_tab`` / ``update_tab`` that touches a tab stamps it
+        # with a fresh monotonically increasing generation.  A caller
+        # that wants to undo ITS OWN publication captures the token and
+        # removes through :meth:`close_tab_if_generation`, which no-ops
+        # when anyone else has republished the tab since — see the
+        # ``_cmd_run`` compensating close (gpt-5.6-sol review 2,
+        # introduced bug 1).  Entries loaded from disk carry no token
+        # (generation 0), which a live capture can never equal.
+        self._generations: dict[str, int] = {}
+        self._generation_counter = 0
         self._load()
 
     def _load(self) -> None:
@@ -191,6 +219,16 @@ class TabRegistry:
         if not isinstance(entries, list):
             return
         self._tabs = _sanitize_entries(entries, keep_task_id=True)
+        # Sanitizing may change the entries — a dropped duplicate, a
+        # clipped title, or a HEALED root work dir.  Do NOT write here:
+        # construction alone must never touch the file, because a
+        # non-owner also constructs on the canonical path (the embedded
+        # launcher's server builds its ``VSCodeServer`` before swapping
+        # in its private registry), and a load-time write from it would
+        # race the owning daemon.  Remember the pending heal instead;
+        # the owner persists it on its first mutation or, failing that,
+        # at shutdown (:meth:`flush`).
+        self._heal_pending = self._tabs != entries
 
     def _save_locked(self) -> None:
         """Atomically persist the tab list (caller holds the lock).
@@ -226,17 +264,35 @@ class TabRegistry:
                 self._path,
             )
         self._persist_failed = False
+        # Every save writes the FULL in-memory state, so any pending
+        # load-time heal is on disk now.
+        self._heal_pending = False
 
     def flush(self) -> None:
-        """Re-persist the registry if its last save failed.
+        """Re-persist the registry if it has unsaved state.
 
-        Called at daemon shutdown so tabs mutated while the disk was
-        unwritable are not silently lost across a restart.  A no-op
-        when the last save succeeded.
+        Called at daemon shutdown so that (a) tabs mutated while the
+        disk was unwritable are not silently lost across a restart and
+        (b) entries healed at load time (a sanitized root work dir)
+        reach the disk even when no tab was ever mutated.  A no-op
+        when the file already matches the in-memory state.
         """
         with self._lock:
-            if self._persist_failed:
+            if self._persist_failed or self._heal_pending:
                 self._save_locked()
+
+    def _bump_generation_locked(self, tab_id: str) -> int:
+        """Stamp *tab_id* with a fresh publication token (lock held).
+
+        Args:
+            tab_id: The shared tab identifier being (re)published.
+
+        Returns:
+            The tab's new generation token.
+        """
+        self._generation_counter += 1
+        self._generations[tab_id] = self._generation_counter
+        return self._generation_counter
 
     def _find_locked(self, tab_id: str) -> dict[str, str] | None:
         """Return the entry for *tab_id* (caller holds the lock)."""
@@ -283,6 +339,20 @@ class TabRegistry:
         with self._lock:
             return self._find_locked(_clean_str(tab_id)) is not None
 
+    def generation(self, tab_id: str) -> int:
+        """Return *tab_id*'s current publication token.
+
+        Args:
+            tab_id: The shared tab identifier.
+
+        Returns:
+            The token of the tab's latest publication, or ``0`` when
+            the tab is unknown or was never published by this process
+            (an entry loaded from disk).
+        """
+        with self._lock:
+            return self._generations.get(_clean_str(tab_id), 0)
+
     def open_tab(
         self, tab_id: str, title: str = "", work_dir: str = "",
     ) -> OpenTabOutcome:
@@ -317,27 +387,104 @@ class TabRegistry:
                 "tabId": tab_id,
                 "chatId": "",
                 "title": _clean_str(title, _MAX_TITLE_CHARS) or "new chat",
-                "workDir": _clean_str(work_dir),
+                "workDir": _clean_work_dir(work_dir),
                 "scopeWorkDir": "",
                 "taskId": "",
             })
+            self._bump_generation_locked(tab_id)
             self._save_locked()
             return OpenTabOutcome.OPENED
 
-    def close_tab(self, tab_id: str) -> bool:
+    def _removal_token_locked(self) -> int:
+        """Draw a removal token from the shared generation clock.
+
+        Called with the registry lock held, in the same critical
+        section as the removal it stamps.  The token orders the
+        removal against every publication: any LATER ``update_tab`` /
+        ``open_tab`` publication of the same tab id receives a larger
+        generation, so :meth:`republished_since` can tell the removal's
+        out-of-lock cleanup tail whether the tab has been legitimately
+        reopened since (gpt-5.6-sol review 3, missed wiring 1).
+
+        Returns:
+            The removal's clock token (always positive).
+        """
+        self._generation_counter += 1
+        return self._generation_counter
+
+    def republished_since(self, tab_id: str, token: int) -> bool:
+        """Return whether *tab_id* was published again after *token*.
+
+        Args:
+            tab_id: The shared tab identifier.
+            token: A removal token from :meth:`close_tab` or an
+                ``update_tab`` displacement, or a publication
+                generation.
+
+        Returns:
+            ``True`` when a publication newer than *token* stamped the
+            tab — its current owner is that later publisher, so any
+            cleanup keyed to *token* must not touch it.
+        """
+        with self._lock:
+            return self._generations.get(_clean_str(tab_id), 0) > token
+
+    def close_tab(self, tab_id: str) -> int:
         """Remove a tab.
 
         Args:
             tab_id: The shared tab identifier.
 
         Returns:
-            ``True`` when the tab existed and was removed.
+            The removal's clock token (positive, truthy) when the tab
+            existed and was removed, ``0`` (falsy) otherwise.  The
+            caller hands the token to its out-of-lock cleanup tail,
+            which uses :meth:`republished_since` to stand down when a
+            later publication has legitimately reopened the tab.
         """
         with self._lock:
             entry = self._find_locked(_clean_str(tab_id))
             if entry is None:
+                return 0
+            self._tabs.remove(entry)
+            self._generations.pop(_clean_str(tab_id), None)
+            token = self._removal_token_locked()
+            self._save_locked()
+            return token
+
+    def close_tab_if_generation(self, tab_id: str, generation: int) -> bool:
+        """Remove a tab only if nobody republished it since *generation*.
+
+        The conditional twin of :meth:`close_tab` for compensating
+        closes: a caller undoing its OWN ``update_tab`` publication
+        passes the token that publication returned; when a later
+        legitimate publication (e.g. a ``resumeSession`` reopen)
+        stamped the tab with a newer token, the stale undo no-ops
+        instead of deleting the newer owner's tab (gpt-5.6-sol
+        review 2, introduced bug 1).  The token comparison and the
+        removal are one atomic operation under the registry lock.
+
+        Args:
+            tab_id: The shared tab identifier.
+            generation: The token returned by the publication being
+                undone.
+
+        Returns:
+            ``True`` when the tab still carried *generation* and was
+            removed.
+        """
+        tab_id = _clean_str(tab_id)
+        if generation <= 0:
+            # A loaded/adopted row has no stamped generation (reads as
+            # 0); a caller could otherwise capture that 0 and "match"
+            # it here.  A real publication token is always positive.
+            return False
+        with self._lock:
+            entry = self._find_locked(tab_id)
+            if entry is None or self._generations.get(tab_id, 0) != generation:
                 return False
             self._tabs.remove(entry)
+            self._generations.pop(tab_id, None)
             self._save_locked()
             return True
 
@@ -351,13 +498,18 @@ class TabRegistry:
         scope_work_dir: str | None = None,
         task_id: str | None = None,
         create: bool = False,
-    ) -> tuple[bool, list[str]]:
+    ) -> tuple[bool, list[tuple[str, int]], int]:
         """Update (or create) a tab's binding, title, work dir or task.
 
         Binding a non-empty *chat_id* atomically DISPLACES (removes)
         any other tab bound to the same chat — the one-tab-per-chat
-        invariant — and reports the displaced tab ids so the caller
-        can release their server-side per-tab state.
+        invariant — and reports the displaced tabs so the caller can
+        release their server-side per-tab state.  Each displaced tab
+        is paired with a removal token, and the caller's own
+        publication generation is returned from the SAME critical
+        section that stamped it (a separate post-hoc ``generation()``
+        lookup could observe a later publisher's stamp — gpt-5.6-sol
+        review 3, introduced bug 1).
 
         Args:
             tab_id: The shared tab identifier.
@@ -379,20 +531,22 @@ class TabRegistry:
             create: Register the tab first when it is unknown.
 
         Returns:
-            ``(changed, displaced)``: whether the registry changed,
-            and the ids of the tabs removed because *chat_id* was
-            bound to them.
+            ``(changed, displaced, generation)``: whether the registry
+            changed, ``(tab_id, removal_token)`` pairs for the tabs
+            removed because *chat_id* was bound to them (see
+            :meth:`republished_since`), and this publication's own
+            generation token (``0`` when nothing was published).
         """
         tab_id = _clean_str(tab_id)
         if not tab_id:
-            return False, []
+            return False, [], 0
         with self._lock:
             entry = self._find_locked(tab_id)
             changed = False
-            displaced: list[str] = []
+            displaced: list[tuple[str, int]] = []
             if entry is None:
                 if not create or len(self._tabs) >= _MAX_TABS:
-                    return False, []
+                    return False, [], 0
                 entry = {
                     "tabId": tab_id, "chatId": "",
                     "title": "new chat", "workDir": "",
@@ -401,6 +555,12 @@ class TabRegistry:
                 }
                 self._tabs.append(entry)
                 changed = True
+            # Every publication — even one that changes no field —
+            # re-stamps the tab: a reopen (``resumeSession``) may
+            # write values identical to the current ones, yet it must
+            # still invalidate any older caller's pending
+            # ``close_tab_if_generation`` undo.
+            generation = self._bump_generation_locked(tab_id)
             if chat_id is not None:
                 chat_id = _clean_str(chat_id)
                 if chat_id:
@@ -409,7 +569,10 @@ class TabRegistry:
                         if t is not entry and t["chatId"] == chat_id
                     ]:
                         self._tabs.remove(other)
-                        displaced.append(other["tabId"])
+                        self._generations.pop(other["tabId"], None)
+                        displaced.append(
+                            (other["tabId"], self._removal_token_locked())
+                        )
                         changed = True
                 if entry["chatId"] != chat_id:
                     entry["chatId"] = chat_id
@@ -423,17 +586,17 @@ class TabRegistry:
             if new_title and entry["title"] != new_title:
                 entry["title"] = new_title
                 changed = True
-            new_wd = _clean_str(work_dir)
+            new_wd = _clean_work_dir(work_dir)
             if new_wd and entry["workDir"] != new_wd:
                 entry["workDir"] = new_wd
                 changed = True
-            new_scope = _clean_str(scope_work_dir)
+            new_scope = _clean_work_dir(scope_work_dir)
             if new_scope and entry.get("scopeWorkDir", "") != new_scope:
                 entry["scopeWorkDir"] = new_scope
                 changed = True
             if changed:
                 self._save_locked()
-            return changed, displaced
+            return changed, displaced, generation
 
     def merge_if_empty(self, entries: list[dict[str, str]]) -> bool:
         """Adopt a legacy client's persisted tabs into an EMPTY registry.
