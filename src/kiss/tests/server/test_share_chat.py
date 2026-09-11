@@ -216,6 +216,17 @@ class TestShareChatOverUds(_UdsServerTestCase):
         self.assertIn("Switch to dark mode", page)
         self.assertIn("#share-theme-btn {", page)  # _SHARE_PAGE_CSS
 
+    def test_share_page_carries_the_subagent_tab_strip(self) -> None:
+        # The page must ship everything the sub-agent tabs need with
+        # it: share.js's tab-strip code and the page CSS that pins the
+        # strip to the top and keeps unselected sections hidden.
+        event = self._share(chatId="tabs", html=self.BODY)
+        self.assertTrue(event["ok"], event)
+        page = Path(event["path"]).read_text()
+        self.assertIn("data-rp-subagents", page)
+        self.assertIn("#tab-bar", page)
+        self.assertIn(".share-task[hidden]", page)
+
     def test_chat_id_is_sanitized_into_the_filename(self) -> None:
         event = self._share(chatId="a/b c!*", html=self.BODY)
         self.assertTrue(event["ok"], event)
@@ -360,6 +371,136 @@ class TestShareChatTasksOverUds(_UdsServerTestCase):
             [parent],
             "a sub-agent transcript replays inside its parent's panels,"
             " never as a chat task of its own",
+        )
+
+    def test_subagent_transcripts_ride_inside_their_task(self) -> None:
+        # A task that fanned out two sub-agents, the first of which ran
+        # a fan-out of its own: the reply's task entry must carry all
+        # three transcripts (parents before children), so the shared
+        # page can open them as tabs like the live webview does.
+        parent = self._seed("chat-sub", "parent task", "ls")
+        sub_one = self._seed("chat-sub", "first sub task", "echo one")
+        sub_two = self._seed("chat-sub", "second sub task", "echo two")
+        grand = self._seed("chat-sub", "grand sub task", "echo grand")
+        plain = self._seed("chat-sub", "plain task", "pwd")
+        th._save_task_extra({"parent_task_id": parent}, task_id=sub_one)
+        th._save_task_extra({"parent_task_id": parent}, task_id=sub_two)
+        th._save_task_extra({"parent_task_id": sub_one}, task_id=grand)
+        event = self._tasks(chatId="chat-sub")
+        self.assertEqual(
+            [t["task_id"] for t in event["tasks"]], [parent, plain]
+        )
+        subs = event["tasks"][0]["subagents"]
+        self.assertEqual(
+            [s["task_id"] for s in subs],
+            [sub_one, sub_two, grand],
+            "direct children first (enqueue order), then grandchildren",
+        )
+        self.assertEqual(
+            [s["parent_task_id"] for s in subs],
+            [parent, parent, sub_one],
+        )
+        self.assertEqual(
+            [s["task"] for s in subs],
+            ["first sub task", "second sub task", "grand sub task"],
+        )
+        # Each sub-agent's events are led by the ensured task_settings
+        # event, exactly like the chat tasks' own event streams.
+        self.assertEqual(
+            [s["events"][0]["type"] for s in subs],
+            ["task_settings"] * 3,
+        )
+        self.assertEqual(subs[0]["events"][1]["command"], "echo one")
+        self.assertEqual(subs[2]["events"][1]["command"], "echo grand")
+        self.assertEqual(
+            event["tasks"][1]["subagents"],
+            [],
+            "a task that fanned out nothing carries an empty list",
+        )
+
+    def test_task_id_narrows_the_reply_to_one_task(self) -> None:
+        # A sub-agent tab's share: its row is not a chat task, so the
+        # webview names it by taskId and gets back exactly that task
+        # and its own descendants — never the chat's other tasks.
+        parent = self._seed("chat-one", "parent task", "ls")
+        sub = self._seed("chat-one", "sub task", "echo sub")
+        grand = self._seed("chat-one", "grand task", "echo grand")
+        self._seed("chat-one", "other task", "pwd")
+        th._save_task_extra({"parent_task_id": parent}, task_id=sub)
+        th._save_task_extra({"parent_task_id": sub}, task_id=grand)
+        event = self._tasks(chatId="tab-sub-9", taskId=sub)
+        self.assertEqual(event["chatId"], "tab-sub-9")
+        self.assertEqual(
+            [t["task_id"] for t in event["tasks"]], [sub]
+        )
+        self.assertEqual(
+            [s["task_id"] for s in event["tasks"][0]["subagents"]],
+            [grand],
+            "only the sub-agent's OWN descendants ride along",
+        )
+        self.assertFalse(event["truncated"])
+
+    def test_unknown_task_id_yields_no_tasks(self) -> None:
+        self._seed("chat-u", "some task", "ls")
+        event = self._tasks(chatId="chat-u", taskId="no-such-task")
+        self.assertEqual(event["tasks"], [])
+
+    def test_non_string_task_id_is_ignored(self) -> None:
+        task = self._seed("chat-n", "the task", "ls")
+        event = self._tasks(chatId="chat-n", taskId=7)
+        self.assertEqual(
+            [t["task_id"] for t in event["tasks"]],
+            [task],
+            "a malformed taskId falls back to the whole-chat listing",
+        )
+
+    def test_running_subagent_events_come_from_the_live_recording(
+        self,
+    ) -> None:
+        # A still-running sub-agent's persisted events lag behind the
+        # asynchronous writer; the share must use the printer's live
+        # recording instead — the same safeguard the session replay
+        # applies.
+        parent = self._seed("chat-live", "parent task", "ls")
+        sub = self._seed("chat-live", "sub task", "stale-cmd")
+        th._save_task_extra({"parent_task_id": parent}, task_id=sub)
+        printer = self.server._printer
+        printer.ensure_recording_for_task(sub)
+        printer.broadcast(
+            {
+                "type": "tool_call",
+                "name": "Bash",
+                "command": "live-cmd",
+                "taskId": sub,
+            }
+        )
+        event = self._tasks(chatId="chat-live")
+        subs = event["tasks"][0]["subagents"]
+        self.assertEqual([s["task_id"] for s in subs], [sub])
+        commands = [
+            e.get("command")
+            for e in subs[0]["events"]
+            if e.get("type") == "tool_call"
+        ]
+        self.assertEqual(
+            commands,
+            ["live-cmd"],
+            "the live recording replaces the lagging persisted events",
+        )
+
+    def test_subagent_bytes_count_against_the_reply_budget(self) -> None:
+        # The oldest task's sub-agent is what makes the pair overflow:
+        # the old task must be dropped WITH its sub-agent, and the
+        # newest kept — the same rule the plain task loader applies.
+        big = "x" * (_SHARE_TASKS_MAX_REPLY_BYTES // 2 + 1024)
+        old = self._seed("chat-sb", "old task", "ls")
+        old_sub = self._seed("chat-sb", "old sub", big)
+        th._save_task_extra({"parent_task_id": old}, task_id=old_sub)
+        newest = self._seed("chat-sb", "new task", big)
+        event = self._tasks(chatId="chat-sb")
+        self.assertTrue(event["truncated"])
+        self.assertEqual(
+            [t["task_id"] for t in event["tasks"]], [newest]
         )
 
     def test_unknown_chat_id_yields_no_tasks(self) -> None:

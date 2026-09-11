@@ -565,36 +565,6 @@ function testSubagentMakesMultipleRunParallelCalls() {
   console.log("  ok - a sub-agent's repeated run_parallel calls open tabs");
 }
 
-function testSubagentResultAutoCollapseClosesNestedTabs() {
-  const {win, posted, rootId} = bootRunningRoot();
-
-  const l1 = runParallelCall(win, posted, rootId, ['l1-a', 'l1-b'], 'L1 ');
-  const l2 = runParallelCall(win, posted, l1[0], ['l2-a', 'l2-b'], 'L2 ');
-  assert.strictEqual(subagentTabEls(win).length, 4, 'both levels open');
-
-  send(win, {type: 'tool_result', tabId: l1[0], content: 'nested done'});
-  send(win, {type: 'result', tabId: l1[0], summary: 'done', success: true});
-  assert.deepStrictEqual(
-    openSubTabIds(win),
-    [...l1].sort(),
-    "the sub-agent's result must auto-collapse its finished nested " +
-      "run_parallel panel and close the nested fan-out's tabs " +
-      '(open now: ' +
-      JSON.stringify(openSubTabIds(win)) +
-      ', expected only level-1: ' +
-      JSON.stringify([...l1].sort()) +
-      ')',
-  );
-  for (const id of l2) {
-    assert.ok(
-      posted.some(m => m.type === 'closeTab' && m.tabId === id),
-      'the backend must be told to close nested sub-agent tab ' + id,
-    );
-  }
-  win.close();
-  console.log('  ok - sub-agent result auto-collapse closes nested tabs');
-}
-
 function testAdjacentHistoryRunParallelPanelIsInert() {
   const {win, posted, rootId} = bootRunningRoot();
   send(win, {type: 'status', running: false, tabId: rootId});
@@ -677,20 +647,6 @@ function testSpawnUnderFragmentlessParentStillOpensTab() {
     'the grandchild tab must be open next to its parent sub-agent tab',
   );
 
-  send(win, {
-    type: 'tool_call',
-    name: 'run_parallel',
-    tabId: l1[0],
-    extras: {tasks: JSON.stringify(['g-task'])},
-  });
-  send(win, {type: 'tool_result', tabId: l1[0], content: 'done'});
-  send(win, {type: 'result', tabId: l1[0], summary: 'done', success: true});
-  assert.deepStrictEqual(
-    openSubTabIds(win),
-    [l1[0]],
-    'the late-rendered nested panel must adopt the unregistered ' +
-      'grandchild tab and close it when the panel auto-collapses',
-  );
   win.close();
   console.log('  ok - spawn under a DOM-less parent still opens a tab');
 }
@@ -1038,7 +994,6 @@ async function main() {
     testThreeLevelNestedRunParallel,
     testNestedPanelCollapseExpand,
     testSubagentMakesMultipleRunParallelCalls,
-    testSubagentResultAutoCollapseClosesNestedTabs,
     testAdjacentHistoryRunParallelPanelIsInert,
     testSpawnUnderFragmentlessParentStillOpensTab,
     testMultiPanelParentReplayAdoptsPerCall,

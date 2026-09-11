@@ -665,9 +665,19 @@ export function activate(context: vscode.ExtensionContext): void {
   // dummy tree: never leave anything (history panel or otherwise) up
   // in the primary sidebar — close it back and reveal the existing
   // chat in the secondary sidebar instead, creating no new chat.
+  // Bumped on EVERY visibility flip: the continuation below parks in two
+  // awaits, and a newer user action (hiding the tree again, switching
+  // primary-sidebar views) during that window must win over the stale
+  // continuation instead of having focus stolen back from it.
+  let treeVisGen = 0;
   treeView.onDidChangeVisibility(async e => {
+    treeVisGen += 1;
     if (!e.visible) return;
     await vscode.commands.executeCommand('workbench.action.closeSidebar');
+    // Event delivery is ordered, so the hide flip our own closeSidebar
+    // just caused has arrived by now: snapshot AFTER it, and only newer
+    // (user-driven) flips invalidate this continuation.
+    const gen = treeVisGen;
     // The tree also pops up when editorTabsMode flips OFF while the
     // KISS container is the active primary-sidebar view (the history
     // panel hides, the tree takes its spot). That flip must leave the
@@ -675,7 +685,12 @@ export function activate(context: vscode.ExtensionContext): void {
     // run in this same tick — a moment to record itself, then bail.
     await new Promise(r => setTimeout(r, 50));
     if (Date.now() - modeSwitchAt < 2000) return;
-    await sidebarView!.focusChatInput();
+    if (gen !== treeVisGen) return;
+    // Deactivation during either await disposes the view and clears the
+    // module slot; a disposed surface must not be focused (and the old
+    // `sidebarView!` assertion threw an unhandled TypeError here).
+    if (!sidebarView) return;
+    await sidebarView.focusChatInput();
   });
 
   if (!context.workspaceState.get<boolean>('sidebarWidened')) {

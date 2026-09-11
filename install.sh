@@ -795,6 +795,63 @@ find_code_cli() {
     return 1
 }
 
+# Remove VS Code's on-disk caches before the extension is built and
+# installed, so the freshly installed build never loads through stale cached
+# state (a corrupted ``CachedExtensionVSIXs`` entry or stale ``CachedData``
+# V8 snapshots can make ``--install-extension`` appear to succeed while the
+# reloaded window keeps running old code).  Only cache directories are
+# touched — VS Code recreates each of them on the next launch:
+#
+#     Cache, CachedData, CachedExtensions, CachedExtensionVSIXs,
+#     "Code Cache", GPUCache
+#
+# swept under every user-data root this installer can target:
+#
+#     macOS:        ~/Library/Application Support/Code
+#     Linux:        ~/.config/Code
+#     code-server:  ${XDG_DATA_HOME:-~/.local/share}/code-server
+#                   (the Docker entrypoint installs into code-server via
+#                   KISS_CODE_CLI — see find_code_cli)
+#
+# User state next to the caches (``User/``, ``extensions/``,
+# ``Local Storage``, ``Session Storage``, ``Workspaces``, ``Backups``) is
+# deliberately NOT touched.  Every removal is best-effort (``|| true``): a
+# cache directory being rewritten by a running VS Code can make ``rm -rf``
+# fail (ENOTEMPTY/EACCES), and a failed cache sweep must never abort an
+# otherwise healthy install under ``set -e``.
+clear_vscode_cache() {
+    local data_dir cache_subdir cleared
+    cleared=0
+    for data_dir in \
+        "$HOME/Library/Application Support/Code" \
+        "$HOME/.config/Code" \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/code-server"; do
+        [ -d "$data_dir" ] || continue
+        for cache_subdir in \
+            "Cache" \
+            "CachedData" \
+            "CachedExtensions" \
+            "CachedExtensionVSIXs" \
+            "Code Cache" \
+            "GPUCache"; do
+            if [ -e "$data_dir/$cache_subdir" ]; then
+                rm -rf "$data_dir/$cache_subdir" 2>/dev/null || true
+                cleared=1
+                # Report honestly: a cache directory being rewritten by a
+                # running VS Code can survive the sweep (ENOTEMPTY/EACCES).
+                if [ -e "$data_dir/$cache_subdir" ]; then
+                    echo "   WARNING: could not fully clear $data_dir/$cache_subdir (in use?); continuing."
+                else
+                    echo "   Cleared $data_dir/$cache_subdir"
+                fi
+            fi
+        done
+    done
+    if [ "$cleared" = 0 ]; then
+        echo "   No VS Code caches found to clear."
+    fi
+}
+
 launch_vscode() {
     # ``$USER_PWD`` is captured at the top of this script before any ``cd``.
     # Passing it to VS Code makes it the workspace root so that agents
@@ -1091,6 +1148,13 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
         echo "   Install VS Code from https://code.visualstudio.com and re-run this script."
         exit 1
     fi
+    echo ""
+
+    # Clear VS Code's caches BEFORE the extension is built and installed so
+    # the update in step [5/5] cannot be served from stale cached state (see
+    # clear_vscode_cache above for what is swept and why it is best-effort).
+    echo ">>> Clearing VS Code caches..."
+    clear_vscode_cache
     echo ""
 
     echo ">>> [4/5] Building VS Code extension..."

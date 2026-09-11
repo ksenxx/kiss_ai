@@ -8,7 +8,9 @@
 import html as html_module
 import logging
 import os
+import posixpath
 import re
+import string
 import tempfile
 from pathlib import Path
 from typing import IO, Any, cast
@@ -111,6 +113,43 @@ def _try_chmod(path: str, mode: int) -> None:
         os.chmod(path, mode)
     except OSError:
         logger.debug("chmod %o failed on %s", mode, path, exc_info=True)
+
+
+def is_root_dir(path: str) -> bool:
+    """Return whether *path* names a filesystem root.
+
+    Roots — POSIX ``/`` (or ``//``), Windows drive roots such as
+    ``C:\\`` / ``C:/`` (including a bare drive ``C:``), and bare
+    backslashes — are never legitimate workspace folders: they reach
+    the daemon only when a GUI-launched process inherited the root as
+    its cwd (a Dock/Finder-launched VS Code window with no folder
+    open).  Rooting a task or the ``@``-mention file scan there would
+    span the whole disk, so callers treat a root exactly like "no work
+    dir" and fall back to a properly configured folder.  Mirrors the
+    VS Code extension's ``path.parse(cwd).root === cwd`` guard in
+    ``SorcarSidebarView._getWorkDir``.
+
+    Root-equivalent spellings (``/./``, ``/..``, ``C:\\.\\``) are
+    normalized before the check so they cannot slip past a literal
+    comparison.  Windows UNC roots (``\\\\server\\share``) are NOT
+    detected: the daemon serves a POSIX filesystem (its transport is a
+    Unix-domain socket), where a double-slash prefix is a legal path,
+    so classifying it as a root would blank legitimate directories.
+
+    Args:
+        path: The candidate directory path (any string).
+
+    Returns:
+        ``True`` when *path* is a filesystem root; ``False`` for every
+        other string, including empty or whitespace-only ones.
+    """
+    p = posixpath.normpath(path.strip().replace("\\", "/"))
+    if p in ("/", "//"):
+        return True
+    # A bare or slash-terminated drive ('C:', 'C:\', 'C:/') from a
+    # Windows-side client.  ASCII letters only: Node's path.win32 (the
+    # extension-side mirror of this guard) recognizes no other drives.
+    return len(p) == 2 and p[1] == ":" and p[0] in string.ascii_letters
 
 
 def substitute_prompt_args(template: str, arguments: dict[str, str] | None) -> str:

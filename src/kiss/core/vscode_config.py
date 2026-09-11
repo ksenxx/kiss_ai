@@ -13,6 +13,7 @@ to (:func:`save_api_key`).
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import logging
@@ -24,6 +25,7 @@ import shutil
 import signal
 import subprocess
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -34,9 +36,11 @@ logger = logging.getLogger(__name__)
 
 _ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
-# Reentrant: save_api_key holds it across the whole file-plus-environment
-# update while delegating the canonical-file edit to _edit_api_keys_env_file,
-# which takes it again for callers (key migration) that edit only the file.
+# Reentrant: save_api_key and _migrate_legacy_rc_keys hold it across their
+# whole file-plus-environment critical sections while nested helpers
+# (e.g. _edit_api_keys_env_file) may take it again.  Within one process it
+# also serializes access to _api_keys_store_flock(), so a single process
+# never flocks the store sidecar through two descriptors at once.
 _config_lock = threading.RLock()
 
 if TYPE_CHECKING:
@@ -501,7 +505,37 @@ def _remove_systemd_mirror() -> None:
         logger.warning("Failed to remove %s", mirror, exc_info=True)
 
 
-def _edit_api_keys_env_file(mutations: dict[str, str | None]) -> None:
+@contextlib.contextmanager
+def _api_keys_store_flock() -> Iterator[None]:
+    """Hold the cross-process flock guarding the canonical key store.
+
+    An ``fcntl`` flock on a sidecar ``.api_keys.env.kiss.lock`` in the
+    store's directory, so two writers (two daemon threads, or two
+    processes sharing one ``$KISS_HOME``) cannot both read the same
+    snapshot and silently drop each other's key.  The sidecar is
+    flocked rather than the store itself because the store is
+    atomically ``os.replace``-d: a lock on the old inode would not
+    exclude a writer that opens the new one.
+
+    Every holder must already hold :data:`_config_lock` — that is what
+    serializes threads *within* one process, so a single process never
+    flocks the sidecar through two file descriptors at once (which
+    would self-deadlock: flock exclusion is per open file description,
+    not per process).  Never call a function that takes this lock while
+    already holding it.
+    """
+    env_path = api_keys_env_path()
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = env_path.with_name("." + env_path.name + ".kiss.lock")
+    with open(lock_path, "w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def _edit_api_keys_env_file_locked(mutations: dict[str, str | None]) -> None:
     """Apply *mutations* to the canonical key store atomically.
 
     Each entry maps a variable name to its new value, or to ``None`` to
@@ -511,53 +545,53 @@ def _edit_api_keys_env_file(mutations: dict[str, str | None]) -> None:
     this module would not import, such as RC-distilled ``PATH``
     entries — pass through byte-for-byte.
 
-    Runs under :data:`_config_lock` plus an ``fcntl`` flock on a sidecar
-    ``.api_keys.env.kiss.lock`` in the same directory, so two savers (two
-    daemon threads, or two processes sharing one ``$KISS_HOME``) cannot
-    both read the same snapshot and silently drop each other's key.  The
-    sidecar is flocked rather than the store itself because the store is
-    atomically ``os.replace``-d: a lock on the old inode would not
-    exclude a writer that opens the new one.  A legacy systemd mirror is
-    deleted inside the same critical section (see
-    :func:`_remove_systemd_mirror`).
+    The caller must hold :data:`_config_lock` **and**
+    :func:`_api_keys_store_flock`; callers whose decision depends on
+    prior reads of the store or of the shell RCs (:func:`save_api_key`'s
+    delete-everywhere contract, :func:`_migrate_legacy_rc_keys`'s
+    missing-key snapshot) hold the flock across the whole read-decide-
+    write transaction so a concurrent process cannot invalidate the
+    snapshot mid-flight.  A legacy systemd mirror is deleted inside the
+    same critical section (see :func:`_remove_systemd_mirror`).
     """
     env_path = api_keys_env_path()
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = env_path.with_name("." + env_path.name + ".kiss.lock")
-    with (
-        _config_lock,
-        open(lock_path, "w", encoding="utf-8") as lock_file,
-    ):
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        try:
-            lines: list[str] = []
-            if env_path.exists():
-                lines = env_path.read_text(encoding="utf-8").splitlines(
-                    keepends=True,
-                )
-            replaced: set[str] = set()
-            new_lines: list[str] = []
-            for line in lines:
-                hit = next(
-                    (k for k in mutations if _env_line_sets_key(line, k)),
-                    None,
-                )
-                if hit is None:
-                    new_lines.append(line)
-                    continue
-                value = mutations[hit]
-                if value is not None and hit not in replaced:
-                    new_lines.append(f"export {hit}={shlex.quote(value)}\n")
-                replaced.add(hit)
-            for name, value in mutations.items():
-                if value is not None and name not in replaced:
-                    if new_lines and not new_lines[-1].endswith("\n"):
-                        new_lines[-1] += "\n"
-                    new_lines.append(f"export {name}={shlex.quote(value)}\n")
-            _atomic_write_text_secure(env_path, "".join(new_lines))
-            _remove_systemd_mirror()
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+    lines: list[str] = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines(
+            keepends=True,
+        )
+    replaced: set[str] = set()
+    new_lines: list[str] = []
+    for line in lines:
+        hit = next(
+            (k for k in mutations if _env_line_sets_key(line, k)),
+            None,
+        )
+        if hit is None:
+            new_lines.append(line)
+            continue
+        value = mutations[hit]
+        if value is not None and hit not in replaced:
+            new_lines.append(f"export {hit}={shlex.quote(value)}\n")
+        replaced.add(hit)
+    for name, value in mutations.items():
+        if value is not None and name not in replaced:
+            if new_lines and not new_lines[-1].endswith("\n"):
+                new_lines[-1] += "\n"
+            new_lines.append(f"export {name}={shlex.quote(value)}\n")
+    _atomic_write_text_secure(env_path, "".join(new_lines))
+    _remove_systemd_mirror()
+
+
+def _edit_api_keys_env_file(mutations: dict[str, str | None]) -> None:
+    """Apply *mutations* to the canonical key store under both locks.
+
+    Standalone entry point for callers that need only a self-contained
+    store edit; see :func:`_edit_api_keys_env_file_locked` for the edit
+    semantics and :func:`_api_keys_store_flock` for the locking.
+    """
+    with _config_lock, _api_keys_store_flock():
+        _edit_api_keys_env_file_locked(mutations)
 
 
 def save_api_key(key_name: str, key_value: str) -> None:
@@ -596,8 +630,17 @@ def save_api_key(key_name: str, key_value: str) -> None:
     the :data:`kiss.core.config.DEFAULT_CONFIG` singleton so subsequent
     model queries see the new key immediately.
 
-    The RC read-modify-replace runs under :data:`_config_lock` plus an
-    ``fcntl`` flock on a sidecar ``<rc>.kiss.lock`` beside the RC.  The
+    The whole store-edit-plus-RC-scrub critical section runs under
+    :data:`_config_lock` plus the canonical store's cross-process flock
+    (:func:`_api_keys_store_flock`): a *deletion* is only complete once
+    both the store and every RC are scrubbed, and holding the store
+    flock across both makes that compound state transition atomic with
+    respect to :func:`_migrate_legacy_rc_keys` running in another
+    process — otherwise the migration could read a not-yet-scrubbed RC
+    after this function's store edit and resurrect the deleted key.
+    Lock order is store flock → RC flock, everywhere.  Each RC
+    read-modify-replace additionally takes an ``fcntl`` flock on a
+    sidecar ``<rc>.kiss.lock`` beside the RC.  The
     sidecar lives beside the RC rather than in ``$KISS_HOME`` because
     the RC is selected from ``$HOME``: two daemons sharing one HOME but
     running with different ``KISS_HOME`` values edit the *same* RC
@@ -639,8 +682,8 @@ def save_api_key(key_name: str, key_value: str) -> None:
         return
     user_shell = _get_user_shell()
 
-    with _config_lock:
-        _edit_api_keys_env_file({key_name: key_value or None})
+    with _config_lock, _api_keys_store_flock():
+        _edit_api_keys_env_file_locked({key_name: key_value or None})
         # The key must disappear from EVERY RC a previous release may
         # have written it to, not only the current $SHELL's: a copy left
         # in another shell's RC would be re-imported by the legacy-key
@@ -1050,12 +1093,22 @@ def _migrate_legacy_rc_keys() -> None:
     and copies what it finds into the file.  Keys already in the file
     are never touched, and when nothing is missing no RC is read at all.
 
-    The whole read-source-write transaction holds :data:`_config_lock`:
-    otherwise a concurrent settings-panel *deletion* could scrub the
-    store between this function's RC read and its final write, and the
-    stale RC observation would resurrect the key the user just deleted.
+    The whole read-source-write transaction holds :data:`_config_lock`
+    **and** the canonical store's cross-process flock
+    (:func:`_api_keys_store_flock`): otherwise a concurrent
+    settings-panel *deletion* — in this process or in another daemon
+    sharing the same ``$KISS_HOME`` — could scrub the store and the RCs
+    between this function's snapshot and its final write, and the stale
+    RC observation would resurrect the key the user just deleted.
+    :func:`save_api_key` holds the same flock across its own store edit
+    plus RC scrub, so the two compound operations serialize in either
+    order and a completed deletion stays deleted.  Holding the flock
+    while sourcing the RC can block a concurrent saver for up to
+    :data:`_MIGRATION_TIMEOUT_S`; migration only reaches the sourcing
+    path on a first startup with keys missing from the store, so the
+    cost is a one-time startup pause, not a steady-state stall.
     """
-    with _config_lock:
+    with _config_lock, _api_keys_store_flock():
         env_path = api_keys_env_path()
         present: set[str] = set()
         if env_path.exists():
@@ -1083,4 +1136,4 @@ def _migrate_legacy_rc_keys() -> None:
             found.update(_source_rc_for_keys(still_missing))
         if found:
             mutations: dict[str, str | None] = dict(found)
-            _edit_api_keys_env_file(mutations)
+            _edit_api_keys_env_file_locked(mutations)

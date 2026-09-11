@@ -110,21 +110,21 @@ function drag(win, resizer, x0, x1) {
   pointer(win, resizer, 'pointerup', {clientX: x1, pointerId: 1});
 }
 
-// Resize bounds declared as --sidebar-min-w / --sidebar-default-min-w /
-// --sidebar-max-w / --chat-min-w in remote-codex.css.  A drag may take
-// the panel down to a 10px sliver; the DEFAULT width never drops below
-// the width at which every history filter toggle fits on a single
-// line.  jsdom never loads that stylesheet, so main.js falls back to
-// the same numbers.  A drag has no upper cap of its own: the panel may
-// grow as long as the chat column keeps CHAT_MIN (--sidebar-max-w
-// bounds only the DEFAULT width).  jsdom reports
+// Resize bounds declared as --sidebar-min-w / --chat-min-w in
+// remote-codex.css.  A drag may take the panel down to a 10px sliver;
+// the DEFAULT width is one fifth of the browser window (the 20vw
+// fallback of --sidebar-default-w).  jsdom never loads that
+// stylesheet, so main.js falls back to the same numbers.  A drag has
+// no upper cap of its own: the panel may grow as long as the chat
+// column — which sits between the history panel and the docked
+// task-info panel (20vw) — keeps CHAT_MIN.  jsdom reports
 // window.innerWidth === 1024.
 const MIN_W = 10;
-const DEFAULT_W = 520;
-const DEFAULT_MAX_W = 820;
-const CHAT_MIN = 360;
 const WINDOW_W = 1024;
-const MAX_W = WINDOW_W - CHAT_MIN;
+const DEFAULT_W = Math.round(WINDOW_W * 0.2);
+const CHAT_MIN = 360;
+const maxFor = w => Math.floor(w * 0.8) - CHAT_MIN;
+const MAX_W = maxFor(WINDOW_W);
 
 function testResizerExistsAndIsAccessible() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
@@ -172,15 +172,15 @@ function testDragResizesSidebar() {
     desktopMatches: true,
   });
   const resizer = win.document.getElementById('sidebar-resizer');
-  drag(win, resizer, 600, 620);
+  drag(win, resizer, 300, 420);
   assert.strictEqual(
     sidebarW(win),
-    '620px',
-    'dragging to x=620 must set --sidebar-w: 620px',
+    '420px',
+    'dragging to x=420 must set --sidebar-w: 420px',
   );
   assert.strictEqual(
     resizer.getAttribute('aria-valuenow'),
-    '620',
+    '420',
     'aria-valuenow must track the width',
   );
   assert.ok(
@@ -195,7 +195,7 @@ function testDragResizesSidebar() {
 function testDragClampsWidth() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
-  drag(win, resizer, 600, 80);
+  drag(win, resizer, 300, 80);
   assert.strictEqual(
     sidebarW(win),
     '80px',
@@ -222,28 +222,28 @@ function testDragClampsWidth() {
 function testWidthPersistsAndRestores() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
-  drag(win, resizer, 600, 650);
+  drag(win, resizer, 300, 430);
   assert.strictEqual(
     win.localStorage.getItem('kiss-sidebar-w'),
-    '650',
+    '430',
     'pointerup must persist the width to localStorage',
   );
   win.close();
   const second = makeWebview({
     remote: true,
     desktopMatches: true,
-    storedWidth: '650',
+    storedWidth: '430',
   });
   assert.strictEqual(
     sidebarW(second.win),
-    '650px',
+    '430px',
     'persisted width must be restored on load',
   );
   assert.strictEqual(
     second.win.document
       .getElementById('sidebar-resizer')
       .getAttribute('aria-valuenow'),
-    '650',
+    '430',
   );
   second.win.close();
   console.log('PASS width persists to localStorage and restores on load');
@@ -300,25 +300,25 @@ function testPersistedGarbageSanitized() {
 function testKeyboardResize() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
-  drag(win, resizer, 600, 600);
+  drag(win, resizer, 300, 400);
   resizer.dispatchEvent(
     new win.KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}),
   );
-  assert.strictEqual(sidebarW(win), '616px', 'ArrowRight grows by 16px');
+  assert.strictEqual(sidebarW(win), '416px', 'ArrowRight grows by 16px');
   resizer.dispatchEvent(
     new win.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}),
   );
   resizer.dispatchEvent(
     new win.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}),
   );
-  assert.strictEqual(sidebarW(win), '584px', 'ArrowLeft shrinks by 16px');
-  assert.strictEqual(resizer.getAttribute('aria-valuenow'), '584');
+  assert.strictEqual(sidebarW(win), '384px', 'ArrowLeft shrinks by 16px');
+  assert.strictEqual(resizer.getAttribute('aria-valuenow'), '384');
   assert.strictEqual(
     win.localStorage.getItem('kiss-sidebar-w'),
-    '584',
+    '384',
     'keyboard resize must persist too',
   );
-  drag(win, resizer, 584, 20);
+  drag(win, resizer, 384, 20);
   assert.strictEqual(sidebarW(win), '20px');
   resizer.dispatchEvent(
     new win.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}),
@@ -338,8 +338,8 @@ function testKeyboardResize() {
 function testDoubleClickResets() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
-  drag(win, resizer, 600, 640);
-  assert.strictEqual(sidebarW(win), '640px');
+  drag(win, resizer, 300, 400);
+  assert.strictEqual(sidebarW(win), '400px');
   resizer.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
   assert.strictEqual(
     sidebarW(win),
@@ -359,25 +359,25 @@ function testDoubleClickResets() {
 function testShrinkingWindowNarrowsThePanel() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
-  drag(win, resizer, 600, MAX_W);
+  drag(win, resizer, 300, MAX_W);
   assert.strictEqual(sidebarW(win), `${MAX_W}px`);
   Object.defineProperty(win, 'innerWidth', {value: 940, configurable: true});
   win.dispatchEvent(new win.Event('resize'));
   assert.strictEqual(
     sidebarW(win),
-    `${940 - CHAT_MIN}px`,
+    `${maxFor(940)}px`,
     'a narrower window must shrink the panel so the chat stays usable',
   );
   assert.strictEqual(
     resizer.getAttribute('aria-valuemax'),
-    String(940 - CHAT_MIN),
+    String(maxFor(940)),
     'aria-valuemax must follow the narrower window',
   );
   Object.defineProperty(win, 'innerWidth', {value: 700, configurable: true});
   win.dispatchEvent(new win.Event('resize'));
   assert.strictEqual(
     sidebarW(win),
-    `${700 - CHAT_MIN}px`,
+    `${maxFor(700)}px`,
     'even below the default width the chat keeps its minimum',
   );
   win.close();
@@ -431,14 +431,14 @@ function testVsCodeWebviewIsolation() {
 function testPointerCancelEndsDrag() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
-  pointer(win, resizer, 'pointerdown', {clientX: 600, pointerId: 1});
-  pointer(win, resizer, 'pointermove', {clientX: 640, pointerId: 1});
-  assert.strictEqual(sidebarW(win), '640px');
-  pointer(win, resizer, 'pointercancel', {clientX: 640, pointerId: 1});
+  pointer(win, resizer, 'pointerdown', {clientX: 300, pointerId: 1});
+  pointer(win, resizer, 'pointermove', {clientX: 440, pointerId: 1});
+  assert.strictEqual(sidebarW(win), '440px');
+  pointer(win, resizer, 'pointercancel', {clientX: 440, pointerId: 1});
   pointer(win, resizer, 'pointermove', {clientX: 750, pointerId: 1});
   assert.strictEqual(
     sidebarW(win),
-    '640px',
+    '440px',
     'moves after pointercancel must be ignored (drag ended)',
   );
   assert.ok(
@@ -478,7 +478,7 @@ function testWideWindowAllowsBeyondDefaultCap() {
   const resizer = win.document.getElementById('sidebar-resizer');
   Object.defineProperty(win, 'innerWidth', {value: 2500, configurable: true});
   win.dispatchEvent(new win.Event('resize'));
-  drag(win, resizer, 600, 1500);
+  drag(win, resizer, 300, 1500);
   assert.strictEqual(
     sidebarW(win),
     '1500px',
@@ -488,16 +488,15 @@ function testWideWindowAllowsBeyondDefaultCap() {
   drag(win, resizer, 1500, 2400);
   assert.strictEqual(
     sidebarW(win),
-    `${2500 - CHAT_MIN}px`,
-    'the chat column always keeps its minimum width',
+    `${maxFor(2500)}px`,
+    'the chat column (beside the 20vw task-info panel) keeps its minimum',
   );
-  // The DEFAULT width still honours --sidebar-max-w: 34% of 2500px
-  // would be 850px, so the cap decides.
+  // The DEFAULT width follows the window: one fifth of 2500px.
   resizer.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
   assert.strictEqual(
     sidebarW(win),
-    `${DEFAULT_MAX_W}px`,
-    'double-click default stays capped at --sidebar-max-w',
+    `${Math.round(2500 * 0.2)}px`,
+    'double-click default is one fifth of the window',
   );
   win.close();
   console.log('PASS wide windows may drag the panel past the default cap');

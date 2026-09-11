@@ -248,10 +248,12 @@ def test_nothing_is_lost_while_the_database_keeps_refusing_writes(
     )
     try:
         persistence._replay_failed_events()
-        assert sidecar.is_file(), (
-            "a failed replay hid the pending rows under a snapshot name; "
-            "the journal must stay where operators and the next replay "
-            "look for it"
+        assert persistence._journal_has_pending_rows(str(sidecar)), (
+            "a failed replay lost track of the pending rows; they must "
+            "stay discoverable for the next replay (they remain under "
+            "their claimed snapshot names — restoring one to the live "
+            "name would let later appends mix into it and break replay "
+            "chronology)"
         )
         assert len(_journal_residue(kiss_home)) == 2, _journal_residue(kiss_home)
     finally:

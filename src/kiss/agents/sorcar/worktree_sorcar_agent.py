@@ -29,6 +29,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
     MergeResult,
+    _reclaim_process_lock,
     repo_lock,
 )
 from kiss.agents.sorcar.persistence import _allocate_chat_id
@@ -614,7 +615,19 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         cleanup_warning = ""
         if wt.original_branch is None:
             return (MergeResult.CHECKOUT_FAILED, "", "")
-        with repo_lock(wt.repo_root):
+        # ``repo_lock`` serialises threads of THIS process only.  The
+        # stash → checkout → squash → commit → pop sequence is a
+        # multi-command transaction on the SHARED main worktree, and a
+        # second Sorcar PROCESS (kiss-web daemon vs. kiss CLI) merging
+        # or reclaiming concurrently runs ``git reset --hard HEAD`` on
+        # its failure paths — wiping this process's staged squash
+        # merge, whose ``_commit_staged_merge`` then sees an empty
+        # index, reports SUCCESS and deletes the only branch holding
+        # the work.  The cross-process flock (the same one reclaim
+        # sweeps hold) covers the whole transaction; the order
+        # ``repo_lock`` → flock matches every other taker, so there is
+        # no ABBA between processes' threads.
+        with repo_lock(wt.repo_root), _reclaim_process_lock(wt.repo_root):
             try:
                 GitWorktreeOps.ensure_scratch_merge_driver(wt.repo_root)
             except Exception:  # pragma: no cover — filesystem permission error
@@ -1238,7 +1251,18 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         if cross_repo:
             released_branch = self._retire_previous_worktree()
 
-        with repo_lock(repo):
+        with repo_lock(repo), _reclaim_process_lock(repo):
+            # For a SAME-repo handoff the cross-process flock must span
+            # retirement AND the baseline snapshot below as one
+            # transaction: _retire_previous_worktree's merge/discard
+            # takes and releases the flock internally (re-entrantly,
+            # under this outer hold), and a peer process waiting on the
+            # flock could otherwise slip in between, check out a
+            # different branch and restore its own dirty state there —
+            # making the cached ``released_branch`` stale and splitting
+            # the base commit and dirty patch across two different
+            # main-tree states.  The nested _reclaim_process_lock below
+            # re-enters this hold instead of self-deadlocking.
             if not cross_repo:
                 released_branch = self._retire_previous_worktree()
             if self._wt is not None:
@@ -1253,83 +1277,95 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                     self._wt.branch,
                 )
                 return None
-            original_branch: str | None
-            if (
-                released_branch is not None
-                and prev_repo_root is not None
-                and prev_repo_root.resolve() == repo.resolve()
-            ):
-                original_branch = released_branch
-            else:
-                original_branch = GitWorktreeOps.current_branch(repo)
-            if original_branch is None:
-                logger.warning("Detached HEAD, running task directly")
-                return None
-
-            if work_dir_str:
-                try:
-                    offset = Path(work_dir_str).resolve().relative_to(repo.resolve())
-                except ValueError:  # pragma: no cover
-                    logger.warning("work_dir not inside repo, running directly")
-                    return None
-            else:
-                offset = Path(".")
-
-            try:
-                GitWorktreeOps.ensure_excluded(repo)
-                GitWorktreeOps.ensure_scratch_merge_driver(repo)
-            except Exception:  # pragma: no cover — filesystem permission error
-                logger.warning("Failed to update git exclude", exc_info=True)
-
-            acquired = self._acquire_task_worktree(repo, original_branch)
-            if acquired is None:
-                return None
-            branch, wt_dir = acquired
-
-            if not GitWorktreeOps.save_original_branch(repo, branch, original_branch):
-                # pragma: no cover — git config failure
-                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
-                return None
-            # No owner-pid write here: ``GitWorktreeOps.create`` stamps
-            # this process's pid as part of a successful creation (and
-            # fails the creation otherwise), and a pooled spare was
-            # created by this same process's pool through that very
-            # method, so both acquisition paths arrive here already
-            # owned.
-
-            try:
-                dirty_copied = GitWorktreeOps.copy_dirty_state(repo, wt_dir)
-            except OSError:
-                logger.warning(
-                    "Failed to copy dirty state into worktree; "
-                    "falling back to direct execution",
-                    exc_info=True,
-                )
-                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
-                return None
-
-            baseline_commit: str | None = None
-            if dirty_copied:
-                GitWorktreeOps.stage_all(wt_dir)
-                if GitWorktreeOps.commit_staged(
-                    wt_dir,
-                    "kiss: baseline from dirty state",
-                    no_verify=True,
+            # The whole baseline snapshot below — reading the main
+            # tree's checked-out branch and copying its dirty state —
+            # must be one consistent read of the SHARED main worktree.
+            # ``repo_lock`` only excludes threads of this process; a
+            # peer process's merge/reclaim/discard stashes, checks
+            # out and resets that same tree under the cross-process
+            # flock, so the capture takes the flock too (repo_lock ->
+            # flock order, like every other taker).  The reclaim /
+            # sweep / create helpers called inside re-enter it
+            # per-thread instead of self-deadlocking on a second
+            # descriptor (see _reclaim_process_lock).
+            with _reclaim_process_lock(repo):
+                original_branch: str | None
+                if (
+                    released_branch is not None
+                    and prev_repo_root is not None
+                    and prev_repo_root.resolve() == repo.resolve()
                 ):
-                    baseline_commit = GitWorktreeOps.head_sha(wt_dir)
-                    if baseline_commit:
-                        GitWorktreeOps.save_baseline_commit(
-                            repo,
-                            branch,
-                            baseline_commit,
-                        )
-                elif GitWorktreeOps.has_uncommitted_changes(wt_dir):
+                    original_branch = released_branch
+                else:
+                    original_branch = GitWorktreeOps.current_branch(repo)
+                if original_branch is None:
+                    logger.warning("Detached HEAD, running task directly")
+                    return None
+
+                if work_dir_str:
+                    try:
+                        offset = Path(work_dir_str).resolve().relative_to(repo.resolve())
+                    except ValueError:  # pragma: no cover
+                        logger.warning("work_dir not inside repo, running directly")
+                        return None
+                else:
+                    offset = Path(".")
+
+                try:
+                    GitWorktreeOps.ensure_excluded(repo)
+                    GitWorktreeOps.ensure_scratch_merge_driver(repo)
+                except Exception:  # pragma: no cover — filesystem permission error
+                    logger.warning("Failed to update git exclude", exc_info=True)
+
+                acquired = self._acquire_task_worktree(repo, original_branch)
+                if acquired is None:
+                    return None
+                branch, wt_dir = acquired
+
+                if not GitWorktreeOps.save_original_branch(repo, branch, original_branch):
+                    # pragma: no cover — git config failure
+                    GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                    return None
+                # No owner-pid write here: ``GitWorktreeOps.create`` stamps
+                # this process's pid as part of a successful creation (and
+                # fails the creation otherwise), and a pooled spare was
+                # created by this same process's pool through that very
+                # method, so both acquisition paths arrive here already
+                # owned.
+
+                try:
+                    dirty_copied = GitWorktreeOps.copy_dirty_state(repo, wt_dir)
+                except OSError:
                     logger.warning(
-                        "Baseline commit failed in new worktree; "
-                        "falling back to direct execution"
+                        "Failed to copy dirty state into worktree; "
+                        "falling back to direct execution",
+                        exc_info=True,
                     )
                     GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
                     return None
+
+                baseline_commit: str | None = None
+                if dirty_copied:
+                    GitWorktreeOps.stage_all(wt_dir)
+                    if GitWorktreeOps.commit_staged(
+                        wt_dir,
+                        "kiss: baseline from dirty state",
+                        no_verify=True,
+                    ):
+                        baseline_commit = GitWorktreeOps.head_sha(wt_dir)
+                        if baseline_commit:
+                            GitWorktreeOps.save_baseline_commit(
+                                repo,
+                                branch,
+                                baseline_commit,
+                            )
+                    elif GitWorktreeOps.has_uncommitted_changes(wt_dir):
+                        logger.warning(
+                            "Baseline commit failed in new worktree; "
+                            "falling back to direct execution"
+                        )
+                        GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                        return None
 
             wt_work_dir = wt_dir / offset
             self._wt = GitWorktree(
@@ -1753,7 +1789,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             )
         checkout_warning = ""
         delete_warning = ""
-        with repo_lock(wt.repo_root):
+        # The flock keeps this discard's main-worktree mutations (the
+        # checkout back to the original branch moves the SHARED main
+        # HEAD) out of another process's in-flight merge/reclaim
+        # transaction — without it, that process would commit its
+        # staged squash merge onto whatever branch this checkout left
+        # behind.  Same ``repo_lock`` → flock order as everywhere else.
+        with repo_lock(wt.repo_root), _reclaim_process_lock(wt.repo_root):
             if rescue_ignored and wt.wt_dir.exists():
                 try:
                     _, rescue_ok = GitWorktreeOps.rescue_ignored_files(

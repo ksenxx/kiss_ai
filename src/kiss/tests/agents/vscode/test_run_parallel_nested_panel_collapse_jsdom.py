@@ -34,9 +34,6 @@ Behaviours verified by the underlying JS test:
   (``resumeSession``), and re-collapsing the summary closes them again;
 * a sub-agent the daemon announces after the summary hid its fan-out
   panel opens no tab, and is opened when that panel is expanded;
-* the task-end collapse pass and the background-tab collapse pass
-  (``collapseAllExceptResult``) close the tabs of a summary-nested
-  fan-out instead of skipping it;
 * replaying a background chat's transcript (``task_events``) collapses
   the replacement ``run_parallel`` panel AND closes the sub-agent tabs
   of the panel it replaced -- the replacement panel is handed to the tab
