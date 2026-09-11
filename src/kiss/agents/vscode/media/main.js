@@ -10273,7 +10273,15 @@
             return u && !u.startsWith('#');
           });
           if (uris.length > 0) {
-            api.resolveDroppedPaths({uris: uris});
+            // Stamp the tab's work dir: the extension host otherwise
+            // falls back to the window's workspace folder / host cwd,
+            // which in a no-folder window is not where this tab's
+            // tasks run, so dropped files would be relativized against
+            // the wrong root.
+            api.resolveDroppedPaths({
+              uris: uris,
+              workDir: workDirForTab(activeTabId),
+            });
             return;
           }
         }
