@@ -1797,6 +1797,146 @@ def _log_orphaned_task_forensics(
         )
 
 
+_USAGE_STEPS_RE = re.compile(r"Steps:\s*(\d+)")
+_USAGE_TOKENS_RE = re.compile(r"Total tokens:\s*([\d,]+)")
+_USAGE_COST_RE = re.compile(r"Budget:\s*\$([0-9][\d,]*\.?\d*)")
+
+
+def _recovered_progress_from_events(
+    db: sqlite3.Connection, task_id: str,
+) -> dict[str, int | float]:
+    """Reconstruct a killed task's last known progress from its events.
+
+    When the owning process dies before the task runner's cleanup can
+    call ``_save_task_extra``, the ``steps``/``tokens``/``cost``/
+    ``end_ts`` columns keep their creation-time zeros and the history
+    UI shows "0 steps, 0 tok" for a task that may have run for hours.
+    The surviving ``events`` rows record how far the task actually
+    got: every ``usage_info`` event carries the per-task step, token,
+    and budget counters in its ``text`` field, and the newest event of
+    any type dates the last observed activity.
+
+    Args:
+        db: Active database connection (caller holds the write lock).
+        task_id: Task whose events should be inspected.
+
+    Only the per-task counter text emitted once per agent step
+    (``"Steps: 175/10000, ... Total tokens: 33,641,687, Budget:
+    $56.4682/$1000.00"``) is trusted.  The live-usage monitor's
+    ``usage_info`` events carry a different text form and structured
+    ``total_tokens``/``total_steps``/``cost`` fields, but those are
+    CROSS-TASK aggregates ("incl. parallel sub-agents") — writing them
+    into the per-task columns would overstate the task, so such events
+    are skipped and the scan continues to the newest per-step event.
+
+    Returns:
+        Mapping of the subset of ``steps``/``tokens``/``cost``/
+        ``end_ts`` columns that could be recovered — empty when the
+        task has no events.  Values are parsed defensively: a
+        malformed or foreign-format ``usage_info`` event contributes
+        nothing and never raises.
+    """
+    progress: dict[str, int | float] = {}
+    last = db.execute(
+        "SELECT MAX(timestamp) AS ts FROM events WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    last_ts = _safe_float(last["ts"] if last is not None else None, 0.0)
+    if last_ts <= 0:
+        return progress
+    progress["end_ts"] = int(last_ts * 1000)
+    usage_rows = db.execute(
+        "SELECT event_json FROM events "
+        "WHERE task_id = ? AND event_json LIKE '%\"usage_info\"%' "
+        "ORDER BY seq DESC",
+        (task_id,),
+    )
+    for usage_row in usage_rows:
+        try:
+            event = json.loads(usage_row["event_json"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(event, dict) or event.get("type") != "usage_info":
+            continue
+        text = str(event.get("text", ""))
+        steps_m = _USAGE_STEPS_RE.search(text)
+        if steps_m is None:
+            # Not the per-step counter form.  In particular the live
+            # monitor's "Tokens: N, Budget: $C (live, incl. parallel
+            # sub-agents)" text has no "Steps:" marker, and its Budget
+            # figure is a cross-task aggregate that must not be
+            # mistaken for this task's cost.
+            continue
+        found: dict[str, int | float] = {}
+        tokens_m = _USAGE_TOKENS_RE.search(text)
+        cost_m = _USAGE_COST_RE.search(text)
+        try:
+            found["steps"] = int(steps_m.group(1))
+            if tokens_m:
+                found["tokens"] = int(tokens_m.group(1).replace(",", ""))
+            if cost_m:
+                found["cost"] = float(cost_m.group(1).replace(",", ""))
+        except ValueError:
+            # The token/cost regexes admit comma-only or otherwise
+            # unconvertible digit groups; a corrupt event must not
+            # abort the recovery sweep.
+            continue
+        progress.update(found)
+        break
+    return progress
+
+
+def _backfill_orphan_progress(
+    db: sqlite3.Connection, rowids: list[int],
+) -> None:
+    """Backfill progress columns of just-recovered orphan rows.
+
+    Called by :func:`_recover_orphaned_tasks` (inside its write
+    transaction) for the rows whose ``result`` it rewrites.  Each
+    still-zero ``steps``/``tokens``/``cost``/``end_ts`` column is
+    filled from the evidence in the task's surviving events, so the
+    history sidebar shows the task's real last-known progress instead
+    of "0 steps, 0 tok".  A column that already holds a non-zero value
+    (written by a partial cleanup before the kill) is never
+    overwritten — the recorded value is more authoritative than a
+    reconstruction.
+
+    The backfill is best-effort by construction: any per-row failure
+    is logged and skipped, because an exception escaping here would
+    roll back the enclosing transaction and undo the sentinel rewrite
+    itself — losing the primary purpose of the sweep over a cosmetic
+    reconstruction.
+
+    Args:
+        db: Active database connection (caller holds the write lock).
+        rowids: The ``rowid``s whose sentinel result was rewritten.
+    """
+    for rid in rowids:
+        try:
+            row = db.execute(
+                "SELECT id FROM task_history WHERE rowid = ?", (rid,),
+            ).fetchone()
+            if row is None or not row["id"]:
+                continue
+            progress = _recovered_progress_from_events(db, str(row["id"]))
+            if not progress:
+                continue
+            sets = [
+                f"{col} = CASE WHEN {col} IS NULL OR {col} = 0 "
+                f"THEN ? ELSE {col} END"
+                for col in progress
+            ]
+            db.execute(
+                f"UPDATE task_history SET {', '.join(sets)} WHERE rowid = ?",
+                [*progress.values(), rid],
+            )
+        except Exception:
+            logger.warning(
+                "orphan progress backfill failed for rowid %s", rid,
+                exc_info=True,
+            )
+
+
 def _recover_orphaned_tasks(
     active_task_ids: set[str],
     created_before: float | None = None,
@@ -1818,7 +1958,11 @@ def _recover_orphaned_tasks(
     for any row that still carries the sentinel AND whose id is not
     in *active_task_ids* (the currently-running tasks in THIS
     process), and rewrite ``result`` to a diagnostic message that
-    truthfully describes what happened.
+    truthfully describes what happened.  The still-zero progress
+    columns of each rewritten row are then backfilled from the task's
+    surviving events (see :func:`_backfill_orphan_progress`) so the
+    history sidebar shows the real last-known step/token/cost state
+    instead of "0 steps, 0 tok".
 
     Liveness is decided from the DATABASE, not from process memory:
     every row records the ``owner`` token of the process that created
@@ -1888,6 +2032,7 @@ def _recover_orphaned_tasks(
                 ],
             )
             rowcount = cursor.rowcount or 0
+            _backfill_orphan_progress(db, dead_rowids)
     if rowcount:
         logger.warning(
             "Recovered %d orphaned task(s) from prior process kill",
