@@ -278,23 +278,28 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
         again = self._sync(_LAPTOP, _SERVER)
         self.assertEqual(again.returncode, 0, again.stderr)
 
-        idle = "0 task row(s) added, 0 updated, 0 event row(s) added"
+        idle = "0 task row(s) added, 0 event row(s) added"
         self.assertEqual(again.stdout.count(idle), 2, again.stdout)
         self.assertEqual(sorted(_tasks(self.local_db)), ["L1", "R1"])
         self.assertEqual(sorted(_tasks(self.remote_db)), ["L1", "R1"])
 
-    def test_a_task_that_got_further_on_the_remote_wins(self) -> None:
-        """The same task on both sides: the run that progressed is kept."""
+    def test_a_task_known_to_both_sides_is_never_rewritten(self) -> None:
+        """Task rows are immutable: each machine keeps its own copy.
+
+        Ids are unique and a task row is never modified after creation,
+        so two copies of one id are the same task; nothing has to travel
+        and neither database's row is touched.
+        """
         _make_db(self.local_db, ["T"], steps=3)
         _make_db(self.remote_db, ["T"], steps=17)
 
         self.assertEqual(self._sync(_LAPTOP, _SERVER).returncode, 0)
 
-        self.assertEqual(_steps(self.local_db, "T"), 17)
+        self.assertEqual(_steps(self.local_db, "T"), 3)
         self.assertEqual(_steps(self.remote_db, "T"), 17)
 
     def test_a_favourite_marked_here_survives_the_sync(self) -> None:
-        """A flag the user set is not progress, and must not be reverted."""
+        """A flag set on a row this machine already has is never reverted."""
         _make_db(self.local_db, ["T"], steps=5)
         _make_db(self.remote_db, ["T"], steps=5)
         con = sqlite3.connect(self.local_db)
@@ -304,13 +309,12 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
 
         self.assertEqual(self._sync(_LAPTOP, _SERVER).returncode, 0)
 
-        for database in (self.local_db, self.remote_db):
-            con = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
-            favourite = con.execute(
-                "SELECT is_favorite FROM task_history WHERE id = 'T'"
-            ).fetchone()[0]
-            con.close()
-            self.assertEqual(favourite, 1, database)
+        con = sqlite3.connect(f"file:{self.local_db}?mode=ro", uri=True)
+        favourite = con.execute(
+            "SELECT is_favorite FROM task_history WHERE id = 'T'"
+        ).fetchone()[0]
+        con.close()
+        self.assertEqual(favourite, 1)
 
     def test_neither_side_overwrites_the_other_at_equal_progress(self) -> None:
         """Two copies of one task that differ without either being ahead.

@@ -32,10 +32,10 @@
 #
 # Nothing is lost, by construction:
 #
-#   * sync_db.py only inserts rows and updates a task row that the incoming
-#     copy has carried further along (more steps, tokens, cost, or a later end
-#     time; a favourite marked on either machine survives).  A row that merely
-#     differs is left alone, no row is ever deleted, and no table other than
+#   * sync_db.py only ever inserts rows.  Task ids are unique and a task row
+#     is immutable once created, so a task travels exactly when the other
+#     machine does not have its id; a row both machines have is left alone,
+#     no row is ever deleted or updated, and no table other than
 #     ``task_history`` and ``events`` is touched.
 #   * Neither live database is ever rewritten by the relocation step: work
 #     directories are translated in the throw-away snapshot that travels, and
@@ -327,8 +327,8 @@ relocate_snapshot() {
 # Pass 1: bring back what ran on the remote
 #
 # The snapshot is taken and rewritten on the remote, so that the rows arriving
-# here already carry this machine's paths: the digests sync_db.py compares then
-# match the rows already here, and a repeated sync moves nothing.
+# here already carry this machine's paths.  sync_db.py matches tasks by their
+# unique, immutable id, so a repeated sync moves nothing.
 # ---------------------------------------------------------------------------
 pull_from_remote() {
     local remote_tasks

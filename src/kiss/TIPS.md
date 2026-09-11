@@ -10,14 +10,17 @@ curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install
 
 # Tip
 
-For writing a Sorcar Extension Agent (SEA), see the README.md.  All communication agents, such as Slack agent, 
-are implemented in KISS Sorcar as SEA.
+## Sorcar Extension Agents (SEAs)
+
+A **Sorcar Extension Agent (SEA)** is a plain Python file that defines a complete custom agent: its top-level `get_X()` functions compute the run's task prompt, system prompt, model, budget, tools, and safety hooks. Pass the file's path as `extension_agent_path` to `sorcar.run()` and the daemon imports it on every run. All third-party agents, such as the Slack and Gmail agents, are implemented in KISS Sorcar as SEAs. See the "Sorcar Extension Agents (SEAs)" section in README.md for a full example, and the detailed SEA guide at <https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md>.
 
 # Tip
 
 ## Prompt KISS Sorcar like the Developer of KISS Sorcar
 
 **Always write precise less than 10 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. The waterfall model does not work that well in contemporary times.
+
+See the commit messages at https://github.com/ksenxx/kiss_ai which include the prompts used by the developer of KISS Sorcar.
 
 **No need to use generic skills for debugging, code review, etc.** Frontier models have been trained on those skills.
 
@@ -29,7 +32,7 @@ are implemented in KISS Sorcar as SEA.
 - Add the following text to your prompt:
 
 ```
-Use 'claude-fable-5-1' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) with `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
+Use 'claude-fable-5-1' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
 ```
 
 # Tip
@@ -178,4 +181,4 @@ Click the burger menu button in the bottom-left corner to see all agents in KISS
 
 ## Settings
 
-Click on the settings button at the top right corner. You can get the URL for the remote web/mobile app, set the remote web app access password, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint using the Settings interface.
+Click on the settings button in the "..." menu. You can get the URL for the remote web/mobile app, set the remote web app access password, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint using the Settings interface.

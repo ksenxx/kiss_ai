@@ -1059,22 +1059,56 @@ async function run() {
       ts: Date.now(),
     });
     click(win.document.getElementById('share-btn'));
-    assert.ok(
-      !wv.posted.some(m => m.type === 'shareChatTasks'),
-      "a sub-agent's rows are not chat tasks: nothing to ask the daemon",
-    );
-    const msg = wv.posted.filter(m => m.type === 'shareChat').pop();
-    assert.ok(msg, 'the sub-agent screen is still exportable');
+    // A sub-agent's row is deliberately absent from the chat's task
+    // list, but its OWN fan-outs' transcripts must ride along: the
+    // daemon is asked for this one task (taskId) instead of the chat.
+    const req = wv.posted.filter(m => m.type === 'shareChatTasks').pop();
+    assert.ok(req, 'the daemon is asked for the sub-agent task');
+    assert.strictEqual(req.taskId, 'sub-1');
     assert.strictEqual(
-      msg.chatId,
+      req.chatId,
       'tab-sub',
       "the page gets the sub-agent tab's own file name, never the " +
         "parent chat's",
     );
+    send(win, {
+      type: 'share_tasks',
+      tabId: req.tabId,
+      chatId: req.chatId,
+      tasks: [
+        {
+          task: 'help out',
+          task_id: 'sub-1',
+          events: [],
+          subagents: [
+            {
+              task: 'nested worker',
+              task_id: 'sub-1-child',
+              parent_task_id: 'sub-1',
+              events: [
+                {type: 'tool_call', name: 'Bash', command: 'nested-work'},
+              ],
+            },
+          ],
+        },
+      ],
+      truncated: false,
+    });
+    const msg = wv.posted.filter(m => m.type === 'shareChat').pop();
+    assert.ok(msg, 'the sub-agent screen is still exportable');
+    assert.strictEqual(msg.chatId, 'tab-sub');
     assert.ok(msg.html.includes('make sub-work'), 'its panels exported');
     assert.ok(
       !msg.html.includes('ls -la'),
       "the parent task's panels stay out of the sub-agent's page",
+    );
+    assert.ok(
+      msg.html.includes('nested-work'),
+      "the sub-agent's own sub-agents ride along to its page",
+    );
+    assert.ok(
+      msg.html.includes('data-task-id="sub-1-child"'),
+      'the nested transcript lands in a tabbed section',
     );
   });
 

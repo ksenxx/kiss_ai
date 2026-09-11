@@ -26,6 +26,7 @@ from kiss.core.models.model import (
     ThinkingCallback,
     TokenCallback,
     accepted_request_params,
+    merge_system_texts,
     responses_items_to_chat_messages,
     transcribe_audio,
 )
@@ -701,23 +702,12 @@ class AnthropicModel(Model):
             if key not in FRAMEWORK_ONLY_CONFIG_KEYS
         }
         enable_cache = self.model_config.get("enable_cache", True)
-        system_instruction = self.model_config.get("system_instruction")
-
-        system_texts: list[str] = [system_instruction] if system_instruction else []
-        for msg in self.conversation:
-            if msg.get("role") != "system":
-                continue
-            content = msg.get("content")
-            if isinstance(content, list):
-                content = "".join(
-                    p.get("text", "")
-                    for p in content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                )
-            if isinstance(content, str) and content.strip() and content not in system_texts:
-                system_texts.append(content)
-        if system_texts:
-            system_instruction = "\n\n".join(system_texts)
+        # The same hoisting Gemini applies (see Model docstring of
+        # merge_system_texts): the Messages API rejects the "system" role,
+        # so handed-off system messages ride in the ``system`` parameter.
+        system_instruction = merge_system_texts(
+            self.model_config.get("system_instruction"), self.conversation
+        )
 
         max_tokens = kwargs.pop("max_tokens", None)
         if max_tokens is None:

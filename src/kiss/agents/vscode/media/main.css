@@ -1478,6 +1478,12 @@ body.remote-chat #theme-btn { display: flex; }
 
 #sidebar.open { transform: translateX(0); }
 
+/* The docked task-info panel exists only on the remote webapp's
+   desktop layout; remote-codex.css shows it there.  Everywhere else
+   (VS Code webview, mobile remote) it stays hidden and the meta
+   values keep rendering in #tab-status-bar. */
+#meta-panel { display: none; }
+
 /* Editor-tabs mode: the burger is gone — the editor-title KS button
    shows the real history panel in the primary sidebar instead. */
 body.editor-tab-mode #menu-btn { display: none; }

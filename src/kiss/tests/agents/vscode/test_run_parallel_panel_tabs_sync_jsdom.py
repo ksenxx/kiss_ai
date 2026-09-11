@@ -31,7 +31,7 @@ Behaviours verified by the underlying JS test (see file for details):
   the owning panel collapse (and expanding it reopens the whole
   fan-out);
 * the automatic collapse passes (``collapseOlderPanels`` while
-  streaming, ``collapseAllExceptResult`` at task end) never leave the
+  streaming, ``collapseAllExceptResult`` on replay) never leave the
   panel collapsed while its sub-agent tabs are open;
 * a delayed ``openSubagentTab`` cannot recreate a tab after collapsing
   the owning panel;

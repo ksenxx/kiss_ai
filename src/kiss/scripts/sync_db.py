@@ -21,12 +21,12 @@ How it works (three phases, each run on the machine that owns the
 database, so a database file is never copied across machines):
 
 1. ``_manifest`` runs on TARGET and emits a small gzipped JSON summary
-   of what TARGET already has: a content digest per ``task_history.id``,
+   of what TARGET already has: the ``task_history.id`` values it holds,
    and the lowest and highest ``events.seq`` plus the number of distinct
    sequence numbers per task.
 2. ``_extract`` runs on SOURCE, reads that summary, and builds a
-   throw-away *delta* database holding only the rows TARGET is missing
-   or that differ.  The delta is streamed back gzipped.
+   throw-away *delta* database holding only the rows TARGET is missing.
+   The delta is streamed back gzipped.
 3. ``_merge`` runs on TARGET, ``ATTACH``-es the delta and inserts the
    new rows in a single transaction.
 
@@ -44,17 +44,10 @@ gap heals.
 Both databases must have the same columns for the two tables; a mismatch
 is refused rather than half-applied.
 
-A ``task_history`` row that exists on both sides is updated from SOURCE
-only when SOURCE's copy actually carried the task further: no smaller
-``steps``, ``tokens``, ``cost`` or ``end_ts``, and at least one of them
-larger.  That stops a stale SOURCE from clobbering a run that progressed
-on TARGET, and -- because the two databases sync in both directions --
-it also stops a row that merely *differs* from overwriting whatever the
-receiving machine has recorded about the same task since.  The two
-columns that a user or a later event sets on their own, ``is_favorite``
-and ``has_events``, are merged rather than copied: once either side has
-them set, both do.  ``--force`` always takes SOURCE's row as it stands,
-``--insert-only`` never updates an existing row.
+Task ids are unique and a task row, once created, is never modified, so
+the sync never has to compare row contents: a task travels exactly when
+TARGET does not have its id, and a ``task_history`` row that exists on
+both sides is always left as TARGET recorded it.
 
 The remote side runs this very file through ``ssh <host> python3 -c
 ...``: the script is stdlib-only and self-contained, so nothing has to
@@ -64,8 +57,6 @@ Usage:
     uv run python -m kiss.scripts.sync_db SOURCE TARGET [OPTIONS]
 
 Options:
-    --insert-only   Only add missing rows; never update existing ones
-    --force         On conflict always overwrite TARGET's task row
     --full          Ignore TARGET's manifest and ship every source row
                     (slow but assumes nothing about how rows were added)
     --dry-run       Perform the merge and roll it back, reporting exactly
@@ -82,7 +73,6 @@ import argparse
 import base64
 import contextlib
 import gzip
-import hashlib
 import json
 import os
 import re
@@ -97,13 +87,6 @@ from typing import Any, BinaryIO
 
 TASK_TABLE = "task_history"
 EVENT_TABLE = "events"
-# Columns of the task table that only ever grow while a task runs; used
-# to decide whether SOURCE's copy of a task supersedes TARGET's copy.
-MONOTONE_COLUMNS = ("steps", "tokens", "cost", "end_ts")
-# Columns that are set independently of a task's progress -- by the user
-# marking a task a favourite, and by the first event a task emits -- and
-# that are therefore merged into the target rather than copied over it.
-STICKY_COLUMNS = ("is_favorite", "has_events")
 # Where each table's column list lives in the manifest.
 MANIFEST_COLUMN_KEYS = {TASK_TABLE: "task_columns", EVENT_TABLE: "event_columns"}
 COPY_BUFFER = 1 << 20
@@ -112,10 +95,6 @@ INSERT_BATCH = 1000
 PHASE_MANIFEST = "_manifest"
 PHASE_EXTRACT = "_extract"
 PHASE_MERGE = "_merge"
-
-MODE_DEFAULT = "default"
-MODE_FORCE = "force"
-MODE_INSERT_ONLY = "insert-only"
 
 # ``user@host`` or ``host``: everything ssh accepts before the colon.
 _HOST_PATTERN = re.compile(r"^[A-Za-z0-9._-]+(@[A-Za-z0-9._-]+)?$")
@@ -331,39 +310,6 @@ def require_columns(columns: list[str], needed: tuple[str, ...], where: str) -> 
         raise SyncError(f"{where} lacks required column(s): {', '.join(absent)}")
 
 
-def row_digest(values: list[Any]) -> str:
-    """Hash one row's values into a short, cross-machine stable digest.
-
-    Each value is hashed as a type tag, its byte length and its bytes, so
-    that no two different rows can be framed into the same byte stream.
-
-    Args:
-        values: Column values in a fixed column order.
-
-    Returns:
-        A hex SHA-1 digest of the framed values.
-    """
-    h = hashlib.sha1(usedforsecurity=False)
-    for value in values:
-        if value is None:
-            tag, payload = b"n", b""
-        elif isinstance(value, bytes):
-            tag, payload = b"b", value
-        elif isinstance(value, str):
-            tag, payload = b"s", value.encode("utf-8", "surrogatepass")
-        elif isinstance(value, bool):
-            tag, payload = b"i", b"1" if value else b"0"
-        elif isinstance(value, int):
-            tag, payload = b"i", str(value).encode()
-        else:
-            tag, payload = b"f", repr(float(value)).encode()
-        h.update(tag)
-        h.update(str(len(payload)).encode())
-        h.update(b":")
-        h.update(payload)
-    return h.hexdigest()
-
-
 def temp_path(suffix: str) -> str:
     """Create an empty temporary file and return its path.
 
@@ -437,12 +383,14 @@ def read_file_gz(inp: BinaryIO, path: str) -> None:
 def phase_manifest(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> None:
     """Emit the target's sync manifest as gzipped JSON.
 
-    The manifest holds a content digest per task id and, per task, the
-    lowest and highest ``events.seq`` together with the number of events
-    the target has.  That is all the source needs to compute a minimal
-    delta: when the count matches the span, the target owns an unbroken
-    run of events and only rows outside it have to travel, and otherwise
-    the source ships every event of that task so earlier gaps heal.
+    The manifest holds the task ids the target already has and, per task,
+    the lowest and highest ``events.seq`` together with the number of
+    events the target has.  That is all the source needs to compute a
+    minimal delta: a task row is immutable once created, so an id the
+    target holds never has to travel again; when the event count matches
+    the span, the target owns an unbroken run of events and only rows
+    outside it have to travel, and otherwise the source ships every event
+    of that task so earlier gaps heal.
 
     Args:
         path: Target database path.
@@ -459,16 +407,13 @@ def phase_manifest(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> 
         require_columns(
             event_cols, ("task_id", "seq"), f"{EVENT_TABLE} in the target database"
         )
-        digest_cols = sorted(task_cols)
-        selection = ", ".join(quote_name(c) for c in digest_cols)
-        tasks: dict[str, str] = {}
-        for row in conn.execute(
-            f"SELECT {selection} FROM main.{quote_name(TASK_TABLE)}"
-            ' WHERE "id" IS NOT NULL'
-        ):
-            values = list(row)
-            task_id = values[digest_cols.index("id")]
-            tasks[str(task_id)] = row_digest(values)
+        tasks = [
+            str(row[0])
+            for row in conn.execute(
+                f'SELECT "id" FROM main.{quote_name(TASK_TABLE)}'
+                ' WHERE "id" IS NOT NULL'
+            )
+        ]
         events = {
             str(task_id): [low, high, count]
             for task_id, low, high, count in conn.execute(
@@ -481,7 +426,7 @@ def phase_manifest(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> 
         conn.close()
     write_json_gz(
         {
-            MANIFEST_COLUMN_KEYS[TASK_TABLE]: digest_cols,
+            MANIFEST_COLUMN_KEYS[TASK_TABLE]: sorted(task_cols),
             MANIFEST_COLUMN_KEYS[EVENT_TABLE]: sorted(event_cols),
             "tasks": tasks,
             "events": events,
@@ -553,7 +498,11 @@ def _create_delta_tables(conn: sqlite3.Connection) -> None:
 
 
 def _extract_tasks(conn: sqlite3.Connection, manifest: dict[str, Any]) -> None:
-    """Copy task rows the target is missing or that differ into the delta.
+    """Copy the task rows whose id the target does not have into the delta.
+
+    Task ids are unique and a task row is never modified after it is
+    created, so an id the target already holds identifies a row that is
+    already there in full and never has to travel.
 
     Args:
         conn: Connection to the delta database with the source attached.
@@ -561,8 +510,7 @@ def _extract_tasks(conn: sqlite3.Connection, manifest: dict[str, Any]) -> None:
     """
     columns = table_columns(conn, "src", TASK_TABLE)
     require_columns(columns, ("id",), f"{TASK_TABLE} in the source database")
-    have: dict[str, str] = manifest.get("tasks") or {}
-    digest_cols = manifest.get(MANIFEST_COLUMN_KEYS[TASK_TABLE]) or sorted(columns)
+    have = set(manifest.get("tasks") or [])
     selection = ", ".join(quote_name(c) for c in columns)
     insert = (
         f"INSERT INTO main.{quote_name(TASK_TABLE)} ({selection})"
@@ -577,8 +525,7 @@ def _extract_tasks(conn: sqlite3.Connection, manifest: dict[str, Any]) -> None:
             # A NULL primary key cannot be matched across databases and
             # would be duplicated on every run, so such rows are skipped.
             continue
-        digest = row_digest([row[index[c]] if c in index else None for c in digest_cols])
-        if have.get(str(task_id)) == digest:
+        if str(task_id) in have:
             continue
         batch.append(tuple(row))
         if len(batch) >= INSERT_BATCH:
@@ -687,39 +634,33 @@ def phase_merge(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> Non
 
     Args:
         path: Target database path.
-        args: The conflict mode (``default``, ``force`` or
-            ``insert-only``) followed by ``commit`` or ``rollback``.
+        args: ``commit`` or ``rollback``; committing is the default.
         inp: Gzipped delta database from :func:`phase_extract`.
         out: Destination binary stream for the JSON statistics.
     """
-    mode = args[0] if args else MODE_DEFAULT
-    commit = len(args) < 2 or args[1] == "commit"
+    commit = not args or args[0] == "commit"
     delta_path = temp_path(".db")
     try:
         read_file_gz(inp, delta_path)
-        stats = _apply_delta(path, delta_path, mode, commit)
+        stats = _apply_delta(path, delta_path, commit)
     finally:
         _unlink(delta_path)
     out.write(json.dumps(stats).encode("utf-8"))
     out.flush()
 
 
-def _apply_delta(
-    target_path: str, delta_path: str, mode: str, commit: bool
-) -> dict[str, int]:
+def _apply_delta(target_path: str, delta_path: str, commit: bool) -> dict[str, int]:
     """Insert every row of a delta database into the target database.
 
     Args:
         target_path: Target database path.
         delta_path: Path of the plain (unzipped) delta database.
-        mode: ``default``, ``force`` or ``insert-only``.
         commit: When False the merge is rolled back after counting the
             rows it would have changed, which is how ``--dry-run``
             reports exactly what a real run would do.
 
     Returns:
-        Counts of the task rows inserted and updated and of the event
-        rows inserted.
+        Counts of the task rows and event rows inserted.
     """
     conn = open_db(target_path)
     try:
@@ -732,7 +673,7 @@ def _apply_delta(
             )
         conn.execute("BEGIN IMMEDIATE")
         try:
-            tasks_inserted, tasks_updated = _merge_tasks(conn, mode)
+            tasks_inserted = _merge_tasks(conn)
             events_inserted = _merge_events(conn)
             conn.execute("COMMIT" if commit else "ROLLBACK")
         except BaseException as exc:
@@ -748,20 +689,22 @@ def _apply_delta(
         conn.close()
     return {
         "tasks_inserted": tasks_inserted,
-        "tasks_updated": tasks_updated,
         "events_inserted": events_inserted,
     }
 
 
-def _merge_tasks(conn: sqlite3.Connection, mode: str) -> tuple[int, int]:
-    """Insert new task rows and update existing ones per the sync mode.
+def _merge_tasks(conn: sqlite3.Connection) -> int:
+    """Insert the delta's task rows the target does not already have.
+
+    Task ids are unique and a task row is immutable once created, so an
+    id that is already in the target denotes the very same row and the
+    incoming copy is simply skipped; the target's rows are never updated.
 
     Args:
         conn: Target connection with the delta attached as ``delta``.
-        mode: ``default``, ``force`` or ``insert-only``.
 
     Returns:
-        The number of rows inserted and the number of rows updated.
+        The number of task rows inserted.
     """
     columns = table_columns(conn, "main", TASK_TABLE)
     require_columns(columns, ("id",), f"{TASK_TABLE} in the target database")
@@ -770,134 +713,9 @@ def _merge_tasks(conn: sqlite3.Connection, mode: str) -> tuple[int, int]:
     sql = (
         f"INSERT INTO main.{table} ({names})"
         f" SELECT {names} FROM delta.{table} WHERE \"id\" IS NOT NULL"
+        ' ON CONFLICT("id") DO NOTHING'
     )
-    updatable = [c for c in columns if c != "id"]
-    if mode == MODE_INSERT_ONLY or not updatable:
-        sql += ' ON CONFLICT("id") DO NOTHING'
-    else:
-        assignments = ", ".join(_assignment(c, mode) for c in updatable)
-        sql += f' ON CONFLICT("id") DO UPDATE SET {assignments}'
-        if mode != MODE_FORCE:
-            sql += " WHERE " + _supersedes_clause(columns)
-    before = _count(conn, "main", TASK_TABLE)
-    changed = conn.execute(sql).rowcount
-    inserted = _count(conn, "main", TASK_TABLE) - before
-    updated = max(changed - inserted, 0)
-    if mode == MODE_DEFAULT:
-        updated += _raise_sticky_columns(conn, columns)
-    return inserted, updated
-
-
-def _raise_sticky_columns(conn: sqlite3.Connection, columns: list[str]) -> int:
-    """Carry a set ``is_favorite`` or ``has_events`` flag over to the target.
-
-    These two columns are not progress: the user marks a favourite
-    whenever they like, and the flag saying a task has events is set by
-    the first event it emits.  A row that is otherwise not further along
-    -- the usual case for two copies of a finished task -- does not get
-    to overwrite the target's row, so the flags are raised here instead.
-    Only raised, never cleared: once either machine has one set, both do.
-
-    All the flags are raised by a single statement, so a row counts once
-    however many of them rose, and a column the incoming row does not
-    raise is not written at all.
-
-    Args:
-        conn: Target connection with the delta attached as ``delta``.
-        columns: Columns of the target's task table.
-
-    Returns:
-        The number of rows whose flags were raised.
-    """
-    table = quote_name(TASK_TABLE)
-    present = [c for c in STICKY_COLUMNS if c in columns]
-    if not present:
-        return 0
-    assignments, rose = [], []
-    for column in present:
-        name = quote_name(column)
-        incoming = (
-            f"(SELECT d.{name} FROM delta.{table} d"
-            f' WHERE d."id" = main.{table}."id")'
-        )
-        larger = f"COALESCE({incoming}, 0) > COALESCE({name}, 0)"
-        assignments.append(f"{name} = CASE WHEN {larger} THEN {incoming} ELSE {name} END")
-        rose.append(larger)
-    return int(
-        conn.execute(
-            f"UPDATE main.{table} SET {', '.join(assignments)}"
-            f" WHERE {' OR '.join(rose)}"
-        ).rowcount
-    )
-
-
-def _assignment(column: str, mode: str) -> str:
-    """Build one ``SET`` assignment of the conflict update.
-
-    Args:
-        column: Column being written.
-        mode: ``default``, ``force`` or ``insert-only``.
-
-    Returns:
-        An SQL assignment: the source's value, or the larger of the two
-        values for a sticky column, which is how a favourite marked on
-        one machine survives a row arriving from the other.
-    """
-    name = quote_name(column)
-    if mode == MODE_FORCE or column not in STICKY_COLUMNS:
-        return f"{name} = excluded.{name}"
-    table = quote_name(TASK_TABLE)
-    return (
-        f"{name} = MAX(COALESCE(excluded.{name}, 0),"
-        f" COALESCE({table}.{name}, 0))"
-    )
-
-
-def _supersedes_clause(columns: list[str]) -> str:
-    """Build the guard that keeps a stale source row from winning.
-
-    A row is only allowed to overwrite the target's row when it carried
-    the task *further*: not behind on any of the columns that grow as a
-    task runs, and ahead on at least one of them.  A row that merely
-    differs -- same progress, some other column edited on the receiving
-    machine since -- leaves the target's row alone, which is what makes
-    syncing the same two databases in both directions non-destructive.
-
-    A table without any of those columns says nothing about which of two
-    copies of a task is the later one, so no copy is allowed to overwrite
-    the other; ``--force`` is how such a table is overwritten on purpose.
-
-    Args:
-        columns: Columns available on both sides of the merge.
-
-    Returns:
-        An SQL boolean expression that is true when the incoming row
-        supersedes the row already in the target.
-    """
-    present = [c for c in MONOTONE_COLUMNS if c in columns]
-    if not present:
-        return "0"
-    not_behind = " AND ".join(_compare_monotone(c, ">=") for c in present)
-    ahead = " OR ".join(_compare_monotone(c, ">") for c in present)
-    return f"({not_behind}) AND ({ahead})"
-
-
-def _compare_monotone(column: str, operator: str) -> str:
-    """Compare one column of the incoming task row with the target's.
-
-    Args:
-        column: Name of a column that grows as a task runs.
-        operator: SQL comparison operator, ``">="`` or ``">"``.
-
-    Returns:
-        An SQL boolean expression comparing the two values, treating a
-        missing value as zero on either side.
-    """
-    name = quote_name(column)
-    return (
-        f"COALESCE(excluded.{name}, 0) {operator}"
-        f" COALESCE({quote_name(TASK_TABLE)}.{name}, 0)"
-    )
+    return conn.execute(sql).rowcount
 
 
 def _merge_events(conn: sqlite3.Connection) -> int:
@@ -962,24 +780,6 @@ def _has_unique_event_key(conn: sqlite3.Connection) -> bool:
         if indexed == ["seq", "task_id"]:
             return True
     return False
-
-
-def _count(conn: sqlite3.Connection, schema: str, table: str) -> int:
-    """Count the rows of a table.
-
-    Args:
-        conn: Open connection.
-        schema: Database name, e.g. ``main`` or ``delta``.
-        table: Table name.
-
-    Returns:
-        The number of rows.
-    """
-    return int(
-        conn.execute(
-            f"SELECT COUNT(*) FROM {quote_name(schema)}.{quote_name(table)}"
-        ).fetchone()[0]
-    )
 
 
 def _unlink(path: str) -> None:
@@ -1157,7 +957,6 @@ def synchronize(
     source: Location,
     target: Location,
     runner: Runner,
-    mode: str = MODE_DEFAULT,
     full: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -1167,8 +966,6 @@ def synchronize(
         source: Database rows are read from; never modified.
         target: Database rows are written to.
         runner: Launches each phase locally or over ssh.
-        mode: Conflict handling for existing task rows: ``default``,
-            ``force`` or ``insert-only``.
         full: Ship every source row instead of only the target's gaps.
         dry_run: Roll the merge back instead of committing it, so the
             target is left untouched but the reported counts are the ones
@@ -1176,7 +973,7 @@ def synchronize(
 
     Returns:
         Statistics with the compressed delta size, the rows inserted and
-        updated and the elapsed wall-clock seconds.
+        the elapsed wall-clock seconds.
 
     Raises:
         SyncError: If source and target are the same database, or if any
@@ -1197,7 +994,7 @@ def synchronize(
             runner.run(target, PHASE_MANIFEST, [], None, manifest_path)
         runner.run(source, PHASE_EXTRACT, [], manifest_path, delta_path)
         commit = "rollback" if dry_run else "commit"
-        runner.run(target, PHASE_MERGE, [mode, commit], delta_path, stats_path)
+        runner.run(target, PHASE_MERGE, [commit], delta_path, stats_path)
         with open(stats_path, "rb") as handle:
             raw = handle.read()
         if not raw:
@@ -1240,14 +1037,12 @@ def format_stats(source: Location, target: Location, stats: dict[str, Any]) -> s
     """
     if stats["dry_run"]:
         applied = (
-            f"would add {stats['tasks_inserted']} task row(s),"
-            f" update {stats['tasks_updated']},"
-            f" add {stats['events_inserted']} event row(s)"
+            f"would add {stats['tasks_inserted']} task row(s)"
+            f" and {stats['events_inserted']} event row(s)"
         )
     else:
         applied = (
             f"{stats['tasks_inserted']} task row(s) added,"
-            f" {stats['tasks_updated']} updated,"
             f" {stats['events_inserted']} event row(s) added"
         )
     return (
@@ -1274,17 +1069,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("source", help="[user@host:]/path/to/source.db (read only)")
     parser.add_argument("target", help="[user@host:]/path/to/target.db (updated)")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--insert-only",
-        action="store_true",
-        help="only add missing rows; never update an existing task row",
-    )
-    group.add_argument(
-        "--force",
-        action="store_true",
-        help="on conflict always overwrite the target's task row",
-    )
     parser.add_argument(
         "--full",
         action="store_true",
@@ -1329,11 +1113,6 @@ def main(argv: list[str] | None = None) -> int:
     if args and args[0] in PHASES:
         return _run_phase_from_argv(args)
     options = build_parser().parse_args(args)
-    mode = MODE_DEFAULT
-    if options.insert_only:
-        mode = MODE_INSERT_ONLY
-    elif options.force:
-        mode = MODE_FORCE
     try:
         source = Location(options.source)
         target = Location(options.target)
@@ -1343,7 +1122,6 @@ def main(argv: list[str] | None = None) -> int:
             source,
             target,
             Runner(options.python, options.port, options.ssh_options),
-            mode=mode,
             full=options.full,
             dry_run=options.dry_run,
         )

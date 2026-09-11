@@ -838,10 +838,24 @@
     return ev && ev.tabId !== undefined ? getTab(ev.tabId) : null;
   }
 
+  // A filesystem root ('/', '//', 'C:\', bare 'C:') is never a real
+  // workspace: it only appears when a no-folder Dock-launched window's
+  // host cwd leaked into a tab or a replayed task recorded one.  The
+  // daemon blanks roots on every command it receives (ServerApi
+  // .dispatch), and this mirror keeps host-local consumers (dropped-
+  // path resolution) off the whole disk too.
+  function isRootDir(p) {
+    if (typeof p !== 'string') return false;
+    const s = p.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+    if (!s) return Boolean(p.trim());
+    return /^[A-Za-z]:$/.test(s);
+  }
+
   function workDirForTab(tabId) {
     const tab = getTab(tabId);
-    if (tab && tab.workDir) return tab.workDir;
-    return configWorkDir || '';
+    if (tab && tab.workDir && !isRootDir(tab.workDir)) return tab.workDir;
+    if (configWorkDir && !isRootDir(configWorkDir)) return configWorkDir;
+    return '';
   }
 
   function saveCurrentTab() {
@@ -1647,47 +1661,63 @@
 
   function ensureMonaco() {
     if (_monacoPromise) return _monacoPromise;
-    _monacoPromise = new Promise((resolve, reject) => {
+    // Failure paths clear the single-flight slot so a later open can
+    // retry — but ONLY the flight that still owns the slot may clear it.
+    // A timed-out flight's script stays live and can report onload or
+    // onerror long after a NEWER flight has taken the slot; an
+    // unconditional reset there wiped out the newer registration and let
+    // a third loader start while the second was still in flight, two AMD
+    // bootstraps then contending for the same global window.require.
+    // `dead` retires this flight's callbacks once it has failed.
+    let dead = false;
+    const retire = () => {
+      dead = true;
+      if (_monacoPromise === flight) _monacoPromise = null;
+    };
+    const flight = new Promise((resolve, reject) => {
       if (window.monaco && window.monaco.editor) {
         resolve(window.monaco);
         return;
       }
       const base = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min';
       const timer = setTimeout(() => {
-        _monacoPromise = null;
+        retire();
         reject(new Error('Monaco load timeout'));
       }, 10000);
       const script = document.createElement('script');
       script.src = base + '/vs/loader.js';
       script.onload = () => {
+        if (dead) return;
         try {
           window.require.config({paths: {vs: base + '/vs'}});
           window.require(
             ['vs/editor/editor.main'],
             () => {
+              if (dead) return;
               clearTimeout(timer);
               resolve(window.monaco);
             },
             err => {
               clearTimeout(timer);
-              _monacoPromise = null;
+              retire();
               reject(err);
             },
           );
         } catch (e) {
           clearTimeout(timer);
-          _monacoPromise = null;
+          retire();
           reject(e);
         }
       };
       script.onerror = () => {
         clearTimeout(timer);
-        _monacoPromise = null;
+        retire();
         reject(new Error('Monaco loader failed'));
       };
       document.head.appendChild(script);
     });
-    return _monacoPromise;
+    _monacoPromise = flight;
+    return flight;
   }
 
   function renderCodeContent(tab, holder, text, language) {
@@ -2812,6 +2842,44 @@
   const statusTokens = document.getElementById('status-tokens');
   const statusBudget = document.getElementById('status-budget');
   const statusSteps = document.getElementById('status-steps');
+
+  /**
+   * Mirror one #tab-status-bar value into its bullet item inside the
+   * docked task-info panel (#meta-panel, remote desktop mode only).
+   *
+   * The status spans have a dozen independent writers (usage events,
+   * tab switches, config replies, the running timer), so the panel
+   * observes the DOM instead of patching every write site: whatever
+   * lands in the status bar lands in the list.  The status span keeps
+   * the "Tokens: " style prefix; the bullet item already carries its
+   * own label, so stripLabel drops the prefix from the mirrored text.
+   * #status-text also mirrors its inline color (red while running,
+   * green when done) onto the Time item.
+   */
+  function mirrorStatusIntoMetaPanel(srcId, dstId, stripLabel) {
+    const src = document.getElementById(srcId);
+    const dst = document.getElementById(dstId);
+    if (!src || !dst || typeof MutationObserver !== 'function') return;
+    const mirror = () => {
+      let text = (src.textContent || '').trim();
+      if (stripLabel) text = text.replace(/^[^:]*:\s*/, '');
+      dst.textContent = text || '\u2014';
+      dst.style.color = src.style.color || '';
+    };
+    mirror();
+    new MutationObserver(mirror).observe(src, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['style'],
+    });
+  }
+  mirrorStatusIntoMetaPanel('status-tokens', 'meta-tokens', true);
+  mirrorStatusIntoMetaPanel('status-budget', 'meta-cost', true);
+  mirrorStatusIntoMetaPanel('status-steps', 'meta-steps', true);
+  mirrorStatusIntoMetaPanel('status-text', 'meta-time', false);
+  mirrorStatusIntoMetaPanel('status-machine', 'meta-machine', false);
 
   // The welcome screen lives inside the scrolling chat container, so
   // whatever scroll offset the previous content left behind (a finished
@@ -4142,12 +4210,23 @@
     return panels.length ? panels[panels.length - 1] : null;
   }
 
-  function rpExpectedTaskCount(rawTasks) {
-    if (Array.isArray(rawTasks)) return rawTasks.length;
+  /**
+   * The task descriptions a run_parallel call declared, or null when
+   * the `tasks` argument is absent or malformed. Kept on the panel
+   * (`_rpDeclaredTasks`) so the share export can match the persisted
+   * sub-agent rows (whose task text IS the declared description) to
+   * the fan-out that ran them, instead of guessing by count alone.
+   *
+   * @param {*} rawTasks The tool call's `tasks` argument (an array,
+   *     or its JSON string form).
+   * @returns {Array<string>|null} The declared descriptions.
+   */
+  function rpDeclaredTaskList(rawTasks) {
+    if (Array.isArray(rawTasks)) return rawTasks.map(String);
     if (typeof rawTasks !== 'string' || !rawTasks) return null;
     try {
       const parsed = JSON.parse(rawTasks);
-      return Array.isArray(parsed) ? parsed.length : null;
+      return Array.isArray(parsed) ? parsed.map(String) : null;
     } catch (_e) {
       return null;
     }
@@ -5075,9 +5154,11 @@
             c._rpParentTabId = ev.tabId;
           tState.runParallelCount = (tState.runParallelCount || 0) + 1;
           c._rpCallIndex = tState.runParallelCount;
-          c._rpExpectedCount = rpExpectedTaskCount(
+          c._rpDeclaredTasks = rpDeclaredTaskList(
             ev.extras ? ev.extras.tasks : undefined,
           );
+          c._rpExpectedCount =
+            c._rpDeclaredTasks === null ? null : c._rpDeclaredTasks.length;
         }
         const isSummary = ev.name === 'summary';
         if (isSummary) {
@@ -5611,20 +5692,9 @@
       if (reported) ctx.stepCount = reported;
     }
     if (t === 'result') {
-      if (ctx.llmPanel && ctx.llmPanel._provisional)
-        discardProvisionalPanel(ctx.llmPanel);
-      else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel, ev.ts);
       ctx.llmPanel = null;
-      // The `finish` tool call produced this result, and the daemon
-      // deliberately emits no tool_result for finish — the result IS
-      // its close. Sealing the last tool panel here freezes finish's
-      // elapsed label; any other tool's panel was already sealed by
-      // its own tool_result (finalizePanelTime is idempotent).
-      if (ctx.state.lastToolCallEl)
-        finalizePanelTime(ctx.state.lastToolCallEl, ev.ts);
       // The daemon's own count is the authoritative one.
       if (ev.step_count) ctx.stepCount = ev.step_count;
-      collapseAllExceptResult(ctx.container, ctx.tabId);
       const rTab = getTab(ctx.tabId);
       if (rTab) {
         // A result proves this tab ran a task — set on replays too
@@ -6723,6 +6793,13 @@
         if (ev.tabId !== undefined && !isForActiveTab(ev)) break;
         if (ev.ok) {
           const savedPath = typeof ev.path === 'string' ? ev.path : '';
+          // The transcript banner below can sit far off screen on a
+          // long chat; a toast says where the page landed either way.
+          showNotification({
+            id: 'share-saved-' + Date.now(),
+            severity: 'info',
+            message: 'Chat page saved to ' + (savedPath || 'reports/'),
+          });
           const banner = addNotice(
             'Chat page saved to ' + (savedPath ? '' : 'reports/'),
           );
@@ -7126,7 +7203,8 @@
           if (ev.extra) {
             try {
               const bgExtra = JSON.parse(ev.extra);
-              if (bgExtra.work_dir) teTab.workDir = bgExtra.work_dir;
+              if (bgExtra.work_dir && !isRootDir(bgExtra.work_dir))
+                teTab.workDir = bgExtra.work_dir;
               if (typeof bgExtra.startTs === 'number' && bgExtra.startTs > 0)
                 teTab.t0 = bgExtra.startTs;
               if (typeof bgExtra.endTs === 'number' && bgExtra.endTs > 0) {
@@ -7275,7 +7353,7 @@
             if (typeof extra.endTs === 'number' && extra.endTs > 0) {
               endTs = extra.endTs;
             }
-            if (extra.work_dir) {
+            if (extra.work_dir && !isRootDir(extra.work_dir)) {
               const wdTab = getTab(activeTabId);
               if (wdTab) wdTab.workDir = extra.work_dir;
             }
@@ -7423,6 +7501,19 @@
       case 'commitMessage':
         break;
       case 'droppedPaths':
+        // The reply edits the VISIBLE composer, so it must still belong
+        // to the tab the files were dropped on: a tab switch during the
+        // host round trip would otherwise insert tab A's paths into tab
+        // B's draft.  (A reply without an owner predates the stamp and
+        // keeps the old visible-composer behavior.)
+        if (
+          ev.tabId !== undefined &&
+          ev.tabId !== null &&
+          ev.tabId !== '' &&
+          ev.tabId !== activeTabId
+        ) {
+          break;
+        }
         if (ev.paths && ev.paths.length > 0) {
           const pos = inp.selectionStart || inp.value.length;
           const before = inp.value.substring(0, pos);
@@ -8162,6 +8253,13 @@
    * tasks are exported from their own persisted transcripts, so
    * keeping the splices would print them twice.
    *
+   * The live fan-out panels' sub-agent bookkeeping (`_rpSubagents`,
+   * `_rpExpectedCount`) lives in JS properties that a DOM clone does
+   * not carry, so it is copied onto the cloned panels by position —
+   * the clone holds exactly the live panels once the `.adjacent-task`
+   * splices (whose panels the property walk skips too) are dropped.
+   * shareStampRunParallel then serializes it into `data-rp-subagents`.
+   *
    * @returns {Element} A detached holder of the cloned transcript.
    */
   function shareLiveTranscript() {
@@ -8170,8 +8268,179 @@
       '#welcome, #adjacent-loader, .adjacent-task',
     );
     for (let i = 0; i < drop.length; i++) drop[i].remove();
+    const origPanels = Array.from(
+      O.querySelectorAll('.tc-run-parallel'),
+    ).filter(p => !p.closest('.adjacent-task'));
+    const clonePanels = live.querySelectorAll('.tc-run-parallel');
+    for (let i = 0; i < clonePanels.length && i < origPanels.length; i++) {
+      clonePanels[i]._rpSubagents = (origPanels[i]._rpSubagents || []).map(
+        en => ({taskId: en.taskId, tabId: ''}),
+      );
+      clonePanels[i]._rpExpectedCount = origPanels[i]._rpExpectedCount;
+      clonePanels[i]._rpDeclaredTasks = origPanels[i]._rpDeclaredTasks;
+    }
     return live;
   }
+
+  // sharesub-coverage:start
+  /**
+   * Group one task's sub-agents (the flat, parents-before-children
+   * `subagents` list of a `share_tasks` reply task) by their parent
+   * task id, preserving the daemon's enqueue order.
+   *
+   * @param {Array<object>} subs The task's sub-agent descriptors.
+   * @returns {Map<string, Array<object>>} parent task id → children.
+   */
+  function shareSubagentsByParent(subs) {
+    const byParent = new Map();
+    for (let i = 0; i < (subs || []).length; i++) {
+      const sub = subs[i];
+      if (!sub || typeof sub !== 'object') continue;
+      const pid =
+        sub.parent_task_id === undefined || sub.parent_task_id === null
+          ? ''
+          : String(sub.parent_task_id);
+      if (!byParent.has(pid)) byParent.set(pid, []);
+      byParent.get(pid).push(sub);
+    }
+    return byParent;
+  }
+
+  /**
+   * Stamp every run_parallel panel of *root* with the task ids of the
+   * sub-agents it fanned out, as a space-separated
+   * `data-rp-subagents` attribute — the static substitute for the
+   * live webview's `_rpSubagents` bookkeeping, which share.js reads
+   * to open and close the shared page's sub-agent tabs when the
+   * panel is expanded and collapsed.
+   *
+   * The claims run in order of confidence, each panel capped at its
+   * declared task count (`_rpExpectedCount`):
+   *
+   * 1. exact ids — a live panel names its sub-agents
+   *    (`_rpSubagents`, copied onto the clone by shareLiveTranscript);
+   * 2. declared text — a replayed panel's `tasks` argument
+   *    (`_rpDeclaredTasks`) names its workers' descriptions, which
+   *    are exactly the persisted sub-agent rows' task texts, so a
+   *    child spawned by something else entirely (a `run_agent` call)
+   *    is never dealt to a fan-out that did not declare it;
+   * 3. a panel with no declared list at all (legacy events) takes
+   *    whatever is left only when it is the LAST such panel, so it
+   *    can never swallow a later fan-out's sub-agents.
+   *
+   * A child no fan-out claims (e.g. a `run_agent` sub-task) is
+   * flagged `_shareOrphan`: its section is exported with
+   * `data-sub-orphan` and the shared page opens its tab whenever its
+   * parent's transcript is on screen — the live webview opens a tab
+   * for such spawns too.
+   *
+   * @param {Element} root A task's or sub-agent's transcript holder.
+   * @param {Array<object>} children Its direct sub-agent descriptors.
+   */
+  function shareStampRunParallel(root, children) {
+    const remaining = (children || []).slice();
+    const panels = Array.from(root.querySelectorAll('.tc-run-parallel'));
+    const claimed = new Map();
+
+    function take(panel, at) {
+      if (!claimed.has(panel)) claimed.set(panel, []);
+      claimed.get(panel).push(String(remaining[at].task_id));
+      remaining.splice(at, 1);
+    }
+
+    function capLeft(panel) {
+      const expected =
+        typeof panel._rpExpectedCount === 'number'
+          ? panel._rpExpectedCount
+          : null;
+      if (expected === null) return null;
+      const have = claimed.has(panel) ? claimed.get(panel).length : 0;
+      return Math.max(0, expected - have);
+    }
+
+    for (const p of panels) {
+      for (const en of p._rpSubagents || []) {
+        const tid =
+          en.taskId === undefined || en.taskId === null
+            ? ''
+            : String(en.taskId);
+        if (!tid) continue;
+        const at = remaining.findIndex(s => String(s.task_id) === tid);
+        if (at >= 0) take(p, at);
+      }
+    }
+    for (const p of panels) {
+      const declared = p._rpDeclaredTasks;
+      if (!declared) continue;
+      let cap = capLeft(p);
+      for (const desc of declared) {
+        if (cap !== null && cap <= 0) break;
+        const at = remaining.findIndex(s => String(s.task || '') === desc);
+        if (at < 0) continue;
+        take(p, at);
+        if (cap !== null) cap--;
+      }
+    }
+    const uncounted = panels.filter(
+      p => typeof p._rpExpectedCount !== 'number',
+    );
+    if (uncounted.length > 0) {
+      const last = uncounted[uncounted.length - 1];
+      while (remaining.length > 0) take(last, 0);
+    }
+    claimed.forEach((ids, p) => {
+      p.setAttribute('data-rp-subagents', ids.join(' '));
+    });
+    for (const s of remaining) s._shareOrphan = true;
+  }
+
+  /**
+   * Render one sub-agent's transcript into a hidden
+   * `.share-task.share-subagent` section of the shared page — the
+   * static body behind one sub-agent tab, which share.js reveals
+   * when the tab is selected. The section carries the identity the
+   * tab strip needs: `data-task-id`, `data-parent-task-id` (so
+   * closing a tab can take its descendants' tabs with it, like the
+   * live webview), and `data-sub-title` — the same "N. description"
+   * label the webview's openSubagentTab puts on a live tab.
+   *
+   * @param {object} sub The sub-agent descriptor
+   *     ({task, task_id, parent_task_id, events}).
+   * @param {Map<string, Array<object>>} byParent The chat task's
+   *     sub-agents grouped by parent (shareSubagentsByParent).
+   * @param {number} seq Page-unique 1-based section number.
+   * @returns {Element} The hidden, assembled section.
+   */
+  function shareSubagentSection(sub, byParent, seq) {
+    const body = replayDetachedTranscript(sub.events || [], activeTabId);
+    body.classList.remove('adjacent-task');
+    const sid = String(sub.task_id || '');
+    shareStampRunParallel(body, byParent.get(sid) || []);
+    const section = shareTaskSection(
+      sub.task,
+      body,
+      seq,
+      taskSettingsFromEvents(sub.events),
+    );
+    section.classList.add('share-subagent');
+    section.hidden = true;
+    section.setAttribute('data-task-id', sid);
+    const pid = String(sub.parent_task_id || '');
+    section.setAttribute('data-parent-task-id', pid);
+    // A child no fan-out panel claims (a run_agent sub-task): the
+    // shared page opens its tab alongside its parent's transcript,
+    // there being no panel to expand for it.
+    if (sub._shareOrphan) section.setAttribute('data-sub-orphan', '1');
+    const siblings = byParent.get(pid) || [];
+    const at = siblings.indexOf(sub);
+    const desc = (sub.task || 'Sub-agent').trim() || 'Sub-agent';
+    section.setAttribute(
+      'data-sub-title',
+      (at >= 0 ? at + 1 + '. ' : '') + desc.substring(0, 40),
+    );
+    return section;
+  }
+  // sharesub-coverage:end
 
   /**
    * Wrap one task of the chat — its synthesized static task panel and
@@ -8234,8 +8503,15 @@
    * are highlighted here, because the shared page inlines only the
    * highlight THEME, not highlight.js itself.
    *
+   * Each task's sub-agents (its `subagents` list, every descendant
+   * the task fanned out) are exported too: their transcripts become
+   * hidden `.share-subagent` sections after the chat's own sections,
+   * and the fan-out panels are stamped with `data-rp-subagents` so
+   * the shared page's tab strip (share.js) opens and closes them
+   * like the live webview's sub-agent tabs.
+   *
    * @param {Array<object>} tasks The chat's persisted tasks, oldest
-   *     first, each {task, task_id, events}.
+   *     first, each {task, task_id, events, subagents}.
    * @returns {string} The share page body's HTML, or '' when neither
    *     the tasks nor the screen have anything to share.
    */
@@ -8249,6 +8525,10 @@
     out.id = 'output';
     let liveUsed = false;
     const list = tasks || [];
+    // The hidden sub-agent sections all land AFTER the chat's own task
+    // sections, so the visible chat reads top to bottom uninterrupted.
+    const subSections = [];
+    let seq = 0;
     _suppressFileLinkChecks = true;
     try {
       for (let i = 0; i < list.length; i++) {
@@ -8257,6 +8537,8 @@
           t.task_id === undefined || t.task_id === null
             ? ''
             : String(t.task_id);
+        const subs = Array.isArray(t.subagents) ? t.subagents : [];
+        const byParent = shareSubagentsByParent(subs);
         let body;
         let settings = taskSettingsFromEvents(t.events);
         if (liveId && tid === liveId) {
@@ -8267,7 +8549,12 @@
           body = replayDetachedTranscript(t.events || [], activeTabId);
           body.classList.remove('adjacent-task');
         }
-        out.appendChild(shareTaskSection(t.task, body, i + 1, settings));
+        shareStampRunParallel(body, byParent.get(tid) || []);
+        out.appendChild(shareTaskSection(t.task, body, ++seq, settings));
+        for (let s = 0; s < subs.length; s++) {
+          if (!subs[s] || typeof subs[s] !== 'object') continue;
+          subSections.push(shareSubagentSection(subs[s], byParent, ++seq));
+        }
       }
     } finally {
       _suppressFileLinkChecks = false;
@@ -8288,16 +8575,16 @@
           // all (the chat was never persisted). It is the chat's
           // newest surface, so it closes the page.
           out.appendChild(
-            shareTaskSection(
-              currentTaskName,
-              live,
-              list.length + 1,
-              currentTaskSettings,
-            ),
+            shareTaskSection(currentTaskName, live, ++seq, currentTaskSettings),
           );
         }
       }
     }
+    // Only now, with the chat's own sections complete (the mid-write
+    // merge above keys off the LAST section), the hidden sub-agent
+    // sections join the page.
+    for (let s = 0; s < subSections.length; s++)
+      out.appendChild(subSections[s]);
     // A task can legitimately have no recorded output; its section
     // (the task text is content in itself) says so instead of being
     // silently dropped.
@@ -9334,7 +9621,23 @@
           // not the chat: its rows are deliberately absent from the
           // chat's task list, so it exports its own screen — under
           // its own file name, never over the parent chat's page.
-          sendShareExport(String(tab.id), [], false);
+          // Its OWN fan-outs' transcripts must still ride along, so
+          // the daemon is asked for this one task's sub-agents first
+          // (the taskId narrows the reply to it); without a task id
+          // there is nothing to look up and the screen exports alone.
+          const subTaskId =
+            tab.currentTaskId === undefined || tab.currentTaskId === null
+              ? ''
+              : String(tab.currentTaskId);
+          if (subTaskId) {
+            api.shareChatTasks({
+              tabId: activeTabId,
+              chatId: String(tab.id),
+              taskId: subTaskId,
+            });
+          } else {
+            sendShareExport(String(tab.id), [], false);
+          }
           return;
         }
         // The page must show ALL tasks of the chat, and after a
@@ -9363,17 +9666,9 @@
       'welcome-cfg-remote-password-toggle',
       'welcome-cfg-remote-password',
     );
-    [
-      'cfg-key-GEMINI_API_KEY',
-      'cfg-key-OPENAI_API_KEY',
-      'cfg-key-ANTHROPIC_API_KEY',
-      'cfg-key-ANTHROPIC_WORKSPACE_ID',
-      'cfg-key-TOGETHER_API_KEY',
-      'cfg-key-OPENROUTER_API_KEY',
-      'cfg-key-ZAI_API_KEY',
-      'cfg-key-MOONSHOT_API_KEY',
-      'cfg-custom-api-key',
-    ].forEach(setupSecretInput);
+    FIRST_PARTY_KEY_IDS.map(k => 'cfg-key-' + k)
+      .concat(['cfg-custom-api-key'])
+      .forEach(setupSecretInput);
     const welcomePwInp = document.getElementById('welcome-cfg-remote-password');
     const settingsPwInp = document.getElementById('cfg-remote-password');
     function _flushPw() {
@@ -9707,129 +10002,220 @@
       }
       applyRemoteDesktop();
     }
+    // Docked panel resizers (remote desktop mode only).  The history
+    // panel (#sidebar) carries a drag handle on its RIGHT edge and the
+    // task-info panel (#meta-panel) one on its LEFT edge.  Both share
+    // the bounds declared in remote-codex.css: a drag may collapse
+    // either panel to a 10px sliver (--sidebar-min-w), and neither may
+    // grow so wide that the chat column between them drops below
+    // --chat-min-w.
     const sidebarResizer = document.getElementById('sidebar-resizer');
-    if (document.body.classList.contains('remote-chat') && sidebarResizer) {
-      // Bounds come from remote-codex.css: a drag may collapse the
-      // panel to a 10px sliver (--sidebar-min-w), while the DEFAULT
-      // width never drops below --sidebar-default-min-w — the width at
-      // which every history filter toggle fits on one line.
-      const SB_MIN = cssPxVar('--sidebar-min-w', 10);
-      const SB_DEFAULT_MIN = cssPxVar('--sidebar-default-min-w', 520);
-      const SB_MAX = cssPxVar('--sidebar-max-w', 820);
+    const metaResizer = document.getElementById('meta-resizer');
+    if (
+      document.body.classList.contains('remote-chat') &&
+      sidebarResizer &&
+      metaResizer
+    ) {
+      const PANEL_MIN = cssPxVar('--sidebar-min-w', 10);
       const CHAT_MIN = cssPxVar('--chat-min-w', 360);
-      const SB_KEY = 'kiss-sidebar-w';
-      // Widest the panel may become on the CURRENT window: a drag may
-      // take the panel as wide as it likes as long as the chat keeps
-      // its minimum usable width — and a wide panel dragged on a big
-      // monitor must not squeeze the chat into an unusable sliver
-      // after the window shrinks. (--sidebar-max-w caps only the
-      // DEFAULT width below, never a drag.)
-      const sidebarWindowMax = () =>
-        Math.max(SB_MIN, window.innerWidth - CHAT_MIN);
-      const sidebarDefaultW = () =>
-        Math.min(
-          sidebarWindowMax(),
+      // The fluid CSS default width: one fifth of the browser window,
+      // the same fraction as the 20vw fallbacks (--sidebar-default-w
+      // and --meta-panel-w) in remote-codex.css.
+      const fluidDefaultW = () => Math.round(window.innerWidth * 0.2);
+      // RENDERED width of each docked panel, shared between the two
+      // resizers: the chat sits BETWEEN the history panel and the
+      // task-info panel, so the widest one panel may grow is the
+      // window minus the chat's minimum usable width minus the OTHER
+      // panel's actual rendered width.  Until a panel is resized it
+      // renders at the fluid CSS default.
+      const panelRenderedW = {
+        sidebar: fluidDefaultW(),
+        meta: fluidDefaultW(),
+      };
+      const panelResizers = [];
+      // A resize of one panel changes how wide the OTHER may become,
+      // so every width change refreshes both resizers' ARIA maxima.
+      const refreshPanelAriaMax = () => {
+        for (const p of panelResizers) {
+          p.resizer.setAttribute('aria-valuemax', String(p.windowMax()));
+        }
+      };
+      /**
+       * Wires dragging, keyboard steps, double-click reset, ARIA and
+       * localStorage persistence for one docked panel resizer.
+       *
+       * resizer          the drag-handle element
+       * name, otherName  keys into panelRenderedW: this panel and the
+       *                  panel on the far side of the chat
+       * cssVar           custom property carrying the panel width
+       * storageKey       localStorage key for the preferred width
+       * pointerWidth(e)  pointer event -> candidate width in px
+       * growKey          the arrow key that widens the panel (the
+       *                  opposite arrow narrows it)
+       */
+      const setupPanelResizer = (
+        resizer,
+        name,
+        otherName,
+        cssVar,
+        storageKey,
+        pointerWidth,
+        growKey,
+      ) => {
+        const windowMax = () =>
           Math.max(
-            SB_DEFAULT_MIN,
-            Math.min(SB_MAX, Math.round(window.innerWidth * 0.34)),
-          ),
-        );
-      // The PREFERRED width (`sidebarW`, what the user last asked for
-      // and what localStorage keeps) is tracked separately from the
-      // RENDERED width (`sidebarRenderedW`, the preference clamped to
-      // the current window): a wide preference loaded — or kept — on a
-      // narrow window renders clamped but must survive as-is, so the
-      // panel springs back once the window is wide enough again.
-      let sidebarRenderedW = sidebarDefaultW();
-      const setSidebarW = px => {
-        const max = sidebarWindowMax();
-        const w = Math.max(SB_MIN, Math.min(max, Math.round(px)));
-        document.documentElement.style.setProperty('--sidebar-w', w + 'px');
-        sidebarResizer.setAttribute('aria-valuemax', String(max));
-        sidebarResizer.setAttribute('aria-valuenow', String(w));
-        sidebarRenderedW = w;
-        return w;
+            PANEL_MIN,
+            window.innerWidth - CHAT_MIN - panelRenderedW[otherName],
+          );
+        const defaultW = () => Math.min(windowMax(), fluidDefaultW());
+        const setW = px => {
+          const w = Math.max(PANEL_MIN, Math.min(windowMax(), Math.round(px)));
+          document.documentElement.style.setProperty(cssVar, w + 'px');
+          resizer.setAttribute('aria-valuenow', String(w));
+          panelRenderedW[name] = w;
+          refreshPanelAriaMax();
+          return w;
+        };
+        resizer.setAttribute('aria-valuemin', String(PANEL_MIN));
+        resizer.setAttribute('aria-valuemax', String(windowMax()));
+        resizer.setAttribute('aria-valuenow', String(defaultW()));
+        // The PREFERRED width (`prefW`, what the user last asked for
+        // and what localStorage keeps) is tracked separately from the
+        // RENDERED width (the preference clamped to the current
+        // window): a wide preference loaded — or kept — on a narrow
+        // window renders clamped but must survive as-is, so the panel
+        // springs back once the window is wide enough again.  A null
+        // preference means the user never resized this panel: it
+        // renders at the fluid CSS default and keeps following the
+        // window fraction as the window changes size.
+        let prefW = null;
+        let persisted = null;
+        try {
+          persisted = window.localStorage.getItem(storageKey);
+        } catch {}
+        if (persisted !== null && /^\d+$/.test(persisted)) {
+          prefW = parseInt(persisted, 10);
+          setW(prefW);
+        }
+        const persistW = () => {
+          if (prefW === null) return;
+          try {
+            window.localStorage.setItem(storageKey, String(prefW));
+          } catch {}
+        };
+        let resizing = false;
+        const endResize = e => {
+          if (!resizing) return;
+          resizing = false;
+          document.body.classList.remove('sidebar-resizing');
+          try {
+            if (
+              e.pointerId !== undefined &&
+              typeof resizer.releasePointerCapture === 'function'
+            ) {
+              resizer.releasePointerCapture(e.pointerId);
+            }
+          } catch {}
+          persistW();
+        };
+        resizer.addEventListener('pointerdown', e => {
+          if (e.button !== 0) return;
+          if (!document.body.classList.contains('remote-desktop')) return;
+          e.preventDefault();
+          resizing = true;
+          document.body.classList.add('sidebar-resizing');
+          try {
+            if (
+              e.pointerId !== undefined &&
+              typeof resizer.setPointerCapture === 'function'
+            ) {
+              resizer.setPointerCapture(e.pointerId);
+            }
+          } catch {}
+        });
+        resizer.addEventListener('pointermove', e => {
+          if (!resizing) return;
+          if (!document.body.classList.contains('remote-desktop')) return;
+          prefW = setW(pointerWidth(e));
+        });
+        resizer.addEventListener('pointerup', endResize);
+        resizer.addEventListener('pointercancel', endResize);
+        resizer.addEventListener('dblclick', () => {
+          if (!document.body.classList.contains('remote-desktop')) return;
+          // Reset: to the default width right now, and back to the
+          // FLUID default (following the window fraction) from the
+          // next window resize on.
+          setW(defaultW());
+          prefW = null;
+          try {
+            window.localStorage.removeItem(storageKey);
+          } catch {}
+        });
+        resizer.addEventListener('keydown', e => {
+          if (!document.body.classList.contains('remote-desktop')) return;
+          if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+          e.preventDefault();
+          // Step from the RENDERED width, not the preference: with a
+          // wide preference clamped by a narrow window, stepping from
+          // the preference would neither move the panel nor mean
+          // anything to the user looking at it.
+          prefW = setW(panelRenderedW[name] + (e.key === growKey ? 16 : -16));
+          persistW();
+        });
+        panelResizers.push({
+          resizer,
+          windowMax,
+          hasPref: () => prefW !== null,
+          // A panel the user resized re-clamps to the new window so a
+          // wide panel narrows instead of crushing the chat; the
+          // preference in `prefW` is intentionally left untouched.
+          reclamp: () => setW(prefW),
+          // An untouched panel goes back to the fluid CSS default.
+          applyFluidDefault: () => {
+            document.documentElement.style.removeProperty(cssVar);
+            panelRenderedW[name] = fluidDefaultW();
+            resizer.setAttribute('aria-valuenow', String(defaultW()));
+          },
+        });
       };
-      sidebarResizer.setAttribute('aria-valuemin', String(SB_MIN));
-      sidebarResizer.setAttribute('aria-valuemax', String(sidebarWindowMax()));
-      sidebarResizer.setAttribute('aria-valuenow', String(sidebarDefaultW()));
-      let sidebarW = sidebarDefaultW();
-      let persisted = null;
-      try {
-        persisted = window.localStorage.getItem(SB_KEY);
-      } catch {}
-      if (persisted !== null && /^\d+$/.test(persisted)) {
-        sidebarW = parseInt(persisted, 10);
-        setSidebarW(sidebarW);
-      }
-      const persistSidebarW = () => {
-        try {
-          window.localStorage.setItem(SB_KEY, String(sidebarW));
-        } catch {}
-      };
-      let sidebarResizing = false;
-      const endSidebarResize = e => {
-        if (!sidebarResizing) return;
-        sidebarResizing = false;
-        document.body.classList.remove('sidebar-resizing');
-        try {
-          if (
-            e.pointerId !== undefined &&
-            typeof sidebarResizer.releasePointerCapture === 'function'
-          ) {
-            sidebarResizer.releasePointerCapture(e.pointerId);
-          }
-        } catch {}
-        persistSidebarW();
-      };
-      sidebarResizer.addEventListener('pointerdown', e => {
-        if (e.button !== 0) return;
-        if (!document.body.classList.contains('remote-desktop')) return;
-        e.preventDefault();
-        sidebarResizing = true;
-        document.body.classList.add('sidebar-resizing');
-        try {
-          if (
-            e.pointerId !== undefined &&
-            typeof sidebarResizer.setPointerCapture === 'function'
-          ) {
-            sidebarResizer.setPointerCapture(e.pointerId);
-          }
-        } catch {}
-      });
-      sidebarResizer.addEventListener('pointermove', e => {
-        if (!sidebarResizing) return;
-        if (!document.body.classList.contains('remote-desktop')) return;
-        sidebarW = setSidebarW(e.clientX);
-      });
-      sidebarResizer.addEventListener('pointerup', endSidebarResize);
-      sidebarResizer.addEventListener('pointercancel', endSidebarResize);
-      sidebarResizer.addEventListener('dblclick', () => {
-        if (!document.body.classList.contains('remote-desktop')) return;
-        sidebarW = setSidebarW(sidebarDefaultW());
-        try {
-          window.localStorage.removeItem(SB_KEY);
-        } catch {}
-      });
-      sidebarResizer.addEventListener('keydown', e => {
-        if (!document.body.classList.contains('remote-desktop')) return;
-        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-        e.preventDefault();
-        // Step from the RENDERED width, not the preference: with a
-        // wide preference clamped by a narrow window, stepping from
-        // the preference would neither move the panel nor mean
-        // anything to the user looking at it.
-        sidebarW = setSidebarW(
-          sidebarRenderedW + (e.key === 'ArrowRight' ? 16 : -16),
-        );
-        persistSidebarW();
-      });
-      // Re-apply the width whenever the window changes size so a wide
-      // panel narrows instead of crushing the chat.  The preferred
-      // width in `sidebarW` is intentionally left untouched.
+      // History panel: the handle rides its RIGHT edge, so the
+      // pointer's distance from the window's LEFT edge is the
+      // candidate width and ArrowRight widens the panel.
+      setupPanelResizer(
+        sidebarResizer,
+        'sidebar',
+        'meta',
+        '--sidebar-w',
+        'kiss-sidebar-w',
+        e => e.clientX,
+        'ArrowRight',
+      );
+      // Task-info panel: the handle rides its LEFT edge, so the
+      // pointer's distance from the window's RIGHT edge is the
+      // candidate width and ArrowLeft widens the panel.
+      setupPanelResizer(
+        metaResizer,
+        'meta',
+        'sidebar',
+        '--meta-w',
+        'kiss-meta-w',
+        e => window.innerWidth - e.clientX,
+        'ArrowLeft',
+      );
+      // Re-apply widths whenever the window changes size.  Untouched
+      // panels first (they follow the window's one-fifth fraction),
+      // then user-resized ones, so the latter clamp against the
+      // up-to-date width of the panel across the chat and the chat
+      // always keeps --chat-min-w.
       window.addEventListener('resize', () => {
         if (!document.body.classList.contains('remote-desktop')) return;
-        setSidebarW(sidebarW);
+        for (const p of panelResizers) {
+          if (!p.hasPref()) p.applyFluidDefault();
+        }
+        for (const p of panelResizers) {
+          if (p.hasPref()) p.reclamp();
+        }
+        refreshPanelAriaMax();
       });
     }
     if (frequentTasksBtn) {
@@ -10052,7 +10438,20 @@
             return u && !u.startsWith('#');
           });
           if (uris.length > 0) {
-            api.resolveDroppedPaths({uris: uris});
+            // Stamp the tab's work dir: the extension host otherwise
+            // falls back to the window's workspace folder / host cwd,
+            // which in a no-folder window is not where this tab's
+            // tasks run, so dropped files would be relativized against
+            // the wrong root.
+            api.resolveDroppedPaths({
+              uris: uris,
+              workDir: workDirForTab(activeTabId),
+              // The host round trip is asynchronous: stamp the owner so
+              // the reply can be rejected if the user switches tabs
+              // before it arrives (it would otherwise land in whichever
+              // composer is visible then).
+              tabId: activeTabId,
+            });
             return;
           }
         }
@@ -10365,6 +10764,14 @@
       data: '',
       pending: true,
     };
+    // A send waiting in attachmentsReady() may be parked on this slot's
+    // conversion when the user removes its chip; the removal signal lets
+    // that wait wake promptly even if the conversion never settles (a
+    // hung decoder).  It resolves true because a removed slot must not
+    // block the submit.
+    slot.removed = new Promise(resolve => {
+      slot.notifyRemoved = () => resolve(true);
+    });
     attachments.push(slot);
     slot.promise = fillAttachmentSlot(file, slot);
     updateInputDisabled();
@@ -10379,14 +10786,36 @@
   /**
    * Wait for every in-flight attachment of the active tab.
    *
+   * The composer stays open while a send waits here, so the user can add
+   * ANOTHER attachment after the wait starts.  A one-time snapshot of the
+   * pending promises would resolve without that late slot: the submit
+   * then shipped without it and resetComposerAfterSend() discarded it —
+   * silent data loss.  So the wait is a fixpoint over the owning tab's
+   * attachment list: it returns only once a pass finds no pending slot
+   * (or a conversion failed, which blocks the submit).
+   *
    * Returns:
    *   A promise for whether all of them arrived intact.
    */
   async function attachmentsReady() {
-    const results = await Promise.all(
-      attachments.filter(a => a.pending).map(a => a.promise),
-    );
-    return results.every(ok => ok);
+    // The array reference is per tab (saveCurrentTab/switchToTab move it
+    // in and out of `attachments`), so pin the owner: a tab switch during
+    // the wait must not make later passes watch another tab's composer.
+    const owner = attachments;
+    for (;;) {
+      const pending = owner.filter(a => a.pending);
+      if (pending.length === 0) return true;
+      // Each slot races its conversion against its removal signal:
+      // clicking the x on a pending chip must wake the wait even if the
+      // conversion never settles (a hung decoder).  The next pass
+      // re-reads the live list, so a removed slot is simply gone, while
+      // a conversion that FAILED for a still-present slot resolves false
+      // and blocks the submit as before.
+      const results = await Promise.all(
+        pending.map(a => Promise.race([a.promise, a.removed])),
+      );
+      if (!results.every(ok => ok)) return false;
+    }
   }
 
   // composerreset0903-coverage:start
@@ -10643,7 +11072,9 @@
         idx +
         '">&times;</span>';
       chip.querySelector('.fc-rm').addEventListener('click', () => {
-        attachments.splice(idx, 1);
+        const gone = attachments.splice(idx, 1)[0];
+        // Wake any send parked on this slot in attachmentsReady().
+        if (gone && gone.notifyRemoved) gone.notifyRemoved();
         updateInputDisabled();
         renderFileChips();
       });
@@ -11784,6 +12215,22 @@
     if (id) settingsEditedFields.add(id);
   }
 
+  // The one first-party API-key inventory: it drives the settings form's
+  // LOAD loop (populateConfigForm), SAVE loop (collectConfigForm) and the
+  // cfg-key-* secret-input listeners.  It was previously declared verbatim
+  // in each place, and an addition to one copy silently drifted out of the
+  // others (a key that displayed but never saved, or vice versa).
+  const FIRST_PARTY_KEY_IDS = [
+    'GEMINI_API_KEY',
+    'OPENAI_API_KEY',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_WORKSPACE_ID',
+    'TOGETHER_API_KEY',
+    'OPENROUTER_API_KEY',
+    'ZAI_API_KEY',
+    'MOONSHOT_API_KEY',
+  ];
+
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
     const setValue = (id, value) => {
@@ -11844,17 +12291,7 @@
       setValue('welcome-cfg-remote-password', cfg.remote_password || '');
     }
     configFormPopulated = true;
-    const keyIds = [
-      'GEMINI_API_KEY',
-      'OPENAI_API_KEY',
-      'ANTHROPIC_API_KEY',
-      'ANTHROPIC_WORKSPACE_ID',
-      'TOGETHER_API_KEY',
-      'OPENROUTER_API_KEY',
-      'ZAI_API_KEY',
-      'MOONSHOT_API_KEY',
-    ];
-    keyIds.forEach(k => {
+    FIRST_PARTY_KEY_IDS.forEach(k => {
       setValue('cfg-key-' + k, (apiKeys && apiKeys[k]) || '');
     });
   }
@@ -11909,17 +12346,7 @@
       cfg.work_dir = wdInp.value.trim();
     }
     const apiKeys = {};
-    const keyIds = [
-      'GEMINI_API_KEY',
-      'OPENAI_API_KEY',
-      'ANTHROPIC_API_KEY',
-      'ANTHROPIC_WORKSPACE_ID',
-      'TOGETHER_API_KEY',
-      'OPENROUTER_API_KEY',
-      'ZAI_API_KEY',
-      'MOONSHOT_API_KEY',
-    ];
-    keyIds.forEach(k => {
+    FIRST_PARTY_KEY_IDS.forEach(k => {
       const id = 'cfg-key-' + k;
       if (!want(id)) return;
       const v = el(id).value.trim();

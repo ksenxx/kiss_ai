@@ -41,6 +41,52 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _effective_commit_repo(work_dir: str) -> Path | None:
+    """Return the repository an autocommit of *work_dir* will mutate.
+
+    Applies the SAME stale-worktree fallback as
+    ``_autocommit_changes``: a *work_dir* under a now-deleted
+    ``.kiss-worktrees/kiss_wt-*`` checkout is remapped to the parent
+    repository before discovery.  The manual-commit dispatcher uses
+    this so its busy-check + claim protect the repository the worker
+    actually stages — claiming the raw submitted path let the worker's
+    in-flight fallback mutate the parent repository unprotected
+    (gpt-5.6-sol review 2, missed wiring 1).
+
+    Args:
+        work_dir: The submitted working directory (possibly stale).
+
+    Returns:
+        The repository root the commit will mutate, or ``None`` when
+        the (post-fallback) path is not inside a git repository.
+    """
+    work_path = Path(work_dir)
+    if not work_path.exists():
+        fallback = _stale_worktree_fallback(work_path)
+        if fallback is not None:
+            work_path = fallback
+    return GitWorktreeOps.discover_repo(work_path)
+
+
+def _same_repo(repo: Path, claimed: Path | None) -> bool:
+    """Whether *claimed* names the same repository root as *repo*.
+
+    Args:
+        repo: The repository root an operation resolved right now.
+        claimed: The root a dispatcher claimed earlier, or ``None``
+            when nothing was claimed.
+
+    Returns:
+        ``True`` only when both name the same resolved root.
+    """
+    if claimed is None:
+        return False
+    try:
+        return repo.resolve() == claimed.resolve()
+    except OSError:  # pragma: no cover — unresolvable path
+        return repo == claimed
+
+
 def _repo_of_dir(work_dir: str) -> Path | None:
     """Return the resolved repo root containing directory *work_dir*.
 
@@ -279,8 +325,16 @@ class _MergeFlowMixin:
         _state_lock: threading.RLock
 
         def _any_non_wt_running(
-            self, repo_root: Path | None = None,
+            self,
+            repo_root: Path | None = None,
+            *,
+            exclude: AgentState | None = None,
         ) -> bool: ...
+        def _claim_main_tree(
+            self, repo_root: Path, reason: str,
+            holder: list[Any] | None = None,
+        ) -> bool: ...
+        def _release_main_tree_claim(self, claim: Any) -> None: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
 
     def _main_dirty_files(self, work_dir: str = "") -> list[str]:
@@ -378,7 +432,13 @@ class _MergeFlowMixin:
         return event
 
     def _autocommit_changes(
-        self, tab_id: str = "", *, work_dir: str = "", manual: bool = False,
+        self,
+        tab_id: str = "",
+        *,
+        work_dir: str = "",
+        manual: bool = False,
+        claimed_repo: Path | None = None,
+        own_state: AgentState | None = None,
     ) -> None:
         """Stage-all + generate-message + commit the tab's working tree.
 
@@ -414,6 +474,21 @@ class _MergeFlowMixin:
                 ``self.work_dir`` when empty.
             manual: ``True`` when the user pressed the Git Commit
                 button (as opposed to the post-task autocommit).
+            claimed_repo: The repository root the DISPATCHER already
+                busy-checked and claimed (the manual-commit path), or
+                ``None`` when no claim was taken for this call (the
+                post-task path, and a dispatch whose path was not in
+                any repository).  When the repository resolved here —
+                after the stale-worktree fallback — is not the claimed
+                one, this method runs the atomic busy-check + claim
+                itself before any git mutation, so the repository
+                actually staged is always protected (gpt-5.6-sol
+                review 2, missed wiring 1 and 2).
+            own_state: The finishing task's own agent state, excluded
+                from the busy check: the post-task auto-commit runs
+                while that task's ``is_running_non_wt`` admission is
+                still active, and must be blocked only by OTHER
+                occupants of the repository.
         """
         work_dir = work_dir or self.work_dir
         # Echoed on every autocommit_done as `workDir` — the DIR THE
@@ -422,6 +497,12 @@ class _MergeFlowMixin:
         # string on its autocommitAction) can recognize its own
         # terminal event.
         requested_dir = work_dir
+        # Release-armed BEFORE publication (``_claim_main_tree`` appends
+        # before it publishes) and installed before the ``try`` below,
+        # so no injected-stop boundary can strand a published claim
+        # with no release owner (gpt-5.6-sol review 3, introduced
+        # bug 2).
+        held_claims: list[Any] = []
         try:
             work_path = Path(work_dir)
             if not work_path.exists():
@@ -436,6 +517,53 @@ class _MergeFlowMixin:
                     message="Not a git repository.", manual=manual, work_dir=requested_dir,
                 )
                 return
+            if not _same_repo(repo, claimed_repo):
+                # The repository about to be staged is NOT covered by
+                # the dispatcher's claim: either no claim was taken
+                # (the automatic post-task commit) or the target
+                # changed under the dispatcher (a worktree path that
+                # vanished after dispatch, remapped to the parent
+                # above).  Run the same atomic busy-check + claim the
+                # manual dispatch runs, in ONE locked section, and
+                # refuse instead of sweeping another task's
+                # half-written files into the commit (gpt-5.6-sol
+                # review 2, missed wirings 1 and 2).
+                with self._state_lock:
+                    if self._any_non_wt_running(repo, exclude=own_state):
+                        self._broadcast_autocommit_done(
+                            tab_id, success=False, committed=False,
+                            message=(
+                                "A task is still running in this folder; "
+                                + (
+                                    "wait for it to finish before "
+                                    "committing."
+                                    if manual else
+                                    "its changes were left uncommitted."
+                                )
+                            ),
+                            manual=manual, work_dir=requested_dir,
+                        )
+                        return
+                    if not self._claim_main_tree(
+                        repo,
+                        "manual commit" if manual else "post-task commit",
+                        holder=held_claims,
+                    ):
+                        self._broadcast_autocommit_done(
+                            tab_id, success=False, committed=False,
+                            message=(
+                                "Another operation is modifying this "
+                                "repository; "
+                                + (
+                                    "wait for it to finish before "
+                                    "committing."
+                                    if manual else
+                                    "the changes were left uncommitted."
+                                )
+                            ),
+                            manual=manual, work_dir=requested_dir,
+                        )
+                        return
             with repo_lock(repo):
                 if not manual:
                     self.printer.broadcast({
@@ -539,6 +667,10 @@ class _MergeFlowMixin:
                 tab_id, success=False, committed=False,
                 message=str(e), manual=manual, work_dir=requested_dir,
             )
+        finally:
+            for claim in held_claims:
+                with self._state_lock:
+                    self._release_main_tree_claim(claim)
 
     def _autocommit_changed_repos(
         self,
@@ -548,6 +680,7 @@ class _MergeFlowMixin:
         task_id: str | None = None,
         extra_paths: set[str] | None = None,
         extra_task_ids: list[str] | None = None,
+        own_state: AgentState | None = None,
     ) -> None:
         """Auto-commit task changes that landed OUTSIDE the work_dir repo.
 
@@ -600,6 +733,9 @@ class _MergeFlowMixin:
             extra_task_ids: History ids of those earlier sequential
                 runs, so THEIR sub-agents' records are collected (and
                 their printer entries freed) too.
+            own_state: The finishing task's own agent state, excluded
+                from each sibling repository's busy check (see
+                :meth:`_autocommit_changes`).
         """
         if task_id is None:
             return
@@ -636,14 +772,50 @@ class _MergeFlowMixin:
             logger.debug("Changed-path grouping failed", exc_info=True)
             return
         for repo, repo_paths in sorted(repos.items()):
+            # Sibling repositories are main working trees too: commit
+            # them under the same per-repo claim protocol as the
+            # work_dir pass, in ONE locked busy-check + claim section,
+            # and skip a repository another task or mutator occupies —
+            # the pathspec commit would otherwise snapshot files a
+            # concurrently running task is still writing (gpt-5.6-sol
+            # review 2, missed wiring 2).  The finishing task's own
+            # still-active admission never names a sibling repo, but
+            # it is excluded for the same reentrancy reason as the
+            # work_dir pass.
+            # Release-armed before publication, with the ``finally``
+            # installed before the claiming section — the same
+            # injected-stop discipline as ``_autocommit_changes``
+            # (gpt-5.6-sol review 3, introduced bug 2).
+            sibling_claims: list[Any] = []
             try:
-                self._autocommit_paths_in_repo(
-                    repo, sorted(repo_paths), tab_id,
-                )
-            except Exception:
-                logger.debug(
-                    "Auto-commit in %s failed", repo, exc_info=True,
-                )
+                with self._state_lock:
+                    claimed = not self._any_non_wt_running(
+                        repo, exclude=own_state,
+                    ) and self._claim_main_tree(
+                        repo, "post-task commit", holder=sibling_claims,
+                    )
+                if not claimed:
+                    self._broadcast_autocommit_done(
+                        tab_id, success=False, committed=False,
+                        message=(
+                            f"{repo.name} is busy (a task or another "
+                            "operation is using it); left the task's "
+                            "changes there uncommitted."
+                        ),
+                    )
+                    continue
+                try:
+                    self._autocommit_paths_in_repo(
+                        repo, sorted(repo_paths), tab_id,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Auto-commit in %s failed", repo, exc_info=True,
+                    )
+            finally:
+                for claim in sibling_claims:
+                    with self._state_lock:
+                        self._release_main_tree_claim(claim)
 
     def _autocommit_paths_in_repo(
         self,
@@ -1602,69 +1774,102 @@ class _MergeFlowMixin:
             }
         with repo_lock(repo):
             # Re-checked under the repo lock (not only before taking
-            # it) to narrow the window in which a direct task starting
-            # on another tab could have its half-written files reset
-            # out from under it.  The residual TOCTOU — a task starting
-            # after this check — is the same window the manual Git
-            # Commit already has (`_cmd_autocommit_action` probes the
-            # same predicate before its own git mutations); a full fix
-            # needs task startup to take a per-repo claim, which
-            # neither flow does today.
-            with self._state_lock:
-                if self._any_non_wt_running(repo):
-                    return {
-                        "success": False,
-                        "message": (
-                            "A task is still running in this folder; "
-                            "wait for it to finish before discarding."
-                        ),
-                    }
-            dirty = self._main_dirty_files(str(repo))
-            if not dirty:
-                return {
-                    "success": True,
-                    "message": "Nothing to discard: the working tree is clean.",
-                }
-            reset = _git(str(repo), "reset", "--hard")
-            if reset.returncode != 0:
-                return {
-                    "success": False,
-                    "message": (
-                        "git reset --hard failed: "
-                        + (reset.stderr or reset.stdout).strip()
-                    ),
-                }
-            clean = _git(str(repo), "clean", "-fd")
-            if clean.returncode != 0:
-                return {
-                    "success": False,
-                    "message": (
-                        "Tracked changes were reset, but git clean -fd "
-                        "failed: " + (clean.stderr or clean.stdout).strip()
-                    ),
-                }
-            # Both commands can return 0 and still leave dirt behind:
-            # `reset --hard` does not enter submodules and `clean -fd`
-            # refuses to delete an untracked nested git repository.
-            # Claiming success then would dismiss the bar over a tree
-            # that `git status` still reports dirty (gpt-5.6-sol
-            # review finding).
-            leftover = self._main_dirty_files(str(repo))
-            if leftover:
-                return {
-                    "success": False,
-                    "message": (
-                        f"Discarded {len(dirty) - len(leftover)} of "
-                        f"{len(dirty)} uncommitted file(s) in "
-                        f"{repo.name}; still dirty (submodule or "
-                        "nested git repository?): "
-                        + ", ".join(leftover[:10])
-                    ),
-                }
+            # it).  The busy check and the main-tree claim are taken
+            # in ONE ``_state_lock`` section: non-worktree task
+            # admission (``_run_task``) checks
+            # ``_main_tree_claim_reason`` in its own locked section
+            # before setting ``is_running_non_wt``, so a direct task
+            # can no longer start between this check and the ``git
+            # reset``/``git clean`` below and have its half-written
+            # files reset out from under it (the residual TOCTOU the
+            # gpt-5.6-sol review demonstrated, finding 2).
+            discard_claims: list[Any] = []
+            try:
+                with self._state_lock:
+                    if self._any_non_wt_running(repo):
+                        return {
+                            "success": False,
+                            "message": (
+                                "A task is still running in this folder; "
+                                "wait for it to finish before discarding."
+                            ),
+                        }
+                    if not self._claim_main_tree(
+                        repo, "discard", holder=discard_claims,
+                    ):
+                        return {
+                            "success": False,
+                            "message": (
+                                "Another operation is modifying this "
+                                "repository; wait for it to finish before "
+                                "discarding."
+                            ),
+                        }
+                return self._discard_main_tree(repo)
+            finally:
+                for claim in discard_claims:
+                    with self._state_lock:
+                        self._release_main_tree_claim(claim)
+
+    def _discard_main_tree(self, repo: Path) -> dict[str, Any]:
+        """Reset and clean *repo*'s main working tree.
+
+        Body of the ``discard`` main-tree action.  The caller holds
+        ``repo_lock(repo)`` and has published the main-tree claim that
+        keeps direct tasks from starting while the tree is mutated.
+
+        Args:
+            repo: The main repository root to discard changes in.
+
+        Returns:
+            Dict with ``success`` bool and ``message`` string.
+        """
+        dirty = self._main_dirty_files(str(repo))
+        if not dirty:
             return {
                 "success": True,
+                "message": "Nothing to discard: the working tree is clean.",
+            }
+        reset = _git(str(repo), "reset", "--hard")
+        if reset.returncode != 0:
+            return {
+                "success": False,
                 "message": (
-                    f"Discarded {len(dirty)} uncommitted file(s) "
-                    f"in {repo.name}."
+                    "git reset --hard failed: "
+                    + (reset.stderr or reset.stdout).strip()
                 ),
             }
+        clean = _git(str(repo), "clean", "-fd")
+        if clean.returncode != 0:
+            return {
+                "success": False,
+                "message": (
+                    "Tracked changes were reset, but git clean -fd "
+                    "failed: " + (clean.stderr or clean.stdout).strip()
+                ),
+            }
+        # Both commands can return 0 and still leave dirt behind:
+        # `reset --hard` does not enter submodules and `clean -fd`
+        # refuses to delete an untracked nested git repository.
+        # Claiming success then would dismiss the bar over a tree
+        # that `git status` still reports dirty (gpt-5.6-sol
+        # review finding).
+        leftover = self._main_dirty_files(str(repo))
+        if leftover:
+            return {
+                "success": False,
+                "message": (
+                    f"Discarded {len(dirty) - len(leftover)} of "
+                    f"{len(dirty)} uncommitted file(s) in "
+                    f"{repo.name}; still dirty (submodule or "
+                    "nested git repository?): "
+                    + ", ".join(leftover[:10])
+                ),
+            }
+        return {
+            "success": True,
+            "message": (
+                f"Discarded {len(dirty)} uncommitted file(s) "
+                f"in {repo.name}."
+            ),
+        }

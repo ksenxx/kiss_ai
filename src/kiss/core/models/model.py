@@ -565,6 +565,45 @@ def flatten_content_to_text(content: Any) -> str:
     return "\n".join(p for p in parts if p)
 
 
+def merge_system_texts(
+    configured: str | None, messages: list[dict[str, Any]]
+) -> str | None:
+    """Merge a configured system instruction with conversation system messages.
+
+    Providers whose request carries the system prompt out-of-band (the
+    Anthropic ``system`` parameter, Gemini's ``system_instruction`` config
+    field) cannot send OpenAI-style ``role="system"`` messages — which
+    enter the conversation when it is handed off from an OpenAI-schema
+    model, e.g. via the Sorcar ``set_model`` tool — so their text is
+    hoisted here instead.  The configured instruction comes first,
+    conversation system messages follow in order, duplicates of an
+    already-collected text are skipped, and content-part lists contribute
+    only their ``text`` parts.
+
+    Args:
+        configured: The ``model_config["system_instruction"]`` value, if any.
+        messages: The conversation messages to scan for ``role="system"``.
+
+    Returns:
+        The merged instruction joined with blank lines, or ``None`` when
+        neither source contributed any text.
+    """
+    system_texts: list[str] = [configured] if configured else []
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            content = "".join(
+                p.get("text", "")
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        if isinstance(content, str) and content.strip() and content not in system_texts:
+            system_texts.append(content)
+    return "\n\n".join(system_texts) if system_texts else None
+
+
 # model_config keys the framework itself consumes: they configure this
 # framework's behaviour (routing, watchdogs, caching policy, the system
 # prompt) and are never request parameters of any provider, so every

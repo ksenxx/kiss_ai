@@ -26,7 +26,10 @@
 # 9. Create GitHub release and upload VSIX asset
 # 10. Publish to PyPI
 # 11. Publish VS Code extension to marketplace
-# 12. Restore stashed changes
+# 12. Run ./install.sh so this machine ends up running the version it just
+#     released (non-interactive, without launching the editor); the
+#     nothing-to-release exit in step 3 runs it too before exiting
+# 13. Restore stashed changes
 
 set -e  # Exit on error
 
@@ -933,6 +936,18 @@ warn_unrewritable_public_refs() {
     print_warn "that reference them, then ask GitHub Support to garbage-collect the repo."
 }
 
+# Run ./install.sh on this machine, non-interactively and without launching an
+# editor, so the machine that ran the release ends up running this checkout.
+# Called from every successful exit of main() — the full release and the
+# nothing-to-release path — while the pre-release stash is still held, so the
+# install always builds from the clean tree. A failure propagates (set -e) and
+# the EXIT trap restores the stash.
+run_local_install() {
+    print_step "Running ./install.sh to install this checkout locally..."
+    KISS_SKIP_LAUNCH=1 bash ./install.sh --non-interactive
+    print_info "Local install completed"
+}
+
 publish_to_pypi() {
     local version="$1"
     
@@ -1087,6 +1102,9 @@ main() {
         print_info "Public repo has no main branch yet - will create it"
     elif ! release_needed "$FILTERED_HEAD" "$PUBLIC_HEAD"; then
         print_info "kiss_ai already matches origin (minus excluded paths, plus vsix) - nothing to release"
+        # Even with nothing to publish, finish by installing this checkout
+        # locally (see run_local_install); the EXIT trap restores the stash.
+        run_local_install
         exit 0
     fi
 
@@ -1168,7 +1186,11 @@ main() {
     # Step 11: Publish VS Code extension (already built in step 5)
     publish_vscode_extension "$VERSION"
 
-    # Step 12: Restore stashed changes
+    # Step 12: Install the released version on this machine, before the stash
+    # is restored so the install builds from the exact tree that was published.
+    run_local_install
+
+    # Step 13: Restore stashed changes
     trap - EXIT
     if [[ "$STASHED" == true ]]; then
         print_step "Restoring stashed changes..."

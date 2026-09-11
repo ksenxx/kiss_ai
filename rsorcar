@@ -96,6 +96,14 @@
 #      machine.  The accounts the remote was already logged in to are kept in
 #      ~/.kiss/ first.  A machine with no GitHub credentials is a warning, not
 #      a failed deploy.
+#   9. Verify the public URL from this machine, print the summary and open
+#      the browser.
+#  10. Run install.sh on the *local* machine too (non-interactive, no editor
+#      launch), so this machine's own install is as fresh as the one it just
+#      deployed.  It runs from the main repository, not from a worktree this
+#      script may have been started in: install.sh points the persistent
+#      launchers (~/.local/bin/rsorcar, sorcar-docker) at its own directory,
+#      and a worktree is reclaimed after its task.
 #
 # Environment overrides:
 #   SORCAR_REMOTE_DIR   name of the remote folder (default: project name)
@@ -750,4 +758,22 @@ if [[ "${SORCAR_NO_BROWSER:-}" != "1" ]]; then
         Linux)  command -v xdg-open >/dev/null 2>&1 && (xdg-open "$PUBLIC_URL" >/dev/null 2>&1 &) || true ;;
     esac
 fi
+
+# ---------------------------------------------------------------------------
+# 10. Run install.sh on the local machine too, so this machine's own install
+#     (VS Code extension, launchers) is as fresh as the one just deployed.
+#     After the summary box above, so a failing local install can never hide
+#     the remote URL and password the deploy produced.  It runs from
+#     $MAIN_REPO, never from a worktree this script may sit in: install.sh
+#     rewrites the persistent launchers to point at its own directory, and a
+#     worktree is reclaimed after its task — a launcher pointing there would
+#     dangle.  --non-interactive: no [Y/n] prompts under ``set -e``;
+#     KISS_SKIP_LAUNCH: the deploy must not pop open an editor here.
+# ---------------------------------------------------------------------------
+step "Running install.sh on the local machine ..."
+[[ -f "$MAIN_REPO/install.sh" ]] \
+    || die "No install.sh in $MAIN_REPO — cannot install locally (the remote deploy above succeeded)."
+KISS_SKIP_LAUNCH=1 bash "$MAIN_REPO/install.sh" --non-interactive \
+    || die "install.sh failed on the local machine (the remote deploy above succeeded)."
+info "Local install completed."
 info "Done."
