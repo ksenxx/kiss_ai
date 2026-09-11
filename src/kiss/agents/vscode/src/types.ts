@@ -55,7 +55,7 @@ export type FromWebviewMessage =
       workDir?: string;
       tabId?: string;
     }
-  | {type: 'shareChatTasks'; chatId: string; tabId?: string}
+  | {type: 'shareChatTasks'; chatId: string; tabId?: string; taskId?: string}
   | {type: 'recordFileUsage'; path: string; workDir?: string}
   | {
       type: 'ready';

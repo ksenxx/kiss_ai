@@ -4142,12 +4142,23 @@
     return panels.length ? panels[panels.length - 1] : null;
   }
 
-  function rpExpectedTaskCount(rawTasks) {
-    if (Array.isArray(rawTasks)) return rawTasks.length;
+  /**
+   * The task descriptions a run_parallel call declared, or null when
+   * the `tasks` argument is absent or malformed. Kept on the panel
+   * (`_rpDeclaredTasks`) so the share export can match the persisted
+   * sub-agent rows (whose task text IS the declared description) to
+   * the fan-out that ran them, instead of guessing by count alone.
+   *
+   * @param {*} rawTasks The tool call's `tasks` argument (an array,
+   *     or its JSON string form).
+   * @returns {Array<string>|null} The declared descriptions.
+   */
+  function rpDeclaredTaskList(rawTasks) {
+    if (Array.isArray(rawTasks)) return rawTasks.map(String);
     if (typeof rawTasks !== 'string' || !rawTasks) return null;
     try {
       const parsed = JSON.parse(rawTasks);
-      return Array.isArray(parsed) ? parsed.length : null;
+      return Array.isArray(parsed) ? parsed.map(String) : null;
     } catch (_e) {
       return null;
     }
@@ -5075,9 +5086,11 @@
             c._rpParentTabId = ev.tabId;
           tState.runParallelCount = (tState.runParallelCount || 0) + 1;
           c._rpCallIndex = tState.runParallelCount;
-          c._rpExpectedCount = rpExpectedTaskCount(
+          c._rpDeclaredTasks = rpDeclaredTaskList(
             ev.extras ? ev.extras.tasks : undefined,
           );
+          c._rpExpectedCount =
+            c._rpDeclaredTasks === null ? null : c._rpDeclaredTasks.length;
         }
         const isSummary = ev.name === 'summary';
         if (isSummary) {
@@ -6723,6 +6736,13 @@
         if (ev.tabId !== undefined && !isForActiveTab(ev)) break;
         if (ev.ok) {
           const savedPath = typeof ev.path === 'string' ? ev.path : '';
+          // The transcript banner below can sit far off screen on a
+          // long chat; a toast says where the page landed either way.
+          showNotification({
+            id: 'share-saved-' + Date.now(),
+            severity: 'info',
+            message: 'Chat page saved to ' + (savedPath || 'reports/'),
+          });
           const banner = addNotice(
             'Chat page saved to ' + (savedPath ? '' : 'reports/'),
           );
@@ -8162,6 +8182,13 @@
    * tasks are exported from their own persisted transcripts, so
    * keeping the splices would print them twice.
    *
+   * The live fan-out panels' sub-agent bookkeeping (`_rpSubagents`,
+   * `_rpExpectedCount`) lives in JS properties that a DOM clone does
+   * not carry, so it is copied onto the cloned panels by position —
+   * the clone holds exactly the live panels once the `.adjacent-task`
+   * splices (whose panels the property walk skips too) are dropped.
+   * shareStampRunParallel then serializes it into `data-rp-subagents`.
+   *
    * @returns {Element} A detached holder of the cloned transcript.
    */
   function shareLiveTranscript() {
@@ -8170,8 +8197,179 @@
       '#welcome, #adjacent-loader, .adjacent-task',
     );
     for (let i = 0; i < drop.length; i++) drop[i].remove();
+    const origPanels = Array.from(
+      O.querySelectorAll('.tc-run-parallel'),
+    ).filter(p => !p.closest('.adjacent-task'));
+    const clonePanels = live.querySelectorAll('.tc-run-parallel');
+    for (let i = 0; i < clonePanels.length && i < origPanels.length; i++) {
+      clonePanels[i]._rpSubagents = (origPanels[i]._rpSubagents || []).map(
+        en => ({taskId: en.taskId, tabId: ''}),
+      );
+      clonePanels[i]._rpExpectedCount = origPanels[i]._rpExpectedCount;
+      clonePanels[i]._rpDeclaredTasks = origPanels[i]._rpDeclaredTasks;
+    }
     return live;
   }
+
+  // sharesub-coverage:start
+  /**
+   * Group one task's sub-agents (the flat, parents-before-children
+   * `subagents` list of a `share_tasks` reply task) by their parent
+   * task id, preserving the daemon's enqueue order.
+   *
+   * @param {Array<object>} subs The task's sub-agent descriptors.
+   * @returns {Map<string, Array<object>>} parent task id → children.
+   */
+  function shareSubagentsByParent(subs) {
+    const byParent = new Map();
+    for (let i = 0; i < (subs || []).length; i++) {
+      const sub = subs[i];
+      if (!sub || typeof sub !== 'object') continue;
+      const pid =
+        sub.parent_task_id === undefined || sub.parent_task_id === null
+          ? ''
+          : String(sub.parent_task_id);
+      if (!byParent.has(pid)) byParent.set(pid, []);
+      byParent.get(pid).push(sub);
+    }
+    return byParent;
+  }
+
+  /**
+   * Stamp every run_parallel panel of *root* with the task ids of the
+   * sub-agents it fanned out, as a space-separated
+   * `data-rp-subagents` attribute — the static substitute for the
+   * live webview's `_rpSubagents` bookkeeping, which share.js reads
+   * to open and close the shared page's sub-agent tabs when the
+   * panel is expanded and collapsed.
+   *
+   * The claims run in order of confidence, each panel capped at its
+   * declared task count (`_rpExpectedCount`):
+   *
+   * 1. exact ids — a live panel names its sub-agents
+   *    (`_rpSubagents`, copied onto the clone by shareLiveTranscript);
+   * 2. declared text — a replayed panel's `tasks` argument
+   *    (`_rpDeclaredTasks`) names its workers' descriptions, which
+   *    are exactly the persisted sub-agent rows' task texts, so a
+   *    child spawned by something else entirely (a `run_agent` call)
+   *    is never dealt to a fan-out that did not declare it;
+   * 3. a panel with no declared list at all (legacy events) takes
+   *    whatever is left only when it is the LAST such panel, so it
+   *    can never swallow a later fan-out's sub-agents.
+   *
+   * A child no fan-out claims (e.g. a `run_agent` sub-task) is
+   * flagged `_shareOrphan`: its section is exported with
+   * `data-sub-orphan` and the shared page opens its tab whenever its
+   * parent's transcript is on screen — the live webview opens a tab
+   * for such spawns too.
+   *
+   * @param {Element} root A task's or sub-agent's transcript holder.
+   * @param {Array<object>} children Its direct sub-agent descriptors.
+   */
+  function shareStampRunParallel(root, children) {
+    const remaining = (children || []).slice();
+    const panels = Array.from(root.querySelectorAll('.tc-run-parallel'));
+    const claimed = new Map();
+
+    function take(panel, at) {
+      if (!claimed.has(panel)) claimed.set(panel, []);
+      claimed.get(panel).push(String(remaining[at].task_id));
+      remaining.splice(at, 1);
+    }
+
+    function capLeft(panel) {
+      const expected =
+        typeof panel._rpExpectedCount === 'number'
+          ? panel._rpExpectedCount
+          : null;
+      if (expected === null) return null;
+      const have = claimed.has(panel) ? claimed.get(panel).length : 0;
+      return Math.max(0, expected - have);
+    }
+
+    for (const p of panels) {
+      for (const en of p._rpSubagents || []) {
+        const tid =
+          en.taskId === undefined || en.taskId === null
+            ? ''
+            : String(en.taskId);
+        if (!tid) continue;
+        const at = remaining.findIndex(s => String(s.task_id) === tid);
+        if (at >= 0) take(p, at);
+      }
+    }
+    for (const p of panels) {
+      const declared = p._rpDeclaredTasks;
+      if (!declared) continue;
+      let cap = capLeft(p);
+      for (const desc of declared) {
+        if (cap !== null && cap <= 0) break;
+        const at = remaining.findIndex(s => String(s.task || '') === desc);
+        if (at < 0) continue;
+        take(p, at);
+        if (cap !== null) cap--;
+      }
+    }
+    const uncounted = panels.filter(
+      p => typeof p._rpExpectedCount !== 'number',
+    );
+    if (uncounted.length > 0) {
+      const last = uncounted[uncounted.length - 1];
+      while (remaining.length > 0) take(last, 0);
+    }
+    claimed.forEach((ids, p) => {
+      p.setAttribute('data-rp-subagents', ids.join(' '));
+    });
+    for (const s of remaining) s._shareOrphan = true;
+  }
+
+  /**
+   * Render one sub-agent's transcript into a hidden
+   * `.share-task.share-subagent` section of the shared page — the
+   * static body behind one sub-agent tab, which share.js reveals
+   * when the tab is selected. The section carries the identity the
+   * tab strip needs: `data-task-id`, `data-parent-task-id` (so
+   * closing a tab can take its descendants' tabs with it, like the
+   * live webview), and `data-sub-title` — the same "N. description"
+   * label the webview's openSubagentTab puts on a live tab.
+   *
+   * @param {object} sub The sub-agent descriptor
+   *     ({task, task_id, parent_task_id, events}).
+   * @param {Map<string, Array<object>>} byParent The chat task's
+   *     sub-agents grouped by parent (shareSubagentsByParent).
+   * @param {number} seq Page-unique 1-based section number.
+   * @returns {Element} The hidden, assembled section.
+   */
+  function shareSubagentSection(sub, byParent, seq) {
+    const body = replayDetachedTranscript(sub.events || [], activeTabId);
+    body.classList.remove('adjacent-task');
+    const sid = String(sub.task_id || '');
+    shareStampRunParallel(body, byParent.get(sid) || []);
+    const section = shareTaskSection(
+      sub.task,
+      body,
+      seq,
+      taskSettingsFromEvents(sub.events),
+    );
+    section.classList.add('share-subagent');
+    section.hidden = true;
+    section.setAttribute('data-task-id', sid);
+    const pid = String(sub.parent_task_id || '');
+    section.setAttribute('data-parent-task-id', pid);
+    // A child no fan-out panel claims (a run_agent sub-task): the
+    // shared page opens its tab alongside its parent's transcript,
+    // there being no panel to expand for it.
+    if (sub._shareOrphan) section.setAttribute('data-sub-orphan', '1');
+    const siblings = byParent.get(pid) || [];
+    const at = siblings.indexOf(sub);
+    const desc = (sub.task || 'Sub-agent').trim() || 'Sub-agent';
+    section.setAttribute(
+      'data-sub-title',
+      (at >= 0 ? at + 1 + '. ' : '') + desc.substring(0, 40),
+    );
+    return section;
+  }
+  // sharesub-coverage:end
 
   /**
    * Wrap one task of the chat — its synthesized static task panel and
@@ -8234,8 +8432,15 @@
    * are highlighted here, because the shared page inlines only the
    * highlight THEME, not highlight.js itself.
    *
+   * Each task's sub-agents (its `subagents` list, every descendant
+   * the task fanned out) are exported too: their transcripts become
+   * hidden `.share-subagent` sections after the chat's own sections,
+   * and the fan-out panels are stamped with `data-rp-subagents` so
+   * the shared page's tab strip (share.js) opens and closes them
+   * like the live webview's sub-agent tabs.
+   *
    * @param {Array<object>} tasks The chat's persisted tasks, oldest
-   *     first, each {task, task_id, events}.
+   *     first, each {task, task_id, events, subagents}.
    * @returns {string} The share page body's HTML, or '' when neither
    *     the tasks nor the screen have anything to share.
    */
@@ -8249,6 +8454,10 @@
     out.id = 'output';
     let liveUsed = false;
     const list = tasks || [];
+    // The hidden sub-agent sections all land AFTER the chat's own task
+    // sections, so the visible chat reads top to bottom uninterrupted.
+    const subSections = [];
+    let seq = 0;
     _suppressFileLinkChecks = true;
     try {
       for (let i = 0; i < list.length; i++) {
@@ -8257,6 +8466,8 @@
           t.task_id === undefined || t.task_id === null
             ? ''
             : String(t.task_id);
+        const subs = Array.isArray(t.subagents) ? t.subagents : [];
+        const byParent = shareSubagentsByParent(subs);
         let body;
         let settings = taskSettingsFromEvents(t.events);
         if (liveId && tid === liveId) {
@@ -8267,7 +8478,12 @@
           body = replayDetachedTranscript(t.events || [], activeTabId);
           body.classList.remove('adjacent-task');
         }
-        out.appendChild(shareTaskSection(t.task, body, i + 1, settings));
+        shareStampRunParallel(body, byParent.get(tid) || []);
+        out.appendChild(shareTaskSection(t.task, body, ++seq, settings));
+        for (let s = 0; s < subs.length; s++) {
+          if (!subs[s] || typeof subs[s] !== 'object') continue;
+          subSections.push(shareSubagentSection(subs[s], byParent, ++seq));
+        }
       }
     } finally {
       _suppressFileLinkChecks = false;
@@ -8288,16 +8504,16 @@
           // all (the chat was never persisted). It is the chat's
           // newest surface, so it closes the page.
           out.appendChild(
-            shareTaskSection(
-              currentTaskName,
-              live,
-              list.length + 1,
-              currentTaskSettings,
-            ),
+            shareTaskSection(currentTaskName, live, ++seq, currentTaskSettings),
           );
         }
       }
     }
+    // Only now, with the chat's own sections complete (the mid-write
+    // merge above keys off the LAST section), the hidden sub-agent
+    // sections join the page.
+    for (let s = 0; s < subSections.length; s++)
+      out.appendChild(subSections[s]);
     // A task can legitimately have no recorded output; its section
     // (the task text is content in itself) says so instead of being
     // silently dropped.
@@ -9334,7 +9550,23 @@
           // not the chat: its rows are deliberately absent from the
           // chat's task list, so it exports its own screen — under
           // its own file name, never over the parent chat's page.
-          sendShareExport(String(tab.id), [], false);
+          // Its OWN fan-outs' transcripts must still ride along, so
+          // the daemon is asked for this one task's sub-agents first
+          // (the taskId narrows the reply to it); without a task id
+          // there is nothing to look up and the screen exports alone.
+          const subTaskId =
+            tab.currentTaskId === undefined || tab.currentTaskId === null
+              ? ''
+              : String(tab.currentTaskId);
+          if (subTaskId) {
+            api.shareChatTasks({
+              tabId: activeTabId,
+              chatId: String(tab.id),
+              taskId: subTaskId,
+            });
+          } else {
+            sendShareExport(String(tab.id), [], false);
+          }
           return;
         }
         // The page must show ALL tasks of the chat, and after a
