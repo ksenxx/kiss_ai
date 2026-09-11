@@ -62,6 +62,7 @@ import shutil
 import signal
 import socket
 import ssl
+import stat as stat_module
 import subprocess
 import sys
 import threading
@@ -5628,6 +5629,117 @@ class RemoteAccessServer:
             await self._endpoint_send(endpoint, json.dumps(reply))
         except Exception:
             logger.debug("checkPaths: failed to write reply", exc_info=True)
+
+    async def _handle_get_info_file(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Send a remote-web client the contents of ``tmp/info.md``.
+
+        Handles the ``getInfoFile`` command polled by ``media/main.js``
+        for the info subpanel of the docked task-info panel (remote
+        desktop mode): the subpanel mirrors ``tmp/info.md`` under the
+        command's ``workDir`` (falling back to the daemon work dir
+        exactly like the other file handlers), and shows nothing when
+        the file does not exist.  The reply is sent directly to the
+        requesting *endpoint* — never broadcast — with the shape::
+
+            {"type": "infoFile", "exists": <bool>, "sig": <str>,
+             "content": <utf-8 text>,           # changed or missing
+             "unchanged": true,                  # sig == cmd knownSig
+             "workDir": <echo of cmd workDir>,
+             "tabId": <echo of cmd tabId>,
+             "token": <echo of cmd token>}
+
+        ``token`` is an opaque client request tag: the webview matches
+        replies by it instead of by ``workDir``, whose dispatch-stamped
+        value may differ from what the client sent (root paths are
+        blanked and re-pinned by ``ServerApi.dispatch``).
+
+        ``sig`` fingerprints the file (``"<mtime_ns>:<size>"``, ``""``
+        when missing); a poll whose ``knownSig`` matches it is answered
+        with ``unchanged: true`` and no ``content``, so an idle file
+        costs a stat per poll instead of a re-read and re-send.  A
+        missing, unreadable, non-regular or oversized
+        (:data:`_OPEN_FILE_MAX_BYTES`) file replies ``exists: false``
+        with empty content — the client renders that as an empty
+        subpanel rather than an error.
+
+        The file is opened ONCE (``O_NONBLOCK``, so a FIFO planted at
+        the path cannot hang the worker thread) and the sig, the type /
+        size checks and the read all use that one descriptor's
+        ``fstat``: a concurrent replacement of the path cannot pair one
+        version's sig with another version's content, and the read is
+        bounded by the fstat'ed size.  A file rewritten mid-read can
+        still yield a short/torn read, which at worst mismatches the
+        sig and heals on the next poll.
+
+        Args:
+            cmd: The parsed ``getInfoFile`` command (optional
+                ``workDir``, ``tabId``, ``knownSig``).
+            endpoint: The requesting WSS connection.
+        """
+        raw_work_dir = self._cmd_str(cmd, "workDir")
+        work_dir = self._cmd_work_dir(cmd)
+        tab_id = self._cmd_str(cmd, "tabId")
+        known_sig = self._cmd_str(cmd, "knownSig")
+        token = self._cmd_str(cmd, "token")
+
+        def _read_info() -> dict[str, Any]:
+            reply: dict[str, Any] = {
+                "type": "infoFile",
+                "workDir": raw_work_dir,
+                "tabId": tab_id,
+                "token": token,
+                "exists": False,
+                "sig": "",
+                "content": "",
+            }
+            path = Path(work_dir) / "tmp" / "info.md"
+            try:
+                fd = os.open(
+                    str(path),
+                    os.O_RDONLY | getattr(os, "O_NONBLOCK", 0),
+                )
+            except OSError:
+                return reply
+            try:
+                st = os.fstat(fd)
+                if (
+                    not stat_module.S_ISREG(st.st_mode)
+                    or st.st_size > _OPEN_FILE_MAX_BYTES
+                ):
+                    return reply
+                sig = f"{st.st_mtime_ns}:{st.st_size}"
+                if known_sig and known_sig == sig:
+                    reply["exists"] = True
+                    reply["sig"] = sig
+                    reply["unchanged"] = True
+                    del reply["content"]
+                    return reply
+                chunks: list[bytes] = []
+                remaining = st.st_size
+                while remaining > 0:
+                    chunk = os.read(fd, remaining)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+            except OSError:
+                return reply
+            finally:
+                os.close(fd)
+            reply["exists"] = True
+            reply["sig"] = sig
+            reply["content"] = b"".join(chunks).decode(
+                "utf-8", errors="replace",
+            )
+            return reply
+
+        reply = await asyncio.to_thread(_read_info)
+        try:
+            await self._endpoint_send(endpoint, json.dumps(reply))
+        except Exception:
+            logger.debug("getInfoFile: failed to write reply", exc_info=True)
 
     async def _handle_active_tasks_query(self, endpoint: Any) -> None:
         """Report in-flight agent tasks back to a single client.

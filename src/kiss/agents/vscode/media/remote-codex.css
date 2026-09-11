@@ -638,6 +638,31 @@ body.remote-chat .running-item-ids::before {
     color: var(--dim);
   }
 
+  /* The info subpanel below the task-info list mirrors the active
+     workdir's tmp/info.md (getInfoFile poll in main.js).  It never
+     takes more than the lower half of the panel and scrolls on its
+     own; while the file is missing the content div is empty and only
+     the header shows. */
+  body.remote-chat.remote-desktop #meta-info {
+    display: flex;
+    flex-direction: column;
+    flex: 0 1 auto;
+    max-height: 50%;
+    min-height: 0;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-8);
+  }
+
+  body.remote-chat.remote-desktop #meta-info-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    font-size: var(--fs-sm);
+    color: var(--dim);
+    overflow-wrap: anywhere;
+  }
+
   body.remote-chat.remote-desktop #sidebar.open #sidebar-resizer {
     display: block;
     position: absolute;

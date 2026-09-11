@@ -269,6 +269,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("recordFileUsage", required=("path",)),
     ApiCommand("openFile", required=("path",), handler="open_file"),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
+    ApiCommand("getInfoFile", handler="get_info_file"),
     ApiCommand("shareChat", required=("chatId", "html"), handler="share_chat"),
     ApiCommand(
         "shareChatTasks", required=("chatId",), handler="share_chat_tasks"
@@ -461,6 +462,10 @@ class ServerBackend(Protocol):
     ) -> None: ...
 
     async def _handle_check_paths(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_get_info_file(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
@@ -981,6 +986,25 @@ class ServerApi:
         if ctx.is_uds:
             return
         await self._backend._handle_check_paths(cmd, ctx.endpoint)
+
+    async def get_info_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Report the contents of ``tmp/info.md`` to a remote-web client.
+
+        The remote webapp's docked task-info panel (desktop mode only)
+        polls this command so its info subpanel can mirror the
+        ``tmp/info.md`` file under the active tab's work dir — empty
+        when the file does not exist.  UDS clients (VS Code windows)
+        never show that panel, so a UDS-delivered ``getInfoFile`` is
+        dropped as a defensive no-op, exactly like ``checkPaths``.
+
+        Args:
+            cmd: The ``getInfoFile`` command (optional ``workDir``,
+                ``tabId``, ``knownSig``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_get_info_file(cmd, ctx.endpoint)
 
     async def share_chat(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Write a chat webview's transcript as a standalone HTML page.

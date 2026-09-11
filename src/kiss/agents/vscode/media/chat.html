@@ -199,7 +199,16 @@
         <li class="meta-item"><span class="meta-label">Steps:</span><span id="meta-steps" class="meta-value">&mdash;</span></li>
         <li class="meta-item"><span class="meta-label">Time:</span><span id="meta-time" class="meta-value">Ready</span></li>
         <li class="meta-item"><span class="meta-label">Machine:</span><span id="meta-machine" class="meta-value">&mdash;</span></li>
+        <li class="meta-item"><span class="meta-label">Workdir:</span><span id="meta-workdir" class="meta-value">&mdash;</span></li>
+        <li class="meta-item"><span class="meta-label">Max budget:</span><span id="meta-max-budget" class="meta-value">&mdash;</span></li>
       </ul>
+      <!-- Info subpanel: mirrors ./tmp/info.md under the active tab's
+           workdir (main.js polls getInfoFile every couple of seconds);
+           the content div stays empty while the file does not exist. -->
+      <div id="meta-info" aria-label="tmp/info.md">
+        <div class="sidebar-hdr">tmp/info.md</div>
+        <div id="meta-info-content" class="md-body"></div>
+      </div>
       <div id="meta-resizer" role="separator" aria-orientation="vertical" aria-label="Resize task info panel" aria-controls="meta-panel" tabindex="0"></div>
     </div>
 

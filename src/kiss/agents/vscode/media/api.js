@@ -34,6 +34,7 @@
     'recordFileUsage',
     'openFile',
     'checkPaths',
+    'getInfoFile',
     'shareChat',
     'shareChatTasks',
     'complete',

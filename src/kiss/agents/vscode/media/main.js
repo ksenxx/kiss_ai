@@ -2881,6 +2881,103 @@
   mirrorStatusIntoMetaPanel('status-text', 'meta-time', false);
   mirrorStatusIntoMetaPanel('status-machine', 'meta-machine', false);
 
+  // metainfo-coverage:start
+  // The info subpanel of the docked task-info panel (#meta-info,
+  // remote desktop mode only) mirrors ./tmp/info.md under the active
+  // tab's workdir.  The daemon owns the file, so the client polls
+  // getInfoFile every couple of seconds; the reply's sig (mtime+size
+  // fingerprint) makes an unchanged file cost one stat per poll, and
+  // a missing file renders as an empty subpanel.
+  const metaInfoContent = document.getElementById('meta-info-content');
+  let metaInfoSig = '';
+  let metaInfoWorkDir = '';
+  // Generation token, bumped on every workdir switch and echoed by the
+  // daemon: replies are matched against it rather than the workDir
+  // echo, because the server's dispatch may rewrite a degenerate
+  // workDir (root paths are blanked and re-pinned) and a rewritten
+  // echo would never string-match the poll target.
+  let metaInfoGen = 0;
+
+  /** Ask the daemon for tmp/info.md under the subpanel's workdir. */
+  function requestInfoFile() {
+    if (!metaInfoContent) return;
+    if (!document.body.classList.contains('remote-desktop')) return;
+    if (document.visibilityState === 'hidden') return;
+    try {
+      api.getInfoFile({
+        workDir: metaInfoWorkDir,
+        tabId: activeTabId,
+        knownSig: metaInfoSig,
+        token: String(metaInfoGen),
+      });
+    } catch (_e) {
+      // Not connected yet; the next poll retries.
+    }
+  }
+
+  /**
+   * Adopt *wd* as the workdir the info subpanel mirrors — the SAME
+   * workdir the panel's Workdir row shows (updateMetaTaskDetails
+   * drives both), so the subpanel can never read one directory while
+   * the row names another.  A change invalidates the held signature
+   * and clears the shown contents right away — the old workdir's
+   * info.md must not survive a tab or config switch, and a late reply
+   * for the former workdir no longer matches — then polls immediately
+   * instead of waiting out the interval.
+   */
+  function setMetaInfoWorkDir(wd) {
+    if (wd === metaInfoWorkDir) return;
+    metaInfoWorkDir = wd;
+    metaInfoSig = '';
+    metaInfoGen++;
+    if (metaInfoContent) metaInfoContent.innerHTML = '';
+    requestInfoFile();
+  }
+
+  /** Paint one infoFile reply into the info subpanel. */
+  function renderInfoFileEvent(ev) {
+    if (!metaInfoContent) return;
+    // A reply for a workdir the panel no longer shows (the poll moved
+    // on with a tab switch) must not overwrite the current one.  The
+    // echoed request token — not the workDir echo, which the server
+    // may have rewritten — names the generation the reply answers.
+    if ((ev.token || '') !== String(metaInfoGen)) return;
+    if (ev.unchanged) return;
+    metaInfoSig = typeof ev.sig === 'string' ? ev.sig : '';
+    const text = ev.exists && typeof ev.content === 'string' ? ev.content : '';
+    if (!text.trim()) {
+      metaInfoContent.innerHTML = '';
+      return;
+    }
+    if (typeof marked !== 'undefined') {
+      metaInfoContent.innerHTML = kissSanitize(marked.parse(text));
+    } else {
+      metaInfoContent.textContent = text;
+    }
+  }
+
+  let metaInfoTimer = null;
+
+  /**
+   * Start or stop the 2s info-file poll to match remote desktop mode.
+   * Called by applyRemoteDesktop whenever the mode is (re)applied.  A
+   * timer that ran unconditionally would tick forever in webviews that
+   * can never show the panel (the VS Code extension, phone-sized
+   * remote windows) — and would keep every jsdom-hosted webview's node
+   * process alive after its tests finish.
+   */
+  function syncMetaInfoPolling() {
+    const want = document.body.classList.contains('remote-desktop');
+    if (want && metaInfoTimer === null) {
+      metaInfoTimer = setInterval(requestInfoFile, 2000);
+      requestInfoFile();
+    } else if (!want && metaInfoTimer !== null) {
+      clearInterval(metaInfoTimer);
+      metaInfoTimer = null;
+    }
+  }
+  // metainfo-coverage:end
+
   // The welcome screen lives inside the scrolling chat container, so
   // whatever scroll offset the previous content left behind (a finished
   // conversation is parked at its bottom) would otherwise hide the
@@ -2974,8 +3071,70 @@
       .join('');
   }
 
+  const metaWorkdirEl = document.getElementById('meta-workdir');
+  const metaMaxBudgetEl = document.getElementById('meta-max-budget');
+  // The configured default task budget (config.max_budget), captured
+  // from configData replies by populateConfigForm: what a task with no
+  // settings of its own would run under.  null until a configData
+  // reply arrives — zero is a REAL budget ("stop immediately"), so it
+  // may not double as the unknown sentinel.
+  let configMaxBudget = null;
+  // The settings payload the meta rows currently describe — whatever
+  // renderTaskPanelInfo painted LAST, which during a scroll onto a
+  // spliced-in neighbouring task is the neighbour's settings, not the
+  // tab's own currentTaskSettings.  A configData repaint must reuse
+  // this, or it would silently jump the rows (and the info-subpanel
+  // workdir) back to the tab's own task while the task header still
+  // describes the neighbour.
+  let metaShownSettings = null;
+
+  /** *value* as a finite budget number, or null when it is not one. */
+  function finiteBudget(value) {
+    if (value == null) return null;
+    const n = Number(value);
+    return isFinite(n) ? n : null;
+  }
+
+  /**
+   * Paint the Workdir and Max budget items of the docked task-info
+   * panel (#meta-panel, remote desktop mode only).  Driven from
+   * renderTaskPanelInfo — the choke point every task-settings repaint
+   * (tab switch, task_settings event, scroll into a neighbouring
+   * task) already goes through — so the two items always describe the
+   * same task as the static task panel.  A task without settings
+   * falls back to the tab's pinned workdir and the configured default
+   * budget.  The workdir shown here is also adopted as the info
+   * subpanel's poll target (setMetaInfoWorkDir), keeping the row and
+   * the mirrored tmp/info.md in the same directory.
+   *
+   * @param {object|null} s A task_settings event's settings payload.
+   */
+  function updateMetaTaskDetails(s) {
+    metaShownSettings = s && typeof s === 'object' ? s : null;
+    s = metaShownSettings;
+    if (!metaWorkdirEl && !metaMaxBudgetEl) return;
+    // A filesystem root is never a real workspace (replayed historical
+    // tasks are a known source of poisoned root paths — see
+    // workDirForTab): fall back exactly like workDirForTab does, and
+    // like the server's dispatch does for the poll, so the reply's
+    // workDir echo keeps matching the poll target.
+    const rawWd = s && s.work_dir ? String(s.work_dir) : '';
+    const wd =
+      (rawWd && !isRootDir(rawWd) ? rawWd : '') || workDirForTab(activeTabId);
+    let budget = finiteBudget(s ? s.max_budget : null);
+    if (budget === null) budget = configMaxBudget;
+    if (metaWorkdirEl) metaWorkdirEl.textContent = wd || '\u2014';
+    if (metaMaxBudgetEl) {
+      metaMaxBudgetEl.textContent =
+        budget === null ? '\u2014' : '$' + budget.toFixed(2);
+    }
+    setMetaInfoWorkDir(wd);
+  }
+  updateMetaTaskDetails(null);
+
   /** Paint *s* into the panel's info block (clears it for null). */
   function renderTaskPanelInfo(s) {
+    updateMetaTaskDetails(s);
     if (!taskPanelInfo) return;
     taskPanelInfo.innerHTML = taskPanelInfoHTML(s);
   }
@@ -6915,6 +7074,9 @@
         }
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
         break;
+      case 'infoFile':
+        renderInfoFileEvent(ev);
+        break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
         autofillHistoryDateRange(ev.dateRange);
@@ -9994,6 +10156,7 @@
           sidebar.classList.remove('open');
           sidebarOverlay.classList.remove('open');
         }
+        syncMetaInfoPolling();
       };
       if (typeof desktopMq.addEventListener === 'function') {
         desktopMq.addEventListener('change', applyRemoteDesktop);
@@ -12274,6 +12437,11 @@
     // A copy of the number here could only ever drift away from it, so
     // the box shows what the daemon sent and nothing when it sent none.
     if (cfg.max_budget != null) setValue('cfg-max-budget', cfg.max_budget);
+    // The docked task-info panel's Workdir / Max budget items fall
+    // back to these config values while the visible task has no
+    // task_settings of its own, so a config change repaints them.
+    configMaxBudget = finiteBudget(cfg.max_budget);
+    updateMetaTaskDetails(metaShownSettings);
     // Initialize the run toggles from the persisted config instead of
     // leaving whatever hardcoded `checked` state chat.html shipped with,
     // so a fresh session (VS Code webview or remote web client) reflects

@@ -255,6 +255,10 @@
   - `cmd`: The ``checkPaths`` command.
   - `ctx`: The transport context of the current call.
 
+- **get_info_file** — Report the contents of ``tmp/info.md`` to a remote-web client. The remote webapp's docked task-info panel (desktop mode only) polls this command so its info subpanel can mirror the ``tmp/info.md`` file under the active tab's work dir — empty when the file does not exist.  UDS clients (VS Code windows) never show that panel, so a UDS-delivered ``getInfoFile`` is dropped as a defensive no-op, exactly like ``checkPaths``.<br/>`async get_info_file(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``getInfoFile`` command (optional ``workDir``, ``tabId``, ``knownSig``).
+  - `ctx`: The transport context of the current call.
+
 - **share_chat** — Write a chat webview's transcript as a standalone HTML page. The chat webview serialized the highlighted tab's static task panel and event panels (its ``shareChat`` command carries the markup) and asks the daemon to save them as ``reports/chat-<chatId>.html`` under the tab's work dir.  Both transports take this path — the VS Code extension host forwards the webview's ``shareChat`` over UDS, the remote webapp sends it over WSS — so the page is built in exactly one place.  The reply is a direct ``share_done`` event to the requester.<br/>`async share_chat(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``shareChat`` command (``chatId``, ``html``, optional ``title``, ``workDir``, ``tabId``).
   - `ctx`: The transport context of the current call.
