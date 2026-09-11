@@ -62,7 +62,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 640 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 658 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -262,7 +262,7 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **640 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **658 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -272,14 +272,14 @@ KISS Sorcar ships a catalog of **640 models** across **9 provider categories**, 
 | Together AI | 91 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 358 |
+| OpenRouter | 376 |
 | Claude Code CLI (`cc/*`) | 14 |
 | Codex CLI (`codex/*`) | 8 |
 
 Current catalog capability totals:
 
-- **620** generation-capable models
-- **463** function-calling-capable models
+- **638** generation-capable models
+- **481** function-calling-capable models
 - **11** embedding models
 
 Full model list:
@@ -576,7 +576,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (358)</strong></summary>
+<summary><strong>OpenRouter (376)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
