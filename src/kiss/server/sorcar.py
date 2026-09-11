@@ -122,6 +122,7 @@ from kiss.agents.sorcar.daemon_client import (
 from kiss.agents.sorcar.daemon_client import (
     run as run,
 )
+from kiss.core.utils import is_root_dir
 from kiss.core.vscode_config import load_config
 
 logger = logging.getLogger(__name__)
@@ -593,7 +594,12 @@ class ServerApi:
            other command lacking a usable ``workDir`` (missing, empty
            or not a string) is stamped with it, so two VS Code windows
            sharing the daemon can never observe each other's folder
-           through the daemon-global fallback.
+           through the daemon-global fallback.  A ``workDir`` naming a
+           filesystem root (``/``, ``C:\\`` — see
+           :func:`kiss.core.utils.is_root_dir`) is blanked first and
+           treated exactly like an absent one, so a client whose cwd
+           degenerated to the root can never pin, persist or execute
+           against the whole disk.
         7. Invokes the :class:`ServerApi` method named by the
            command's catalog entry.
 
@@ -625,6 +631,19 @@ class ServerApi:
         cmd["connId"] = ctx.conn_state["conn_id"]
         name = cmd["type"]
         handler = API[name].handler
+        raw_wd = cmd.get("workDir")
+        if isinstance(raw_wd, str) and is_root_dir(raw_wd):
+            # A filesystem root is never a real workspace: it arrives
+            # only from a client that inherited the root as its cwd (a
+            # Dock-launched VS Code window with no folder open) or from
+            # a tab whose persisted registry entry was poisoned by one.
+            # Blank it HERE — the one chokepoint every transport
+            # shares — so a root can neither pin the connection, nor
+            # poison the daemon-wide fallback via ``setWorkDir``, nor
+            # root a task or the @-mention file scan at the whole
+            # disk.  The command then falls back to the connection pin
+            # (stamped below) or the daemon's configured folder.
+            cmd["workDir"] = ""
         if name == "setWorkDir":
             new_wd = cmd.get("workDir", "")
             if isinstance(new_wd, str) and new_wd:

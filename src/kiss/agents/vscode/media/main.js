@@ -838,10 +838,24 @@
     return ev && ev.tabId !== undefined ? getTab(ev.tabId) : null;
   }
 
+  // A filesystem root ('/', '//', 'C:\', bare 'C:') is never a real
+  // workspace: it only appears when a no-folder Dock-launched window's
+  // host cwd leaked into a tab or a replayed task recorded one.  The
+  // daemon blanks roots on every command it receives (ServerApi
+  // .dispatch), and this mirror keeps host-local consumers (dropped-
+  // path resolution) off the whole disk too.
+  function isRootDir(p) {
+    if (typeof p !== 'string') return false;
+    const s = p.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+    if (!s) return Boolean(p.trim());
+    return /^[A-Za-z]:$/.test(s);
+  }
+
   function workDirForTab(tabId) {
     const tab = getTab(tabId);
-    if (tab && tab.workDir) return tab.workDir;
-    return configWorkDir || '';
+    if (tab && tab.workDir && !isRootDir(tab.workDir)) return tab.workDir;
+    if (configWorkDir && !isRootDir(configWorkDir)) return configWorkDir;
+    return '';
   }
 
   function saveCurrentTab() {
@@ -7135,7 +7149,8 @@
           if (ev.extra) {
             try {
               const bgExtra = JSON.parse(ev.extra);
-              if (bgExtra.work_dir) teTab.workDir = bgExtra.work_dir;
+              if (bgExtra.work_dir && !isRootDir(bgExtra.work_dir))
+                teTab.workDir = bgExtra.work_dir;
               if (typeof bgExtra.startTs === 'number' && bgExtra.startTs > 0)
                 teTab.t0 = bgExtra.startTs;
               if (typeof bgExtra.endTs === 'number' && bgExtra.endTs > 0) {
@@ -7284,7 +7299,7 @@
             if (typeof extra.endTs === 'number' && extra.endTs > 0) {
               endTs = extra.endTs;
             }
-            if (extra.work_dir) {
+            if (extra.work_dir && !isRootDir(extra.work_dir)) {
               const wdTab = getTab(activeTabId);
               if (wdTab) wdTab.workDir = extra.work_dir;
             }

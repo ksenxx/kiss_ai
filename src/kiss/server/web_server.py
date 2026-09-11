@@ -92,6 +92,7 @@ from kiss.agents.sorcar.persistence import (
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.models.model_info import get_default_model
+from kiss.core.utils import is_root_dir
 from kiss.core.vscode_config import (
     apply_config_to_env,
     load_api_keys,
@@ -3973,6 +3974,14 @@ class RemoteAccessServer:
 
         if not work_dir:
             work_dir = load_config().get("work_dir", "") or None
+        if work_dir and is_root_dir(work_dir):
+            # A filesystem root (persisted by a pre-guard client, or a
+            # degenerate launcher cwd) must never become the instance
+            # work dir: it would root every unstamped command — and
+            # the @-mention file scan — at the whole disk.  Drop it and
+            # let ``VSCodeServer`` supply its own (also root-guarded)
+            # fallback.
+            work_dir = None
         self.work_dir: str = work_dir or ""
 
         self._voice_speaker_identifier: SpeakerIdentifier | None = None
