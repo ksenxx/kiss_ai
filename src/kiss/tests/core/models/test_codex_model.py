@@ -31,11 +31,11 @@ _CODEX_MODEL_NAMES = (
     "codex/codex-auto-review",
     "codex/default",
     "codex/gpt-5.4",
-    "codex/gpt-5.4-mini",
     "codex/gpt-5.5",
     "codex/gpt-5.6-luna",
     "codex/gpt-5.6-sol",
     "codex/gpt-5.6-terra",
+    "codex/gpt-6-astra",
 )
 
 # Slugs rejected by the Codex CLI when authenticated with a ChatGPT
