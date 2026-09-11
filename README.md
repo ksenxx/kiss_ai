@@ -121,7 +121,7 @@ To install only the KISS Sorcar extension, open Visual Studio Code, search for *
 
 ## Using KISS Sorcar
 
-KISS Sorcar has three client interfaces, all served by one local daemon: the **VS Code extension**, the **remote web/mobile app**, and the **Python client API**. A fourth interface, the **`sorcar` terminal command**, runs a SorcarAgent directly in the current directory without the daemon: `sorcar -t "Summarize README.md"` runs an inline task, `sorcar -f task.txt` runs the file's content as the task (exactly one of `-t`/`-f` is required; see `sorcar --help` for the model and budget flags).
+KISS Sorcar has three client interfaces, all served by one local daemon: the **VS Code extension**, the **remote web/mobile app**, and the **Python client API**. A fourth interface, the **`sorcar` terminal command**, runs a SorcarAgent directly in the current directory without the daemon: `sorcar -t "Summarize README.md"` runs an inline task, `sorcar -f task.txt` runs the file's content as the task (exactly one of `-t`/`-f` is required; see `sorcar --help` for the model, budget, and work-dir flags).
 
 ### VS Code extension and web/mobile app
 
@@ -166,7 +166,7 @@ print(result.text, result.success, result.cost, result.tokens, result.steps)
 follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-`run()` accepts keyword options mirroring the chat interface — `model`, `work_dir`, `scope_work_dir` (workspace directory the task's tab is scoped to, when different from the execution `work_dir`), `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config` (custom endpoint/headers), `web_tools`, `is_parallel`, `timeout`, `stop_on_timeout` (also stop the task when `timeout` expires; default `False` — the task keeps running), `sock_path` (daemon socket override) — plus options to customize the agent itself:
+`run()` accepts keyword options mirroring the chat interface — `model`, `work_dir`, `scope_work_dir` (workspace directory the task's tab is scoped to, when different from the execution `work_dir`), `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config` (custom endpoint/headers), `web_tools`, `is_parallel`, `timeout`, `stop_on_timeout` (also stop the task when `timeout` expires; default `False` — the task keeps running), `sock_path` (daemon socket override), `parent_task_id` / `parent_tab_id` (attach the run as a sub-agent of a calling task, nesting its tab and history row under that task — how the `run_agent` tool dispatches) — plus options to customize the agent itself:
 
 - `tools="/path/to/my_tools.py"` — a Python file whose `get_tools()` function returns the functions the daemon registers as extra agent tools. The functions are never serialized: only the path travels over the socket, and the daemon imports the file, calls `get_tools()`, and runs the tools in its own process.
 - `system_prompt` — replace the default system prompt for the run (and its sub-agents); `append_to_system_prompt` / `append_to_prompt` — append text to the system prompt or task prompt instead of replacing them.
@@ -223,7 +223,7 @@ result = sorcar.run(
 
 Key points:
 
-- **Overridable parameters.** Every `sorcar.run()` parameter except `timeout`, `stop_on_timeout`, `sock_path`, `scope_work_dir`, `web_tools`, `is_parallel`, and `extension_agent_path` itself has a getter: `get_prompt()`, `get_work_dir()`, `get_model()`, `get_chat_id()`, `get_system_prompt()`, `get_tools()`, `get_use_worktree()`, `get_auto_commit()`, `get_max_budget()`, `get_model_config()`, `get_if_append_basic_tools()` (overrides `append_basic_tools`), `get_append_to_system_prompt()`, and `get_append_to_prompt()`. `web_tools` and `is_parallel` always keep the values passed to `run()` (their defaults when the caller passed none).
+- **Overridable parameters.** Every `sorcar.run()` parameter except `timeout`, `stop_on_timeout`, `sock_path`, `scope_work_dir`, `parent_task_id`, `parent_tab_id`, `web_tools`, `is_parallel`, and `extension_agent_path` itself has a getter: `get_prompt()`, `get_work_dir()`, `get_model()`, `get_chat_id()`, `get_system_prompt()`, `get_tools()`, `get_use_worktree()`, `get_auto_commit()`, `get_max_budget()`, `get_model_config()`, `get_if_append_basic_tools()` (overrides `append_basic_tools`), `get_append_to_system_prompt()`, and `get_append_to_prompt()`. `web_tools` and `is_parallel` always keep the values passed to `run()` (their defaults when the caller passed none).
 - **Atomic, type-checked overrides.** Getters run in the daemon process and are re-imported from source on every run. Each return value is type-checked; overrides apply only after every getter succeeds, and a broken getter fails the task with a diagnostic in `TaskResult.text`.
 - **Tools, two ways.** `get_tools()` may return a list of callables — making the script its own tools file — or the path of a separate Python file whose `get_tools()` returns the callables. Either way the tools execute in the daemon process; nothing is serialized over the socket. `get_tools()` overrides (does not append to) the caller's `tools` argument.
 - **Hook getters.** `get_llm_call_hook()` and `get_tool_call_hook()` return functions with no `run()` equivalent (callables can't travel the wire). `llm_call_hook(new_messages)` runs before every LLM call and its return value replaces the outgoing messages; `tool_call_hook(name, args)` runs before every tool call — returning `"OK"` lets the tool execute, any other string suppresses the call and is given to the model as the tool's result:
@@ -245,7 +245,7 @@ The full authoring guide — every getter's semantics, error handling, chat cont
 
 - Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
 - MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`; OAuth tokens are persisted under `~/.kiss/mcp_auth/`.
-- "Tricks" button entries read from `~/.kiss/INJECTIONS.md` (one per `## Trick` section), seeded on install from the bundled `src/kiss/INJECTIONS.md`. Edit the file to customise the dropdown; remove it to regenerate from the bundled defaults.
+- "Tricks" (inject-instruction) entries are the concatenation of two `## Trick`-sectioned Markdown files: (1) `~/.kiss/MY_INJECTION.md` — your personal tricks, auto-created on first read with a starter trick and never overwritten thereafter; (2) the bundled `src/kiss/INJECTIONS.md`, read directly from the package so every upgrade delivers the latest bundled tricks. Edit `~/.kiss/MY_INJECTION.md` to customise; your tricks are listed first.
 - Welcome-screen sample-task chips are the concatenation of two `## Task`-sectioned Markdown files: (1) `~/.kiss/MY_TASK_TEMPLATES.md` — your personal tasks, auto-created on first launch with the seed `## Task\n\nHi!\n` and never overwritten thereafter; (2) the bundled `src/kiss/SAMPLE_TASKS.md` — sample tasks shipped with the extension, read directly from the package so every upgrade delivers the latest chips. To customise your chips edit `~/.kiss/MY_TASK_TEMPLATES.md`; to reset it remove the file.
 
 ## Messaging & Third-Party Agents
@@ -358,6 +358,11 @@ Full model list:
 - `gpt-5.6-terra-low`
 - `gpt-5.6-terra-medium`
 - `gpt-5.6-terra-xhigh`
+- `gpt-6-astra`
+- `gpt-6-astra-high`
+- `gpt-6-astra-low`
+- `gpt-6-astra-medium`
+- `gpt-6-astra-xhigh`
 - `gpt-audio`
 - `gpt-audio-1.5`
 - `gpt-audio-2025-08-28`
@@ -632,6 +637,7 @@ Full model list:
 - `openrouter/deepseek/deepseek-v4-flash-vision-exp`
 - `openrouter/deepseek/deepseek-v4-pro`
 - `openrouter/deepseek/deepseek-v4-pro-0813`
+- `openrouter/deepseek/deepseek-v4.1-flash`
 - `openrouter/google/gemini-2.5-flash`
 - `openrouter/google/gemini-2.5-flash-image`
 - `openrouter/google/gemini-2.5-flash-lite`
@@ -663,11 +669,12 @@ Full model list:
 - `openrouter/google/lyria-3-pro-preview`
 - `openrouter/gryphe/mythomax-l2-13b`
 - `openrouter/ibm-granite/granite-4.0-h-micro`
-- `openrouter/ibm-granite/granite-4.1-8b`
 - `openrouter/ibm-granite/granite-4.2-8b`
 - `openrouter/inception/mercury-2`
-- `openrouter/inception/mercury-2.5-preview`
+- `openrouter/inception/mercury-2.5`
 - `openrouter/inclusionai/ling-3.0-flash`
+- `openrouter/inclusionai/ling-3.0-flash-fin`
+- `openrouter/inclusionai/ling-3.0-flash-vl`
 - `openrouter/kwaipilot/kat-coder-pro-v2`
 - `openrouter/kwaipilot/kat-coder-pro-v2.5`
 - `openrouter/mancer/weaver`
@@ -717,15 +724,13 @@ Full model list:
 - `openrouter/moonshotai/kimi-k3-max`
 - `openrouter/morph/morph-v3-fast`
 - `openrouter/morph/morph-v3-large`
-- `openrouter/nex-agi/nex-n2-mini`
-- `openrouter/nex-agi/nex-n2-pro`
 - `openrouter/nousresearch/hermes-3-llama-3.1-405b`
 - `openrouter/nousresearch/hermes-3-llama-3.1-70b`
 - `openrouter/nousresearch/hermes-4-405b`
-- `openrouter/nousresearch/hermes-4-70b`
 - `openrouter/nvidia/nemotron-3-nano-30b-a3b`
 - `openrouter/nvidia/nemotron-3-super-120b-a12b`
 - `openrouter/nvidia/nemotron-3-ultra-550b-a55b`
+- `openrouter/nvidia/nemotron-3.5-content-safety`
 - `openrouter/nvidia/nemotron-3.5-lightning`
 - `openrouter/openai/gpt-3.5-turbo`
 - `openrouter/openai/gpt-3.5-turbo-0613`
@@ -776,6 +781,11 @@ Full model list:
 - `openrouter/openai/gpt-5.6-terra-low`
 - `openrouter/openai/gpt-5.6-terra-medium`
 - `openrouter/openai/gpt-5.6-terra-xhigh`
+- `openrouter/openai/gpt-6-astra`
+- `openrouter/openai/gpt-6-astra-high`
+- `openrouter/openai/gpt-6-astra-low`
+- `openrouter/openai/gpt-6-astra-medium`
+- `openrouter/openai/gpt-6-astra-xhigh`
 - `openrouter/openai/gpt-audio`
 - `openrouter/openai/gpt-audio-mini`
 - `openrouter/openai/gpt-chat-latest`
@@ -858,12 +868,14 @@ Full model list:
 - `openrouter/qwen/qwen3.8-2.4t-a95b`
 - `openrouter/qwen/qwen3.8-27b`
 - `openrouter/qwen/qwen3.8-flash`
-- `openrouter/qwen/qwen3.8-max`
+- `openrouter/qwen/qwen3.8-max-0902`
 - `openrouter/rekaai/reka-edge`
 - `openrouter/rekaai/reka-flash-3`
 - `openrouter/relace/relace-apply-3`
 - `openrouter/relace/relace-search`
+- `openrouter/sakana/fugu-max`
 - `openrouter/sakana/fugu-ultra`
+- `openrouter/sakana/fugu-ultra-v2`
 - `openrouter/sao10k/l3-lunaris-8b`
 - `openrouter/sao10k/l3.1-euryale-70b`
 - `openrouter/sao10k/l3.3-euryale-70b`
@@ -923,12 +935,27 @@ Full model list:
 - `openrouter/~google/gemini-flash-latest`
 - `openrouter/~google/gemini-pro-latest`
 - `openrouter/~moonshotai/kimi-latest`
-- `openrouter/~openai/gpt-latest`
-- `openrouter/~openai/gpt-latest-high`
-- `openrouter/~openai/gpt-latest-low`
-- `openrouter/~openai/gpt-latest-medium`
-- `openrouter/~openai/gpt-latest-xhigh`
+- `openrouter/~openai/gpt-astra-latest`
+- `openrouter/~openai/gpt-astra-latest-high`
+- `openrouter/~openai/gpt-astra-latest-low`
+- `openrouter/~openai/gpt-astra-latest-medium`
+- `openrouter/~openai/gpt-astra-latest-xhigh`
+- `openrouter/~openai/gpt-luna-latest`
+- `openrouter/~openai/gpt-luna-latest-high`
+- `openrouter/~openai/gpt-luna-latest-low`
+- `openrouter/~openai/gpt-luna-latest-medium`
+- `openrouter/~openai/gpt-luna-latest-xhigh`
 - `openrouter/~openai/gpt-mini-latest`
+- `openrouter/~openai/gpt-sol-latest`
+- `openrouter/~openai/gpt-sol-latest-high`
+- `openrouter/~openai/gpt-sol-latest-low`
+- `openrouter/~openai/gpt-sol-latest-medium`
+- `openrouter/~openai/gpt-sol-latest-xhigh`
+- `openrouter/~openai/gpt-terra-latest`
+- `openrouter/~openai/gpt-terra-latest-high`
+- `openrouter/~openai/gpt-terra-latest-low`
+- `openrouter/~openai/gpt-terra-latest-medium`
+- `openrouter/~openai/gpt-terra-latest-xhigh`
 - `openrouter/~x-ai/grok-latest`
 - `openrouter/~z-ai/glm-flash-latest`
 - `openrouter/~z-ai/glm-latest`
@@ -961,11 +988,11 @@ Full model list:
 - `codex/codex-auto-review`
 - `codex/default`
 - `codex/gpt-5.4`
-- `codex/gpt-5.4-mini`
 - `codex/gpt-5.5`
 - `codex/gpt-5.6-luna`
 - `codex/gpt-5.6-sol`
 - `codex/gpt-5.6-terra`
+- `codex/gpt-6-astra`
 
 </details>
 
