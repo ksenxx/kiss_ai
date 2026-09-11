@@ -48,7 +48,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from kiss.core.utils import atomic_write_text
+from kiss.core.utils import atomic_write_text, is_root_dir
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,22 @@ def _clean_str(value: Any, max_len: int = 0) -> str:
     return out
 
 
+def _clean_work_dir(value: Any) -> str:
+    """Return *value* as a work dir: stripped, ``""`` for roots.
+
+    A filesystem root (``/``, ``C:\\`` — see
+    :func:`kiss.core.utils.is_root_dir`) is never a legitimate tab
+    work dir; one can only have been stamped by a client whose cwd
+    degenerated to the root (a no-folder Dock-launched VS Code
+    window).  Mapping it to ``""`` both refuses to adopt new roots
+    and HEALS entries already persisted in ``tabs.json`` on the next
+    load, so an old poisoned tab stops rooting its tasks and
+    ``@``-mention file scans at the whole disk.
+    """
+    out = _clean_str(value)
+    return "" if is_root_dir(out) else out
+
+
 def _sanitize_entries(
     entries: list[Any], *, keep_task_id: bool,
 ) -> list[dict[str, str]]:
@@ -142,8 +158,8 @@ def _sanitize_entries(
                 _clean_str(entry.get("title"), _MAX_TITLE_CHARS)
                 or "new chat"
             ),
-            "workDir": _clean_str(entry.get("workDir")),
-            "scopeWorkDir": _clean_str(entry.get("scopeWorkDir")),
+            "workDir": _clean_work_dir(entry.get("workDir")),
+            "scopeWorkDir": _clean_work_dir(entry.get("scopeWorkDir")),
             "taskId": (
                 _clean_str(entry.get("taskId")) if keep_task_id else ""
             ),
@@ -172,6 +188,7 @@ class TabRegistry:
         self._lock = threading.Lock()
         self._tabs: list[dict[str, str]] = []
         self._persist_failed = False
+        self._heal_pending = False
         self._load()
 
     def _load(self) -> None:
@@ -191,6 +208,16 @@ class TabRegistry:
         if not isinstance(entries, list):
             return
         self._tabs = _sanitize_entries(entries, keep_task_id=True)
+        # Sanitizing may change the entries — a dropped duplicate, a
+        # clipped title, or a HEALED root work dir.  Do NOT write here:
+        # construction alone must never touch the file, because a
+        # non-owner also constructs on the canonical path (the embedded
+        # launcher's server builds its ``VSCodeServer`` before swapping
+        # in its private registry), and a load-time write from it would
+        # race the owning daemon.  Remember the pending heal instead;
+        # the owner persists it on its first mutation or, failing that,
+        # at shutdown (:meth:`flush`).
+        self._heal_pending = self._tabs != entries
 
     def _save_locked(self) -> None:
         """Atomically persist the tab list (caller holds the lock).
@@ -226,16 +253,21 @@ class TabRegistry:
                 self._path,
             )
         self._persist_failed = False
+        # Every save writes the FULL in-memory state, so any pending
+        # load-time heal is on disk now.
+        self._heal_pending = False
 
     def flush(self) -> None:
-        """Re-persist the registry if its last save failed.
+        """Re-persist the registry if it has unsaved state.
 
-        Called at daemon shutdown so tabs mutated while the disk was
-        unwritable are not silently lost across a restart.  A no-op
-        when the last save succeeded.
+        Called at daemon shutdown so that (a) tabs mutated while the
+        disk was unwritable are not silently lost across a restart and
+        (b) entries healed at load time (a sanitized root work dir)
+        reach the disk even when no tab was ever mutated.  A no-op
+        when the file already matches the in-memory state.
         """
         with self._lock:
-            if self._persist_failed:
+            if self._persist_failed or self._heal_pending:
                 self._save_locked()
 
     def _find_locked(self, tab_id: str) -> dict[str, str] | None:
@@ -317,7 +349,7 @@ class TabRegistry:
                 "tabId": tab_id,
                 "chatId": "",
                 "title": _clean_str(title, _MAX_TITLE_CHARS) or "new chat",
-                "workDir": _clean_str(work_dir),
+                "workDir": _clean_work_dir(work_dir),
                 "scopeWorkDir": "",
                 "taskId": "",
             })
@@ -423,11 +455,11 @@ class TabRegistry:
             if new_title and entry["title"] != new_title:
                 entry["title"] = new_title
                 changed = True
-            new_wd = _clean_str(work_dir)
+            new_wd = _clean_work_dir(work_dir)
             if new_wd and entry["workDir"] != new_wd:
                 entry["workDir"] = new_wd
                 changed = True
-            new_scope = _clean_str(scope_work_dir)
+            new_scope = _clean_work_dir(scope_work_dir)
             if new_scope and entry.get("scopeWorkDir", "") != new_scope:
                 entry["scopeWorkDir"] = new_scope
                 changed = True

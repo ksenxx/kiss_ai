@@ -28,6 +28,7 @@ from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
 )
+from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.tab_registry import OpenTabOutcome
@@ -352,9 +353,23 @@ class _CommandsMixin:
         re-entrant, so callers already holding it may call this
         directly.
 
+        Refuses a filesystem root (``/``, ``C:\\`` — see
+        :func:`kiss.core.utils.is_root_dir`): the fallback is what an
+        unstamped command resolves to, so adopting a root here (from a
+        persisted ``config.work_dir`` via ``saveConfig``, the one root
+        source ``ServerApi.dispatch``'s top-level ``workDir``
+        normalization cannot see) would root those commands — and the
+        ``@``-mention file scan — at the whole disk.
+
         Args:
             new_dir: The non-empty directory to adopt.
         """
+        if is_root_dir(new_dir):
+            logger.warning(
+                "Refusing filesystem root %r as the daemon work dir; "
+                "keeping %r", new_dir, self.work_dir,
+            )
+            return
         with self._state_lock:
             if self.work_dir != new_dir:
                 self.work_dir = new_dir

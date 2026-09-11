@@ -54,6 +54,7 @@ from kiss.core.models.model_info import (
     MODEL_INFO,
     get_default_model,
 )
+from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.autocomplete import (
@@ -355,7 +356,16 @@ class VSCodeServer(
             name="task-dependency-prewarm",
             daemon=True,
         ).start()
-        self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
+        # The daemon-wide last-resort work dir.  A GUI-launched daemon
+        # (launchd/systemd, `open -a`) can inherit cwd `/`, and a
+        # poisoned environment can carry a root in KISS_WORKDIR;
+        # falling back to a filesystem root would let every unstamped
+        # command (and the @-mention file scan) span the whole disk,
+        # so degrade to the user's home directory instead.
+        _fallback_wd = os.environ.get("KISS_WORKDIR") or os.getcwd()
+        if is_root_dir(_fallback_wd):
+            _fallback_wd = os.path.expanduser("~")
+        self.work_dir = _fallback_wd
         # The canonical shared tab registry (mirrored by every client).
         # The path is resolved through the persistence module's
         # redirectable KISS dir so tests point it at a scratch home.
