@@ -1958,7 +1958,12 @@ def _recover_orphaned_tasks(
     for any row that still carries the sentinel AND whose id is not
     in *active_task_ids* (the currently-running tasks in THIS
     process), and rewrite ``result`` to a diagnostic message that
-    truthfully describes what happened.  The still-zero progress
+    truthfully describes what happened.  A sentinel row whose final
+    result survives in the plain-file sidecar journal (see
+    :func:`_journal_final_result`) actually FINISHED — its committed
+    result was lost by the database afterwards (WAL discarded after a
+    ``disk I/O error``) — so the journalled result is restored instead
+    of the "process killed" message.  The still-zero progress
     columns of each rewritten row are then backfilled from the task's
     surviving events (see :func:`_backfill_orphan_progress`) so the
     history sidebar shows the real last-known step/token/cost state
@@ -2010,35 +2015,63 @@ def _recover_orphaned_tasks(
     if created_before is not None:
         select_sql += "AND timestamp < ? "
         params.append(float(created_before))
+    sidecar = _final_results_path(str(_DB_PATH))
+    journalled = _load_final_results(sidecar)
     with _rw_lock.write_lock(), _immediate_txn(db):
         candidates = db.execute(select_sql, params).fetchall()
-        dead_rowids = [
-            int(row["rid"])
+        dead_rows = [
+            (int(row["rid"]), str(row["id"] or ""))
             for row in candidates
             if str(row["id"] or "") not in active_ids
             and not _owner_is_alive(row["owner"] or "")
         ]
-        _log_orphaned_task_forensics(db, dead_rowids)
+        # A dead row whose final result survives in the sidecar journal
+        # was NOT killed mid-task: its result was saved to the database
+        # but the committed pages were later lost (e.g. the 2026-09-12
+        # WAL loss after a ``disk I/O error``).  Restore the journalled
+        # result instead of mislabeling the task as "process killed".
+        restored_rowids = [
+            rid for rid, tid in dead_rows if tid in journalled
+        ]
+        killed_rowids = [
+            rid for rid, tid in dead_rows if tid not in journalled
+        ]
+        _log_orphaned_task_forensics(db, killed_rowids)
         rowcount = 0
-        if dead_rowids:
-            placeholders = ",".join(["?"] * len(dead_rowids))
+        for rid, tid in dead_rows:
+            if tid not in journalled:
+                continue
+            cursor = db.execute(
+                "UPDATE task_history SET result = ? "
+                "WHERE rowid = ? AND result = ?",
+                [journalled[tid], rid, "Agent Failed Abruptly"],
+            )
+            rowcount += cursor.rowcount or 0
+            logger.warning(
+                "Task result lost by the database was restored from "
+                "the final-results journal: id=%s", tid,
+            )
+        if killed_rowids:
+            placeholders = ",".join(["?"] * len(killed_rowids))
             cursor = db.execute(
                 "UPDATE task_history SET result = ? "
                 f"WHERE rowid IN ({placeholders}) AND result = ?",
                 [
                     "Task terminated unexpectedly (process killed)",
-                    *dead_rowids,
+                    *killed_rowids,
                     "Agent Failed Abruptly",
                 ],
             )
-            rowcount = cursor.rowcount or 0
-            _backfill_orphan_progress(db, dead_rowids)
+            rowcount += cursor.rowcount or 0
+        if restored_rowids or killed_rowids:
+            _backfill_orphan_progress(db, restored_rowids + killed_rowids)
     if rowcount:
         logger.warning(
             "Recovered %d orphaned task(s) from prior process kill",
             rowcount,
         )
         _invalidate_chat_context_cache("")
+    _prune_final_results_journal(sidecar)
     return rowcount
 
 
@@ -2172,6 +2205,12 @@ def _save_task_result(
 ) -> None:
     """Save just the result summary for a task (no event table changes).
 
+    The result is additionally journalled to a plain-file sidecar
+    (see :func:`_journal_final_result`) so the startup orphan sweep
+    can restore it if the database write is later lost to an I/O
+    failure — the sweep would otherwise mislabel the finished task as
+    "process killed".
+
     Args:
         result: The task result text to store in the history entry.
         task_id: Stable row id to update when available.
@@ -2180,6 +2219,8 @@ def _save_task_result(
     affected_chat_id = _update_task_column("result", result, task_id, task)
     if affected_chat_id is None:
         return
+    if is_task_history_id(task_id):
+        _journal_final_result(str(task_id), result)
     _invalidate_chat_context_cache(affected_chat_id)
 
 
@@ -2421,6 +2462,152 @@ def _persist_batch_with_retry(batch: list[tuple[str, str, float, str]]) -> None:
 def _failed_events_path(db_path: str) -> str:
     """Return the journal path holding unwritable events for *db_path*."""
     return db_path + ".failed_events.jsonl"
+
+
+def _final_results_path(db_path: str) -> str:
+    """Return the sidecar path journalling final task results for *db_path*."""
+    return db_path + ".final_results.jsonl"
+
+
+#: Journalled final results older than this are pruned at sweep time.
+#: By then the row either kept its committed result (the journal entry
+#: was never needed) or an earlier sweep already restored it.
+_FINAL_RESULTS_MAX_AGE_S = 30 * 24 * 3600.0
+
+
+def _journal_final_result(task_id: str, result: str) -> None:
+    """Best-effort append of a task's final result to a sidecar file.
+
+    SQLite alone is not a sufficient store for the terminal ``result``
+    of a task: in the 2026-09-12 incident the database entered a
+    ``disk I/O error`` state, every WAL frame committed during the
+    final minutes of a task was silently discarded when the next
+    process opened the file, and the startup sweep
+    (:func:`_recover_orphaned_tasks`) — seeing the creation sentinel
+    where the successful result used to be — mislabeled the finished
+    task as "process killed".
+
+    The remedy is a plain append-only JSON-lines sidecar next to the
+    database: a medium that does not share SQLite's failure modes.  The
+    sweep consults it before declaring a sentinel row killed and
+    restores the journalled result instead (see
+    :func:`_load_final_results`).
+
+    The append is serialised against concurrent appends and the
+    sweep-time prune in other processes by
+    :func:`_journal_file_lock`.  Failures are logged and swallowed:
+    the journal is a safety net, and the primary database write has
+    already succeeded when this runs.
+
+    Args:
+        task_id: History row id whose result was just saved.
+        result: The result text that was written to the database.
+    """
+    sidecar = _final_results_path(str(_DB_PATH))
+    line = json.dumps(
+        {"task_id": task_id, "result": result, "ts": time.time()}
+    )
+    with _journal_lock:
+        try:
+            with _journal_file_lock(sidecar):
+                # A process killed mid-append can leave a torn last
+                # record with no trailing newline; appending directly
+                # onto that fragment would fuse THIS record into one
+                # malformed line and lose it too.  Terminate any torn
+                # tail first so only the torn record is discarded.
+                prefix = ""
+                if os.path.exists(sidecar) and os.path.getsize(sidecar):
+                    with open(sidecar, "rb") as tail:
+                        tail.seek(-1, os.SEEK_END)
+                        if tail.read(1) != b"\n":
+                            prefix = "\n"
+                with open(sidecar, "a", encoding="utf-8") as stream:
+                    stream.write(prefix + line + "\n")
+        except OSError:
+            logger.warning(
+                "final result for task %s could not be journalled in %s",
+                task_id, sidecar, exc_info=True,
+            )
+
+
+def _load_final_results(sidecar: str) -> dict[str, str]:
+    """Load the journalled final results from *sidecar*, last write wins.
+
+    Args:
+        sidecar: Path returned by :func:`_final_results_path`.
+
+    Returns:
+        Mapping of task id to its most recently journalled result.
+        Missing or unreadable files and corrupt lines (a torn write
+        from a killed process) yield/skip to an empty or partial map.
+    """
+    results: dict[str, str] = {}
+    try:
+        with open(sidecar, encoding="utf-8") as stream:
+            for raw in stream:
+                try:
+                    entry = json.loads(raw)
+                    task_id = entry["task_id"]
+                    result = entry["result"]
+                except (ValueError, TypeError, KeyError):
+                    continue
+                if isinstance(task_id, str) and isinstance(result, str):
+                    results[task_id] = result
+    except OSError:
+        return results
+    return results
+
+
+def _prune_final_results_journal(sidecar: str) -> None:
+    """Drop journal entries older than :data:`_FINAL_RESULTS_MAX_AGE_S`.
+
+    Called after each orphan sweep so the sidecar stays a bounded
+    incident log (one small line per finished task) instead of growing
+    forever.  The rewrite happens under :func:`_journal_file_lock` and
+    lands via an atomic rename, so a concurrent append in another
+    process is either retained or ordered after the prune — never
+    torn.  That guarantee needs the inter-process flock, so on
+    platforms without ``fcntl`` (Windows) the prune is skipped
+    entirely: a rename replacing the journal with a pre-append
+    snapshot would silently drop the record a peer just appended,
+    and an unbounded-but-intact journal is the lesser harm.  All
+    failures are logged and swallowed.
+
+    Args:
+        sidecar: Path returned by :func:`_final_results_path`.
+    """
+    if _fcntl is None:  # pragma: no cover — Windows has no flock
+        return
+    cutoff = time.time() - _FINAL_RESULTS_MAX_AGE_S
+    with _journal_lock:
+        try:
+            with _journal_file_lock(sidecar):
+                if not os.path.exists(sidecar):
+                    return
+                kept: list[str] = []
+                pruned = False
+                with open(sidecar, encoding="utf-8") as stream:
+                    for raw in stream:
+                        try:
+                            entry_ts = float(json.loads(raw)["ts"])
+                        except (ValueError, TypeError, KeyError):
+                            pruned = True
+                            continue
+                        if entry_ts >= cutoff:
+                            kept.append(raw)
+                        else:
+                            pruned = True
+                if not pruned:
+                    return
+                tmp_path = sidecar + ".pruning"
+                with open(tmp_path, "w", encoding="utf-8") as stream:
+                    stream.writelines(kept)
+                os.replace(tmp_path, sidecar)
+        except OSError:
+            logger.warning(
+                "final-results journal %s could not be pruned",
+                sidecar, exc_info=True,
+            )
 
 
 #: Suffix of a journal file a replayer has taken ownership of.  The
