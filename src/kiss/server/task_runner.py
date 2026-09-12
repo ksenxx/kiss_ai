@@ -391,6 +391,28 @@ def parse_task_tags(text: str) -> list[str]:
     return tasks if tasks else [text]
 
 
+def contains_task_tags(text: str) -> bool:
+    """True when *text* carries at least one non-empty ``<task>`` block.
+
+    Used by the command handlers to decide how to treat a message the
+    user sends while a task is running: a plain message is injected
+    into the live agent's conversation as a steering instruction,
+    whereas a ``<task>...</task>`` list is queued on the state's
+    ``queued_followup_tasks`` and executed one-by-one as additional
+    sequential subtasks once the current task finishes.
+
+    Args:
+        text: The user message to inspect.
+
+    Returns:
+        ``True`` when :func:`parse_task_tags` would return the tagged
+        blocks rather than falling back to the whole text.
+    """
+    return any(
+        m.strip() for m in re.findall(r"<task>(.*?)</task>", text, re.DOTALL)
+    )
+
+
 def _release_worktree_without_merging(
     agent: Any, has_changes: bool,
 ) -> None:
@@ -860,6 +882,11 @@ class _TaskRunnerMixin:
                     state.user_answer_queue = None
                     state.pending_user_messages.clear()
                     state.unattributed_prompt_echoes.clear()
+                    # Queued ``<task>`` follow-ups that were never
+                    # drained (the run failed, was stopped, or the
+                    # message landed after the last drain point) must
+                    # not leak into a later run on the same tab.
+                    state.queued_followup_tasks.clear()
                     state.is_task_active = False
                     state.is_running_non_wt = False
                     state.non_wt_repo_root = None
@@ -1123,6 +1150,13 @@ class _TaskRunnerMixin:
                 if existing.user_answer_queue is None:
                     existing.user_answer_queue = queue.Queue(maxsize=1)
                 existing.task_thread = threading.current_thread()
+                # A reused idle state carries the PREVIOUS run's
+                # closed follow-up queue; left set, every later
+                # ``<task>`` steering message on this tab would be
+                # steered instead of queued.  Re-open it (and drop any
+                # stale leftovers) for the new run.
+                existing.queued_followup_tasks.clear()
+                existing.followup_queue_closed = False
                 cmd["_state_key"] = existing.task_id
                 return existing
             state = AgentState(
@@ -1521,7 +1555,16 @@ class _TaskRunnerMixin:
             # without the tools the client asked for.
             client_tools = load_tools_file(cmd.get("toolsFile"))
 
-            for subtask_index, task_prompt in enumerate(subtasks):
+            # A ``while`` over a growable list, not a ``for``: a
+            # steering message of ``<task>`` blocks sent while a
+            # subtask runs is queued on
+            # ``state.queued_followup_tasks`` (see
+            # ``_cmd_append_user_message``) and drained below after
+            # the subtask finishes, extending this list so the queued
+            # tasks run one-by-one as further sequential subtasks.
+            subtask_index = 0
+            while subtask_index < len(subtasks):
+                task_prompt = subtasks[subtask_index]
                 state.last_user_prompt = task_prompt
                 state.last_result_summary = ""
                 # Reset per subtask: a later subtask that fails must not
@@ -1629,6 +1672,13 @@ class _TaskRunnerMixin:
                     )
                     state.last_result_summary = result_summary
                 if subtask_failed:
+                    with self._state_lock:
+                        # A failure aborts the queued follow-ups, so
+                        # no further drain will happen: close the
+                        # queue so late ``<task>`` messages take the
+                        # steering path instead of being silently
+                        # cleared by the end-of-run cleanup.
+                        state.followup_queue_closed = True
                     already_broadcast = bool(
                         getattr(subtask_exc, "terminal_result_broadcast", False)
                     )
@@ -1640,6 +1690,35 @@ class _TaskRunnerMixin:
                             tab_id=tab_id,
                         )
                     break
+                # Drain follow-up tasks the user queued mid-run with a
+                # ``<task>``-tagged steering message BEFORE deciding
+                # whether this subtask is the last one: extending
+                # ``subtasks`` here makes the just-finished subtask an
+                # intermediate one, so its row is persisted below and
+                # the queued tasks then run one-by-one exactly like
+                # the subtasks of a multi-``<task>`` submission.
+                with self._state_lock:
+                    queued_followups = list(state.queued_followup_tasks)
+                    state.queued_followup_tasks.clear()
+                    if not queued_followups and subtask_index >= len(subtasks) - 1:
+                        # This was the LAST drain (the loop is about
+                        # to exit) and it found nothing: close the
+                        # queue in the same critical section, so a
+                        # ``<task>`` message racing this drain either
+                        # landed above and runs, or arrives after
+                        # closure and takes the plain steering path —
+                        # never accepted-and-then-dropped (see
+                        # ``_route_prompt_to_owner``).
+                        state.followup_queue_closed = True
+                if queued_followups:
+                    if append_to_prompt:
+                        # Same executed-prompt suffix contract as the
+                        # pre-loop application to the submitted
+                        # subtasks.
+                        queued_followups = [
+                            t + append_to_prompt for t in queued_followups
+                        ]
+                    subtasks.extend(queued_followups)
                 if subtask_index < len(subtasks) - 1:
                     # _persist_subtask_row's cleanup_task frees this
                     # subtask's changed-path record; take it first so
@@ -1670,6 +1749,7 @@ class _TaskRunnerMixin:
                         use_worktree=use_worktree,
                         sub_start_ms=sub_start_ms,
                     )
+                subtask_index += 1
         except BaseException as _outer_exc:
             if result_summary == "Agent Failed Abruptly":
                 # ``_stop_interrupt_wrapped``: a stop injected while
@@ -1698,6 +1778,14 @@ class _TaskRunnerMixin:
                 tab_id=tab_id,
             )
         finally:
+            with self._state_lock:
+                # The subtask loop is over on every path (normal exit
+                # and the outer-exception one), so no drain of
+                # ``queued_followup_tasks`` can happen any more; from
+                # here on a ``<task>`` message must take the plain
+                # steering path (see ``_route_prompt_to_owner``)
+                # rather than be queued, echoed and silently dropped.
+                state.followup_queue_closed = True
             end_event_broadcast = False
             # Whether the LAST child row's ``subagentDone`` went out on
             # the normal path below; the mandatory-cleanup finally

@@ -32,7 +32,11 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.merge_flow import _effective_commit_repo
 from kiss.server.tab_registry import OpenTabOutcome
-from kiss.server.task_runner import _client_task_id_of
+from kiss.server.task_runner import (
+    _client_task_id_of,
+    contains_task_tags,
+    parse_task_tags,
+)
 
 if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
@@ -133,6 +137,48 @@ def _task_accepts_input(state: AgentState | None) -> bool:
     if state is None:
         return False
     return state.is_task_active or state.thread_alive()
+
+
+def _route_prompt_to_owner(owner: AgentState, prompt: str) -> None:
+    """Queue a mid-run user *prompt* on the right list of *owner*.
+
+    A plain message is appended to ``pending_user_messages`` — the
+    live agent's pre-step hook drains it into the model conversation
+    as a steering instruction.  A message wrapped in
+    ``<task>...</task>`` tags is instead split into its task blocks
+    and appended to ``queued_followup_tasks``: the task runner's
+    per-subtask loop drains that list once the CURRENT task finishes
+    and runs each block one-by-one as further sequential subtasks, so
+    a task list typed mid-run never steers the running task.
+
+    Only server-owned states take the queued-tasks path: the drain
+    lives in ``TaskRunner._run_task_inner``, which executes only
+    UI-launched runs.  A sub-agent or standalone state has no such
+    loop, so a ``<task>`` message sent to one would sit undrained
+    forever — it falls back to live steering injection instead.  The
+    same fallback applies once the run's ``followup_queue_closed``
+    flag is up (the loop passed its final drain, a subtask failed, or
+    the run is finalizing): a task queued then would be echoed to the
+    user and silently discarded by the end-of-run cleanup.  The flag
+    is raised under the same :data:`agent_state.STATE_LOCK` this
+    helper runs under, so a message either lands in the queue before
+    the final drain (and runs) or takes the steering path — never the
+    accepted-then-dropped middle ground.
+
+    MUST be called while holding :data:`agent_state.STATE_LOCK`.
+
+    Args:
+        owner: The running-task state that accepted the prompt.
+        prompt: The user's message (non-empty).
+    """
+    if (
+        owner.server_owned
+        and not owner.followup_queue_closed
+        and contains_task_tags(prompt)
+    ):
+        owner.queued_followup_tasks.extend(parse_task_tags(prompt))
+    else:
+        owner.pending_user_messages.append(prompt)
 
 
 def _restart_kiss_web_daemon() -> bool:
@@ -453,7 +499,7 @@ class _CommandsMixin:
                 # submitted during the startup window in which the
                 # thread was alive but the flag not yet raised.
                 if isinstance(prompt, str) and prompt.strip():
-                    prev.pending_user_messages.append(prompt)
+                    _route_prompt_to_owner(prev, prompt)
                     inject_prompt = prompt
                     inject_task = _owner_task_id(prev)
                     if not inject_task:
@@ -944,6 +990,13 @@ class _CommandsMixin:
         pre-step hook can drain and inject the messages into the model
         conversation before the next model call.
 
+        Exception (see :func:`_route_prompt_to_owner`): a message
+        wrapped in ``<task>...</task>`` tags is NOT injected into the
+        running task.  Its task blocks are queued on
+        :attr:`AgentState.queued_followup_tasks` instead, and the task
+        runner executes them one-by-one as further sequential subtasks
+        once the current task finishes.
+
         When the tab itself has no live task (the common case for a
         VIEWER tab opened from the history sidebar while a task runs
         in ANOTHER tab — the viewer is subscribed to the running
@@ -984,7 +1037,7 @@ class _CommandsMixin:
                     tab_id,
                 )
                 return
-            owner.pending_user_messages.append(prompt)
+            _route_prompt_to_owner(owner, prompt)
             owner_task = _owner_task_id(owner)
             if not owner_task:
                 owner.unattributed_prompt_echoes.append(prompt)
