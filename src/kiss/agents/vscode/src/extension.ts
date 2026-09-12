@@ -108,7 +108,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Switching the editor-tabs mode (from the settings UI toggle or
   // settings.json): ON migrates the registry's chats of this workspace
-  // into editor tabs (the sidebar view hides via its `when` clause);
+  // into editor tabs (the sidebar view hides via its `when` clause)
+  // and CLOSES the secondary sidebar — the chats now live in editor
+  // tabs, so the bar the sidebar chat occupied must not linger empty;
   // OFF closes the panels without retiring their chats and CLOSES the
   // secondary sidebar — the sidebar view re-adopts the chats from
   // `tabs_state` when a KS button (or anything else) next reveals it.
@@ -124,6 +126,9 @@ export function activate(context: vscode.ExtensionContext): void {
           panelManager!.enterMode(
             sidebarView!.getRegistryTabEntries(),
             workspaceDir(),
+          );
+          void vscode.commands.executeCommand(
+            'workbench.action.closeAuxiliaryBar',
           );
         } else {
           panelManager!.closeAll();
