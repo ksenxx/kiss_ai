@@ -1505,13 +1505,13 @@ class _MergeFlowMixin:
                 ),
             }
         if self._any_non_wt_running(repo_root):
-            return {
-                "success": False,
-                "message": (
-                    "Another tab is running a task on the main working "
-                    f"tree. Wait for it to finish before {verb}."
-                ),
-            }
+            message = (
+                "Another tab is running a task on the main working "
+                f"tree. Wait for it to finish before {verb}."
+            )
+            if verb == "merging":
+                message += " Then open a new chat to auto merge."
+            return {"success": False, "message": message}
         return None
 
     def _handle_worktree_action(
@@ -1635,7 +1635,7 @@ class _MergeFlowMixin:
                     "message": (
                         "Another tab is running a task on the main "
                         "working tree. Wait for it to finish before "
-                        f"{verb}."
+                        f"{verb}. Then open a new chat to auto merge."
                     ),
                 }
             if not already_claimed:
