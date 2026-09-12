@@ -1056,6 +1056,36 @@ body.remote-chat #welcome-config { display: none !important; }
   white-space: pre-wrap; word-break: break-word;
 }
 
+/* Images a tool call generated, embedded on its tool_result event and
+   rendered inline in the tool's panel (see appendResultImages). */
+.tr-images {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 8px 10px;
+}
+.tc > .tr-images { border-top: 1px solid var(--border); }
+
+.tr-img-box {
+  display: flex; flex-direction: column; gap: 3px;
+  max-width: 100%; min-width: 0;
+}
+
+.tr-img {
+  display: block; max-width: 100%; max-height: 260px;
+  width: auto; height: auto;
+  border: 1px solid var(--border); border-radius: 6px;
+  cursor: zoom-in;
+
+  /* Checkerboard-free neutral backing so transparent PNGs stay
+     legible on both themes. */
+  background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+}
+.tr-img.tr-img-full { max-height: none; cursor: zoom-out; }
+
+.tr-img-cap {
+  font-size: var(--fs-sm, 11px); color: var(--dim);
+  word-break: break-all;
+}
+
 .llm-panel {
   border: 1px solid rgb(88 166 255 / 15%); border-radius: 8px;
   margin: 6px 0; max-height: 350px; overflow-y: auto;

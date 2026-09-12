@@ -5089,6 +5089,43 @@
     return html;
   }
 
+  // resultimages-coverage:start
+  /**
+   * Render the images a tool call generated — server-embedded as
+   * base64 payloads on the tool_result event (see
+   * JsonPrinter._collect_result_images) — inline in the tool's event
+   * panel.  Clicking an image toggles between the capped preview
+   * height and its natural size.
+   */
+  function appendResultImages(ev, container) {
+    if (!Array.isArray(ev.images) || !ev.images.length) return;
+    const wrap = mkEl('div', 'tr-images');
+    for (let i = 0; i < ev.images.length; i++) {
+      const im = ev.images[i];
+      if (!im || !im.b64 || !im.mime) continue;
+      const box = mkEl('div', 'tr-img-box');
+      const img = document.createElement('img');
+      img.className = 'tr-img';
+      // Property assignment (never innerHTML): the payload is inert
+      // data, and an <img> data: URI cannot run scripts.
+      img.src = 'data:' + im.mime + ';base64,' + im.b64;
+      img.alt = im.path || 'tool result image';
+      if (im.path) img.title = im.path;
+      img.addEventListener('click', () => {
+        img.classList.toggle('tr-img-full');
+      });
+      box.appendChild(img);
+      if (im.path) {
+        const cap = mkEl('div', 'tr-img-cap');
+        cap.textContent = im.path;
+        box.appendChild(cap);
+      }
+      wrap.appendChild(box);
+    }
+    if (wrap.childElementCount) container.appendChild(wrap);
+  }
+  // resultimages-coverage:end
+
   // autoscroll-coverage:start
   // Auto-scroll: the chat webview (extension and remote webapp alike)
   // follows the tail of the latest event panel — unless the user
@@ -5533,7 +5570,12 @@
         if (ev.is_error) tState.pendingReport = null;
         else confirmReadyReport(tState, ev);
         // report-coverage:end
-        if (hadBash && !ev.is_error) break;
+        if (hadBash && !ev.is_error) {
+          // resultimages-coverage:start
+          appendResultImages(ev, tState.lastToolCallEl || target);
+          // resultimages-coverage:end
+          break;
+        }
         const resultTarget = tState.lastToolCallEl || target;
         if (ev.is_error) {
           const r = mkEl('div', 'ev tr err');
@@ -5559,6 +5601,9 @@
           addCopyButton(op);
           if (!tState.lastToolCallEl) addPanelTimestamp(op, ev.ts);
           resultTarget.appendChild(op);
+          // resultimages-coverage:start
+          appendResultImages(ev, resultTarget);
+          // resultimages-coverage:end
         }
         break;
       }

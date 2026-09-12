@@ -241,6 +241,8 @@ type ToWebviewMessageBody =
       is_error?: boolean;
       tool_name?: string;
       path?: string;
+      /** Images the tool call generated, embedded for inline display. */
+      images?: Array<{path?: string; mime: string; b64: string}>;
     }
   | {type: 'system_output'; text: string}
   | {
