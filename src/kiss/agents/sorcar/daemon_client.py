@@ -354,7 +354,7 @@ def run(
     auto_commit: bool = True,
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
-    web_tools: bool | None = None,
+    use_web_tools: bool | None = None,
     is_parallel: bool = True,
     append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
@@ -508,7 +508,7 @@ def run(
             channel agent modules) makes the script its own tools
             file.  ``timeout``, *stop_on_timeout*, *sock_path*,
             *scope_work_dir*, *parent_task_id*, *parent_tab_id*,
-            *web_tools*, and *is_parallel* have no
+            *use_web_tools*, and *is_parallel* have no
             getters by design: the first three are client-transport
             parameters — the script only runs on the daemon that
             *sock_path* selects, *timeout* bounds this client's local
@@ -518,7 +518,7 @@ def run(
             not be able to repoint at another workspace,
             *parent_task_id* / *parent_tab_id* are the CALLING task's
             identity, which the script must not be able to forge, and
-            *web_tools* / *is_parallel* always keep the values passed
+            *use_web_tools* / *is_parallel* always keep the values passed
             to this call (their defaults when the caller passed
             none).  The
             *extension_agent_path* itself is resolved against this process's
@@ -538,8 +538,12 @@ def run(
         model_config: Per-task model configuration override (custom
             endpoint / headers); ``None`` uses the daemon's configured
             model endpoint.  Must be JSON-serializable.
-        web_tools: Per-task browser-tool enablement override; ``None``
-            uses the daemon's configured default.
+        use_web_tools: Per-task browser-tool enablement override,
+            mapped to the agent's ``web_tools`` toggle
+            (:meth:`kiss.agents.sorcar.sorcar_agent.SorcarAgent.run`);
+            ``None`` uses the daemon's configured default (the
+            settings panel's "Use web tools" checkbox, persisted as
+            ``use_web_browser``).
         is_parallel: Whether the agent may spawn parallel sub-agents.
             Defaults to True.
         append_basic_tools: Whether the agent gets the built-in basic
@@ -549,7 +553,7 @@ def run(
             Defaults to True.  When False the agent's ONLY tools are
             ``finish`` and the caller-supplied tools — the ones
             returned by the *tools* file's ``get_tools()`` — so the
-            *web_tools* and *is_parallel* toggles have no tools left
+            *use_web_tools* and *is_parallel* toggles have no tools left
             to act on.  The default system prompt (``SYSTEM.md``)
             assumes the basic toolset (e.g. it mandates a first
             ``Read("./SORCAR.md")`` call), so a restricted run should
@@ -691,7 +695,7 @@ def run(
             "autoCommit": auto_commit,
             "maxBudget": max_budget,
             "modelConfig": model_config,
-            "webTools": web_tools,
+            "webTools": use_web_tools,
             "useParallel": is_parallel,
             "appendBasicTools": append_basic_tools,
             "appendToSystemPrompt": append_to_system_prompt,

@@ -224,7 +224,7 @@ class AgentPathApiTest(unittest.TestCase):
         parameter and the script defines a getter for each — the
         daemon-built agent must see the SCRIPT's values, proving the
         getters ran on the daemon and won over the passed arguments.
-        The script also defines ``get_web_tools()`` and
+        The script also defines ``get_use_web_tools()`` and
         ``get_is_parallel()``, which are NOT part of the getter
         contract: they must be ignored and the client-passed values
         kept.
@@ -300,9 +300,10 @@ class AgentPathApiTest(unittest.TestCase):
                 return {{"base_url": "http://localhost:1234/v1"}}
 
 
-            def get_web_tools():
-                # NOT a supported getter: web_tools has no agent-script
-                # override — this must be ignored, never called.
+            def get_use_web_tools():
+                # NOT a supported getter: use_web_tools has no
+                # agent-script override — this must be ignored, never
+                # called.
                 return False
 
 
@@ -340,7 +341,7 @@ class AgentPathApiTest(unittest.TestCase):
             auto_commit=True,
             max_budget=9.5,
             model_config={"base_url": "http://client:1/v1"},
-            web_tools=True,
+            use_web_tools=True,
             is_parallel=True,
             sock_path=self.sock_path,
             timeout=60,
@@ -359,9 +360,9 @@ class AgentPathApiTest(unittest.TestCase):
         assert seen["_auto_commit_attr"] is False
         assert seen["max_budget"] == 1.25
         assert seen["model_config"] == {"base_url": "http://localhost:1234/v1"}
-        # ``get_web_tools()`` / ``get_is_parallel()`` are NOT agent-script
-        # getters: the script's False returns are ignored and the
-        # client-passed True values survive.
+        # ``get_use_web_tools()`` / ``get_is_parallel()`` are NOT
+        # agent-script getters: the script's False returns are ignored
+        # and the client-passed True values survive.
         assert seen["_web_tools_attr"] is True
         assert seen["_is_parallel_attr"] is True
         assert [t.__name__ for t in seen["tools"]] == ["scripted_tool"]

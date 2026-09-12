@@ -127,7 +127,7 @@ on the daemon.
 ## Overridable parameters
 
 Every parameter of `sorcar.run()` except `timeout`, `stop_on_timeout`,
-`sock_path`, `scope_work_dir`, `web_tools`, `is_parallel`, and
+`sock_path`, `scope_work_dir`, `use_web_tools`, `is_parallel`, and
 `extension_agent_path` itself has a corresponding getter the SEA
 may define.  The getter is named `get_X()` for parameter `X`,
 except `append_basic_tools`, whose getter is
@@ -164,8 +164,9 @@ The seven parameters without getters:
 - **`scope_work_dir`** — the CALLING client's tab-bar visibility
   scope (wire field `tabScopeWorkDir`), which a dispatched script
   must not be able to repoint at another workspace.
-- **`web_tools`** — always the value the caller passed to `run()`
-  (default `None`: the daemon's configured default).
+- **`use_web_tools`** — always the value the caller passed to `run()`
+  (default `None`: the daemon's configured default — the settings
+  panel's "Use web tools" checkbox, persisted as `use_web_browser`).
 - **`is_parallel`** — always the value the caller passed to `run()`
   (default `True`).
 - **`extension_agent_path`** — the script cannot override its own path.
@@ -333,7 +334,7 @@ def search_database(query: str, max_results: int = 10) -> str:
 By default (`append_basic_tools=True`) the agent gets the built-in
 KISS Sorcar toolset — `Bash`, `Read`, `Edit`, `Write`,
 `ask_user_question`, `talk`, `set_model`, `summary`, and (depending
-on `web_tools` and `is_parallel`) browser tools, `run_agent`,
+on `use_web_tools` and `is_parallel`) browser tools, `run_agent`,
 `run_parallel`, `number_of_cores` — **plus** your extension tools.
 
 When `append_basic_tools=False`, the agent's **only** tools are
@@ -608,7 +609,7 @@ def run(
     auto_commit: bool = True,
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
-    web_tools: bool | None = None,
+    use_web_tools: bool | None = None,
     is_parallel: bool = True,
     append_basic_tools: bool = True,
     append_to_system_prompt: str = "",

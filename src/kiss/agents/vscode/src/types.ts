@@ -27,6 +27,7 @@ export type FromWebviewMessage =
       useWorktree?: boolean;
       useParallel?: boolean;
       autoCommit?: boolean;
+      webTools?: boolean;
       tabId?: string;
       workDir?: string;
     }
@@ -597,6 +598,7 @@ export interface AgentCommand {
   useWorktree?: boolean;
   useParallel?: boolean;
   autoCommit?: boolean;
+  webTools?: boolean;
   task?: string;
   direction?: 'prev' | 'next';
   tabId?: string;

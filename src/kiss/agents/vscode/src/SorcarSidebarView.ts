@@ -1221,6 +1221,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     tabId?: string,
     workDir?: string,
     autoCommit?: boolean,
+    webTools?: boolean,
   ): void {
     const effectiveWorkDir = workDir || this._getWorkDir();
     // No local setTaskText echo: the daemon's common run path
@@ -1236,6 +1237,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       useWorktree,
       useParallel,
       autoCommit,
+      webTools,
       tabId,
     });
   }
@@ -1334,6 +1336,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           tabId,
           effectiveWorkDir,
           message.autoCommit,
+          message.webTools,
         );
         break;
       }

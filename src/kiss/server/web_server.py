@@ -6121,6 +6121,10 @@ class RemoteAccessServer:
             "useWorktree": cmd.get("useWorktree", True),
             "useParallel": cmd.get("useParallel", True),
             "autoCommit": cmd.get("autoCommit", True),
+            # Absent/non-bool means "no per-run override": the task
+            # runner then falls back to the persisted "Use web tools"
+            # setting (config key ``use_web_browser``).
+            "webTools": cmd.get("webTools"),
             # Carried over from the ``submit`` this run was built from:
             # ``_run_cmd`` bypasses the dispatcher that stamps it, so
             # without this a browser-launched task would record an

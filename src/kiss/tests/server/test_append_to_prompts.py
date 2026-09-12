@@ -67,7 +67,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             append_to_system_prompt=_SYS_MARKER,
             use_worktree=False,
-            web_tools=False,
+            use_web_tools=False,
             sock_path=self.sock_path,
             timeout=60,
         )
@@ -89,7 +89,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             append_to_prompt=_PROMPT_MARKER,
             use_worktree=False,
-            web_tools=False,
+            use_web_tools=False,
             sock_path=self.sock_path,
             timeout=60,
         )
@@ -110,7 +110,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             "task without suffixes",
             work_dir=self.repo,
             use_worktree=False,
-            web_tools=False,
+            use_web_tools=False,
             sock_path=self.sock_path,
             timeout=60,
         )
@@ -128,7 +128,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             append_to_prompt=_PROMPT_MARKER,
             use_worktree=False,
-            web_tools=False,
+            use_web_tools=False,
             sock_path=self.sock_path,
             timeout=60,
         )
@@ -157,7 +157,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             system_prompt=custom_base,
             append_to_system_prompt=_SYS_MARKER,
             use_worktree=False,
-            web_tools=False,
+            use_web_tools=False,
             sock_path=self.sock_path,
             timeout=60,
         )
@@ -192,7 +192,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             extension_agent_path=agent_path,
             use_worktree=False,
-            web_tools=False,
+            use_web_tools=False,
             sock_path=self.sock_path,
             timeout=60,
         )

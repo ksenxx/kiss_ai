@@ -273,7 +273,7 @@ def run_agent_via_kiss_web(
                 use_worktree=use_worktree,
                 max_budget=max_budget,
                 model_config=model_config,
-                web_tools=web_tools,
+                use_web_tools=web_tools,
                 is_parallel=is_parallel,
                 append_basic_tools=append_basic_tools,
                 append_to_system_prompt=append_to_system_prompt,

@@ -2817,6 +2817,23 @@
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
   const worktreeToggleBtn = document.getElementById('cfg-use-worktree');
+  const webToolsToggleBtn = document.getElementById('cfg-use-web-tools');
+  // Whether #cfg-use-web-tools reflects a KNOWN state — the persisted
+  // config (populateConfigForm ran) or an explicit user toggle.  Until
+  // then a submit must NOT send a per-run ``webTools`` override: the
+  // checkbox still holds chat.html's hardcoded ``checked``, and an
+  // invented ``webTools: true`` would defeat the daemon's fallback to
+  // the persisted "Use web tools" setting (config key
+  // ``use_web_browser``).  Unlike ``useWorktree``/``autoCommit`` —
+  // whose wire value IS the source of truth for the run — ``webTools``
+  // has that server-side config fallback, so omitting it is the
+  // correct "no opinion yet" signal.
+  let webToolsStateKnown = false;
+  if (webToolsToggleBtn) {
+    webToolsToggleBtn.addEventListener('change', () => {
+      webToolsStateKnown = true;
+    });
+  }
   const autocommitBtn = document.getElementById('autocommit-btn');
   const updateBtn = document.getElementById('cfg-update-btn');
   const updateModelsBtn = document.getElementById('cfg-update-models-btn');
@@ -11105,6 +11122,12 @@
       useParallel: true,
       autoCommit: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
     };
+    // Only a KNOWN toggle state becomes a per-run override; otherwise
+    // the field stays absent and the daemon falls back to the
+    // persisted "Use web tools" setting (see webToolsStateKnown).
+    if (webToolsToggleBtn && webToolsStateKnown) {
+      msg.webTools = !!webToolsToggleBtn.checked;
+    }
     if (curTab && curTab.workDir) msg.workDir = curTab.workDir;
     api.send(msg);
     t0 = Date.now();
@@ -12496,6 +12519,11 @@
     // same defaults as vscode_config.DEFAULTS.
     setChecked(autocommitToggleBtn, cfg.auto_commit_mode !== false);
     setChecked(worktreeToggleBtn, cfg.is_worktree !== false);
+    setChecked(webToolsToggleBtn, cfg.use_web_browser !== false);
+    // The toggle now mirrors the persisted setting (or a user edit that
+    // setChecked preserved), so submits may carry it as the per-run
+    // ``webTools`` override.
+    webToolsStateKnown = true;
     setValue('cfg-custom-endpoint', cfg.custom_endpoint || '');
     setValue('cfg-custom-api-key', cfg.custom_api_key || '');
     setValue('cfg-custom-headers', cfg.custom_headers || '');
@@ -12543,6 +12571,9 @@
     }
     if (want('cfg-use-worktree')) {
       cfg.is_worktree = !!(worktreeToggleBtn && worktreeToggleBtn.checked);
+    }
+    if (want('cfg-use-web-tools')) {
+      cfg.use_web_browser = !!(webToolsToggleBtn && webToolsToggleBtn.checked);
     }
     if (want('cfg-custom-endpoint')) {
       cfg.custom_endpoint = el('cfg-custom-endpoint').value.trim();

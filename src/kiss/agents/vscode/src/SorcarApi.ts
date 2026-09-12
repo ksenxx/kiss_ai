@@ -15,6 +15,7 @@ export interface RunFields {
   useWorktree?: boolean;
   useParallel?: boolean;
   autoCommit?: boolean;
+  webTools?: boolean;
   tabId?: string;
 }
 

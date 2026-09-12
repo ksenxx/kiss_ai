@@ -373,7 +373,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             tools=self._write_client_tools(),
             use_worktree=False,
-            web_tools=False,
+            use_web_tools=False,
             sock_path=self.sock_path,
             timeout=60,
         )
@@ -529,7 +529,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             "default task whose first session fails",
             work_dir=self.repo,
             use_worktree=False,
-            web_tools=False,
+            use_web_tools=False,
             sock_path=self.sock_path,
             timeout=60,
         )

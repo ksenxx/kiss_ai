@@ -903,7 +903,7 @@ class SorcarRunApiTest(unittest.TestCase):
                 )
 
     def test_per_task_overrides_forwarded(self) -> None:
-        """``max_budget`` / ``model_config`` / ``web_tools`` /
+        """``max_budget`` / ``model_config`` / ``use_web_tools`` /
         ``is_parallel`` reach the daemon-built agent."""
         seen: dict[str, Any] = {}
 
@@ -929,7 +929,7 @@ class SorcarRunApiTest(unittest.TestCase):
             timeout=60,
             max_budget=2.5,
             model_config={"base_url": "http://localhost:9999/v1"},
-            web_tools=False,
+            use_web_tools=False,
             is_parallel=True,
         )
         assert result.success is True
@@ -972,6 +972,56 @@ class SorcarRunApiTest(unittest.TestCase):
         ), "malformed modelConfig must not reach the agent"
         assert seen["model_config"] != "junk"
         assert seen["web_tools"] is True, "config default web tools apply"
+
+    def test_persisted_use_web_tools_setting_applies(self) -> None:
+        """The settings panel's "Use web tools" checkbox binds the run.
+
+        The checkbox persists as config key ``use_web_browser``: a run
+        WITHOUT a per-run ``use_web_tools`` override must fall back to
+        the persisted ``False``, and an explicit ``use_web_tools=True``
+        on the same daemon must beat the persisted setting.
+        """
+        vscode_config.save_config({"use_web_browser": False})
+        seen: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen["web_tools"] = getattr(self_agent, "_use_web_tools", None)
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer")
+            if printer is not None:
+                printer.print(
+                    raw, type="result", step_count=1,
+                    total_tokens=1, cost="$0.0001",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "run under the persisted web-tools setting",
+            work_dir=self.repo,
+            use_worktree=False,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        assert seen["web_tools"] is False, (
+            "the persisted use_web_browser=False setting never reached "
+            "the agent"
+        )
+
+        result = sorcar.run(
+            "run with an explicit per-run override",
+            work_dir=self.repo,
+            use_worktree=False,
+            use_web_tools=True,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        assert seen["web_tools"] is True, (
+            "the per-run use_web_tools=True override must beat the "
+            "persisted setting"
+        )
 
     def test_custom_system_prompt_replaces_default(self) -> None:
         """A non-empty ``system_prompt`` replaces the SYSTEM.md prompt.
