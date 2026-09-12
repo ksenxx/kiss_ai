@@ -4,9 +4,10 @@
 // add your name here
 
 // End-to-end (JSDOM) tests for the "Auto commit" / "Use worktree" /
-// "Use web tools" settings toggles: they must be INITIALIZED from the
-// server's ``configData`` (keys ``auto_commit_mode`` / ``is_worktree``
-// / ``use_web_browser``) instead of the hardcoded ``checked`` state
+// "Use web tools", and "Classify tasks before running" settings
+// toggles: they must be INITIALIZED from the server's ``configData``
+// (keys ``auto_commit_mode`` / ``is_worktree`` / ``use_web_browser`` /
+// ``classify_tasks``) instead of the hardcoded ``checked`` state
 // shipped in chat.html, and their state must be PERSISTED back through
 // ``saveConfig`` when the settings panel closes.
 
@@ -82,6 +83,7 @@ function testTogglesInitializedFalseFromConfigData() {
       auto_commit_mode: false,
       is_worktree: false,
       use_web_browser: false,
+      classify_tasks: false,
     },
     apiKeys: {},
   });
@@ -89,6 +91,7 @@ function testTogglesInitializedFalseFromConfigData() {
   const ac = win.document.getElementById('cfg-auto-commit');
   const wt = win.document.getElementById('cfg-use-worktree');
   const web = win.document.getElementById('cfg-use-web-tools');
+  const ct = win.document.getElementById('cfg-classify-tasks');
   assert.strictEqual(
     ac.checked,
     false,
@@ -105,6 +108,12 @@ function testTogglesInitializedFalseFromConfigData() {
     web.checked,
     false,
     'configData {use_web_browser:false} must uncheck #cfg-use-web-tools ' +
+      '(was left at the hardcoded checked state from chat.html)',
+  );
+  assert.strictEqual(
+    ct.checked,
+    false,
+    'configData {classify_tasks:false} must uncheck #cfg-classify-tasks ' +
       '(was left at the hardcoded checked state from chat.html)',
   );
 
@@ -137,10 +146,16 @@ function testTogglesInitializedTrueFromConfigData() {
   win.document.getElementById('cfg-auto-commit').checked = false;
   win.document.getElementById('cfg-use-worktree').checked = false;
   win.document.getElementById('cfg-use-web-tools').checked = false;
+  win.document.getElementById('cfg-classify-tasks').checked = false;
 
   send(win, {
     type: 'configData',
-    config: {auto_commit_mode: true, is_worktree: true, use_web_browser: true},
+    config: {
+      auto_commit_mode: true,
+      is_worktree: true,
+      use_web_browser: true,
+      classify_tasks: true,
+    },
     apiKeys: {},
   });
 
@@ -159,6 +174,11 @@ function testTogglesInitializedTrueFromConfigData() {
     true,
     'configData {use_web_browser:true} must check #cfg-use-web-tools',
   );
+  assert.strictEqual(
+    win.document.getElementById('cfg-classify-tasks').checked,
+    true,
+    'configData {classify_tasks:true} must check #cfg-classify-tasks',
+  );
   win.close();
   console.log('  ok - configData true values re-check the toggles');
 }
@@ -168,6 +188,7 @@ function testMissingKeysDefaultToChecked() {
   win.document.getElementById('cfg-auto-commit').checked = false;
   win.document.getElementById('cfg-use-worktree').checked = false;
   win.document.getElementById('cfg-use-web-tools').checked = false;
+  win.document.getElementById('cfg-classify-tasks').checked = false;
 
   // Older servers / partial configs omit the keys: default is true,
   // matching vscode_config.DEFAULTS.
@@ -187,6 +208,11 @@ function testMissingKeysDefaultToChecked() {
     win.document.getElementById('cfg-use-web-tools').checked,
     true,
     'missing use_web_browser must default #cfg-use-web-tools to checked',
+  );
+  assert.strictEqual(
+    win.document.getElementById('cfg-classify-tasks').checked,
+    true,
+    'missing classify_tasks must default #cfg-classify-tasks to checked',
   );
   win.close();
   console.log('  ok - missing config keys default the toggles to checked');
@@ -231,7 +257,12 @@ function testToggleStatePersistedOnSettingsClose() {
   // settings-close flush.
   send(win, {
     type: 'configData',
-    config: {auto_commit_mode: true, is_worktree: true, use_web_browser: true},
+    config: {
+      auto_commit_mode: true,
+      is_worktree: true,
+      use_web_browser: true,
+      classify_tasks: true,
+    },
     apiKeys: {},
   });
 
@@ -239,12 +270,15 @@ function testToggleStatePersistedOnSettingsClose() {
   const ac = win.document.getElementById('cfg-auto-commit');
   const wt = win.document.getElementById('cfg-use-worktree');
   const web = win.document.getElementById('cfg-use-web-tools');
+  const ct = win.document.getElementById('cfg-classify-tasks');
   ac.checked = false;
   ac.dispatchEvent(new win.Event('change', {bubbles: true}));
   wt.checked = false;
   wt.dispatchEvent(new win.Event('change', {bubbles: true}));
   web.checked = false;
   web.dispatchEvent(new win.Event('change', {bubbles: true}));
+  ct.checked = false;
+  ct.dispatchEvent(new win.Event('change', {bubbles: true}));
 
   win.document
     .getElementById('settings-panel-close')
@@ -267,24 +301,32 @@ function testToggleStatePersistedOnSettingsClose() {
     false,
     'saveConfig must persist use_web_browser from #cfg-use-web-tools',
   );
+  assert.strictEqual(
+    save.config.classify_tasks,
+    false,
+    'saveConfig must persist classify_tasks from #cfg-classify-tasks',
+  );
 
   // Round-trip: the server echoes the saved config back; a fresh
   // populate must land on the persisted (unchecked) state.
   ac.checked = true;
   wt.checked = true;
   web.checked = true;
+  ct.checked = true;
   send(win, {
     type: 'configData',
     config: {
       auto_commit_mode: false,
       is_worktree: false,
       use_web_browser: false,
+      classify_tasks: false,
     },
     apiKeys: {},
   });
   assert.strictEqual(ac.checked, false, 'echoed configData must re-apply');
   assert.strictEqual(wt.checked, false, 'echoed configData must re-apply');
   assert.strictEqual(web.checked, false, 'echoed configData must re-apply');
+  assert.strictEqual(ct.checked, false, 'echoed configData must re-apply');
   win.close();
   console.log('  ok - settings close persists toggle state via saveConfig');
 }

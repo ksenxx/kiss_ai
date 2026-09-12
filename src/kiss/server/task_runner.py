@@ -1274,6 +1274,36 @@ class _TaskRunnerMixin:
             append_to_system_prompt, append_to_prompt,
         )
 
+        # Pre-run task classification (kiss.agents.sorcar.task_classifier),
+        # resolved HERE — before the main-tree claim checks and worktree
+        # bookkeeping below — so this runner and the agent agree on ONE
+        # effective worktree mode for the whole submission: an
+        # ``is_development`` verdict decides worktree isolation, and the
+        # claims, merge presentation, auto-commit paths, and persistence
+        # all key off the same value.  The verdict is pre-seeded into
+        # the agent (``classify_task_for_run``), which reuses it for its
+        # own worktree gating and system prompt selection instead of
+        # re-classifying inside the run.  Only this run's effective mode
+        # changes; the persisted ``is_worktree`` setting is never
+        # written.  A disabled or failed classification leaves
+        # ``use_worktree`` exactly as the client requested.
+        from kiss.core.vscode_config import build_model_config, load_config
+
+        _raw_mc_early = cmd.get("modelConfig")
+        _classify_verdict = agent.classify_task_for_run(
+            model_name=model,
+            task=prompt + append_to_prompt,
+            model_config=(
+                _raw_mc_early
+                if isinstance(_raw_mc_early, dict)
+                else build_model_config(load_config())
+            ),
+        )
+        if _classify_verdict is not None:
+            use_worktree = _classify_verdict.is_development
+            with self._state_lock:
+                state.use_worktree = use_worktree
+
         if not use_worktree:
             repo = GitWorktreeOps.discover_repo(Path(work_dir))
             with self._state_lock:

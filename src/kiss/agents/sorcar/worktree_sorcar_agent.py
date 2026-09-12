@@ -1486,6 +1486,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
 
         Falls back to direct execution (no worktree) when:
         - ``use_worktree`` kwarg is explicitly ``False``
+        - The pre-run task classifier is enabled and reports the task
+          is not a development task (``is_development=False``); the
+          verdict likewise FORCES a worktree when it reports
+          ``is_development=True`` (see
+          ``kiss.agents.sorcar.task_classifier``)
         - ``work_dir`` is not inside a git repo
         - The repo has no commits
         - HEAD is detached (no merge target)
@@ -1531,8 +1536,30 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             # RUNNING task in the same repo.
             self.set_printer(printer)
 
+        use_worktree = bool(kwargs.pop("use_worktree", True))
+        # Pre-run task classification (see
+        # ``kiss.agents.sorcar.task_classifier``): when it yields a
+        # verdict, the task's ``is_development`` decides worktree
+        # isolation for THIS run — a development task edits files and
+        # gets a worktree; a non-development task does not.  The
+        # persisted ``is_worktree`` setting is never modified.  A
+        # disabled or failed classification keeps the caller's
+        # ``use_worktree`` value.  The reset guards against stale state
+        # from an earlier run that crashed before ``SorcarAgent.run``'s
+        # cleanup; the verdict computed here is reused there for the
+        # system prompt selection.
+        self._reset_task_classification()
+        classification = self._classify_task_once(
+            kwargs.get("model_name"),
+            prompt_template,
+            kwargs.get("model_config"),
+            arguments=kwargs.get("arguments"),
+        )
+        if classification is not None:
+            use_worktree = classification.is_development
+
         wt_work_dir: Path | None = None
-        if kwargs.pop("use_worktree", True):
+        if use_worktree:
             work_dir_str = kwargs.get("work_dir")
             discovery_dir = Path(work_dir_str) if work_dir_str else Path.cwd()
             repo = GitWorktreeOps.discover_repo(discovery_dir)

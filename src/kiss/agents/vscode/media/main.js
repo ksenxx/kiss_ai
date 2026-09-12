@@ -2848,6 +2848,7 @@
     'server-reset-confirm-cancel',
   );
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
+  const classifyTasksToggleBtn = document.getElementById('cfg-classify-tasks');
   const shareBtn = document.getElementById('share-btn');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
@@ -12524,6 +12525,7 @@
     // setChecked preserved), so submits may carry it as the per-run
     // ``webTools`` override.
     webToolsStateKnown = true;
+    setChecked(classifyTasksToggleBtn, cfg.classify_tasks !== false);
     setValue('cfg-custom-endpoint', cfg.custom_endpoint || '');
     setValue('cfg-custom-api-key', cfg.custom_api_key || '');
     setValue('cfg-custom-headers', cfg.custom_headers || '');
@@ -12574,6 +12576,11 @@
     }
     if (want('cfg-use-web-tools')) {
       cfg.use_web_browser = !!(webToolsToggleBtn && webToolsToggleBtn.checked);
+    }
+    if (want('cfg-classify-tasks')) {
+      cfg.classify_tasks = !!(
+        classifyTasksToggleBtn && classifyTasksToggleBtn.checked
+      );
     }
     if (want('cfg-custom-endpoint')) {
       cfg.custom_endpoint = el('cfg-custom-endpoint').value.trim();

@@ -26,9 +26,14 @@ from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.agents.sorcar.skills import make_skill_tool
+from kiss.agents.sorcar.task_classifier import (
+    TaskClassification,
+    classification_enabled,
+    classify_task,
+)
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.core.base import SYSTEM_PROMPT
+from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
@@ -40,6 +45,7 @@ from kiss.core.models.model_info import (
 )
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
+from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
 
@@ -874,6 +880,25 @@ class SorcarAgent(RelentlessAgent):
         self._use_web_tools: bool = True
         self._is_parallel: bool = True
         self._append_basic_tools: bool = True
+        # Pre-run task classification state (see
+        # :meth:`_classify_task_once`).  ``_classification_attempted``
+        # makes the classifier run at most once per task even though
+        # both ``WorktreeSorcarAgent.run`` (for the worktree decision)
+        # and :meth:`run` (for the system prompt) consult it; the
+        # usage counters hold the classifier's spend until
+        # :meth:`_fold_classifier_usage` banks it into the run totals.
+        self._task_classification: TaskClassification | None = None
+        self._classification_attempted: bool = False
+        # True when the verdict was established by an external driver
+        # (the server's task runner via :meth:`classify_task_for_run`)
+        # for the CURRENT submission: internal per-run resets then keep
+        # the verdict so every subtask of the submission reuses it and
+        # the driver's own worktree bookkeeping never disagrees with
+        # the agent's.  Cleared by the next classify_task_for_run call.
+        self._classification_preseeded: bool = False
+        self._classifier_budget_used: float = 0.0
+        self._classifier_tokens_used: int = 0
+        self._classifier_steps: int = 0
         # Sub-agent threads this agent stopped waiting for; see
         # :class:`_AbandonedSubagent` and :meth:`reclaim_abandoned_subagents`.
         # Touched by the agent thread and by server threads (worktree
@@ -1606,6 +1631,136 @@ class SorcarAgent(RelentlessAgent):
         )
         return settings
 
+    def _reset_task_classification(self) -> None:
+        """Forget any classification state left over from an earlier run.
+
+        Called at the start of every top-level entry point that
+        classifies (``WorktreeSorcarAgent.run``) so a run that crashed
+        before :meth:`run`'s cleanup cannot leak a stale verdict into
+        the next task on a reused agent instance.  Unfolded classifier
+        spend from such a crashed run is dropped with the verdict:
+        folding it into an unrelated later run would corrupt that run's
+        accounting worse than losing the (≤ classifier-cap) telemetry.
+
+        A verdict pre-seeded by :meth:`classify_task_for_run` survives:
+        the external driver established it for the current submission,
+        and internal resets (one per subtask run) must not discard it.
+        """
+        if self._classification_preseeded:
+            return
+        self._classification_attempted = False
+        self._task_classification = None
+        self._classifier_budget_used = 0.0
+        self._classifier_tokens_used = 0
+        self._classifier_steps = 0
+
+    def classify_task_for_run(
+        self,
+        model_name: str | None,
+        task: str,
+        model_config: dict[str, Any] | None = None,
+    ) -> TaskClassification | None:
+        """Classify *task* now and pre-seed the verdict for coming runs.
+
+        For external drivers that must know the run's effective
+        worktree mode BEFORE calling :meth:`run` — the server's task
+        runner decides its main-tree claims, merge presentation, and
+        persistence from ``use_worktree``, so it classifies here, sets
+        ``use_worktree = verdict.is_development``, and passes that
+        value to the run.  The pre-seeded verdict is then reused by the
+        run itself (worktree gating and system prompt selection) and by
+        every later subtask of the same submission, so the driver and
+        the agent can never disagree.  The seed lasts until the next
+        ``classify_task_for_run`` call on this agent.
+
+        Args:
+            model_name: The model the run will use, possibly None.
+            task: The (already substituted) task prompt about to run.
+            model_config: The model configuration the run will use.
+
+        Returns:
+            The task's classification, or ``None`` when classification
+            is disabled or failed.
+        """
+        self._classification_preseeded = False
+        self._reset_task_classification()
+        verdict = self._classify_task_once(model_name, task, model_config)
+        self._classification_preseeded = True
+        return verdict
+
+    def _classify_task_once(
+        self,
+        model_name: str | None,
+        task: str,
+        model_config: dict[str, Any] | None,
+        arguments: dict[str, str] | None = None,
+    ) -> TaskClassification | None:
+        """Classify *task* at most once per run and return the verdict.
+
+        The first call per run (see :meth:`_reset_task_classification`)
+        performs the classification — when
+        :func:`~kiss.agents.sorcar.task_classifier.classification_enabled`
+        allows it — with the same resolved model and model config the
+        main run will use, and banks the classifier's usage counters for
+        :meth:`_fold_classifier_usage`.  Every later call returns the
+        cached verdict, so ``WorktreeSorcarAgent.run`` (worktree
+        decision) and :meth:`run` (system prompt selection) share one
+        classification.
+
+        Args:
+            model_name: The caller-supplied model name, possibly None.
+            task: The task prompt template about to run.
+            model_config: The caller-supplied model configuration.
+            arguments: The caller-supplied prompt-template arguments;
+                substituted into *task* before classification so the
+                classifier sees the prompt the run will actually
+                execute, not the raw ``{placeholder}`` template.
+
+        Returns:
+            The task's classification, or ``None`` when classification
+            is disabled or failed (the run then behaves exactly as it
+            would without a classifier).
+        """
+        if self._classification_attempted:
+            return self._task_classification
+        self._classification_attempted = True
+        if not classification_enabled():
+            return None
+        outcome = classify_task(
+            task=substitute_prompt_args(task, arguments),
+            model_name=self._resolve_model_name(model_name),
+            model_config=model_config,
+        )
+        self._classifier_budget_used = outcome.budget_used
+        self._classifier_tokens_used = outcome.tokens_used
+        self._classifier_steps = outcome.steps
+        self._task_classification = outcome.classification
+        if outcome.classification is not None:
+            logger.info(
+                "Task classified: is_simple=%s is_development=%s",
+                outcome.classification.is_simple,
+                outcome.classification.is_development,
+            )
+        return self._task_classification
+
+    def _fold_classifier_usage(self) -> None:
+        """Bank the pre-run classifier's spend into this run's totals.
+
+        Runs from :meth:`run`'s ``finally``, AFTER ``super().run`` — the
+        classifier executes before ``RelentlessAgent._reset`` zeroes the
+        cumulative counters, so folding earlier would be erased.  Also
+        clears the classification state so a reused agent instance
+        starts its next run fresh.
+        """
+        with self._usage_lock:
+            self.budget_used += self._classifier_budget_used
+            self.total_tokens_used += self._classifier_tokens_used
+            self.total_steps += self._classifier_steps
+        self._classifier_budget_used = 0.0
+        self._classifier_tokens_used = 0
+        self._classifier_steps = 0
+        self._reset_task_classification()
+
     def run(  # type: ignore[override]
         self,
         model_name: str | None = None,
@@ -1718,8 +1873,25 @@ class SorcarAgent(RelentlessAgent):
         tl = getattr(printer, "_thread_local", None) if printer else None
         self._stop_event = getattr(tl, "stop_event", None) if tl else None
         try:
+            # Pre-run task classification (idempotent per run:
+            # WorktreeSorcarAgent.run may have classified already for
+            # its worktree decision).  A task the classifier deems
+            # simple — no software development, no Internet search —
+            # runs on the reduced SYSTEM_LITE.md prompt; everything
+            # else (including a failed or disabled classification)
+            # keeps the full SYSTEM.md.  A caller-supplied
+            # *base_system_prompt* still wins over both.
+            classification = self._classify_task_once(
+                model_name, prompt_template, model_config,
+                arguments=arguments,
+            )
+            default_base_prompt = (
+                SYSTEM_PROMPT_LITE
+                if classification is not None and classification.is_simple
+                else SYSTEM_PROMPT
+            )
             system_instructions = (
-                (self._base_system_prompt or SYSTEM_PROMPT)
+                (self._base_system_prompt or default_base_prompt)
                 + (system_prompt if system_prompt else "")
             )
             prompt = prompt_template
@@ -1758,6 +1930,7 @@ class SorcarAgent(RelentlessAgent):
                 tool_call_hook=tool_call_hook,
             )
         finally:
+            self._fold_classifier_usage()
             if self.web_use_tool:
                 self.web_use_tool.close()
             self.web_use_tool = None

@@ -77,6 +77,11 @@ DEFAULTS: dict[str, Any] = {
     "remote_password": "",
     "auto_commit_mode": True,
     "is_worktree": True,
+    # Pre-run task classification (kiss.agents.sorcar.task_classifier):
+    # a single-call KISSAgent on the run's model decides is_simple
+    # (lite system prompt) and is_development (worktree on/off for
+    # that run only — this persisted is_worktree value is not touched).
+    "classify_tasks": True,
     "work_dir": "",
     "last_model": "",
 }
