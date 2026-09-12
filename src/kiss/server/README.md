@@ -127,9 +127,9 @@ on the daemon.
 ## Overridable parameters
 
 Every parameter of `sorcar.run()` except `timeout`, `stop_on_timeout`,
-`sock_path`, `scope_work_dir`, `use_web_tools`, `is_parallel`, and
-`extension_agent_path` itself has a corresponding getter the SEA
-may define.  The getter is named `get_X()` for parameter `X`,
+`sock_path`, `scope_work_dir`, `use_web_tools`, `classify_tasks`,
+`is_parallel`, and `extension_agent_path` itself has a corresponding
+getter the SEA may define.  The getter is named `get_X()` for parameter `X`,
 except `append_basic_tools`, whose getter is
 `get_if_append_basic_tools()`.  The table below lists them all.
 
@@ -152,7 +152,7 @@ except `append_basic_tools`, whose getter is
 When a getter is absent, the caller's value is used (which is the
 `run()` default when the caller did not pass one).
 
-The seven parameters without getters:
+The eight parameters without getters:
 
 - **`timeout`** — bounds the *client's* local wait (`None` waits
   indefinitely); the daemon never sees it.
@@ -167,6 +167,10 @@ The seven parameters without getters:
 - **`use_web_tools`** — always the value the caller passed to `run()`
   (default `None`: the daemon's configured default — the settings
   panel's "Use web tools" checkbox, persisted as `use_web_browser`).
+- **`classify_tasks`** — always the value the caller passed to `run()`
+  (default `None`: the daemon's configured default — the settings
+  panel's "Classify tasks before running" checkbox, persisted as
+  `classify_tasks`).
 - **`is_parallel`** — always the value the caller passed to `run()`
   (default `True`).
 - **`extension_agent_path`** — the script cannot override its own path.
@@ -610,6 +614,7 @@ def run(
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
     use_web_tools: bool | None = None,
+    classify_tasks: bool | None = None,
     is_parallel: bool = True,
     append_basic_tools: bool = True,
     append_to_system_prompt: str = "",

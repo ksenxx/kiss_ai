@@ -973,6 +973,69 @@ class SorcarRunApiTest(unittest.TestCase):
         assert seen["model_config"] != "junk"
         assert seen["web_tools"] is True, "config default web tools apply"
 
+    def test_classify_tasks_override_forwarded(self) -> None:
+        """The per-run ``classify_tasks`` toggle reaches the classifier.
+
+        ``kiss.server.sorcar.run(classify_tasks=...)`` rides the wire
+        as ``classifyTasks`` and the task runner must hand it to
+        ``classify_task_for_run(enabled=...)`` — the run-side gate of
+        the settings panel's "Classify tasks before running" option.
+        Absent and malformed values mean "no override" (``None``), the
+        same untrusted-input contract as ``webTools``.  The suite-wide
+        ``KISS_DISABLE_TASK_CLASSIFIER=1`` kill switch keeps the real
+        ``classify_task_for_run`` from ever calling a model here, so
+        the full daemon pipeline runs with only the ``run`` stub.
+        """
+        seen_enabled: list[Any] = []
+        original_classify = SorcarAgent.classify_task_for_run
+
+        def recording_classify(
+            self_agent: Any, *args: Any, **kwargs: Any,
+        ) -> Any:
+            seen_enabled.append(kwargs.get("enabled"))
+            return original_classify(self_agent, *args, **kwargs)
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer")
+            if printer is not None:
+                printer.print(
+                    raw, type="result", step_count=1,
+                    total_tokens=1, cost="$0.0001",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+        SorcarAgent.classify_task_for_run = recording_classify  # type: ignore[assignment,method-assign]
+        try:
+            for override in (False, True):
+                result = sorcar.run(
+                    "task with a classification override",
+                    work_dir=self.repo,
+                    use_worktree=False,
+                    classify_tasks=override,
+                    sock_path=self.sock_path,
+                    timeout=60,
+                )
+                assert result.success is True
+            # No parameter passed: the wire carries null → no override.
+            result = sorcar.run(
+                "task without a classification override",
+                work_dir=self.repo,
+                use_worktree=False,
+                sock_path=self.sock_path,
+                timeout=60,
+            )
+            assert result.success is True
+            # A malformed (non-boolean) classifyTasks is ignored.
+            self._raw_daemon_run("", extra_cmd={"classifyTasks": "yes"})
+        finally:
+            SorcarAgent.classify_task_for_run = original_classify  # type: ignore[method-assign]
+        assert seen_enabled == [False, True, None, None], (
+            "classify_tasks was not forwarded verbatim on the "
+            "run → classify_task_for_run path"
+        )
+
     def test_persisted_use_web_tools_setting_applies(self) -> None:
         """The settings panel's "Use web tools" checkbox binds the run.
 

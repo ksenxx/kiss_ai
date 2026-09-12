@@ -177,18 +177,28 @@ class ClassifierRun:
     steps: int
 
 
-def classification_enabled() -> bool:
+def classification_enabled(override: bool | None = None) -> bool:
     """Whether pre-run task classification should run.
+
+    Args:
+        override: Per-run override of the persisted ``classify_tasks``
+            setting — the ``classifyTasks`` wire field of the ``run``
+            command (the *classify_tasks* parameter of
+            :func:`kiss.server.sorcar.run`).  ``None`` (the default)
+            means "no override": the config key decides.
 
     Returns:
         ``False`` when the ``KISS_DISABLE_TASK_CLASSIFIER`` environment
-        variable is set to ``"1"`` (the test suite's kill switch) or
-        when the ``classify_tasks`` config key — persisted in
+        variable is set to ``"1"`` (the test suite's kill switch, which
+        wins over everything).  Otherwise *override* when it is not
+        ``None``, else the ``classify_tasks`` config key — persisted in
         ``~/.kiss/config.json`` and toggleable in the settings panel —
-        is off; ``True`` otherwise (the default).
+        defaulting to ``True``.
     """
     if os.environ.get(_DISABLE_ENV, "") == "1":
         return False
+    if override is not None:
+        return override
     from kiss.core.vscode_config import load_config
 
     try:

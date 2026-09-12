@@ -6127,6 +6127,11 @@ class RemoteAccessServer:
             # runner then falls back to the persisted "Use web tools"
             # setting (config key ``use_web_browser``).
             "webTools": cmd.get("webTools"),
+            # Same contract for pre-run task classification: the task
+            # runner falls back to the persisted "Classify tasks
+            # before running" setting (config key ``classify_tasks``)
+            # when no boolean override is carried.
+            "classifyTasks": cmd.get("classifyTasks"),
             # Carried over from the ``submit`` this run was built from:
             # ``_run_cmd`` bypasses the dispatcher that stamps it, so
             # without this a browser-launched task would record an

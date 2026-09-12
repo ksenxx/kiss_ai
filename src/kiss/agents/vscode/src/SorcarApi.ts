@@ -16,6 +16,7 @@ export interface RunFields {
   useParallel?: boolean;
   autoCommit?: boolean;
   webTools?: boolean;
+  classifyTasks?: boolean;
   tabId?: string;
 }
 

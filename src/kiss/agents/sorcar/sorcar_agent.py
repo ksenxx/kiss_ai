@@ -1659,6 +1659,7 @@ class SorcarAgent(RelentlessAgent):
         model_name: str | None,
         task: str,
         model_config: dict[str, Any] | None = None,
+        enabled: bool | None = None,
     ) -> TaskClassification | None:
         """Classify *task* now and pre-seed the verdict for coming runs.
 
@@ -1677,6 +1678,15 @@ class SorcarAgent(RelentlessAgent):
             model_name: The model the run will use, possibly None.
             task: The (already substituted) task prompt about to run.
             model_config: The model configuration the run will use.
+            enabled: Per-run override of the persisted
+                ``classify_tasks`` setting — the ``classifyTasks`` wire
+                field of the ``run`` command (the *classify_tasks*
+                parameter of :func:`kiss.server.sorcar.run`).  ``True``
+                forces classification on, ``False`` skips it (the run
+                then behaves exactly as it would without a
+                classifier), and ``None`` (the default) follows the
+                config.  The ``KISS_DISABLE_TASK_CLASSIFIER``
+                environment kill switch wins over any override.
 
         Returns:
             The task's classification, or ``None`` when classification
@@ -1684,7 +1694,9 @@ class SorcarAgent(RelentlessAgent):
         """
         self._classification_preseeded = False
         self._reset_task_classification()
-        verdict = self._classify_task_once(model_name, task, model_config)
+        verdict = self._classify_task_once(
+            model_name, task, model_config, enabled_override=enabled,
+        )
         self._classification_preseeded = True
         return verdict
 
@@ -1694,6 +1706,7 @@ class SorcarAgent(RelentlessAgent):
         task: str,
         model_config: dict[str, Any] | None,
         arguments: dict[str, str] | None = None,
+        enabled_override: bool | None = None,
     ) -> TaskClassification | None:
         """Classify *task* at most once per run and return the verdict.
 
@@ -1715,6 +1728,10 @@ class SorcarAgent(RelentlessAgent):
                 substituted into *task* before classification so the
                 classifier sees the prompt the run will actually
                 execute, not the raw ``{placeholder}`` template.
+            enabled_override: Per-run override of the persisted
+                ``classify_tasks`` setting (see
+                :meth:`classify_task_for_run`); ``None`` follows the
+                config.
 
         Returns:
             The task's classification, or ``None`` when classification
@@ -1724,7 +1741,7 @@ class SorcarAgent(RelentlessAgent):
         if self._classification_attempted:
             return self._task_classification
         self._classification_attempted = True
-        if not classification_enabled():
+        if not classification_enabled(enabled_override):
             return None
         outcome = classify_task(
             task=substitute_prompt_args(task, arguments),

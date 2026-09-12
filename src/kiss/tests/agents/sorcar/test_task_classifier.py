@@ -358,6 +358,27 @@ def test_classification_enabled_follows_config(
     assert classification_enabled() is True
 
 
+def test_classification_enabled_per_run_override(
+    env: IsolatedKissHome,
+) -> None:
+    """A per-run boolean override beats the config; None follows it."""
+    env.write_config(classify_tasks=True)
+    assert classification_enabled(override=False) is False
+    assert classification_enabled(override=None) is True
+    env.write_config(classify_tasks=False)
+    assert classification_enabled(override=True) is True
+    assert classification_enabled(override=None) is False
+
+
+def test_classification_env_kill_switch_beats_override(
+    env: IsolatedKissHome,
+) -> None:
+    """KISS_DISABLE_TASK_CLASSIFIER=1 wins even over override=True."""
+    env.write_config(classify_tasks=True)
+    os.environ[_DISABLE_ENV] = "1"
+    assert classification_enabled(override=True) is False
+
+
 # ---------------------------------------------------------------------------
 # SorcarAgent._classify_task_once — caching and the disabled path
 # ---------------------------------------------------------------------------
@@ -374,6 +395,31 @@ def test_classify_once_returns_none_when_disabled(
     # The attempt is cached: later calls do not re-consult the config.
     env.write_config(classify_tasks=True)
     assert agent._classify_task_once(MODEL, _SIMPLE_TASK, None) is None
+
+
+def test_classify_for_run_disabled_by_override(
+    env: IsolatedKissHome,
+) -> None:
+    """classify_task_for_run(enabled=False) skips classification even
+    with the config on, and the disabled seed survives into the run:
+    a later in-run classification attempt returns None without
+    re-consulting the (enabled) config."""
+    env.write_config(classify_tasks=True)
+    agent = SorcarAgent("clf-run-override-off")
+    assert (
+        agent.classify_task_for_run(
+            model_name=MODEL, task=_DEV_TASK, enabled=False,
+        )
+        is None
+    )
+    assert agent._classification_attempted is True
+    assert agent._classification_preseeded is True
+    # No classification ran, so no classifier spend was banked.
+    assert agent._classifier_budget_used == 0.0
+    assert agent._classifier_tokens_used == 0
+    assert agent._classifier_steps == 0
+    # The run reuses the seed instead of re-classifying.
+    assert agent._classify_task_once(MODEL, _DEV_TASK, None) is None
 
 
 def test_classify_once_returns_cached_verdict(
@@ -652,6 +698,29 @@ def test_classify_task_for_run_preseeds_worktree_decision(
     env.write_config(classify_tasks=False)
     assert agent.classify_task_for_run(model_name=MODEL, task=_DEV_TASK) is None
     assert agent._task_classification is None
+
+
+@live_api
+@requires_anthropic
+def test_classify_task_for_run_enabled_override_beats_config(
+    env: IsolatedKissHome,
+) -> None:
+    """enabled=True classifies for real even with classify_tasks off.
+
+    The per-run ``classify_tasks`` parameter of
+    ``kiss.server.sorcar.run`` (wire field ``classifyTasks``) must win
+    over the persisted "Classify tasks before running" setting in both
+    directions; the forcing direction needs a real verdict to prove
+    the classification actually ran.
+    """
+    env.write_config(classify_tasks=False)
+    agent = SorcarAgent("clf-run-override-on")
+    verdict = agent.classify_task_for_run(
+        model_name=MODEL, task=_DEV_TASK, enabled=True,
+    )
+    assert verdict is not None
+    assert verdict.is_development is True
+    assert agent._classifier_budget_used > 0.0
 
 
 @live_api

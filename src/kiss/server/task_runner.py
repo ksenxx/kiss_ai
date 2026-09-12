@@ -1290,6 +1290,15 @@ class _TaskRunnerMixin:
         from kiss.core.vscode_config import build_model_config, load_config
 
         _raw_mc_early = cmd.get("modelConfig")
+        # Per-run classification toggle: the ``classifyTasks`` wire
+        # field (``classify_tasks`` on ``kiss.server.sorcar.run``).
+        # Absent or malformed means "no override" — the persisted
+        # "Classify tasks before running" setting decides, exactly
+        # like ``webTools`` falls back to "Use web tools".
+        _raw_classify = cmd.get("classifyTasks")
+        _classify_enabled = (
+            _raw_classify if isinstance(_raw_classify, bool) else None
+        )
         _classify_verdict = agent.classify_task_for_run(
             model_name=model,
             task=prompt + append_to_prompt,
@@ -1298,6 +1307,7 @@ class _TaskRunnerMixin:
                 if isinstance(_raw_mc_early, dict)
                 else build_model_config(load_config())
             ),
+            enabled=_classify_enabled,
         )
         if _classify_verdict is not None:
             use_worktree = _classify_verdict.is_development

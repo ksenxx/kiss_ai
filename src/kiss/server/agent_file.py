@@ -82,12 +82,13 @@ parameter (wire field ``appendBasicTools``).  ``timeout``,
 client-transport parameters — the script only runs on the daemon that
 ``sock_path`` selects, ``timeout`` bounds the client's local wait, and
 ``stop_on_timeout`` picks the client's timeout behavior — so a
-daemon-side getter could never take effect.  ``use_web_tools`` and
-``is_parallel`` have no getters either: an SEA run always
-uses the values the client passed to ``run()`` (the parameters'
-defaults when the caller passed none), so a script defining
-``get_use_web_tools()`` or ``get_is_parallel()`` is simply not
-consulted for them.  ``scope_work_dir`` (wire field ``tabScopeWorkDir``) is
+daemon-side getter could never take effect.  ``use_web_tools``,
+``classify_tasks``, and ``is_parallel`` have no getters either: an SEA
+run always uses the values the client passed to ``run()`` (the
+parameters' defaults when the caller passed none), so a script
+defining ``get_use_web_tools()``, ``get_classify_tasks()``, or
+``get_is_parallel()`` is simply not consulted for them.
+``scope_work_dir`` (wire field ``tabScopeWorkDir``) is
 absent by design too: it is the CALLING client's tab-bar visibility
 scope, which the dispatched script must not be able to repoint at
 another workspace — and its absence here is what lets the scope

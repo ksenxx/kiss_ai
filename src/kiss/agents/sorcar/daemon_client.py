@@ -355,6 +355,7 @@ def run(
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
     use_web_tools: bool | None = None,
+    classify_tasks: bool | None = None,
     is_parallel: bool = True,
     append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
@@ -508,7 +509,7 @@ def run(
             channel agent modules) makes the script its own tools
             file.  ``timeout``, *stop_on_timeout*, *sock_path*,
             *scope_work_dir*, *parent_task_id*, *parent_tab_id*,
-            *use_web_tools*, and *is_parallel* have no
+            *use_web_tools*, *classify_tasks*, and *is_parallel* have no
             getters by design: the first three are client-transport
             parameters — the script only runs on the daemon that
             *sock_path* selects, *timeout* bounds this client's local
@@ -518,9 +519,9 @@ def run(
             not be able to repoint at another workspace,
             *parent_task_id* / *parent_tab_id* are the CALLING task's
             identity, which the script must not be able to forge, and
-            *use_web_tools* / *is_parallel* always keep the values passed
-            to this call (their defaults when the caller passed
-            none).  The
+            *use_web_tools* / *classify_tasks* / *is_parallel* always
+            keep the values passed to this call (their defaults when
+            the caller passed none).  The
             *extension_agent_path* itself is resolved against this process's
             working directory and validated eagerly, like *tools*.  A
             broken agent script (deleted before the daemon reads it,
@@ -544,6 +545,16 @@ def run(
             ``None`` uses the daemon's configured default (the
             settings panel's "Use web tools" checkbox, persisted as
             ``use_web_browser``).
+        classify_tasks: Per-task override of pre-run task
+            classification (``kiss.agents.sorcar.task_classifier``),
+            which runs one lightweight non-agentic LLM call before the
+            task to pick the system prompt (lite vs. full) and decide
+            worktree isolation for the run.  ``True`` forces
+            classification on, ``False`` skips it — the run then keeps
+            the *use_worktree* value passed here and the full system
+            prompt — and ``None`` (the default) uses the daemon's
+            configured default (the settings panel's "Classify tasks
+            before running" checkbox, persisted as ``classify_tasks``).
         is_parallel: Whether the agent may spawn parallel sub-agents.
             Defaults to True.
         append_basic_tools: Whether the agent gets the built-in basic
@@ -696,6 +707,7 @@ def run(
             "maxBudget": max_budget,
             "modelConfig": model_config,
             "webTools": use_web_tools,
+            "classifyTasks": classify_tasks,
             "useParallel": is_parallel,
             "appendBasicTools": append_basic_tools,
             "appendToSystemPrompt": append_to_system_prompt,
