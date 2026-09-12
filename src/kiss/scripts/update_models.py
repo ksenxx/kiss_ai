@@ -1884,33 +1884,43 @@ def apply_updates_to_file(
     print(f"  Written to {MODEL_INFO_PATH}")
 
 
+# Runtime routing label (from model_info.get_model_provider) -> README
+# category label. The README spells some labels differently: "Together AI"
+# / "Moonshot AI" carry the vendor suffix, and the CLI categories keep the
+# backticked prefix so the table row can be matched verbatim by
+# tests/test_readme_zai_moonshot. There is deliberately no "Unknown" entry:
+# a catalog model that no provider routes must fail the sync loudly
+# (KeyError) instead of being silently miscounted.
+_PROVIDER_LABEL_TO_README_CATEGORY: dict[str, str] = {
+    "OpenAI": "OpenAI",
+    "Anthropic": "Anthropic",
+    "Gemini": "Gemini",
+    "Together": "Together AI",
+    "Z.AI": "Z.AI",
+    "Moonshot": "Moonshot AI",
+    "OpenRouter": "OpenRouter",
+    "Claude Code CLI": "Claude Code CLI (`cc/*`)",
+    "Codex CLI": "Codex CLI (`codex/*`)",
+}
+
+
 def _readme_provider_category(model_name: str) -> str:
     """Return the README provider-category label for ``model_name``.
 
-    Mirrors ``tests/test_readme_zai_moonshot._provider_category`` so that
-    counts emitted into ``README.md`` are guaranteed to agree with the
-    test's expectations after :func:`sync_readme_catalog` rewrites the
-    "Models Supported" section. The ``cc/*`` and ``codex/*`` labels keep
-    the backticks (and matching parentheses) so they can be matched
-    verbatim by the test's ``| Provider | count |`` regex.
+    Categories follow the provider that ROUTES the model, looked up from
+    the single runtime routing table
+    (:func:`kiss.core.models.model_info.get_model_provider`) rather than a
+    duplicated prefix list — so the open-weight ``openai/gpt-oss-*`` and
+    ``google/gemma-*`` models count under Together AI (they are served
+    with a ``TOGETHER_API_KEY``), and any future routing change is
+    reflected here automatically.
+
+    Raises:
+        KeyError: If no registered provider routes ``model_name``.
     """
-    if model_name.startswith("openrouter/"):
-        return "OpenRouter"
-    if model_name.startswith("cc/"):
-        return "Claude Code CLI (`cc/*`)"
-    if model_name.startswith("codex/"):
-        return "Codex CLI (`codex/*`)"
-    if model_name.startswith("claude-"):
-        return "Anthropic"
-    if model_name.startswith("glm-"):
-        return "Z.AI"
-    if model_name.startswith(("kimi-", "moonshot-")):
-        return "Moonshot AI"
-    if model_name.startswith(("gemini-", "google/")):
-        return "Gemini / Google"
-    if model_name.startswith(("gpt-", "o", "computer-use-preview", "text-embedding-")):
-        return "OpenAI"
-    return "Together AI"
+    from kiss.core.models.model_info import get_model_provider
+
+    return _PROVIDER_LABEL_TO_README_CATEGORY[get_model_provider(model_name)]
 
 
 # Every label _readme_provider_category can return, i.e. every per-provider
@@ -1920,7 +1930,7 @@ def _readme_provider_category(model_name: str) -> str:
 _README_CATEGORIES: tuple[str, ...] = (
     "OpenAI",
     "Anthropic",
-    "Gemini / Google",
+    "Gemini",
     "Together AI",
     "Z.AI",
     "Moonshot AI",
