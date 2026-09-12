@@ -156,11 +156,9 @@ def _port_arg_backends() -> list[tuple[Any, str]]:
     from kiss.agents.third_party_agents.synology_chat_agent import (
         SynologyChatChannelBackend,
     )
-    from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
     from kiss.agents.third_party_agents.zalo_agent import ZaloChannelBackend
 
     return [
-        (WhatsAppChannelBackend, "WhatsApp webhook bind failed: "),
         (ZaloChannelBackend, "Zalo webhook bind failed: "),
         (LineChannelBackend, "LINE webhook bind failed: "),
         (DingTalkChannelBackend, "DingTalk callback bind failed: "),
@@ -169,7 +167,7 @@ def _port_arg_backends() -> list[tuple[Any, str]]:
 
 
 class TestPortArgumentBackends:
-    """The five backends passing an explicit port to their start method."""
+    """The four backends passing an explicit port to their start method."""
 
     @pytest.mark.parametrize("backend_cls,prefix", _port_arg_backends())
     def test_start_and_stop(self, backend_cls: Any, prefix: str) -> None:

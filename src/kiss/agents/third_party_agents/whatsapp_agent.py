@@ -2,14 +2,25 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""WhatsApp Agent — channel agent with WhatsApp Business Cloud API tools.
+"""WhatsApp Agent — channel agent for a personal WhatsApp account, QR-paired.
 
-Provides authenticated access to WhatsApp via the Meta Graph API.
-Handles authentication (reading config from disk or prompting the user
-via the browser), stores the access token and phone number ID securely
-in ``~/.kiss/third_party_agents/whatsapp/config.json``, and exposes a focused set
-of WhatsApp Business API tools that give the agent full control over
-messaging, media, templates, and business profile management.
+Uses the same approach as the ``whatsapp`` entry in ``connectors/``: the
+`lharries/whatsapp-mcp <https://github.com/lharries/whatsapp-mcp>`_ Go
+bridge speaks the WhatsApp Web multidevice protocol (whatsmeow), pairs
+once via a QR code scanned from the phone, and mirrors all message
+history into a local SQLite database (``whatsapp-bridge/store/``).
+Nothing new sees the traffic — it is the normal end-to-end-encrypted
+WhatsApp Web protocol, and all data stays on this machine.
+
+This module manages the bridge itself (clone, build, run, QR pairing)
+and exposes messaging tools that read the bridge's SQLite database and
+call its localhost REST API — no Meta Business account, access token,
+or webhook is involved.
+
+Pairing renders the bridge's QR code into a local HTML page
+(``~/.kiss/third_party_agents/whatsapp/qr.html``) so the agent can show
+it in the browser for the user to scan with their phone (WhatsApp →
+Settings → Linked devices → Link a device).
 
 Usage::
 
@@ -19,780 +30,1073 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
-import queue
-import threading
-from http.server import BaseHTTPRequestHandler
+import os
+import re
+import shutil
+import signal
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 import requests
 
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    drain_queue_messages,
-    start_http_server,
-    stop_http_server,
-)
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_WEBHOOK_PORT = 18080
-
 _WHATSAPP_DIR = Path.home() / ".kiss" / "third_party_agents" / "whatsapp"
-_GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
-_config = ChannelConfig(_WHATSAPP_DIR, ("access_token", "phone_number_id"))
+_BRIDGE_REPO_URL = "https://github.com/lharries/whatsapp-mcp"
+_BRIDGE_BINARY_NAME = "kiss-whatsapp-bridge"
+# The upstream bridge hardcodes its REST port (startRESTServer(..., 8080)).
+_DEFAULT_BRIDGE_PORT = 8080
+_PAIRED_MARKER = "Successfully connected and authenticated!"
+_CONNECTED_MARKER = "Connected to WhatsApp!"
+_QR_TIMEOUT_MARKER = "Timeout waiting for QR code scan"
+# qrterminal.GenerateHalfBlock output: QR-dark modules are SPACES, QR-light
+# modules are full/half blocks, so a QR line contains only these 4 chars.
+_QR_LINE_CHARS = frozenset("█▀▄ ")
+_config = ChannelConfig(_WHATSAPP_DIR, ())
 
 
-def _api_request(
-    method: str,
-    url: str,
-    access_token: str,
-    json_body: dict | None = None,  # type: ignore[type-arg]
-    data: dict | None = None,  # type: ignore[type-arg]
-    files: dict | None = None,  # type: ignore[type-arg]
-) -> dict[str, Any]:
-    """Make an authenticated request to the Meta Graph API.
+def _channel_dir() -> Path:
+    """Return the WhatsApp channel data directory, honouring ``KISS_HOME``."""
+    return kiss_home() / "third_party_agents" / "whatsapp"
+
+
+def _default_repo_dir() -> Path:
+    """Return the default whatsapp-mcp clone location.
+
+    Reuses an existing ``~/.kiss/connectors/whatsapp-mcp`` clone (made by
+    ``connectors/enable.py enable whatsapp``) so the device is paired only
+    once; otherwise a clone inside the channel directory is used.
+    """
+    connectors_clone = kiss_home() / "connectors" / "whatsapp-mcp"
+    if (connectors_clone / "whatsapp-bridge" / "main.go").exists():
+        return connectors_clone
+    return _channel_dir() / "whatsapp-mcp"
+
+
+def _apply_config(backend: WhatsAppChannelBackend) -> None:
+    """Apply the persisted config (repo_dir, bridge_port) to *backend*.
 
     Args:
-        method: HTTP method (GET, POST, DELETE).
-        url: Full URL to request.
-        access_token: Bearer token for authorization.
-        json_body: JSON body for POST requests.
-        data: Form data for multipart requests.
-        files: File data for multipart uploads.
+        backend: The backend to configure.
+    """
+    cfg = _config.load() or {}
+    if cfg.get("repo_dir"):
+        backend._repo_dir = cfg["repo_dir"]
+    try:
+        if cfg.get("bridge_port"):
+            backend._bridge_port = int(cfg["bridge_port"])
+    except ValueError:
+        logger.warning("Ignoring invalid bridge_port in %s", _config.path)
+
+
+def _dump_clipped(payload: dict[str, Any], *list_keys: str) -> str:
+    """Serialize *payload* to JSON, bounded to roughly 8000 characters.
+
+    Unlike slicing the encoded text (which cuts inside JSON tokens), this
+    drops trailing items from the named list values until the result fits,
+    marking the payload with ``"truncated": true``.
+
+    Args:
+        payload: The response dict to serialize.
+        *list_keys: Keys of list values that may be shortened.
 
     Returns:
-        Parsed JSON response dict.
+        Valid JSON text.
     """
-    headers = {"Authorization": f"Bearer {access_token}"}
-    kwargs: dict[str, Any] = {"headers": headers, "timeout": 30}
-    if json_body is not None:
-        kwargs["json"] = json_body
-    if data is not None:
-        kwargs["data"] = data
-    if files is not None:
-        kwargs["files"] = files
-    resp = requests.request(method, url, **kwargs)
+    text = json.dumps(payload, indent=2)
+    lists = [payload[k] for k in list_keys if isinstance(payload.get(k), list)]
+    while len(text) > 7900 and any(lists):
+        max(lists, key=len).pop()
+        payload["truncated"] = True
+        text = json.dumps(payload, indent=2)
+    return text
+
+
+def _parse_time_bound(value: str) -> tuple[str, str]:
+    """Validate an ISO-8601 time bound for message filters.
+
+    Args:
+        value: User-supplied timestamp text (``T`` or space separator).
+
+    Returns:
+        Tuple of (normalized bound, "") on success, or ("", error message).
+    """
+    from datetime import datetime
+
     try:
-        return resp.json()  # type: ignore[no-any-return]
-    except ValueError:  # pragma: no cover – Graph API always returns JSON
-        return {"error": {"message": resp.text, "code": resp.status_code}}
+        return datetime.fromisoformat(value).isoformat(sep=" "), ""
+    except ValueError:
+        return "", (
+            f"Invalid date format: {value!r}. Use ISO-8601 (UTC), "
+            "e.g. '2026-09-10 10:00:00'."
+        )
+
+
+def _sender_forms(contact: str) -> tuple[str, str]:
+    """Return both stored sender representations for a contact identifier.
+
+    The bridge stores live-event senders as the bare user (digits) but
+    history-synced group senders as the full JID, so matching must accept
+    both exact forms.
+
+    Args:
+        contact: A JID or phone number in any common format.
+
+    Returns:
+        Tuple of (bare user, full JID).
+    """
+    jid = _to_jid(contact)
+    return jid.split("@")[0], jid
+
+
+def _to_jid(recipient: str) -> str:
+    """Normalize a recipient to a WhatsApp JID.
+
+    Args:
+        recipient: A JID (``123@s.whatsapp.net``, group ``123@g.us``) or a
+            phone number in any common format (``+1 415-555-2671``).
+
+    Returns:
+        The JID unchanged, or ``<digits>@s.whatsapp.net`` for a phone number.
+    """
+    recipient = recipient.strip()
+    if "@" in recipient:
+        return recipient
+    return re.sub(r"\D", "", recipient) + "@s.whatsapp.net"
+
+
+def _rest_recipient(recipient: str) -> str:
+    """Normalize a recipient for the bridge REST API.
+
+    The bridge accepts either a bare number (country code, digits only)
+    or a full JID.
+
+    Args:
+        recipient: JID or phone number in any common format.
+
+    Returns:
+        The JID unchanged, or the digits of the phone number.
+    """
+    recipient = recipient.strip()
+    if "@" in recipient:
+        return recipient
+    return re.sub(r"\D", "", recipient)
 
 
 class WhatsAppChannelBackend(ToolMethodBackend):
-    """Channel backend for WhatsApp Business Cloud API.
+    """Channel backend for personal WhatsApp via the whatsapp-mcp Go bridge.
 
-    Provides channel monitoring via webhook queue and message sending
-    for the channel poller and interactive agent.
-
-    For message polling, uses a webhook queue pattern: an embedded HTTP
-    server receives POST events from the WhatsApp platform and buffers
-    them; ``poll_messages()`` drains this buffer.
+    Reads message history from the bridge's SQLite database
+    (``whatsapp-bridge/store/messages.db``) and sends messages / downloads
+    media through the bridge's localhost REST API (``/api/send``,
+    ``/api/download``).
     """
 
-    def __init__(self, graph_api_base: str = _GRAPH_API_BASE) -> None:
+    def __init__(self, repo_dir: str = "", bridge_port: int = _DEFAULT_BRIDGE_PORT) -> None:
         """Initialize the backend.
 
         Args:
-            graph_api_base: Base URL of the Meta Graph API. Overridable for
-                testing against a local server.
+            repo_dir: Path of the whatsapp-mcp clone. Empty selects the
+                default location (the connectors clone when present).
+            bridge_port: Port of the bridge REST API. The upstream bridge
+                always listens on 8080; override only for a patched bridge
+                or a test stand-in.
         """
-        self._graph_api_base = graph_api_base
-        self._access_token: str = ""
-        self._phone_number_id: str = ""
-        self._waba_id: str = ""
-        self._verify_token: str = ""
+        self._repo_dir = repo_dir
+        self._bridge_port = bridge_port
         self._connection_info: str = ""
-        self._message_queue: queue.Queue[dict[str, Any]] = queue.Queue()
-        self._webhook_server: ThreadedHTTPServer | None = None
-        self._webhook_thread: threading.Thread | None = None
 
-    def connect(self) -> bool:
-        """Authenticate with WhatsApp using stored config and start webhook server.
+    @property
+    def repo_dir(self) -> Path:
+        """Absolute path of the whatsapp-mcp clone."""
+        if self._repo_dir:
+            return Path(self._repo_dir).expanduser().resolve()
+        return _default_repo_dir()
 
-        Returns:
-            True on success, False on failure.
+    @property
+    def bridge_dir(self) -> Path:
+        """Path of the Go bridge directory inside the clone."""
+        return self.repo_dir / "whatsapp-bridge"
+
+    @property
+    def messages_db(self) -> Path:
+        """Path of the bridge's message-history SQLite database."""
+        return self.bridge_dir / "store" / "messages.db"
+
+    @property
+    def session_db(self) -> Path:
+        """Path of the bridge's whatsmeow session SQLite database."""
+        return self.bridge_dir / "store" / "whatsapp.db"
+
+    def _is_paired(self) -> bool:
+        """Return True if a paired WhatsApp device session exists on disk.
+
+        The bridge creates ``store/whatsapp.db`` on first launch even
+        before the QR code is scanned, so mere file existence is not
+        pairing: a paired session has a row in whatsmeow's device table.
         """
-        cfg = _config.load()
-        if not cfg:  # pragma: no branch
-            self._connection_info = "No WhatsApp config found. Please authenticate first."
+        if not self.session_db.exists():
             return False
-        self._access_token = cfg["access_token"]
-        self._phone_number_id = cfg["phone_number_id"]
-        self._waba_id = cfg.get("waba_id", "")
-        self._verify_token = cfg.get("verify_token", "")
-
-        url = (
-            f"{self._graph_api_base}/{self._phone_number_id}"
-            "?fields=verified_name,display_phone_number"
-        )
-        result = _api_request("GET", url, self._access_token)
-        if "error" in result:  # pragma: no branch
-            self._connection_info = f"WhatsApp auth failed: {result['error']}"
+        try:
+            conn = sqlite3.connect(f"file:{self.session_db}?mode=ro", uri=True, timeout=10)
+            try:
+                rows = conn.execute("SELECT count(*) FROM whatsmeow_device").fetchone()
+            finally:
+                conn.close()
+            return bool(rows and rows[0])
+        except sqlite3.Error:
+            # Unreadable or pre-device-table database: treat as unpaired.
             return False
 
-        self._connection_info = (
-            f"Authenticated as {result.get('verified_name', '')} "
-            f"({result.get('display_phone_number', '')})"
-        )
-        port = int(cfg.get("webhook_port", _DEFAULT_WEBHOOK_PORT))
-        if not self._start_webhook_server(port=port):  # pragma: no branch
-            return False
-        return True
+    def _api_url(self, endpoint: str) -> str:
+        """Return the bridge REST API URL for *endpoint* (``send``/``download``)."""
+        return f"http://127.0.0.1:{self._bridge_port}/api/{endpoint}"
 
-    def _start_webhook_server(self, port: int = _DEFAULT_WEBHOOK_PORT) -> bool:
-        """Start the webhook HTTP server in a background thread.
+    def _bridge_running(self) -> bool:
+        """Return True if the bridge REST API answers on its port.
+
+        The bridge's ``/api/send`` handler only allows POST and answers a
+        GET with exactly 405; requiring that status keeps an unrelated
+        service on the same port from being mistaken for the bridge.
+        """
+        try:
+            resp = requests.get(self._api_url("send"), timeout=3)
+            return resp.status_code == 405
+        except requests.RequestException:
+            return False
+
+    def _api_send(self, payload: dict[str, str]) -> tuple[bool, str]:
+        """POST *payload* to the bridge ``/api/send`` endpoint.
 
         Args:
-            port: Port to listen on. Default: 18080 (overridable via the
-                ``webhook_port`` config key in :meth:`connect`).
+            payload: JSON body with ``recipient`` and ``message`` and/or
+                ``media_path``.
 
         Returns:
-            True if the server started successfully, False otherwise.
+            Tuple of (success, status message).
         """
-        backend = self
+        try:
+            resp = requests.post(self._api_url("send"), json=payload, timeout=60)
+        except requests.RequestException as e:
+            return False, (
+                f"Bridge not reachable: {e}. Start it with start_whatsapp_bridge()."
+            )
+        try:
+            result = resp.json()
+        except ValueError:
+            return False, f"HTTP {resp.status_code}: {resp.text[:500]}"
+        return bool(result.get("success", False)), str(result.get("message", ""))
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
-                from urllib.parse import parse_qs, urlparse
+    def _query(self, sql: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
+        """Run a read-only SQL query against the message database.
 
-                parsed = urlparse(self.path)
-                params = parse_qs(parsed.query)
-                mode = params.get("hub.mode", [""])[0]
-                token = params.get("hub.verify_token", [""])[0]
-                challenge = params.get("hub.challenge", [""])[0]
-                if backend._verify_token and not (
-                    mode == "subscribe" and token == backend._verify_token
-                ):
-                    self.send_response(403)
-                    self.end_headers()
-                    self.wfile.write(b"Forbidden")
-                    return
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(challenge.encode())
+        Args:
+            sql: SQL SELECT statement.
+            params: Bound query parameters.
 
-            def do_POST(self) -> None:
-                length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(length)
-                try:
-                    data = json.loads(body)
-                    for entry in data.get("entry", []):  # pragma: no branch
-                        for change in entry.get("changes", []):  # pragma: no branch
-                            value = change.get("value", {})
-                            for msg in value.get("messages", []):  # pragma: no branch
-                                backend._message_queue.put(msg)
-                except Exception:
-                    pass
-                self.send_response(200)
-                self.end_headers()
+        Returns:
+            All result rows.
 
-            def log_message(self, *args: Any) -> None:  # type: ignore[override]
-                pass
+        Raises:
+            FileNotFoundError: If the message database does not exist yet.
+            sqlite3.Error: On SQL errors.
+        """
+        if not self.messages_db.exists():
+            raise FileNotFoundError(
+                f"{self.messages_db} not found. Pair WhatsApp first "
+                "(check_whatsapp_auth() explains the steps) and give the "
+                "bridge a few minutes to sync history."
+            )
+        conn = sqlite3.connect(f"file:{self.messages_db}?mode=ro", uri=True, timeout=10)
+        try:
+            return conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
 
-        self.disconnect()
-        self._webhook_server, self._webhook_thread, error = start_http_server(
-            ("0.0.0.0", port),
-            Handler,
-            log=logger,
-            started_log="WhatsApp webhook server started on port %d",
-            error_prefix="WhatsApp webhook bind failed",
-            error_log="Could not start webhook server: %s",
-        )
-        if error is not None:
-            self._connection_info = error
+    # ------------------------------------------------------------------
+    # Channel protocol
+    # ------------------------------------------------------------------
+
+    def connect(self) -> bool:
+        """Verify the device is paired and the bridge is reachable.
+
+        Returns:
+            True on success, False (with ``connection_info``) otherwise.
+        """
+        _apply_config(self)
+        if not self._is_paired():
+            self._connection_info = (
+                "WhatsApp is not paired. Run: kiss-whatsapp -t 'authenticate whatsapp'"
+            )
             return False
+        if not self._bridge_running():
+            self._connection_info = (
+                "WhatsApp bridge is not running. "
+                "Run: kiss-whatsapp -t 'start the whatsapp bridge'"
+            )
+            return False
+        self._connection_info = f"WhatsApp bridge connected (repo: {self.repo_dir})"
         return True
 
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
-        """Drain the webhook message queue and return new messages.
+        """Return new messages from the bridge's SQLite database.
 
         Args:
-            channel_id: Sender phone number to filter on. When non-empty,
-                messages from other senders are dropped; when empty, all
-                messages are returned.
-            oldest: Unused for push-mode channels.
+            channel_id: Chat to monitor — a JID or a phone number
+                (normalized to ``<digits>@s.whatsapp.net``). Empty
+                monitors all chats.
+            oldest: Timestamp cursor — the raw ``messages.timestamp``
+                string of the newest message already seen. ``""``/``"0"``
+                fetches the most recent messages without an after-filter.
             limit: Maximum messages to return.
 
         Returns:
-            Tuple of (messages, oldest). Each message dict has at minimum:
-            ts, user (from), text.
+            Tuple of (messages oldest-first, new cursor). Each message
+            dict has ts, user (sender), text, id, chat_jid, is_from_me.
         """
-        raw_messages = drain_queue_messages(
-            self._message_queue,
-            limit=limit,
-            keep=lambda raw: not channel_id or raw.get("from", "") == channel_id,
-        )
+        where = []
+        params: list[Any] = []
+        has_cursor = oldest not in ("", "0")
+        if channel_id:
+            where.append("chat_jid = ?")
+            params.append(_to_jid(channel_id))
+        if has_cursor:
+            where.append("timestamp > ?")
+            params.append(oldest)
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        # With a cursor, take the OLDEST unseen rows so a burst larger
+        # than *limit* is delivered across ticks instead of being skipped;
+        # without one, seed from the most recent rows.
+        order = "ASC" if has_cursor else "DESC"
+        try:
+            rows = self._query(
+                "SELECT id, chat_jid, sender, content, timestamp, is_from_me, media_type "
+                f"FROM messages {where_sql} ORDER BY timestamp {order}, id LIMIT ?",
+                (*params, limit),
+            )
+        except (FileNotFoundError, sqlite3.Error) as e:
+            logger.warning("WhatsApp poll failed: %s", e)
+            return [], oldest
+        if not has_cursor:
+            rows = list(reversed(rows))
+        new_cursor = oldest
         messages: list[dict[str, Any]] = []
-        for raw in raw_messages:
-            msg_type = raw.get("type", "")
-            if msg_type == "text":  # pragma: no branch
-                text = raw.get("text", {}).get("body", "")
-            else:
-                text = f"[{msg_type} message]"
+        for msg_id, chat_jid, sender, content, ts, is_from_me, media_type in rows:
+            ts = str(ts or "")
+            if ts > new_cursor:
+                new_cursor = ts
             messages.append(
                 {
-                    "ts": raw.get("timestamp", ""),
-                    "user": raw.get("from", ""),
-                    "text": text,
-                    "id": raw.get("id", ""),
+                    "ts": ts,
+                    "user": str(sender or ""),
+                    "text": str(content or "") or f"[{media_type} message]",
+                    "id": str(msg_id or ""),
+                    "chat_jid": str(chat_jid or ""),
+                    "is_from_me": bool(is_from_me),
                 }
             )
-        return messages, oldest
+        return messages, new_cursor
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Send a text message to a WhatsApp number.
+        """Send a text message through the bridge REST API.
 
         Args:
-            channel_id: Recipient phone number in E.164 format.
+            channel_id: Recipient JID or phone number.
             text: Message text.
             thread_ts: Unused for WhatsApp.
 
         Raises:
-            RuntimeError: If the Graph API returns an error response.
+            RuntimeError: If the bridge reports failure or is unreachable.
         """
-        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
-        result = _api_request(
-            "POST",
-            url,
-            self._access_token,
-            json_body={
-                "messaging_product": "whatsapp",
-                "to": channel_id,
-                "type": "text",
-                "text": {"body": text},
-            },
+        ok, message = self._api_send(
+            {"recipient": _rest_recipient(channel_id), "message": text}
         )
-        if "error" in result:
-            raise RuntimeError(f"WhatsApp send failed: {result['error']}")
+        if not ok:
+            raise RuntimeError(f"WhatsApp send failed: {message}")
 
-    def disconnect(self) -> None:
-        """Stop the embedded webhook server and release backend resources."""
-        self._webhook_server, self._webhook_thread = stop_http_server(
-            self._webhook_server, self._webhook_thread
-        )
+    def is_from_bot(self, msg: dict[str, Any]) -> bool:
+        """Return True for messages sent from this paired account."""
+        return bool(msg.get("is_from_me"))
 
-    def send_text_message(self, to: str, body: str, preview_url: bool = False) -> str:
-        """Send a text message to a WhatsApp number.
+    # ------------------------------------------------------------------
+    # Agent tools (public methods are exposed automatically)
+    # ------------------------------------------------------------------
 
-        Args:
-            to: Recipient phone number in E.164 format (e.g. "+14155238886").
-                Include country code, no spaces or dashes.
-            body: Message text (up to 4096 characters).
-            preview_url: If True, URLs in the body will show a preview.
-                Default: False.
-
-        Returns:
-            JSON string with ok status and message_id.
-        """
-        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
-        try:
-            result = _api_request(
-                "POST",
-                url,
-                self._access_token,
-                json_body={
-                    "messaging_product": "whatsapp",
-                    "to": to,
-                    "type": "text",
-                    "text": {"preview_url": preview_url, "body": body},
-                },
-            )
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            messages = result.get("messages", [])  # pragma: no cover
-            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
-            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def send_template_message(
-        self,
-        to: str,
-        template_name: str,
-        language_code: str = "en_US",
-        components: str = "",
-    ) -> str:
-        """Send a pre-approved template message.
-
-        Template messages are required to initiate conversations outside
-        the 24-hour customer service window.
+    def search_whatsapp_contacts(self, query: str) -> str:
+        """Search WhatsApp contacts by name or phone number.
 
         Args:
-            to: Recipient phone number in E.164 format.
-            template_name: Name of the approved message template.
-            language_code: Template language code (e.g. "en_US").
-                Default: "en_US".
-            components: Optional JSON string of template components
-                (header, body, button parameters).
+            query: Search term matched (case-insensitively) against
+                contact names and JIDs.
 
         Returns:
-            JSON string with ok status and message_id.
+            JSON string with a list of contacts (jid, name, phone_number).
         """
-        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
-            template: dict[str, Any] = {
-                "name": template_name,
-                "language": {"code": language_code},
-            }
-            if components:
-                template["components"] = json.loads(components)
-            result = _api_request(
-                "POST",
-                url,
-                self._access_token,
-                json_body={
-                    "messaging_product": "whatsapp",
-                    "to": to,
-                    "type": "template",
-                    "template": template,
-                },
+            rows = self._query(
+                "SELECT DISTINCT jid, name FROM chats "
+                "WHERE (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?)) "
+                "AND jid NOT LIKE '%@g.us' ORDER BY name, jid LIMIT 50",
+                (f"%{query}%", f"%{query}%"),
             )
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            messages = result.get("messages", [])  # pragma: no cover
-            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
-            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def send_media_message(
-        self,
-        to: str,
-        media_type: str,
-        media_id: str = "",
-        link: str = "",
-        caption: str = "",
-        filename: str = "",
-    ) -> str:
-        """Send a media message (image, document, audio, video, sticker).
-
-        Provide either media_id (from upload_media) or link (public URL).
-
-        Args:
-            to: Recipient phone number in E.164 format.
-            media_type: Type of media. Options: "image", "document",
-                "audio", "video", "sticker".
-            media_id: Media ID from a previous upload_media call.
-            link: Public URL of the media file. Used if media_id is empty.
-            caption: Optional caption (supported for image, video, document).
-            filename: Optional filename (for document type).
-
-        Returns:
-            JSON string with ok status and message_id.
-        """
-        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
-        try:
-            media_obj: dict[str, Any] = {}
-            if media_id:
-                media_obj["id"] = media_id
-            elif link:
-                media_obj["link"] = link
-            if caption and media_type in ("image", "video", "document"):
-                media_obj["caption"] = caption
-            if filename and media_type == "document":
-                media_obj["filename"] = filename
-            result = _api_request(
-                "POST",
-                url,
-                self._access_token,
-                json_body={
-                    "messaging_product": "whatsapp",
-                    "to": to,
-                    "type": media_type,
-                    media_type: media_obj,
-                },
-            )
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            messages = result.get("messages", [])  # pragma: no cover
-            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
-            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def send_reaction(self, to: str, message_id: str, emoji: str) -> str:
-        """React to a message with an emoji.
-
-        Args:
-            to: Phone number of the message recipient.
-            message_id: ID of the message to react to.
-            emoji: Emoji character (e.g. "👍", "❤️", "😂").
-
-        Returns:
-            JSON string with ok status and message_id.
-        """
-        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
-        try:
-            result = _api_request(
-                "POST",
-                url,
-                self._access_token,
-                json_body={
-                    "messaging_product": "whatsapp",
-                    "to": to,
-                    "type": "reaction",
-                    "reaction": {"message_id": message_id, "emoji": emoji},
-                },
-            )
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            messages = result.get("messages", [])  # pragma: no cover
-            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
-            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def send_location_message(
-        self,
-        to: str,
-        latitude: str,
-        longitude: str,
-        name: str = "",
-        address: str = "",
-    ) -> str:
-        """Send a location message.
-
-        Args:
-            to: Recipient phone number in E.164 format.
-            latitude: Latitude of the location (e.g. "37.7749").
-            longitude: Longitude of the location (e.g. "-122.4194").
-            name: Optional name of the location.
-            address: Optional address of the location.
-
-        Returns:
-            JSON string with ok status and message_id.
-        """
-        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
-        try:
-            location: dict[str, Any] = {
-                "latitude": latitude,
-                "longitude": longitude,
-            }
-            if name:
-                location["name"] = name
-            if address:
-                location["address"] = address
-            result = _api_request(
-                "POST",
-                url,
-                self._access_token,
-                json_body={
-                    "messaging_product": "whatsapp",
-                    "to": to,
-                    "type": "location",
-                    "location": location,
-                },
-            )
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            messages = result.get("messages", [])  # pragma: no cover
-            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
-            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def send_interactive_message(self, to: str, interactive_json: str) -> str:
-        """Send an interactive message (buttons, lists, or product messages).
-
-        Args:
-            to: Recipient phone number in E.164 format.
-            interactive_json: JSON string of the interactive object.
-
-        Returns:
-            JSON string with ok status and message_id.
-        """
-        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
-        try:
-            result = _api_request(
-                "POST",
-                url,
-                self._access_token,
-                json_body={
-                    "messaging_product": "whatsapp",
-                    "to": to,
-                    "type": "interactive",
-                    "interactive": json.loads(interactive_json),
-                },
-            )
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            messages = result.get("messages", [])  # pragma: no cover
-            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
-            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def send_contact_message(self, to: str, contacts_json: str) -> str:
-        """Send a contact card message.
-
-        Args:
-            to: Recipient phone number in E.164 format.
-            contacts_json: JSON string of contacts array.
-
-        Returns:
-            JSON string with ok status and message_id.
-        """
-        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
-        try:
-            result = _api_request(
-                "POST",
-                url,
-                self._access_token,
-                json_body={
-                    "messaging_product": "whatsapp",
-                    "to": to,
-                    "type": "contacts",
-                    "contacts": json.loads(contacts_json),
-                },
-            )
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            messages = result.get("messages", [])  # pragma: no cover
-            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
-            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def mark_as_read(self, message_id: str) -> str:
-        """Mark a received message as read.
-
-        Args:
-            message_id: ID of the message to mark as read.
-
-        Returns:
-            JSON string with ok status.
-        """
-        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
-        try:
-            result = _api_request(
-                "POST",
-                url,
-                self._access_token,
-                json_body={
-                    "messaging_product": "whatsapp",
-                    "status": "read",
-                    "message_id": message_id,
-                },
-            )
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            return json.dumps(  # pragma: no cover
-                {"ok": True, "success": result.get("success", False)}
-            )
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def get_business_profile(self) -> str:
-        """Get the WhatsApp Business profile information.
-
-        Returns:
-            JSON string with business profile data (about, address,
-            description, email, websites, profile_picture_url).
-        """
-        url = (
-            f"{self._graph_api_base}/{self._phone_number_id}/whatsapp_business_profile"
-            "?fields=about,address,description,email,websites,profile_picture_url,vertical"
-        )
-        try:
-            result = _api_request("GET", url, self._access_token)
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            data_list = result.get("data", [])  # pragma: no cover
-            profile = data_list[0] if data_list else {}  # pragma: no cover
-            return json.dumps({"ok": True, "profile": profile}, indent=2)  # pragma: no cover
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def update_business_profile(
-        self,
-        about: str = "",
-        address: str = "",
-        description: str = "",
-        email: str = "",
-        websites: str = "",
-        vertical: str = "",
-    ) -> str:
-        """Update the WhatsApp Business profile.
-
-        Args:
-            about: Short description (max 139 characters).
-            address: Business address.
-            description: Full business description (max 512 characters).
-            email: Business email address.
-            websites: Comma-separated list of website URLs (max 2).
-            vertical: Business category (e.g. "RETAIL", "FOOD", "HEALTH").
-
-        Returns:
-            JSON string with ok status.
-        """
-        url = f"{self._graph_api_base}/{self._phone_number_id}/whatsapp_business_profile"
-        try:
-            body: dict[str, Any] = {"messaging_product": "whatsapp"}
-            if about:
-                body["about"] = about
-            if address:
-                body["address"] = address
-            if description:
-                body["description"] = description
-            if email:
-                body["email"] = email
-            if websites:
-                body["websites"] = [w.strip() for w in websites.split(",")]
-            if vertical:
-                body["vertical"] = vertical
-            result = _api_request("POST", url, self._access_token, json_body=body)
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            return json.dumps(  # pragma: no cover
-                {"ok": True, "success": result.get("success", False)}
-            )
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def upload_media(self, file_path: str, mime_type: str) -> str:
-        """Upload a media file for later sending.
-
-        Args:
-            file_path: Local path to the file to upload.
-            mime_type: MIME type of the file (e.g. "image/jpeg",
-                "application/pdf", "video/mp4", "audio/ogg").
-
-        Returns:
-            JSON string with ok status and media_id (use in
-            send_media_message).
-        """
-        url = f"{self._graph_api_base}/{self._phone_number_id}/media"
-        try:
-            with open(file_path, "rb") as f:
-                result = _api_request(
-                    "POST",
-                    url,
-                    self._access_token,
-                    data={"messaging_product": "whatsapp", "type": mime_type},
-                    files={"file": (Path(file_path).name, f, mime_type)},
-                )
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            return json.dumps(  # pragma: no cover
-                {"ok": True, "media_id": result.get("id", "")}
-            )
-        except OSError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def get_media_url(self, media_id: str) -> str:
-        """Get the download URL for an uploaded media file.
-
-        Args:
-            media_id: Media ID from upload_media or a received message.
-
-        Returns:
-            JSON string with ok status, url, mime_type, and file_size.
-        """
-        url = f"{self._graph_api_base}/{media_id}"
-        try:
-            result = _api_request("GET", url, self._access_token)
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            return json.dumps(
-                {  # pragma: no cover
-                    "ok": True,
-                    "url": result.get("url", ""),
-                    "mime_type": result.get("mime_type", ""),
-                    "file_size": result.get("file_size", 0),
-                }
-            )
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def delete_media(self, media_id: str) -> str:
-        """Delete an uploaded media file.
-
-        Args:
-            media_id: Media ID to delete.
-
-        Returns:
-            JSON string with ok status.
-        """
-        url = f"{self._graph_api_base}/{media_id}"
-        try:
-            result = _api_request("DELETE", url, self._access_token)
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            return json.dumps(  # pragma: no cover
-                {"ok": True, "success": result.get("success", False)}
-            )
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def list_message_templates(self, limit: int = 20, status: str = "") -> str:
-        """List available message templates for the WhatsApp Business Account.
-
-        Requires waba_id to be configured.
-
-        Args:
-            limit: Maximum number of templates to return. Default: 20.
-            status: Filter by status ("APPROVED", "PENDING", "REJECTED").
-                If empty, returns all statuses.
-
-        Returns:
-            JSON string with template list (name, status, category, language).
-        """
-        if not self._waba_id:
-            return json.dumps(
-                {
-                    "ok": False,
-                    "error": "waba_id not configured. Re-authenticate with "
-                    "authenticate_whatsapp() and provide the WABA ID.",
-                }
-            )
-        params = f"?limit={limit}"
-        if status:
-            params += f"&status={status}"
-        url = f"{self._graph_api_base}/{self._waba_id}/message_templates{params}"
-        try:
-            result = _api_request("GET", url, self._access_token)
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
-            templates = [  # pragma: no cover
-                {
-                    "name": t.get("name", ""),
-                    "status": t.get("status", ""),
-                    "category": t.get("category", ""),
-                    "language": t.get("language", ""),
-                    "id": t.get("id", ""),
-                }
-                for t in result.get("data", [])
+            contacts = [
+                {"jid": jid, "name": name, "phone_number": str(jid).split("@")[0]}
+                for jid, name in rows
             ]
-            # pragma: no cover
-            return json.dumps({"ok": True, "templates": templates}, indent=2)[:8000]
+            return _dump_clipped({"ok": True, "contacts": contacts}, "contacts")
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
+
+    def list_whatsapp_chats(
+        self,
+        query: str = "",
+        limit: int = 20,
+        page: int = 0,
+        include_last_message: bool = True,
+        sort_by: str = "last_active",
+    ) -> str:
+        """List WhatsApp chats (direct and group) with metadata.
+
+        Args:
+            query: Optional term to filter chats by name or JID.
+            limit: Maximum chats to return. Default: 20.
+            page: Page number for pagination. Default: 0.
+            include_last_message: Include each chat's last message.
+            sort_by: "last_active" (default) or "name".
+
+        Returns:
+            JSON string with a list of chats (jid, name,
+            last_message_time, and optionally last_message details).
+        """
+        try:
+            if include_last_message:
+                select = (
+                    "SELECT chats.jid, chats.name, chats.last_message_time, "
+                    "messages.content, messages.sender, messages.is_from_me FROM chats "
+                    "LEFT JOIN messages ON chats.jid = messages.chat_jid "
+                    "AND chats.last_message_time = messages.timestamp"
+                )
+                # Same-second messages can tie last_message_time; keep one
+                # row per chat so LIMIT/OFFSET stay correct.
+                group_by = "GROUP BY chats.jid"
+            else:
+                select = (
+                    "SELECT chats.jid, chats.name, chats.last_message_time, "
+                    "NULL, NULL, NULL FROM chats"
+                )
+                group_by = ""
+            where = ""
+            params: list[Any] = []
+            if query:
+                where = "WHERE (LOWER(chats.name) LIKE LOWER(?) OR chats.jid LIKE ?)"
+                params += [f"%{query}%", f"%{query}%"]
+            order = "chats.last_message_time DESC" if sort_by == "last_active" else "chats.name"
+            rows = self._query(
+                f"{select} {where} {group_by} ORDER BY {order} LIMIT ? OFFSET ?",
+                (*params, limit, page * limit),
+            )
+            chats = [self._chat_dict(row, include_last_message) for row in rows]
+            return _dump_clipped({"ok": True, "chats": chats}, "chats")
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def _chat_dict(self, row: tuple[Any, ...], include_last_message: bool) -> dict[str, Any]:
+        """Convert a chats+last-message row into a result dict.
+
+        Args:
+            row: (jid, name, last_message_time, content, sender, is_from_me).
+            include_last_message: Whether the message columns are meaningful.
+
+        Returns:
+            Chat dict for JSON serialization.
+        """
+        chat: dict[str, Any] = {
+            "jid": row[0],
+            "name": row[1],
+            "last_message_time": row[2],
+        }
+        if include_last_message:
+            chat["last_message"] = row[3]
+            chat["last_sender"] = row[4]
+            chat["last_is_from_me"] = bool(row[5]) if row[5] is not None else None
+        return chat
+
+    def get_whatsapp_chat(self, chat_jid: str, include_last_message: bool = True) -> str:
+        """Get WhatsApp chat metadata by JID.
+
+        Args:
+            chat_jid: The chat JID (``...@s.whatsapp.net`` or ``...@g.us``).
+            include_last_message: Include the chat's last message.
+
+        Returns:
+            JSON string with the chat metadata, or an error.
+        """
+        try:
+            rows = self._query(
+                "SELECT c.jid, c.name, c.last_message_time, m.content, m.sender, "
+                "m.is_from_me FROM chats c LEFT JOIN messages m ON c.jid = m.chat_jid "
+                "AND c.last_message_time = m.timestamp WHERE c.jid = ? LIMIT 1",
+                (chat_jid,),
+            )
+            if not rows:
+                return json.dumps({"ok": False, "error": f"Chat not found: {chat_jid}"})
+            return json.dumps(
+                {"ok": True, "chat": self._chat_dict(rows[0], include_last_message)}, indent=2
+            )
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_whatsapp_direct_chat_by_contact(self, sender_phone_number: str) -> str:
+        """Find the direct (non-group) chat with a phone number.
+
+        Args:
+            sender_phone_number: Phone number to search for (digits;
+                country code included).
+
+        Returns:
+            JSON string with the chat metadata, or an error.
+        """
+        try:
+            digits = re.sub(r"\D", "", sender_phone_number)
+            rows = self._query(
+                "SELECT c.jid, c.name, c.last_message_time, m.content, m.sender, "
+                "m.is_from_me FROM chats c LEFT JOIN messages m ON c.jid = m.chat_jid "
+                "AND c.last_message_time = m.timestamp "
+                "WHERE c.jid LIKE ? AND c.jid NOT LIKE '%@g.us' LIMIT 1",
+                (f"%{digits}%",),
+            )
+            if not rows:
+                return json.dumps(
+                    {"ok": False, "error": f"No direct chat found with {sender_phone_number}"}
+                )
+            return json.dumps({"ok": True, "chat": self._chat_dict(rows[0], True)}, indent=2)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_whatsapp_contact_chats(self, jid: str, limit: int = 20, page: int = 0) -> str:
+        """List all chats (direct and group) involving a contact.
+
+        Args:
+            jid: The contact's JID (``...@s.whatsapp.net``).
+            limit: Maximum chats to return. Default: 20.
+            page: Page number for pagination. Default: 0.
+
+        Returns:
+            JSON string with the list of chats.
+        """
+        try:
+            rows = self._query(
+                "SELECT DISTINCT c.jid, c.name, c.last_message_time, NULL, NULL, NULL "
+                "FROM chats c JOIN messages m ON c.jid = m.chat_jid "
+                "WHERE m.sender IN (?, ?) OR c.jid = ? "
+                "ORDER BY c.last_message_time DESC LIMIT ? OFFSET ?",
+                (*_sender_forms(jid), jid, limit, page * limit),
+            )
+            chats = [self._chat_dict(row, False) for row in rows]
+            return _dump_clipped({"ok": True, "chats": chats}, "chats")
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_whatsapp_last_interaction(self, jid: str) -> str:
+        """Get the most recent message involving a contact.
+
+        Args:
+            jid: The contact's JID (``...@s.whatsapp.net``).
+
+        Returns:
+            JSON string with the most recent message, or an error.
+        """
+        try:
+            rows = self._query(
+                "SELECT m.id, m.chat_jid, c.name, m.sender, m.content, m.timestamp, "
+                "m.is_from_me, m.media_type FROM messages m "
+                "JOIN chats c ON m.chat_jid = c.jid "
+                "WHERE m.sender IN (?, ?) OR c.jid = ? "
+                "ORDER BY m.timestamp DESC, m.id DESC LIMIT 1",
+                (*_sender_forms(jid), jid),
+            )
+            if not rows:
+                return json.dumps({"ok": False, "error": f"No messages found for {jid}"})
+            return json.dumps({"ok": True, "message": self._message_dict(rows[0])}, indent=2)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def _message_dict(self, row: tuple[Any, ...]) -> dict[str, Any]:
+        """Convert a message row into a result dict.
+
+        Args:
+            row: (id, chat_jid, chat_name, sender, content, timestamp,
+                is_from_me, media_type).
+
+        Returns:
+            Message dict for JSON serialization.
+        """
+        content = row[4]
+        if isinstance(content, str) and len(content) > 2000:
+            content = content[:2000] + "…[truncated]"
+        return {
+            "id": row[0],
+            "chat_jid": row[1],
+            "chat_name": row[2],
+            "sender": row[3],
+            "content": content,
+            "timestamp": row[5],
+            "is_from_me": bool(row[6]),
+            "media_type": row[7],
+        }
+
+    _MESSAGE_SELECT = (
+        "SELECT m.id, m.chat_jid, c.name, m.sender, m.content, m.timestamp, "
+        "m.is_from_me, m.media_type FROM messages m JOIN chats c ON m.chat_jid = c.jid"
+    )
+
+    def list_whatsapp_messages(
+        self,
+        chat_jid: str = "",
+        sender_phone_number: str = "",
+        query: str = "",
+        after: str = "",
+        before: str = "",
+        limit: int = 20,
+        page: int = 0,
+    ) -> str:
+        """List WhatsApp messages matching the given filters, newest first.
+
+        Args:
+            chat_jid: Only messages in this chat JID.
+            sender_phone_number: Only messages from this sender (digits or JID).
+            query: Only messages whose text contains this term
+                (case-insensitive).
+            after: Only messages after this timestamp
+                (``YYYY-MM-DD HH:MM:SS``; compared against the stored
+                timestamp string).
+            before: Only messages before this timestamp.
+            limit: Maximum messages to return. Default: 20.
+            page: Page number for pagination. Default: 0.
+
+        Returns:
+            JSON string with the matching messages. Media messages have
+            empty content and a media_type; use
+            download_whatsapp_media(message_id, chat_jid) to fetch the file.
+        """
+        try:
+            where = []
+            params: list[Any] = []
+            if chat_jid:
+                where.append("m.chat_jid = ?")
+                params.append(chat_jid)
+            if sender_phone_number:
+                where.append("m.sender IN (?, ?)")
+                params.extend(_sender_forms(sender_phone_number))
+            if query:
+                where.append("LOWER(m.content) LIKE LOWER(?)")
+                params.append(f"%{query}%")
+            for bound, op in ((after, ">"), (before, "<")):
+                if not bound:
+                    continue
+                normalized, error = _parse_time_bound(bound)
+                if error:
+                    return json.dumps({"ok": False, "error": error})
+                where.append(f"datetime(m.timestamp) {op} datetime(?)")
+                params.append(normalized)
+            where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+            rows = self._query(
+                f"{self._MESSAGE_SELECT} {where_sql} "
+                "ORDER BY m.timestamp DESC LIMIT ? OFFSET ?",
+                (*params, limit, page * limit),
+            )
+            messages = [self._message_dict(row) for row in rows]
+            return _dump_clipped({"ok": True, "messages": messages}, "messages")
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_whatsapp_message_context(
+        self, message_id: str, before: int = 5, after: int = 5
+    ) -> str:
+        """Get the messages surrounding a specific message in its chat.
+
+        Args:
+            message_id: ID of the target message.
+            before: Number of earlier messages to include. Default: 5.
+            after: Number of later messages to include. Default: 5.
+
+        Returns:
+            JSON string with before/message/after message lists.
+        """
+        try:
+            target = self._query(
+                f"{self._MESSAGE_SELECT} WHERE m.id = ? LIMIT 1", (message_id,)
+            )
+            if not target:
+                return json.dumps({"ok": False, "error": f"Message not found: {message_id}"})
+            msg = self._message_dict(target[0])
+            # Compound (timestamp, id) comparisons keep same-second
+            # neighbours (whole-second history timestamps tie often).
+            before_rows = self._query(
+                f"{self._MESSAGE_SELECT} WHERE m.chat_jid = ? "
+                "AND (m.timestamp < ? OR (m.timestamp = ? AND m.id < ?)) "
+                "ORDER BY m.timestamp DESC, m.id DESC LIMIT ?",
+                (msg["chat_jid"], msg["timestamp"], msg["timestamp"], msg["id"], before),
+            )
+            after_rows = self._query(
+                f"{self._MESSAGE_SELECT} WHERE m.chat_jid = ? "
+                "AND (m.timestamp > ? OR (m.timestamp = ? AND m.id > ?)) "
+                "ORDER BY m.timestamp ASC, m.id ASC LIMIT ?",
+                (msg["chat_jid"], msg["timestamp"], msg["timestamp"], msg["id"], after),
+            )
+            return _dump_clipped(
+                {
+                    "ok": True,
+                    "before": [self._message_dict(r) for r in reversed(before_rows)],
+                    "message": msg,
+                    "after": [self._message_dict(r) for r in after_rows],
+                },
+                "before",
+                "after",
+            )
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def send_whatsapp_message(self, recipient: str, message: str) -> str:
+        """Send a WhatsApp text message to a person or group.
+
+        Args:
+            recipient: Phone number with country code (e.g. "+14155238886"
+                or "14155238886") or a JID ("123456789@s.whatsapp.net";
+                groups use "123456789@g.us").
+            message: The message text to send.
+
+        Returns:
+            JSON string with ok status and the bridge's status message.
+        """
+        if not recipient.strip():
+            return json.dumps({"ok": False, "error": "recipient is required"})
+        ok, status = self._api_send(
+            {"recipient": _rest_recipient(recipient), "message": message}
+        )
+        return json.dumps({"ok": ok, "message": status})
+
+    def send_whatsapp_file(self, recipient: str, media_path: str) -> str:
+        """Send a file (image, video, raw audio, document) via WhatsApp.
+
+        Args:
+            recipient: Phone number with country code or a JID
+                (groups use "...@g.us").
+            media_path: Absolute path of the file to send.
+
+        Returns:
+            JSON string with ok status and the bridge's status message.
+        """
+        if not recipient.strip():
+            return json.dumps({"ok": False, "error": "recipient is required"})
+        if not Path(media_path).is_file():
+            return json.dumps({"ok": False, "error": f"File not found: {media_path}"})
+        ok, status = self._api_send(
+            {"recipient": _rest_recipient(recipient), "media_path": str(media_path)}
+        )
+        return json.dumps({"ok": ok, "message": status})
+
+    def send_whatsapp_audio_message(self, recipient: str, media_path: str) -> str:
+        """Send an audio file as a playable WhatsApp voice message.
+
+        Non-``.ogg`` files are converted to Opus with ffmpeg first; if
+        ffmpeg is unavailable, use send_whatsapp_file() instead (the audio
+        then arrives as a plain file, not a voice note).
+
+        Args:
+            recipient: Phone number with country code or a JID.
+            media_path: Absolute path of the audio file.
+
+        Returns:
+            JSON string with ok status and the bridge's status message.
+        """
+        if not recipient.strip():
+            return json.dumps({"ok": False, "error": "recipient is required"})
+        path = Path(media_path)
+        if not path.is_file():
+            return json.dumps({"ok": False, "error": f"File not found: {media_path}"})
+        if path.suffix != ".ogg":
+            fd, converted = tempfile.mkstemp(suffix=".ogg", prefix="kiss-whatsapp-voice.")
+            os.close(fd)
+            cmd = [
+                "ffmpeg", "-i", str(path), "-c:a", "libopus", "-b:a", "32k",
+                "-ar", "24000", "-application", "voip", "-vbr", "on",
+                "-compression_level", "10", "-frame_duration", "60", "-y",
+                converted,
+            ]
+            try:
+                subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
+            except (OSError, subprocess.SubprocessError) as e:
+                Path(converted).unlink(missing_ok=True)
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": f"ffmpeg conversion failed ({e}); "
+                        "use send_whatsapp_file() to send the raw audio instead.",
+                    }
+                )
+            path = Path(converted)
+        try:
+            ok, status = self._api_send(
+                {"recipient": _rest_recipient(recipient), "media_path": str(path)}
+            )
+        finally:
+            if path != Path(media_path):
+                path.unlink(missing_ok=True)
+        return json.dumps({"ok": ok, "message": status})
+
+    def download_whatsapp_media(self, message_id: str, chat_jid: str) -> str:
+        """Download the media of a WhatsApp message to a local file.
+
+        Args:
+            message_id: ID of the message containing media (from
+                list_whatsapp_messages).
+            chat_jid: JID of the chat containing the message.
+
+        Returns:
+            JSON string with ok status and the local file path.
+        """
+        try:
+            resp = requests.post(
+                self._api_url("download"),
+                json={"message_id": message_id, "chat_jid": chat_jid},
+                timeout=120,
+            )
+            result = resp.json()
+            return json.dumps(
+                {
+                    "ok": bool(result.get("success", False)),
+                    "message": result.get("message", ""),
+                    "file_path": result.get("path", ""),
+                    "filename": result.get("filename", ""),
+                }
+            )
+        except (requests.RequestException, ValueError) as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+
+# ----------------------------------------------------------------------
+# Bridge process management and QR pairing
+# ----------------------------------------------------------------------
+
+
+# The whatsmeow version pinned by upstream whatsapp-mcp (Mar 2025) is now
+# rejected by WhatsApp servers ("Client outdated (405)"), so the bridge is
+# built against the latest whatsmeow.  Newer whatsmeow added a
+# context.Context first argument to these calls in the bridge's main.go;
+# the plain-string rewrites below adapt it, plus one security fix (each
+# rewrite is a no-op once applied).
+_BRIDGE_SOURCE_FIXES = (
+    (
+        "client.Download(downloader)",
+        "client.Download(context.Background(), downloader)",
+    ),
+    (
+        'sqlstore.New("sqlite3"',
+        'sqlstore.New(context.Background(), "sqlite3"',
+    ),
+    (
+        "container.GetFirstDevice()",
+        "container.GetFirstDevice(context.Background())",
+    ),
+    (
+        "client.GetGroupInfo(jid)",
+        "client.GetGroupInfo(context.Background(), jid)",
+    ),
+    (
+        "client.Store.Contacts.GetContact(jid)",
+        "client.Store.Contacts.GetContact(context.Background(), jid)",
+    ),
+    # Security hardening: upstream binds its unauthenticated REST API to
+    # every interface (":8080"); restrict it to loopback.
+    (
+        'fmt.Sprintf(":%d", port)',
+        'fmt.Sprintf("127.0.0.1:%d", port)',
+    ),
+)
+
+
+def _modernize_bridge_source(bridge_dir: Path) -> str:
+    """Upgrade the bridge's whatsmeow dependency and adapt its source.
+
+    Runs ``go get go.mau.fi/whatsmeow@latest`` and ``go mod tidy``, then
+    applies the mechanical context-argument rewrites the newer whatsmeow
+    API requires (see ``_BRIDGE_SOURCE_FIXES``).
+
+    Args:
+        bridge_dir: The ``whatsapp-bridge`` directory of the clone.
+
+    Returns:
+        "" on success, or an error message.
+    """
+    for cmd in (["go", "get", "go.mau.fi/whatsmeow@latest"], ["go", "mod", "tidy"]):
+        result = subprocess.run(
+            cmd, cwd=str(bridge_dir), capture_output=True, text=True, timeout=600
+        )
+        if result.returncode != 0:
+            return f"{' '.join(cmd)} failed: {result.stderr[-1000:]}"
+    main_go = bridge_dir / "main.go"
+    src = main_go.read_text(encoding="utf-8")
+    for old, new in _BRIDGE_SOURCE_FIXES:
+        src = src.replace(old, new)
+    main_go.write_text(src, encoding="utf-8")
+    return ""
+
+
+def _bridge_log_path() -> Path:
+    """Return the bridge stdout/stderr log path."""
+    return _channel_dir() / "bridge.log"
+
+
+def _bridge_pid_path() -> Path:
+    """Return the bridge PID file path."""
+    return _channel_dir() / "bridge.pid"
+
+
+def _qr_html_path() -> Path:
+    """Return the QR pairing page path."""
+    return _channel_dir() / "qr.html"
+
+
+def _bridge_pid() -> int:
+    """Return the recorded bridge PID, or 0 if none/invalid."""
+    try:
+        return int(_bridge_pid_path().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if *pid* refers to a live process."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _is_qr_line(line: str) -> bool:
+    """Return True if *line* looks like a qrterminal half-block QR row.
+
+    qrterminal's ``GenerateHalfBlock`` renders QR-dark modules as spaces
+    and QR-light modules as ``█``/``▀``/``▄``, so a QR row contains only
+    those four characters.
+    """
+    line = line.rstrip("\r\n")
+    return len(line) >= 20 and bool(set(line) & set("█▀▄")) and set(line) <= _QR_LINE_CHARS
+
+
+def _extract_last_qr(log_text: str) -> str:
+    """Extract the most recent QR code block from bridge log text.
+
+    Args:
+        log_text: Full text of the bridge log.
+
+    Returns:
+        The QR block (newline-joined half-block rows), or "" if none.
+    """
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in log_text.splitlines():
+        if _is_qr_line(line):
+            current.append(line.rstrip("\r\n"))
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    for block in reversed(blocks):
+        if len(block) >= 10:
+            return "\n".join(block)
+    return ""
+
+
+def _write_qr_html(qr_text: str) -> Path:
+    """Write the QR pairing page and return its path.
+
+    The half-block QR maps light modules to block glyphs and dark modules
+    to spaces, so the page uses white glyphs on a black background — the
+    correct polarity for phone cameras.
+
+    Args:
+        qr_text: The captured half-block QR block.
+
+    Returns:
+        Path of the written HTML file.
+    """
+    from html import escape
+
+    path = _qr_html_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta http-equiv='refresh' content='4'>"
+        "<title>Link WhatsApp</title></head>"
+        "<body style='background:#000;color:#fff;font-family:sans-serif;"
+        "text-align:center;padding-top:24px'>"
+        "<h2>Link this computer to WhatsApp</h2>"
+        "<p>On your phone: WhatsApp &rarr; Settings &rarr; Linked devices "
+        "&rarr; Link a device &mdash; then scan this code:</p>"
+        "<pre style=\"font-family:'DejaVu Sans Mono','Menlo','Consolas',"
+        "monospace;font-size:12px;line-height:1;letter-spacing:0;"
+        "display:inline-block;background:#000;color:#fff\">"
+        f"{escape(qr_text)}</pre>"
+        "<p>This page reloads itself; when the code expires a fresh one "
+        "replaces it. After scanning, the page reports success within a "
+        "few seconds.</p></body></html>",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_paired_html() -> None:
+    """Overwrite the QR page with a success message (shown after pairing)."""
+    path = _qr_html_path()
+    if not path.exists():
+        return
+    path.write_text(
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<title>WhatsApp linked</title></head>"
+        "<body style='background:#000;color:#fff;font-family:sans-serif;"
+        "text-align:center;padding-top:24px'><h2>&#10003; WhatsApp linked "
+        "successfully</h2><p>You can close this page.</p></body></html>",
+        encoding="utf-8",
+    )
 
 
 class WhatsAppAgent(BaseChannelAgent):
-    """Channel agent with WhatsApp Business Cloud API tools.
+    """Channel agent for a personal WhatsApp account (QR-paired bridge).
 
-    Tasks run on the kiss-web daemon's agent (which supplies bash,
-    file editing, and browser automation) with authenticated WhatsApp API tools for
-    sending messages, media, templates, reactions, interactive messages,
-    location/contact sharing, and business profile management.
+    Tasks run on the kiss-web daemon's agent (which supplies bash, file
+    editing, and browser automation) with tools for searching contacts,
+    reading and searching the locally synced message history, sending
+    text/files/voice messages, and downloading received media — all
+    through the whatsapp-mcp Go bridge that pairs with the user's phone
+    via a QR code.
 
-    The agent checks for stored config on initialization. If no config
-    is found, authentication tools guide the user through obtaining and
-    storing their Meta access token and phone number ID.
+    If the bridge is not yet set up, the authentication tools clone and
+    build it, start it, render the pairing QR code into a local HTML page,
+    and wait for the user to scan it.
 
     Example::
 
@@ -802,139 +1106,454 @@ class WhatsAppAgent(BaseChannelAgent):
         )
     """
 
+    channel_system_prompt = (
+        "\n\n## WhatsApp Pairing\n"
+        "WhatsApp pairing flow (only when check_whatsapp_auth() reports "
+        "not paired): call authenticate_whatsapp() to clone and build the "
+        "bridge, then start_whatsapp_bridge(). If it reports a QR page, "
+        "call show_browser(), open the page with go_to_url('file://...'), "
+        "ask the user to scan the QR code with their phone (WhatsApp -> "
+        "Settings -> Linked devices -> Link a device), and call "
+        "wait_for_whatsapp_pairing() until it reports success. Message "
+        "history syncs for a few minutes after first pairing."
+    )
+
     def __init__(self) -> None:
         super().__init__("WhatsApp Agent")
         self._backend = WhatsAppChannelBackend()
-        cfg = _config.load()
-        if cfg:
-            self._backend._access_token = cfg["access_token"]
-            self._backend._phone_number_id = cfg["phone_number_id"]
-            self._backend._waba_id = cfg.get("waba_id", "")
+        _apply_config(self._backend)
 
     def _is_authenticated(self) -> bool:
-        """Return True if WhatsApp credentials are configured."""
-        return bool(self._backend._access_token)
+        """Return True if a WhatsApp device session exists (QR pairing done)."""
+        return bool(self._backend._is_paired())
 
     def _get_auth_tools(self) -> list:
-        """Return WhatsApp authentication tool functions."""
+        """Return WhatsApp bridge setup, pairing, and lifecycle tool functions."""
         agent = self
 
         def check_whatsapp_auth() -> str:
-            """Check if WhatsApp Business API credentials are configured.
+            """Check whether WhatsApp is paired and the bridge is running.
 
-            Tests the stored credentials against the Meta Graph API.
+            Reports the whatsapp-mcp clone, the bridge build, the bridge
+            process, and the QR pairing state, with the next step to take.
 
             Returns:
-                Authentication status with phone number info, or
-                instructions for how to authenticate.
+                JSON status report with a next_step instruction.
             """
-            if not agent._backend._access_token:
-                return (
-                    "Not authenticated with WhatsApp. Use "
-                    "authenticate_whatsapp(access_token=..., phone_number_id=...) "
-                    "to configure. To get these values:\n"
-                    "1. Go to https://developers.facebook.com/apps/\n"
-                    "2. Create or select a Business app with WhatsApp product\n"
-                    "3. Under WhatsApp > API Setup, find:\n"
-                    "   - Temporary access token (or create a System User token)\n"
-                    "   - Phone number ID (shown under 'From' phone number)\n"
-                    "4. Call authenticate_whatsapp(access_token='...', "
-                    "phone_number_id='...')"
+            backend = agent._backend
+            binary = backend.bridge_dir / _BRIDGE_BINARY_NAME
+            status = {
+                "repo_dir": str(backend.repo_dir),
+                "repo_cloned": (backend.repo_dir / "whatsapp-bridge" / "main.go").exists(),
+                "bridge_built": binary.exists(),
+                "bridge_running": backend._bridge_running(),
+                "paired": backend._is_paired(),
+                "messages_synced": backend.messages_db.exists(),
+                "go_installed": shutil.which("go") is not None,
+            }
+            if not status["repo_cloned"] or not status["bridge_built"]:
+                status["next_step"] = (
+                    "Call authenticate_whatsapp() to clone and build the "
+                    "whatsapp-mcp bridge (requires git and Go >= 1.24 with "
+                    "gcc for CGO)."
                 )
-            url = (
-                f"{agent._backend._graph_api_base}/{agent._backend._phone_number_id}"
-                "?fields=verified_name,display_phone_number"
+            elif not status["bridge_running"]:
+                status["next_step"] = "Call start_whatsapp_bridge()."
+            elif not status["paired"]:
+                status["next_step"] = (
+                    "Call get_whatsapp_qr_code(), open the returned QR page "
+                    "in the browser for the user to scan with their phone, "
+                    "then wait_for_whatsapp_pairing()."
+                )
+            else:
+                status["next_step"] = "Ready. Use the whatsapp_* messaging tools."
+            return json.dumps(status, indent=2)
+
+        def authenticate_whatsapp(
+            repo_dir: str = "", bridge_port: str = "", rebuild: bool = False
+        ) -> str:
+            """Set up the WhatsApp bridge: clone whatsapp-mcp and build it.
+
+            Clones https://github.com/lharries/whatsapp-mcp (reusing an
+            existing ~/.kiss/connectors/whatsapp-mcp clone when present),
+            upgrades its whatsmeow dependency to the latest release
+            (WhatsApp rejects the upstream pin as "Client outdated"),
+            builds the Go bridge (CGO enabled), and saves the config.
+            Pairing itself happens afterwards via start_whatsapp_bridge()
+            and the QR code.
+
+            Args:
+                repo_dir: Optional custom path for the whatsapp-mcp clone.
+                bridge_port: Optional REST port of a patched bridge
+                    (the upstream bridge always uses 8080).
+                rebuild: Force a whatsmeow upgrade and rebuild even when a
+                    bridge binary exists (use when the bridge log reports
+                    "Client outdated").
+
+            Returns:
+                JSON string with the setup result and the next step.
+            """
+            backend = agent._backend
+            if repo_dir.strip():
+                backend._repo_dir = repo_dir.strip()
+            if bridge_port.strip():
+                try:
+                    backend._bridge_port = int(bridge_port)
+                except ValueError:
+                    return json.dumps(
+                        {"ok": False, "error": f"Invalid bridge_port: {bridge_port}"}
+                    )
+            repo = backend.repo_dir
+            if not (repo / "whatsapp-bridge" / "main.go").exists():
+                if shutil.which("git") is None:
+                    return json.dumps({"ok": False, "error": "git is not installed."})
+                try:
+                    repo.parent.mkdir(parents=True, exist_ok=True)
+                except OSError as e:
+                    return json.dumps(
+                        {"ok": False, "error": f"Cannot create {repo.parent}: {e}"}
+                    )
+                clone = subprocess.run(
+                    ["git", "clone", "--depth", "1", _BRIDGE_REPO_URL, str(repo)],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+                if clone.returncode != 0:
+                    return json.dumps(
+                        {"ok": False, "error": f"git clone failed: {clone.stderr[-1000:]}"}
+                    )
+            binary = backend.bridge_dir / _BRIDGE_BINARY_NAME
+            if rebuild:
+                binary.unlink(missing_ok=True)
+            if not binary.exists():
+                if shutil.which("go") is None:
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": "Go is not installed. Install the latest Go "
+                            "(https://go.dev/doc/install; macOS: brew install go) "
+                            "and gcc (the bridge uses go-sqlite3, a CGO package), "
+                            "then call authenticate_whatsapp() again.",
+                        }
+                    )
+                error = _modernize_bridge_source(backend.bridge_dir)
+                if error:
+                    return json.dumps({"ok": False, "error": error})
+                build = subprocess.run(
+                    ["go", "build", "-o", _BRIDGE_BINARY_NAME, "."],
+                    cwd=str(backend.bridge_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=900,
+                    env={**os.environ, "CGO_ENABLED": "1"},
+                )
+                if build.returncode != 0:
+                    return json.dumps(
+                        {"ok": False, "error": f"go build failed: {build.stderr[-2000:]}"}
+                    )
+            _config.save(
+                {
+                    "repo_dir": str(repo),
+                    "bridge_port": str(backend._bridge_port),
+                }
             )
-            result = _api_request("GET", url, agent._backend._access_token)
-            if "error" in result:
-                return json.dumps({"ok": False, "error": result["error"]})
             return json.dumps(
-                {  # pragma: no cover
+                {
                     "ok": True,
-                    "phone_number_id": agent._backend._phone_number_id,
-                    "verified_name": result.get("verified_name", ""),
-                    "display_phone_number": result.get("display_phone_number", ""),
+                    "message": "WhatsApp bridge is cloned and built.",
+                    "next_step": "Call start_whatsapp_bridge().",
                 }
             )
 
-        def authenticate_whatsapp(
-            access_token: str,
-            phone_number_id: str,
-            waba_id: str = "",
-            verify_token: str = "",
-        ) -> str:
-            """Store and validate WhatsApp Business API credentials.
+        def start_whatsapp_bridge() -> str:
+            """Start the WhatsApp bridge process (detached, survives this task).
 
-            Saves the credentials to ~/.kiss/third_party_agents/whatsapp/config.json
-            and validates them against the Meta Graph API.
-
-            Args:
-                access_token: Meta Graph API access token.
-                phone_number_id: WhatsApp Business phone number ID.
-                waba_id: WhatsApp Business Account ID (optional).
-                verify_token: Shared secret for Meta webhook GET verification
-                    (optional). When set, the webhook only answers subscribe
-                    challenges carrying this token.
+            If the device is already paired the bridge simply reconnects;
+            otherwise the bridge prints a pairing QR code, which is
+            rendered into a local HTML page for the user to scan.
 
             Returns:
-                Validation result with phone number info, or error.
+                JSON string with the bridge status; when pairing is needed
+                it includes qr_page (a file path to open in the browser).
             """
-            access_token = access_token.strip()
-            phone_number_id = phone_number_id.strip()
-            if not access_token or not phone_number_id:
-                return "Both access_token and phone_number_id are required."
-            url = (
-                f"{agent._backend._graph_api_base}/{phone_number_id}"
-                "?fields=verified_name,display_phone_number"
-            )
-            result = _api_request("GET", url, access_token)
-            if "error" in result:
+            backend = agent._backend
+            if backend._bridge_running():
+                return json.dumps({"ok": True, "message": "Bridge already running."})
+            pid = _bridge_pid()
+            if _pid_alive(pid):
+                # The bridge opens its REST port only after pairing, so a
+                # live PID without a REST answer means pairing is pending.
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "message": f"Bridge (pid {pid}) is already starting or waiting "
+                        "for its QR scan. Call get_whatsapp_qr_code() and "
+                        "wait_for_whatsapp_pairing() instead of starting it again.",
+                    }
+                )
+            binary = backend.bridge_dir / _BRIDGE_BINARY_NAME
+            if not binary.exists():
                 return json.dumps(
                     {
                         "ok": False,
-                        "error": f"Credential validation failed: {result['error']}",
+                        "error": "Bridge not built. Call authenticate_whatsapp() first.",
                     }
                 )
-            _config.save(
-                {
-                    "access_token": access_token.strip(),
-                    "phone_number_id": phone_number_id.strip(),
-                    "waba_id": waba_id.strip(),
-                    "verify_token": verify_token.strip(),
-                }
-            )  # pragma: no cover
-            agent._backend._access_token = access_token  # pragma: no cover
-            agent._backend._phone_number_id = phone_number_id  # pragma: no cover
-            agent._backend._waba_id = waba_id.strip()  # pragma: no cover
-            agent._backend._verify_token = verify_token.strip()  # pragma: no cover
+            log_path = _bridge_log_path()
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("", encoding="utf-8")
+            with open(log_path, "ab") as log_fp:
+                proc = subprocess.Popen(
+                    [str(binary)],
+                    cwd=str(backend.bridge_dir),
+                    stdout=log_fp,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            _bridge_pid_path().write_text(str(proc.pid), encoding="utf-8")
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                time.sleep(1)
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+                if _CONNECTED_MARKER in text or _PAIRED_MARKER in text:
+                    return json.dumps(
+                        {"ok": True, "message": "Bridge started and connected to WhatsApp."}
+                    )
+                qr = _extract_last_qr(text)
+                if qr:
+                    page = _write_qr_html(qr)
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "pairing_needed": True,
+                            "qr_page": str(page),
+                            "message": "Pairing needed. Call show_browser(), open "
+                            f"go_to_url('file://{page}'), ask the user to scan the "
+                            "QR code with WhatsApp on their phone (Settings -> "
+                            "Linked devices -> Link a device), then call "
+                            "wait_for_whatsapp_pairing().",
+                        }
+                    )
+                if "Client outdated" in text:
+                    with contextlib.suppress(OSError):
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    _bridge_pid_path().unlink(missing_ok=True)
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": "WhatsApp rejected the bridge as outdated. Call "
+                            "authenticate_whatsapp(rebuild=True) to upgrade whatsmeow "
+                            "and rebuild, then start_whatsapp_bridge() again.",
+                        }
+                    )
+                if proc.poll() is not None:
+                    _bridge_pid_path().unlink(missing_ok=True)
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": f"Bridge exited (code {proc.returncode}). "
+                            f"Log tail: {text[-2000:]}",
+                        }
+                    )
             return json.dumps(
-                {  # pragma: no cover
-                    "ok": True,
-                    "message": "WhatsApp credentials saved and validated.",
-                    "verified_name": result.get("verified_name", ""),
-                    "display_phone_number": result.get("display_phone_number", ""),
+                {
+                    "ok": False,
+                    "error": "Bridge did not report a connection or QR code within "
+                    f"60s. Log tail: "
+                    f"{log_path.read_text(encoding='utf-8', errors='replace')[-2000:]}",
                 }
             )
 
+        def get_whatsapp_qr_code() -> str:
+            """Refresh the QR pairing page from the latest bridge output.
+
+            The bridge rotates the QR code periodically; this re-extracts
+            the newest code from the bridge log and rewrites the HTML page.
+
+            Returns:
+                JSON string with the qr_page path, or an error.
+            """
+            log_path = _bridge_log_path()
+            if not log_path.exists():
+                return json.dumps(
+                    {"ok": False, "error": "No bridge log. Call start_whatsapp_bridge() first."}
+                )
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+            if _PAIRED_MARKER in text or _CONNECTED_MARKER in text:
+                _write_paired_html()
+                return json.dumps({"ok": True, "message": "Already paired and connected."})
+            qr = _extract_last_qr(text)
+            if not qr:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "No QR code in the bridge log (yet). "
+                        f"Log tail: {text[-1000:]}",
+                    }
+                )
+            page = _write_qr_html(qr)
+            return json.dumps(
+                {
+                    "ok": True,
+                    "qr_page": str(page),
+                    "message": f"Open file://{page} in the browser and ask the user "
+                    "to scan it with WhatsApp on their phone.",
+                }
+            )
+
+        def wait_for_whatsapp_pairing(timeout: int = 120) -> str:
+            """Wait for the user to scan the QR code and complete pairing.
+
+            Polls the bridge log, refreshing the QR page whenever the
+            bridge rotates the code, until pairing succeeds or *timeout*
+            elapses (call again to keep waiting — the bridge itself gives
+            up after ~3 minutes and must then be restarted).
+
+            Args:
+                timeout: Maximum seconds to wait. Default: 120.
+
+            Returns:
+                JSON string with the pairing result.
+            """
+            log_path = _bridge_log_path()
+            if not log_path.exists():
+                return json.dumps(
+                    {"ok": False, "error": "No bridge log. Call start_whatsapp_bridge() first."}
+                )
+            last_qr = ""
+            deadline = time.time() + max(timeout, 1)
+            while True:
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+                if _PAIRED_MARKER in text or _CONNECTED_MARKER in text:
+                    _write_paired_html()
+                    return json.dumps(
+                        {"ok": True, "message": "WhatsApp paired and connected. Message "
+                         "history now syncs in the background (takes a few minutes)."}
+                    )
+                if _QR_TIMEOUT_MARKER in text:
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": "The bridge timed out waiting for the QR scan. "
+                            "Call start_whatsapp_bridge() to get a fresh QR code.",
+                        }
+                    )
+                if not _pid_alive(_bridge_pid()):
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": "The bridge process is no longer running. Call "
+                            f"start_whatsapp_bridge() again. Log tail: {text[-1000:]}",
+                        }
+                    )
+                qr = _extract_last_qr(text)
+                if qr and qr != last_qr:
+                    _write_qr_html(qr)
+                    last_qr = qr
+                if time.time() >= deadline:
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": "Still waiting for the QR scan. Call "
+                            "wait_for_whatsapp_pairing() again, or "
+                            "get_whatsapp_qr_code() to refresh the page.",
+                        }
+                    )
+                time.sleep(2)
+
+        def stop_whatsapp_bridge() -> str:
+            """Stop the WhatsApp bridge process.
+
+            Note that the bridge only syncs messages while it runs; leave
+            it running if the channel poller monitors WhatsApp.
+
+            Returns:
+                JSON string with the stop result.
+            """
+            pid = _bridge_pid()
+            if pid <= 0:
+                return json.dumps({"ok": False, "error": "No recorded bridge PID."})
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                _bridge_pid_path().unlink(missing_ok=True)
+                return json.dumps({"ok": True, "message": "Bridge was not running."})
+            except PermissionError as e:
+                return json.dumps({"ok": False, "error": f"Could not stop bridge: {e}"})
+            _bridge_pid_path().unlink(missing_ok=True)
+            return json.dumps({"ok": True, "message": f"Bridge (pid {pid}) stopped."})
+
         def clear_whatsapp_auth() -> str:
-            """Clear the stored WhatsApp authentication credentials.
+            """Unpair WhatsApp: stop the bridge and delete the local session.
+
+            Deletes the session and message databases
+            (``whatsapp-bridge/store/``) and the saved config. Also remove
+            the linked device on the phone (WhatsApp -> Settings -> Linked
+            devices).
 
             Returns:
                 Status message.
             """
+            backend = agent._backend
+            pid = _bridge_pid()
+            if backend._bridge_running() and not _pid_alive(pid):
+                return (
+                    "Refusing to clear: a WhatsApp bridge is running on port "
+                    f"{backend._bridge_port} that this agent did not start (e.g. the "
+                    "connectors bridge). Stop it first, then call "
+                    "clear_whatsapp_auth() again."
+                )
+            if pid > 0:
+                with contextlib.suppress(OSError):
+                    os.killpg(pid, signal.SIGTERM)
+                deadline = time.time() + 5
+                while _pid_alive(pid) and time.time() < deadline:
+                    time.sleep(0.2)
+                _bridge_pid_path().unlink(missing_ok=True)
+            store = backend.bridge_dir / "store"
+            try:
+                if store.exists():
+                    shutil.rmtree(store)
+            except OSError as e:
+                return f"Could not fully delete {store}: {e}"
+            _qr_html_path().unlink(missing_ok=True)
             _config.clear()
-            agent._backend._access_token = ""
-            agent._backend._phone_number_id = ""
-            agent._backend._waba_id = ""
-            agent._backend._verify_token = ""
-            return "WhatsApp authentication cleared."
+            return (
+                "WhatsApp session cleared. Also remove this device on the phone: "
+                "WhatsApp -> Settings -> Linked devices."
+            )
 
-        return [check_whatsapp_auth, authenticate_whatsapp, clear_whatsapp_auth]
+        return [
+            check_whatsapp_auth,
+            authenticate_whatsapp,
+            start_whatsapp_bridge,
+            get_whatsapp_qr_code,
+            wait_for_whatsapp_pairing,
+            stop_whatsapp_bridge,
+            clear_whatsapp_auth,
+        ]
+
+
+def _make_backend() -> WhatsAppChannelBackend:
+    """Create a configured backend for channel poll mode."""
+    backend = WhatsAppChannelBackend()
+    _apply_config(backend)
+    if not backend._is_paired():
+        print("Not paired. Run: kiss-whatsapp -t 'authenticate whatsapp'")
+        sys.exit(1)
+    return backend
 
 
 def main() -> None:  # pragma: no cover – CLI entry point requires API
     """Run the WhatsAppAgent from the command line with chat persistence."""
-    channel_main(WhatsAppAgent, "kiss-whatsapp")
+    channel_main(
+        WhatsAppAgent,
+        "kiss-whatsapp",
+        channel_name="WhatsApp",
+        make_backend=_make_backend,
+    )
 
 
 def tools() -> list:
@@ -942,7 +1561,7 @@ def tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    bridge state persisted under ``~/.kiss`` and returns its
     authentication and backend tools.
     """
     return WhatsAppAgent()._get_tools()

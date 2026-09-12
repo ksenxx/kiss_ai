@@ -218,14 +218,16 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Twitch"],
     },
     {
+        # QR-paired personal WhatsApp (whatsapp-mcp bridge): authenticate
+        # takes no credentials — it clones and builds the bridge.
         "module": "kiss.agents.third_party_agents.whatsapp_agent",
         "class": "WhatsAppAgent",
         "check": "check_whatsapp_auth",
         "auth": "authenticate_whatsapp",
         "clear": "clear_whatsapp_auth",
-        "required_params": ["access_token", "phone_number_id"],
-        "prompt_urls": ["https://developers.facebook.com/apps/"],
-        "prompt_keywords": ["WhatsApp", "Phone number ID"],
+        "required_params": [],
+        "prompt_urls": [],
+        "prompt_keywords": ["WhatsApp", "QR"],
     },
     {
         "module": "kiss.agents.third_party_agents.zalo_agent",

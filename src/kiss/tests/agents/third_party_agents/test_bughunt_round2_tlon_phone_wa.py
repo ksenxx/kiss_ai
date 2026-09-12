@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Round-2 integration tests for tlon_agent, phone_control_agent, whatsapp_agent.
+"""Round-2 integration tests for tlon_agent and phone_control_agent.
 
 Runs real in-process HTTP servers that record request method/path/body and
 return service-shaped JSON. No mocks, patches, or test doubles.
@@ -14,10 +14,9 @@ Bugs covered:
 - Tlon ``post_message`` memo author must be the configured ship, not ``"~"``.
 - phone_control ``poll_messages`` must only return SMS from the requested
   ``channel_id`` sender (empty channel_id returns all).
-- WhatsApp webhook GET must implement Meta verification: echo ``hub.challenge``
-  only when ``hub.mode == "subscribe"`` and ``hub.verify_token`` matches the
-  configured token; 403 otherwise. Without a configured token the challenge is
-  echoed unconditionally (backward compatibility).
+
+(The former WhatsApp webhook-verification tests were removed: the WhatsApp
+agent now uses the QR-paired whatsapp-mcp bridge and has no Meta webhook.)
 """
 
 from __future__ import annotations
@@ -31,14 +30,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 import pytest
-import requests
 
 from kiss.agents.third_party_agents.phone_control_agent import PhoneControlChannelBackend
 from kiss.agents.third_party_agents.phone_control_agent import _config as _phone_config
 from kiss.agents.third_party_agents.tlon_agent import TlonChannelBackend
 from kiss.agents.third_party_agents.tlon_agent import _config as _tlon_config
-from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
-from kiss.agents.third_party_agents.whatsapp_agent import _config as _wa_config
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):
@@ -265,71 +261,3 @@ class TestPhoneControlSenderFilter:
         messages, new_oldest = self.backend.poll_messages("", "")
         assert len(messages) == 2, messages
         assert new_oldest == "2"
-
-
-class TestWhatsAppWebhookVerification:
-    """The webhook GET handler must implement Meta subscribe verification."""
-
-    def setup_method(self) -> None:
-        self._server, self.base = _start_server()
-        self._cfg = _ConfigBackup(_wa_config.path)
-        self._cfg.save()
-        self.backend: WhatsAppChannelBackend | None = None
-
-    def teardown_method(self) -> None:
-        if self.backend is not None:
-            self.backend.disconnect()
-        self._server.shutdown()
-        self._server.server_close()
-        self._cfg.restore()
-
-    def _connect(self, verify_token: str | None) -> str:
-        cfg = {
-            "access_token": "tok",
-            "phone_number_id": "pnid",
-            "webhook_port": str(_free_port()),
-        }
-        if verify_token is not None:
-            cfg["verify_token"] = verify_token
-        _wa_config.save(cfg)
-        self.backend = WhatsAppChannelBackend(graph_api_base=self.base)
-        assert self.backend.connect() is True
-        assert self.backend._webhook_server is not None
-        port = self.backend._webhook_server.server_address[1]
-        return f"http://127.0.0.1:{port}/"
-
-    @staticmethod
-    def _verify_get(url: str, mode: str, token: str) -> requests.Response:
-        return requests.get(
-            url,
-            params={"hub.mode": mode, "hub.verify_token": token, "hub.challenge": "X"},
-            timeout=10,
-        )
-
-    def test_wrong_verify_token_rejected(self) -> None:
-        """With a configured token, a wrong hub.verify_token must not get the challenge."""
-        url = self._connect("sekret")
-        resp = self._verify_get(url, "subscribe", "WRONG")
-        assert resp.status_code == 403, f"expected 403, got {resp.status_code}"
-        assert resp.text != "X", "challenge must not be echoed for a wrong verify token"
-
-    def test_wrong_mode_rejected(self) -> None:
-        """With a configured token, hub.mode != subscribe must be rejected."""
-        url = self._connect("sekret")
-        resp = self._verify_get(url, "unsubscribe", "sekret")
-        assert resp.status_code == 403, f"expected 403, got {resp.status_code}"
-        assert resp.text != "X"
-
-    def test_correct_token_and_mode_echo_challenge(self) -> None:
-        """A matching subscribe verification must echo the challenge."""
-        url = self._connect("sekret")
-        resp = self._verify_get(url, "subscribe", "sekret")
-        assert resp.status_code == 200, f"expected 200, got {resp.status_code}"
-        assert resp.text == "X"
-
-    def test_no_configured_token_keeps_legacy_echo(self) -> None:
-        """Without a configured verify_token the challenge is echoed (back compat)."""
-        url = self._connect(None)
-        resp = self._verify_get(url, "subscribe", "anything")
-        assert resp.status_code == 200
-        assert resp.text == "X"
