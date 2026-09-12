@@ -43,6 +43,11 @@ body.remote-chat {
   --favorite: #f5b400;
   --copied: #4caf50;
 
+  /* The settings dialog's green outline (see #settings-panel below):
+     a semantic alias of the theme green, so the light theme's --green
+     override re-themes the border automatically. */
+  --settings-border: var(--green);
+
   /*
    * Docked task-history panel geometry (desktop mode only).  The
    * resize floor (--sidebar-min-w) is deliberately tiny — 10px — so a
@@ -391,7 +396,12 @@ body.remote-chat #tricks-panel {
 
 body.remote-chat #settings-panel {
   background: var(--surface);
-  border: 1px solid var(--border-8);
+
+  /* Same green theme border as the VS Code surfaces (see main.css
+     #settings-panel), routed through the --settings-border palette
+     alias so the remote page keeps decorative tokens out of plain
+     properties (test_no_decorative_color_tokens_in_codex_css). */
+  border: 2px solid var(--settings-border);
 }
 
 body.remote-chat .sidebar-hdr {

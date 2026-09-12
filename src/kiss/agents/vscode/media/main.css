@@ -1613,7 +1613,11 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
   width: 90vw;
   max-height: 90vh;
   background: var(--bg2);
-  border: 1px solid var(--border);
+
+  /* Green theme border so the settings dialog stands out on every
+     surface (sidebar, editor panel; the remote page restates it in
+     remote-codex.css with the same variable). */
+  border: 2px solid var(--green);
   border-radius: 8px;
   z-index: 200;
   padding: 16px;
