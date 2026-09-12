@@ -7138,6 +7138,19 @@
         }
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
         break;
+      case 'myModelsData':
+        myModels = Array.isArray(ev.models) ? ev.models : [];
+        // The edited model vanished (deleted from another window, or
+        // renamed by this very edit's save): drop the edit state so the
+        // boxes stop claiming to edit an entry that no longer exists.
+        if (
+          customModelEditName !== null &&
+          !myModels.some(m => m && m.name === customModelEditName)
+        ) {
+          cancelCustomModelEdit();
+        }
+        renderCustomModels();
+        break;
       case 'infoFile':
         renderInfoFileEvent(ev);
         break;
@@ -10489,6 +10502,29 @@
       settingsPanel.addEventListener('input', noteSettingsEdit);
       settingsPanel.addEventListener('change', noteSettingsEdit);
     }
+    CONFIG_SUBPANELS.forEach(pair => {
+      const toggle = document.getElementById(pair[0]);
+      const body = document.getElementById(pair[1]);
+      if (toggle && body) {
+        toggle.addEventListener('click', () => {
+          setConfigSubpanelExpanded(pair[0], pair[1], body.hidden);
+        });
+      }
+    });
+    const customModelAddBtn = document.getElementById('custom-model-add-btn');
+    const customModelSaveBtn = document.getElementById('custom-model-save-btn');
+    const customModelCancelBtn = document.getElementById(
+      'custom-model-cancel-btn',
+    );
+    if (customModelAddBtn) {
+      customModelAddBtn.addEventListener('click', submitCustomModel);
+    }
+    if (customModelSaveBtn) {
+      customModelSaveBtn.addEventListener('click', submitCustomModel);
+    }
+    if (customModelCancelBtn) {
+      customModelCancelBtn.addEventListener('click', cancelCustomModelEdit);
+    }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
       api.getHistory({
@@ -12254,10 +12290,18 @@
     setPanelOpen(settingsPanel, settingsOverlay, true);
     configFormPopulated = false;
     settingsEditedFields.clear();
+    // The API Keys / Custom Models subpanels START collapsed on every
+    // open; only an explicit click on their header expands them.
+    collapseConfigSubpanels();
     api.getConfig();
+    api.getMyModels();
   }
 
   function closeSettingsPanel() {
+    // An abandoned in-place edit must not leak the edited model's
+    // endpoint / key / headers into the saved config: restore the
+    // boxes to what the user last typed BEFORE flushing the form.
+    cancelCustomModelEdit();
     saveSettingsIfPopulated();
     settingsEditedFields.clear();
     setPanelOpen(settingsPanel, settingsOverlay, false);
@@ -12431,6 +12475,319 @@
     setupPasswordToggle(btn.id, inputId, noun);
   }
 
+  // ---- Collapsible settings subpanels (API Keys, Custom Models) ----
+
+  // toggle-button id / body id of every collapsible settings subpanel.
+  const CONFIG_SUBPANELS = [
+    ['api-keys-toggle', 'api-keys-body'],
+    ['custom-models-toggle', 'custom-models-body'],
+  ];
+
+  /**
+   * Expand or collapse one settings subpanel.
+   *
+   * @param {string} toggleId The subpanel's header-button element id.
+   * @param {string} bodyId The subpanel's body element id.
+   * @param {boolean} expanded True shows the body.
+   */
+  function setConfigSubpanelExpanded(toggleId, bodyId, expanded) {
+    const toggle = document.getElementById(toggleId);
+    const body = document.getElementById(bodyId);
+    if (!toggle || !body) return;
+    body.hidden = !expanded;
+    toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    toggle.classList.toggle('expanded', expanded);
+  }
+
+  /** Collapse every settings subpanel (the settings panel's open state). */
+  function collapseConfigSubpanels() {
+    CONFIG_SUBPANELS.forEach(pair => {
+      setConfigSubpanelExpanded(pair[0], pair[1], false);
+    });
+  }
+
+  // ---- Custom Models subpanel (~/.kiss/MY_MODELS.json) ----
+
+  // The daemon's last myModelsData list: one row per custom model.
+  let myModels = [];
+  // Name of the MY_MODELS.json entry being edited in the boxes, or
+  // null while the boxes feed the Add button.
+  let customModelEditName = null;
+  // Box values captured when the edit began, restored on Cancel/Save so
+  // an edit never leaks the model's values into the saved config (the
+  // endpoint / key / headers boxes double as the config form's custom-
+  // endpoint fields).
+  let customModelBoxSnapshot = null;
+  // Which of the three shared boxes held USER-typed values when the
+  // edit began (their settingsEditedFields membership). Restored on
+  // cancel so an edit can neither promote the model's values into
+  // "user-edited" nor keep a fresher configData from repainting boxes
+  // the user never touched.
+  let customModelPreEditDirty = null;
+  // The last configData's custom-endpoint values. Recorded even while
+  // an edit skips repainting the boxes, so cancelling the edit can
+  // restore the AUTHORITATIVE values instead of a stale pre-edit
+  // snapshot (the boxes may have been populated before this panel
+  // open's configData reply arrived).
+  let lastCustomCfgValues = null;
+
+  /** Read the Custom Models boxes. @returns {object} Trimmed values. */
+  function readCustomModelBoxes() {
+    const el = id => document.getElementById(id);
+    return {
+      name: el('cfg-custom-model-name').value.trim(),
+      endpoint: el('cfg-custom-endpoint').value.trim(),
+      apiKey: el('cfg-custom-api-key').value.trim(),
+      headers: el('cfg-custom-headers').value.trim(),
+    };
+  }
+
+  /**
+   * Write the Custom Models boxes.
+   *
+   * Programmatic writes fire no input event, so they never mark the
+   * fields as user-edited (see settingsEditedFields).
+   *
+   * @param {object} values name / endpoint / apiKey / headers strings.
+   */
+  function writeCustomModelBoxes(values) {
+    const el = id => document.getElementById(id);
+    el('cfg-custom-model-name').value = values.name;
+    el('cfg-custom-endpoint').value = values.endpoint;
+    el('cfg-custom-api-key').value = values.apiKey;
+    el('cfg-custom-headers').value = values.headers;
+  }
+
+  /**
+   * Show the Add button (false) or the Save + Cancel pair (true).
+   *
+   * @param {boolean} editing Whether an edit is in progress.
+   */
+  function setCustomModelEditMode(editing) {
+    const addBtn = document.getElementById('custom-model-add-btn');
+    const saveBtn = document.getElementById('custom-model-save-btn');
+    const cancelBtn = document.getElementById('custom-model-cancel-btn');
+    if (addBtn) addBtn.style.display = editing ? 'none' : '';
+    if (saveBtn) saveBtn.style.display = editing ? '' : 'none';
+    if (cancelBtn) cancelBtn.style.display = editing ? '' : 'none';
+  }
+
+  /**
+   * Load *model* into the boxes and switch Add to Save / Cancel.
+   *
+   * @param {object} model A myModelsData row (name / endpoint /
+   *   api_key / headers).
+   */
+  function startCustomModelEdit(model) {
+    if (customModelEditName === null) {
+      customModelBoxSnapshot = readCustomModelBoxes();
+      customModelPreEditDirty = new Set(
+        [
+          'cfg-custom-endpoint',
+          'cfg-custom-api-key',
+          'cfg-custom-headers',
+        ].filter(id => settingsEditedFields.has(id)),
+      );
+    }
+    customModelEditName = model.name;
+    writeCustomModelBoxes({
+      name: model.name,
+      endpoint: model.endpoint || '',
+      apiKey: model.api_key || '',
+      headers: model.headers || '',
+    });
+    setCustomModelEditMode(true);
+    renderCustomModels();
+  }
+
+  /**
+   * Abandon the in-place edit and restore the pre-edit box values.
+   *
+   * A box the user had typed into before the edit gets that typed
+   * value back (and stays marked edited). A box the user never touched
+   * gets the LATEST configData value — not the snapshot, which may
+   * predate this panel open's config reply — and its accidental
+   * edited-mark (typing during the model edit) is dropped, so later
+   * configData polls repaint it and a close flushes authoritative
+   * values instead of stale ones.
+   */
+  function cancelCustomModelEdit() {
+    if (customModelEditName === null) return;
+    customModelEditName = null;
+    if (customModelBoxSnapshot) {
+      const snap = customModelBoxSnapshot;
+      const dirty = customModelPreEditDirty || new Set();
+      const cfg = lastCustomCfgValues;
+      const restored = {name: snap.name};
+      [
+        ['cfg-custom-endpoint', 'endpoint'],
+        ['cfg-custom-api-key', 'apiKey'],
+        ['cfg-custom-headers', 'headers'],
+      ].forEach(pair => {
+        const id = pair[0];
+        const key = pair[1];
+        if (dirty.has(id)) {
+          restored[key] = snap[key];
+        } else {
+          restored[key] = cfg ? cfg[key] : snap[key];
+          settingsEditedFields.delete(id);
+        }
+      });
+      writeCustomModelBoxes(restored);
+      customModelBoxSnapshot = null;
+      customModelPreEditDirty = null;
+    }
+    setCustomModelEditMode(false);
+    renderCustomModels();
+  }
+
+  /**
+   * Send the boxes to the daemon: Add a new model, or Save an edit.
+   *
+   * The daemon writes ~/.kiss/MY_MODELS.json and answers every client
+   * with a fresh myModelsData, which repaints the list.
+   */
+  /**
+   * Client-side mirror of the daemon's saveMyModel validation.
+   *
+   * Mirroring it here keeps a rejected Add/Save from optimistically
+   * clearing the boxes and losing the draft (the daemon's error event
+   * arrives after the state is gone).
+   *
+   * @param {object} values The trimmed box values.
+   * @returns {string|null} The error message, or null when valid.
+   */
+  function customModelValidationError(values) {
+    if (values.name.startsWith('_')) {
+      return "Custom model name must not start with '_'";
+    }
+    const exists = myModels.some(m => m && m.name === values.name);
+    if (customModelEditName === null && exists) {
+      return (
+        "A custom model named '" +
+        values.name +
+        "' already exists; use its Edit button to change it"
+      );
+    }
+    if (
+      customModelEditName !== null &&
+      values.name !== customModelEditName &&
+      exists
+    ) {
+      return "A custom model named '" + values.name + "' already exists";
+    }
+    return null;
+  }
+
+  function submitCustomModel() {
+    const values = readCustomModelBoxes();
+    const nameInp = document.getElementById('cfg-custom-model-name');
+    if (!values.name) {
+      if (nameInp) nameInp.focus();
+      return;
+    }
+    const validationError = customModelValidationError(values);
+    if (validationError) {
+      showNotification({message: validationError, severity: 'error'});
+      if (nameInp) nameInp.focus();
+      return;
+    }
+    const msg = {
+      name: values.name,
+      endpoint: values.endpoint,
+      apiKey: values.apiKey,
+      headers: values.headers,
+    };
+    if (customModelEditName !== null) {
+      msg.originalName = customModelEditName;
+      api.saveMyModel(msg);
+      cancelCustomModelEdit();
+      return;
+    }
+    api.saveMyModel(msg);
+    // The entry is added; a stale name left behind would make the next
+    // Add silently overwrite it. The endpoint / key / headers boxes
+    // keep what the user typed — they are also the config form's
+    // custom-endpoint fields.
+    if (nameInp) nameInp.value = '';
+  }
+
+  /** Repaint the #custom-models-list rows from myModels. */
+  function renderCustomModels() {
+    const list = document.getElementById('custom-models-list');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!myModels.length) {
+      const empty = document.createElement('div');
+      empty.className = 'custom-models-empty';
+      empty.textContent = 'No custom models in ~/.kiss/MY_MODELS.json';
+      list.appendChild(empty);
+      return;
+    }
+    myModels.forEach(model => {
+      if (!model || !model.name) return;
+      list.appendChild(buildCustomModelRow(model));
+    });
+  }
+
+  /**
+   * Build one list row: name, endpoint, Edit and Delete buttons.
+   *
+   * @param {object} model A myModelsData row.
+   * @returns {HTMLElement} The row element.
+   */
+  function buildCustomModelRow(model) {
+    const row = document.createElement('div');
+    row.className = 'custom-model-row';
+    row.classList.toggle('editing', model.name === customModelEditName);
+
+    const name = document.createElement('span');
+    name.className = 'custom-model-name';
+    name.textContent = model.name;
+    name.title = model.name;
+    row.appendChild(name);
+
+    const endpoint = document.createElement('span');
+    endpoint.className = 'custom-model-endpoint';
+    endpoint.textContent = model.endpoint || '';
+    endpoint.title = model.endpoint || '';
+    row.appendChild(endpoint);
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'custom-model-btn custom-model-edit-btn';
+    editBtn.setAttribute('aria-label', 'Edit ' + model.name);
+    editBtn.title = 'Edit';
+    editBtn.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>' +
+      '</svg>';
+    editBtn.addEventListener('click', () => startCustomModelEdit(model));
+    row.appendChild(editBtn);
+
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'custom-model-btn custom-model-delete-btn';
+    delBtn.setAttribute('aria-label', 'Delete ' + model.name);
+    delBtn.title = 'Delete';
+    delBtn.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round" aria-hidden="true">' +
+      '<polyline points="3 6 5 6 21 6"/>' +
+      '<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 ' +
+      '1 2-2h4a2 2 0 0 1 2 2v2"/>' +
+      '</svg>';
+    delBtn.addEventListener('click', () => {
+      if (model.name === customModelEditName) cancelCustomModelEdit();
+      api.deleteMyModel({name: model.name});
+    });
+    row.appendChild(delBtn);
+    return row;
+  }
+
   let configFormPopulated = false;
   // Ids of the settings fields the user has edited since the panel was
   // opened.  `configData` is not a one-shot reply: the host re-pushes it
@@ -12526,9 +12883,22 @@
     // ``webTools`` override.
     webToolsStateKnown = true;
     setChecked(classifyTasksToggleBtn, cfg.classify_tasks !== false);
-    setValue('cfg-custom-endpoint', cfg.custom_endpoint || '');
-    setValue('cfg-custom-api-key', cfg.custom_api_key || '');
-    setValue('cfg-custom-headers', cfg.custom_headers || '');
+    // Recorded even while an edit is active (the boxes themselves are
+    // skipped below), so cancelling the edit restores the latest
+    // authoritative values — see cancelCustomModelEdit.
+    lastCustomCfgValues = {
+      endpoint: cfg.custom_endpoint || '',
+      apiKey: cfg.custom_api_key || '',
+      headers: cfg.custom_headers || '',
+    };
+    // While a Custom Models edit has the boxes loaded with a model's
+    // values (a programmatic write, so settingsEditedFields does not
+    // guard it), the 2-second configData poll must not repaint them.
+    if (customModelEditName === null) {
+      setValue('cfg-custom-endpoint', cfg.custom_endpoint || '');
+      setValue('cfg-custom-api-key', cfg.custom_api_key || '');
+      setValue('cfg-custom-headers', cfg.custom_headers || '');
+    }
     setValue('cfg-remote-password', cfg.remote_password || '');
     // The welcome screen's password box mirrors the settings one, so it
     // follows the same edited mark.

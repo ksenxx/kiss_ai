@@ -9,11 +9,15 @@
 non-agentic tasks only).
 """
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
 import tempfile
+import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -276,6 +280,289 @@ def _read_my_models() -> dict[str, dict[str, Any]]:
         for name, entry in raw.items()
         if not name.startswith("_") and isinstance(entry, dict)
     }
+
+
+_MY_MODELS_EDIT_LOCK = threading.Lock()
+"""Serializes read-modify-write edits of ``~/.kiss/MY_MODELS.json``.
+
+Guards the settings panel's custom-model CRUD (:func:`save_custom_model`
+/ :func:`delete_custom_model`) so two concurrent ``saveMyModel`` /
+``deleteMyModel`` commands (two settings panels closing together) cannot
+both read the same snapshot and silently drop each other's edit.  Every
+holder additionally takes the cross-process flock
+(:func:`_my_models_flock`) — the thread lock alone cannot exclude
+another daemon sharing the same home directory, and a single process
+must never flock the sidecar through two descriptors at once.
+"""
+
+
+@contextlib.contextmanager
+def _my_models_flock() -> Iterator[None]:
+    """Hold the cross-process flock guarding ``MY_MODELS.json`` edits.
+
+    An ``fcntl`` flock on a sidecar ``.MY_MODELS.json.kiss.lock`` next
+    to the registry, so two *processes* sharing one home directory
+    cannot both read the same snapshot and silently drop each other's
+    model.  The sidecar is flocked rather than the registry itself
+    because the registry is atomically ``os.replace``-d: a lock on the
+    old inode would not exclude a writer that opens the new one.  Same
+    technique as ``vscode_config._api_keys_store_flock``.
+
+    Callers must already hold :data:`_MY_MODELS_EDIT_LOCK`.
+    """
+    path = USER_MY_MODELS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name("." + path.name + ".kiss.lock")
+    with open(lock_path, "w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+_CUSTOM_MODEL_DEFAULTS: dict[str, Any] = {
+    "context_length": 128000,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+}
+"""Loader-required keys seeded into a settings-panel-created entry.
+
+:func:`_build_model_info_entry` raises ``KeyError`` on an entry missing
+any of these, which would poison the whole catalog load, so every entry
+the settings panel creates carries them.
+"""
+
+
+def _read_my_models_file() -> dict[str, Any] | None:
+    """Return the full parsed ``MY_MODELS.json`` object (auto-seeded).
+
+    Unlike :func:`_read_my_models`, keeps ``_``-prefixed documentation
+    keys and non-dict values so a rewrite preserves them byte-for-value.
+    Returns ``None`` when the file is unreadable, corrupt, or not a
+    JSON object — the CRUD writers refuse to touch such a file, because
+    "recovering" it by rewriting would silently destroy whatever the
+    user's hand-edited registry still holds.
+    """
+    _seed_my_models_file()
+    try:
+        raw = json.loads(USER_MY_MODELS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.debug("Unreadable or corrupt %s", USER_MY_MODELS_PATH, exc_info=True)
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _write_my_models_file(raw: dict[str, Any]) -> None:
+    """Atomically rewrite ``MY_MODELS.json`` with *raw*.
+
+    Staged in a sibling temp file and ``os.replace``-d into position so
+    a concurrent reader (catalog load, another settings panel) never
+    observes a truncated file.
+    """
+    from kiss.core.utils import atomic_write_text
+
+    USER_MY_MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(USER_MY_MODELS_PATH, json.dumps(raw, indent=2) + "\n")
+
+
+def list_custom_models() -> list[dict[str, str]]:
+    """Return the user's custom models for the settings panel.
+
+    One row per non-``_`` model entry in ``~/.kiss/MY_MODELS.json``,
+    each with the four fields the settings panel edits — ``name``,
+    ``endpoint``, ``api_key`` and ``headers`` (missing or non-string
+    values read as ``""``) — sorted by name for a stable UI order.
+    """
+    rows: list[dict[str, str]] = []
+    for name, entry in sorted(_read_my_models().items()):
+        rows.append({
+            "name": name,
+            "endpoint": _entry_str(entry, "endpoint"),
+            "api_key": _entry_str(entry, "api_key"),
+            "headers": _entry_str(entry, "headers"),
+        })
+    return rows
+
+
+def _entry_str(entry: dict[str, Any], key: str) -> str:
+    """Return ``entry[key]`` when it is a string, else ``""``."""
+    value = entry.get(key, "")
+    return value if isinstance(value, str) else ""
+
+
+_MY_MODELS_CORRUPT_ERROR = (
+    "~/.kiss/MY_MODELS.json is unreadable or not a JSON object; "
+    "fix or remove the file by hand"
+)
+
+
+def _seed_new_custom_entry(name: str) -> dict[str, Any]:
+    """Return the loader-required keys for a brand-new *name* entry.
+
+    A name that shadows a bundled catalog model copies THAT model's
+    context length and prices — seeding the generic
+    :data:`_CUSTOM_MODEL_DEFAULTS` over e.g. ``gpt-5.6-sol`` would
+    replace its real 500K context and per-token prices with 128K and
+    $0, silently breaking budget accounting for the bundled model.
+    """
+    info = MODEL_INFO.get(name)
+    if info is None:
+        return dict(_CUSTOM_MODEL_DEFAULTS)
+    return {
+        "context_length": info.context_length,
+        "input_price_per_1M": info.input_price_per_1M,
+        "output_price_per_1M": info.output_price_per_1M,
+    }
+
+
+def save_custom_model(
+    name: str,
+    endpoint: str = "",
+    api_key: str = "",
+    headers: str = "",
+    original_name: str = "",
+) -> str | None:
+    """Add or update a custom model entry in ``~/.kiss/MY_MODELS.json``.
+
+    An **add** (*original_name* empty) refuses a name that already has
+    an entry — the settings panel presents Add and Edit as distinct
+    operations, so a colliding Add must not silently overwrite.  An
+    **edit** (*original_name* == *name*) merges into the existing entry,
+    so hand-written keys such as ``thinking`` or real prices survive an
+    endpoint change.  A **rename** (*original_name* != *name*) moves the
+    entry, refusing a target name that already exists — otherwise one
+    Save would destroy two records at once.  A brand-new entry is
+    seeded with the loader-required keys (see
+    :func:`_seed_new_custom_entry`).  An empty ``endpoint`` /
+    ``api_key`` / ``headers`` value removes that key from the entry.
+
+    Args:
+        name: The model name (the JSON key).
+        endpoint: OpenAI-compatible base URL for the model.
+        api_key: API key sent to the endpoint.
+        headers: Extra HTTP headers, ``Key: Value`` one per line.
+        original_name: The entry's exact key before an edit ("" for
+            adds).  Not trimmed: a hand-authored key with surrounding
+            whitespace must keep matching itself, or a Save would
+            duplicate it under the trimmed name.
+
+    Returns:
+        An error message when the request is unusable, else ``None``.
+
+    Raises:
+        OSError: When the registry file cannot be written.
+    """
+    name = name.strip()
+    if not name:
+        return "Custom model name must not be empty"
+    if name.startswith("_"):
+        return "Custom model name must not start with '_'"
+    if original_name.startswith("_"):
+        # ``_``-prefixed keys are reserved documentation/inert entries;
+        # a (crafted) originalName must not be able to move or destroy
+        # them through the rename path.
+        return "Original model name must not start with '_'"
+    with _MY_MODELS_EDIT_LOCK, _my_models_flock():
+        raw = _read_my_models_file()
+        if raw is None:
+            return _MY_MODELS_CORRUPT_ERROR
+        if original_name not in raw:
+            # The edited entry vanished (deleted by another window):
+            # fall through to plain add semantics.
+            original_name = ""
+        if original_name != name and name in raw:
+            if original_name:
+                return f"A custom model named '{name}' already exists"
+            return (
+                f"A custom model named '{name}' already exists; "
+                "use its Edit button to change it"
+            )
+        entry: dict[str, Any] | None = None
+        if original_name:
+            moved = raw.pop(original_name)
+            if isinstance(moved, dict):
+                entry = moved
+        if entry is None:
+            entry = _seed_new_custom_entry(name)
+        for key, value in (
+            ("endpoint", endpoint.strip()),
+            ("api_key", api_key.strip()),
+            ("headers", headers.strip()),
+        ):
+            if value:
+                entry[key] = value
+            else:
+                entry.pop(key, None)
+        raw[name] = entry
+        _write_my_models_file(raw)
+    return None
+
+
+def delete_custom_model(name: str) -> str | None:
+    """Remove the custom model entry *name* from ``~/.kiss/MY_MODELS.json``.
+
+    A name with no entry is a no-op (the file is not rewritten).
+    ``_``-prefixed keys (documentation / inert entries, never listed by
+    :func:`list_custom_models`) are refused, so a crafted
+    ``deleteMyModel`` cannot destroy them.
+
+    Args:
+        name: The model name (the JSON key) to remove.
+
+    Returns:
+        An error message when the request is unusable, else ``None``.
+
+    Raises:
+        OSError: When the registry file cannot be written.
+    """
+    if name.startswith("_"):
+        return "Custom model name must not start with '_'"
+    with _MY_MODELS_EDIT_LOCK, _my_models_flock():
+        raw = _read_my_models_file()
+        if raw is None:
+            return _MY_MODELS_CORRUPT_ERROR
+        if name not in raw:
+            return None
+        del raw[name]
+        _write_my_models_file(raw)
+    return None
+
+
+def custom_model_config(model_name: str) -> dict[str, Any] | None:
+    """Return the ``model_config`` stored for *model_name*, if any.
+
+    Looks the name up in ``~/.kiss/MY_MODELS.json`` and, when the entry
+    carries an ``endpoint``, builds the ``model_config`` dict the
+    :func:`model` factory routes on: ``base_url`` plus optional
+    ``api_key`` and ``extra_headers`` (parsed from the entry's
+    ``Key: Value`` lines).  This is what makes a settings-panel custom
+    model actually run against its own endpoint — the task runner
+    consults it for the selected model before falling back to the
+    global custom-endpoint config.
+
+    Args:
+        model_name: The model name to look up (the exact JSON key).
+
+    Returns:
+        The ``model_config`` dict, or ``None`` when the name has no
+        entry or the entry has no endpoint.
+    """
+    from kiss.core.vscode_config import _parse_custom_headers
+
+    entry = _read_my_models().get(model_name)
+    if entry is None:
+        return None
+    endpoint = _entry_str(entry, "endpoint")
+    if not endpoint:
+        return None
+    result: dict[str, Any] = {"base_url": endpoint}
+    api_key = _entry_str(entry, "api_key")
+    if api_key:
+        result["api_key"] = api_key
+    parsed = _parse_custom_headers(_entry_str(entry, "headers"))
+    if parsed:
+        result["extra_headers"] = parsed
+    return result
 
 
 def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:

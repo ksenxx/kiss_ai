@@ -391,7 +391,7 @@ body.remote-chat #tricks-panel {
 
 body.remote-chat #settings-panel {
   background: var(--surface);
-  border-left: 1px solid var(--border-8);
+  border: 1px solid var(--border-8);
 }
 
 body.remote-chat .sidebar-hdr {

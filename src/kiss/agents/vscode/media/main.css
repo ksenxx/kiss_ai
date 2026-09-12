@@ -340,6 +340,87 @@ body {
 
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
 
+/* Collapsible settings subpanels (API Keys, Custom Models): the same
+   chevron-toggle pattern as the history panel's Filters drawer. */
+.config-subpanel { margin-top: 8px; }
+
+.config-subpanel-toggle {
+  display: flex; align-items: center; gap: 4px;
+  width: 100%; padding: 2px 0; margin: 0 0 6px;
+  background: none; border: none;
+  font-family: inherit; font-size: var(--fs-md); font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  color: color-mix(in srgb, var(--fg) 50%, transparent);
+  text-align: left;
+  cursor: pointer; user-select: none;
+}
+
+.config-subpanel-toggle:hover { color: var(--accent); }
+
+.config-subpanel-toggle:focus-visible {
+  outline: 1px solid var(--accent); outline-offset: 1px;
+}
+
+.config-subpanel-chevron { flex: none; transition: transform 0.2s ease; }
+
+.config-subpanel-toggle.expanded .config-subpanel-chevron {
+  transform: rotate(90deg);
+}
+
+.config-subpanel-body[hidden] { display: none !important; }
+
+/* The Custom Models subpanel's Add / Save / Cancel row and the list of
+   models stored in ~/.kiss/MY_MODELS.json. */
+.custom-model-actions {
+  display: flex; align-items: center; gap: 8px; margin: 10px 0;
+}
+
+#custom-models-list { margin-top: 4px; }
+
+.custom-model-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 6px; border-radius: 4px;
+}
+
+.custom-model-row:hover {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+
+.custom-model-row.editing {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.custom-model-name {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-md); color: var(--fg);
+}
+
+.custom-model-endpoint {
+  flex: none; max-width: 40%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-sm);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+
+.custom-model-btn {
+  flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 3px; border: none; border-radius: 4px;
+  background: none; cursor: pointer;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+
+.custom-model-btn:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+.custom-models-empty {
+  padding: 4px 6px; font-size: var(--fs-sm);
+  color: color-mix(in srgb, var(--fg) 50%, transparent);
+}
+
 /* Tips / Update / Reset Server / Update Models.  ``flex-wrap`` + the
    ``white-space: nowrap`` on the buttons below make the row break
    BETWEEN buttons when it is too narrow, never inside a label. */
@@ -1522,24 +1603,30 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
 #frequent-overlay.open,
 #tricks-overlay.open { opacity: 1; pointer-events: auto; }
 
+/* The settings panel: a centered dialog. No entry animation — it is
+   display-toggled, never slid in from an edge. */
 #settings-panel {
   position: fixed;
-  right: 0;
-  top: 0;
-  bottom: 0;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
   width: 90vw;
+  max-height: 90vh;
   background: var(--bg2);
-  border-left: 1px solid var(--border);
-  transform: translateX(100%);
-  transition: transform 0.2s ease;
+  border: 1px solid var(--border);
+  border-radius: 8px;
   z-index: 200;
   padding: 16px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+
+  /* visibility (not display) so the closed panel keeps a measurable
+     layout box; no transition, so opening never animates. */
+  visibility: hidden;
 }
 
-#settings-panel.open { transform: translateX(0); }
+#settings-panel.open { visibility: visible; }
 
 #frequent-panel {
   position: fixed;

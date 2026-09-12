@@ -1519,6 +1519,105 @@ class _CommandsMixin:
         if password_changed:
             _restart_kiss_web_daemon()
 
+    def _cmd_get_my_models(self, cmd: dict[str, Any]) -> None:
+        """Send the custom models from ``~/.kiss/MY_MODELS.json``.
+
+        Answers the settings panel's Custom Models subpanel with a
+        ``myModelsData`` event, stamped with the sender's ``connId`` so
+        one window opening its settings panel never repaints another
+        window's list mid-edit.
+        """
+        from kiss.core.models.model_info import list_custom_models
+
+        event: dict[str, Any] = {
+            "type": "myModelsData", "models": list_custom_models(),
+        }
+        conn_id = cmd.get("connId", "")
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
+
+    def _broadcast_my_models(self) -> None:
+        """Broadcast the current custom-model list to every client.
+
+        Mutations are broadcast UNstamped (no ``connId``): the file is
+        shared by every window, so all open settings panels must repaint
+        after an add / edit / delete, not only the one that clicked.
+        """
+        from kiss.core.models.model_info import list_custom_models
+
+        self.printer.broadcast({
+            "type": "myModelsData", "models": list_custom_models(),
+        })
+
+    def _cmd_save_my_model(self, cmd: dict[str, Any]) -> None:
+        """Add or update one custom model in ``~/.kiss/MY_MODELS.json``.
+
+        Services the settings panel's Add and Save (edit) buttons.  The
+        payload carries the model ``name`` plus optional ``endpoint`` /
+        ``apiKey`` / ``headers`` strings and, for an edit that renamed
+        the model, ``originalName``.  A rejected name (empty, or
+        ``_``-prefixed — reserved for documentation keys) answers the
+        sender with an ``error`` event; success rebroadcasts the list
+        to every client.
+        """
+        from kiss.core.models.model_info import save_custom_model
+
+        def field(key: str) -> str:
+            value = cmd.get(key, "")
+            return value if isinstance(value, str) else ""
+
+        try:
+            error = save_custom_model(
+                name=field("name"),
+                endpoint=field("endpoint"),
+                api_key=field("apiKey"),
+                headers=field("headers"),
+                original_name=field("originalName"),
+            )
+        except OSError as e:
+            # A failed write (permissions, disk full) must answer the
+            # client instead of killing its connection's dispatch.
+            logger.warning("saveMyModel failed", exc_info=True)
+            error = f"Could not write ~/.kiss/MY_MODELS.json: {e}"
+        if error:
+            self._send_my_models_error(error, cmd)
+            return
+        self._broadcast_my_models()
+
+    def _send_my_models_error(self, error: str, cmd: dict[str, Any]) -> None:
+        """Answer a failed custom-model mutation with an ``error`` event.
+
+        Stamped with the sender's ``connId`` when present so the banner
+        pops only in the window that clicked.
+        """
+        event: dict[str, Any] = {"type": "error", "text": error}
+        conn_id = cmd.get("connId", "")
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
+
+    def _cmd_delete_my_model(self, cmd: dict[str, Any]) -> None:
+        """Delete one custom model from ``~/.kiss/MY_MODELS.json``.
+
+        Services the settings panel's per-model Delete button, then
+        rebroadcasts the list to every client.
+        """
+        from kiss.core.models.model_info import delete_custom_model
+
+        name = cmd.get("name", "")
+        error = None
+        if isinstance(name, str) and name:
+            try:
+                error = delete_custom_model(name)
+            except OSError as e:
+                logger.warning("deleteMyModel failed", exc_info=True)
+                error = f"Could not write ~/.kiss/MY_MODELS.json: {e}"
+        if error:
+            self._send_my_models_error(error, cmd)
+            return
+        self._broadcast_my_models()
+
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
         """Update the server's *fallback* working directory.
 
@@ -1589,4 +1688,7 @@ class _CommandsMixin:
         "setWorkDir": _cmd_set_work_dir,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
+        "getMyModels": _cmd_get_my_models,
+        "saveMyModel": _cmd_save_my_model,
+        "deleteMyModel": _cmd_delete_my_model,
     }

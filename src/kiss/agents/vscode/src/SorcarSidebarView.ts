@@ -314,6 +314,12 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   getAdjacentTask: ['tabId', 'taskId', 'direction'],
   getConfig: [],
   saveConfig: ['config', 'apiKeys'],
+  // The settings panel's Custom Models subpanel: the daemon owns
+  // ~/.kiss/MY_MODELS.json, so the CRUD travels to it whole and the
+  // `myModelsData` replies come back through the client relay.
+  getMyModels: [],
+  saveMyModel: ['name', 'endpoint', 'apiKey', 'headers', 'originalName'],
+  deleteMyModel: ['name'],
   // The daemon builds and writes the shared chat page for both the
   // extension and the remote webapp, so the webview's serialized
   // transcript travels through whole; the daemon answers with a
@@ -561,6 +567,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._getApi().getModels();
         this._getApi().getInputHistory();
         this._getApi().getConfig();
+        // The settings panel's Custom Models list would otherwise stay
+        // empty/stale in a panel left open across a daemon outage.
+        this._getApi().forward({type: 'getMyModels'});
       }
     });
     client.on('disconnect', () => {

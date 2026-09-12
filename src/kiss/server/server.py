@@ -53,6 +53,7 @@ from kiss.core import config as config_module
 from kiss.core.models.model_info import (
     MODEL_INFO,
     get_default_model,
+    list_custom_models,
 )
 from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
@@ -888,12 +889,37 @@ class VSCodeServer(
                 }
             )
 
-        from kiss.core.vscode_config import get_custom_model_entry, load_config
+        from kiss.core.vscode_config import (
+            _parse_custom_headers,
+            get_custom_model_entry,
+            load_config,
+        )
 
         cfg = load_config()
         custom = get_custom_model_entry(cfg)
         if custom:
             models_list.insert(0, custom)
+
+        # Settings-panel custom models (~/.kiss/MY_MODELS.json entries
+        # carrying an endpoint) are selectable right away — they are not
+        # in MODEL_INFO until the next restart, so the picker lists them
+        # from the file, shaped exactly like the config-based custom
+        # entry above.  Names already listed (a catalog model the entry
+        # merely overrides) are left as the catalog reported them.
+        listed_names = {m["name"] for m in models_list}
+        for cm in list_custom_models():
+            if not cm["endpoint"] or cm["name"] in listed_names:
+                continue
+            models_list.insert(0, {
+                "name": cm["name"],
+                "inp": 0,
+                "out": 0,
+                "uses": usage.get(cm["name"], 0),
+                "vendor": "Custom",
+                "endpoint": cm["endpoint"],
+                "api_key": cm["api_key"],
+                "extra_headers": _parse_custom_headers(cm["headers"]),
+            })
 
         available_names = {m["name"] for m in models_list}
         with self._state_lock:

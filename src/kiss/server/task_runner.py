@@ -1433,6 +1433,17 @@ class _TaskRunnerMixin:
             _cfg_budget = float(_vcfg["max_budget"])
             _cfg_web = _vcfg.get("use_web_browser", True)
             _model_config = build_model_config(_vcfg)
+            # A settings-panel custom model (a ~/.kiss/MY_MODELS.json
+            # entry carrying an endpoint) runs against ITS OWN
+            # endpoint / key / headers: the per-model config wins over
+            # the global custom-endpoint fallback above, or the run
+            # would silently target whatever endpoint the global
+            # config last held.
+            from kiss.core.models.model_info import custom_model_config
+
+            _my_model_config = custom_model_config(model)
+            if _my_model_config is not None:
+                _model_config = _my_model_config
             _agent_budget = coerce_budget_override(cmd.get("maxBudget"))
             _raw_web = cmd.get("webTools")
             _agent_web = _raw_web if isinstance(_raw_web, bool) else None

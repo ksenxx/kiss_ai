@@ -314,7 +314,13 @@
           </div>
 
           <div class="config-divider"></div>
-          <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
+          <!-- Collapsible subpanels (API Keys, Custom Models): same
+               toggle pattern as the history panel's Filters drawer;
+               main.js re-collapses both every time the settings panel
+               opens, so they always START collapsed. -->
+          <div class="config-subpanel" id="api-keys-subpanel">
+            <button type="button" id="api-keys-toggle" class="config-subpanel-toggle" aria-expanded="false" aria-controls="api-keys-body"><svg class="config-subpanel-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>API Keys</span></button>
+            <div id="api-keys-body" class="config-subpanel-body" hidden>
           <label class="config-label">Anthropic API Key
             <input type="password" autocomplete="off" id="cfg-key-ANTHROPIC_API_KEY" placeholder="Enter Anthropic API key">
           </label>
@@ -339,6 +345,14 @@
           <label class="config-label">Gemini API Key (NOT RECOMMENDED)
             <input type="password" autocomplete="off" id="cfg-key-GEMINI_API_KEY" placeholder="Enter Gemini API key">
           </label>
+            </div>
+          </div>
+          <div class="config-subpanel" id="custom-models-subpanel">
+            <button type="button" id="custom-models-toggle" class="config-subpanel-toggle" aria-expanded="false" aria-controls="custom-models-body"><svg class="config-subpanel-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Custom Models</span></button>
+            <div id="custom-models-body" class="config-subpanel-body" hidden>
+          <label class="config-label">Custom model name
+            <input type="text" id="cfg-custom-model-name" placeholder="e.g. my-org/my-model">
+          </label>
           <label class="config-label">Custom endpoint (local model)
             <input type="text" id="cfg-custom-endpoint" placeholder="http://localhost:8080/v1">
           </label>
@@ -348,6 +362,14 @@
           <label class="config-label">Custom headers
             <textarea id="cfg-custom-headers" rows="2" placeholder="Key:Value (one per line)"></textarea>
           </label>
+          <div class="custom-model-actions">
+            <button type="button" id="custom-model-add-btn" class="config-update-btn">Add</button>
+            <button type="button" id="custom-model-save-btn" class="config-update-btn" style="display:none;">Save</button>
+            <button type="button" id="custom-model-cancel-btn" class="config-update-btn" style="display:none;">Cancel</button>
+          </div>
+          <div id="custom-models-list"></div>
+            </div>
+          </div>
         </div>
       </div>
 

@@ -257,6 +257,9 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("selectModel", required=("model",)),
     ApiCommand("getConfig"),
     ApiCommand("saveConfig", required=("config",)),
+    ApiCommand("getMyModels"),
+    ApiCommand("saveMyModel", required=("name",)),
+    ApiCommand("deleteMyModel", required=("name",)),
     ApiCommand("getDefaultModel", handler="get_default_model"),
     ApiCommand("readKissConfig", handler="read_kiss_config"),
     ApiCommand(

@@ -6028,7 +6028,9 @@ class RemoteAccessServer:
         tab_id = self._cmd_str(cmd, "tabId")
         conn_id = cmd.get("connId", "")
         work_dir = cmd.get("workDir", "")
-        for init_cmd in ("getModels", "getInputHistory", "getConfig"):
+        for init_cmd in (
+            "getModels", "getInputHistory", "getConfig", "getMyModels",
+        ):
             init: dict[str, Any] = {"type": init_cmd, "connId": conn_id}
             if work_dir:
                 init["workDir"] = work_dir
