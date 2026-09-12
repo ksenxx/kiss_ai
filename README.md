@@ -16,7 +16,7 @@
 
 ### Open-source general-purpose AI agent for long-horizon tasks and AI discovery
 
-**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon, and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. All agents run as daemons. Complex AI systems/techniques can be replaced with a paragraph of prompt in KISS Sorcar.
+**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon, and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. Agents run as daemons hosted by the local server (a standalone `sorcar` terminal command can also run a task without the daemon). Complex AI systems/techniques can be replaced with a paragraph of prompt in KISS Sorcar.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
@@ -131,18 +131,18 @@ Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and
 
 - `@` file/folder mentions with ranked project-file completion.
 - Per-task **git worktree isolation** — worktrees are pre-warmed in the background for fast task start, with auto-commit and merge on success, or an interactive merge/discard prompt — toggle both in the Settings panel.
-- A pre-run **task classifier** (one fast structured-output model call, no tool loop) that detects whether the task is a development task — non-development tasks (questions, research, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. Toggleable in the Settings panel.
+- A pre-run **task classifier** (a single fast non-agentic model call — structured output with a plain-text fallback; skipped for `cc/*` and `codex/*` models) that detects whether the task is a development task — non-development tasks (questions, research, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. Toggleable in the Settings panel.
 - A model picker, per-task budget caps, chat history with resume (filtered to the current workspace by default), and an agent dashboard (burger menu, bottom-left).
 - Wake-word voice chat ("sorcar, …") via the mic button, including steering a running agent by voice.
 - Live steering: inject a message into a running agent, or switch its model mid-run.
 - Tab mirroring — every VS Code window and web client opened on the same workspace shows the same tabs with the same contents; the tab bar is scoped to the client's workspace directory, and sub-agents dispatched with `run_agent` open their own tab in the calling workspace.
-- Scheduled automations: ask in plain language ("every weekday at 9am, summarize my unread Slack messages") and the built-in cron agent (also runnable from the shell as `kiss-cron`) creates, lists, pauses, resumes, or removes the schedule. A job runs an unattended LLM task or a plain shell command and can deliver its result to any authenticated messaging channel (e.g. `telegram:123456`, `email:user@example.com`).
+- Scheduled automations: ask in plain language ("every weekday at 9am, summarize my unread Slack messages") and the built-in cron agent (also runnable from the shell as `kiss-cron`) creates, lists, pauses, resumes, or removes the schedule. A job runs an unattended LLM task or a plain shell command and can deliver its result to an authenticated messaging channel (24 of the 32 channels support delivery, e.g. `telegram:123456`, `email:user@example.com`).
 
 The remote web app is the same interface served over a cloudflared tunnel: copy the URL and password from the Settings panel and open it on any device.
 
 ### The `kiss-web` daemon
 
-The `kiss-web` daemon hosts all agents, chat sessions, and the web app, and services every client command — including config reads/writes, default-model lookup, and the wake-word listener — over its socket. The VS Code extension starts it automatically; you can also manage it yourself:
+The `kiss-web` daemon hosts the agents, chat sessions, and the web app, and services every client command — including config reads/writes, default-model lookup, and the wake-word listener — over its socket. The VS Code extension starts it automatically; you can also manage it yourself:
 
 ```bash
 # Start the daemon (serves the web app and the extension).
@@ -169,7 +169,7 @@ print(result.text, result.success, result.cost, result.tokens, result.steps)
 follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-`run()` accepts keyword options mirroring the chat interface — `model`, `work_dir`, `scope_work_dir` (workspace directory the task's tab is scoped to, when different from the execution `work_dir`), `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config` (custom endpoint/headers), `use_web_tools`, `is_parallel`, `timeout`, `stop_on_timeout` (also stop the task when `timeout` expires; default `False` — the task keeps running), `sock_path` (daemon socket override), `parent_task_id` / `parent_tab_id` (attach the run as a sub-agent of a calling task, nesting its tab and history row under that task — how the `run_agent` tool dispatches) — plus options to customize the agent itself:
+`run()` accepts keyword options mirroring the chat interface — `model`, `work_dir`, `scope_work_dir` (workspace directory the task's tab is scoped to, when different from the execution `work_dir`), `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config` (custom endpoint/headers), `use_web_tools`, `classify_tasks` (per-run task-classifier override; `None` falls back to the daemon's persisted setting), `is_parallel`, `timeout`, `stop_on_timeout` (also stop the task when `timeout` expires; default `False` — the task keeps running), `sock_path` (daemon socket override), `parent_task_id` / `parent_tab_id` (attach the run as a sub-agent of a calling task, nesting its tab and history row under that task — how the `run_agent` tool dispatches) — plus options to customize the agent itself:
 
 - `tools="/path/to/my_tools.py"` — a Python file whose `get_tools()` function returns the functions the daemon registers as extra agent tools. The functions are never serialized: only the path travels over the socket, and the daemon imports the file, calls `get_tools()`, and runs the tools in its own process.
 - `system_prompt` — replace the default system prompt for the run (and its sub-agents); `append_to_system_prompt` / `append_to_prompt` — append text to the system prompt or task prompt instead of replacing them.
@@ -269,14 +269,14 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **660 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **660 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 110 |
+| OpenAI | 102 |
 | Anthropic | 14 |
-| Gemini / Google | 27 |
-| Together AI | 91 |
+| Gemini | 24 |
+| Together AI | 102 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
 | OpenRouter | 378 |
@@ -292,7 +292,7 @@ Current catalog capability totals:
 Full model list:
 
 <details>
-<summary><strong>OpenAI (110)</strong></summary>
+<summary><strong>OpenAI (102)</strong></summary>
 
 - `computer-use-preview`
 - `computer-use-preview-2025-03-11`
@@ -393,14 +393,6 @@ Full model list:
 - `o4-mini-2025-04-16`
 - `o4-mini-deep-research`
 - `o4-mini-deep-research-2025-06-26`
-- `openai/gpt-oss-120b`
-- `openai/gpt-oss-120b-high`
-- `openai/gpt-oss-120b-low`
-- `openai/gpt-oss-120b-medium`
-- `openai/gpt-oss-20b`
-- `openai/gpt-oss-20b-high`
-- `openai/gpt-oss-20b-low`
-- `openai/gpt-oss-20b-medium`
 - `text-embedding-3-large`
 - `text-embedding-3-small`
 - `text-embedding-ada-002`
@@ -428,7 +420,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Gemini / Google (27)</strong></summary>
+<summary><strong>Gemini (24)</strong></summary>
 
 - `gemini-2.5-flash`
 - `gemini-2.5-flash-image`
@@ -454,14 +446,11 @@ Full model list:
 - `gemini-embedding-2-preview`
 - `gemini-omni-1.1-flash`
 - `gemini-omni-flash-preview`
-- `google/gemma-2-27b-it`
-- `google/gemma-3n-E4B-it`
-- `google/gemma-4-31B-it`
 
 </details>
 
 <details>
-<summary><strong>Together AI (91)</strong></summary>
+<summary><strong>Together AI (102)</strong></summary>
 
 - `BAAI/bge-base-en-v1.5`
 - `Qwen/QwQ-32B`
@@ -508,6 +497,9 @@ Full model list:
 - `deepseek-ai/DeepSeek-V4-Pro-0813`
 - `deepseek-ai/deepseek-coder-33b-instruct`
 - `essentialai/rnj-1-instruct`
+- `google/gemma-2-27b-it`
+- `google/gemma-3n-E4B-it`
+- `google/gemma-4-31B-it`
 - `intfloat/multilingual-e5-large-instruct`
 - `meta-llama/Llama-3-70b-chat-hf`
 - `meta-llama/Llama-3-8b-chat-hf`
@@ -544,6 +536,14 @@ Full model list:
 - `nvidia/Llama-3.1-Nemotron-70B-Instruct-HF`
 - `nvidia/NVIDIA-Nemotron-Nano-9B-v2`
 - `nvidia/nemotron-3-ultra-550b-a55b`
+- `openai/gpt-oss-120b`
+- `openai/gpt-oss-120b-high`
+- `openai/gpt-oss-120b-low`
+- `openai/gpt-oss-120b-medium`
+- `openai/gpt-oss-20b`
+- `openai/gpt-oss-20b-high`
+- `openai/gpt-oss-20b-low`
+- `openai/gpt-oss-20b-medium`
 - `zai-org/GLM-4.5-Air-FP8`
 - `zai-org/GLM-4.6`
 - `zai-org/GLM-4.7`
