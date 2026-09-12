@@ -107,6 +107,7 @@ from kiss.server.json_printer import (
     with_task_settings_event,
 )
 from kiss.server.server import VSCodeServer, broadcast_to_conn
+from kiss.server.stall_watchdog import start_stall_watchdog
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
 from kiss.server.voice_wake import (
@@ -7860,6 +7861,10 @@ class RemoteAccessServer:
             self.port,
         )
         logger.info("Initial memory: rss=%.1fMB pid=%d", _rss_mb(), pid)
+        # A GIL-holding stall (2026-09-12: a quadratic regex over a
+        # 5.8 MB tool result) freezes every thread, including logging;
+        # the C-level watchdog still dumps all thread stacks to stderr.
+        start_stall_watchdog()
 
         self._install_signal_handlers()
 

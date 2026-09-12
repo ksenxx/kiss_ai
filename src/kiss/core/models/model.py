@@ -367,6 +367,13 @@ def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
     cursor = 0
     for match in BINARY_ATTACHMENT_OPEN_RE.finditer(text):
         open_start, open_end = match.span()
+        if open_start < cursor:
+            # An opener inside the block just consumed (only possible in
+            # text that quotes the sentinel, e.g. a Read of this file).
+            # Skipping it keeps the scan linear: without this, every
+            # such opener re-searched for the same closer and re-decoded
+            # the overlapping payload, which is quadratic.
+            continue
         close_idx = text.find(BINARY_ATTACHMENT_CLOSE, open_end)
         if close_idx == -1:  # pragma: no cover – defensive: malformed sentinel
             break

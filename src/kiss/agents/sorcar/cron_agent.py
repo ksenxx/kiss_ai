@@ -129,7 +129,9 @@ def _is_silent(summary: str) -> bool:
     Returns:
         ``True`` when delivery should be suppressed.
     """
-    return re.sub(r"<[^>]+>", "", summary).strip() in _SILENCE_TOKENS
+    # ``[^<>]`` (not ``[^>]``) keeps this linear: a summary with many
+    # ``<`` and no ``>`` otherwise rescans to the end from each ``<``.
+    return re.sub(r"<[^<>]+>", "", summary).strip() in _SILENCE_TOKENS
 
 
 @contextlib.contextmanager

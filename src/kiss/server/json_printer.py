@@ -131,7 +131,18 @@ _RESULT_IMAGE_FALLBACK_WINDOW_SECS = 60.0
 #: prefix keeps ``C:\shots\x.png`` whole; the trailing lookahead
 #: rejects longer names like ``x.png.bak`` while still accepting a
 #: sentence-ending period (``Saved output.png.``).
+#:
+#: The leading lookbehind (``not preceded by a token character``) pins
+#: every match attempt to the START of a token, which makes the scan
+#: linear in the text size.  Without it the engine attempted a match
+#: at every offset inside a token and backtracked to the token's end
+#: each time — quadratic — and a tool result containing one long
+#: unbroken token (``media/vosk.js`` embeds a 5.77 M-char base64
+#: blob) pinned the GIL for hours, freezing the whole server process
+#: (2026-09-12 outage).  Semantics are unchanged: a token's longest
+#: valid image suffix is found from its first character either way.
 _IMAGE_PATH_RE = re.compile(
+    r"(?<![^\s\"'`<>|:;,()\[\]{}])"
     r"(?:(?<![\w.-])[A-Za-z]:[\\/])?[^\s\"'`<>|:;,()\[\]{}]+"
     r"\.(?:png|jpe?g|gif|webp|bmp|svg)(?![\w-]|\.[\w-])",
     re.IGNORECASE,

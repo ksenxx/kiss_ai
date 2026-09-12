@@ -7,7 +7,6 @@
 
 import json
 import logging
-import re
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -201,13 +200,28 @@ def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
         A tuple of (reasoning, final_answer) where reasoning is the content
         within <think> tags and final_answer is the remaining content.
     """
-    think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL)
-    match = think_pattern.search(content)
-    if match:
-        reasoning = match.group(1).strip()
-        final_answer = think_pattern.sub("", content).strip()
-        return reasoning, final_answer
-    return "", content
+    # A find() loop rather than ``<think>(.*?)</think>``: the lazy regex
+    # rescans to the end of the text for every unclosed opener, which is
+    # quadratic on model output that repeats the tag (and ``re`` holds
+    # the GIL while it does so).
+    reasoning = ""
+    answer_parts: list[str] = []
+    cursor = 0
+    while True:
+        start = content.find("<think>", cursor)
+        if start == -1:
+            break
+        end = content.find("</think>", start + len("<think>"))
+        if end == -1:
+            break
+        if not answer_parts:
+            reasoning = content[start + len("<think>") : end].strip()
+        answer_parts.append(content[cursor:start])
+        cursor = end + len("</think>")
+    if not answer_parts:
+        return "", content
+    answer_parts.append(content[cursor:])
+    return reasoning, "".join(answer_parts).strip()
 
 
 def _delta_reasoning_text(delta: Any) -> str | None:

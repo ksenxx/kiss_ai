@@ -19,7 +19,6 @@ import ctypes
 import logging
 import math
 import queue
-import re
 import threading
 import time
 import uuid
@@ -386,9 +385,29 @@ def parse_task_tags(text: str) -> list[str]:
     Returns:
         List of task strings.  Always contains at least one element.
     """
-    tasks = [m.strip() for m in re.findall(r"<task>(.*?)</task>", text, re.DOTALL)]
-    tasks = [t for t in tasks if t]
+    tasks = [t for t in _task_tag_blocks(text) if t]
     return tasks if tasks else [text]
+
+
+def _task_tag_blocks(text: str) -> list[str]:
+    """Return the stripped contents of every ``<task>...</task>`` block.
+
+    Equivalent to ``re.findall(r"<task>(.*?)</task>", text, re.DOTALL)``
+    but linear: the lazy regex rescanned to the end of the text for
+    every unclosed opener, which is quadratic on pasted input that
+    repeats ``<task>`` (and ``re`` holds the GIL while scanning).
+    """
+    blocks: list[str] = []
+    cursor = 0
+    while True:
+        start = text.find("<task>", cursor)
+        if start == -1:
+            return blocks
+        end = text.find("</task>", start + len("<task>"))
+        if end == -1:
+            return blocks
+        blocks.append(text[start + len("<task>") : end].strip())
+        cursor = end + len("</task>")
 
 
 def contains_task_tags(text: str) -> bool:
@@ -408,9 +427,7 @@ def contains_task_tags(text: str) -> bool:
         ``True`` when :func:`parse_task_tags` would return the tagged
         blocks rather than falling back to the whole text.
     """
-    return any(
-        m.strip() for m in re.findall(r"<task>(.*?)</task>", text, re.DOTALL)
-    )
+    return any(_task_tag_blocks(text))
 
 
 def _release_worktree_without_merging(

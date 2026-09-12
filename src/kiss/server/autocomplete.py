@@ -42,9 +42,32 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_TRAILING_IDENT_RE = re.compile(r"([\w][\w.]*)\Z")
-
 _ACTIVE_FILE_READ_CAP = 50000
+
+
+def _is_ident_char(ch: str) -> bool:
+    """True for the ``[\\w.]`` class: word characters (``str.isalnum``
+    or underscore, as ``re`` defines ``\\w`` for str patterns) and dots."""
+    return ch == "." or ch == "_" or ch.isalnum()
+
+
+def _trailing_ident_token(query: str) -> str:
+    """Return the trailing ``[\\w][\\w.]*`` run of *query* (may be empty).
+
+    Scans backwards from the end, so the cost is the token's length.
+    The former ``re.search(r"([\\w][\\w.]*)\\Z")`` tried a match at
+    every character of a long unbroken run and backtracked to its end
+    each time — quadratic, tens of seconds for a pasted 64k-char blob —
+    on the server's event-loop thread, on every keystroke.
+    """
+    end = len(query)
+    start = end
+    while start > 0 and _is_ident_char(query[start - 1]):
+        start -= 1
+    # The run must begin with a word character, not a dot.
+    while start < end and query[start] == ".":
+        start += 1
+    return query[start:end]
 
 
 def trailing_identifier(query: str) -> str:
@@ -61,10 +84,8 @@ def trailing_identifier(query: str) -> str:
         The trailing token, or ``""`` when *query* does not end in a
         completable identifier prefix.
     """
-    m = _TRAILING_IDENT_RE.search(query)
-    if not m or len(m.group(1)) < 2:
-        return ""
-    return m.group(1)
+    token = _trailing_ident_token(query)
+    return token if len(token) >= 2 else ""
 
 
 def read_active_file_head(path: str) -> str:
@@ -197,8 +218,7 @@ def _ghost_suffix(query: str, completions: list[dict[str, str]]) -> str:
     elif kind == "trick":
         prefix = current_sentence_partial(query)
     else:
-        m = _TRAILING_IDENT_RE.search(query)
-        prefix = m.group(1) if m else ""
+        prefix = _trailing_ident_token(query)
     if not prefix or not text.startswith(prefix):
         return ""
     return text[len(prefix):]
