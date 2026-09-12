@@ -72,6 +72,9 @@ dependencies = [
     # ./.venv/bin/bandit and ./.venv/bin/semgrep to flag dangerous sinks.
     "bandit>=1.9.4",
     "semgrep>=1.169.0",
+    # PostgreSQL driver for the postgres channel agent
+    # (kiss.agents.third_party_agents.postgres_agent).
+    "psycopg[binary]>=3.2.0",
 ]
 
 [build-system]
@@ -393,5 +396,14 @@ kiss-weixin = "kiss.agents.third_party_agents.weixin_agent:main"
 kiss-qq = "kiss.agents.third_party_agents.qq_agent:main"
 kiss-simplex = "kiss.agents.third_party_agents.simplex_agent:main"
 kiss-oai = "kiss.agents.third_party_agents.openai_compat_agent:main"
+kiss-brave = "kiss.agents.third_party_agents.brave_search_agent:main"
+kiss-notion = "kiss.agents.third_party_agents.notion_agent:main"
+kiss-postgres = "kiss.agents.third_party_agents.postgres_agent:main"
+kiss-firecrawl = "kiss.agents.third_party_agents.firecrawl_agent:main"
+kiss-github = "kiss.agents.third_party_agents.github_agent:main"
+kiss-gcal = "kiss.agents.third_party_agents.google_calendar_agent:main"
+kiss-gdrive = "kiss.agents.third_party_agents.google_drive_agent:main"
+kiss-gdocs = "kiss.agents.third_party_agents.google_docs_agent:main"
+kiss-gsheets = "kiss.agents.third_party_agents.google_sheets_agent:main"
 kiss-cron = "kiss.agents.sorcar.cron_agent:main"
 swedefend-eval = "swedefend.evaluate_fable5:main"

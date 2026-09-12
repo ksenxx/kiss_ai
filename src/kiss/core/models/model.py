@@ -26,6 +26,7 @@ import subprocess
 import threading
 import time
 import types as types_module
+import typing
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Collection, Iterator
@@ -1171,11 +1172,21 @@ class Model(ABC):
 
         param_descriptions = self._parse_docstring_params(doc)
 
+        # Under ``from __future__ import annotations`` (PEP 563) the
+        # signature's raw annotations are strings like ``"int"``, which
+        # would fall through the type mapping to ``{"type": "string"}``.
+        # Resolve them to real types so int/bool/float parameters keep
+        # their proper JSON-schema types.
+        try:
+            hints = typing.get_type_hints(func)
+        except Exception:
+            hints = {}
+
         properties: dict[str, Any] = {}
         required: list[str] = []
 
         for param_name, param in sig.parameters.items():
-            param_type = param.annotation
+            param_type = hints.get(param_name, param.annotation)
             param_schema = self._python_type_to_json_schema(param_type)
 
             if param_name in param_descriptions:
