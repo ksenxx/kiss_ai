@@ -1084,6 +1084,23 @@ def _strip_thinking_alias(bare: str) -> str:
     return bare
 
 
+# Rolling "latest" aliases (OpenRouter ``~openai`` passthroughs) that track
+# GPT-5.6/GPT-6 snapshots and therefore share their cache and long-context
+# pricing rules (their catalog rates match the versioned counterparts:
+# astra -> gpt-6-astra, luna/sol/terra -> gpt-5.6-*).  ``gpt-latest`` is the
+# pre-September-2026 spelling of ``gpt-sol-latest``, kept for user-local
+# catalog copies that predate the rename.  ``gpt-mini-latest`` is NOT here:
+# it tracks gpt-5.4-mini, which has free cache writes and no long-context
+# tier (it does share the 0.10x cache-read discount).
+_OPENAI_ROLLING_LATEST = (
+    "gpt-latest",
+    "gpt-astra-latest",
+    "gpt-luna-latest",
+    "gpt-sol-latest",
+    "gpt-terra-latest",
+)
+
+
 def _openai_charges_cache_writes(bare: str) -> bool:
     """Return True when the OpenAI model bills prompt-cache writes.
 
@@ -1096,7 +1113,10 @@ def _openai_charges_cache_writes(bare: str) -> bool:
     OpenAI pricing page (gpt-6-astra $12.50, gpt-5.6-sol $5.00, -terra
     $2.50, -luna $0.25 per MTok cache write = exactly 1.25x their input
     prices).  ``-pro`` variants publish no cache pricing, so they stay on
-    free writes.
+    free writes.  The rolling :data:`_OPENAI_ROLLING_LATEST` aliases track
+    GPT-5.6/GPT-6 snapshots (their catalog rates match the versioned
+    counterparts), so they bill writes too; ``gpt-mini-latest`` tracks
+    gpt-5.4-mini and keeps free writes.
 
     Args:
         bare: An OpenAI model name without any provider prefix.
@@ -1104,7 +1124,10 @@ def _openai_charges_cache_writes(bare: str) -> bool:
     Returns:
         True when cache-write tokens are billed at 1.25x the input price.
     """
-    return bare.startswith(("gpt-5.6", "gpt-6")) and "-pro" not in bare
+    return (
+        bare.startswith(("gpt-5.6", "gpt-6") + _OPENAI_ROLLING_LATEST)
+        and "-pro" not in bare
+    )
 
 
 def _openai_cache_read_multiplier(bare: str) -> float:
@@ -1129,7 +1152,9 @@ def _openai_cache_read_multiplier(bare: str) -> float:
     """
     if "-pro" in bare:
         return 1.0
-    if bare in ("gpt-latest", "gpt-mini-latest"):
+    # The rolling "latest" aliases track GPT-5.x/6.x snapshots, so they
+    # share the 0.10x discount (see :data:`_OPENAI_ROLLING_LATEST`).
+    if bare.startswith(_OPENAI_ROLLING_LATEST + ("gpt-mini-latest",)):
         return 0.10
     if bare.startswith(("gpt-5", "gpt-6")) or "chat-latest" in bare:
         return 0.10
@@ -1636,7 +1661,10 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     $8/$0.80/$10/$30, and likewise terra/luna/5.5/5.4 at exactly
     2x/1.5x) and https://ai.google.dev/gemini-api/docs/pricing
     (gemini-3-pro $2/$12 -> $4/$18, gemini-2.5-pro $1.25/$10 ->
-    $2.50/$15).
+    $2.50/$15).  The rolling :data:`_OPENAI_ROLLING_LATEST` aliases track
+    those same GPT-5.6/GPT-6 snapshots and inherit the uplift;
+    ``gpt-mini-latest`` tracks gpt-5.4-mini, which has no long-context
+    tier.
 
     Multipliers (not absolute prices) are returned so OpenRouter
     passthrough entries, whose base prices follow OpenRouter's own
@@ -1655,7 +1683,10 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     bare = _strip_thinking_alias(_strip_provider_prefix(model_name))
     if bare.startswith(_OPENAI_OPENROUTER_PREFIXES + _GOOGLE_OPENROUTER_PREFIXES):
         bare = bare.split("/", 2)[2]
-    if bare.startswith(("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")):
+    if bare.startswith(
+        ("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+        + _OPENAI_ROLLING_LATEST
+    ):
         return 272_000, 2.0, 1.5
     if bare.startswith("gpt-5.5") and "-pro" not in bare:
         return 272_000, 2.0, 1.5

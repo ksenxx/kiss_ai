@@ -95,19 +95,88 @@ def test_xhigh_alias_calculate_cost_matches_base(
     )
 
 
-def test_gpt_latest_xhigh_cache_read_uses_openai_gpt5_discount() -> None:
-    """Regression: ``openrouter/~openai/gpt-latest-xhigh`` is a GPT-5.x alias.
+# The rolling OpenRouter ``~openai`` latest aliases track GPT-5.6/GPT-6
+# snapshots (astra -> gpt-6-astra, luna/sol/terra -> gpt-5.6-*) and must
+# therefore share the snapshot families' absolute pricing rules: the 0.10x
+# cache-read discount, the 1.25x billed cache writes, and the 2x/1.5x
+# long-context uplift above 272k prompt tokens.  Alias/base parity tests
+# above cannot catch an absolute error when base and alias are BOTH wrong,
+# so these checks pin the absolute rules per family.
+_ROLLING_LATEST_BASES = (
+    "openrouter/~openai/gpt-astra-latest",
+    "openrouter/~openai/gpt-luna-latest",
+    "openrouter/~openai/gpt-sol-latest",
+    "openrouter/~openai/gpt-terra-latest",
+)
 
-    The OpenAI cache-read multiplier table treats the bare names
-    ``gpt-latest`` and ``gpt-mini-latest`` as 0.10x (GPT-5.x). The
-    ``-xhigh`` alias must inherit the same 0.10x discount; previously
-    it fell through to the default 0.50x, billing 5x too much for cache
-    reads.
+
+@pytest.mark.parametrize("base", _ROLLING_LATEST_BASES)
+def test_rolling_latest_cache_read_uses_openai_gpt5_discount(base: str) -> None:
+    """Rolling latest entries and their -xhigh aliases read cache at 0.10x.
+
+    Regression: before the September 2026 catalog rename these fell
+    through to the default 0.50x multiplier, billing 5x too much for
+    cache reads.
     """
-    alias = "openrouter/~openai/gpt-latest-xhigh"
-    if alias not in MODEL_INFO:
-        pytest.skip(f"{alias} not present in MODEL_INFO")
-    info = MODEL_INFO[alias]
+    for name in (base, f"{base}-xhigh"):
+        assert name in MODEL_INFO, f"{name} missing from MODEL_INFO"
+        info = MODEL_INFO[name]
+        assert info.cache_read_price_per_1M == pytest.approx(
+            info.input_price_per_1M * 0.10
+        ), name
+
+
+@pytest.mark.parametrize("base", _ROLLING_LATEST_BASES)
+def test_rolling_latest_bills_cache_writes(base: str) -> None:
+    """Rolling latest entries bill cache writes at 1.25x like their snapshots.
+
+    Regression: they previously fell into the free-writes rule that only
+    applies before the GPT-5.6 family.
+    """
+    info = MODEL_INFO[base]
+    assert info.cache_write_price_per_1M == pytest.approx(
+        info.input_price_per_1M * 1.25
+    ), base
+
+
+@pytest.mark.parametrize("base", _ROLLING_LATEST_BASES)
+def test_rolling_latest_gets_long_context_uplift(base: str) -> None:
+    """Above 272k prompt tokens the 2x input / 1.5x output tier applies.
+
+    Regression: the uplift previously matched only the versioned family
+    names, so rolling aliases billed long prompts at short-context rates.
+    """
+    info = MODEL_INFO[base]
+    in_tokens, out_tokens = 272_001, 10_000
+    expected = (
+        in_tokens / 1e6 * info.input_price_per_1M * 2.0
+        + out_tokens / 1e6 * info.output_price_per_1M * 1.5
+    )
+    assert calculate_cost(base, in_tokens, out_tokens) == pytest.approx(expected)
+    # Below the threshold the standard rates apply unchanged.
+    small_in, small_out = 1_000, 1_000
+    small_expected = (
+        small_in / 1e6 * info.input_price_per_1M
+        + small_out / 1e6 * info.output_price_per_1M
+    )
+    assert calculate_cost(base, small_in, small_out) == pytest.approx(
+        small_expected
+    )
+
+
+def test_gpt_mini_latest_keeps_free_writes_and_no_uplift() -> None:
+    """``gpt-mini-latest`` tracks gpt-5.4-mini: 0.10x reads, free writes,
+    and NO long-context tier."""
+    name = "openrouter/~openai/gpt-mini-latest"
+    assert name in MODEL_INFO, f"{name} missing from MODEL_INFO"
+    info = MODEL_INFO[name]
     assert info.cache_read_price_per_1M == pytest.approx(
         info.input_price_per_1M * 0.10
     )
+    assert info.cache_write_price_per_1M == 0.0
+    in_tokens, out_tokens = 272_001, 10_000
+    linear = (
+        in_tokens / 1e6 * info.input_price_per_1M
+        + out_tokens / 1e6 * info.output_price_per_1M
+    )
+    assert calculate_cost(name, in_tokens, out_tokens) == pytest.approx(linear)
