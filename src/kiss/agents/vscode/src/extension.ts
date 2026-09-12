@@ -10,6 +10,7 @@ import {SorcarSidebarView} from './SorcarSidebarView';
 import {CHAT_PANEL_VIEW_TYPE, SorcarPanelManager} from './SorcarPanelManager';
 import {getGitApi} from './gitApi';
 import {isReloadReady} from './reloadGuard';
+import {syncEditorActionsLocation} from './editorActionsLocation';
 
 import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
 import {findKissProject} from './kissPaths';
@@ -120,8 +121,23 @@ export function activate(context: vscode.ExtensionContext): void {
   if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
     context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration(e => {
+        // The title-bar placement of the Sorcar buttons depends on the
+        // custom title bar being visible: when its visibility setting
+        // flips, re-sync (an owned "titleBar" value is restored while
+        // the custom title bar is "never" — the actions would be
+        // hidden — and re-applied when it comes back).
+        if (
+          e.affectsConfiguration('window.customTitleBarVisibility') &&
+          editorTabsMode()
+        ) {
+          void syncEditorActionsLocation(context, true);
+        }
         if (!e.affectsConfiguration('kissSorcar.editorTabsMode')) return;
         modeSwitchAt = Date.now();
+        // Follow the mode with the editor-actions toolbar: ON moves
+        // the four Sorcar editor-title buttons into the window title
+        // bar, OFF restores the user's own actions location.
+        void syncEditorActionsLocation(context, editorTabsMode());
         if (editorTabsMode()) {
           panelManager!.enterMode(
             sidebarView!.getRegistryTabEntries(),
@@ -141,6 +157,17 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   sidebarView.syncWorkDir();
+
+  // In editor-tabs mode the Sorcar editor-title buttons (+, git
+  // commit, gear, KS) live in the window title bar rather than the
+  // editor tab bar; apply that on activation too, so the placement
+  // holds in fresh windows. Activation with the mode OFF deliberately
+  // does NOT restore: another window may have the mode ON (e.g. a
+  // workspace-level override turns it off only here), and the setting
+  // is global — restores happen only on explicit mode flips.
+  if (editorTabsMode()) {
+    void syncEditorActionsLocation(context, true);
+  }
 
   // How many editor tabs host a chat — live panels AND the serialized
   // placeholders a window reload restores (indistinguishable in the
