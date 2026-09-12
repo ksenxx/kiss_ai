@@ -1001,16 +1001,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             "keeping its worktree %s pending on this agent",
             wt.branch, wt.wt_dir,
         )
-        with self._warning_lock:
-            current = self._merge_conflict_warning or ""
-        self._set_warnings(merge=(
-            f"{current}\n" if current else ""
-        ) + (
+        keep_warning = (
             f"The keep decision for branch '{wt.branch}' could not be "
             "recorded in git config, so its worktree is still pending on "
             "this tab: merge, discard, or leave it as is explicitly once "
             "git config is writable again."
-        ))
+        )
+        self.add_warning(keep_warning)
         return False
 
 
@@ -1388,10 +1385,12 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     ) -> None:
         """Set pending warning attribute(s) under ``_warning_lock``.
 
-        All internal writers of ``_stash_pop_warning`` /
-        ``_merge_conflict_warning`` go through this helper so a write
-        can never land inside :meth:`_flush_warnings`'s atomic
-        take-and-clear section and be silently wiped by its clear.
+        Internal writers of ``_stash_pop_warning`` /
+        ``_merge_conflict_warning`` go through this helper (or
+        :meth:`add_warning`, which combines with the pending warning
+        under the same lock) so a write can never land inside
+        :meth:`_flush_warnings`'s atomic take-and-clear section and be
+        silently wiped by its clear.
 
         Args:
             stash: New ``_stash_pop_warning`` value, or ``None`` to
@@ -1404,6 +1403,35 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 self._stash_pop_warning = stash
             if merge is not None:
                 self._merge_conflict_warning = merge
+
+    def add_warning(self, text: str, *, prepend: bool = False) -> None:
+        """Combine *text* with the pending merge warning atomically.
+
+        The read, combine and write happen under ONE hold of
+        ``_warning_lock``.  Reading the current warning, releasing the
+        lock and writing the combination back through
+        :meth:`_set_warnings` would leave a gap in which a
+        :meth:`_flush_warnings` takes (and broadcasts) the current
+        warning only for the write to put it back — delivering it a
+        second time — and in which a concurrent :meth:`_set_warnings`
+        is silently overwritten.
+
+        Args:
+            text: The warning to add.  Joined to the pending warning
+                with a newline; becomes the whole warning when none is
+                pending.
+            prepend: Put *text* before the pending warning instead of
+                after it.
+        """
+        with self._warning_lock:
+            current = self._merge_conflict_warning
+            if not current:
+                combined = text
+            elif prepend:
+                combined = f"{text}\n{current}"
+            else:
+                combined = f"{current}\n{text}"
+            self._merge_conflict_warning = combined
 
     def _flush_warnings(self, printer: Any) -> None:
         """Broadcast and clear any pending stash/merge warnings.
@@ -1448,13 +1476,16 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 )
             except Exception:
                 # Restore so a broken printer never permanently loses the
-                # (already-cleared) warning — but only when the slot is
-                # still empty, so a warning set concurrently while this
-                # broadcast was failing is never overwritten by the old one.
+                # (already-cleared) warning.  A warning set concurrently
+                # while this broadcast was failing must survive too, so
+                # the old one is put in front of it rather than either
+                # overwriting or being dropped in its favour.
                 logger.debug("stash warning broadcast failed", exc_info=True)
                 with self._warning_lock:
-                    if self._stash_pop_warning is None:
-                        self._stash_pop_warning = stash_warning
+                    current = self._stash_pop_warning
+                    self._stash_pop_warning = (
+                        f"{stash_warning}\n{current}" if current else stash_warning
+                    )
         if merge_warning:
             try:
                 self._broadcast_to_watchers(
@@ -1462,9 +1493,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 )
             except Exception:
                 logger.debug("merge warning broadcast failed", exc_info=True)
-                with self._warning_lock:
-                    if self._merge_conflict_warning is None:
-                        self._merge_conflict_warning = merge_warning
+                self.add_warning(merge_warning, prepend=True)
 
 
     def run(  # type: ignore[override]

@@ -653,11 +653,19 @@ class _LiveUsageMonitor:
         Joining then guarantees no later emission can race with the
         subsequent :func:`_attribute_sub_usage` offset bump (which would
         double-count the sub-agents' spend in the displayed total).
+
+        Safe to call when :meth:`start` never ran, raised (thread
+        exhaustion) or was interrupted by a stop injected while it was
+        waiting for the thread to come up: ``join`` would raise on a
+        thread that never registered as started, so only a live thread
+        is joined — ``_done`` is set regardless, and a thread that did
+        start exits at its next tick.
         """
         self._done.set()
-        if self._thread is not None:
-            self._thread.join()
-            self._thread = None
+        thread = self._thread
+        self._thread = None
+        if thread is not None and thread.is_alive():
+            thread.join()
 
     def _loop(self) -> None:
         thread_local = getattr(self._printer, "_thread_local", None)
@@ -945,20 +953,22 @@ class SorcarAgent(RelentlessAgent):
         # side worktree cleanup call this concurrently — double-
         # counting spend or losing a totals update.  Neither callee
         # acquires ``_abandoned_lock``, so this cannot deadlock.
+        #
+        # The pass runs over the CURRENT list, not the pre-wait
+        # snapshot: a child abandoned by a fan-out that ended during
+        # the wait must count towards the return value (callers delete
+        # the shared working directory on True), and one that a
+        # concurrent reclaimer already banked and forgot must not be
+        # banked again.
         with self._abandoned_lock:
             still_running: list[_AbandonedSubagent] = []
-            for item in pending:
+            for item in self._abandoned_subagents:
                 budget, tokens, steps = item.unbanked_usage()
                 if budget or tokens or steps:
                     _attribute_sub_usage(self, budget, tokens, steps)
                 if not item.future.done():
                     still_running.append(item)
-            live = {id(item) for item in still_running}
-            self._abandoned_subagents = [
-                item
-                for item in self._abandoned_subagents
-                if item not in pending or id(item) in live
-            ]
+            self._abandoned_subagents = still_running
         return not still_running
 
     def _subagent_budget_share(self, num_tasks: int) -> float | None:
@@ -1063,8 +1073,11 @@ class SorcarAgent(RelentlessAgent):
         self.reclaim_abandoned_subagents()
         totals: dict[str, float] = {}
         monitor = _LiveUsageMonitor(self, self.printer)
-        monitor.start()
         try:
+            # Started inside the try: a stop injected between the start
+            # and the try would otherwise leak the polling thread —
+            # emitting every second for the rest of the process.
+            monitor.start()
             results = run_tasks_parallel(
                 tasks,
                 max_workers=max_workers,
@@ -2320,8 +2333,15 @@ def run_tasks_parallel(
     abandoned = False
     try:
         pool = ThreadPoolExecutor(max_workers=max_workers)
-        futures = [pool.submit(_run_single, item) for item in enumerate(tasks)]
         try:
+            # Submission happens INSIDE the guarded region, appending
+            # one future at a time: a stop injected while the tasks are
+            # still being submitted must see every child submitted so
+            # far, so the abandon path below runs for them instead of
+            # the ``finally`` joining untracked running children with
+            # ``shutdown(wait=True)``.
+            for item in enumerate(tasks):
+                futures.append(pool.submit(_run_single, item))
             results = _await_subagents(futures, parent_stop_event)
         except BaseException:
             abandoned = any(not f.done() for f in futures)

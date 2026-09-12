@@ -21,7 +21,6 @@ via the same credential data contract (``homeserver`` / ``access_token``
 from __future__ import annotations
 
 import json
-import socket
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -186,13 +185,9 @@ class TestSendTypingBestEffort:
             assert len(server.recorded) == 1
             assert server.recorded[0]["method"] == "PUT"
 
-    def test_unreachable_server_is_swallowed(self) -> None:
+    def test_unreachable_server_is_swallowed(self, refusing_port: int) -> None:
         """A connection-refused homeserver does not raise."""
-        probe = socket.socket()
-        probe.bind(("127.0.0.1", 0))
-        dead_port = probe.getsockname()[1]
-        probe.close()
-        backend = _backend_for(f"http://127.0.0.1:{dead_port}")
+        backend = _backend_for(f"http://127.0.0.1:{refusing_port}")
         backend.send_typing("!room123:example.org")
 
     def test_missing_user_id_is_silent_noop(self) -> None:

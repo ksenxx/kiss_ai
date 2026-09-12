@@ -520,15 +520,22 @@ class _AutocompleteMixin:
         concurrent callers cannot both observe ``None`` and spawn
         duplicate worker threads (which would leak an orphan thread
         consuming from an unreferenced queue).
+
+        The worker is published only after ``start()`` succeeded: a
+        failed start (``RuntimeError: can't start new thread`` under
+        thread exhaustion) used to leave a dead thread object in
+        :attr:`_complete_worker`, so every later call returned early
+        and requests queued forever with no consumer.
         """
         with self._state_lock:
             if self._complete_worker is not None:
                 return
             self._complete_queue = queue.Queue()
-            self._complete_worker = threading.Thread(
+            worker = threading.Thread(
                 target=self._complete_worker_loop, daemon=True
             )
-            self._complete_worker.start()
+            worker.start()
+            self._complete_worker = worker
 
     def _resolve_work_dir(self, work_dir: str) -> str:
         """Return *work_dir* when non-empty, else the daemon-wide work_dir.

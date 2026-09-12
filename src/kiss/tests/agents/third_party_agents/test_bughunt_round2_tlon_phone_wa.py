@@ -22,7 +22,6 @@ agent now uses the QR-paired whatsapp-mcp bridge and has no Meta webhook.)
 from __future__ import annotations
 
 import json
-import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -100,13 +99,6 @@ class _RecordingHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         """Silence request logging."""
-
-
-def _free_port() -> int:
-    """Return an ephemeral free TCP port on localhost."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def _start_server() -> tuple[ThreadingHTTPServer, str]:

@@ -339,6 +339,7 @@ class _CommandsMixin:
         ) -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
         def _close_tab(self, tab_id: str) -> None: ...
+        def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _registry_update_tab(
             self,
             tab_id: str,
@@ -670,12 +671,23 @@ class _CommandsMixin:
                 )
                 if not pre_cancelled:
                     thread.start()
-        except BaseException:
+        except BaseException as exc:
             with self._state_lock:
-                if state is not None and state.task_thread is thread:
+                never_started = state.task_thread is thread
+                if never_started:
                     state.task_thread = None
                     state.stop_event = None
                     state.user_answer_queue = None
+            if never_started:
+                # Both frontends raised the tab's running state the
+                # moment the user hit Enter, and only a terminal
+                # ``result`` + ``status running:false`` ever lower it
+                # — normally ``_run_task``'s own failure path, which
+                # never ran here (``RuntimeError: can't start new
+                # thread`` under thread exhaustion, or a failed
+                # registry publication).  Emit them, or the tab stays
+                # "running" until a daemon restart.
+                self._report_run_start_failure(tab_id, cmd, exc)
             raise
         if pre_cancelled:
             # Route the never-started run through the normal terminal
@@ -686,6 +698,44 @@ class _CommandsMixin:
             # the marker, right here on the dispatch thread.
             cmd["_pre_cancelled"] = True
             self._run_task(cmd)
+
+    def _report_run_start_failure(
+        self, tab_id: str, cmd: dict[str, Any], exc: BaseException,
+    ) -> None:
+        """Broadcast the terminal events of a run whose thread never started.
+
+        Mirrors the ``result`` / ``status running:false`` pair that
+        ``_run_task`` emits when setup fails, for the case where the
+        worker thread itself could not be started, and retires the
+        tab's state if the frontend closed it meanwhile.
+
+        Args:
+            tab_id: The tab whose run failed to start.
+            cmd: The run command (its client run token is stamped on
+                the ``status`` event like a normal run end).
+            exc: The error raised before the worker thread ran.
+        """
+        logger.warning(
+            "Task could not be started: tab_id=%s error=%s", tab_id, exc,
+            exc_info=True,
+        )
+        self.printer.broadcast({
+            "type": "result",
+            "text": f"Task failed: {type(exc).__name__}: {exc}",
+            "success": False,
+            "total_tokens": 0,
+            "cost": "$0.0000",
+            "step_count": 0,
+            "tabId": tab_id,
+        })
+        status_end: dict[str, Any] = {
+            "type": "status", "running": False, "tabId": tab_id,
+        }
+        client_task_id = _client_task_id_of(cmd)
+        if client_task_id:
+            status_end["taskId"] = client_task_id
+        self.printer.broadcast(status_end)
+        self._dispose_if_closed(tab_id)
 
     def _cmd_stop(self, cmd: dict[str, Any]) -> None:
         """Stop a running task.
@@ -1263,11 +1313,19 @@ class _CommandsMixin:
                 )
                 return
             self._commit_msg_tabs.add(tab_id)
-        threading.Thread(
-            target=self._run_commit_message_job,
-            args=(tab_id, work_dir),
-            daemon=True,
-        ).start()
+        try:
+            threading.Thread(
+                target=self._run_commit_message_job,
+                args=(tab_id, work_dir),
+                daemon=True,
+            ).start()
+        except BaseException:
+            # The worker never ran, so its ``finally`` cannot release
+            # the claim published above — release it here or the tab
+            # drops every later request as a duplicate.
+            with self._state_lock:
+                self._commit_msg_tabs.discard(tab_id)
+            raise
 
     def _run_commit_message_job(self, tab_id: str, work_dir: str) -> None:
         """Generate the tab's commit message and re-arm the button.

@@ -26,6 +26,8 @@ import json
 import os
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -167,6 +169,17 @@ def _start_bridge_server(
     server.recorded = []  # type: ignore[attr-defined]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, server.server_address[1]
+
+
+@contextmanager
+def _bridge_server(response_body: dict[str, Any]) -> Iterator[tuple[ThreadingHTTPServer, int]]:
+    """Run a bridge stand-in server for the block, shutting it down afterwards."""
+    server, port = _start_bridge_server(response_body)
+    try:
+        yield server, port
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 # A genuine qrterminal.GenerateHalfBlock-shaped block (charset {█ ▀ ▄ space}).
@@ -484,26 +497,18 @@ class TestChannelProtocol:
         assert flags == {"m1": False, "m2": True, "m3": False}
 
     def test_send_message_posts_to_bridge(self, tmp_path: Path) -> None:
-        server, port = _start_bridge_server({"success": True, "message": "sent"})
-        try:
+        with _bridge_server({"success": True, "message": "sent"}) as (server, port):
             backend = WhatsAppChannelBackend(repo_dir=str(tmp_path), bridge_port=port)
             backend.send_message("+1 (415) 555-0001", "hello")
             path, body = server.recorded[0]  # type: ignore[attr-defined]
             assert path == "/api/send"
             assert body == {"recipient": "14155550001", "message": "hello"}
-        finally:
-            server.shutdown()
-            server.server_close()
 
     def test_send_message_raises_on_bridge_error(self, tmp_path: Path) -> None:
-        server, port = _start_bridge_server({"success": False, "message": "not on WhatsApp"})
-        try:
+        with _bridge_server({"success": False, "message": "not on WhatsApp"}) as (server, port):
             backend = WhatsAppChannelBackend(repo_dir=str(tmp_path), bridge_port=port)
             with pytest.raises(RuntimeError, match="not on WhatsApp"):
                 backend.send_message("14155550001", "hello")
-        finally:
-            server.shutdown()
-            server.server_close()
 
     def test_send_message_raises_when_bridge_down(self, tmp_path: Path) -> None:
         backend = WhatsAppChannelBackend(repo_dir=str(tmp_path), bridge_port=1)
@@ -527,15 +532,11 @@ class TestChannelProtocol:
     def test_connect_paired_and_running(self, channel_state: Any, tmp_path: Path) -> None:
         _make_db(tmp_path)
         _make_paired_session(tmp_path)
-        server, port = _start_bridge_server({"success": True, "message": ""})
-        try:
+        with _bridge_server({"success": True, "message": ""}) as (server, port):
             _config.save({"repo_dir": str(tmp_path), "bridge_port": str(port)})
             backend = WhatsAppChannelBackend()
             assert backend.connect() is True
             assert "connected" in backend.connection_info
-        finally:
-            server.shutdown()
-            server.server_close()
 
     def test_connect_ignores_invalid_port_config(
         self, channel_state: Any, tmp_path: Path
@@ -710,30 +711,22 @@ class TestAgentAndAuthTools:
         (bridge / "main.go").write_text("package main")
         (bridge / "kiss-whatsapp-bridge").write_text("bin")
         _make_paired_session(tmp_path)
-        server, port = _start_bridge_server({"success": True, "message": ""})
-        try:
+        with _bridge_server({"success": True, "message": ""}) as (server, port):
             _config.save({"repo_dir": str(tmp_path), "bridge_port": str(port)})
             status = json.loads(_auth_tools(WhatsAppAgent())["check_whatsapp_auth"]())
             assert status["bridge_running"] is True and status["paired"] is True
             assert status["next_step"].startswith("Ready")
-        finally:
-            server.shutdown()
-            server.server_close()
 
     def test_check_auth_reports_pairing_needed(self, tmp_path: Path) -> None:
         bridge = tmp_path / "whatsapp-bridge"
         bridge.mkdir(parents=True)
         (bridge / "main.go").write_text("package main")
         (bridge / "kiss-whatsapp-bridge").write_text("bin")
-        server, port = _start_bridge_server({"success": True, "message": ""})
-        try:
+        with _bridge_server({"success": True, "message": ""}) as (server, port):
             _config.save({"repo_dir": str(tmp_path), "bridge_port": str(port)})
             status = json.loads(_auth_tools(WhatsAppAgent())["check_whatsapp_auth"]())
             assert status["bridge_running"] is True and status["paired"] is False
             assert "get_whatsapp_qr_code" in status["next_step"]
-        finally:
-            server.shutdown()
-            server.server_close()
 
     def test_authenticate_rejects_bad_port(self, tmp_path: Path) -> None:
         result = json.loads(
@@ -794,14 +787,10 @@ class TestAgentAndAuthTools:
         assert result["ok"] is False and "authenticate_whatsapp" in result["error"]
 
     def test_start_bridge_short_circuits_when_running(self, tmp_path: Path) -> None:
-        server, port = _start_bridge_server({"success": True, "message": ""})
-        try:
+        with _bridge_server({"success": True, "message": ""}) as (server, port):
             _config.save({"repo_dir": str(tmp_path), "bridge_port": str(port)})
             result = json.loads(_auth_tools(WhatsAppAgent())["start_whatsapp_bridge"]())
             assert result == {"ok": True, "message": "Bridge already running."}
-        finally:
-            server.shutdown()
-            server.server_close()
 
     def test_qr_code_without_log(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path), "bridge_port": "1"})
@@ -917,13 +906,9 @@ class TestAgentAndAuthTools:
     def test_clear_refuses_unowned_running_bridge(self, tmp_path: Path) -> None:
         _make_db(tmp_path)
         _make_paired_session(tmp_path)
-        server, port = _start_bridge_server({"success": True, "message": ""})
-        try:
+        with _bridge_server({"success": True, "message": ""}) as (server, port):
             _config.save({"repo_dir": str(tmp_path), "bridge_port": str(port)})
             message = _auth_tools(WhatsAppAgent())["clear_whatsapp_auth"]()
-        finally:
-            server.shutdown()
-            server.server_close()
         assert "Refusing to clear" in message
         assert (tmp_path / "whatsapp-bridge" / "store" / "whatsapp.db").exists()
 

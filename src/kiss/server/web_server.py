@@ -268,6 +268,13 @@ _EXTENSION_DIR_PREFIX = "ksenxx.kiss-sorcar-"
 _PYPI_FETCH_TIMEOUT = 5.0
 
 _WS_PING_TIMEOUT = 10
+_UDS_DRAIN_TIMEOUT = 30.0
+"""Seconds a UDS peer may leave its socket unread before it is dropped.
+
+UDS peers have no ping watchdog, so a peer that stops reading would
+otherwise hold its send lock forever while every later broadcast queues
+another pending send for it without bound.
+"""
 
 _TUNNEL_UNHEALTHY_LIMIT_NAMED = 3
 
@@ -1325,7 +1332,6 @@ def _stderr_reader_loop(
     stderr: Any,
     parse: Callable[[str], str | None],
     result: list[str | None],
-    stop_event: threading.Event | None = None,
     rate_limit_flag: list[bool] | None = None,
     url_found_event: threading.Event | None = None,
 ) -> None:
@@ -1342,13 +1348,18 @@ def _stderr_reader_loop(
     pipe, causing the reader to bail out with stderr buffered data
     unread (and the URL therefore missed).
 
-    **Critically**, after finding the URL the loop does **not** return.
-    It continues draining stderr so the pipe buffer never fills up.
-    If the buffer were to fill (~64 KiB), ``cloudflared`` would block
-    on its next stderr write, which in Go deadlocks the whole process
-    (the logging mutex prevents any goroutine from making progress).
-    The result is an unhealthy tunnel that the watchdog force-restarts,
-    giving a new URL every few minutes.
+    **Critically**, the loop never returns while the subprocess is
+    alive — neither after finding the URL nor after the caller's URL
+    wait timed out.  It is the ONLY reader of the pipe for the whole
+    life of the ``cloudflared`` process (the callers keep the process
+    when the URL is discovered later through the metrics endpoint, or
+    unconditionally for a named tunnel).  If the pipe buffer were to
+    fill (~64 KiB), ``cloudflared`` would block on its next stderr
+    write, which in Go deadlocks the whole process (the logging mutex
+    prevents any goroutine from making progress); its metrics endpoint
+    then stops answering too, so the watchdog can no longer even tell
+    that the tunnel is unhealthy.  A stop-on-timeout early exit used
+    to exist here and produced exactly that hang.
 
     Args:
         stderr: A line-buffered text-mode file-like object.
@@ -1356,11 +1367,6 @@ def _stderr_reader_loop(
             recognised, otherwise ``None``.
         result: Single-element list used to communicate the URL back
             to the caller across the thread boundary.
-        stop_event: When set by the caller (after a timeout) the loop
-            exits at its next iteration.  Used by H6 to bound the
-            reader-thread lifetime: once a single additional line is
-            consumed (or the subprocess dies) the daemon thread exits
-            instead of running until process shutdown.
         rate_limit_flag: Optional single-element list set to ``True``
             on the first stderr line matching
             :func:`_is_rate_limit_line`.  Lets callers distinguish a
@@ -1387,9 +1393,6 @@ def _stderr_reader_loop(
                 found = True
                 if url_found_event is not None:
                     url_found_event.set()
-                continue
-        if stop_event is not None and stop_event.is_set():
-            return
 
 
 def _read_url_from_stderr(
@@ -1402,7 +1405,11 @@ def _read_url_from_stderr(
 
     The reader runs in a daemon thread so this call is bounded even
     when ``cloudflared`` keeps streaming non-matching log lines after
-    startup.
+    startup.  The thread itself is NOT bounded by *timeout*: it keeps
+    draining the pipe until EOF, i.e. until *proc* exits (see
+    :func:`_stderr_reader_loop` for why a live ``cloudflared`` must
+    never be left without a stderr reader).  One drain thread per live
+    tunnel process is therefore expected; it ends with the process.
 
     Args:
         proc: A subprocess started with ``stderr=subprocess.PIPE`` and
@@ -1423,22 +1430,27 @@ def _read_url_from_stderr(
     stderr = proc.stderr
     assert stderr is not None
     result: list[str | None] = [None]
-    stop_event = threading.Event()
     url_found_event = threading.Event()
     reader = threading.Thread(
         target=_stderr_reader_loop,
-        args=(
-            stderr, parse, result, stop_event, rate_limit_flag,
-            url_found_event,
-        ),
+        args=(stderr, parse, result, rate_limit_flag, url_found_event),
+        name=f"cloudflared-stderr-drain-{proc.pid}",
         daemon=True,
     )
-    reader.start()
+    try:
+        reader.start()
+    except Exception:
+        # No drain thread (``RuntimeError: can't start new thread``
+        # under thread exhaustion): a live *proc* would block on its
+        # first full stderr pipe — for cloudflared a whole-process
+        # deadlock.  Kill and reap it before reporting the failure so
+        # the caller never keeps a reader-less process.
+        proc.kill()
+        proc.wait()
+        stderr.close()
+        raise
     url_found_event.wait(timeout=timeout)
-    if result[0] is not None:
-        return result[0]
-    stop_event.set()
-    return None
+    return result[0]
 
 
 def _parse_quick_tunnel_url(line: str) -> str | None:
@@ -2008,6 +2020,39 @@ def _generate_self_signed_cert(
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
 
+def _flock_with_deadline(lock_file: Any, timeout: float) -> None:
+    """Take an exclusive ``flock`` on *lock_file*, giving up after *timeout*.
+
+    Polls ``LOCK_EX | LOCK_NB`` with short sleeps instead of blocking
+    in ``LOCK_EX``: the blocking call cannot be interrupted by
+    cancelling the coroutine that offloaded it to the executor, so a
+    sibling process that wedged while holding the lock would stall
+    startup forever.
+
+    Args:
+        lock_file: An open file object whose descriptor is locked.
+        timeout: Maximum seconds to keep trying.
+
+    Raises:
+        TimeoutError: The lock was still held by another process when
+            *timeout* elapsed.
+    """
+    import fcntl
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"{lock_file.name} still locked by another process "
+                    f"after {timeout:.0f}s",
+                ) from None
+            time.sleep(0.05)
+
+
 def _create_ssl_context(
     certfile: str | None = None,
     keyfile: str | None = None,
@@ -2123,12 +2168,13 @@ class WebPrinter(JsonPrinter):
         self.work_dir: str = ""
         self._pending_sends: dict[Any, set[ConcurrentFuture[None]]] = {}
         self._send_locks: dict[Any, asyncio.Lock] = {}
+        self._uds_drain_timeout: float = _UDS_DRAIN_TIMEOUT
         # tabId -> pending worktree dir of that tab's finished (or
         # running) worktree task; see _track_worktree_event().
         self._tab_worktree_dirs: dict[str, str] = {}
 
     def _track_worktree_event(
-        self, event: dict[str, Any], tab_id: Any,
+        self, event: dict[str, Any], tab_id: Any, task_id: Any = None,
     ) -> None:
         """Track *tab_id*'s pending worktree directory from *event*.
 
@@ -2153,6 +2199,11 @@ class WebPrinter(JsonPrinter):
         Args:
             event: The event being broadcast.
             tab_id: The tab the event copy is addressed to.
+            task_id: For a fan-out copy, the task whose subscriber
+                list named *tab_id*; the directory is recorded only if
+                the tab is STILL subscribed to it (see
+                :meth:`_record_tab_worktree_dir`).  ``None`` for an
+                event addressed to the tab directly.
         """
         if not isinstance(tab_id, str) or not tab_id:
             return
@@ -2162,7 +2213,7 @@ class WebPrinter(JsonPrinter):
             if isinstance(nested, list):
                 for sub in nested:
                     if isinstance(sub, dict):
-                        self._track_worktree_event(sub, tab_id)
+                        self._track_worktree_event(sub, tab_id, task_id)
             return
         if etype in ("worktree_created", "worktree_done"):
             wt_work_dir = event.get("worktreeWorkDir")
@@ -2172,7 +2223,7 @@ class WebPrinter(JsonPrinter):
                 else event.get("worktreeDir")
             )
             if isinstance(wt_dir, str) and wt_dir:
-                self._tab_worktree_dirs[tab_id] = wt_dir
+                self._record_tab_worktree_dir(tab_id, wt_dir, task_id)
         elif (
             etype == "worktree_result"
             and event.get("success")
@@ -2184,6 +2235,36 @@ class WebPrinter(JsonPrinter):
             # into it — mirroring the VS Code host (gpt-5.6-sol review
             # finding).
             self._tab_worktree_dirs.pop(tab_id, None)
+
+    def _record_tab_worktree_dir(
+        self, tab_id: str, wt_dir: str, task_id: Any,
+    ) -> None:
+        """Record *wt_dir* as *tab_id*'s worktree, unless the copy is stale.
+
+        A fan-out copy is addressed from a subscriber snapshot taken
+        before this call; a concurrent rebind (``cleanup_tab`` then a
+        subscription to another task) can land in between, and
+        recording the OLD task's worktree for the rebound tab would
+        make its ``openFile``/``checkPaths`` resolve into the wrong
+        repository.  The subscription is therefore re-checked and the
+        entry written in one ``_lock`` critical section — the same
+        lock :meth:`cleanup_tab` unsubscribes and drops the entry
+        under — so every interleaving converges on the serial outcome.
+
+        Args:
+            tab_id: The tab the event copy is addressed to.
+            wt_dir: The worktree directory to record.
+            task_id: The task the fan-out copy belongs to, or ``None``
+                for an event addressed to the tab directly (always
+                recorded).
+        """
+        with self._lock:
+            if task_id is not None:
+                key = self._coerce_task_id(task_id)
+                viewers = self._subscribers.get(key) if key else None
+                if not viewers or tab_id not in viewers:
+                    return
+            self._tab_worktree_dirs[tab_id] = wt_dir
 
     def worktree_dir_for_tab(self, tab_id: str) -> str:
         """Return the pending worktree dir recorded for *tab_id*.
@@ -2215,12 +2296,20 @@ class WebPrinter(JsonPrinter):
         way :meth:`_track_worktree_event` re-records the entry before
         any file link is checked.
 
+        The subscriptions go first, then the entry is dropped under the
+        same ``_lock`` :meth:`_record_tab_worktree_dir` writes under.
+        A stale fan-out copy that passed its subscription re-check
+        before the unsubscribe has already written its entry by the
+        time this pop runs (so the pop removes it); one that re-checks
+        afterwards writes nothing.  Either way the entry is gone.
+
         Args:
             tab_id: The frontend tab identifier to drop.
         """
-        if tab_id:
-            self._tab_worktree_dirs.pop(tab_id, None)
         super().cleanup_tab(tab_id)
+        if tab_id:
+            with self._lock:
+                self._tab_worktree_dirs.pop(tab_id, None)
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send *event* to every connected WebSocket client.
@@ -2341,7 +2430,7 @@ class WebPrinter(JsonPrinter):
             return
         base = json.dumps(event)[:-1]
         for tab_id in targets:
-            self._track_worktree_event(event, tab_id)
+            self._track_worktree_event(event, tab_id, event.get("taskId"))
             self._send_to_ws_clients(
                 f'{base}, "tabId": {json.dumps(tab_id)}}}'
             )
@@ -2663,16 +2752,24 @@ class WebPrinter(JsonPrinter):
         peers.  On any write failure, the writer is removed from the
         active set so subsequent broadcasts skip it.
 
+        The drain is bounded by :attr:`_uds_drain_timeout`: a peer that
+        stops reading would otherwise block here forever under the
+        endpoint's send lock while every later broadcast appended one
+        more pending future for it without bound.  On timeout the peer
+        is dropped and its transport closed (which also unblocks its
+        handler's ``readline()`` so the connection is torn down).
+
         Args:
             writer: The asyncio stream writer for the UDS connection.
             data: The JSON payload (already encoded with ``json.dumps``).
         """
         try:
             writer.write(data.encode("utf-8") + b"\n")
-            await writer.drain()
+            await asyncio.wait_for(writer.drain(), self._uds_drain_timeout)
         except Exception:
             logger.debug("Failed to write to UDS client", exc_info=True)
             self.remove_uds_writer(writer)
+            writer.close()
 
     def _add_endpoint(self, endpoint: Any, collection: set[Any]) -> None:
         """Register a WSS/UDS *endpoint* in *collection* for broadcasting.
@@ -4008,6 +4105,13 @@ class RemoteAccessServer:
         self._tunnel_rate_limited = False
         self._tunnel_force_restart_count = 0
         self._tunnel_force_restart_next_allowed = 0.0
+        # Serialises publishing a freshly spawned cloudflared into
+        # ``_tunnel_proc`` against ``_stop_tunnel``: cancelling the
+        # watchdog task does not stop an in-flight executor
+        # ``_start_tunnel``, so without this a stop could see "no
+        # process" and the start could publish a live one afterwards.
+        self._tunnel_lock = threading.Lock()
+        self._tunnel_stopped = False
         self._ntfy_base_url = ntfy_base_url
         self._last_posted_url: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -4016,6 +4120,10 @@ class RemoteAccessServer:
             Path(uds_path) if uds_path else _default_uds_path()
         )
         self._uds_owner_wait_s = uds_owner_wait_s
+        # A concurrently starting sibling legitimately holds the UDS
+        # sidecar lock for up to ``uds_owner_wait_s`` while it waits
+        # out a predecessor, so the startup lock wait must outlast that.
+        self._uds_lock_timeout_s = uds_owner_wait_s + 30.0
         self._uds_server: asyncio.Server | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._latest_version: str | None = None
@@ -6210,6 +6318,11 @@ class RemoteAccessServer:
                     stderr=subprocess.PIPE,
                     text=True,
                     encoding="utf-8",
+                    # One non-UTF-8 byte in a log line would otherwise
+                    # raise ``UnicodeDecodeError`` inside the sole
+                    # stderr drain thread and kill it, leaving the live
+                    # cloudflared to block on a full pipe.
+                    errors="replace",
                     start_new_session=True,
                 )
             except FileNotFoundError:
@@ -6238,12 +6351,25 @@ class RemoteAccessServer:
                     if last_proc.stderr is not None:
                         last_proc.stderr.close()
                     last_proc.wait()
-                self._tunnel_proc = proc
-                self._tunnel_started_at = time.monotonic()
-                self._tunnel_adopted_pid = None
-                _save_cloudflared_pidfile(
-                    proc.pid, self._tunnel_metrics_port, None,
-                )
+                with self._tunnel_lock:
+                    if self._tunnel_stopped:
+                        # ``_stop_tunnel`` already ran (the watchdog
+                        # tick that started us was cancelled by
+                        # ``stop_async``); publishing now would leak
+                        # a live cloudflared past shutdown.
+                        proc.kill()
+                        proc.wait()
+                        if proc.stderr is not None:
+                            proc.stderr.close()
+                        raise RuntimeError(
+                            "tunnel stopped while cloudflared was starting",
+                        )
+                    self._tunnel_proc = proc
+                    self._tunnel_started_at = time.monotonic()
+                    self._tunnel_adopted_pid = None
+                    _save_cloudflared_pidfile(
+                        proc.pid, self._tunnel_metrics_port, None,
+                    )
                 return
             if last_proc is not None:
                 if last_proc.stderr is not None:
@@ -6931,8 +7057,15 @@ class RemoteAccessServer:
         daemon may have already overwritten it; removing it would
         race with the new instance's ``_save_url_file`` and cause the
         VS Code sidebar to show no URL.
+
+        Sets :attr:`_tunnel_stopped` under :attr:`_tunnel_lock` so an
+        in-flight executor :meth:`_start_tunnel` (whose watchdog task
+        was cancelled, not stopped) kills its own cloudflared instead
+        of publishing it after this method has already returned.
         """
-        self._terminate_tunnel_proc()
+        with self._tunnel_lock:
+            self._tunnel_stopped = True
+            self._terminate_tunnel_proc()
         self._reset_tunnel_backoff_state()
 
     def _detach_tunnel(self) -> None:
@@ -7081,8 +7214,6 @@ class RemoteAccessServer:
         self._printer._loop = self._loop
 
         try:
-            import fcntl
-
             self._uds_path.parent.mkdir(parents=True, exist_ok=True)
             # Serialise the probe → unlink → bind sequence across
             # processes with an exclusive sidecar file lock (C-RC3;
@@ -7098,8 +7229,12 @@ class RemoteAccessServer:
                 self._uds_path.name + ".lock",
             )
             with open(lock_path, "w", encoding="utf-8") as uds_lock:
+                # Bounded: a blocking ``LOCK_EX`` would wait forever
+                # behind a wedged sibling, and cancelling this
+                # coroutine does not interrupt the executor syscall.
                 await self._loop.run_in_executor(
-                    None, fcntl.flock, uds_lock, fcntl.LOCK_EX,
+                    None, _flock_with_deadline, uds_lock,
+                    self._uds_lock_timeout_s,
                 )
                 if self._uds_path.exists() or self._uds_path.is_symlink():
                     await self._wait_for_uds_release()
@@ -7530,12 +7665,27 @@ class RemoteAccessServer:
             self._shutdown_initiated = True
             loop = self._loop
             if loop is not None and loop.is_running():
-                threading.Thread(
-                    target=self._shutdown_on_sigterm,
-                    name="kiss-sigterm-shutdown",
-                    daemon=True,
-                ).start()
-                return
+                try:
+                    threading.Thread(
+                        target=self._shutdown_on_sigterm,
+                        name="kiss-sigterm-shutdown",
+                        daemon=True,
+                    ).start()
+                    return
+                except Exception:
+                    # Thread exhaustion is exactly when an operator
+                    # sends SIGTERM.  The latch above is already set,
+                    # so without a fallback every later SIGTERM would
+                    # be ignored and nothing would ever shut down.
+                    logger.exception(
+                        "%s: could not start the shutdown thread; "
+                        "unwinding the event loop directly", sig_name,
+                    )
+                try:
+                    loop.call_soon_threadsafe(self._request_loop_shutdown)
+                    return
+                except RuntimeError:
+                    pass  # Loop already closed: fall through and raise.
             raise KeyboardInterrupt(f"Received {sig_name}")
 
     def _request_loop_shutdown(self) -> None:
@@ -8024,7 +8174,12 @@ class RemoteAccessServer:
             # (e.g. a briefly unwritable KISS dir) so they survive
             # the restart; a no-op when the last save succeeded.
             await asyncio.to_thread(self._vscode_server.tab_registry.flush)
-            self._stop_tunnel()
+            # ``_stop_tunnel`` blocks in ``Popen.wait(timeout=5)`` while
+            # cloudflared shuts down; keep it off the loop like every
+            # other blocking step above so the final frames to
+            # connected clients (and any embedder's own tasks) are
+            # not frozen for the grace period.
+            await asyncio.to_thread(self._stop_tunnel)
             _remove_url_file(self._url_file)
 
 

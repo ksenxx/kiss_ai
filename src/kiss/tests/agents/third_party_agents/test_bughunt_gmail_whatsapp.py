@@ -21,9 +21,12 @@ Bugs covered (the WhatsApp ones re-targeted at the QR-paired bridge backend):
 from __future__ import annotations
 
 import json
-import os
+import logging
+import re
 import sqlite3
 import threading
+import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -181,19 +184,52 @@ class TestWhatsAppPollMessages:
         assert [m["text"] for m in messages] == ["from-111-b"]
 
 
+def _wait_for_redirect_port(
+    caplog: pytest.LogCaptureFixture, flow_thread: threading.Thread, timeout: float = 10.0
+) -> int:
+    """Return the local redirect port announced by ``run_local_server``.
+
+    The flow logs its authorization URL (INFO on ``google_auth_oauthlib.flow``)
+    once the redirect server is listening; the ``redirect_uri`` query
+    parameter carries the ephemeral port.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for record in caplog.records:
+            match = re.search(
+                r"redirect_uri=http%3A%2F%2Flocalhost%3A(\d+)", record.getMessage()
+            )
+            if match:
+                return int(match.group(1))
+        if not flow_thread.is_alive():
+            break
+        time.sleep(0.02)
+    raise AssertionError("OAuth flow never announced its local redirect server")
+
+
 class TestGmailOAuthFlow:
     """Bug (A): headless OAuth flow must not call the removed run_console()."""
 
     def test_run_console_removed_from_installed_dependency(self) -> None:
         assert not hasattr(InstalledAppFlow, "run_console")
 
-    def test_headless_oauth_flow_does_not_raise_attribute_error(self) -> None:
+    def test_headless_oauth_flow_does_not_raise_attribute_error(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The headless flow starts a real local redirect server, not run_console().
+
+        ``run_local_server`` blocks in ``handle_request()`` until the
+        browser redirect arrives, so the test plays the browser: it reads
+        the redirect port from the flow's INFO log line and sends a bogus
+        ``?state=...&code=...`` redirect. ``fetch_token`` then fails on the
+        CSRF state check before any network I/O, which lets the flow
+        thread and its listening socket exit instead of leaking.
+        """
         creds_path = gmail_agent._credentials_path()
         backup = creds_path.read_text() if creds_path.exists() else None
-        old_headless = os.environ.get("KISS_HEADLESS")
         creds_path.parent.mkdir(parents=True, exist_ok=True)
         creds_path.write_text(json.dumps(_DUMMY_CLIENT_SECRETS))
-        os.environ["KISS_HEADLESS"] = "1"
+        monkeypatch.setenv("KISS_HEADLESS", "1")
         result: dict[str, BaseException] = {}
 
         def run_flow() -> None:
@@ -204,15 +240,20 @@ class TestGmailOAuthFlow:
 
         thread = threading.Thread(target=run_flow, daemon=True)
         try:
-            thread.start()
-            thread.join(timeout=3.0)
+            with caplog.at_level(logging.INFO, logger="google_auth_oauthlib.flow"):
+                thread.start()
+                port = _wait_for_redirect_port(caplog, thread)
+            with urllib.request.urlopen(
+                f"http://localhost:{port}/?state=bogus&code=bogus", timeout=10
+            ) as resp:
+                assert resp.status == 200
+            thread.join(timeout=10.0)
+            assert not thread.is_alive(), "OAuth flow thread did not exit"
             exc = result.get("exc")
             assert not isinstance(exc, AttributeError), f"run_console still used: {exc}"
+            # oauthlib ships no type stubs, so match the CSRF-check error by name.
+            assert type(exc).__name__ == "MismatchingStateError", f"unexpected outcome: {exc!r}"
         finally:
-            if old_headless is None:
-                os.environ.pop("KISS_HEADLESS", None)
-            else:
-                os.environ["KISS_HEADLESS"] = old_headless
             if backup is not None:
                 creds_path.write_text(backup)
             elif creds_path.exists():

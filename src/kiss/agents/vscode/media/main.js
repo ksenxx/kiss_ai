@@ -10823,6 +10823,10 @@
   // A valid JPEG of any real photo is far bigger than this; mobile Safari has
   // been seen returning byte-stub blobs instead of an encoded image.
   const ATTACH_MIN_JPEG_BYTES = 256;
+  // Reading + converting one attachment must settle within this: a browser
+  // decoder / FileReader that never calls back would otherwise leave the
+  // slot pending -- and the tab's send latched -- for ever.
+  const ATTACH_PREPARE_TIMEOUT_MS = 60 * 1000;
   // Image formats every supported vision API understands.
   const MODEL_IMAGE_MIME_TYPES = [
     'image/jpeg',
@@ -11022,11 +11026,34 @@
   }
 
   /**
+   * Settle with `promise`, or reject with `why` once `ms` have passed.
+   */
+  function withDeadline(promise, ms, why) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(why)), ms);
+      promise.then(
+        value => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        err => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
+  }
+
+  /**
    * Fill `slot` with the bytes of `file`, or drop it and explain why.
    *
    * The tab's own lists are captured up front: the user may switch tabs while
    * a photo is being converted, and the outcome belongs to the tab that
    * picked the file, not to whichever tab is on screen when it lands.
+   *
+   * Preparation is bounded: a decoder or reader that never calls back is
+   * reported through the same error chip as a failed conversion, so the
+   * send waiting in attachmentsReady() is released instead of latched.
    *
    * Returns:
    *   A promise for whether the slot now holds a usable attachment.
@@ -11035,7 +11062,13 @@
     const ownerFiles = attachments;
     const ownerErrors = attachErrors;
     try {
-      const ready = await prepareAttachment(file);
+      const ready = await withDeadline(
+        prepareAttachment(file),
+        ATTACH_PREPARE_TIMEOUT_MS,
+        'it could not be read within ' +
+          Math.round(ATTACH_PREPARE_TIMEOUT_MS / 1000) +
+          's',
+      );
       slot.name = ready.name;
       slot.type = ready.type;
       slot.data = ready.data;

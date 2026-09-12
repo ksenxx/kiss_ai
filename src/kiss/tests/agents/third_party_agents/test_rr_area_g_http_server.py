@@ -75,7 +75,7 @@ class TestStartHttpServerHelper:
             assert server is not None and thread is not None
             assert thread.daemon and thread.is_alive()
             port = server.server_address[1]
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/") as resp:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=10) as resp:
                 assert resp.read() == b"pong"
             assert f"test server started on port {port}" in caplog.text
         finally:

@@ -729,17 +729,29 @@ export function activate(context: vscode.ExtensionContext): void {
     sidebarView!.onFirstResolve(() => {
       const widenTimer = setTimeout(async () => {
         // The extension may have been deactivated before this fires.
-        if (!sidebarView) return;
+        // Clearing the timer cannot stop a callback that has already
+        // started, so the view is captured here and its liveness
+        // re-checked after every await: deactivation during one of
+        // them clears the module slot (and disposes the view).
+        const view = sidebarView;
+        if (!view) return;
         // The one-time widening belongs to the sidebar surface only.
         if (editorTabsMode()) return;
-        await vscode.commands.executeCommand(
-          'workbench.action.focusAuxiliaryBar',
-        );
-        await sidebarView.widenToOneThird();
-        await vscode.commands.executeCommand(
-          'workbench.action.focusFirstEditorGroup',
-        );
-        await context.workspaceState.update('sidebarWidened', true);
+        try {
+          await vscode.commands.executeCommand(
+            'workbench.action.focusAuxiliaryBar',
+          );
+          if (sidebarView !== view) return;
+          await view.widenToOneThird();
+          if (sidebarView !== view) return;
+          await vscode.commands.executeCommand(
+            'workbench.action.focusFirstEditorGroup',
+          );
+          if (sidebarView !== view) return;
+          await context.workspaceState.update('sidebarWidened', true);
+        } catch (err) {
+          console.error('[KISS Sorcar] sidebar widening failed:', err);
+        }
       }, 500);
       context.subscriptions.push({dispose: () => clearTimeout(widenTimer)});
     });
@@ -757,21 +769,34 @@ export function activate(context: vscode.ExtensionContext): void {
 
   if (shouldAutoOpen) {
     const autoOpenTimer = setTimeout(async () => {
-      if (!sidebarView) return;
-      if (firstLaunch) {
-        // The workbench's default layout (code-server and recent VS
-        // Code) starts with the secondary sidebar open on the built-in
-        // Chat view. KISS Sorcar's chat replaces it: close the bar
-        // before opening the chat surface. In sidebar mode the
-        // focusChatInput below reopens it on the KISS chat view; in
-        // editor-tabs mode the chat is an editor tab and the bar
-        // stays closed.
-        await vscode.commands.executeCommand(
-          'workbench.action.closeAuxiliaryBar',
-        );
+      // Same discipline as the widen timer above: deactivation during
+      // an await clears `sidebarView`/`panelManager`, and the old
+      // `chatController(true)!` then dereferenced undefined and left
+      // this callback rejecting unhandled.
+      const view = sidebarView;
+      if (!view) return;
+      try {
+        if (firstLaunch) {
+          // The workbench's default layout (code-server and recent VS
+          // Code) starts with the secondary sidebar open on the
+          // built-in Chat view. KISS Sorcar's chat replaces it: close
+          // the bar before opening the chat surface. In sidebar mode
+          // the focusChatInput below reopens it on the KISS chat view;
+          // in editor-tabs mode the chat is an editor tab and the bar
+          // stays closed.
+          await vscode.commands.executeCommand(
+            'workbench.action.closeAuxiliaryBar',
+          );
+          if (sidebarView !== view) return;
+        }
+        const controller = chatController(true);
+        if (!controller) return;
+        await controller.focusChatInput();
+        if (sidebarView !== view) return;
+        await context.workspaceState.update('firstLaunchDone', true);
+      } catch (err) {
+        console.error('[KISS Sorcar] first-launch chat open failed:', err);
       }
-      await chatController(true)!.focusChatInput();
-      await context.workspaceState.update('firstLaunchDone', true);
     }, 1000);
     context.subscriptions.push({dispose: () => clearTimeout(autoOpenTimer)});
   }

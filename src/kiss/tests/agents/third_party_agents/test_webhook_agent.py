@@ -386,11 +386,15 @@ def test_poll_messages_filters_other_routes() -> None:
 
 
 def _raw_post_status(port: int, path: str, headers: dict[str, str], body: bytes = b"") -> int:
-    """POST over a raw socket (allows malformed/missing Content-Length)."""
+    """POST over a raw socket (allows malformed/missing Content-Length).
+
+    Headers are sent as latin-1 so a test can put a real non-ASCII byte
+    such as ``²`` on the wire, exactly as an HTTP client would.
+    """
     with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
         lines = [f"POST {path} HTTP/1.1", f"Host: 127.0.0.1:{port}", "Connection: close"]
         lines.extend(f"{k}: {v}" for k, v in headers.items())
-        sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode() + body)
+        sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body)
         data = b""
         while b"\r\n" not in data:
             chunk = sock.recv(4096)
@@ -647,27 +651,12 @@ def test_deliver_only_connect_failure_returns_502_and_disconnects(
         backend.disconnect()
 
 
-def _raw_post_status_latin1(port: int, path: str, headers: dict[str, str]) -> int:
-    """POST over a raw socket with latin-1 header bytes (e.g. a real ``²``)."""
-    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
-        lines = [f"POST {path} HTTP/1.1", f"Host: 127.0.0.1:{port}", "Connection: close"]
-        lines.extend(f"{k}: {v}" for k, v in headers.items())
-        sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
-        data = b""
-        while b"\r\n" not in data:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            data += chunk
-        return int(data.split(b" ", 2)[1])
-
-
 def test_unicode_digit_and_overlong_content_length_rejected() -> None:
     """A latin-1 ``²`` or a 5000-digit Content-Length gets 400, not a crash."""
     backend, base = _start_backend(name="cl2", secret=_SECRET, kind="github")
     try:
         port = backend._bound_port
-        assert _raw_post_status_latin1(port, "/hook/cl2", {"Content-Length": "\u00b2"}) == 400
+        assert _raw_post_status(port, "/hook/cl2", {"Content-Length": "\u00b2"}) == 400
         assert _raw_post_status(port, "/hook/cl2", {"Content-Length": "9" * 5000}) == 400
         body = json.dumps({"event": "ok"}).encode()
         resp = requests.post(

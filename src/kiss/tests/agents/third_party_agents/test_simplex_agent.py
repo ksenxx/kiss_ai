@@ -128,11 +128,9 @@ def _handler(conn: ServerConnection) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_kiss_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point KISS_HOME at a per-test temp dir so ~/.kiss is never touched."""
-    home = tmp_path / "kiss_home"
-    monkeypatch.setenv("KISS_HOME", str(home))
-    return home
+def _isolated_kiss_home(isolated_kiss_home: Path) -> Path:
+    """Apply the shared per-test ``KISS_HOME`` isolation to every test here."""
+    return isolated_kiss_home
 
 
 @pytest.fixture

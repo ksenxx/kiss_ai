@@ -1045,6 +1045,7 @@ class _MergeFlowMixin:
             if state is None:
                 return
             state.is_merging = False
+            state.merge_thread = None
         self._dispose_if_closed(tab_id)
 
     def _finalize_pending_worktree(self, tab_id: str) -> _PendingOutcome:
@@ -1122,6 +1123,7 @@ class _MergeFlowMixin:
                 # simultaneous resumes would race the presentation's
                 # empty-branch auto-discard (F4-20).
                 state.is_merging = True
+                state.merge_thread = threading.current_thread()
                 return _PendingOutcome.PRESENT_CLAIMED
             # Claim the worktree before releasing the lock so a
             # concurrent resume (remote commands run on a thread pool)
@@ -1130,7 +1132,14 @@ class _MergeFlowMixin:
             # action it selects: dropping it in between would reopen
             # the very race it exists to close, and would also let the
             # probe's answer go stale before it is acted on.
+            #
+            # Every claim that goes on to rewrite the repository also
+            # publishes its thread: shutdown's ``_await_active_merges``
+            # only waits for ``merge_thread`` (cancelling the command's
+            # executor future does not stop this function), so a
+            # claim without it let the daemon exit mid-merge.
             state.is_merging = True
+            state.merge_thread = threading.current_thread()
         try:
             changed = self._get_worktree_changed_files(tab_id)
             action = "merge" if changed else "discard"
@@ -1140,6 +1149,7 @@ class _MergeFlowMixin:
         finally:
             with self._state_lock:
                 state.is_merging = False
+                state.merge_thread = None
             self._dispose_if_closed(tab_id)
         self.printer.broadcast(
             {"type": "worktree_result", "tabId": tab_id, **result},
@@ -1208,7 +1218,9 @@ class _MergeFlowMixin:
                 ):
                     return
                 prev_merging = state.is_merging
+                prev_thread = state.merge_thread
                 state.is_merging = True
+                state.merge_thread = threading.current_thread()
             try:
                 # Automatic path: rescue git-ignored task output the
                 # changed-files probe cannot see (see
@@ -1217,6 +1229,7 @@ class _MergeFlowMixin:
             finally:
                 with self._state_lock:
                     state.is_merging = prev_merging
+                    state.merge_thread = prev_thread
                 # A close that arrived during the discard saw the
                 # tab busy and deferred disposal; nothing later
                 # would dispose it (F4-29).

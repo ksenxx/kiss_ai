@@ -507,10 +507,20 @@ def _kill_process_group(process: subprocess.Popen) -> None:
         process: The subprocess to terminate.
     """
     if sys.platform == "win32":  # pragma: no cover — Windows only
-        subprocess.run(
-            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
-            capture_output=True,
-        )
+        # Bounded like ``git_worktree._git``'s taskkill: a hung taskkill
+        # would otherwise wedge the stop monitor / timeout path forever.
+        with suppress(subprocess.TimeoutExpired):
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=10,
+            )
+        if process.poll() is None:
+            # taskkill hung or failed: at least the shell itself must
+            # not survive, or the caller reports ``exit code None``
+            # for a command that is still running.
+            with suppress(OSError):
+                process.kill()
     else:
         if process.poll() is not None:
             # Already reaped: the shell's PID — and therefore the PGID
@@ -920,8 +930,9 @@ class UsefulTools:
         out_queue: "queue.Queue[str | None]",
         chunks: list[str],
         deadline: float,
+        stop: threading.Event | None = None,
     ) -> bool:
-        """Consume streamed lines from *out_queue* until EOF or *deadline*.
+        """Consume streamed lines from *out_queue* until EOF, *deadline* or *stop*.
 
         Runs on the thread that called :meth:`Bash` so that
         ``stream_callback`` executes with the caller's thread-local
@@ -936,18 +947,29 @@ class UsefulTools:
             out_queue: Queue fed by the reader thread; ``None`` marks EOF.
             chunks: Accumulator that received lines are appended to.
             deadline: ``time.monotonic()`` timestamp to stop waiting at.
+            stop: When given, polled every 0.2 s; the wait also ends
+                once it is set.  ``_stop_monitor`` alone cannot end the
+                wait when the shell has already exited but a background
+                child still holds the stdout pipe (no group to kill),
+                so without this a stop would block for the whole
+                *deadline*.
 
         Returns:
-            True when the EOF sentinel was received, False on deadline.
+            True when the EOF sentinel was received, False on deadline
+            or stop.
         """
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
+            if stop is not None:
+                if stop.is_set():
+                    return False
+                remaining = min(remaining, 0.2)
             try:
                 line = out_queue.get(timeout=remaining)
             except queue.Empty:
-                return False
+                continue
             if line is None:
                 return True
             chunks.append(line)
@@ -972,6 +994,10 @@ class UsefulTools:
           after this method returned success-looking output.  The reader
           thread stays behind in discard mode so a child that writes to
           the inherited pipe can never block on a full pipe buffer.
+
+        A ``stop_event`` ends the wait early in both states: a running
+        shell is killed and its exit code reported; an exited shell's
+        output is returned after the same short EOF grace period.
         """
         process = self._spawn(command)
         done = threading.Event()
@@ -994,19 +1020,31 @@ class UsefulTools:
                         logger.debug("stdout close failed", exc_info=True)
                 out_queue.put(None)
 
-        reader = threading.Thread(target=_drain_stdout, daemon=True)
-        self._start_stop_monitor(process, done)
-        reader.start()
         timed_out = False
         eof = False
         chunks: list[str] = []
         try:
+            # The helper threads start INSIDE the kill/cleanup region:
+            # a ``Thread.start()`` that raises (thread exhaustion) or a
+            # stop injected here must still kill the shell just spawned
+            # and set ``done`` — otherwise the command runs on unowned
+            # and an already-started monitor polls forever.
+            reader = threading.Thread(target=_drain_stdout, daemon=True)
+            self._start_stop_monitor(process, done)
+            reader.start()
             eof = self._consume_stream(
                 out_queue, chunks, time.monotonic() + timeout_seconds,
+                stop=self.stop_event,
             )
             if not eof:
-                timed_out = process.poll() is None
-                if timed_out:
+                # A stop is not a timeout: the shell is killed (the
+                # monitor may already have done so) and its exit code
+                # reported, exactly as when the stop landed on a running
+                # shell before this loop learned to observe it.
+                stopped = self.stop_event is not None and self.stop_event.is_set()
+                still_running = process.poll() is None
+                timed_out = still_running and not stopped
+                if still_running:
                     _kill_process_group(process)
                 eof = self._consume_stream(
                     out_queue, chunks, time.monotonic() + 5,

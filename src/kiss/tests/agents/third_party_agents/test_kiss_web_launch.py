@@ -65,7 +65,7 @@ def _init_repo(repo: str) -> None:
     def git(*args: str) -> None:
         subprocess.run(
             ["git", *args], cwd=repo, capture_output=True, text=True,
-            check=False,
+            check=False, timeout=60,
         )
 
     git("init", "-q")

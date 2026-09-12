@@ -21,7 +21,6 @@ the tests verify the actual HTTP traffic the typing indicator produces:
 from __future__ import annotations
 
 import json
-import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
@@ -110,13 +109,9 @@ class TestDiscordSendTyping:
         assert req["method"] == "POST"
         assert req["path"] == "/channels/ERR/typing"
 
-    def test_send_typing_swallows_unreachable_server(self) -> None:
+    def test_send_typing_swallows_unreachable_server(self, refusing_port: int) -> None:
         """An unreachable server (connection refused) must never raise."""
-        probe = socket.socket()
-        probe.bind(("127.0.0.1", 0))
-        closed_port = probe.getsockname()[1]
-        probe.close()
-        backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{closed_port}")
+        backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{refusing_port}")
         backend._bot_token = "test-token"
         backend.send_typing("111")
         assert self.server.requests == []

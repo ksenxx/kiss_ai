@@ -1602,6 +1602,13 @@ class _CLIProcess:
         self._timeout = timeout
         self._deadline = time.monotonic() + timeout
         try:
+            # errors="replace": a hook, plugin or shell command the CLI
+            # runs can print bytes in any encoding.  With the strict
+            # default the first undecodable byte raises inside a drain
+            # thread, which then stops reading: on stderr the child
+            # blocks in write(2) once the pipe is full and the turn is
+            # killed as a stall; on stdout everything after the byte is
+            # silently dropped and a truncated answer reported as done.
             self._proc = subprocess.Popen(
                 args,
                 stdin=subprocess.PIPE,
@@ -1609,6 +1616,7 @@ class _CLIProcess:
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 cwd=cwd,
             )
         except OSError as e:
@@ -1988,11 +1996,20 @@ class _ToolCallFilteredStream:
         return self
 
     def __exit__(self, *exc_info: Any) -> None:
-        """Release buffered text, restore the callbacks and clear the mark."""
-        self._flush()
-        self._model.token_callback = self._token_callback
-        self._model.thinking_callback = self._thinking_callback
-        self._model._tool_bearing_turn = False
+        """Release buffered text, restore the callbacks and clear the mark.
+
+        The flush hands held text to the original token callback, which
+        in production raises ``KeyboardInterrupt`` once the user has
+        pressed Stop; the restoration must still happen, or the reused
+        adapter keeps streaming through this dead filter and treats its
+        next ordinary turn as tool-bearing.
+        """
+        try:
+            self._flush()
+        finally:
+            self._model.token_callback = self._token_callback
+            self._model.thinking_callback = self._thinking_callback
+            self._model._tool_bearing_turn = False
 
     def _emit(self, text: str) -> None:
         """Send *text* onward, if there is any and anyone is listening."""

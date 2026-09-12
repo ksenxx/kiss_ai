@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import email
 import json
-import os
-from collections.abc import Iterator
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -35,18 +33,9 @@ from kiss.agents.third_party_agents.email_agent import (
 
 
 @pytest.fixture(autouse=True)
-def _isolated_kiss_home(tmp_path: Path) -> Iterator[Path]:
-    """Point ``KISS_HOME`` at a fresh temp dir so tests never touch ~/.kiss."""
-    saved = os.environ.get("KISS_HOME")
-    home = tmp_path / "kiss_home"
-    os.environ["KISS_HOME"] = str(home)
-    try:
-        yield home
-    finally:
-        if saved is None:
-            os.environ.pop("KISS_HOME", None)
-        else:
-            os.environ["KISS_HOME"] = saved
+def _isolated_kiss_home(isolated_kiss_home: Path) -> Path:
+    """Apply the shared per-test ``KISS_HOME`` isolation to every test here."""
+    return isolated_kiss_home
 
 
 def _raw_plain(**overrides: str) -> bytes:

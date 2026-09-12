@@ -498,9 +498,11 @@ def _release_worktree_without_merging(
             f"it with: git checkout {branch}"
         ))
         return
-    with agent._warning_lock:
-        stranded = agent._merge_conflict_warning
-    agent._set_warnings(merge=f"{reason} {stranded}" if stranded else reason)
+    # The preserve above may have left a warning saying where the
+    # work is (e.g. hook-refused commit); put the reason in front of it
+    # atomically, so a flush racing this call can neither re-deliver
+    # that warning nor have a concurrent write overwritten.
+    agent.add_warning(reason, prepend=True)
 
 
 def _wt_merge_on_repo(state: AgentState, repo: Path | None) -> bool:
@@ -2428,11 +2430,25 @@ class _TaskRunnerMixin:
                 owner_state,
                 task_thread,
             )
-            threading.Thread(
-                target=self._force_stop_thread,
-                args=(task_thread, still_owns),
-                daemon=True,
-            ).start()
+            try:
+                threading.Thread(
+                    target=self._force_stop_thread,
+                    args=(task_thread, still_owns),
+                    daemon=True,
+                ).start()
+            except RuntimeError:
+                # Thread exhaustion ("can't start new thread"): the stop
+                # is already acknowledged and the event set, so a task
+                # blocked in a non-cooperative call would otherwise
+                # never be interrupted.  Enforce inline instead; the
+                # watchdog's waits are bounded, and this handler runs on
+                # an executor thread, not the event loop.
+                logger.warning(
+                    "Stop watchdog thread for tab %s could not be started; "
+                    "enforcing the stop inline",
+                    tab_id, exc_info=True,
+                )
+                self._force_stop_thread(task_thread, still_owns)
 
     def _broadcast_stop_ack(self, tab_id: str, accepted: bool) -> None:
         """Tell *tab_id* that its Stop click was received.

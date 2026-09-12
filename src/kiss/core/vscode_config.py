@@ -36,11 +36,14 @@ logger = logging.getLogger(__name__)
 
 _ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
-# Reentrant: save_api_key and _migrate_legacy_rc_keys hold it across their
-# whole file-plus-environment critical sections while nested helpers
-# (e.g. _edit_api_keys_env_file) may take it again.  Within one process it
-# also serializes access to _api_keys_store_flock(), so a single process
-# never flocks the store sidecar through two descriptors at once.
+# Serializes every writer and reader of config.json, the canonical key
+# store, os.environ and DEFAULT_CONFIG within one process.  It also
+# serializes access to _api_keys_store_flock(), so a single process never
+# flocks the store sidecar through two descriptors at once (which would
+# self-deadlock — see that function).  Every holder calls only helpers
+# that take neither this lock nor the flock again (the ``_locked``
+# variants), so nothing nests today; it stays an RLock so a nested
+# acquisition of THIS lock can never be the thing that deadlocks.
 _config_lock = threading.RLock()
 
 if TYPE_CHECKING:
@@ -383,7 +386,7 @@ SYSTEMD_ENV_FILE = "api_keys.systemd.env"
 Older ``./rsorcar`` deploys generated this second copy of the keys and
 pointed the ``kiss-web`` unit's ``EnvironmentFile=`` at it.  Keys now
 live in exactly one file — the canonical store, which the daemon parses
-itself — so :func:`_edit_api_keys_env_file` *deletes* a mirror it finds:
+itself — so :func:`_edit_api_keys_env_file_locked` *deletes* a mirror it finds:
 the old unit's ``EnvironmentFile=-`` (dash: ignore if missing) tolerates
 the removal, and a key deleted in the settings panel can never be
 re-injected by systemd from a stale copy across a service restart.
@@ -586,17 +589,6 @@ def _edit_api_keys_env_file_locked(mutations: dict[str, str | None]) -> None:
             new_lines.append(f"export {name}={shlex.quote(value)}\n")
     _atomic_write_text_secure(env_path, "".join(new_lines))
     _remove_systemd_mirror()
-
-
-def _edit_api_keys_env_file(mutations: dict[str, str | None]) -> None:
-    """Apply *mutations* to the canonical key store under both locks.
-
-    Standalone entry point for callers that need only a self-contained
-    store edit; see :func:`_edit_api_keys_env_file_locked` for the edit
-    semantics and :func:`_api_keys_store_flock` for the locking.
-    """
-    with _config_lock, _api_keys_store_flock():
-        _edit_api_keys_env_file_locked(mutations)
 
 
 def save_api_key(key_name: str, key_value: str) -> None:

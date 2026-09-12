@@ -179,7 +179,10 @@ function injectHtmlBase(html: string, dirUri: string): string {
 import {AgentClient, DroppedCommandReason} from './AgentClient';
 import {SorcarApi} from './SorcarApi';
 import {getGitApi} from './gitApi';
-import {getDefaultModel} from './DependencyInstaller';
+import {
+  provisionalDefaultModel,
+  resolveDefaultModel,
+} from './DependencyInstaller';
 import {buildChatHtml, readSampleTasks} from './SorcarTab';
 import {VoiceWakeService} from './voiceWake';
 import {kissHomeDir} from './userAssets';
@@ -521,10 +524,27 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // webview has sent any message carrying the id.
       this._ownTabs.add(panelHooks.rootTabId);
     }
-    this._selectedModel =
-      vscode.workspace
-        .getConfiguration('kissSorcar')
-        .get<string>('defaultModel') || getDefaultModel();
+    const configured = vscode.workspace
+      .getConfiguration('kissSorcar')
+      .get<string>('defaultModel');
+    if (configured) {
+      this._selectedModel = configured;
+    } else {
+      // Never block on `uv run` here: this runs on the extension host's
+      // event loop during activation (and for every new panel in
+      // editor-tabs mode).  Start from a spawn-free guess and adopt the
+      // real default when it arrives -- unless the daemon's `models`
+      // reply or the user has picked a model meanwhile.
+      const provisional = provisionalDefaultModel();
+      this._selectedModel = provisional;
+      resolveDefaultModel().then(
+        model => {
+          if (this._terminated || this._selectedModel !== provisional) return;
+          this._selectedModel = model;
+        },
+        err => console.error('[SorcarSidebarView] default model lookup:', err),
+      );
+    }
   }
 
   private _getApi(): SorcarApi {

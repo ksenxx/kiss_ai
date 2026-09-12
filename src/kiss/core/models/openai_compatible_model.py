@@ -514,6 +514,47 @@ class OpenAICompatibleBase(Model):
                 f"Embedding generation failed for model {model_to_use}: {e}"
             ) from e
 
+    @staticmethod
+    def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
+        """Convert one :class:`Attachment` to this transport's content part.
+
+        Each transport has its own part shape (``image_url`` /
+        ``input_audio`` / ``file`` for Chat Completions, ``input_image`` /
+        ``input_file`` for Responses), so the conversion is theirs; the
+        filtering loop in :meth:`_attachments_to_content_parts` is shared.
+
+        Args:
+            att: The attachment to convert.
+
+        Returns:
+            The content-part dict, or ``None`` when the provider does not
+            accept the attachment's format (a warning is logged).
+        """
+        raise NotImplementedError  # pragma: no cover – overridden by both transports
+
+    @classmethod
+    def _attachments_to_content_parts(
+        cls, attachments: list[Attachment]
+    ) -> list[dict[str, Any]]:
+        """Convert attachments to a list of content-part dicts.
+
+        Unsupported MIME types are dropped (with a warning from
+        :meth:`_attachment_to_content_part`).
+
+        Args:
+            attachments: The attachments to convert.
+
+        Returns:
+            A list of content-part dicts.  May be shorter than *attachments*
+            if some MIME types were not supported.
+        """
+        parts: list[dict[str, Any]] = []
+        for att in attachments:
+            part = cls._attachment_to_content_part(att)
+            if part is not None:
+                parts.append(part)
+        return parts
+
     def _is_deepseek_reasoning_model(self) -> bool:
         """Check if this is a DeepSeek R1 reasoning model.
 
@@ -649,28 +690,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             ", ".join(sorted(OPENAI_INPUT_AUDIO_FORMATS)),
         )
         return None
-
-    @classmethod
-    def _attachments_to_content_parts(
-        cls, attachments: list[Attachment]
-    ) -> list[dict[str, Any]]:
-        """Convert attachments to a list of OpenAI content-part dicts.
-
-        Unsupported MIME types are silently dropped (with a warning).
-
-        Args:
-            attachments: The attachments to convert.
-
-        Returns:
-            A list of content-part dicts.  May be shorter than *attachments*
-            if some MIME types were not supported.
-        """
-        parts: list[dict[str, Any]] = []
-        for att in attachments:
-            part = cls._attachment_to_content_part(att)
-            if part is not None:
-                parts.append(part)
-        return parts
 
     def _deliver_tool_result_attachments(
         self, attachments: list[Attachment]

@@ -691,6 +691,167 @@ _db_conn: sqlite3.Connection | None = None
 _thread_local = threading.local()
 _db_generation: int = 0
 
+#: Every connection :func:`_get_db` has opened in this process and not
+#: yet closed, keyed by ``id(conn)`` -> ``(conn, owning thread, db
+#: path)``.  ``sqlite3.Connection`` cannot be weakly referenced, so a
+#: connection whose owning thread died without ``_close_thread_db()``
+#: is closed and dropped by :func:`_prune_dead_thread_conns` instead of
+#: being pinned here forever.  Guarded by ``_init_tables_lock``.  Exists
+#: for one purpose: the orphaned-sidecar recovery in
+#: :func:`_recover_orphaned_sidecars` has to close ALL connections to a
+#: database — see :func:`_sidecars_orphaned`.
+_open_conns: dict[int, tuple[sqlite3.Connection, threading.Thread, str]] = {}
+
+#: Per database path: ``(db_file_id, shm_file_id)`` of the ``-shm``
+#: sidecar the connections in this process are mapped to.  An entry
+#: exists exactly while at least one registered connection to that
+#: path is open (SQLite deletes the sidecars on the last close, so the
+#: next connection records a fresh identity).  Guarded by
+#: ``_init_tables_lock`` for writes; read without the lock (a stale read
+#: only delays detection by one call).
+_attached_shm: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {}
+
+
+def _path_has_open_conns(path: str) -> bool:
+    """Return whether any registered connection to *path* is open."""
+    return any(p == path for _c, _o, p in _open_conns.values())
+
+
+def _drop_open_conn_locked(key: int) -> None:
+    """Forget registry entry *key*; drop the path's ``-shm`` identity if
+    it was the last connection to that path.  Caller holds the lock."""
+    entry = _open_conns.pop(key, None)
+    if entry is not None and not _path_has_open_conns(entry[2]):
+        _attached_shm.pop(entry[2], None)
+
+
+def _prune_dead_thread_conns() -> None:
+    """Close and forget connections whose owning thread has exited.
+
+    Caller holds ``_init_tables_lock``.  A thread that ended without
+    calling ``_close_thread_db()`` used to leave its connection to the
+    garbage collector; the registry pins it, so it is closed here.
+    """
+    for key, (conn, owner, _path) in list(_open_conns.items()):
+        if not owner.is_alive():
+            _drop_open_conn_locked(key)
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def _sidecars_orphaned(
+    current_path: str, current_id: tuple[int, int] | None,
+) -> bool:
+    """Return ``True`` when this process is mapped to a dead ``-shm``.
+
+    SQLite maps exactly ONE ``-shm`` per process per database inode —
+    shared by every connection in the process — but opens the ``-wal``
+    by *name* for each connection.  When something outside this process
+    unlinks ``sorcar.db-wal``/``sorcar.db-shm`` (the daemon was found
+    holding sixteen descriptors to ``sorcar.db-wal (deleted)``), the
+    connections that are already open keep working against a deleted
+    inode (so every frame they commit is lost on a hard kill), other
+    processes read a database missing those frames, and every NEW
+    connection in this process inherits the dead ``-shm`` mapping while
+    opening a fresh ``-wal`` — the two disagree and the connection fails
+    with ``sqlite3.OperationalError: disk I/O error``
+    (``SQLITE_IOERR_SHORT_READ``).  That is the "every new task fails
+    within 100 ms" failure.
+
+    The condition is detected by identity: the ``-shm`` on disk (missing,
+    or a different inode because another process already recreated it)
+    is not the one this process attached to.  A transient ``os.stat``
+    failure (:data:`_FILE_ID_UNKNOWN`) proves nothing and is ignored.
+
+    Args:
+        current_path: The active database path.
+        current_id: Identity of the database file itself (already
+            computed by the caller); the recorded ``-shm`` identity only
+            applies to connections opened against this same file.
+    """
+    attached = _attached_shm.get(current_path)
+    if attached is None:
+        return False
+    db_id, shm_id = attached
+    if db_id != current_id:
+        return False
+    on_disk = _db_file_identity(current_path + "-shm")
+    if on_disk is _FILE_ID_UNKNOWN or on_disk == shm_id:
+        return False
+    # The -shm differs.  Re-stat the database file AFTER the -shm so a
+    # concurrent deletion of the whole database (db, then -wal, then
+    # -shm — the redirect/delete pattern of the test fixtures) is not
+    # mistaken for an orphaned mapping: a deleted or replaced database
+    # is handled per thread by the identity check in ``_get_db``.
+    return _db_file_identity(current_path) == db_id
+
+
+def _recover_orphaned_sidecars(current_path: str) -> None:
+    """Drop the dead ``-shm`` mapping: checkpoint, close every connection.
+
+    Called by :func:`_get_db` when :func:`_sidecars_orphaned` is true or
+    when a brand-new connection failed with ``SQLITE_IOERR``.  While the
+    old mapping is still valid, the frames this process committed into
+    the deleted ``-wal`` are folded into the main file with a passive
+    checkpoint (so they survive), then EVERY open connection to
+    *current_path* in the process is interrupted and closed — SQLite
+    releases the shared ``-shm`` mapping only when the last connection
+    using it closes, so closing just the calling thread's connection
+    would leave every new connection failing.  The generation counter
+    is bumped so each other thread's next ``_get_db()`` reconnects (its
+    cached handle is already closed); a statement in flight on another
+    thread fails once with ``ProgrammingError`` instead of that thread
+    keeping the dead mapping alive for the life of the process.
+
+    Idempotent under ``_init_tables_lock``: a racing thread that finds
+    the mapping already dropped returns without doing anything.
+    """
+    global _db_conn, _db_generation
+    with _init_tables_lock:
+        if current_path not in _attached_shm:
+            return
+        _prune_dead_thread_conns()
+        doomed = [
+            (key, conn) for key, (conn, _owner, path) in _open_conns.items()
+            if path == current_path
+        ]
+        logger.error(
+            "%s-wal/-shm were deleted or replaced under this process while "
+            "%d connection(s) were open; checkpointing and reconnecting "
+            "every thread (new connections were failing with 'disk I/O "
+            "error' until now)",
+            current_path,
+            len(doomed),
+        )
+        for _key, conn in doomed:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                break
+            except sqlite3.Error:
+                continue
+        for key, conn in doomed:
+            try:
+                conn.interrupt()
+            except sqlite3.Error:
+                pass
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+            _drop_open_conn_locked(key)
+        _attached_shm.pop(current_path, None)
+        _db_conn = None
+        _db_generation += 1
+    _invalidate_chat_context_cache("")
+
+
+def _forget_open_conn(conn: sqlite3.Connection) -> None:
+    """Remove *conn* from :data:`_open_conns` (no-op if absent)."""
+    with _init_tables_lock:
+        _drop_open_conn_locked(id(conn))
+
 
 def _close_cached_thread_conn() -> sqlite3.Connection | None:
     """Close and forget the CALLING thread's cached connection.
@@ -707,6 +868,7 @@ def _close_cached_thread_conn() -> sqlite3.Connection | None:
     """
     tl_conn: sqlite3.Connection | None = getattr(_thread_local, "conn", None)
     if tl_conn is not None:
+        _forget_open_conn(tl_conn)
         try:
             tl_conn.close()
         except Exception:
@@ -1397,7 +1559,12 @@ def _get_db() -> sqlite3.Connection:
     * ``_DB_PATH`` changes (test redirects), or
     * the file at ``_DB_PATH`` is deleted or replaced on disk (its
       ``(st_dev, st_ino)`` identity no longer matches the one the
-      cached connection was opened against).
+      cached connection was opened against), or
+    * the ``-shm`` sidecar this process is mapped to was deleted or
+      replaced on disk (:func:`_sidecars_orphaned`) — then EVERY
+      connection in the process is closed first
+      (:func:`_recover_orphaned_sidecars`), because a new connection
+      cannot work while any old one keeps the dead mapping alive.
 
     The process-global ``_db_conn`` is deliberately NOT part of that
     validity test: it names whichever connection was created last by
@@ -1410,11 +1577,15 @@ def _get_db() -> sqlite3.Connection:
     tl_conn: sqlite3.Connection | None = getattr(tl, "conn", None)
     tl_gen: int = getattr(tl, "gen", -1)
     tl_path: str | None = getattr(tl, "path", None)
-    gen_snapshot = _db_generation
     current_path = str(_DB_PATH)
     current_id = _db_file_identity(current_path)
     if current_id is not _FILE_ID_UNKNOWN:
         _maybe_reset_caches(current_path, current_id)
+    if _sidecars_orphaned(current_path, current_id):
+        _recover_orphaned_sidecars(current_path)
+    # Read AFTER the recovery above: it bumps the generation, and this
+    # thread's cached handle (closed by it) must be seen as stale.
+    gen_snapshot = _db_generation
 
     if (
         tl_conn is not None
@@ -1441,12 +1612,56 @@ def _get_db() -> sqlite3.Connection:
         # later call would hand out as valid.
         tl.conn = None
         tl.file_id = None
+        _forget_open_conn(tl_conn)
         try:
             tl_conn.close()
         except Exception:
             pass
 
     _ensure_kiss_dir()
+    try:
+        conn = _open_db_connection(current_path)
+    except sqlite3.OperationalError as exc:
+        code = getattr(exc, "sqlite_errorcode", 0) or 0
+        if code & 0xFF != sqlite3.SQLITE_IOERR or current_path not in _attached_shm:
+            raise
+        # A fresh connection failing with SQLITE_IOERR while older ones
+        # are open is the dead -shm mapping (see ``_sidecars_orphaned``)
+        # caught before the identity check could see it — e.g. the
+        # sidecars were unlinked between the stat above and the open.
+        _recover_orphaned_sidecars(current_path)
+        # The recovery bumped the generation; snapshot again BEFORE the
+        # reopen (never after: a ``_close_db`` racing the open must
+        # still retire this connection on the next call).
+        gen_snapshot = _db_generation
+        conn = _open_db_connection(current_path)
+
+    tl.conn = conn
+    tl.gen = gen_snapshot
+    tl.path = current_path
+    tl.file_id = _db_file_identity(current_path)
+    _db_conn = conn
+    return conn
+
+
+def _open_db_connection(current_path: str) -> sqlite3.Connection:
+    """Open, configure and register one new connection to *current_path*.
+
+    Runs the WAL pragma (retried while another connection holds the
+    database busy), the schema migration and table initialisation under
+    ``_init_tables_lock``, then records the connection in
+    :data:`_open_conns` and — for the first connection to this database
+    file — the identity of the ``-shm`` sidecar the process is now
+    mapped to (:data:`_attached_shm`), which is what
+    :func:`_sidecars_orphaned` later compares against.
+
+    Args:
+        current_path: The database file to open.
+
+    Returns:
+        The configured connection.  On any failure the half-open
+        connection is closed before the exception propagates.
+    """
     # Deliberately NO manual cleanup of stale ``-wal``/``-shm``
     # sidecars here.  Application-level unlink of SQLite's sidecar
     # files is impossible to make safe: any check-then-unlink is racy
@@ -1463,34 +1678,58 @@ def _get_db() -> sqlite3.Connection:
         timeout=10,
         isolation_level=None,
     )
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.row_factory = sqlite3.Row
-    with _init_tables_lock:
-        wal_deadline = time.monotonic() + 30.0
-        while True:
-            try:
-                conn.execute("PRAGMA journal_mode=WAL")
-                break
-            except sqlite3.OperationalError as exc:
-                code = getattr(exc, "sqlite_errorcode", None)
-                busy = (
-                    code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-                    if code is not None
-                    else "locked" in str(exc).lower()
-                    or "busy" in str(exc).lower()
-                )
-                if not busy or time.monotonic() >= wal_deadline:
-                    raise
-                time.sleep(0.05)
-        _migrate_old_schema_if_needed(conn)
-        _init_tables(conn)
-
-    tl.conn = conn
-    tl.gen = gen_snapshot
-    tl.path = current_path
-    tl.file_id = _db_file_identity(current_path)
-    _db_conn = conn
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
+        with _init_tables_lock:
+            wal_deadline = time.monotonic() + 30.0
+            while True:
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    code = getattr(exc, "sqlite_errorcode", None)
+                    busy = (
+                        code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                        if code is not None
+                        else "locked" in str(exc).lower()
+                        or "busy" in str(exc).lower()
+                    )
+                    if not busy or time.monotonic() >= wal_deadline:
+                        raise
+                    time.sleep(0.05)
+            _migrate_old_schema_if_needed(conn)
+            _init_tables(conn)
+            # The first live connection is the one that created (or
+            # re-created) the process's -shm mapping; a later one only
+            # joins it.  Re-record for the first so an identity left
+            # over from a fully closed earlier generation (SQLite
+            # deletes the sidecars on the last close) is not compared
+            # against the new mapping.
+            _prune_dead_thread_conns()
+            first_live = not _path_has_open_conns(current_path)
+            _open_conns[id(conn)] = (
+                conn, threading.current_thread(), current_path,
+            )
+            db_id = _db_file_identity(current_path)
+            shm_id = _db_file_identity(current_path + "-shm")
+            attached = _attached_shm.get(current_path)
+            if (
+                db_id is not None
+                and db_id is not _FILE_ID_UNKNOWN
+                and shm_id is not None
+                and shm_id is not _FILE_ID_UNKNOWN
+                and (first_live or attached is None or attached[0] != db_id)
+            ):
+                _attached_shm[current_path] = (db_id, shm_id)
+    except BaseException:
+        _forget_open_conn(conn)
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+        raise
     return conn
 
 
