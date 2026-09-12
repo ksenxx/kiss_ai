@@ -4,13 +4,14 @@
 # add your name here
 """End-to-end tests for pre-run task classification.
 
-``kiss.agents.sorcar.task_classifier`` runs a single-step KISSAgent on
-the run's own model BEFORE a Sorcar agent starts a task.  Its
-``finish(is_simple, is_development)`` verdict selects the system prompt
-(``SYSTEM_LITE.md`` for simple tasks, ``SYSTEM.md`` otherwise) and
-decides worktree isolation for that run (``is_development`` becomes the
-effective ``use_worktree``) without touching the persisted
-``is_worktree`` setting.
+``kiss.agents.sorcar.task_classifier`` runs one NON-AGENTIC KISSAgent
+generation on the run's own model BEFORE a Sorcar agent starts a task.
+The structured JSON verdict ``{"is_simple": ..., "is_development": ...}``
+selects the system prompt (``SYSTEM_LITE.md`` for simple tasks,
+``SYSTEM.md`` otherwise) and decides worktree isolation for that run
+(``is_development`` becomes the effective ``use_worktree``) without
+touching the persisted ``is_worktree`` setting.  Tasks that only
+request git operations are never development.
 
 The classification tests call real LLMs (a cheap model) — no mocks.
 The wiring tests drive real ``SorcarAgent`` / ``WorktreeSorcarAgent``
@@ -22,7 +23,6 @@ printer whose task-allocation hook raises (the same technique as
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Iterator
 from typing import Any
@@ -32,11 +32,15 @@ import yaml
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.task_classifier import (
+    _VERDICT_JSON_SCHEMA,
+    CLASSIFIER_MAX_TOKENS,
+    CLASSIFIER_STALL_TIMEOUT_SECONDS,
     TaskClassification,
+    _classifier_model_config,
     _parse_verdict,
+    _structured_output_config,
     classification_enabled,
     classify_task,
-    finish,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
@@ -64,6 +68,13 @@ _DEV_TASK = (
     "Software development task: edit the file src/utils.py in this "
     "repository to fix the off-by-one bug in the pagination helper, "
     "and update its unit test. This requires editing source files."
+)
+
+_GIT_TASK = (
+    "Run git operations only: check `git status`, squash-merge the "
+    "branch kiss/wt-123 into main with `git merge --squash`, resolve "
+    "any merge conflicts, commit the result, and delete the branch. "
+    "Do not write any new code."
 )
 
 _DISABLE_ENV = "KISS_DISABLE_TASK_CLASSIFIER"
@@ -122,10 +133,11 @@ def test_classify_simple_task(env: IsolatedKissHome) -> None:
     assert outcome.classification is not None
     assert outcome.classification.is_simple is True
     assert outcome.classification.is_development is False
-    # The attempt's real usage is reported for budget folding.
+    # The attempt's real usage is reported for budget folding, and the
+    # non-agentic classification is exactly one generation.
     assert outcome.budget_used > 0.0
     assert outcome.tokens_used > 0
-    assert outcome.steps >= 1
+    assert outcome.steps == 1
 
 
 @live_api
@@ -138,6 +150,31 @@ def test_classify_development_task(env: IsolatedKissHome) -> None:
     assert outcome.classification.is_development is True
 
 
+@live_api
+@requires_anthropic
+def test_classify_git_task_is_not_development(
+    env: IsolatedKissHome,
+) -> None:
+    """A task that only requests git operations is never development."""
+    outcome = classify_task(task=_GIT_TASK, model_name=MODEL)
+    assert outcome.classification is not None
+    assert outcome.classification.is_development is False
+
+
+@live_api
+@requires_anthropic
+def test_classify_truncates_huge_task(env: IsolatedKissHome) -> None:
+    """A giant prompt is truncated before classification, bounding the
+    call's input cost, and the gist still classifies correctly."""
+    huge_task = _DEV_TASK + "\n" + ("filler line about the codebase\n" * 5000)
+    assert len(huge_task) > 100_000
+    outcome = classify_task(task=huge_task, model_name=MODEL)
+    assert outcome.classification is not None
+    assert outcome.classification.is_development is True
+    # ~20k chars of task survive; the input can't be the full 150k chars.
+    assert outcome.tokens_used < 15_000
+
+
 def test_classify_task_bad_model_fails_soft() -> None:
     """An unknown model yields classification=None, not an exception."""
     outcome = classify_task(
@@ -148,30 +185,55 @@ def test_classify_task_bad_model_fails_soft() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Verdict parsing and the finish tool — no LLM
+# Structured-output verdict parsing — no LLM
 # ---------------------------------------------------------------------------
 
 
-def test_finish_tool_normalizes_string_booleans() -> None:
-    """String-typed booleans from lax models are interpreted by content."""
-    assert json.loads(finish(True, False)) == {
-        "is_simple": True,
-        "is_development": False,
-    }
-    assert json.loads(finish("false", "TRUE")) == {  # type: ignore[arg-type]
-        "is_simple": False,
-        "is_development": True,
-    }
-
-
-def test_parse_verdict_accepts_finish_output() -> None:
-    """The finish tool's JSON round-trips into a TaskClassification."""
-    assert _parse_verdict(finish(True, False)) == TaskClassification(
-        is_simple=True, is_development=False,
-    )
+def test_parse_verdict_accepts_bare_json() -> None:
+    """The demanded schema — one bare JSON object — parses directly."""
+    assert _parse_verdict(
+        '{"is_simple": true, "is_development": false}'
+    ) == TaskClassification(is_simple=True, is_development=False)
+    # String-typed booleans from lax models are interpreted by content.
     assert _parse_verdict(
         '{"is_simple": "yes", "is_development": "no"}'
     ) == TaskClassification(is_simple=True, is_development=False)
+
+
+def test_parse_verdict_extracts_json_from_fences_and_prose() -> None:
+    """Code fences and surrounding prose do not defeat extraction."""
+    fenced = (
+        "```json\n"
+        '{"is_simple": false, "is_development": true}\n'
+        "```"
+    )
+    assert _parse_verdict(fenced) == TaskClassification(
+        is_simple=False, is_development=True,
+    )
+    prose = (
+        "Here is my classification of the task:\n"
+        '{"is_simple": true, "is_development": false}\n'
+        "Let me know if you need anything else."
+    )
+    assert _parse_verdict(prose) == TaskClassification(
+        is_simple=True, is_development=False,
+    )
+    # A leading brace that is not JSON does not stop the scan.
+    noisy = (
+        "{broken json} then the real verdict "
+        '{"is_simple": false, "is_development": false}'
+    )
+    assert _parse_verdict(noisy) == TaskClassification(
+        is_simple=False, is_development=False,
+    )
+    # An earlier valid JSON object without the verdict keys is skipped.
+    decoy = (
+        '{"note": "thinking"} '
+        '{"is_simple": true, "is_development": true}'
+    )
+    assert _parse_verdict(decoy) == TaskClassification(
+        is_simple=True, is_development=True,
+    )
 
 
 def test_parse_verdict_rejects_junk() -> None:
@@ -180,6 +242,95 @@ def test_parse_verdict_rejects_junk() -> None:
     assert _parse_verdict("[1, 2]") is None
     assert _parse_verdict('{"is_simple": true}') is None
     assert _parse_verdict("") is None
+    assert _parse_verdict(None) is None  # type: ignore[arg-type]
+
+
+def test_parse_verdict_rejects_non_boolean_values() -> None:
+    """Truthy junk must not silently flip worktree isolation."""
+    assert _parse_verdict('{"is_simple": [], "is_development": {"x": 1}}') is None
+    assert _parse_verdict('{"is_simple": 2, "is_development": null}') is None
+    assert _parse_verdict('{"is_simple": 1.0, "is_development": true}') is None
+    assert _parse_verdict('{"is_simple": "maybe", "is_development": true}') is None
+    # A later well-formed verdict still wins over an earlier junk one.
+    assert _parse_verdict(
+        '{"is_simple": null, "is_development": 3} '
+        '{"is_simple": false, "is_development": true}'
+    ) == TaskClassification(is_simple=False, is_development=True)
+
+
+def test_classifier_model_config_enforces_output_cap() -> None:
+    """The classifier's output cap wins over every caller spelling."""
+    config = _classifier_model_config(None)
+    assert config["max_tokens"] == CLASSIFIER_MAX_TOKENS
+    assert config["stream_stall_timeout"] == CLASSIFIER_STALL_TIMEOUT_SECONDS
+    original = {
+        "extra_headers": {"x": "y"},
+        "max_tokens": 64000,
+        "max_completion_tokens": 64000,
+        "max_output_tokens": 64000,
+        "stream_stall_timeout": 3600.0,
+        "thinking": {"type": "enabled", "budget_tokens": 10000},
+    }
+    config = _classifier_model_config(original)
+    assert config["max_tokens"] == CLASSIFIER_MAX_TOKENS
+    assert "max_completion_tokens" not in config
+    assert "max_output_tokens" not in config
+    assert config["extra_headers"] == {"x": "y"}
+    # The classifier's stall timeout wins over the caller's patience
+    # budget, which sizes the main run.
+    assert config["stream_stall_timeout"] == CLASSIFIER_STALL_TIMEOUT_SECONDS
+    # The main run's thinking budget cannot fit inside the classifier's
+    # output cap (Anthropic rejects budget_tokens >= max_tokens), so the
+    # caller's thinking configuration is dropped.
+    assert "thinking" not in config
+    # The caller's dict is untouched.
+    assert original["max_tokens"] == 64000
+    assert original["max_output_tokens"] == 64000
+    assert original["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+
+
+def test_structured_output_config_per_provider() -> None:
+    """Each provider gets its own schema-enforcement knob; unknown
+    providers get none and rely on the prompt alone."""
+    base = {"max_tokens": CLASSIFIER_MAX_TOKENS}
+
+    anthropic = _structured_output_config(base, "claude-haiku-4-5")
+    assert anthropic is not None
+    assert anthropic["output_format"] == {
+        "type": "json_schema",
+        "schema": _VERDICT_JSON_SCHEMA,
+    }
+    # Thinking is force-disabled: a one-line verdict needs no reasoning
+    # budget, and a main-run thinking budget cannot fit the output cap.
+    assert anthropic["thinking"] == {"type": "disabled"}
+    with_thinking = _structured_output_config(
+        {**base, "thinking": {"type": "enabled", "budget_tokens": 10000}},
+        "claude-haiku-4-5",
+    )
+    assert with_thinking is not None
+    assert with_thinking["thinking"] == {"type": "disabled"}
+
+    gemini = _structured_output_config(base, "gemini-2.5-flash")
+    assert gemini is not None
+    assert gemini["response_mime_type"] == "application/json"
+    assert gemini["response_json_schema"] == _VERDICT_JSON_SCHEMA
+
+    openai = _structured_output_config(base, "gpt-5.2")
+    assert openai is not None
+    assert openai["response_format"]["type"] == "json_schema"
+    assert (
+        openai["response_format"]["json_schema"]["schema"]
+        == _VERDICT_JSON_SCHEMA
+    )
+
+    # Harbor-style provider prefixes route like the model factory does.
+    prefixed = _structured_output_config(base, "anthropic/claude-haiku-4-5")
+    assert prefixed is not None
+    assert "output_format" in prefixed
+
+    assert _structured_output_config(base, "no-such-provider/x") is None
+    # The base config is never mutated.
+    assert base == {"max_tokens": CLASSIFIER_MAX_TOKENS}
 
 
 # ---------------------------------------------------------------------------
