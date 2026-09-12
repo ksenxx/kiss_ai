@@ -144,8 +144,8 @@ def test_load_credentials_wrong_shape_json_returns_none(kiss_home) -> None:
         assert load_google_credentials(_SERVICE, _SCOPES) is None
 
 
-def test_get_tools_survives_wrong_shape_token_files(kiss_home) -> None:
-    """Each Google agent module's get_tools() works with a wrong-shape token.json."""
+def test_tools_survives_wrong_shape_token_files(kiss_home) -> None:
+    """Each Google agent module's tools() works with a wrong-shape token.json."""
     import kiss.agents.third_party_agents.google_calendar_agent as gcal_mod
     import kiss.agents.third_party_agents.google_docs_agent as gdocs_mod
     import kiss.agents.third_party_agents.google_drive_agent as gdrive_mod
@@ -158,8 +158,8 @@ def test_get_tools_survives_wrong_shape_token_files(kiss_home) -> None:
     for wrong_shape in ("[]", "null", '"just-a-string"'):
         for service, module in modules.items():
             _write_token(service, wrong_shape)
-            tools = module.get_tools()
-            assert tools, f"{service} get_tools() returned no tools for {wrong_shape!r}"
+            tools = module.tools()
+            assert tools, f"{service} tools() returned no tools for {wrong_shape!r}"
             assert all(callable(t) for t in tools)
 
 

@@ -6,13 +6,13 @@
 
 ``_stop_task``'s watchdog cancels a run by injecting an asynchronous
 ``KeyboardInterrupt`` into the task thread.  The untrusted-code
-loaders — ``apply_agent_overrides`` (agent-script ``get_X()`` getters)
+loaders — ``apply_agent_overrides`` (agent-script ``X()`` getters)
 and ``load_tools_file`` (``get_tools()``) — execute caller-supplied
 Python on that thread and convert EVERY raise, ``BaseException``
 included, into their diagnostic error type.  An injected stop landing
 while such a getter runs was therefore swallowed:
 
-* the run was reported ``"Task failed: AgentFileError: get_prompt()
+* the run was reported ``"Task failed: AgentFileError: prompt()
   ... raised: KeyboardInterrupt"`` (or the ``ToolsFileError``
   equivalent) instead of ``"Task stopped by user"``;
 * ``_cancel_outcome`` never ran, so the stop was never acknowledged
@@ -153,7 +153,7 @@ _BLOCKING_GETTER = textwrap.dedent(
 
 _BROKEN_GETTER = textwrap.dedent(
     """
-    def get_prompt():
+    def prompt():
         \"\"\"Raise immediately — a genuinely broken agent script.\"\"\"
         raise ValueError("script bug")
     """
@@ -264,8 +264,8 @@ class TestStopWrappedInterrupt(TestCase):
         self.client.wait_for("status", tab_id, running=False)
 
     def test_stop_during_agent_script_getter_is_a_user_stop(self) -> None:
-        """KI inside ``get_prompt()`` (AgentFileError site, ``_run_task``)."""
-        script = self._write_script("agent.py", "get_prompt", "agent")
+        """KI inside ``prompt()`` (AgentFileError site, ``_run_task``)."""
+        script = self._write_script("agent.py", "prompt", "agent")
         self._run_and_stop("wrap-agent-tab", "agent", agentPath=script)
 
     def test_stop_during_tools_file_get_tools_is_a_user_stop(self) -> None:

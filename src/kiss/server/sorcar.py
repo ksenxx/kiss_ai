@@ -66,13 +66,13 @@ functions — the daemon loads the file itself, so the tools execute
                         tools="my_tools.py")
 
 Similarly, ``extension_agent_path="/path/to/my_agent.py"`` names an *agent
-script* — a Sorcar Extension Agent (SEA) — whose top-level ``get_X()``
+script* — a Sorcar Extension Agent (SEA) — whose top-level ``X()``
 functions compute the run's parameters on the daemon — e.g. a
-``get_model()`` overrides *model*, a
-``get_prompt()`` overrides *prompt* — while parameters without a getter
+``model()`` overrides *model*, a
+``prompt()`` overrides *prompt* — while parameters without a getter
 keep the values passed to :func:`run` (see the :func:`run` docstring
 for the script format).  The script may additionally define
-``get_llm_call_hook()`` / ``get_tool_call_hook()``, returning functions
+``llm_call_hook()`` / ``tool_call_hook()``, returning functions
 ``llm_call_hook`` and ``tool_call_hook`` that the daemon passes to the
 underlying :class:`kiss.core.kiss_agent.KISSAgent` (see
 :meth:`~kiss.core.kiss_agent.KISSAgent.run`); these two have no

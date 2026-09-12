@@ -14,8 +14,8 @@ run's system prompt — right after the default ``SYSTEM.md`` prompt or
 the ``system_prompt`` replacement — and ``append_to_prompt`` is
 appended to the executed task prompt (to EACH subtask of a
 multi-``<task>`` prompt).  Both default to ``""`` (append nothing),
-are overridable by an agent script's ``get_append_to_system_prompt()``
-/ ``get_append_to_prompt()`` getters, and are treated as untrusted
+are overridable by an agent script's ``append_to_system_prompt()``
+/ ``append_to_prompt()`` getters, and are treated as untrusted
 wire input by the daemon (non-string appends nothing).
 """
 
@@ -168,19 +168,19 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         assert SYSTEM_PROMPT[:80] not in sp
 
     def test_agent_script_getters_override(self) -> None:
-        """Script ``get_append_to_*()`` getters override the client values."""
+        """Script ``append_to_*()`` getters override the client values."""
         agent_path = self._write_py(
             "append_prompts_agent.py",
             f'''
             """Agent script appending to both prompts."""
 
 
-            def get_append_to_system_prompt() -> str:
+            def append_to_system_prompt() -> str:
                 """Append a system prompt suffix."""
                 return {_SYS_MARKER!r}
 
 
-            def get_append_to_prompt() -> str:
+            def append_to_prompt() -> str:
                 """Append a prompt suffix."""
                 return {_PROMPT_MARKER!r}
             ''',
@@ -202,14 +202,14 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         assert _PROMPT_MARKER in call["arguments"]["task_description"]
 
     def test_agent_script_getter_wrong_type_fails_task(self) -> None:
-        """A non-string ``get_append_to_prompt()`` stops the task loudly."""
+        """A non-string ``append_to_prompt()`` stops the task loudly."""
         agent_path = self._write_py(
             "bad_append_prompt_agent.py",
             '''
             """Agent script with a wrong-typed getter."""
 
 
-            def get_append_to_prompt() -> int:
+            def append_to_prompt() -> int:
                 """Return the wrong type."""
                 return 5
             ''',
@@ -225,7 +225,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is False
-        assert "get_append_to_prompt" in result.text
+        assert "append_to_prompt" in result.text
         assert "string" in result.text
         assert calls == [], "no executor session may start for a broken script"
 

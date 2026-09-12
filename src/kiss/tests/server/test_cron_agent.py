@@ -51,7 +51,7 @@ def test_tools_file_loaded_run_now_uses_daemon_sock_path(
         namespace = execute_python_file(
             cron_agent.__file__, ToolsFileError, "tools file",
         )
-        loaded_cron_job = namespace["get_tools"]()[0]
+        loaded_cron_job = namespace["tools"]()[0]
         # A distinct module copy — the very situation the canonical
         # lookup exists for.
         assert loaded_cron_job is not cron_job

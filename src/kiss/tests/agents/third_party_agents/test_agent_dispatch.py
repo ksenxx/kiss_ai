@@ -209,14 +209,14 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     # an explicit ``timeout`` argument is parsed and forwarded.
     captured.clear()
     tool("cron", "run 'echo hi' every 5 minutes", timeout="42.5")
-    assert captured[0]["work_dir"] == cron_agent.get_work_dir()
+    assert captured[0]["work_dir"] == cron_agent.work_dir()
     assert captured[0]["scope_work_dir"] == str(caller)
     assert captured[0]["timeout"] == 42.5
     assert captured[0]["stop_on_timeout"] is True
 
     # Path mode: executes in the caller's project (scope == work_dir).
     script = caller / "helper.py"
-    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    script.write_text("def model() -> str:\n    return 'm'\n")
     captured.clear()
     tool(str(script), "say hi")
     assert captured[0]["work_dir"] == str(caller)
@@ -261,7 +261,7 @@ def test_dispatch_forwards_parent_identity(
     caller = tmp_path / "caller_project"
     caller.mkdir()
     script = caller / "helper.py"
-    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    script.write_text("def model() -> str:\n    return 'm'\n")
 
     # A calling agent with a persisted task row: its task id and its
     # frontend tab id ride along, so the daemon runs the sub-task as
@@ -347,7 +347,7 @@ def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
     import os
 
     script = tmp_path / "my_researcher.py"
-    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    script.write_text("def model() -> str:\n    return 'm'\n")
     out = run_agent(str(script), "say hi", workspace="ignored-ws")
     assert out.startswith(
         "Error: the my_researcher agent task could not run:"
@@ -382,7 +382,7 @@ def test_relative_path_resolves_against_captured_work_dir(
     project = tmp_path / "project"
     (project / "agents").mkdir(parents=True)
     script = project / "agents" / "reviewer.py"
-    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    script.write_text("def model() -> str:\n    return 'm'\n")
     elsewhere = tmp_path / "daemon_cwd"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
@@ -405,7 +405,7 @@ def test_path_mode_runs_in_captured_work_dir(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     script = project / "helper.py"
-    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    script.write_text("def model() -> str:\n    return 'm'\n")
     out = make_run_agent_tool(str(project))(str(script), "say hi")
     assert out.startswith("Error: the helper agent task could not run:")
     assert not (tmp_path / "agent_work").exists()
@@ -418,7 +418,7 @@ def test_standalone_relative_path_resolves_against_cwd(
     # Without a captured work directory (standalone tool), a relative
     # path resolves against the process working directory.
     script = tmp_path / "local_agent.py"
-    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    script.write_text("def model() -> str:\n    return 'm'\n")
     monkeypatch.chdir(tmp_path)
     out = run_agent("local_agent.py", "say hi")
     assert out.startswith("Error: the local_agent agent task could not run:")
@@ -473,7 +473,7 @@ def test_dispatch_uses_recorded_daemon_socket(
     out = run_agent("ntfy", "say hi")
     assert "recorded-daemon.sock" in out
     script = tmp_path / "probe_agent.py"
-    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    script.write_text("def model() -> str:\n    return 'm'\n")
     out = run_agent(str(script), "say hi")
     assert "recorded-daemon.sock" in out
 
@@ -501,13 +501,13 @@ def test_every_channel_module_is_dispatchable() -> None:
             getattr(cls, "channel_system_prompt", None), str,
         ), channel
         assert module.__file__ and Path(module.__file__).is_file(), channel
-        assert callable(getattr(module, "get_tools", None)), channel
+        assert callable(getattr(module, "tools", None)), channel
 
 
 def test_channel_module_is_a_valid_agent_script() -> None:
     # The exact contract the dispatch relies on: passing a channel
     # module as ``extension_agent_path`` makes the daemon use the module as its
-    # own tools file (its ``get_tools()`` returns the tool list).
+    # own tools file (its ``tools()`` returns the tool list).
     import kiss.agents.third_party_agents.ntfy_agent as ntfy_agent
 
     cmd = {"agentPath": ntfy_agent.__file__, "toolsFile": ""}

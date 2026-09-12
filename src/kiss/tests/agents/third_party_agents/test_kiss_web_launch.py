@@ -12,7 +12,7 @@ synchronous client API :func:`kiss.server.sorcar.run`: the launcher
 connects to a daemon's Unix-domain socket, sends the documented ``run``
 command, and supplies the agent's channel tools through the API's
 ``tools=`` *file path* contract: the agent's OWN module is the tools
-file, and the daemon imports it and calls its top-level ``get_tools()``
+file, and the daemon imports it and calls its top-level ``tools()``
 to build a fresh agent from the credentials persisted under the
 active kiss home.  No bridge, registry, wrapper, or generated file is
 involved.  The task is executed by a daemon-built chat agent, NOT by
@@ -424,7 +424,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             "        return []\n"
             "\n"
             "\n"
-            "def get_tools() -> list:\n"
+            "def tools() -> list:\n"
             '    """Return the note-channel tools."""\n'
             "    return NoteAgent()._get_tools()\n",
             encoding="utf-8",
@@ -434,7 +434,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
             assert "add_note" in tools, (
                 "the authenticated backend's tool must come from the "
-                "module's get_tools()"
+                "module's tools()"
             )
             return str(tools["add_note"](note="from daemon"))
 
@@ -472,7 +472,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             sock_path=self.sock_path,
         )
         assert seen == ["teamspace"], (
-            "the daemon-side get_tools() must see the launch workspace"
+            "the daemon-side tools() must see the launch workspace"
         )
         assert os.environ.get("KISS_CHANNEL_WORKSPACE") is None, (
             "the launcher must restore the workspace env var"
@@ -510,7 +510,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             assert started["A"].wait(timeout=30)
             thread_b.start()
             # B uses a DIFFERENT workspace: it must wait for A instead
-            # of overwriting the env var A's daemon-side get_tools()
+            # of overwriting the env var A's daemon-side tools()
             # reads — that would load the wrong account's credentials.
             assert not started["B"].wait(timeout=1.0), (
                 "a launch must not start while a different workspace "

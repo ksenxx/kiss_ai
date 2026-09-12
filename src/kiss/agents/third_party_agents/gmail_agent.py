@@ -1032,7 +1032,7 @@ def main() -> None:
     channel_main(GmailAgent, "kiss-gmail")
 
 
-def get_tools() -> list:
+def tools() -> list:
     """Return the Gmail channel tools (``kiss.server.sorcar.run`` tools-file contract).
 
     Called by the kiss-web daemon when this module's path is passed as

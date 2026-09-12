@@ -18,9 +18,9 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   ``extension_agent_path`` contract), and a scheduling request is dispatched to
   it with the ``run_agent`` tool as ``run_agent("cron", task)`` — the
   dispatched session gets the :func:`cron_job` tool from
-  :func:`get_tools` and runs in ``~/.kiss/cron/work`` without a
-  worktree (:func:`get_work_dir`, :func:`get_use_worktree`,
-  :func:`get_auto_commit`).
+  :func:`tools` and runs in ``~/.kiss/cron/work`` without a
+  worktree (:func:`work_dir`, :func:`use_worktree`,
+  :func:`auto_commit`).
 - The kiss-web daemon runs the scheduler automatically in a
   background thread (:func:`start_scheduler_thread`): every ~60
   seconds a tick finds due jobs, reschedules them *before* running
@@ -924,7 +924,7 @@ agents' dispatch preamble.
 """
 
 
-def get_tools() -> list:
+def tools() -> list:
     """Return the cron tools (``kiss.server.sorcar.run`` tools-file contract).
 
     Called by the kiss-web daemon when this module's path is passed as
@@ -937,7 +937,7 @@ def get_tools() -> list:
     return [cron_job]
 
 
-def get_work_dir() -> str:
+def work_dir() -> str:
     """Return the work directory for dispatched cron-management sessions.
 
     Agent-script getter (``kiss.server.sorcar.run``'s
@@ -954,7 +954,7 @@ def get_work_dir() -> str:
     return str(work_dir)
 
 
-def get_use_worktree() -> bool:
+def use_worktree() -> bool:
     """Return whether dispatched cron sessions use a git worktree.
 
     Agent-script getter: managing the JSON job store needs no git
@@ -966,7 +966,7 @@ def get_use_worktree() -> bool:
     return False
 
 
-def get_auto_commit() -> bool:
+def auto_commit() -> bool:
     """Return whether dispatched cron sessions auto-commit.
 
     Agent-script getter: managing the JSON job store needs no git

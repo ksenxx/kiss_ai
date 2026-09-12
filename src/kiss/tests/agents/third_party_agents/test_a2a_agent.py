@@ -146,9 +146,9 @@ def test_authenticate_rejects_bad_input() -> None:
     assert not _config.path.exists()
 
 
-def test_get_tools_module_function() -> None:
-    """The module-level ``get_tools()`` returns a non-empty tool list."""
-    tools = a2a_mod.get_tools()
+def test_tools_module_function() -> None:
+    """The module-level ``tools()`` returns a non-empty tool list."""
+    tools = a2a_mod.tools()
     assert tools
     assert _AUTH_TRIO <= _tool_names(tools)
 

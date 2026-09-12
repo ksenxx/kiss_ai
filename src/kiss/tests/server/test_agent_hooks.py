@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for agent-script ``get_llm_call_hook``/``get_tool_call_hook``.
+"""End-to-end tests for agent-script ``llm_call_hook``/``tool_call_hook``.
 
 Spin up a real :class:`kiss.server.web_server.RemoteAccessServer` on a
 temporary Unix-domain socket (the :class:`DaemonRunApiHarness` from
@@ -17,8 +17,8 @@ thread → ``apply_agent_overrides`` hook staging →
 ``RelentlessAgent.perform_task`` → ``KISSAgent.run`` — executes for
 real without any model API calls.
 
-Contract under test: an agent script's ``get_llm_call_hook()`` /
-``get_tool_call_hook()`` return the ``llm_call_hook`` /
+Contract under test: an agent script's ``llm_call_hook()`` /
+``tool_call_hook()`` getters return the ``llm_call_hook`` /
 ``tool_call_hook`` functions the underlying :class:`KISSAgent` receives;
 without them (or with a getter returning ``None``) the executor
 receives ``None``; a wrong-typed getter result stops the task loudly;
@@ -76,7 +76,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             MARKER_DIR = Path(r"{self.tmpdir}")
 
 
-            def llm_call_hook(new_messages):
+            def _llm_hook(new_messages):
                 """Stamp a marker and append a message to the batch.
 
                 Args:
@@ -87,7 +87,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
                 return [*new_messages, dict(role="user", content="hooked")]
 
 
-            def tool_call_hook(name, args):
+            def _tool_hook(name, args):
                 """Stamp a marker; allow finish, veto everything else.
 
                 Args:
@@ -99,14 +99,14 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
                 return "OK" if name == "finish" else "blocked by hook"
 
 
-            def get_llm_call_hook():
+            def llm_call_hook():
                 """Return the LLM-call hook."""
-                return llm_call_hook
+                return _llm_hook
 
 
-            def get_tool_call_hook():
+            def tool_call_hook():
                 """Return the tool-call hook."""
-                return tool_call_hook
+                return _tool_hook
             ''',
         )
 
@@ -167,7 +167,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
     def test_hook_getter_returning_none_passes_none(self) -> None:
         """A hook getter may return ``None``, meaning "no hook".
 
-        The script defines both getters; only ``get_llm_call_hook()``
+        The script defines both getters; only ``llm_call_hook()``
         returns a callable — the executor must get that callable and a
         ``None`` tool-call hook.
         """
@@ -186,12 +186,12 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
                 return list(reversed(new_messages))
 
 
-            def get_llm_call_hook():
+            def llm_call_hook():
                 """Return the LLM-call hook."""
                 return _reverse_messages
 
 
-            def get_tool_call_hook():
+            def tool_call_hook():
                 """Install no tool-call hook."""
                 return None
             ''',
@@ -213,14 +213,14 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         assert call["tool_call_hook"] is None
 
     def test_wrong_typed_hook_getter_fails_task(self) -> None:
-        """A non-callable ``get_tool_call_hook()`` result stops the task."""
+        """A non-callable ``tool_call_hook()`` result stops the task."""
         agent_path = self._write_py(
             "bad_hook_agent.py",
             '''
             """Agent script with a wrong-typed hook getter."""
 
 
-            def get_tool_call_hook() -> int:
+            def tool_call_hook() -> int:
                 """Return the wrong type."""
                 return 42
             ''',
@@ -236,7 +236,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is False
-        assert "get_tool_call_hook" in result.text
+        assert "tool_call_hook" in result.text
         assert "a callable or None" in result.text
         assert calls == [], "no executor session may start for a broken script"
 

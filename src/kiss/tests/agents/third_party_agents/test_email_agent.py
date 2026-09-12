@@ -29,7 +29,9 @@ from kiss.agents.third_party_agents.email_agent import (
     _config,
     _is_automated_mail,
     _normalize_mail,
-    get_tools,
+)
+from kiss.agents.third_party_agents.email_agent import (
+    tools as module_tools,
 )
 
 _AUTH_TRIO = {"check_email_auth", "authenticate_email", "clear_email_auth"}
@@ -189,9 +191,9 @@ class TestAuthFlow:
             "starttls",
         )
 
-    def test_module_get_tools(self) -> None:
-        """The module-level get_tools() returns a non-empty tool list."""
-        tools = get_tools()
+    def test_module_tools(self) -> None:
+        """The module-level tools() returns a non-empty tool list."""
+        tools = module_tools()
         assert tools
         assert _AUTH_TRIO <= {t.__name__ for t in tools}
 

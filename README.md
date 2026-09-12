@@ -178,25 +178,25 @@ follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 
 ### Sorcar Extension Agents (SEAs)
 
-A **Sorcar Extension Agent (SEA)** is a plain Python file whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports the file on every run and calls its top-level `get_X()` functions to compute the run's parameters; parameters without a getter keep whatever the caller passed. One file can define the task prompt, system prompt, model, budget, tools, and safety hooks — a complete custom agent:
+A **Sorcar Extension Agent (SEA)** is a plain Python file whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports the file on every run and calls its top-level `X()` functions — named after `run()`'s parameters — to compute the run's parameters; parameters without a getter keep whatever the caller passed. One file can define the task prompt, system prompt, model, budget, tools, and safety hooks — a complete custom agent:
 
 ```python
 # weather_agent.py — a minimal SEA
 import requests
 
-def get_prompt() -> str:
+def prompt() -> str:
     return "Look up the current weather in San Francisco and report it."
 
-def get_max_budget() -> float:
+def max_budget() -> float:
     return 0.50
 
-def get_use_worktree() -> bool:
+def use_worktree() -> bool:
     return False  # no repo changes expected
 
-def get_if_append_basic_tools() -> bool:
+def if_append_basic_tools() -> bool:
     return False  # restrict the agent to finish + our tools
 
-def get_system_prompt() -> str:
+def system_prompt() -> str:
     return ("You are a weather assistant. Use the get_weather tool "
             "to look up weather, then call finish with the result.")
 
@@ -210,7 +210,7 @@ def get_weather(city: str) -> str:
     resp.raise_for_status()
     return resp.text.strip()
 
-def get_tools() -> list:
+def tools() -> list:
     """Return the tools the agent may call."""
     return [get_weather]
 ```
@@ -219,27 +219,27 @@ def get_tools() -> list:
 from kiss.server import sorcar
 
 result = sorcar.run(
-    "placeholder",  # required non-blank; overridden by get_prompt()
+    "placeholder",  # required non-blank; overridden by prompt()
     extension_agent_path="weather_agent.py",
 )
 ```
 
 Key points:
 
-- **Overridable parameters.** Every `sorcar.run()` parameter except `timeout`, `stop_on_timeout`, `sock_path`, `scope_work_dir`, `parent_task_id`, `parent_tab_id`, `use_web_tools`, `is_parallel`, and `extension_agent_path` itself has a getter: `get_prompt()`, `get_work_dir()`, `get_model()`, `get_chat_id()`, `get_system_prompt()`, `get_tools()`, `get_use_worktree()`, `get_auto_commit()`, `get_max_budget()`, `get_model_config()`, `get_if_append_basic_tools()` (overrides `append_basic_tools`), `get_append_to_system_prompt()`, and `get_append_to_prompt()`. `use_web_tools` and `is_parallel` always keep the values passed to `run()` (their defaults when the caller passed none).
+- **Overridable parameters.** Every `sorcar.run()` parameter except `timeout`, `stop_on_timeout`, `sock_path`, `parent_task_id`, `parent_tab_id`, and `extension_agent_path` itself has a getter named after it: `prompt()`, `work_dir()`, `model()`, `chat_id()`, `system_prompt()`, `tools()`, `use_worktree()`, `auto_commit()`, `max_budget()`, `model_config()`, `if_append_basic_tools()` (overrides `append_basic_tools`), `append_to_system_prompt()`, `append_to_prompt()`, `scope_work_dir()`, `use_web_tools()`, `classify_tasks()`, and `is_parallel()`. `use_web_tools()` and `classify_tasks()` return a bool, or `None` to fall back to the daemon's persisted setting.
 - **Atomic, type-checked overrides.** Getters run in the daemon process and are re-imported from source on every run. Each return value is type-checked; overrides apply only after every getter succeeds, and a broken getter fails the task with a diagnostic in `TaskResult.text`.
-- **Tools, two ways.** `get_tools()` may return a list of callables — making the script its own tools file — or the path of a separate Python file whose `get_tools()` returns the callables. Either way the tools execute in the daemon process; nothing is serialized over the socket. `get_tools()` overrides (does not append to) the caller's `tools` argument.
-- **Hook getters.** `get_llm_call_hook()` and `get_tool_call_hook()` return functions with no `run()` equivalent (callables can't travel the wire). `llm_call_hook(new_messages)` runs before every LLM call and its return value replaces the outgoing messages; `tool_call_hook(name, args)` runs before every tool call — returning `"OK"` lets the tool execute, any other string suppresses the call and is given to the model as the tool's result:
+- **Tools, two ways.** `tools()` may return a list of callables — making the script its own tools file — or the path of a separate Python file whose `get_tools()` (or `tools()`) returns the callables. Either way the tools execute in the daemon process; nothing is serialized over the socket. `tools()` overrides (does not append to) the caller's `tools` argument.
+- **Hook getters.** `llm_call_hook()` and `tool_call_hook()` return functions with no `run()` equivalent (callables can't travel the wire). `llm_call_hook(new_messages)` runs before every LLM call and its return value replaces the outgoing messages; `tool_call_hook(name, args)` runs before every tool call — returning `"OK"` lets the tool execute, any other string suppresses the call and is given to the model as the tool's result:
 
 ```python
 # guarded_agent.py — veto dangerous shell commands
-def tool_call_hook(name, args):
+def veto_destructive(name, args):
     if name == "Bash" and "rm -rf" in str(args.get("command", "")):
         return "Blocked: destructive command"
     return "OK"
 
-def get_tool_call_hook():
-    return tool_call_hook
+def tool_call_hook():
+    return veto_destructive
 ```
 
 The full authoring guide — every getter's semantics, error handling, chat continuation, model configuration, and a complete worked example — is in [src/kiss/server/README.md](src/kiss/server/README.md).

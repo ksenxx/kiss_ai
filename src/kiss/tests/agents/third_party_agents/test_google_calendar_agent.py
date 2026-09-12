@@ -285,9 +285,9 @@ def test_clear_auth_removes_token_and_relocks_tools() -> None:
     assert [t.__name__ for t in agent._get_tools()] == _AUTH_TOOL_NAMES
 
 
-def test_get_tools_module_function() -> None:
-    """Module-level get_tools() returns the auth tool quartet when locked."""
-    tools = gcal_mod.get_tools()
+def test_tools_module_function() -> None:
+    """Module-level tools() returns the auth tool quartet when locked."""
+    tools = gcal_mod.tools()
     assert [t.__name__ for t in tools] == _AUTH_TOOL_NAMES
     assert all(callable(t) for t in tools)
 

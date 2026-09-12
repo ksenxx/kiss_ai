@@ -24,7 +24,9 @@ from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
 from kiss.agents.third_party_agents.wecom_agent import (
     WeComAgent,
     WeComChannelBackend,
-    get_tools,
+)
+from kiss.agents.third_party_agents.wecom_agent import (
+    tools as module_tools,
 )
 
 _AUTH_TRIO = {"check_wecom_auth", "authenticate_wecom", "clear_wecom_auth"}
@@ -139,9 +141,9 @@ def test_fresh_agent_loads_persisted_config() -> None:
     assert fresh._backend._webhook_url == "https://x?key=1"
 
 
-def test_get_tools_module_function() -> None:
-    """The module-level get_tools() returns a non-empty tool list."""
-    assert len(get_tools()) >= 3
+def test_tools_module_function() -> None:
+    """The module-level tools() returns a non-empty tool list."""
+    assert len(module_tools()) >= 3
 
 
 def test_post_message_shape(receiver: _WebhookReceiver) -> None:

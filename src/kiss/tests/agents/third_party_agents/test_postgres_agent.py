@@ -143,9 +143,9 @@ def test_read_only_defaults_to_true_when_key_missing() -> None:
     assert agent._backend._read_only is True
 
 
-def test_get_tools_module_function() -> None:
-    """Module-level get_tools() returns a non-empty tool list."""
-    tools = pg_mod.get_tools()
+def test_tools_module_function() -> None:
+    """Module-level tools() returns a non-empty tool list."""
+    tools = pg_mod.tools()
     assert len(tools) >= 3
     assert all(callable(t) for t in tools)
 

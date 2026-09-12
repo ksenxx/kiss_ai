@@ -590,6 +590,7 @@ class _TaskRunnerMixin:
             chat_id: str | None = None,
             title: str | None = None,
             work_dir: str | None = None,
+            scope_work_dir: str | None = None,
             task_id: str | None = None,
             create: bool = False,
         ) -> int: ...
@@ -691,12 +692,14 @@ class _TaskRunnerMixin:
             state = self._resolve_run_state(cmd)
             # The dispatch handler fixed ``state.chat_id`` from the
             # client-sent ``chatId`` before this thread started, so a
-            # ``get_chat_id()`` override must be re-applied to the state —
+            # ``chat_id()`` override must be re-applied to the state —
             # ``_run_task_inner`` binds the agent's chat from it.  Gated on
-            # the OVERRIDDEN set: without a ``get_chat_id()`` getter the
+            # the OVERRIDDEN set: without a ``chat_id()`` getter the
             # state's chat id (possibly carried over from the tab's
             # previous run) must stay untouched.
-            if overridden_fields & {"chatId", "prompt", "workDir"}:
+            if overridden_fields & {
+                "chatId", "prompt", "workDir", "tabScopeWorkDir",
+            }:
                 override_chat_id: str | None = None
                 if "chatId" in overridden_fields:
                     # An empty override means "fresh chat" — mint the id
@@ -726,6 +729,23 @@ class _TaskRunnerMixin:
                         # as the EFFECTIVE directory the run uses.
                         (cmd["workDir"] or self.work_dir)
                         if "workDir" in overridden_fields
+                        else None
+                    ),
+                    scope_work_dir=(
+                        # A ``scope_work_dir()`` override re-pins the tab's
+                        # workspace-visibility scope, which the dispatch
+                        # handler pinned from the client-sent
+                        # ``tabScopeWorkDir`` before this thread started.
+                        # ``update_tab`` keeps the current scope for an
+                        # empty value, so an EMPTY override (meaning "scope
+                        # to the run's work dir", like an empty client-sent
+                        # scope) must be pinned as the effective work
+                        # directory — mirroring the ``workDir`` re-pin.
+                        (
+                            str(cmd["tabScopeWorkDir"] or "")
+                            or str(cmd.get("workDir") or self.work_dir)
+                        )
+                        if "tabScopeWorkDir" in overridden_fields
                         else None
                     ),
                 )
@@ -1470,8 +1490,8 @@ class _TaskRunnerMixin:
                 if isinstance(_raw_model_config, dict)
                 else None
             )
-            # Agent-script hooks (``get_llm_call_hook`` /
-            # ``get_tool_call_hook``), staged onto the command dict by
+            # Agent-script hooks (``llm_call_hook`` /
+            # ``tool_call_hook``), staged onto the command dict by
             # ``apply_agent_overrides``.  Guarded with ``callable``:
             # the fields never travel the wire as callables, so a
             # (buggy or malicious) client that sends them as JSON

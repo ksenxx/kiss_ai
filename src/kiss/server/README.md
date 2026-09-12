@@ -2,7 +2,8 @@
 
 A **Sorcar Extension Agent (SEA)** is a plain Python file whose path you pass as
 `extension_agent_path` to `kiss.server.sorcar.run()`.  The daemon
-imports the file, calls its top-level `get_X()` functions, and uses
+imports the file, calls its top-level `X()` functions — named after
+`run()`'s parameters — and uses
 the return values to override the run's parameters.  Parameters
 without a getter keep whatever the caller passed (or the default).
 The getters execute **in the daemon process** and are re-imported from
@@ -27,19 +28,19 @@ contract, error handling, and ends with a complete working example.
 
 import requests
 
-def get_prompt() -> str:
+def prompt() -> str:
     return "Look up the current weather in San Francisco and report it."
 
-def get_max_budget() -> float:
+def max_budget() -> float:
     return 0.50
 
-def get_use_worktree() -> bool:
+def use_worktree() -> bool:
     return False  # no repo changes expected
 
-def get_if_append_basic_tools() -> bool:
+def if_append_basic_tools() -> bool:
     return False  # only finish + our tools
 
-def get_system_prompt() -> str:
+def system_prompt() -> str:
     return (
         "You are a weather assistant. Use the get_weather tool "
         "to look up weather, then call finish with the result."
@@ -57,7 +58,7 @@ def get_weather(city: str) -> str:
     resp.raise_for_status()
     return resp.text.strip()
 
-def get_tools() -> list:
+def tools() -> list:
     """Return the tools the agent may call."""
     return [get_weather]
 ```
@@ -68,7 +69,7 @@ Launch it:
 from kiss.server import sorcar
 
 result = sorcar.run(
-    "placeholder",  # required non-blank; overridden by get_prompt()
+    "placeholder",  # required non-blank; overridden by prompt()
     extension_agent_path="weather_agent.py",
 )
 print(result.text, result.success, result.cost)
@@ -76,7 +77,7 @@ print(result.text, result.success, result.cost)
 
 The client-side `prompt` argument must be non-empty (the client
 validates this before connecting to the daemon), but when the agent
-script defines `get_prompt()`, the script's return value replaces it
+script defines `prompt()`, the script's return value replaces it
 on the daemon.
 
 
@@ -92,8 +93,8 @@ on the daemon.
    │                                         │
    │ validate path exists                    │ import agent.py
    │ resolve to absolute                     │ for each PARAM_FIELDS entry:
-   │ send JSON {"agentPath": "…", …}        │   if get_X defined & callable:
-   │ over Unix-domain socket                 │     call get_X()
+   │ send JSON {"agentPath": "…", …}        │   if X defined & callable:
+   │ over Unix-domain socket                 │     call X()
    │                                         │     type-check return value
    ▼                                         │     stage override
  block, read events ◄───────────────────     │ apply staged overrides to cmd
@@ -112,7 +113,7 @@ on the daemon.
 
 2. **Daemon side** — `apply_agent_overrides()` (in
    `kiss.server.agent_file`) imports the file, iterates every
-   overridable parameter, calls `get_X()` when defined, type-checks
+   overridable parameter, calls `X()` when defined, type-checks
    the return value, and writes the checked value into the command
    dict.  Overrides are staged: they apply atomically only after every
    getter succeeds.  A broken getter raises `AgentFileError` and the
@@ -120,39 +121,44 @@ on the daemon.
 
 3. **Tools loading** — After overrides, the daemon reads the
    `toolsFile` field and calls `load_tools_file()` to import it and
-   invoke its `get_tools()`.  The returned callables become the
+   invoke its `get_tools()` (or, for an SEA doubling as its own tools
+   file, its `tools()`).  The returned callables become the
    agent's tools.
 
 
 ## Overridable parameters
 
 Every parameter of `sorcar.run()` except `timeout`, `stop_on_timeout`,
-`sock_path`, `scope_work_dir`, `use_web_tools`, `classify_tasks`,
-`is_parallel`, and `extension_agent_path` itself has a corresponding
-getter the SEA may define.  The getter is named `get_X()` for parameter `X`,
+`sock_path`, `parent_task_id`, `parent_tab_id`, and
+`extension_agent_path` itself has a corresponding
+getter the SEA may define.  The getter is named `X()` for parameter `X`,
 except `append_basic_tools`, whose getter is
-`get_if_append_basic_tools()`.  The table below lists them all.
+`if_append_basic_tools()`.  The table below lists them all.
 
 | Getter function              | Return type                     | `run()` default           | Wire field          |
 |------------------------------|---------------------------------|---------------------------|---------------------|
-| `get_prompt()`               | `str` (non-empty)               | (required argument)       | `prompt`            |
-| `get_work_dir()`             | `str`                           | `""` (daemon default)     | `workDir`           |
-| `get_model()`                | `str`                           | `""` (daemon default)     | `model`             |
-| `get_chat_id()`              | `str`                           | `""` (new chat)           | `chatId`            |
-| `get_system_prompt()`        | `str`                           | `""` (default SYSTEM.md)  | `systemPrompt`      |
-| `get_tools()`                | `str`, `Path`, `list`, or `None`| `None` (no extra tools)   | `toolsFile`         |
-| `get_use_worktree()`         | `bool`                          | `True`                    | `useWorktree`       |
-| `get_auto_commit()`          | `bool`                          | `True`                    | `autoCommit`        |
-| `get_max_budget()`           | `float` (finite) or `None`      | `None` (daemon default)   | `maxBudget`         |
-| `get_model_config()`         | `dict` or `None`                | `None`                    | `modelConfig`       |
-| `get_if_append_basic_tools()` | `bool`                         | `True`                    | `appendBasicTools`  |
-| `get_append_to_system_prompt()` | `str`                        | `""` (append nothing)     | `appendToSystemPrompt` |
-| `get_append_to_prompt()`     | `str`                           | `""` (append nothing)     | `appendToPrompt`    |
+| `prompt()`               | `str` (non-empty)               | (required argument)       | `prompt`            |
+| `work_dir()`             | `str`                           | `""` (daemon default)     | `workDir`           |
+| `model()`                | `str`                           | `""` (daemon default)     | `model`             |
+| `chat_id()`              | `str`                           | `""` (new chat)           | `chatId`            |
+| `system_prompt()`        | `str`                           | `""` (default SYSTEM.md)  | `systemPrompt`      |
+| `tools()`                | `str`, `Path`, `list`, or `None`| `None` (no extra tools)   | `toolsFile`         |
+| `use_worktree()`         | `bool`                          | `True`                    | `useWorktree`       |
+| `auto_commit()`          | `bool`                          | `True`                    | `autoCommit`        |
+| `max_budget()`           | `float` (finite) or `None`      | `None` (daemon default)   | `maxBudget`         |
+| `model_config()`         | `dict` or `None`                | `None`                    | `modelConfig`       |
+| `if_append_basic_tools()` | `bool`                         | `True`                    | `appendBasicTools`  |
+| `append_to_system_prompt()` | `str`                        | `""` (append nothing)     | `appendToSystemPrompt` |
+| `append_to_prompt()`     | `str`                           | `""` (append nothing)     | `appendToPrompt`    |
+| `scope_work_dir()`       | `str`                           | `""` (scope = work dir)   | `tabScopeWorkDir`   |
+| `use_web_tools()`        | `bool` or `None`                | `None` (daemon default)   | `webTools`          |
+| `classify_tasks()`       | `bool` or `None`                | `None` (daemon default)   | `classifyTasks`     |
+| `is_parallel()`          | `bool`                          | `True`                    | `useParallel`       |
 
 When a getter is absent, the caller's value is used (which is the
 `run()` default when the caller did not pass one).
 
-The eight parameters without getters:
+The parameters without getters:
 
 - **`timeout`** — bounds the *client's* local wait (`None` waits
   indefinitely); the daemon never sees it.
@@ -161,42 +167,47 @@ The eight parameters without getters:
   keeps running); a client-side choice the script must not override.
 - **`sock_path`** — selects which daemon to connect to; the script
   already runs on that daemon.
-- **`scope_work_dir`** — the CALLING client's tab-bar visibility
-  scope (wire field `tabScopeWorkDir`), which a dispatched script
-  must not be able to repoint at another workspace.
-- **`use_web_tools`** — always the value the caller passed to `run()`
-  (default `None`: the daemon's configured default — the settings
-  panel's "Use web tools" checkbox, persisted as `use_web_browser`).
-- **`classify_tasks`** — always the value the caller passed to `run()`
-  (default `None`: the daemon's configured default — the settings
-  panel's "Classify tasks before running" checkbox, persisted as
-  `classify_tasks`).
-- **`is_parallel`** — always the value the caller passed to `run()`
-  (default `True`).
+- **`parent_task_id` / `parent_tab_id`** — the CALLING task's
+  identity (how `run_agent` nests a dispatched run under its caller),
+  which a dispatched script must not be able to forge.
 - **`extension_agent_path`** — the script cannot override its own path.
 
 ### Getter semantics
 
-- **`get_model()`** — an empty string `""` means "use the daemon's
+- **`model()`** — an empty string `""` means "use the daemon's
   configured default model".  A non-empty string must name a model in
   the daemon's available model list or the task fails.
-- **`get_chat_id()`** — an empty string `""` starts a fresh chat.  A
+- **`chat_id()`** — an empty string `""` starts a fresh chat.  A
   non-empty string resumes that chat session.
-- **`get_system_prompt()`** — an empty or blank string uses the
+- **`system_prompt()`** — an empty or blank string uses the
   default `SYSTEM.md` system prompt.  A non-empty string replaces it.
-- **`get_tools()`** — **overrides** (does not append to) the caller's
+- **`tools()`** — **overrides** (does not append to) the caller's
   `tools` argument.  Returning `None` clears any caller-supplied tools.
-- **`get_if_append_basic_tools()`** — overrides the
+- **`if_append_basic_tools()`** — overrides the
   `append_basic_tools` parameter; `False` strips the run down to
   `finish` plus the supplied tools.
-- **`get_append_to_system_prompt()`** — extra text **appended** to
+- **`append_to_system_prompt()`** — extra text **appended** to
   the run's system prompt (the default `SYSTEM.md` prompt or the
-  `get_system_prompt()` replacement) when the agent is executed.
-  Unlike `get_system_prompt()`, it does not replace anything.
-- **`get_append_to_prompt()`** — extra text **appended** to the
+  `system_prompt()` replacement) when the agent is executed.
+  Unlike `system_prompt()`, it does not replace anything.
+- **`append_to_prompt()`** — extra text **appended** to the
   executed task prompt.  A multi-`<task>` prompt runs the agent once
   per subtask and the text is appended to each subtask's prompt.  The
   appended text becomes part of the recorded prompt in chat history.
+- **`scope_work_dir()`** — the workspace directory the run's tab is
+  scoped to in clients' tab bars, when different from the execution
+  `work_dir`.  An empty string scopes the tab to the run's work
+  directory (the default scoping), like an empty client-sent
+  `scope_work_dir`.
+- **`use_web_tools()`** — per-run browser-tool enablement.  `None`
+  falls back to the daemon's configured default (the settings panel's
+  "Use web tools" checkbox, persisted as `use_web_browser`).
+- **`classify_tasks()`** — per-run pre-run task classification.
+  `None` falls back to the daemon's configured default (the settings
+  panel's "Classify tasks before running" checkbox, persisted as
+  `classify_tasks`).
+- **`is_parallel()`** — whether the agent may spawn parallel
+  sub-agents (`run_parallel`).
 
 ### Hook getters (no `run()` parameter)
 
@@ -207,8 +218,8 @@ process:
 
 | Getter function        | Return type          | Staged command field |
 |------------------------|----------------------|----------------------|
-| `get_llm_call_hook()`  | callable or `None`   | `llmCallHook`        |
-| `get_tool_call_hook()` | callable or `None`   | `toolCallHook`       |
+| `llm_call_hook()`  | callable or `None`   | `llmCallHook`        |
+| `tool_call_hook()` | callable or `None`   | `toolCallHook`       |
 
 The returned functions — `llm_call_hook` and `tool_call_hook` — are
 passed to the underlying `KISSAgent.run()` of every task-executor
@@ -231,13 +242,13 @@ like every wrong-typed getter.
 
 ```python
 # guarded_agent.py
-def tool_call_hook(name, args):
+def veto_destructive(name, args):
     if name == "Bash" and "rm -rf" in str(args.get("command", "")):
         return "Blocked: destructive command"
     return "OK"
 
-def get_tool_call_hook():
-    return tool_call_hook
+def tool_call_hook():
+    return veto_destructive
 ```
 
 
@@ -248,16 +259,17 @@ approaches.
 
 ### 1. Separate tools file (path return)
 
-`get_tools()` returns the **path** (string or `pathlib.Path`) of
-another Python file.  The daemon imports that file and calls its own
-`get_tools()` to obtain the callable list.  Use an absolute path; the
+`tools()` returns the **path** (string or `pathlib.Path`) of
+another Python file.  The daemon imports that file and calls its
+`get_tools()` (or `tools()`) to obtain the callable list.  Use an
+absolute path; the
 daemon does not resolve paths against the client's working directory.
 
 ```python
 # my_agent.py
 import pathlib
 
-def get_tools():
+def tools():
     return pathlib.Path("/absolute/path/to/my_tools.py")
 ```
 
@@ -278,9 +290,9 @@ def get_tools():
 
 ### 2. Self-contained agent (list return)
 
-`get_tools()` returns a **list of callables** directly.  The daemon
+`tools()` returns a **list of callables** directly.  The daemon
 normalizes this to the agent script's own path and later re-imports
-the same file as the tools file, calling `get_tools()` again.  This
+the same file as the tools file, calling `tools()` again.  This
 makes the SEA its own tools file — a single file provides
 both parameter overrides and tools.
 
@@ -292,7 +304,7 @@ initialization, or idempotent setup) if side effects are expensive.
 ```python
 # self_contained_agent.py
 
-def get_prompt() -> str:
+def prompt() -> str:
     return "Double the number 21."
 
 def double(n: int) -> int:
@@ -303,7 +315,7 @@ def double(n: int) -> int:
     """
     return n * 2
 
-def get_tools() -> list:
+def tools() -> list:
     return [double]
 ```
 
@@ -342,19 +354,19 @@ on `use_web_tools` and `is_parallel`) browser tools, `run_agent`,
 `run_parallel`, `number_of_cores` — **plus** your extension tools.
 
 When `append_basic_tools=False`, the agent's **only** tools are
-`finish` and the tools from `get_tools()`.  This is useful for
+`finish` and the tools from `tools()`.  This is useful for
 building focused, restricted agents.
 
 When restricting tools, the default system prompt (`SYSTEM.md`)
 assumes the full toolset (it mandates a first `Read("./SORCAR.md")`
-call, among other things).  Pass a custom `get_system_prompt()` that
+call, among other things).  Pass a custom `system_prompt()` that
 matches the tools you provide:
 
 ```python
-def get_if_append_basic_tools() -> bool:
+def if_append_basic_tools() -> bool:
     return False
 
-def get_system_prompt() -> str:
+def system_prompt() -> str:
     return (
         "You are a weather assistant. Use the get_weather tool "
         "to look up weather, then call finish with the result."
@@ -379,9 +391,9 @@ the daemon):
 |-----------|---------------|
 | File deleted between client validation and daemon import | `agent script '...' is not an existing Python (.py) file` |
 | File raises at import time | `agent script '...' failed to import: ...` |
-| `get_X` defined but not callable | `get_X of agent script '...' must be a callable, got ...` |
-| `get_X()` raises an exception | `get_X() of agent script '...' raised: ...` |
-| `get_X()` returns wrong type | `get_X() of agent script '...' must return ..., got ...` |
+| `X` defined but not callable | `X of agent script '...' must be a callable, got ...` |
+| `X()` raises an exception | `X() of agent script '...' raised: ...` |
+| `X()` returns wrong type | `X() of agent script '...' must return ..., got ...` |
 
 Overrides are **atomic**: if any getter fails, the command keeps all
 its original values (no partial overrides).
@@ -406,19 +418,19 @@ result2 = sorcar.run(
 )
 ```
 
-An SEA can also force a specific chat via `get_chat_id()`.
+An SEA can also force a specific chat via `chat_id()`.
 
 
 ## Model configuration
 
-Use `get_model_config()` to pass custom endpoint URLs, headers, or
+Use `model_config()` to pass custom endpoint URLs, headers, or
 sampling parameters:
 
 ```python
-def get_model() -> str:
+def model() -> str:
     return "my-custom-model"
 
-def get_model_config() -> dict:
+def model_config() -> dict:
     return {
         "base_url": "http://localhost:8080/v1",
         "api_key": "sk-local-key",
@@ -437,7 +449,7 @@ managing a SQLite task database.  It uses the full basic toolset
 (`append_basic_tools` defaults to `True`), so the LLM can also use
 `Bash`, `Read`, `Write`, etc. alongside the custom database tools.
 
-The agent does **not** define `get_prompt()` or `get_model()`, so
+The agent does **not** define `prompt()` or `model()`, so
 the caller's prompt reaches the LLM and the daemon's configured
 default model is used.
 
@@ -480,18 +492,18 @@ def _get_db() -> sqlite3.Connection:
 
 
 # --- Overridable parameter getters ---
-# No get_prompt() — the caller's prompt is used as-is.
-# No get_model() — the daemon's configured default model is used.
+# No prompt() — the caller's prompt is used as-is.
+# No model() — the daemon's configured default model is used.
 
-def get_max_budget() -> float:
+def max_budget() -> float:
     return 1.0
 
 
-def get_use_worktree() -> bool:
+def use_worktree() -> bool:
     return False  # no code changes expected
 
 
-def get_system_prompt() -> str:
+def system_prompt() -> str:
     return (
         "You manage a personal task list stored in a SQLite database.  "
         "Use the add_task, list_tasks, and complete_task tools to "
@@ -568,7 +580,7 @@ def complete_task(task_id: int) -> str:
     return json.dumps({"error": f"Task {task_id} not found or already done"})
 
 
-def get_tools() -> list:
+def tools() -> list:
     """Return the tools the agent may call."""
     return [add_task, list_tasks, complete_task]
 ```
@@ -643,36 +655,37 @@ class TaskResult:
 | Aspect | SEA (`extension_agent_path`) | Tools file (`tools`) |
 |--------|------------------------------------------|----------------------|
 | **Purpose** | Override run parameters AND supply tools | Supply tools only |
-| **Getter functions** | `get_prompt()`, `get_model()`, `get_system_prompt()`, `get_tools()`, etc. (13 total) | `get_tools()` only |
-| **Required function** | None — define only the getters you need | Must define `get_tools()` |
-| **Can be combined** | Yes — `get_tools()` can point to a separate tools file | N/A |
-| **Can be self-contained** | Yes — return a list from `get_tools()` and the script becomes its own tools file | Always self-contained |
+| **Getter functions** | `prompt()`, `model()`, `system_prompt()`, `tools()`, etc. (17 total, plus 2 hooks) | `get_tools()` (or `tools()`) only |
+| **Required function** | None — define only the getters you need | Must define `get_tools()` (or `tools()`) |
+| **Can be combined** | Yes — `tools()` can point to a separate tools file | N/A |
+| **Can be self-contained** | Yes — return a list from `tools()` and the script becomes its own tools file | Always self-contained |
 
 
 ## Tips
 
 - The client-side `prompt` argument must be **non-empty** even when
-  `get_prompt()` overrides it; the client validates before connecting.
+  `prompt()` overrides it; the client validates before connecting.
 - An SEA **may define any subset** of the getters.  Only
   define the ones whose defaults you want to change.
-- Omit `get_model()` to use the daemon's configured default model
+- Omit `model()` to use the daemon's configured default model
   rather than hard-coding one.
-- The `get_tools()` return value of a **list** makes the SEA its
+- The `tools()` return value of a **list** makes the SEA its
   own tools file.  This is the most common pattern.
-- **Use absolute paths** for the `get_tools()` path return — the
+- **Use absolute paths** for the `tools()` path return — the
   daemon does not resolve paths against the client's working directory.
-- `get_tools()` **overrides** the caller's `tools` argument; it does
+- `tools()` **overrides** the caller's `tools` argument; it does
   not append to it.  Returning `None` clears caller-supplied tools.
 - The agent script is **re-imported from source** on every run.
   Edits take effect immediately without restarting the daemon.
-- A self-contained agent (list-returning `get_tools()`) is imported
+- A self-contained agent (list-returning `tools()`) is imported
   **twice** per run: once for parameter overrides, once for tools
   loading.  Keep module-level side effects idempotent.
-- `get_max_budget()` must return a **finite** number.  `NaN`,
+- `max_budget()` must return a **finite** number.  `NaN`,
   `±inf`, or an overflowing value raises `AgentFileError`.
-- A `get_X = None` (a defined attribute that is not callable) is
-  treated as a broken getter and stops the task — it is not treated
-  as "absent".
+- A getter defined as a non-callable (e.g. a module-level variable
+  named `model` or `tools`) is treated as a broken getter and stops
+  the task — it is not treated as "absent".  Avoid module-level
+  variables that share a getter's name.
 - The SEA and its tools run **in the daemon process**
   with the daemon user's privileges and environment.  Any libraries
   your code imports must be installed in the daemon's Python
