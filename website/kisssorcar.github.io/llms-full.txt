@@ -16,8 +16,8 @@
 - [Installation](https://kisssorcar.github.io/docs/installation.md) — Install from source, pipx/uv, API-key configuration, VS Code extension, Docker
 - [Client Interfaces](https://kisssorcar.github.io/docs/cli.md) — The `kiss-web` daemon, VS Code extension, web/mobile app, and Python client API
 - [Python API Reference](https://kisssorcar.github.io/docs/api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, GitWorktreeOps
-- [Supported Models](https://kisssorcar.github.io/docs/models.md) — 634-model catalog across 9 provider categories
-- [Messaging & Third-Party Agents](https://kisssorcar.github.io/docs/messaging-agents.md) — 32 channel agents plus infrastructure agents and the Govee smart-home CLI
+- [Supported Models](https://kisssorcar.github.io/docs/models.md) — 660-model catalog across 9 provider categories
+- [Messaging & Third-Party Agents](https://kisssorcar.github.io/docs/messaging-agents.md) — 32 messaging-channel agents and 9 service agents, plus infrastructure agents and the Govee smart-home CLI
 - [Sample Tasks](https://kisssorcar.github.io/docs/sample-tasks.md) — Ready-to-use example prompts
 - [Prompt Tricks](https://kisssorcar.github.io/docs/prompt-tricks.md) — Reusable prompt snippets that boost result quality
 - [Tips](https://kisssorcar.github.io/docs/tips.md) — Practical tips for getting the highest-quality work
@@ -62,11 +62,11 @@ print(result.text)
 
 > Open-source general-purpose AI agent for long-horizon tasks and AI discovery.
 
-**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon, and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. All agents run as daemons. Complex AI systems/techniques can be replaced with a paragraph of prompt in KISS Sorcar.
+**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon, and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. Agents run as daemons hosted by the local server (a standalone `sorcar` terminal command can also run a task without the daemon). Complex AI systems/techniques can be replaced with a paragraph of prompt in KISS Sorcar.
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
-- **Version:** 2026.9.3
+- **Version:** 2026.9.12
 - **License:** Apache-2.0
 - **Python:** 3.13+
 - **Website:** <https://kisssorcar.github.io/>
@@ -83,12 +83,12 @@ print(result.text)
 | Multiple models from multiple vendors in the same task | Yes — mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | No — Anthropic Claude models only | No — one model per task |
 | Primary focus | Quality — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | Core agents lines of code | ~3000 | Unknown | Unknown |
-| Models in bundled catalog | 634 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| Models in bundled catalog | 660 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | Bring your own API key / endpoint | Yes — keys stay on your machine | Anthropic key | Routed through Cursor backend |
 | Open source | Yes — Apache-2.0 | Proprietary | Proprietary |
 | Price | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
 | Run on top of Claude Code / Codex CLI | Yes — `cc/*` and `codex/*` namespaces | N/A | No |
-| Messaging and communication channels | 32 third-party channel agents, including Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, and Home Assistant | Slack, mobile Remote Control, and research-preview channels; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel | Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel |
+| Messaging and communication channels | 43 third-party agents: 32 messaging channels (Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace | Slack, mobile Remote Control, and research-preview channels; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel | Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel |
 | Scheduled automations | Natural-language cron agent | — | — |
 | Wake word for voice interaction | Sorcar | N/A | N/A |
 
@@ -100,7 +100,8 @@ print(result.text)
 - **Dynamic model switching and steering.** A running agent can change its own LLM mid-task (`set_model`), and you can inject user messages into a running agent to steer it on the fly.
 - **Git-worktree task isolation.** Each interactive task runs on an isolated git worktree branch that is auto-committed and squash-merged back when it finishes.
 - **Voice interaction.** With the `sorcar` wake word, KISS Sorcar behaves like a super-intelligent Alexa; it distinguishes among different speakers.
-- **32 channel agents.** Slack, Gmail, Email (IMAP/SMTP), WhatsApp, SMS, iMessage, Telegram, Discord, Signal, phone control, Home Assistant, and more.
+- **43 third-party agents.** 32 messaging channels — Slack, Gmail, Email (IMAP/SMTP), WhatsApp, SMS, iMessage, Telegram, Discord, Signal, phone control, Home Assistant, and more — plus service agents for GitHub, Notion, PostgreSQL, Brave Search, Firecrawl, and Google Workspace (Calendar, Drive, Docs, Sheets).
+- **Pre-run task classification.** A single fast non-agentic model call detects whether a task is a development task — non-development tasks (questions, research, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. Toggleable in the Settings panel.
 
 ## What Is in the Name
 
@@ -136,6 +137,8 @@ curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install
 
 The installer targets macOS and Linux on `x86_64`, `aarch64`, and `arm64`. It installs or checks the tools needed to run KISS Sorcar and build/install the VS Code extension.
 
+If the Update button in the settings UI fails, run the full installation command again. It will not delete your history.
+
 ## Python Package Install
 
 If you only want the Python package (the `kiss-web` daemon, the Python client API, and the messaging-agent entry points):
@@ -164,6 +167,8 @@ export GEMINI_API_KEY=...
 
 You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the VS Code extension or web app — useful for local or self-hosted models.
 
+You can register your own models (e.g. a local vLLM/Ollama endpoint or a provider model not in the bundled catalog) in the **Custom Models** section of the Settings panel; entries are stored in `~/.kiss/MY_MODELS.json` and appear in the model picker alongside the bundled catalog.
+
 ## VS Code Extension
 
 To install only the KISS Sorcar extension, open Visual Studio Code, search for **KISS Sorcar** in the extension marketplace, install it, and relaunch VS Code. Press ESC if you do not have a specific API key ready, but configure at least one model backend before running tasks.
@@ -188,11 +193,15 @@ To run KISS Sorcar in a Docker container (exposes a VS Code interface in the hos
 
 # KISS Sorcar Client Interfaces
 
-> KISS Sorcar is used through three client interfaces, all served by one local daemon (`kiss-web`): the VS Code extension, the remote web/mobile app, and the Python client API `kiss.server.sorcar.run`.
+> KISS Sorcar is used through three client interfaces, all served by one local daemon (`kiss-web`): the VS Code extension, the remote web/mobile app, and the Python client API `kiss.server.sorcar.run`. A fourth interface, the `sorcar` terminal command, runs a SorcarAgent directly in the current directory without the daemon.
+
+## The `sorcar` Terminal Command
+
+The standalone `sorcar` command runs a task without the daemon: `sorcar -t "Summarize README.md"` runs an inline task, and `sorcar -f task.txt` runs the file's content as the task (exactly one of `-t`/`-f` is required; see `sorcar --help` for the model, budget, and work-dir flags).
 
 ## The `kiss-web` Daemon
 
-The `kiss-web` daemon hosts all agents, chat sessions, and the web app, and services every client command — including config reads/writes, default-model lookup, and the wake-word listener — over its socket. The VS Code extension starts it automatically; you can also manage it yourself:
+The `kiss-web` daemon hosts the agents, chat sessions, and the web app, and services every client command — including config reads/writes, default-model lookup, and the wake-word listener — over its socket. The VS Code extension starts it automatically; you can also manage it yourself:
 
 ```bash
 # Start the daemon (serves the web app and the extension).
@@ -216,11 +225,12 @@ Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and
 
 - `@` file/folder mentions with ranked project-file completion.
 - Per-task **git worktree isolation** — worktrees are pre-warmed in the background for fast task start, with auto-commit and merge on success, or an interactive merge/discard prompt — toggle both in the Settings panel.
+- A pre-run **task classifier** (a single fast non-agentic model call — structured output with a plain-text fallback; skipped for `cc/*` and `codex/*` models) that detects whether the task is a development task — non-development tasks (questions, research, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. Toggleable in the Settings panel.
 - A model picker, per-task budget caps, chat history with resume (filtered to the current workspace by default), and an agent dashboard (burger menu, bottom-left).
 - Wake-word voice chat ("sorcar, …") via the mic button, including steering a running agent by voice.
 - Live steering: inject a message into a running agent, or switch its model mid-run.
 - Tab mirroring — every VS Code window and web client opened on the same workspace shows the same tabs with the same contents; the tab bar is scoped to the client's workspace directory, and sub-agents dispatched with `run_agent` open their own tab in the calling workspace.
-- Scheduled automations: ask in plain language ("every weekday at 9am, summarize my unread Slack messages") and the built-in cron agent creates, lists, pauses, resumes, or removes the schedule. A job runs an unattended LLM task or a plain shell command and can deliver its result to any authenticated messaging channel (e.g. `telegram:123456`, `email:user@example.com`).
+- Scheduled automations: ask in plain language ("every weekday at 9am, summarize my unread Slack messages") and the built-in cron agent (also runnable from the shell as `kiss-cron`) creates, lists, pauses, resumes, or removes the schedule. A job runs an unattended LLM task or a plain shell command and can deliver its result to an authenticated messaging channel (24 of the 32 channels support delivery, e.g. `telegram:123456`, `email:user@example.com`).
 - API keys, a custom model endpoint, custom HTTP headers, budget limits, and the remote-access password, all set in the Settings panel.
 
 The remote web app is the same interface served over a cloudflared tunnel: copy the URL and password from the Settings panel and open it on any device.
@@ -245,6 +255,8 @@ Keyword options:
 |--------|-------------|
 | `work_dir` | Working directory for the task; the daemon's default when empty |
 | `scope_work_dir` | Workspace-scope directory for the task's tab; the task's working directory when empty |
+| `parent_task_id` | Task-history row id of the calling task; non-empty marks the run as a sub-agent of that task (nested tab and history row) — how the `run_agent` tool dispatches |
+| `parent_tab_id` | Frontend tab id of the calling task's tab, so the webview knows which tab spawned the sub-agent |
 | `model` | Model name; the daemon's selected default when empty |
 | `chat_id` | Existing chat session id to continue; a new chat when empty |
 | `tools` | Path to a Python file whose `get_tools()` function returns the functions the daemon registers as extra agent tools |
@@ -258,6 +270,7 @@ Keyword options:
 | `max_budget` | Per-task budget override in USD |
 | `model_config` | Per-task model configuration override (custom endpoint / headers) |
 | `use_web_tools` | Per-task browser-tool enablement override (maps to the agent's `web_tools` toggle; `None` uses the daemon's configured default — the settings panel's "Use web tools" checkbox) |
+| `classify_tasks` | Per-run override of pre-run task classification: `True` forces it on, `False` skips it, `None` (default) uses the daemon's persisted setting — the settings panel's "Classify tasks before running" checkbox |
 | `is_parallel` | Whether the agent may spawn parallel sub-agents (default `True`) |
 | `timeout` | Maximum seconds to wait for the task to finish (default `3600`) |
 | `stop_on_timeout` | Also stop the task when `timeout` expires; default `False` — the task keeps running |
@@ -290,8 +303,8 @@ The full authoring guide is in [`src/kiss/server/README.md`](https://github.com/
 ## Skills, MCP Servers, and Customization
 
 - Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
-- MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`; OAuth tokens are persisted under `~/.kiss/mcp_auth/`.
-- "Tricks" button entries read from `~/.kiss/INJECTIONS.md` (one per `## Trick` section), seeded on install from the bundled `src/kiss/INJECTIONS.md`. Edit the file to customize the dropdown; remove it to regenerate the bundled defaults.
+- MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`; OAuth tokens are persisted under `~/.kiss/mcp_auth/`. A curated catalog of privacy-first MCP connectors (fetch, time, memory, GitHub, Slack, Google Workspace, WhatsApp, …) ships in [`connectors/`](https://github.com/ksenxx/kiss_ai/blob/main/connectors/README.md) with `enable.py`/`verify.py` CLIs.
+- "Tricks" (inject-instruction) entries are the concatenation of two `## Trick`-sectioned Markdown files: `~/.kiss/MY_INJECTION.md` (your personal tricks, auto-created on first read and never overwritten thereafter) and the bundled `src/kiss/INJECTIONS.md`, read directly from the package so every upgrade delivers the latest bundled tricks. Edit `~/.kiss/MY_INJECTION.md` to customize; your tricks are listed first.
 - Welcome-screen sample-task chips are the concatenation of `~/.kiss/MY_TASK_TEMPLATES.md` (your personal tasks) and the bundled `src/kiss/SAMPLE_TASKS.md`.
 
 ---
@@ -345,12 +358,13 @@ Agent with both coding tools and browser automation for web + code tasks.
 
 **Constructor:** `SorcarAgent(name: str) -> None`
 
+- **classify_task_for_run** — `classify_task_for_run(model_name, task, model_config=None, enabled=None) -> TaskClassification | None`. Classify the task now (one lightweight non-agentic LLM call) and pre-seed the verdict for the coming run, so an external driver can know the run's effective worktree mode before calling `run` — the verdict decides worktree gating and lite-vs-full system prompt selection. `enabled` is a per-run override of the persisted `classify_tasks` setting (`True` forces classification, `False` skips it, `None` follows the config); the `KISS_DISABLE_TASK_CLASSIFIER` environment kill switch wins over any override. Returns `None` when classification is disabled or failed.
 - **run** — Adds on top of `RelentlessAgent.run`: `web_tools: bool = True` (set False for terminal-only), `is_parallel: bool = True` (enables the `run_parallel` tool for spawning parallel sub-agents), `current_editor_file` (path appended to the prompt), `ask_user_question_callback` (collects a text response from the user), `base_system_prompt` (replaces the default system prompt for this agent and its `run_parallel` sub-agents), `append_basic_tools` (set False to run with only `finish` plus the caller's tools), `llm_call_hook`, `tool_call_hook` (forwarded to every sub-session's `KISSAgent`). Returns YAML with `success` and `summary`.
 
 ### Module helpers
 
 - **`auto_commit_changes(commit_dir, user_prompt, message_fn, notify_fn=None, task_result=None) -> bool`** — Stage all changes, generate a commit message (typically via an LLM), and commit. Re-stages just before committing so late-arriving files are included. Falls back to a generic message if `message_fn` raises. Returns True if a commit was created.
-- **`run_tasks_parallel(tasks, max_workers=None, model_name=None, work_dir=None, printer=None, totals_out=None, max_budget=None, model_config=None, usage_monitor=None, parent_agent=None, chat_id='', parent_tab_id='', base_system_prompt='', system_prompt_suffix='') -> list[str]`** — Execute multiple SorcarAgent tasks concurrently with a thread pool; each task gets its own `ChatSorcarAgent`. Returns YAML result strings in the same order as `tasks`.
+- **`run_tasks_parallel(tasks, max_workers=None, model_name=None, work_dir=None, printer=None, totals_out=None, max_budget=None, model_config=None, usage_monitor=None, parent_agent=None, chat_id='', parent_tab_id='', base_system_prompt='', system_prompt_suffix='', web_tools=True) -> list[str]`** — Execute multiple SorcarAgent tasks concurrently with a thread pool; each task gets its own `ChatSorcarAgent`. `web_tools=False` denies each sub-agent the browser tools, so a parent running without web tools spawns children that cannot re-acquire them. Returns YAML result strings in the same order as `tasks`.
 
 ## `kiss.agents.sorcar.chat_sorcar_agent` — Chat-session persistence
 
@@ -396,7 +410,7 @@ Highlights (all methods take explicit `repo`/`wt_dir` paths):
 
 SorcarAgent that isolates every task in a git worktree.
 
-- **`run(prompt_template='', **kwargs) -> str`** — Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Any previously pending branch is auto-committed and squash-merged first. Falls back to direct execution when `use_worktree=False`, when `work_dir` is not in a git repo, when the repo has no commits, or when HEAD is detached.
+- **`run(prompt_template='', **kwargs) -> str`** — Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Any previously pending branch is auto-committed and squash-merged first. Falls back to direct execution when `use_worktree=False`, when the pre-run task classifier is enabled and reports the task is not a development task (the verdict likewise forces a worktree when it reports `is_development=True`), when `work_dir` is not in a git repo, when the repo has no commits, or when HEAD is detached.
 - **merge() -> str** — Merge the task branch into the original branch. Idempotent; auto-commits uncommitted worktree changes and stashes/restores user edits on main.
 - **discard() -> str** — Throw away the task branch and worktree, checkout the original branch. Idempotent.
 - **leave_as_is() -> str** — Detach from the pending worktree, leaving the branch, directory, and uncommitted changes untouched on disk (the "Do nothing" button of the post-task worktree bar); a preserve-for-review marker keeps future processes from silently publishing it.
@@ -408,28 +422,28 @@ SorcarAgent that isolates every task in a git worktree.
 
 # Models Supported by KISS Sorcar
 
-> KISS Sorcar ships a catalog of **634 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding).
+> KISS Sorcar ships a catalog of **660 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding).
 
-The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json) in the source repository.
+The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json) in the source repository. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
 ## Provider Categories
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 105 |
+| OpenAI | 102 |
 | Anthropic | 14 |
-| Gemini / Google | 27 |
-| Together AI | 91 |
+| Gemini | 24 |
+| Together AI | 102 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 356 |
+| OpenRouter | 378 |
 | Claude Code CLI (`cc/*`) | 14 |
-| Codex CLI (`codex/*`) | 9 |
+| Codex CLI (`codex/*`) | 8 |
 
 ## Capability Totals
 
-- **614** generation-capable models
-- **455** function-calling-capable models
+- **640** generation-capable models
+- **481** function-calling-capable models
 - **11** embedding models
 
 ## Configuring Model Access
@@ -451,7 +465,7 @@ Or point at any OpenAI-compatible local/self-hosted endpoint by setting a custom
 ## Model Namespaces
 
 - Plain names (e.g. `claude-sonnet-4-6`, `gpt-4.1`) map to the native provider APIs.
-- `openrouter/...` routes through OpenRouter (356 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
+- `openrouter/...` routes through OpenRouter (378 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
 - `cc/haiku`, `cc/sonnet`, `cc/opus` run on top of the Claude Code CLI.
 - `codex/...` (e.g. `codex/gpt-5.6-sol`) run on top of the Codex CLI.
 
@@ -471,7 +485,7 @@ A running agent can also switch its own model mid-task with the `set_model` tool
 
 When no model is selected, KISS Sorcar defaults to the best available model for the API keys you have configured.
 
-The full per-model list (all 634 entries) is in the [project README](https://github.com/ksenxx/kiss_ai#models-supported).
+The full per-model list (all 660 entries) is in the [project README](https://github.com/ksenxx/kiss_ai#models-supported).
 
 ---
 
@@ -479,9 +493,9 @@ The full per-model list (all 634 entries) is in the [project README](https://git
 
 # Messaging & Third-Party Agents
 
-> KISS Sorcar includes 32 third-party channel agents that act on messaging services, mailboxes, and devices on your behalf, plus infrastructure agents and a Govee smart-home CLI.
+> KISS Sorcar includes 43 third-party agents that act on messaging services, mailboxes, devices, and web services on your behalf — 32 messaging-channel agents and 9 service agents — plus infrastructure agents and a Govee smart-home CLI.
 
-## The 32 Channel Agents
+## The 32 Messaging-Channel Agents
 
 - BlueBubbles
 - DingTalk
@@ -516,7 +530,21 @@ The full per-model list (all 634 entries) is in the [project README](https://git
 - WhatsApp
 - Zalo
 
-In a chat task, just say what you want ("send 'running late' to Alice on WhatsApp") — Sorcar dispatches the matching channel agent through its `run_agent` tool. Each channel also has its own CLI entry point (`kiss-slack`, `kiss-gmail`, `kiss-whatsapp`, ...) for running channel tasks directly from the shell.
+## The 9 Service Agents
+
+Nine service agents give Sorcar authenticated API tools for productivity and data services:
+
+- Brave Search (`kiss-brave`)
+- Firecrawl (`kiss-firecrawl`)
+- GitHub (`kiss-github`)
+- Google Calendar (`kiss-gcal`)
+- Google Docs (`kiss-gdocs`)
+- Google Drive (`kiss-gdrive`)
+- Google Sheets (`kiss-gsheets`)
+- Notion (`kiss-notion`)
+- PostgreSQL (`kiss-postgres`)
+
+In a chat task, just say what you want ("send 'running late' to Alice on WhatsApp", "list my open GitHub PRs") — Sorcar dispatches the matching agent through its `run_agent` tool. Each agent also has its own CLI entry point (`kiss-slack`, `kiss-gmail`, `kiss-whatsapp`, ...) for running tasks directly from the shell.
 
 ## Infrastructure Agents
 
@@ -531,19 +559,19 @@ KISS Sorcar also ships a **Govee smart-home CLI** for controlling IoT lights (on
 ## Example Prompts
 
 ```text
-Can you authenticate me with the <<workspace name>> workspace on Slack?
+Authenticate slack workspace <<workspace name>>.
 ```
 
 ```text
-Can you authenticate me with Gmail?
+Authenticate Gmail [, or gcal, gdrive, gdoc, gsheets]?
 ```
 
 ```text
-Can you send "Hello from Sorcar!" to 1-800-772-1213?
+Can you send "Hello from Sorcar!" to 1-800-999-9999?
 ```
 
 ```text
-Can you check my gmail every hour and ping me on slack if there is any important
+Can you check my Gmail every hour and ping me on Slack if there is any important
 email that needs my immediate attention?
 ```
 
@@ -570,24 +598,24 @@ Can you change the step <<specify step>> as follows: <<whatever way you want to 
 ## Messaging
 
 ```text
-Can you authenticate me with the <<workspace name>> workspace on Slack?
+Authenticate slack workspace <<workspace name>>.
 ```
 
 ```text
-Can you authenticate me with Gmail?
+Authenticate Gmail [, or gcal, gdrive, gdoc, gsheets]?
 ```
 
 ```text
-Can you check my gmail every hour and ping me on slack if there is any important email that
+Can you check my Gmail every hour and ping me on Slack if there is any important email that
 needs my immediate attention?
 ```
 
 ```text
-Can you authenticate me with the iMessage agent?
+Authenticate iMessage.
 ```
 
 ```text
-Can you send "Hello from Sorcar!" to 1-800-772-1213?
+Can you send "Hello from Sorcar!" to 1-800-999-9999?
 ```
 
 ## Fact-Checking & Security Review
@@ -603,10 +631,10 @@ security vulnerabilities, create a POC and test it. Create a report.
 ## AI Discovery
 
 ```text
-Sorcar for AI Discovery: Can you AI discover the lightest and fastest AI model that will give
-the best accuracy and recall on the data at <</path/to/data>> at the cheapest price? Use 'modal'
+Sorcar for AI Discovery: Can you AI-discover the lightest and fastest AI model that will give
+the best accuracy and recall on the data at <</path/to/data>> at the lowest price? Use 'modal'
 CLI to train your models on GPUs and evaluate if needed. The total budget for Modal.com is
-$ 1,000. Do not STOP until accuracy/recall reaches 99% and price per query on the model is less
+$ 1,000. Do not STOP until accuracy/recall reaches 99% and the model's price per query is less
 than $0.50. Create a report.
 ```
 
@@ -634,29 +662,29 @@ frontier in the folder ./pareto, with a sub-folder for each node in the frontier
 contains a prompt file (prompt.md) and a JSON file, say score.json, containing the list of data
 points (ids) from the sval set that were correctly predicted by the prompt. When you add a node
 to the Pareto frontier, make sure that the list of correctly predicted data points is not a
-subset or equal to an existing list of data points in some node in the frontier. If such a node
-exists, do not add the new node. After adding a node, remove all nodes whose list of datapoints
-is a subset or equal to the list of datapoints in the added node. Then run the following
-algorithm.
+subset of or equal to an existing list of data points in some node in the frontier. If such a
+node exists, do not add the new node. After adding a node, remove all nodes whose list of data
+points is a subset of or equal to the list of data points in the added node. Then run the
+following algorithm.
 
-1. pick a node from the Pareto frontier with probability 0.5
-   a. sample a minibatch of 5 datapoints from the dev set
+1. Pick a node from the Pareto frontier with probability 0.5
+   a. sample a minibatch of 5 data points from the dev set
    b. run the agent with the prompt from the node on the minibatch
-   c. If the agent incorrectly predicts for some datapoints, analyze and reflect on the
-      trajectory events of the agent on those datapoints available at ~/.kiss/sorcar.db and
-      propose a new prompt that will fix the mistakes made by the agent on datapoints
+   c. If the agent incorrectly predicts for some data points, analyze and reflect on the
+      trajectory events of the agent on those data points available at ~/.kiss/sorcar.db and
+      propose a new prompt that will fix the mistakes made by the agent on data points
       incorrectly predicted
-   d. if the agent predicts correctly on the minibatch, then evaluate it on the sval set and
-      create the list of datapoints on which the agent with the new prompt predicts correctly.
-   e. Add the new prompt and the list of datapoints to the Pareto frontier
+   d. If the agent predicts correctly on the minibatch, then evaluate it on the sval set and
+      create the list of data points on which the agent with the new prompt predicts correctly.
+   e. Add the new prompt and the list of data points to the Pareto frontier
 
 1. Pick two nodes from the Pareto frontier randomly with the remaining probability.
-   a. Sample a minibatch of 5 datapoints from the dev set
+   a. Sample a minibatch of 5 data points from the dev set
    b. Merge the prompts from the two nodes into a new prompt.
    c. If the agent predicts correctly on the minibatch with the new prompt, then evaluate it on
       the sval set and create the list of datapoints on which the agent with the new prompt
       predicts correctly.
-   d. Add the new prompt and the list of datapoints to the Pareto frontier
+   d. Add the new prompt and the list of data points to the Pareto frontier
 
 1. Repeat steps 1 and 2 until there is no change in the prompt after 3 iterations.
    END_RUN_GEPA
@@ -664,8 +692,8 @@ algorithm.
 
 At each step, keep track of the best prompt, which has the maximum number of successfully
 predicted data points, in ./pareto/optimal.md. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR
-CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE
-DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create
+CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT THE DATA. YOUR SOLUTION MUST GENERALIZE
+BEYOND THE DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create
 an HTML report with diagrams and illustrations in ./reports and open it in the user's default
 browser. Do NOT STOP until you cannot improve the accuracy and recall after three consecutive
 rollouts. Use gpt-5.6-sol model (not codex) for a thorough review of the work done at every
@@ -680,16 +708,16 @@ See also [Prompt Tricks](https://kisssorcar.github.io/docs/prompt-tricks.md) and
 
 # Prompt Tricks
 
-> Reusable prompt snippets ("tricks") that boost KISS Sorcar result quality. In the VS Code extension these appear under the "Tricks" button; they are read from `~/.kiss/INJECTIONS.md` (one per `## Trick` section), seeded on install from the bundled `src/kiss/INJECTIONS.md`; edit the file to customize the dropdown, or remove it to regenerate the bundled defaults. Append one or more to your task prompt.
+> Reusable prompt snippets ("tricks") that boost KISS Sorcar result quality. In the VS Code extension these appear under the "Tricks" button; they are the concatenation of two `## Trick`-sectioned Markdown files: `~/.kiss/MY_INJECTION.md` (your personal tricks, auto-created on first read and never overwritten thereafter) and the bundled [`src/kiss/INJECTIONS.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md), read directly from the package so every upgrade delivers the latest bundled tricks. Edit `~/.kiss/MY_INJECTION.md` to customize; your tricks are listed first. Append one or more to your task prompt.
 
 ## Multi-Model Quality
 
 ```text
 Use 'claude-fable-5' model for all tasks, including software development. Use 'gpt-5.6-sol'
-(not codex) with `run_parallel` tool for a thorough read-only review and debugging of the other
-model's work. Thoroughly check whether the other model has missed any code or wiring or
-introduced any bugs. Use at most 50% of task budget in gpt-5.6-sol for reviewing and debugging,
-and ask the model to not invent new problems. Use the model names literally without
+(not codex) using `run_parallel` tool for a thorough read-only review and debugging of the
+other model's work. Thoroughly check whether the other model has missed any code or wiring or
+introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for reviewing and
+debugging, and ask the model not to invent new problems. Use the model names literally without
 hallucinating new model names.
 ```
 
@@ -716,30 +744,30 @@ Can you check the following message for a merge conflict and help me fix it?
 
 ```text
 You MUST use the user's default browser and computer use to authenticate using claude-fable-5-1
-as the model. Do all the steps on user's behalf and ask user's help ONLY if you are stuck on
-login or captcha.
+as the model. Do all the steps on the user's behalf and ask the user's help ONLY if you are
+stuck on login or captcha.
+```
+
+## Multi-Model Quality (GPT-6 Astra Review)
+
+```text
+Use 'claude-fable-5' model for all tasks, including software development. Use 'gpt-6-astra'
+(not codex) using `run_parallel` tool for a thorough read-only review and debugging of the
+other model's work. Thoroughly check whether the other model has missed any code or wiring or
+introduced any bugs. Use at most 50% of the task budget in gpt-6-astra for reviewing and
+debugging, and ask the model not to invent new problems. Use the model names literally without
+hallucinating new model names.
 ```
 
 ## Multi-Model Quality (Kimi K3)
 
 ```text
 Use 'openrouter/moonshotai/kimi-k3' model for all tasks, including software development. Use
-'gpt-5.6-sol' (not codex) with `run_parallel` tool for a thorough read-only review and
+'gpt-5.6-sol' (not codex) using `run_parallel` tool for a thorough read-only review and
 debugging of the other model's work. Thoroughly check whether the other model has missed any
-code or wiring or introduced any bugs. Use at most 50% of task budget in gpt-5.6-sol for
-reviewing and debugging, and ask the model to not invent new problems. Use the model names
+code or wiring or introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for
+reviewing and debugging, and ask the model not to invent new problems. Use the model names
 literally without hallucinating new model names.
-```
-
-## Multi-Model Quality (GLM-5.3)
-
-```text
-Use 'openrouter/z-ai/glm-5.3' model for all tasks, including software development. Use
-'gpt-5.6-sol' (not codex) for a thorough read-only review and debugging of the other model's
-work. Thoroughly check whether the other model has missed any code or wiring or introduced any
-bugs. Use at most 50% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the
-model to not invent new problems. Use the model names literally without hallucinating new
-model names.
 ```
 
 ## Self-Improving Model Routing
@@ -767,9 +795,31 @@ See also [Sample Tasks](https://kisssorcar.github.io/docs/sample-tasks.md) and [
 
 > Practical tips for getting the highest-quality work from KISS Sorcar. These mirror the built-in tips shipped in [`src/kiss/TIPS.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/TIPS.md).
 
+## Update Button in the Settings
+
+If the Update button in settings fails, run the full installation command again. It will not delete your history.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
+```
+
+## Chat in the Editor or in the Sidebar
+
+In VS Code, you can run KISS Sorcar in two modes: full editor mode, where the chats open as editor tabs, and non-editor mode, where the chats open in the sidebar. You can switch between the two modes by selecting/deselecting the "Chat in the editor" option on the KISS Sorcar settings page.
+
+## Task Classifier
+
+KISS Sorcar now uses a quick task classifier to determine whether the task should run with git worktree mode and whether the task is complex or simple. You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running".
+
+## Sorcar Extension Agents (SEAs)
+
+A **Sorcar Extension Agent (SEA)** is a plain Python file that defines a complete custom agent: its top-level `X()` functions — named after `sorcar.run()`'s parameters — compute the run's task prompt, system prompt, model, budget, tools, and safety hooks. Pass the file's path as `extension_agent_path` to `sorcar.run()` and the daemon imports it on every run. All third-party agents, such as the Slack and Gmail agents, are implemented in KISS Sorcar as SEAs. See the "Sorcar Extension Agents (SEAs)" section in the [README](https://github.com/ksenxx/kiss_ai#sorcar-extension-agents-seas) for a full example, and the detailed SEA guide at [`src/kiss/server/README.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md).
+
 ## Prompt KISS Sorcar Like the Developer of KISS Sorcar
 
-**Always write precise 1–6 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. The waterfall model does not work that well in contemporary times.
+**Always write precise less than 10 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. The waterfall model doesn't work well in contemporary times.
+
+See the commit messages at <https://github.com/ksenxx/kiss_ai> which include the prompts used by the developer of KISS Sorcar.
 
 **No need to use generic skills for debugging, code review, etc.** Frontier models have been trained on those skills.
 
@@ -780,42 +830,24 @@ See also [Sample Tasks](https://kisssorcar.github.io/docs/sample-tasks.md) and [
 
 ```text
 Use 'claude-fable-5-1' model for all tasks, including software development. Use 'gpt-5.6-sol'
-(not codex) with `run_parallel` tool for a thorough read-only review and debugging of the
+(not codex) using `run_parallel` tool for a thorough read-only review and debugging of the
 other model's work. Thoroughly check whether the other model has missed any code or wiring
-or introduced any bugs. Use at most 50% of task budget in gpt-5.6-sol for reviewing and
-debugging, and ask the model to not invent new problems. Use the model names literally
-without hallucinating new model names.
+or introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for reviewing and
+debugging, and ask the model not to invent new problems. Use model names literally; don't
+hallucinate new model names.
 ```
 
 ## Ask for Task Status Anytime
 
-If you want to get the status of a task, you can open a new chat and ask KISS Sorcar what is the status of the task doing …
+To get the status of a task, open a new chat and ask KISS Sorcar what the status is of the task being done…
 
 ## Novel Features: `set_model` and Steering-on-the-Fly
 
 You can **instantaneously inject a user message** into a running agent and make the agent take the message into account in the rest of its execution.
 
-Moreover, while an agent is running, you can ask it to **dynamically change its model** for the rest of the execution of the agent.
+Moreover, while an agent is running, you can ask it to **dynamically change its model** for the rest of the agent's execution.
 
-These are unique features of KISS Sorcar. These two **IPs (intellectual properties)** make KISS Sorcar super powerful for multi-model reasoning and dynamic steering of tasks running for hours to days. Model routing intelligence can be expressed in a few sentences.
-
-## Use Optimized Multi-Model Routing to Save Cost or Improve Quality
-
-Add the following text to your prompt:
-
-```text
-If ./ROUTING.md exists, use the instructions in the file for model routing. Otherwise, use
-the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet
-extensively to figure out which model is best yet cheap for each subtask. Here are some
-hints, but the internet has better knowledge: claude-fable-5 and
-openrouter/moonshotai/kimi-k3 — best for SWE work; gpt-5.6-sol — best for reviewing;
-openrouter/qwen/qwen3.8-max, openrouter/x-ai/grok-4.6, openrouter/z-ai/glm-5.3,
-openrouter/deepseek/deepseek-v4-pro-0813 — for SWE tasks when budget is low; and
-gpt-5.6-luna and openrouter/deepseek/deepseek-v4-pro-0813 for review when budget is low.
-Irrespective of whether ./ROUTING.md exists or not, after the task completes, based on your
-experience in completing the task, create or update the model routing strategy (as text) in
-./ROUTING.md that reduces token cost while not degrading the quality of the work.
-```
+These are unique features of KISS Sorcar. These two **IPs (intellectual properties)** make KISS Sorcar super powerful for multi-model reasoning and dynamic steering of tasks running for hours to days. You can describe model-routing intelligence in a few sentences.
 
 ## Voice Chat with KISS Sorcar
 
@@ -831,7 +863,7 @@ You can also steer the agent's execution and ask for status when an agent is run
 
 ## Use the KISS Sorcar Remote Web/Mobile App
 
-Go to the Settings panel and copy the URL at the top. This URL contains a message showing the latest cloudflared URL where you can find the KISS Sorcar web app. Send the URL from the Settings page to your mobile device. Also see/set the remote password on the Settings page. You can SMS, Slack, or email the URL to the mobile device.
+Go to the Settings panel and copy the URL at the top. This URL contains a message showing the latest cloudflared URL where you can find the KISS Sorcar web app. Send the URL from the Settings page to your mobile device. Also view or set the remote password on the Settings page. You can SMS, Slack, or email the URL to the mobile device.
 
 Open the URL in a browser on the mobile device and enter your remote password. You will see your familiar Codex-like chat interface.
 
@@ -888,9 +920,9 @@ All you need to do is use a variant of the following prompt with KISS Sorcar:
 ```text
 Can you AI discover the lightest and fastest AI model that will give >95% accuracy and
 recall on the data at <</path/to/data>> at the cost of $0.25 per query? Use 'modal' CLI to
-train your models on GPUs and evaluate if needed. The total budget for Modal.com is $1,000.
-Experiment with a smaller subset of data and fewer model parameters to run experiments
-quickly, then extrapolate. Do not STOP until you reach the goals. Create a detailed report.
+train your models on GPUs and evaluate if needed. Your total budget for Modal.com is $1,000.
+Experiment with a smaller data subset and fewer model parameters to run experiments quickly,
+then extrapolate. Do not STOP until you reach the goals. Create a detailed report.
 ```
 
 ## AI Optimization of Software and AI Systems
@@ -899,17 +931,16 @@ All you need to do is use a variant of the following prompt with KISS Sorcar:
 
 ```text
 Can you run the command <<command>> in the background and monitor its output in real time
-to optimize the code at <<folder_name_or_url>> with respect to the following metrics:
-<<speed, accuracy, recall, cost>>. Then use AI discovery to optimize. You can add a
-diagnostic code that prints metrics, such as running time, at a finer granularity. Do not
-forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP
-until the metrics achieve the following values: <<give_concrete_values_for_metrics>>.
-Create a report.
+to optimize the code at <<folder_name_or_url>> for the following metrics: <<speed, accuracy,
+recall, cost>>. Then use AI discovery to optimize. You may add diagnostic code that prints
+metrics, such as running time, at a finer granularity. Don't forget to remove the diagnostic
+code after optimization is complete. You MUST NOT STOP until the metrics achieve the
+following values: <<give_concrete_values_for_metrics>>. Create a report.
 ```
 
 ## More Prompt Examples for Connecting to Slack, SMS, Gmail…
 
-See them on the welcome page when a new chat is created. Click on them to copy them to the chat input textbox.
+See them on the welcome page when you create a new chat. Click on them to copy them to the chat input textbox.
 
 ## Useful Promptlets
 
@@ -921,4 +952,22 @@ Click the burger menu button in the bottom-left corner to see all agents in KISS
 
 ## Settings
 
-Click the **Settings** button at the top-right corner. You can get the URL for the remote web/mobile app, set the remote web app access password, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint — all from the Settings interface.
+Click on the settings button in the "..." menu. Use the Settings interface to get the URL for the remote web/mobile app, set the remote web app access password, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint.
+
+## Use Optimized Multi-Model Routing to Save Cost or Improve Quality
+
+Add the following text to your prompt:
+
+```text
+If ./ROUTING.md exists, use the instructions in the file for model routing. Otherwise, use
+the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet
+extensively to figure out which model is best yet cheap for each subtask. Here are some
+hints, but the internet has better knowledge: claude-fable-5 and
+openrouter/moonshotai/kimi-k3 — best for SWE work; gpt-5.6-sol — best for reviewing;
+openrouter/qwen/qwen3.8-max, openrouter/x-ai/grok-4.6, openrouter/z-ai/glm-5.3,
+openrouter/deepseek/deepseek-v4-pro-0813 — for SWE tasks when budget is low; and
+gpt-5.6-luna and openrouter/deepseek/deepseek-v4-pro-0813 for review when budget is low.
+Irrespective of whether ./ROUTING.md exists or not, after the task completes, based on your
+experience in completing the task, create or update the model routing strategy (as text) in
+./ROUTING.md that reduces token cost while not degrading the quality of the work.
+```
