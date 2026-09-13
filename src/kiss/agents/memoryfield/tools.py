@@ -10,6 +10,7 @@ runs an incremental index sync, so pages written by any process (the agent,
 a human in an editor, git pull) are searchable without a separate reindex.
 """
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from kiss.agents.memoryfield.index import Embedder, SearchHit, VectorIndex
@@ -29,6 +30,10 @@ search index. Follow this protocol:
    page over creating a near-duplicate.
 3. Do not store secrets, credentials or raw transcripts. Delete pages that turn
    out to be wrong or obsolete with `memory_delete`.
+4. When search results look redundant or outdated, call `memory_refresh`: it
+   re-indexes pages edited outside the agent and lists near-duplicate and stale
+   pages. Merge duplicates with `memory_write` + `memory_delete`, and re-verify
+   or delete stale pages.
 """
 
 # Cap on characters returned by memory_pull so a broad query cannot flood the context.
@@ -76,6 +81,7 @@ class MemoryTools:
             self.memory_write,
             self.memory_list,
             self.memory_delete,
+            self.memory_refresh,
         ]
 
     def memory_search(self, query: str, k: int = 5) -> str:
@@ -169,6 +175,63 @@ class MemoryTools:
                 line += f": {page.summary}"
             lines.append(line)
         return "\n".join(lines)
+
+    def memory_refresh(self, stale_days: int = 30, duplicate_threshold: float = 0.9) -> str:
+        """Re-index the memory and report pages that need maintenance.
+
+        Re-embeds pages changed on disk by any process (the agent, a human in
+        an editor, git pull), drops index rows for deleted pages, and lists
+        near-duplicate page pairs plus pages whose ``updated`` timestamp is
+        old, so they can be merged, re-verified, or deleted.
+
+        Args:
+            stale_days: Pages not updated in this many days are listed as
+                stale (default 30).
+            duplicate_threshold: Cosine similarity at or above which two pages
+                are reported as near-duplicates (default 0.9).
+        """
+        report = self.index.sync()
+        lines = [
+            f"Index refreshed: {report.added} added, {report.updated} updated, "
+            f"{report.removed} removed, {report.unchanged} unchanged."
+        ]
+        duplicates = self.index.near_duplicates(duplicate_threshold)
+        if duplicates:
+            lines.append(
+                "Near-duplicate pages (merge with memory_write, then memory_delete the loser):"
+            )
+            lines.extend(
+                f"  {a} ~ {b}  (similarity {score:.3f})" for a, b, score in duplicates[:20]
+            )
+        stale = self._stale_pages(stale_days)
+        if stale:
+            lines.append(f"Pages not updated in {stale_days} days (re-verify or delete):")
+            lines.extend(f"  {name}  (updated {updated})" for name, updated in stale[:20])
+        if not duplicates and not stale:
+            lines.append("No near-duplicate or stale pages.")
+        return "\n".join(lines)
+
+    def _stale_pages(self, stale_days: int) -> list[tuple[str, str]]:
+        """Return ``(name, updated)`` for pages older than *stale_days* days.
+
+        Pages whose ``updated`` frontmatter is missing or unparseable are
+        skipped: staleness cannot be established for them, and reporting
+        them would train the agent to "fix" pages that may be fresh.
+        """
+        cutoff = datetime.now(UTC) - timedelta(days=stale_days)
+        stale: list[tuple[str, str]] = []
+        for name in self.memory.page_names():
+            raw_updated = str(self.memory.read(name).frontmatter.get("updated", ""))
+            try:
+                updated = datetime.strptime(raw_updated, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=UTC
+                )
+            except ValueError:
+                continue
+            if updated < cutoff:
+                stale.append((name, raw_updated))
+        stale.sort(key=lambda entry: entry[1])
+        return stale
 
     def memory_delete(self, name: str) -> str:
         """Delete a memory page that is wrong or obsolete.

@@ -85,6 +85,13 @@ DEFAULTS: dict[str, Any] = {
     # (lite system prompt) and is_development (worktree on/off for
     # that run only — this persisted is_worktree value is not touched).
     "classify_tasks": True,
+    # Persistent agent memory (kiss.agents.memoryfield): when True,
+    # SorcarAgent runs get the memory_* tools and the MEMORY_PROTOCOL
+    # system-prompt block.  Pages live in ``memory_dir`` when set, else
+    # ``$KISS_HOME/memories`` (~/.kiss/memories).  The KISS_USE_MEMORY
+    # environment variable overrides the stored toggle for one process.
+    "use_memory": False,
+    "memory_dir": "",
     "work_dir": "",
     "last_model": "",
 }

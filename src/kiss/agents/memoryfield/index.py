@@ -362,6 +362,40 @@ class VectorIndex:
         hits.sort(key=attrgetter("score"), reverse=True)
         return hits[:k]
 
+    def near_duplicates(self, threshold: float = 0.9) -> list[tuple[str, str, float]]:
+        """Return page pairs whose embeddings are at least *threshold* similar.
+
+        An exhaustive pairwise scan over the stored embeddings — fine for the
+        hundreds of pages a memoryfield is designed for. Pairs whose stored
+        dimensions differ (rows written by different embedders into a shared
+        index file) are skipped, matching :meth:`search`.
+
+        Args:
+            threshold: Minimum cosine similarity for a pair to be reported.
+
+        Returns:
+            ``(name_a, name_b, score)`` triples, names in lexical order within
+            each pair, sorted by descending score.
+        """
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT filename, embedding FROM pages ORDER BY filename"
+            ).fetchall()
+        vectors = [
+            (str(filename)[:-3], deserialize_float32(bytes(blob)))
+            for filename, blob in rows
+        ]
+        pairs: list[tuple[str, str, float]] = []
+        for i, (name_a, vector_a) in enumerate(vectors):
+            for name_b, vector_b in vectors[i + 1 :]:
+                if len(vector_a) != len(vector_b):
+                    continue
+                score = math.sumprod(vector_a, vector_b)
+                if score >= threshold:
+                    pairs.append((name_a, name_b, score))
+        pairs.sort(key=lambda pair: pair[2], reverse=True)
+        return pairs
+
     def count(self) -> int:
         """Number of pages currently in the index."""
         with closing(self._connect()) as conn:

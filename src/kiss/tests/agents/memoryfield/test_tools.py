@@ -30,6 +30,7 @@ def test_tools_full_lifecycle(tmp_path: Path) -> None:
         "memory_write",
         "memory_list",
         "memory_delete",
+        "memory_refresh",
     ]
     assert tools.memory_search("anything") == "No memory pages yet."
     assert tools.memory_pull("anything") == "No memory pages yet."
@@ -114,7 +115,13 @@ def test_pull_truncates_an_oversized_first_hit(tmp_path: Path) -> None:
 
 
 def test_protocol_mentions_every_tool() -> None:
-    for name in ("memory_search", "memory_pull", "memory_write", "memory_delete"):
+    for name in (
+        "memory_search",
+        "memory_pull",
+        "memory_write",
+        "memory_delete",
+        "memory_refresh",
+    ):
         assert name in MEMORY_PROTOCOL
 
 

@@ -22,6 +22,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.memoryfield.tools import MEMORY_PROTOCOL, MemoryTools
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
@@ -42,6 +43,7 @@ from kiss.core.models.model_info import (
     _match_openai_compatible_provider,
     _strip_provider_prefix,
     get_default_model,
+    model_runs_task_to_completion,
 )
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
@@ -64,6 +66,75 @@ def summary(description: str) -> str:
     """
     del description
     return "Summary recorded."
+
+
+def _memory_root_for_run(
+    append_basic_tools: bool,
+    docker_image: str | None,
+    model_name: str,
+) -> Path | None:
+    """The memory directory this run should use, or None for no memory.
+
+    Memory rides with the built-in toolset, so three gates precede the
+    user's ``use_memory`` setting (see :func:`_memory_settings`):
+
+    * ``append_basic_tools=False`` strips the run down to ``finish`` plus
+      the caller's tools — promising ``memory_*`` tools in the prompt
+      would be a lie.
+    * Docker runs replace Bash/Read/Edit/Write with container-backed
+      tools; the memory tools execute in the host process on host paths,
+      so registering them would hand a containerized task read/write
+      access to host memory outside the ``docker_image`` boundary.
+    * Run-to-completion CLI models (``cc/*``, ``codex/*``) never see
+      KISS-registered tools, so they get neither the tools nor a protocol
+      demanding them.
+
+    Args:
+        append_basic_tools: Whether the run builds the built-in toolset.
+        docker_image: The run's Docker image, if any.
+        model_name: The resolved model name the run will use.
+
+    Returns:
+        The memory root when every gate and the config flag allow it,
+        else None.
+    """
+    if not append_basic_tools or docker_image:
+        return None
+    if model_runs_task_to_completion(model_name):
+        return None
+    enabled, root = _memory_settings()
+    return root if enabled else None
+
+
+def _memory_settings() -> tuple[bool, Path]:
+    """Return whether persistent agent memory is enabled and where it lives.
+
+    The toggle is the ``use_memory`` key of ``~/.kiss/config.json`` (see
+    :data:`kiss.core.vscode_config.DEFAULTS`, default off).  The
+    ``KISS_USE_MEMORY`` environment variable, when non-empty, wins over
+    the stored value — ``0``/``false``/``no``/``off`` (any case) disable,
+    anything else enables — so one process or test can flip memory
+    without editing the config file.  Pages live in the config's
+    ``memory_dir`` when set, else ``$KISS_HOME/memories``
+    (``~/.kiss/memories``).
+
+    Returns:
+        ``(enabled, root)`` where *root* is the memory page directory
+        (created lazily on first write by
+        :class:`kiss.agents.memoryfield.pages.MemoryDir`).
+    """
+    from kiss.core.config import kiss_home
+    from kiss.core.vscode_config import load_config
+
+    cfg = load_config()
+    env = os.environ.get("KISS_USE_MEMORY", "").strip().lower()
+    if env:
+        enabled = env not in ("0", "false", "no", "off")
+    else:
+        enabled = bool(cfg.get("use_memory", False))
+    raw_dir = str(cfg.get("memory_dir", "")).strip()
+    root = Path(raw_dir).expanduser() if raw_dir else kiss_home() / "memories"
+    return enabled, root
 
 
 def _generate_commit_message(
@@ -885,6 +956,11 @@ class SorcarAgent(RelentlessAgent):
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
         self.docker_manager: Any = None
+        # Persistent agent memory (kiss.agents.memoryfield), built per
+        # run by :meth:`run` when the ``use_memory`` config flag (or the
+        # KISS_USE_MEMORY environment variable) enables it; None keeps
+        # the run memory-free.  :meth:`_get_tools` registers its tools.
+        self._memory_tools: MemoryTools | None = None
         self._use_web_tools: bool = True
         self._is_parallel: bool = True
         self._append_basic_tools: bool = True
@@ -1488,6 +1564,8 @@ class SorcarAgent(RelentlessAgent):
             self._show_model_in_picker(model_name)
             return f"Model changed from {previous_name} to {model_name}."
 
+        if self._memory_tools is not None:
+            tools.extend(self._memory_tools.tools())
         skill_tool = make_skill_tool(self.work_dir or ".")
         if skill_tool is not None:
             tools.append(skill_tool)
@@ -1900,6 +1978,7 @@ class SorcarAgent(RelentlessAgent):
         # tree, exactly like a *base_system_prompt* replacement.
         self._system_prompt_suffix = system_prompt if system_prompt else ""
         self.web_use_tool = None
+        self._memory_tools = None
         tl = getattr(printer, "_thread_local", None) if printer else None
         self._stop_event = getattr(tl, "stop_event", None) if tl else None
         try:
@@ -1924,6 +2003,14 @@ class SorcarAgent(RelentlessAgent):
                 (self._base_system_prompt or default_base_prompt)
                 + (system_prompt if system_prompt else "")
             )
+            memory_root = _memory_root_for_run(
+                self._append_basic_tools,
+                docker_image,
+                self._resolve_model_name(model_name),
+            )
+            if memory_root is not None:
+                self._memory_tools = MemoryTools(memory_root)
+                system_instructions += "\n\n" + MEMORY_PROTOCOL
             prompt = prompt_template
             if attachments:
                 parts = _attachment_parts(attachments)
@@ -1964,6 +2051,7 @@ class SorcarAgent(RelentlessAgent):
             if self.web_use_tool:
                 self.web_use_tool.close()
             self.web_use_tool = None
+            self._memory_tools = None
             self._ask_user_question_callback = None
             self.pre_step_hook = None
             self.tool_call_guard = None
