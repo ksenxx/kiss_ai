@@ -32,15 +32,15 @@ Each dispatch is a plain call of the daemon client
 public API ``kiss.server.sorcar.run``) passing the prompt and the agent file's
 path as ``extension_agent_path``: the daemon imports the file as an
 agent script
-and applies its ``get_X()`` parameter overrides.  For a channel, the
-module's ``get_tools()`` returns the channel's tool callables, so the
+and applies its ``X()`` parameter overrides.  For a channel, the
+module's ``tools()`` returns the channel's tool callables, so the
 script serves as its own tools file — the daemon-built agent gets the
 channel's authenticated API tools (credentials persisted under
 ``~/.kiss``) on top of the standard tools (bash, files, browser) — and
 the sub-task runs in the channel agents' shared work directory
 (``~/.kiss/channel_work``).  For a path-named agent script, whatever
-getters the file defines (``get_tools``, ``get_model``,
-``get_system_prompt``, ...) configure the session the same way; a
+getters the file defines (``tools``, ``model``,
+``system_prompt``, ...) configure the session the same way; a
 relative path is resolved against the CALLING task's work directory
 (captured by :func:`make_run_agent_tool` — the tool runs in the daemon
 process, whose own working directory is unrelated to the user's
@@ -281,9 +281,9 @@ def _dispatch(
         prompt: The full prompt for the sub-task.
         agent_path: Absolute path of the agent script.
         work_dir: Working directory for the sub-task; created when
-            absent (an agent script's ``get_work_dir()`` still wins).
+            absent (an agent script's ``work_dir()`` still wins).
         model_name: LLM model for the sub-task; empty for the daemon
-            default (an agent script's ``get_model()`` still wins).
+            default (an agent script's ``model()`` still wins).
         budget: Per-task USD budget override; ``None`` for the daemon
             default.
         timeout: Maximum seconds to wait for the sub-task's result.
@@ -464,15 +464,15 @@ def _run_agent(
     if squashed == "cron":
         # The scheduled-automations agent: an agent script in the
         # sorcar package (not a third-party channel), dispatched the
-        # same way — its get_tools() supplies the cron_job tool and
-        # its get_work_dir()/get_use_worktree()/get_auto_commit()
+        # same way — its tools() supplies the cron_job tool and
+        # its work_dir()/use_worktree()/auto_commit()
         # getters keep the session in ~/.kiss/cron/work, out of the
         # calling project's git lifecycle.
         from kiss.agents.sorcar import cron_agent
 
         return _dispatch(
             "cron", cron_agent.CRON_DISPATCH_PREAMBLE + task,
-            str(cron_agent.__file__), cron_agent.get_work_dir(),
+            str(cron_agent.__file__), cron_agent.work_dir(),
             model_name, budget, wait, parent_agent,
             scope_work_dir=parent_work_dir,
         )
@@ -597,13 +597,13 @@ def make_run_agent_tool(
         The task runs as a fresh session on the kiss-web daemon — the
         agent file's path is passed as the ``extension_agent_path`` of
         :func:`kiss.server.sorcar.run`, so the session is configured
-        by the file's ``get_X()`` getters (a channel module's
-        ``get_tools()`` supplies that channel's authenticated tools,
+        by the file's ``X()`` getters (a channel module's
+        ``tools()`` supplies that channel's authenticated tools,
         credentials persisted under ``~/.kiss``) on top of the
         standard tools.  A path-named agent's session runs in THIS
         task's work directory (so it operates on the same project,
         with the standard worktree/auto-commit lifecycle) unless the
-        script's ``get_work_dir()`` says otherwise; a channel agent's
+        script's ``work_dir()`` says otherwise; a channel agent's
         session runs in the channels' shared ``~/.kiss/channel_work``.
         This call blocks until the task finishes or the ``timeout``
         (default 300 seconds) expires, whichever comes first; a
@@ -626,12 +626,12 @@ def make_run_agent_tool(
                 task's work directory).
             task: The task for the agent, e.g. "Send 'hello' to the
                 #sorcar channel".  A path-named agent script's
-                ``get_prompt()``, if defined, replaces it.
+                ``prompt()``, if defined, replaces it.
             workspace: Workspace/account identifier for multi-account
                 channels (default ``"default"``).  Ignored for
                 path-named agent scripts.
             model_name: LLM model for the sub-task; empty uses the
-                daemon default.  An agent script's ``get_model()``
+                daemon default.  An agent script's ``model()``
                 still wins.
             max_budget: Per-task USD budget override as a number
                 string; empty uses the daemon default.

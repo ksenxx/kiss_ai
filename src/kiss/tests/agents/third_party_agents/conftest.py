@@ -5,17 +5,47 @@
 """Shared fixtures for channel-agent tests.
 
 Isolates the Slack token directory per test so parallel pytest processes
-never race on the real ``~/.kiss/third_party_agents/slack`` path.
+never race on the real ``~/.kiss/third_party_agents/slack`` path, and
+provides the per-test ``KISS_HOME`` and refusing-port fixtures that several
+test modules used to define locally.
 """
 
 from __future__ import annotations
 
+import socket
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 import kiss.agents.third_party_agents.slack_agent as slack_agent_mod
+
+
+@pytest.fixture
+def isolated_kiss_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point ``KISS_HOME`` at a per-test temp dir so ``~/.kiss`` is never touched.
+
+    ``ChannelConfig.path`` and ``kiss_home()`` resolve the env var lazily,
+    so every config written by the test lands under the returned directory.
+    """
+    home = tmp_path / "kiss_home"
+    monkeypatch.setenv("KISS_HOME", str(home))
+    return home
+
+
+@pytest.fixture
+def refusing_port() -> Iterator[int]:
+    """A localhost TCP port on which every connect is refused for the whole test.
+
+    The socket stays bound but never calls ``listen()``: the kernel answers
+    each connection attempt with RST, and because the port remains bound no
+    other process can start listening on it meanwhile -- unlike the
+    bind/close/reuse-the-number pattern, which races with concurrent tests.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        yield int(sock.getsockname()[1])
 
 
 @pytest.fixture(autouse=True)

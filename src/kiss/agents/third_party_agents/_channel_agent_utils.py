@@ -689,9 +689,10 @@ def agent_tools_file(agent_cls: type) -> str:
     """Return the tools-file path for a channel agent class.
 
     The ``kiss.server.sorcar.run`` API takes extra agent tools as the
-    path of a Python file whose top-level ``get_tools()`` returns the
+    path of a Python file whose top-level ``get_tools()`` (or, for an
+    agent script, ``tools()``) returns the
     tool callables.  For channel agents that file is the agent's OWN
-    defining module: each agent module defines a ``get_tools()`` that
+    defining module: each agent module defines a ``tools()`` that
     builds a fresh agent from the credentials persisted under
     ``~/.kiss`` and returns its authentication and backend tools.
 
@@ -700,11 +701,11 @@ def agent_tools_file(agent_cls: type) -> str:
 
     Returns:
         The absolute path of the module defining *agent_cls*, or ``""``
-        when that module does not define a callable ``get_tools()``
+        when that module does not define a callable ``tools()``
         (e.g. ``BaseChannelAgent`` itself or test-local classes).
     """
     module = sys.modules.get(agent_cls.__module__)
-    if module is None or not callable(getattr(module, "get_tools", None)):
+    if module is None or not callable(getattr(module, "tools", None)):
         return ""
     return str(getattr(module, "__file__", "") or "")
 
@@ -719,7 +720,7 @@ class BaseChannelAgent:
     and the daemon builds and executes its own chat agent with the
     standard tools (bash, file editing, browser automation).  The
     channel agent instance is the *carrier* of channel identity: the
-    :attr:`tools_file` naming the module whose ``get_tools()`` the
+    :attr:`tools_file` naming the module whose ``tools()`` the
     daemon calls to build the channel tools, the :attr:`workspace`
     those tools authenticate under, the :attr:`channel_system_prompt`
     guidance, and the run results the launcher writes back
@@ -728,12 +729,12 @@ class BaseChannelAgent:
 
     Subclasses must set ``self._backend`` (a ``ToolMethodBackend``
     instance), override :meth:`_is_authenticated` and
-    :meth:`_get_auth_tools`, and define a module-level ``get_tools()``
+    :meth:`_get_auth_tools`, and define a module-level ``tools()``
     in their own module::
 
         class SlackAgent(BaseChannelAgent): ...
 
-        def get_tools() -> list:
+        def tools() -> list:
             return SlackAgent()._get_tools()
     """
 
@@ -751,9 +752,9 @@ class BaseChannelAgent:
 
     @property
     def tools_file(self) -> str:
-        """Path of the module whose ``get_tools()`` supplies this agent's tools.
+        """Path of the module whose ``tools()`` supplies this agent's tools.
 
-        ``""`` when the agent's defining module has no ``get_tools()``
+        ``""`` when the agent's defining module has no ``tools()``
         (plain carriers such as ``KissWebChatAgent`` add no channel
         tools).
         """
@@ -794,7 +795,7 @@ class BaseChannelAgent:
         :func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`,
         which supplies this agent's channel tools through the API's
         ``tools=`` file-path contract (:attr:`tools_file` — the agent
-        module whose ``get_tools()`` the daemon calls), appends
+        module whose ``tools()`` the daemon calls), appends
         :attr:`channel_system_prompt` to the prompt, and records the
         YAML result in :attr:`last_run_result` along with the cost /
         token / step totals.  Keyword arguments outside the launcher's
@@ -1348,7 +1349,7 @@ class ChannelRunner:
         :func:`run_agent_via_kiss_web` (``_cmd_run``) so the task is
         live-visible and interactable from any connected remote
         webview while it runs.  The channel tools come from the
-        runner's tools file (the agent module's ``get_tools()``, per
+        runner's tools file (the agent module's ``tools()``, per
         the ``kiss.server.sorcar.run`` tools-file contract); after the
         run the task summary is posted to the message's thread unless
         the agent already replied there itself.  With persistent state

@@ -229,9 +229,9 @@ def test_new_agent_loads_persisted_config() -> None:
     assert agent._backend._token == _TOKEN
 
 
-def test_get_tools_module_function() -> None:
-    """Module-level get_tools() returns a non-empty tool list."""
-    tools = ha_mod.get_tools()
+def test_tools_module_function() -> None:
+    """Module-level tools() returns a non-empty tool list."""
+    tools = ha_mod.tools()
     assert len(tools) >= 3
     assert all(callable(t) for t in tools)
 

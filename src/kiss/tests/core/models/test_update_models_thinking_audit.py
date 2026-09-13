@@ -88,7 +88,7 @@ class TestCatalogAliasesFrozen:
             "gpt-5.6-sol",
             "openrouter/openai/gpt-5.5",
             "openrouter/openai/gpt-5.6-sol",
-            "openrouter/~openai/gpt-latest",
+            "openrouter/~openai/gpt-sol-latest",
         ):
             assert base in data, f"Base {base} missing"
             assert data[base].get("thinking") == "high", base

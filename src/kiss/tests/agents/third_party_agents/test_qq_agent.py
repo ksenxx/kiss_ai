@@ -29,7 +29,9 @@ from kiss.agents.third_party_agents.qq_agent import (
     QQChannelBackend,
     _config,
     _derive_signing_key,
-    get_tools,
+)
+from kiss.agents.third_party_agents.qq_agent import (
+    tools as module_tools,
 )
 
 _SECRET = "kiss-qq-test-secret"
@@ -172,10 +174,10 @@ def test_auth_trio_persistence() -> None:
     assert agent._is_authenticated() is False
 
 
-def test_get_tools_module_function() -> None:
-    """Module-level get_tools() returns a non-empty tool list."""
+def test_tools_module_function() -> None:
+    """Module-level tools() returns a non-empty tool list."""
     _config.clear()
-    assert len(get_tools()) >= 3
+    assert len(module_tools()) >= 3
 
 
 def test_send_messages_with_cached_token() -> None:

@@ -623,6 +623,18 @@
     }
     // sharesub-coverage:end
 
+    // resultimages-coverage:start
+    // Tool-result images: the live webview installs a per-element
+    // click-to-zoom listener (appendResultImages in main.js), which
+    // outerHTML serialization cannot carry over — re-wire it here.
+    const trImg = target.closest('.tr-img');
+    if (trImg) {
+      e.stopPropagation();
+      trImg.classList.toggle('tr-img-full');
+      return;
+    }
+    // resultimages-coverage:end
+
     const drawerBtn = target.closest('#task-panel-drawer-btn');
     if (drawerBtn) {
       // The page holds one #task-panel per task of the chat, so the

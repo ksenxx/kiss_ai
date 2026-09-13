@@ -257,28 +257,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         )
         return None
 
-    @classmethod
-    def _attachments_to_content_parts(
-        cls, attachments: list[Attachment]
-    ) -> list[dict[str, Any]]:
-        """Convert ``attachments`` to a list of Responses-API content parts.
-
-        Unsupported MIME types are skipped (with a warning).
-
-        Args:
-            attachments: Attachments to convert.
-
-        Returns:
-            A list of content parts; possibly shorter than ``attachments``
-            if some MIME types were unsupported.
-        """
-        parts: list[dict[str, Any]] = []
-        for att in attachments:
-            part = cls._attachment_to_content_part(att)
-            if part is not None:
-                parts.append(part)
-        return parts
-
     def _consume_pending_call_id(
         self,
         func_name: str,
@@ -1262,6 +1240,14 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         its frame is released — until then a daemon watchdog thread stays
         alive and armed over a connection that never returns to the pool.
 
+        The thinking bracket is closed in the same ``finally``, as the
+        Chat Completions, Anthropic and Gemini transports do:
+        ``stop_aware_events`` closes it for a stop and a stall but
+        re-raises every other transport failure untouched, and
+        ``KISSAgent`` retries those in the SAME run without resetting the
+        printer — which would otherwise render the retry's answer as
+        reasoning.  A no-op when the turn ended outside a reasoning block.
+
         Args:
             stream: The streaming iterator returned by the SDK.
 
@@ -1279,6 +1265,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             return self._consume_stream_events(events)
         finally:
             events.close()
+            self._close_thinking_if_open()
 
     def _consume_stream_events(
         self,

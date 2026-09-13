@@ -150,9 +150,9 @@ def test_authenticate_rejects_bad_input(isolated_home: Path) -> None:
     assert not (isolated_home / "third_party_agents" / "openai_compat" / "config.json").exists()
 
 
-def test_get_tools_module_function(isolated_home: Path) -> None:
-    """The module-level get_tools() returns a non-empty tool list."""
-    tools = oai_mod.get_tools()
+def test_tools_module_function(isolated_home: Path) -> None:
+    """The module-level tools() returns a non-empty tool list."""
+    tools = oai_mod.tools()
     assert tools
     assert "authenticate_openai_compat" in [fn.__name__ for fn in tools]
 

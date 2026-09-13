@@ -7,7 +7,6 @@
 
 import json
 import logging
-import re
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -201,13 +200,28 @@ def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
         A tuple of (reasoning, final_answer) where reasoning is the content
         within <think> tags and final_answer is the remaining content.
     """
-    think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL)
-    match = think_pattern.search(content)
-    if match:
-        reasoning = match.group(1).strip()
-        final_answer = think_pattern.sub("", content).strip()
-        return reasoning, final_answer
-    return "", content
+    # A find() loop rather than ``<think>(.*?)</think>``: the lazy regex
+    # rescans to the end of the text for every unclosed opener, which is
+    # quadratic on model output that repeats the tag (and ``re`` holds
+    # the GIL while it does so).
+    reasoning = ""
+    answer_parts: list[str] = []
+    cursor = 0
+    while True:
+        start = content.find("<think>", cursor)
+        if start == -1:
+            break
+        end = content.find("</think>", start + len("<think>"))
+        if end == -1:
+            break
+        if not answer_parts:
+            reasoning = content[start + len("<think>") : end].strip()
+        answer_parts.append(content[cursor:start])
+        cursor = end + len("</think>")
+    if not answer_parts:
+        return "", content
+    answer_parts.append(content[cursor:])
+    return reasoning, "".join(answer_parts).strip()
 
 
 def _delta_reasoning_text(delta: Any) -> str | None:
@@ -500,6 +514,47 @@ class OpenAICompatibleBase(Model):
                 f"Embedding generation failed for model {model_to_use}: {e}"
             ) from e
 
+    @staticmethod
+    def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
+        """Convert one :class:`Attachment` to this transport's content part.
+
+        Each transport has its own part shape (``image_url`` /
+        ``input_audio`` / ``file`` for Chat Completions, ``input_image`` /
+        ``input_file`` for Responses), so the conversion is theirs; the
+        filtering loop in :meth:`_attachments_to_content_parts` is shared.
+
+        Args:
+            att: The attachment to convert.
+
+        Returns:
+            The content-part dict, or ``None`` when the provider does not
+            accept the attachment's format (a warning is logged).
+        """
+        raise NotImplementedError  # pragma: no cover – overridden by both transports
+
+    @classmethod
+    def _attachments_to_content_parts(
+        cls, attachments: list[Attachment]
+    ) -> list[dict[str, Any]]:
+        """Convert attachments to a list of content-part dicts.
+
+        Unsupported MIME types are dropped (with a warning from
+        :meth:`_attachment_to_content_part`).
+
+        Args:
+            attachments: The attachments to convert.
+
+        Returns:
+            A list of content-part dicts.  May be shorter than *attachments*
+            if some MIME types were not supported.
+        """
+        parts: list[dict[str, Any]] = []
+        for att in attachments:
+            part = cls._attachment_to_content_part(att)
+            if part is not None:
+                parts.append(part)
+        return parts
+
     def _is_deepseek_reasoning_model(self) -> bool:
         """Check if this is a DeepSeek R1 reasoning model.
 
@@ -635,28 +690,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             ", ".join(sorted(OPENAI_INPUT_AUDIO_FORMATS)),
         )
         return None
-
-    @classmethod
-    def _attachments_to_content_parts(
-        cls, attachments: list[Attachment]
-    ) -> list[dict[str, Any]]:
-        """Convert attachments to a list of OpenAI content-part dicts.
-
-        Unsupported MIME types are silently dropped (with a warning).
-
-        Args:
-            attachments: The attachments to convert.
-
-        Returns:
-            A list of content-part dicts.  May be shorter than *attachments*
-            if some MIME types were not supported.
-        """
-        parts: list[dict[str, Any]] = []
-        for att in attachments:
-            part = cls._attachment_to_content_part(att)
-            if part is not None:
-                parts.append(part)
-        return parts
 
     def _deliver_tool_result_attachments(
         self, attachments: list[Attachment]

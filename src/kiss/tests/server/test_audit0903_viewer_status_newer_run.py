@@ -50,7 +50,7 @@ _BLOCKING_SCRIPT = textwrap.dedent(
     _DIR = pathlib.Path(__file__).resolve().parent
 
 
-    def get_prompt():
+    def prompt():
         \"\"\"Block until released, then raise (the task ends in setup).\"\"\"
         (_DIR / "entered-{marker}").write_text("1", encoding="utf-8")
         deadline = time.time() + 60

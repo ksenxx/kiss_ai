@@ -1,6 +1,6 @@
 # KISS Sorcar
 
-> KISS Sorcar is a free, open-source (Apache-2.0), local-first, bring-your-own-key general-purpose AI agent framework for long-horizon tasks and AI discovery. It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon (`kiss-web`), and offers the Python client API `kiss.server.sorcar.run`. Prompts and code go directly to the model provider or local endpoint you configure — never through third-party servers. It ships a catalog of 634 models across 9 provider categories and supports multi-model workflows expressed purely via prompts.
+> KISS Sorcar is a free, open-source (Apache-2.0), local-first, bring-your-own-key general-purpose AI agent framework for long-horizon tasks and AI discovery. It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon (`kiss-web`), and offers the Python client API `kiss.server.sorcar.run`. Prompts and code go directly to the model provider or local endpoint you configure — never through third-party servers. It ships a catalog of 660 models across 9 provider categories and supports multi-model workflows expressed purely via prompts.
 
 Key facts for assistants and coding agents:
 
@@ -10,7 +10,7 @@ Key facts for assistants and coding agents:
 - Source repository: https://github.com/ksenxx/kiss_ai
 - Website: https://kisssorcar.github.io/
 - Paper: "KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant" (arXiv:2604.23822)
-- Differentiators vs Claude Code / Cursor: multi-vendor multi-model in a single task, AI discovery and GEPA prompt optimization via plain prompts, 32 third-party channel agents (Slack, Gmail, Email, WhatsApp, SMS, phone control, Home Assistant, …), git-worktree task isolation, dynamic model switching (`set_model`) and mid-run user steering, ~3000 LoC core agents, free framework (you pay only your model provider).
+- Differentiators vs Claude Code / Cursor: multi-vendor multi-model in a single task, AI discovery and GEPA prompt optimization via plain prompts, 43 third-party agents — 32 messaging channels (Slack, Gmail, Email, WhatsApp, SMS, phone control, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace — git-worktree task isolation, dynamic model switching (`set_model`) and mid-run user steering, ~3000 LoC core agents, free framework (you pay only your model provider).
 
 ## Docs
 
@@ -19,8 +19,8 @@ Key facts for assistants and coding agents:
 - [Installation](https://kisssorcar.github.io/docs/installation.md): Install from source, pipx/uv, model API-key configuration, VS Code extension, Docker
 - [Client interfaces](https://kisssorcar.github.io/docs/cli.md): The `kiss-web` daemon, the VS Code extension and web/mobile app features, and the Python client API `kiss.server.sorcar.run`
 - [Python API reference](https://kisssorcar.github.io/docs/api.md): KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, and GitWorktreeOps
-- [Supported models](https://kisssorcar.github.io/docs/models.md): 634-model catalog across 9 provider categories with capability totals
-- [Messaging & third-party agents](https://kisssorcar.github.io/docs/messaging-agents.md): The 32 channel agents, infrastructure agents, and the Govee smart-home CLI
+- [Supported models](https://kisssorcar.github.io/docs/models.md): 660-model catalog across 9 provider categories with capability totals
+- [Messaging & third-party agents](https://kisssorcar.github.io/docs/messaging-agents.md): The 32 messaging-channel agents, 9 service agents, infrastructure agents, and the Govee smart-home CLI
 - [Sample tasks](https://kisssorcar.github.io/docs/sample-tasks.md): Ready-to-use example prompts, including AI discovery, optimization, and GEPA
 - [Prompt tricks](https://kisssorcar.github.io/docs/prompt-tricks.md): Reusable prompt snippets ("tricks") that boost result quality
 - [Tips](https://kisssorcar.github.io/docs/tips.md): Practical tips for getting the highest-quality work from KISS Sorcar
@@ -35,13 +35,21 @@ Key facts for assistants and coding agents:
 - [SWEDefend (PDF)](https://kisssorcar.github.io/assets/swedefend.pdf): Confidence-gated intent-alignment judge defending program-repair agents against backdoored patches
 - [Cleverest+ (PDF)](https://kisssorcar.github.io/assets/cleverest_plus.pdf): Fixed-budget portfolio and signature-grounded oracle for commit-directed test generation
 
+## Blog
+
+- [Making LZ4's Multithreaded File Compression Scale](https://kisssorcar.github.io/blog/lz4-optimization-blog.html): 1.88–2.57× stock lz4 file-mode throughput with byte-identical output
+- [Optimizing DuckDB Against Its Official and Academic Benchmarks](https://kisssorcar.github.io/blog/duckdb-optimization-blog.html): Verified 1.152–1.237× geomean speedups on TPC-H, TPC-DS, IMDB/JOB, h2oai, ClickBench
+- [Reaching 99+ on Biomni × TusoAI-Style Biology Benchmarks with AI Discovery](https://kisssorcar.github.io/blog/tuso-evolved-blog.html): AI-discovery loop evolving one method to ≥99/100 on all tasks
+- [Optimizing SQLite Against Its Official and Academic Benchmarks](https://kisssorcar.github.io/blog/sqlite-optimization-blog.html): Verified 1.59× geomean speedup on speedtest1, kvtest, TATP, SSB
+- [Verification of the sqlite-optimized Repository](https://kisssorcar.github.io/blog/sqlite-optimized-verification-report.html): Independent rebuild-and-reproduce audit of the SQLite work
+
 ## Source & Install
 
 - [GitHub repository](https://github.com/ksenxx/kiss_ai): Full source code, issues, and commit history
 - [README](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/README.md): Canonical project README with the full model list
 - [API.md](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/API.md): Auto-generated API reference in the source repo
 - [PyPI package](https://pypi.org/project/kiss-agent-framework/): `kiss-agent-framework` releases
-- [Model catalog JSON](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json): Machine-readable source of truth for all 634 models with prices, context lengths, and capability flags
+- [Model catalog JSON](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json): Machine-readable source of truth for all 660 models with prices, context lengths, and capability flags
 
 ## Optional
 

@@ -15,24 +15,24 @@ Can you change the step <<specify step>> as follows: <<whatever way you want to 
 ## Messaging
 
 ```text
-Can you authenticate me with the <<workspace name>> workspace on Slack?
+Authenticate slack workspace <<workspace name>>.
 ```
 
 ```text
-Can you authenticate me with Gmail?
+Authenticate Gmail [, or gcal, gdrive, gdoc, gsheets]?
 ```
 
 ```text
-Can you check my gmail every hour and ping me on slack if there is any important email that
+Can you check my Gmail every hour and ping me on Slack if there is any important email that
 needs my immediate attention?
 ```
 
 ```text
-Can you authenticate me with the iMessage agent?
+Authenticate iMessage.
 ```
 
 ```text
-Can you send "Hello from Sorcar!" to 1-800-772-1213?
+Can you send "Hello from Sorcar!" to 1-800-999-9999?
 ```
 
 ## Fact-Checking & Security Review
@@ -48,10 +48,10 @@ security vulnerabilities, create a POC and test it. Create a report.
 ## AI Discovery
 
 ```text
-Sorcar for AI Discovery: Can you AI discover the lightest and fastest AI model that will give
-the best accuracy and recall on the data at <</path/to/data>> at the cheapest price? Use 'modal'
+Sorcar for AI Discovery: Can you AI-discover the lightest and fastest AI model that will give
+the best accuracy and recall on the data at <</path/to/data>> at the lowest price? Use 'modal'
 CLI to train your models on GPUs and evaluate if needed. The total budget for Modal.com is
-$ 1,000. Do not STOP until accuracy/recall reaches 99% and price per query on the model is less
+$ 1,000. Do not STOP until accuracy/recall reaches 99% and the model's price per query is less
 than $0.50. Create a report.
 ```
 
@@ -79,29 +79,29 @@ frontier in the folder ./pareto, with a sub-folder for each node in the frontier
 contains a prompt file (prompt.md) and a JSON file, say score.json, containing the list of data
 points (ids) from the sval set that were correctly predicted by the prompt. When you add a node
 to the Pareto frontier, make sure that the list of correctly predicted data points is not a
-subset or equal to an existing list of data points in some node in the frontier. If such a node
-exists, do not add the new node. After adding a node, remove all nodes whose list of datapoints
-is a subset or equal to the list of datapoints in the added node. Then run the following
-algorithm.
+subset of or equal to an existing list of data points in some node in the frontier. If such a
+node exists, do not add the new node. After adding a node, remove all nodes whose list of data
+points is a subset of or equal to the list of data points in the added node. Then run the
+following algorithm.
 
-1. pick a node from the Pareto frontier with probability 0.5
-   a. sample a minibatch of 5 datapoints from the dev set
+1. Pick a node from the Pareto frontier with probability 0.5
+   a. sample a minibatch of 5 data points from the dev set
    b. run the agent with the prompt from the node on the minibatch
-   c. If the agent incorrectly predicts for some datapoints, analyze and reflect on the
-      trajectory events of the agent on those datapoints available at ~/.kiss/sorcar.db and
-      propose a new prompt that will fix the mistakes made by the agent on datapoints
+   c. If the agent incorrectly predicts for some data points, analyze and reflect on the
+      trajectory events of the agent on those data points available at ~/.kiss/sorcar.db and
+      propose a new prompt that will fix the mistakes made by the agent on data points
       incorrectly predicted
-   d. if the agent predicts correctly on the minibatch, then evaluate it on the sval set and
-      create the list of datapoints on which the agent with the new prompt predicts correctly.
-   e. Add the new prompt and the list of datapoints to the Pareto frontier
+   d. If the agent predicts correctly on the minibatch, then evaluate it on the sval set and
+      create the list of data points on which the agent with the new prompt predicts correctly.
+   e. Add the new prompt and the list of data points to the Pareto frontier
 
 1. Pick two nodes from the Pareto frontier randomly with the remaining probability.
-   a. Sample a minibatch of 5 datapoints from the dev set
+   a. Sample a minibatch of 5 data points from the dev set
    b. Merge the prompts from the two nodes into a new prompt.
    c. If the agent predicts correctly on the minibatch with the new prompt, then evaluate it on
       the sval set and create the list of datapoints on which the agent with the new prompt
       predicts correctly.
-   d. Add the new prompt and the list of datapoints to the Pareto frontier
+   d. Add the new prompt and the list of data points to the Pareto frontier
 
 1. Repeat steps 1 and 2 until there is no change in the prompt after 3 iterations.
    END_RUN_GEPA
@@ -109,8 +109,8 @@ algorithm.
 
 At each step, keep track of the best prompt, which has the maximum number of successfully
 predicted data points, in ./pareto/optimal.md. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR
-CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE
-DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create
+CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT THE DATA. YOUR SOLUTION MUST GENERALIZE
+BEYOND THE DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create
 an HTML report with diagrams and illustrations in ./reports and open it in the user's default
 browser. Do NOT STOP until you cannot improve the accuracy and recall after three consecutive
 rollouts. Use gpt-5.6-sol model (not codex) for a thorough review of the work done at every

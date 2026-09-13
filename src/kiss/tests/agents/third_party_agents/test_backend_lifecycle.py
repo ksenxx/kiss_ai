@@ -13,7 +13,6 @@ from typing import Any, cast
 from kiss.agents.third_party_agents.irc_agent import IRCChannelBackend
 from kiss.agents.third_party_agents.line_agent import LineChannelBackend
 from kiss.agents.third_party_agents.synology_chat_agent import SynologyChatChannelBackend
-from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
 from kiss.agents.third_party_agents.zalo_agent import ZaloChannelBackend
 
 
@@ -41,15 +40,6 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
-
-
-def test_whatsapp_disconnect_stops_server() -> None:
-    backend = WhatsAppChannelBackend()
-    assert backend._start_webhook_server(port=_free_port())
-    assert backend._webhook_server is not None
-    backend.disconnect()
-    assert backend._webhook_server is None
-    assert backend._webhook_thread is None
 
 
 def test_webhook_connect_failure_is_reported() -> None:

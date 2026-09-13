@@ -43,6 +43,11 @@ body.remote-chat {
   --favorite: #f5b400;
   --copied: #4caf50;
 
+  /* The settings dialog's green outline (see #settings-panel below):
+     a semantic alias of the theme green, so the light theme's --green
+     override re-themes the border automatically. */
+  --settings-border: var(--green);
+
   /*
    * Docked task-history panel geometry (desktop mode only).  The
    * resize floor (--sidebar-min-w) is deliberately tiny — 10px — so a
@@ -391,7 +396,12 @@ body.remote-chat #tricks-panel {
 
 body.remote-chat #settings-panel {
   background: var(--surface);
-  border-left: 1px solid var(--border-8);
+
+  /* Same green theme border as the VS Code surfaces (see main.css
+     #settings-panel), routed through the --settings-border palette
+     alias so the remote page keeps decorative tokens out of plain
+     properties (test_no_decorative_color_tokens_in_codex_css). */
+  border: 2px solid var(--settings-border);
 }
 
 body.remote-chat .sidebar-hdr {
@@ -616,8 +626,11 @@ body.remote-chat .running-item-ids::before {
     flex-direction: column;
     gap: 10px;
 
-    /* Scrolling lives here, not on #meta-panel (see above). */
-    flex: 1 1 auto;
+    /* The list keeps its natural height so every row stays visible —
+       the info subpanel below takes ALL the remaining space — but it
+       may still shrink and scroll (here, not on #meta-panel, see
+       above) when the list ALONE is taller than the window. */
+    flex: 0 1 auto;
     min-height: 0;
     overflow-y: auto;
   }
@@ -636,6 +649,37 @@ body.remote-chat .running-item-ids::before {
 
   body.remote-chat.remote-desktop .meta-item .meta-value {
     color: var(--dim);
+  }
+
+  /* The info subpanel below the task-info list mirrors the active
+     workdir's tmp/info.md (getInfoFile poll in main.js).  Its flex
+     basis is 0 so its own content never squeezes the list above:
+     it grows into exactly the space the list leaves free — the rest
+     of the panel — and scrolls inside.  While there is nothing to
+     show (no running task, or the file is missing or empty) main.js
+     drops the `visible` class and the WHOLE subpanel disappears,
+     header included. */
+  body.remote-chat.remote-desktop #meta-info {
+    display: none;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-height: 0;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-8);
+  }
+
+  body.remote-chat.remote-desktop #meta-info.visible {
+    display: flex;
+  }
+
+  body.remote-chat.remote-desktop #meta-info-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    font-size: var(--fs-sm);
+    color: var(--dim);
+    overflow-wrap: anywhere;
   }
 
   body.remote-chat.remote-desktop #sidebar.open #sidebar-resizer {

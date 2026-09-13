@@ -22,7 +22,6 @@ Fixes under test, driven against a REAL TCP IRC server in this file
 
 from __future__ import annotations
 
-import os
 import socket
 import threading
 import time
@@ -35,18 +34,9 @@ from kiss.agents.third_party_agents.irc_agent import IRCChannelBackend, _config
 
 
 @pytest.fixture(autouse=True)
-def _isolated_kiss_home(tmp_path: Path) -> Iterator[Path]:
-    """Point KISS_HOME at a fresh temp dir so tests never touch ~/.kiss."""
-    saved = os.environ.get("KISS_HOME")
-    home = tmp_path / "kiss_home"
-    os.environ["KISS_HOME"] = str(home)
-    try:
-        yield home
-    finally:
-        if saved is None:
-            os.environ.pop("KISS_HOME", None)
-        else:
-            os.environ["KISS_HOME"] = saved
+def _isolated_kiss_home(isolated_kiss_home: Path) -> Path:
+    """Apply the shared per-test ``KISS_HOME`` isolation to every test here."""
+    return isolated_kiss_home
 
 
 def _read_lines(conn: socket.socket, until: str, timeout: float = 5.0) -> list[str]:

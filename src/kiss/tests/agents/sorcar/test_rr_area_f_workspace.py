@@ -5,7 +5,7 @@
 """End-to-end tests for the channel-workspace no-leak property (F-RC3).
 
 ``KISS_CHANNEL_WORKSPACE`` is process-global and read by a channel
-module's ``get_tools()`` while a launch is in flight.  Before the fix,
+module's ``tools()`` while a launch is in flight.  Before the fix,
 ``enter_workspace`` overwrote it last-writer-wins, so two overlapping
 dispatches with DIFFERENT workspaces (each holding it for up to ~15
 minutes) made the first task's channel import read the second task's
@@ -83,7 +83,7 @@ def test_conflicting_enter_times_out_without_entering() -> None:
         assert enter_workspace("account-b", timeout=0.2) is False
         assert time.monotonic() - start >= 0.2
         # Nothing was entered and, crucially, nothing was overwritten:
-        # the running launch's get_tools() still reads ITS workspace.
+        # the running launch's tools() still reads ITS workspace.
         assert os.environ[WORKSPACE_ENV_VAR] == "account-a"
         assert channel_workspace._ACTIVE_WORKSPACES == {"account-a": 1}
     finally:

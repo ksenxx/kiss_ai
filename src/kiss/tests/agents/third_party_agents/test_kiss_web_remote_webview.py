@@ -64,7 +64,7 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         Path(self.repo).mkdir(parents=True, exist_ok=True)
         subprocess.run(
             ["git", "init", "-q"], cwd=self.repo,
-            capture_output=True, check=False,
+            capture_output=True, check=False, timeout=60,
         )
 
         kiss_dir = Path(self.tmpdir) / ".kiss"

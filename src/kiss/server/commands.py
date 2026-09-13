@@ -32,7 +32,11 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.merge_flow import _effective_commit_repo
 from kiss.server.tab_registry import OpenTabOutcome
-from kiss.server.task_runner import _client_task_id_of
+from kiss.server.task_runner import (
+    _client_task_id_of,
+    contains_task_tags,
+    parse_task_tags,
+)
 
 if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
@@ -133,6 +137,48 @@ def _task_accepts_input(state: AgentState | None) -> bool:
     if state is None:
         return False
     return state.is_task_active or state.thread_alive()
+
+
+def _route_prompt_to_owner(owner: AgentState, prompt: str) -> None:
+    """Queue a mid-run user *prompt* on the right list of *owner*.
+
+    A plain message is appended to ``pending_user_messages`` — the
+    live agent's pre-step hook drains it into the model conversation
+    as a steering instruction.  A message wrapped in
+    ``<task>...</task>`` tags is instead split into its task blocks
+    and appended to ``queued_followup_tasks``: the task runner's
+    per-subtask loop drains that list once the CURRENT task finishes
+    and runs each block one-by-one as further sequential subtasks, so
+    a task list typed mid-run never steers the running task.
+
+    Only server-owned states take the queued-tasks path: the drain
+    lives in ``TaskRunner._run_task_inner``, which executes only
+    UI-launched runs.  A sub-agent or standalone state has no such
+    loop, so a ``<task>`` message sent to one would sit undrained
+    forever — it falls back to live steering injection instead.  The
+    same fallback applies once the run's ``followup_queue_closed``
+    flag is up (the loop passed its final drain, a subtask failed, or
+    the run is finalizing): a task queued then would be echoed to the
+    user and silently discarded by the end-of-run cleanup.  The flag
+    is raised under the same :data:`agent_state.STATE_LOCK` this
+    helper runs under, so a message either lands in the queue before
+    the final drain (and runs) or takes the steering path — never the
+    accepted-then-dropped middle ground.
+
+    MUST be called while holding :data:`agent_state.STATE_LOCK`.
+
+    Args:
+        owner: The running-task state that accepted the prompt.
+        prompt: The user's message (non-empty).
+    """
+    if (
+        owner.server_owned
+        and not owner.followup_queue_closed
+        and contains_task_tags(prompt)
+    ):
+        owner.queued_followup_tasks.extend(parse_task_tags(prompt))
+    else:
+        owner.pending_user_messages.append(prompt)
 
 
 def _restart_kiss_web_daemon() -> bool:
@@ -293,6 +339,7 @@ class _CommandsMixin:
         ) -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
         def _close_tab(self, tab_id: str) -> None: ...
+        def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _registry_update_tab(
             self,
             tab_id: str,
@@ -453,7 +500,7 @@ class _CommandsMixin:
                 # submitted during the startup window in which the
                 # thread was alive but the flag not yet raised.
                 if isinstance(prompt, str) and prompt.strip():
-                    prev.pending_user_messages.append(prompt)
+                    _route_prompt_to_owner(prev, prompt)
                     inject_prompt = prompt
                     inject_task = _owner_task_id(prev)
                     if not inject_task:
@@ -624,12 +671,23 @@ class _CommandsMixin:
                 )
                 if not pre_cancelled:
                     thread.start()
-        except BaseException:
+        except BaseException as exc:
             with self._state_lock:
-                if state is not None and state.task_thread is thread:
+                never_started = state.task_thread is thread
+                if never_started:
                     state.task_thread = None
                     state.stop_event = None
                     state.user_answer_queue = None
+            if never_started:
+                # Both frontends raised the tab's running state the
+                # moment the user hit Enter, and only a terminal
+                # ``result`` + ``status running:false`` ever lower it
+                # — normally ``_run_task``'s own failure path, which
+                # never ran here (``RuntimeError: can't start new
+                # thread`` under thread exhaustion, or a failed
+                # registry publication).  Emit them, or the tab stays
+                # "running" until a daemon restart.
+                self._report_run_start_failure(tab_id, cmd, exc)
             raise
         if pre_cancelled:
             # Route the never-started run through the normal terminal
@@ -640,6 +698,44 @@ class _CommandsMixin:
             # the marker, right here on the dispatch thread.
             cmd["_pre_cancelled"] = True
             self._run_task(cmd)
+
+    def _report_run_start_failure(
+        self, tab_id: str, cmd: dict[str, Any], exc: BaseException,
+    ) -> None:
+        """Broadcast the terminal events of a run whose thread never started.
+
+        Mirrors the ``result`` / ``status running:false`` pair that
+        ``_run_task`` emits when setup fails, for the case where the
+        worker thread itself could not be started, and retires the
+        tab's state if the frontend closed it meanwhile.
+
+        Args:
+            tab_id: The tab whose run failed to start.
+            cmd: The run command (its client run token is stamped on
+                the ``status`` event like a normal run end).
+            exc: The error raised before the worker thread ran.
+        """
+        logger.warning(
+            "Task could not be started: tab_id=%s error=%s", tab_id, exc,
+            exc_info=True,
+        )
+        self.printer.broadcast({
+            "type": "result",
+            "text": f"Task failed: {type(exc).__name__}: {exc}",
+            "success": False,
+            "total_tokens": 0,
+            "cost": "$0.0000",
+            "step_count": 0,
+            "tabId": tab_id,
+        })
+        status_end: dict[str, Any] = {
+            "type": "status", "running": False, "tabId": tab_id,
+        }
+        client_task_id = _client_task_id_of(cmd)
+        if client_task_id:
+            status_end["taskId"] = client_task_id
+        self.printer.broadcast(status_end)
+        self._dispose_if_closed(tab_id)
 
     def _cmd_stop(self, cmd: dict[str, Any]) -> None:
         """Stop a running task.
@@ -944,6 +1040,13 @@ class _CommandsMixin:
         pre-step hook can drain and inject the messages into the model
         conversation before the next model call.
 
+        Exception (see :func:`_route_prompt_to_owner`): a message
+        wrapped in ``<task>...</task>`` tags is NOT injected into the
+        running task.  Its task blocks are queued on
+        :attr:`AgentState.queued_followup_tasks` instead, and the task
+        runner executes them one-by-one as further sequential subtasks
+        once the current task finishes.
+
         When the tab itself has no live task (the common case for a
         VIEWER tab opened from the history sidebar while a task runs
         in ANOTHER tab — the viewer is subscribed to the running
@@ -984,7 +1087,7 @@ class _CommandsMixin:
                     tab_id,
                 )
                 return
-            owner.pending_user_messages.append(prompt)
+            _route_prompt_to_owner(owner, prompt)
             owner_task = _owner_task_id(owner)
             if not owner_task:
                 owner.unattributed_prompt_echoes.append(prompt)
@@ -1210,11 +1313,19 @@ class _CommandsMixin:
                 )
                 return
             self._commit_msg_tabs.add(tab_id)
-        threading.Thread(
-            target=self._run_commit_message_job,
-            args=(tab_id, work_dir),
-            daemon=True,
-        ).start()
+        try:
+            threading.Thread(
+                target=self._run_commit_message_job,
+                args=(tab_id, work_dir),
+                daemon=True,
+            ).start()
+        except BaseException:
+            # The worker never ran, so its ``finally`` cannot release
+            # the claim published above — release it here or the tab
+            # drops every later request as a duplicate.
+            with self._state_lock:
+                self._commit_msg_tabs.discard(tab_id)
+            raise
 
     def _run_commit_message_job(self, tab_id: str, work_dir: str) -> None:
         """Generate the tab's commit message and re-arm the button.
@@ -1519,6 +1630,105 @@ class _CommandsMixin:
         if password_changed:
             _restart_kiss_web_daemon()
 
+    def _cmd_get_my_models(self, cmd: dict[str, Any]) -> None:
+        """Send the custom models from ``~/.kiss/MY_MODELS.json``.
+
+        Answers the settings panel's Custom Models subpanel with a
+        ``myModelsData`` event, stamped with the sender's ``connId`` so
+        one window opening its settings panel never repaints another
+        window's list mid-edit.
+        """
+        from kiss.core.models.model_info import list_custom_models
+
+        event: dict[str, Any] = {
+            "type": "myModelsData", "models": list_custom_models(),
+        }
+        conn_id = cmd.get("connId", "")
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
+
+    def _broadcast_my_models(self) -> None:
+        """Broadcast the current custom-model list to every client.
+
+        Mutations are broadcast UNstamped (no ``connId``): the file is
+        shared by every window, so all open settings panels must repaint
+        after an add / edit / delete, not only the one that clicked.
+        """
+        from kiss.core.models.model_info import list_custom_models
+
+        self.printer.broadcast({
+            "type": "myModelsData", "models": list_custom_models(),
+        })
+
+    def _cmd_save_my_model(self, cmd: dict[str, Any]) -> None:
+        """Add or update one custom model in ``~/.kiss/MY_MODELS.json``.
+
+        Services the settings panel's Add and Save (edit) buttons.  The
+        payload carries the model ``name`` plus optional ``endpoint`` /
+        ``apiKey`` / ``headers`` strings and, for an edit that renamed
+        the model, ``originalName``.  A rejected name (empty, or
+        ``_``-prefixed — reserved for documentation keys) answers the
+        sender with an ``error`` event; success rebroadcasts the list
+        to every client.
+        """
+        from kiss.core.models.model_info import save_custom_model
+
+        def field(key: str) -> str:
+            value = cmd.get(key, "")
+            return value if isinstance(value, str) else ""
+
+        try:
+            error = save_custom_model(
+                name=field("name"),
+                endpoint=field("endpoint"),
+                api_key=field("apiKey"),
+                headers=field("headers"),
+                original_name=field("originalName"),
+            )
+        except OSError as e:
+            # A failed write (permissions, disk full) must answer the
+            # client instead of killing its connection's dispatch.
+            logger.warning("saveMyModel failed", exc_info=True)
+            error = f"Could not write ~/.kiss/MY_MODELS.json: {e}"
+        if error:
+            self._send_my_models_error(error, cmd)
+            return
+        self._broadcast_my_models()
+
+    def _send_my_models_error(self, error: str, cmd: dict[str, Any]) -> None:
+        """Answer a failed custom-model mutation with an ``error`` event.
+
+        Stamped with the sender's ``connId`` when present so the banner
+        pops only in the window that clicked.
+        """
+        event: dict[str, Any] = {"type": "error", "text": error}
+        conn_id = cmd.get("connId", "")
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
+
+    def _cmd_delete_my_model(self, cmd: dict[str, Any]) -> None:
+        """Delete one custom model from ``~/.kiss/MY_MODELS.json``.
+
+        Services the settings panel's per-model Delete button, then
+        rebroadcasts the list to every client.
+        """
+        from kiss.core.models.model_info import delete_custom_model
+
+        name = cmd.get("name", "")
+        error = None
+        if isinstance(name, str) and name:
+            try:
+                error = delete_custom_model(name)
+            except OSError as e:
+                logger.warning("deleteMyModel failed", exc_info=True)
+                error = f"Could not write ~/.kiss/MY_MODELS.json: {e}"
+        if error:
+            self._send_my_models_error(error, cmd)
+            return
+        self._broadcast_my_models()
+
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
         """Update the server's *fallback* working directory.
 
@@ -1589,4 +1799,7 @@ class _CommandsMixin:
         "setWorkDir": _cmd_set_work_dir,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
+        "getMyModels": _cmd_get_my_models,
+        "saveMyModel": _cmd_save_my_model,
+        "deleteMyModel": _cmd_delete_my_model,
     }

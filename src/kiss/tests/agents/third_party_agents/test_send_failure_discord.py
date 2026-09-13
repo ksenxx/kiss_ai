@@ -22,7 +22,6 @@ at via the ``api_base`` constructor argument, following
 from __future__ import annotations
 
 import json
-import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
@@ -106,13 +105,9 @@ class TestDiscordSendMessageFailures:
         assert req["path"] == "/channels/ERR/messages"
         assert req["body"] == {"content": "hello"}
 
-    def test_send_message_raises_on_unreachable_server(self) -> None:
+    def test_send_message_raises_on_unreachable_server(self, refusing_port: int) -> None:
         """An unreachable server (connection refused) must raise."""
-        probe = socket.socket()
-        probe.bind(("127.0.0.1", 0))
-        closed_port = probe.getsockname()[1]
-        probe.close()
-        backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{closed_port}")
+        backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{refusing_port}")
         backend._bot_token = "test-token"
         with pytest.raises(requests.RequestException):
             backend.send_message("111", "hello")
