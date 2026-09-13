@@ -45,12 +45,13 @@ Agent with both coding tools and browser automation for web + code tasks.
 
 **Constructor:** `SorcarAgent(name: str) -> None`
 
+- **classify_task_for_run** — `classify_task_for_run(model_name, task, model_config=None, enabled=None) -> TaskClassification | None`. Classify the task now (one lightweight non-agentic LLM call) and pre-seed the verdict for the coming run, so an external driver can know the run's effective worktree mode before calling `run` — the verdict decides worktree gating and lite-vs-full system prompt selection. `enabled` is a per-run override of the persisted `classify_tasks` setting (`True` forces classification, `False` skips it, `None` follows the config); the `KISS_DISABLE_TASK_CLASSIFIER` environment kill switch wins over any override. Returns `None` when classification is disabled or failed.
 - **run** — Adds on top of `RelentlessAgent.run`: `web_tools: bool = True` (set False for terminal-only), `is_parallel: bool = True` (enables the `run_parallel` tool for spawning parallel sub-agents), `current_editor_file` (path appended to the prompt), `ask_user_question_callback` (collects a text response from the user), `base_system_prompt` (replaces the default system prompt for this agent and its `run_parallel` sub-agents), `append_basic_tools` (set False to run with only `finish` plus the caller's tools), `llm_call_hook`, `tool_call_hook` (forwarded to every sub-session's `KISSAgent`). Returns YAML with `success` and `summary`.
 
 ### Module helpers
 
 - **`auto_commit_changes(commit_dir, user_prompt, message_fn, notify_fn=None, task_result=None) -> bool`** — Stage all changes, generate a commit message (typically via an LLM), and commit. Re-stages just before committing so late-arriving files are included. Falls back to a generic message if `message_fn` raises. Returns True if a commit was created.
-- **`run_tasks_parallel(tasks, max_workers=None, model_name=None, work_dir=None, printer=None, totals_out=None, max_budget=None, model_config=None, usage_monitor=None, parent_agent=None, chat_id='', parent_tab_id='', base_system_prompt='', system_prompt_suffix='') -> list[str]`** — Execute multiple SorcarAgent tasks concurrently with a thread pool; each task gets its own `ChatSorcarAgent`. Returns YAML result strings in the same order as `tasks`.
+- **`run_tasks_parallel(tasks, max_workers=None, model_name=None, work_dir=None, printer=None, totals_out=None, max_budget=None, model_config=None, usage_monitor=None, parent_agent=None, chat_id='', parent_tab_id='', base_system_prompt='', system_prompt_suffix='', web_tools=True) -> list[str]`** — Execute multiple SorcarAgent tasks concurrently with a thread pool; each task gets its own `ChatSorcarAgent`. `web_tools=False` denies each sub-agent the browser tools, so a parent running without web tools spawns children that cannot re-acquire them. Returns YAML result strings in the same order as `tasks`.
 
 ## `kiss.agents.sorcar.chat_sorcar_agent` — Chat-session persistence
 
@@ -96,7 +97,7 @@ Highlights (all methods take explicit `repo`/`wt_dir` paths):
 
 SorcarAgent that isolates every task in a git worktree.
 
-- **`run(prompt_template='', **kwargs) -> str`** — Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Any previously pending branch is auto-committed and squash-merged first. Falls back to direct execution when `use_worktree=False`, when `work_dir` is not in a git repo, when the repo has no commits, or when HEAD is detached.
+- **`run(prompt_template='', **kwargs) -> str`** — Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Any previously pending branch is auto-committed and squash-merged first. Falls back to direct execution when `use_worktree=False`, when the pre-run task classifier is enabled and reports the task is not a development task (the verdict likewise forces a worktree when it reports `is_development=True`), when `work_dir` is not in a git repo, when the repo has no commits, or when HEAD is detached.
 - **merge() -> str** — Merge the task branch into the original branch. Idempotent; auto-commits uncommitted worktree changes and stashes/restores user edits on main.
 - **discard() -> str** — Throw away the task branch and worktree, checkout the original branch. Idempotent.
 - **leave_as_is() -> str** — Detach from the pending worktree, leaving the branch, directory, and uncommitted changes untouched on disk (the "Do nothing" button of the post-task worktree bar); a preserve-for-review marker keeps future processes from silently publishing it.

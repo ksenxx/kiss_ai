@@ -179,7 +179,10 @@ function injectHtmlBase(html: string, dirUri: string): string {
 import {AgentClient, DroppedCommandReason} from './AgentClient';
 import {SorcarApi} from './SorcarApi';
 import {getGitApi} from './gitApi';
-import {getDefaultModel} from './DependencyInstaller';
+import {
+  provisionalDefaultModel,
+  resolveDefaultModel,
+} from './DependencyInstaller';
 import {buildChatHtml, readSampleTasks} from './SorcarTab';
 import {VoiceWakeService} from './voiceWake';
 import {kissHomeDir} from './userAssets';
@@ -314,6 +317,12 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   getAdjacentTask: ['tabId', 'taskId', 'direction'],
   getConfig: [],
   saveConfig: ['config', 'apiKeys'],
+  // The settings panel's Custom Models subpanel: the daemon owns
+  // ~/.kiss/MY_MODELS.json, so the CRUD travels to it whole and the
+  // `myModelsData` replies come back through the client relay.
+  getMyModels: [],
+  saveMyModel: ['name', 'endpoint', 'apiKey', 'headers', 'originalName'],
+  deleteMyModel: ['name'],
   // The daemon builds and writes the shared chat page for both the
   // extension and the remote webapp, so the webview's serialized
   // transcript travels through whole; the daemon answers with a
@@ -515,10 +524,27 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // webview has sent any message carrying the id.
       this._ownTabs.add(panelHooks.rootTabId);
     }
-    this._selectedModel =
-      vscode.workspace
-        .getConfiguration('kissSorcar')
-        .get<string>('defaultModel') || getDefaultModel();
+    const configured = vscode.workspace
+      .getConfiguration('kissSorcar')
+      .get<string>('defaultModel');
+    if (configured) {
+      this._selectedModel = configured;
+    } else {
+      // Never block on `uv run` here: this runs on the extension host's
+      // event loop during activation (and for every new panel in
+      // editor-tabs mode).  Start from a spawn-free guess and adopt the
+      // real default when it arrives -- unless the daemon's `models`
+      // reply or the user has picked a model meanwhile.
+      const provisional = provisionalDefaultModel();
+      this._selectedModel = provisional;
+      resolveDefaultModel().then(
+        model => {
+          if (this._terminated || this._selectedModel !== provisional) return;
+          this._selectedModel = model;
+        },
+        err => console.error('[SorcarSidebarView] default model lookup:', err),
+      );
+    }
   }
 
   private _getApi(): SorcarApi {
@@ -561,6 +587,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._getApi().getModels();
         this._getApi().getInputHistory();
         this._getApi().getConfig();
+        // The settings panel's Custom Models list would otherwise stay
+        // empty/stale in a panel left open across a daemon outage.
+        this._getApi().forward({type: 'getMyModels'});
       }
     });
     client.on('disconnect', () => {
@@ -1221,6 +1250,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     tabId?: string,
     workDir?: string,
     autoCommit?: boolean,
+    webTools?: boolean,
   ): void {
     const effectiveWorkDir = workDir || this._getWorkDir();
     // No local setTaskText echo: the daemon's common run path
@@ -1236,6 +1266,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       useWorktree,
       useParallel,
       autoCommit,
+      webTools,
       tabId,
     });
   }
@@ -1334,6 +1365,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           tabId,
           effectiveWorkDir,
           message.autoCommit,
+          message.webTools,
         );
         break;
       }

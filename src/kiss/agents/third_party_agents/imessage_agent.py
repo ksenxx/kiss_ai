@@ -302,7 +302,7 @@ def main() -> None:
     channel_main(IMessageAgent, "kiss-imessage")
 
 
-def get_tools() -> list:
+def tools() -> list:
     """Return the iMessage channel tools (``kiss.server.sorcar.run`` tools-file contract).
 
     Called by the kiss-web daemon when this module's path is passed as

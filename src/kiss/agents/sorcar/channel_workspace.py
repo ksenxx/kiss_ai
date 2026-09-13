@@ -6,7 +6,7 @@
 
 Channel agent modules read their multi-account workspace identifier
 from the process-global ``KISS_CHANNEL_WORKSPACE`` environment
-variable when their ``get_tools()`` runs on the daemon.  Everything
+variable when their ``tools()`` runs on the daemon.  Everything
 that launches a channel session — the channel CLIs' kiss-web launcher
 (``kiss.agents.third_party_agents._kiss_web_launcher``) and the sorcar
 ``run_agent`` dispatch tool (:mod:`kiss.agents.sorcar.agent_dispatch`)
@@ -49,7 +49,7 @@ def enter_workspace(workspace: str, timeout: float | None = None) -> bool:
     The env var is process-global, so a launch that exported a
     DIFFERENT workspace and is still running must finish first:
     overwriting its value would make that launch's daemon-side channel
-    ``get_tools()`` read THIS launch's workspace and load the wrong
+    ``tools()`` read THIS launch's workspace and load the wrong
     account's credentials.  This call therefore blocks until no other
     workspace is active (same-workspace launches overlap freely via
     the reference count) or *timeout* expires.

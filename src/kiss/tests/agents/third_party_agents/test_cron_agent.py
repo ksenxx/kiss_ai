@@ -56,7 +56,7 @@ def test_delivery_error_notes() -> None:
 
 
 def test_get_tools_and_sorcar_wiring() -> None:
-    assert cron_agent.get_tools() == [cron_job]
+    assert cron_agent.tools() == [cron_job]
     # The module lives in the sorcar package and never imports from
     # kiss.agents.third_party_agents at module scope.
     source_text = Path(cron_agent.__file__).read_text(encoding="utf-8")

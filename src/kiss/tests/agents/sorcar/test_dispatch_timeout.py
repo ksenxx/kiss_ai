@@ -349,7 +349,7 @@ def test_run_agent_tool_waits_past_delayed_result(
     daemon = _SlowFinishDaemon(delay=1.5)
     monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
     script = tmp_path / "slow_helper.py"
-    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    script.write_text("def model() -> str:\n    return 'm'\n")
     try:
         out = make_run_agent_tool(str(tmp_path))(
             str(script), "say hi slowly", timeout=timeout_arg,
@@ -432,7 +432,7 @@ def test_run_agent_tool_times_out_and_stops_the_task(
     daemon = _StopConfirmingDaemon()
     monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
     script = tmp_path / "helper.py"
-    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    script.write_text("def model() -> str:\n    return 'm'\n")
     try:
         out = make_run_agent_tool(str(tmp_path))(
             str(script), "never finishes", timeout="0.5",
@@ -464,7 +464,7 @@ def test_run_agent_tool_reports_unconfirmed_stop(
     daemon = _RecordingDaemon(path, mode="silent")
     monkeypatch.setenv("KISS_SORCAR_SOCK", str(path))
     script = tmp_path / "helper.py"
-    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    script.write_text("def model() -> str:\n    return 'm'\n")
     try:
         out = make_run_agent_tool(str(tmp_path))(
             str(script), "never finishes", timeout="0.5",
@@ -604,7 +604,7 @@ def test_empty_timeout_applies_the_default_constant(
     daemon = _StopConfirmingDaemon()
     monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
     script = tmp_path / "helper.py"
-    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    script.write_text("def model() -> str:\n    return 'm'\n")
     try:
         out = make_run_agent_tool(str(tmp_path))(str(script), "never finishes")
         assert "did not finish within 0.3s" in out

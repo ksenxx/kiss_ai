@@ -2817,6 +2817,23 @@
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
   const worktreeToggleBtn = document.getElementById('cfg-use-worktree');
+  const webToolsToggleBtn = document.getElementById('cfg-use-web-tools');
+  // Whether #cfg-use-web-tools reflects a KNOWN state — the persisted
+  // config (populateConfigForm ran) or an explicit user toggle.  Until
+  // then a submit must NOT send a per-run ``webTools`` override: the
+  // checkbox still holds chat.html's hardcoded ``checked``, and an
+  // invented ``webTools: true`` would defeat the daemon's fallback to
+  // the persisted "Use web tools" setting (config key
+  // ``use_web_browser``).  Unlike ``useWorktree``/``autoCommit`` —
+  // whose wire value IS the source of truth for the run — ``webTools``
+  // has that server-side config fallback, so omitting it is the
+  // correct "no opinion yet" signal.
+  let webToolsStateKnown = false;
+  if (webToolsToggleBtn) {
+    webToolsToggleBtn.addEventListener('change', () => {
+      webToolsStateKnown = true;
+    });
+  }
   const autocommitBtn = document.getElementById('autocommit-btn');
   const updateBtn = document.getElementById('cfg-update-btn');
   const updateModelsBtn = document.getElementById('cfg-update-models-btn');
@@ -2831,6 +2848,7 @@
     'server-reset-confirm-cancel',
   );
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
+  const classifyTasksToggleBtn = document.getElementById('cfg-classify-tasks');
   const shareBtn = document.getElementById('share-btn');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
@@ -2880,6 +2898,149 @@
   mirrorStatusIntoMetaPanel('status-steps', 'meta-steps', true);
   mirrorStatusIntoMetaPanel('status-text', 'meta-time', false);
   mirrorStatusIntoMetaPanel('status-machine', 'meta-machine', false);
+
+  // metainfo-coverage:start
+  // The info subpanel of the docked task-info panel (#meta-info,
+  // remote desktop mode only) mirrors ./tmp/info.md under the active
+  // tab's workdir.  The daemon owns the file, so the client polls
+  // getInfoFile every couple of seconds; the reply's sig (mtime+size
+  // fingerprint) makes an unchanged file cost one stat per poll, and
+  // a missing file renders as an empty subpanel.
+  const metaInfoEl = document.getElementById('meta-info');
+  const metaInfoContent = document.getElementById('meta-info-content');
+  let metaInfoSig = '';
+  let metaInfoWorkDir = '';
+  // Generation token, bumped on every workdir switch and echoed by the
+  // daemon: replies are matched against it rather than the workDir
+  // echo, because the server's dispatch may rewrite a degenerate
+  // workDir (root paths are blanked and re-pinned) and a rewritten
+  // echo would never string-match the poll target.
+  let metaInfoGen = 0;
+
+  /**
+   * Paint *html* into the info subpanel's content div.  The `visible`
+   * class on #meta-info follows: while there is nothing to show the
+   * WHOLE subpanel — the tmp/info.md header included — stays hidden,
+   * so an idle tab or a missing file leaves no trace in the panel.
+   *
+   * @param {string} html Sanitized markup, '' to empty and hide.
+   */
+  function setMetaInfoHTML(html) {
+    if (!metaInfoContent) return;
+    metaInfoContent.innerHTML = html;
+    if (metaInfoEl) metaInfoEl.classList.toggle('visible', html !== '');
+  }
+
+  /** Ask the daemon for tmp/info.md under the subpanel's workdir. */
+  function requestInfoFile() {
+    if (!metaInfoContent) return;
+    // Only a RUNNING task has a live tmp/info.md worth mirroring; an
+    // idle tab's subpanel stays empty and costs the daemon nothing.
+    if (!isRunning) return;
+    if (!document.body.classList.contains('remote-desktop')) return;
+    if (document.visibilityState === 'hidden') return;
+    try {
+      api.getInfoFile({
+        workDir: metaInfoWorkDir,
+        tabId: activeTabId,
+        knownSig: metaInfoSig,
+        token: String(metaInfoGen),
+      });
+    } catch (_e) {
+      // Not connected yet; the next poll retries.
+    }
+  }
+
+  /**
+   * Adopt *wd* as the workdir the info subpanel mirrors — the SAME
+   * workdir the panel's Workdir row shows (updateMetaTaskDetails
+   * drives both), so the subpanel can never read one directory while
+   * the row names another.  A change invalidates the held signature
+   * and clears the shown contents right away — the old workdir's
+   * info.md must not survive a tab or config switch, and a late reply
+   * for the former workdir no longer matches — then polls immediately
+   * instead of waiting out the interval.
+   */
+  function setMetaInfoWorkDir(wd) {
+    if (wd === metaInfoWorkDir) return;
+    metaInfoWorkDir = wd;
+    metaInfoSig = '';
+    metaInfoGen++;
+    setMetaInfoHTML('');
+    requestInfoFile();
+  }
+
+  // Whether the last syncMetaInfoRunning call saw a running task, so
+  // the frequent setRunningState repaints only act on actual flips.
+  let metaInfoSawRunning = false;
+
+  /**
+   * Track the visible tab's running state for the info subpanel.
+   * Called by setRunningState on every repaint: when the task ends
+   * (or the user switches to an idle tab) the subpanel empties and
+   * hides right away — a late reply for the finished task no longer
+   * matches the bumped generation — and when one starts, the first
+   * poll fires immediately instead of waiting out the 2s interval.
+   *
+   * @param {boolean} running Whether the visible tab is now running.
+   */
+  function syncMetaInfoRunning(running) {
+    running = !!running;
+    if (running === metaInfoSawRunning) return;
+    metaInfoSawRunning = running;
+    if (running) {
+      requestInfoFile();
+    } else {
+      metaInfoSig = '';
+      metaInfoGen++;
+      setMetaInfoHTML('');
+    }
+  }
+
+  /** Paint one infoFile reply into the info subpanel. */
+  function renderInfoFileEvent(ev) {
+    if (!metaInfoContent) return;
+    // A reply for a workdir the panel no longer shows (the poll moved
+    // on with a tab switch) must not overwrite the current one.  The
+    // echoed request token — not the workDir echo, which the server
+    // may have rewritten — names the generation the reply answers.
+    if ((ev.token || '') !== String(metaInfoGen)) return;
+    if (ev.unchanged) return;
+    metaInfoSig = typeof ev.sig === 'string' ? ev.sig : '';
+    const text = ev.exists && typeof ev.content === 'string' ? ev.content : '';
+    if (!text.trim()) {
+      setMetaInfoHTML('');
+      return;
+    }
+    if (typeof marked !== 'undefined') {
+      setMetaInfoHTML(kissSanitize(marked.parse(text)));
+    } else {
+      metaInfoContent.textContent = text;
+      if (metaInfoEl) metaInfoEl.classList.add('visible');
+    }
+  }
+
+  let metaInfoTimer = null;
+
+  /**
+   * Start or stop the 2s info-file poll to match remote desktop mode.
+   * Called by applyRemoteDesktop whenever the mode is (re)applied.  A
+   * timer that ran unconditionally would tick forever in webviews that
+   * can never show the panel (the VS Code extension, phone-sized
+   * remote windows) — and would keep every jsdom-hosted webview's node
+   * process alive after its tests finish.
+   */
+  function syncMetaInfoPolling() {
+    const want = document.body.classList.contains('remote-desktop');
+    if (want && metaInfoTimer === null) {
+      metaInfoTimer = setInterval(requestInfoFile, 2000);
+      requestInfoFile();
+    } else if (!want && metaInfoTimer !== null) {
+      clearInterval(metaInfoTimer);
+      metaInfoTimer = null;
+    }
+  }
+  // metainfo-coverage:end
 
   // The welcome screen lives inside the scrolling chat container, so
   // whatever scroll offset the previous content left behind (a finished
@@ -2974,8 +3135,70 @@
       .join('');
   }
 
+  const metaWorkdirEl = document.getElementById('meta-workdir');
+  const metaMaxBudgetEl = document.getElementById('meta-max-budget');
+  // The configured default task budget (config.max_budget), captured
+  // from configData replies by populateConfigForm: what a task with no
+  // settings of its own would run under.  null until a configData
+  // reply arrives — zero is a REAL budget ("stop immediately"), so it
+  // may not double as the unknown sentinel.
+  let configMaxBudget = null;
+  // The settings payload the meta rows currently describe — whatever
+  // renderTaskPanelInfo painted LAST, which during a scroll onto a
+  // spliced-in neighbouring task is the neighbour's settings, not the
+  // tab's own currentTaskSettings.  A configData repaint must reuse
+  // this, or it would silently jump the rows (and the info-subpanel
+  // workdir) back to the tab's own task while the task header still
+  // describes the neighbour.
+  let metaShownSettings = null;
+
+  /** *value* as a finite budget number, or null when it is not one. */
+  function finiteBudget(value) {
+    if (value == null) return null;
+    const n = Number(value);
+    return isFinite(n) ? n : null;
+  }
+
+  /**
+   * Paint the Workdir and Max budget items of the docked task-info
+   * panel (#meta-panel, remote desktop mode only).  Driven from
+   * renderTaskPanelInfo — the choke point every task-settings repaint
+   * (tab switch, task_settings event, scroll into a neighbouring
+   * task) already goes through — so the two items always describe the
+   * same task as the static task panel.  A task without settings
+   * falls back to the tab's pinned workdir and the configured default
+   * budget.  The workdir shown here is also adopted as the info
+   * subpanel's poll target (setMetaInfoWorkDir), keeping the row and
+   * the mirrored tmp/info.md in the same directory.
+   *
+   * @param {object|null} s A task_settings event's settings payload.
+   */
+  function updateMetaTaskDetails(s) {
+    metaShownSettings = s && typeof s === 'object' ? s : null;
+    s = metaShownSettings;
+    if (!metaWorkdirEl && !metaMaxBudgetEl) return;
+    // A filesystem root is never a real workspace (replayed historical
+    // tasks are a known source of poisoned root paths — see
+    // workDirForTab): fall back exactly like workDirForTab does, and
+    // like the server's dispatch does for the poll, so the reply's
+    // workDir echo keeps matching the poll target.
+    const rawWd = s && s.work_dir ? String(s.work_dir) : '';
+    const wd =
+      (rawWd && !isRootDir(rawWd) ? rawWd : '') || workDirForTab(activeTabId);
+    let budget = finiteBudget(s ? s.max_budget : null);
+    if (budget === null) budget = configMaxBudget;
+    if (metaWorkdirEl) metaWorkdirEl.textContent = wd || '\u2014';
+    if (metaMaxBudgetEl) {
+      metaMaxBudgetEl.textContent =
+        budget === null ? '\u2014' : '$' + budget.toFixed(2);
+    }
+    setMetaInfoWorkDir(wd);
+  }
+  updateMetaTaskDetails(null);
+
   /** Paint *s* into the panel's info block (clears it for null). */
   function renderTaskPanelInfo(s) {
+    updateMetaTaskDetails(s);
     if (!taskPanelInfo) return;
     taskPanelInfo.innerHTML = taskPanelInfoHTML(s);
   }
@@ -4866,6 +5089,43 @@
     return html;
   }
 
+  // resultimages-coverage:start
+  /**
+   * Render the images a tool call generated — server-embedded as
+   * base64 payloads on the tool_result event (see
+   * JsonPrinter._collect_result_images) — inline in the tool's event
+   * panel.  Clicking an image toggles between the capped preview
+   * height and its natural size.
+   */
+  function appendResultImages(ev, container) {
+    if (!Array.isArray(ev.images) || !ev.images.length) return;
+    const wrap = mkEl('div', 'tr-images');
+    for (let i = 0; i < ev.images.length; i++) {
+      const im = ev.images[i];
+      if (!im || !im.b64 || !im.mime) continue;
+      const box = mkEl('div', 'tr-img-box');
+      const img = document.createElement('img');
+      img.className = 'tr-img';
+      // Property assignment (never innerHTML): the payload is inert
+      // data, and an <img> data: URI cannot run scripts.
+      img.src = 'data:' + im.mime + ';base64,' + im.b64;
+      img.alt = im.path || 'tool result image';
+      if (im.path) img.title = im.path;
+      img.addEventListener('click', () => {
+        img.classList.toggle('tr-img-full');
+      });
+      box.appendChild(img);
+      if (im.path) {
+        const cap = mkEl('div', 'tr-img-cap');
+        cap.textContent = im.path;
+        box.appendChild(cap);
+      }
+      wrap.appendChild(box);
+    }
+    if (wrap.childElementCount) container.appendChild(wrap);
+  }
+  // resultimages-coverage:end
+
   // autoscroll-coverage:start
   // Auto-scroll: the chat webview (extension and remote webapp alike)
   // follows the tail of the latest event panel — unless the user
@@ -5310,7 +5570,12 @@
         if (ev.is_error) tState.pendingReport = null;
         else confirmReadyReport(tState, ev);
         // report-coverage:end
-        if (hadBash && !ev.is_error) break;
+        if (hadBash && !ev.is_error) {
+          // resultimages-coverage:start
+          appendResultImages(ev, tState.lastToolCallEl || target);
+          // resultimages-coverage:end
+          break;
+        }
         const resultTarget = tState.lastToolCallEl || target;
         if (ev.is_error) {
           const r = mkEl('div', 'ev tr err');
@@ -5336,6 +5601,9 @@
           addCopyButton(op);
           if (!tState.lastToolCallEl) addPanelTimestamp(op, ev.ts);
           resultTarget.appendChild(op);
+          // resultimages-coverage:start
+          appendResultImages(ev, resultTarget);
+          // resultimages-coverage:end
         }
         break;
       }
@@ -6915,6 +7183,22 @@
         }
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
         break;
+      case 'myModelsData':
+        myModels = Array.isArray(ev.models) ? ev.models : [];
+        // The edited model vanished (deleted from another window, or
+        // renamed by this very edit's save): drop the edit state so the
+        // boxes stop claiming to edit an entry that no longer exists.
+        if (
+          customModelEditName !== null &&
+          !myModels.some(m => m && m.name === customModelEditName)
+        ) {
+          cancelCustomModelEdit();
+        }
+        renderCustomModels();
+        break;
+      case 'infoFile':
+        renderInfoFileEvent(ev);
+        break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
         autofillHistoryDateRange(ev.dateRange);
@@ -8048,6 +8332,7 @@
     if (!running) flushStreamTailSweep();
     // streamtail-coverage:end
     isRunning = running;
+    syncMetaInfoRunning(running);
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
     // A tab that is not running has nothing left to stop, so the
@@ -9994,6 +10279,7 @@
           sidebar.classList.remove('open');
           sidebarOverlay.classList.remove('open');
         }
+        syncMetaInfoPolling();
       };
       if (typeof desktopMq.addEventListener === 'function') {
         desktopMq.addEventListener('change', applyRemoteDesktop);
@@ -10261,6 +10547,29 @@
       settingsPanel.addEventListener('input', noteSettingsEdit);
       settingsPanel.addEventListener('change', noteSettingsEdit);
     }
+    CONFIG_SUBPANELS.forEach(pair => {
+      const toggle = document.getElementById(pair[0]);
+      const body = document.getElementById(pair[1]);
+      if (toggle && body) {
+        toggle.addEventListener('click', () => {
+          setConfigSubpanelExpanded(pair[0], pair[1], body.hidden);
+        });
+      }
+    });
+    const customModelAddBtn = document.getElementById('custom-model-add-btn');
+    const customModelSaveBtn = document.getElementById('custom-model-save-btn');
+    const customModelCancelBtn = document.getElementById(
+      'custom-model-cancel-btn',
+    );
+    if (customModelAddBtn) {
+      customModelAddBtn.addEventListener('click', submitCustomModel);
+    }
+    if (customModelSaveBtn) {
+      customModelSaveBtn.addEventListener('click', submitCustomModel);
+    }
+    if (customModelCancelBtn) {
+      customModelCancelBtn.addEventListener('click', cancelCustomModelEdit);
+    }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
       api.getHistory({
@@ -10514,6 +10823,10 @@
   // A valid JPEG of any real photo is far bigger than this; mobile Safari has
   // been seen returning byte-stub blobs instead of an encoded image.
   const ATTACH_MIN_JPEG_BYTES = 256;
+  // Reading + converting one attachment must settle within this: a browser
+  // decoder / FileReader that never calls back would otherwise leave the
+  // slot pending -- and the tab's send latched -- for ever.
+  const ATTACH_PREPARE_TIMEOUT_MS = 60 * 1000;
   // Image formats every supported vision API understands.
   const MODEL_IMAGE_MIME_TYPES = [
     'image/jpeg',
@@ -10713,11 +11026,34 @@
   }
 
   /**
+   * Settle with `promise`, or reject with `why` once `ms` have passed.
+   */
+  function withDeadline(promise, ms, why) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(why)), ms);
+      promise.then(
+        value => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        err => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
+  }
+
+  /**
    * Fill `slot` with the bytes of `file`, or drop it and explain why.
    *
    * The tab's own lists are captured up front: the user may switch tabs while
    * a photo is being converted, and the outcome belongs to the tab that
    * picked the file, not to whichever tab is on screen when it lands.
+   *
+   * Preparation is bounded: a decoder or reader that never calls back is
+   * reported through the same error chip as a failed conversion, so the
+   * send waiting in attachmentsReady() is released instead of latched.
    *
    * Returns:
    *   A promise for whether the slot now holds a usable attachment.
@@ -10726,7 +11062,13 @@
     const ownerFiles = attachments;
     const ownerErrors = attachErrors;
     try {
-      const ready = await prepareAttachment(file);
+      const ready = await withDeadline(
+        prepareAttachment(file),
+        ATTACH_PREPARE_TIMEOUT_MS,
+        'it could not be read within ' +
+          Math.round(ATTACH_PREPARE_TIMEOUT_MS / 1000) +
+          's',
+      );
       slot.name = ready.name;
       slot.type = ready.type;
       slot.data = ready.data;
@@ -10895,6 +11237,12 @@
       useParallel: true,
       autoCommit: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
     };
+    // Only a KNOWN toggle state becomes a per-run override; otherwise
+    // the field stays absent and the daemon falls back to the
+    // persisted "Use web tools" setting (see webToolsStateKnown).
+    if (webToolsToggleBtn && webToolsStateKnown) {
+      msg.webTools = !!webToolsToggleBtn.checked;
+    }
     if (curTab && curTab.workDir) msg.workDir = curTab.workDir;
     api.send(msg);
     t0 = Date.now();
@@ -12020,10 +12368,18 @@
     setPanelOpen(settingsPanel, settingsOverlay, true);
     configFormPopulated = false;
     settingsEditedFields.clear();
+    // The API Keys / Custom Models subpanels START collapsed on every
+    // open; only an explicit click on their header expands them.
+    collapseConfigSubpanels();
     api.getConfig();
+    api.getMyModels();
   }
 
   function closeSettingsPanel() {
+    // An abandoned in-place edit must not leak the edited model's
+    // endpoint / key / headers into the saved config: restore the
+    // boxes to what the user last typed BEFORE flushing the form.
+    cancelCustomModelEdit();
     saveSettingsIfPopulated();
     settingsEditedFields.clear();
     setPanelOpen(settingsPanel, settingsOverlay, false);
@@ -12197,6 +12553,319 @@
     setupPasswordToggle(btn.id, inputId, noun);
   }
 
+  // ---- Collapsible settings subpanels (API Keys, Custom Models) ----
+
+  // toggle-button id / body id of every collapsible settings subpanel.
+  const CONFIG_SUBPANELS = [
+    ['api-keys-toggle', 'api-keys-body'],
+    ['custom-models-toggle', 'custom-models-body'],
+  ];
+
+  /**
+   * Expand or collapse one settings subpanel.
+   *
+   * @param {string} toggleId The subpanel's header-button element id.
+   * @param {string} bodyId The subpanel's body element id.
+   * @param {boolean} expanded True shows the body.
+   */
+  function setConfigSubpanelExpanded(toggleId, bodyId, expanded) {
+    const toggle = document.getElementById(toggleId);
+    const body = document.getElementById(bodyId);
+    if (!toggle || !body) return;
+    body.hidden = !expanded;
+    toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    toggle.classList.toggle('expanded', expanded);
+  }
+
+  /** Collapse every settings subpanel (the settings panel's open state). */
+  function collapseConfigSubpanels() {
+    CONFIG_SUBPANELS.forEach(pair => {
+      setConfigSubpanelExpanded(pair[0], pair[1], false);
+    });
+  }
+
+  // ---- Custom Models subpanel (~/.kiss/MY_MODELS.json) ----
+
+  // The daemon's last myModelsData list: one row per custom model.
+  let myModels = [];
+  // Name of the MY_MODELS.json entry being edited in the boxes, or
+  // null while the boxes feed the Add button.
+  let customModelEditName = null;
+  // Box values captured when the edit began, restored on Cancel/Save so
+  // an edit never leaks the model's values into the saved config (the
+  // endpoint / key / headers boxes double as the config form's custom-
+  // endpoint fields).
+  let customModelBoxSnapshot = null;
+  // Which of the three shared boxes held USER-typed values when the
+  // edit began (their settingsEditedFields membership). Restored on
+  // cancel so an edit can neither promote the model's values into
+  // "user-edited" nor keep a fresher configData from repainting boxes
+  // the user never touched.
+  let customModelPreEditDirty = null;
+  // The last configData's custom-endpoint values. Recorded even while
+  // an edit skips repainting the boxes, so cancelling the edit can
+  // restore the AUTHORITATIVE values instead of a stale pre-edit
+  // snapshot (the boxes may have been populated before this panel
+  // open's configData reply arrived).
+  let lastCustomCfgValues = null;
+
+  /** Read the Custom Models boxes. @returns {object} Trimmed values. */
+  function readCustomModelBoxes() {
+    const el = id => document.getElementById(id);
+    return {
+      name: el('cfg-custom-model-name').value.trim(),
+      endpoint: el('cfg-custom-endpoint').value.trim(),
+      apiKey: el('cfg-custom-api-key').value.trim(),
+      headers: el('cfg-custom-headers').value.trim(),
+    };
+  }
+
+  /**
+   * Write the Custom Models boxes.
+   *
+   * Programmatic writes fire no input event, so they never mark the
+   * fields as user-edited (see settingsEditedFields).
+   *
+   * @param {object} values name / endpoint / apiKey / headers strings.
+   */
+  function writeCustomModelBoxes(values) {
+    const el = id => document.getElementById(id);
+    el('cfg-custom-model-name').value = values.name;
+    el('cfg-custom-endpoint').value = values.endpoint;
+    el('cfg-custom-api-key').value = values.apiKey;
+    el('cfg-custom-headers').value = values.headers;
+  }
+
+  /**
+   * Show the Add button (false) or the Save + Cancel pair (true).
+   *
+   * @param {boolean} editing Whether an edit is in progress.
+   */
+  function setCustomModelEditMode(editing) {
+    const addBtn = document.getElementById('custom-model-add-btn');
+    const saveBtn = document.getElementById('custom-model-save-btn');
+    const cancelBtn = document.getElementById('custom-model-cancel-btn');
+    if (addBtn) addBtn.style.display = editing ? 'none' : '';
+    if (saveBtn) saveBtn.style.display = editing ? '' : 'none';
+    if (cancelBtn) cancelBtn.style.display = editing ? '' : 'none';
+  }
+
+  /**
+   * Load *model* into the boxes and switch Add to Save / Cancel.
+   *
+   * @param {object} model A myModelsData row (name / endpoint /
+   *   api_key / headers).
+   */
+  function startCustomModelEdit(model) {
+    if (customModelEditName === null) {
+      customModelBoxSnapshot = readCustomModelBoxes();
+      customModelPreEditDirty = new Set(
+        [
+          'cfg-custom-endpoint',
+          'cfg-custom-api-key',
+          'cfg-custom-headers',
+        ].filter(id => settingsEditedFields.has(id)),
+      );
+    }
+    customModelEditName = model.name;
+    writeCustomModelBoxes({
+      name: model.name,
+      endpoint: model.endpoint || '',
+      apiKey: model.api_key || '',
+      headers: model.headers || '',
+    });
+    setCustomModelEditMode(true);
+    renderCustomModels();
+  }
+
+  /**
+   * Abandon the in-place edit and restore the pre-edit box values.
+   *
+   * A box the user had typed into before the edit gets that typed
+   * value back (and stays marked edited). A box the user never touched
+   * gets the LATEST configData value — not the snapshot, which may
+   * predate this panel open's config reply — and its accidental
+   * edited-mark (typing during the model edit) is dropped, so later
+   * configData polls repaint it and a close flushes authoritative
+   * values instead of stale ones.
+   */
+  function cancelCustomModelEdit() {
+    if (customModelEditName === null) return;
+    customModelEditName = null;
+    if (customModelBoxSnapshot) {
+      const snap = customModelBoxSnapshot;
+      const dirty = customModelPreEditDirty || new Set();
+      const cfg = lastCustomCfgValues;
+      const restored = {name: snap.name};
+      [
+        ['cfg-custom-endpoint', 'endpoint'],
+        ['cfg-custom-api-key', 'apiKey'],
+        ['cfg-custom-headers', 'headers'],
+      ].forEach(pair => {
+        const id = pair[0];
+        const key = pair[1];
+        if (dirty.has(id)) {
+          restored[key] = snap[key];
+        } else {
+          restored[key] = cfg ? cfg[key] : snap[key];
+          settingsEditedFields.delete(id);
+        }
+      });
+      writeCustomModelBoxes(restored);
+      customModelBoxSnapshot = null;
+      customModelPreEditDirty = null;
+    }
+    setCustomModelEditMode(false);
+    renderCustomModels();
+  }
+
+  /**
+   * Send the boxes to the daemon: Add a new model, or Save an edit.
+   *
+   * The daemon writes ~/.kiss/MY_MODELS.json and answers every client
+   * with a fresh myModelsData, which repaints the list.
+   */
+  /**
+   * Client-side mirror of the daemon's saveMyModel validation.
+   *
+   * Mirroring it here keeps a rejected Add/Save from optimistically
+   * clearing the boxes and losing the draft (the daemon's error event
+   * arrives after the state is gone).
+   *
+   * @param {object} values The trimmed box values.
+   * @returns {string|null} The error message, or null when valid.
+   */
+  function customModelValidationError(values) {
+    if (values.name.startsWith('_')) {
+      return "Custom model name must not start with '_'";
+    }
+    const exists = myModels.some(m => m && m.name === values.name);
+    if (customModelEditName === null && exists) {
+      return (
+        "A custom model named '" +
+        values.name +
+        "' already exists; use its Edit button to change it"
+      );
+    }
+    if (
+      customModelEditName !== null &&
+      values.name !== customModelEditName &&
+      exists
+    ) {
+      return "A custom model named '" + values.name + "' already exists";
+    }
+    return null;
+  }
+
+  function submitCustomModel() {
+    const values = readCustomModelBoxes();
+    const nameInp = document.getElementById('cfg-custom-model-name');
+    if (!values.name) {
+      if (nameInp) nameInp.focus();
+      return;
+    }
+    const validationError = customModelValidationError(values);
+    if (validationError) {
+      showNotification({message: validationError, severity: 'error'});
+      if (nameInp) nameInp.focus();
+      return;
+    }
+    const msg = {
+      name: values.name,
+      endpoint: values.endpoint,
+      apiKey: values.apiKey,
+      headers: values.headers,
+    };
+    if (customModelEditName !== null) {
+      msg.originalName = customModelEditName;
+      api.saveMyModel(msg);
+      cancelCustomModelEdit();
+      return;
+    }
+    api.saveMyModel(msg);
+    // The entry is added; a stale name left behind would make the next
+    // Add silently overwrite it. The endpoint / key / headers boxes
+    // keep what the user typed — they are also the config form's
+    // custom-endpoint fields.
+    if (nameInp) nameInp.value = '';
+  }
+
+  /** Repaint the #custom-models-list rows from myModels. */
+  function renderCustomModels() {
+    const list = document.getElementById('custom-models-list');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!myModels.length) {
+      const empty = document.createElement('div');
+      empty.className = 'custom-models-empty';
+      empty.textContent = 'No custom models in ~/.kiss/MY_MODELS.json';
+      list.appendChild(empty);
+      return;
+    }
+    myModels.forEach(model => {
+      if (!model || !model.name) return;
+      list.appendChild(buildCustomModelRow(model));
+    });
+  }
+
+  /**
+   * Build one list row: name, endpoint, Edit and Delete buttons.
+   *
+   * @param {object} model A myModelsData row.
+   * @returns {HTMLElement} The row element.
+   */
+  function buildCustomModelRow(model) {
+    const row = document.createElement('div');
+    row.className = 'custom-model-row';
+    row.classList.toggle('editing', model.name === customModelEditName);
+
+    const name = document.createElement('span');
+    name.className = 'custom-model-name';
+    name.textContent = model.name;
+    name.title = model.name;
+    row.appendChild(name);
+
+    const endpoint = document.createElement('span');
+    endpoint.className = 'custom-model-endpoint';
+    endpoint.textContent = model.endpoint || '';
+    endpoint.title = model.endpoint || '';
+    row.appendChild(endpoint);
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'custom-model-btn custom-model-edit-btn';
+    editBtn.setAttribute('aria-label', 'Edit ' + model.name);
+    editBtn.title = 'Edit';
+    editBtn.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>' +
+      '</svg>';
+    editBtn.addEventListener('click', () => startCustomModelEdit(model));
+    row.appendChild(editBtn);
+
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'custom-model-btn custom-model-delete-btn';
+    delBtn.setAttribute('aria-label', 'Delete ' + model.name);
+    delBtn.title = 'Delete';
+    delBtn.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round" aria-hidden="true">' +
+      '<polyline points="3 6 5 6 21 6"/>' +
+      '<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 ' +
+      '1 2-2h4a2 2 0 0 1 2 2v2"/>' +
+      '</svg>';
+    delBtn.addEventListener('click', () => {
+      if (model.name === customModelEditName) cancelCustomModelEdit();
+      api.deleteMyModel({name: model.name});
+    });
+    row.appendChild(delBtn);
+    return row;
+  }
+
   let configFormPopulated = false;
   // Ids of the settings fields the user has edited since the panel was
   // opened.  `configData` is not a one-shot reply: the host re-pushes it
@@ -12274,6 +12943,11 @@
     // A copy of the number here could only ever drift away from it, so
     // the box shows what the daemon sent and nothing when it sent none.
     if (cfg.max_budget != null) setValue('cfg-max-budget', cfg.max_budget);
+    // The docked task-info panel's Workdir / Max budget items fall
+    // back to these config values while the visible task has no
+    // task_settings of its own, so a config change repaints them.
+    configMaxBudget = finiteBudget(cfg.max_budget);
+    updateMetaTaskDetails(metaShownSettings);
     // Initialize the run toggles from the persisted config instead of
     // leaving whatever hardcoded `checked` state chat.html shipped with,
     // so a fresh session (VS Code webview or remote web client) reflects
@@ -12281,9 +12955,28 @@
     // same defaults as vscode_config.DEFAULTS.
     setChecked(autocommitToggleBtn, cfg.auto_commit_mode !== false);
     setChecked(worktreeToggleBtn, cfg.is_worktree !== false);
-    setValue('cfg-custom-endpoint', cfg.custom_endpoint || '');
-    setValue('cfg-custom-api-key', cfg.custom_api_key || '');
-    setValue('cfg-custom-headers', cfg.custom_headers || '');
+    setChecked(webToolsToggleBtn, cfg.use_web_browser !== false);
+    // The toggle now mirrors the persisted setting (or a user edit that
+    // setChecked preserved), so submits may carry it as the per-run
+    // ``webTools`` override.
+    webToolsStateKnown = true;
+    setChecked(classifyTasksToggleBtn, cfg.classify_tasks !== false);
+    // Recorded even while an edit is active (the boxes themselves are
+    // skipped below), so cancelling the edit restores the latest
+    // authoritative values — see cancelCustomModelEdit.
+    lastCustomCfgValues = {
+      endpoint: cfg.custom_endpoint || '',
+      apiKey: cfg.custom_api_key || '',
+      headers: cfg.custom_headers || '',
+    };
+    // While a Custom Models edit has the boxes loaded with a model's
+    // values (a programmatic write, so settingsEditedFields does not
+    // guard it), the 2-second configData poll must not repaint them.
+    if (customModelEditName === null) {
+      setValue('cfg-custom-endpoint', cfg.custom_endpoint || '');
+      setValue('cfg-custom-api-key', cfg.custom_api_key || '');
+      setValue('cfg-custom-headers', cfg.custom_headers || '');
+    }
     setValue('cfg-remote-password', cfg.remote_password || '');
     // The welcome screen's password box mirrors the settings one, so it
     // follows the same edited mark.
@@ -12328,6 +13021,14 @@
     }
     if (want('cfg-use-worktree')) {
       cfg.is_worktree = !!(worktreeToggleBtn && worktreeToggleBtn.checked);
+    }
+    if (want('cfg-use-web-tools')) {
+      cfg.use_web_browser = !!(webToolsToggleBtn && webToolsToggleBtn.checked);
+    }
+    if (want('cfg-classify-tasks')) {
+      cfg.classify_tasks = !!(
+        classifyTasksToggleBtn && classifyTasksToggleBtn.checked
+      );
     }
     if (want('cfg-custom-endpoint')) {
       cfg.custom_endpoint = el('cfg-custom-endpoint').value.trim();

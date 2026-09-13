@@ -58,6 +58,9 @@ TASK_SETTINGS_HEADER = "\n# Task Settings\n"
 #: Budget cap (USD) a run falls back to when the caller states none.
 DEFAULT_MAX_BUDGET = 200.0
 
+#: Model a run falls back to when the caller states none.
+DEFAULT_MODEL_NAME = "claude-opus-4-6"
+
 CONTINUATION_PROMPT = """
 # Task Progress (Continuation {continuation_number})
 
@@ -240,6 +243,11 @@ class RelentlessAgent(Base):
         # concurrent read-modify-writes interleave and one side's
         # increment silently vanishes from the task's accounting.
         self._usage_lock: threading.Lock = threading.Lock()
+        # Exists from construction, not only after ``_reset``: the
+        # classifier-usage fold in ``SorcarAgent.run``'s ``finally``
+        # (and any other pre-``_reset`` failure path) may touch the
+        # cumulative step counter before the first session starts.
+        self.total_steps: int = 0
 
     def _reset(
         self,
@@ -262,11 +270,11 @@ class RelentlessAgent(Base):
         self.max_budget = (
             max_budget if max_budget is not None else DEFAULT_MAX_BUDGET
         )
-        self.model_name = model_name if model_name is not None else "claude-opus-4-6"
+        self.model_name = model_name if model_name is not None else DEFAULT_MODEL_NAME
         self.verbose = verbose
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
-        self.total_steps: int = 0
+        self.total_steps = 0
         self._current_executor: KISSAgent | None = None
         self.docker_image = docker_image
         self.docker_manager: Any = None

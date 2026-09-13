@@ -27,6 +27,7 @@ export type FromWebviewMessage =
       useWorktree?: boolean;
       useParallel?: boolean;
       autoCommit?: boolean;
+      webTools?: boolean;
       tabId?: string;
       workDir?: string;
     }
@@ -116,6 +117,17 @@ export type FromWebviewMessage =
       config: Record<string, unknown>;
       apiKeys: Record<string, string>;
     }
+  | {type: 'getMyModels'}
+  | {
+      type: 'saveMyModel';
+      name: string;
+      endpoint?: string;
+      apiKey?: string;
+      headers?: string;
+      /** The entry's name before an edit-and-rename ('' for adds). */
+      originalName?: string;
+    }
+  | {type: 'deleteMyModel'; name: string}
   | {type: 'sizeReport'; innerWidth: number; screenWidth: number}
   | {type: 'runUpdate'}
   | {type: 'updateModels'}
@@ -229,6 +241,8 @@ type ToWebviewMessageBody =
       is_error?: boolean;
       tool_name?: string;
       path?: string;
+      /** Images the tool call generated, embedded for inline display. */
+      images?: Array<{path?: string; mime: string; b64: string}>;
     }
   | {type: 'system_output'; text: string}
   | {
@@ -336,6 +350,15 @@ type ToWebviewMessageBody =
       apiKeys?: Record<string, string>;
       /** The server machine's hostname, shown in the status bar. */
       machine?: string;
+    }
+  | {
+      type: 'myModelsData';
+      models: Array<{
+        name: string;
+        endpoint: string;
+        api_key: string;
+        headers: string;
+      }>;
     }
   | {
       type: 'history';
@@ -573,6 +596,9 @@ export interface AgentCommand {
     | 'setWorkDir'
     | 'getConfig'
     | 'saveConfig'
+    | 'getMyModels'
+    | 'saveMyModel'
+    | 'deleteMyModel'
     | 'serverReset'
     | 'shareChat'
     | 'shareChatTasks'
@@ -597,6 +623,7 @@ export interface AgentCommand {
   useWorktree?: boolean;
   useParallel?: boolean;
   autoCommit?: boolean;
+  webTools?: boolean;
   task?: string;
   direction?: 'prev' | 'next';
   tabId?: string;
@@ -605,6 +632,16 @@ export interface AgentCommand {
   isFavorite?: boolean;
   title?: string;
   latest?: string;
+  /** saveMyModel / deleteMyModel: the custom model's name. */
+  name?: string;
+  /** saveMyModel: OpenAI-compatible base URL for the model. */
+  endpoint?: string;
+  /** saveMyModel: API key sent to the endpoint. */
+  apiKey?: string;
+  /** saveMyModel: extra HTTP headers, `Key: Value` one per line. */
+  headers?: string;
+  /** saveMyModel: the entry's name before an edit-and-rename. */
+  originalName?: string;
   restoredTabs?: Array<{
     tabId: string;
     chatId: string;

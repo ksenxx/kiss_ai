@@ -11,9 +11,9 @@
 //    insertSelectionToChat go to the panel manager's controllers when
 //    the mode is ON and to the sidebar view when OFF;
 //  - flipping kissSorcar.editorTabsMode ON migrates the registry's
-//    tabs into panels (enterMode) and OFF closes all panels AND the
-//    secondary sidebar (workbench.action.closeAuxiliaryBar) without
-//    refocusing the chat;
+//    tabs into panels (enterMode) and closes the secondary sidebar
+//    (workbench.action.closeAuxiliaryBar); OFF closes all panels AND
+//    the secondary sidebar without refocusing the chat;
 //  - the KS activity-bar button's dummy tree (non-editor mode): on
 //    becoming visible it closes the primary sidebar and reveals the
 //    chat in the secondary sidebar without creating a chat — except
@@ -472,12 +472,20 @@ async function runTest() {
     'sidebar mode: a remote tab must not open an editor tab',
   );
 
-  // --- flip the mode ON: registry tabs migrate to panels ---------------
+  // --- flip the mode ON: registry tabs migrate to panels and the
+  // secondary sidebar (which hosted the sidebar chat) closes ------------
   editorTabsMode = true;
+  executedCommands.length = 0;
   await fireConfigChange();
   assert.strictEqual(calls.manager.enterMode.length, 1);
   assert.deepStrictEqual(calls.manager.enterMode[0].entries, registryEntries);
   assert.strictEqual(calls.manager.enterMode[0].workspaceDir, '/ws/project');
+  assert.ok(
+    executedCommands.some(
+      e => e.cmd === 'workbench.action.closeAuxiliaryBar',
+    ),
+    'mode on closes the secondary sidebar',
+  );
 
   fireDelta(false);
   assert.strictEqual(

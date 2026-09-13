@@ -10,6 +10,7 @@ import {SorcarSidebarView} from './SorcarSidebarView';
 import {CHAT_PANEL_VIEW_TYPE, SorcarPanelManager} from './SorcarPanelManager';
 import {getGitApi} from './gitApi';
 import {isReloadReady} from './reloadGuard';
+import {syncEditorActionsLocation} from './editorActionsLocation';
 
 import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
 import {findKissProject} from './kissPaths';
@@ -108,7 +109,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Switching the editor-tabs mode (from the settings UI toggle or
   // settings.json): ON migrates the registry's chats of this workspace
-  // into editor tabs (the sidebar view hides via its `when` clause);
+  // into editor tabs (the sidebar view hides via its `when` clause)
+  // and CLOSES the secondary sidebar — the chats now live in editor
+  // tabs, so the bar the sidebar chat occupied must not linger empty;
   // OFF closes the panels without retiring their chats and CLOSES the
   // secondary sidebar — the sidebar view re-adopts the chats from
   // `tabs_state` when a KS button (or anything else) next reveals it.
@@ -118,12 +121,30 @@ export function activate(context: vscode.ExtensionContext): void {
   if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
     context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration(e => {
+        // The title-bar placement of the Sorcar buttons depends on the
+        // custom title bar being visible: when its visibility setting
+        // flips, re-sync (an owned "titleBar" value is restored while
+        // the custom title bar is "never" — the actions would be
+        // hidden — and re-applied when it comes back).
+        if (
+          e.affectsConfiguration('window.customTitleBarVisibility') &&
+          editorTabsMode()
+        ) {
+          void syncEditorActionsLocation(context, true);
+        }
         if (!e.affectsConfiguration('kissSorcar.editorTabsMode')) return;
         modeSwitchAt = Date.now();
+        // Follow the mode with the editor-actions toolbar: ON moves
+        // the four Sorcar editor-title buttons into the window title
+        // bar, OFF restores the user's own actions location.
+        void syncEditorActionsLocation(context, editorTabsMode());
         if (editorTabsMode()) {
           panelManager!.enterMode(
             sidebarView!.getRegistryTabEntries(),
             workspaceDir(),
+          );
+          void vscode.commands.executeCommand(
+            'workbench.action.closeAuxiliaryBar',
           );
         } else {
           panelManager!.closeAll();
@@ -136,6 +157,17 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   sidebarView.syncWorkDir();
+
+  // In editor-tabs mode the Sorcar editor-title buttons (+, git
+  // commit, gear, KS) live in the window title bar rather than the
+  // editor tab bar; apply that on activation too, so the placement
+  // holds in fresh windows. Activation with the mode OFF deliberately
+  // does NOT restore: another window may have the mode ON (e.g. a
+  // workspace-level override turns it off only here), and the setting
+  // is global — restores happen only on explicit mode flips.
+  if (editorTabsMode()) {
+    void syncEditorActionsLocation(context, true);
+  }
 
   // How many editor tabs host a chat — live panels AND the serialized
   // placeholders a window reload restores (indistinguishable in the
@@ -697,17 +729,29 @@ export function activate(context: vscode.ExtensionContext): void {
     sidebarView!.onFirstResolve(() => {
       const widenTimer = setTimeout(async () => {
         // The extension may have been deactivated before this fires.
-        if (!sidebarView) return;
+        // Clearing the timer cannot stop a callback that has already
+        // started, so the view is captured here and its liveness
+        // re-checked after every await: deactivation during one of
+        // them clears the module slot (and disposes the view).
+        const view = sidebarView;
+        if (!view) return;
         // The one-time widening belongs to the sidebar surface only.
         if (editorTabsMode()) return;
-        await vscode.commands.executeCommand(
-          'workbench.action.focusAuxiliaryBar',
-        );
-        await sidebarView.widenToOneThird();
-        await vscode.commands.executeCommand(
-          'workbench.action.focusFirstEditorGroup',
-        );
-        await context.workspaceState.update('sidebarWidened', true);
+        try {
+          await vscode.commands.executeCommand(
+            'workbench.action.focusAuxiliaryBar',
+          );
+          if (sidebarView !== view) return;
+          await view.widenToOneThird();
+          if (sidebarView !== view) return;
+          await vscode.commands.executeCommand(
+            'workbench.action.focusFirstEditorGroup',
+          );
+          if (sidebarView !== view) return;
+          await context.workspaceState.update('sidebarWidened', true);
+        } catch (err) {
+          console.error('[KISS Sorcar] sidebar widening failed:', err);
+        }
       }, 500);
       context.subscriptions.push({dispose: () => clearTimeout(widenTimer)});
     });
@@ -725,21 +769,34 @@ export function activate(context: vscode.ExtensionContext): void {
 
   if (shouldAutoOpen) {
     const autoOpenTimer = setTimeout(async () => {
-      if (!sidebarView) return;
-      if (firstLaunch) {
-        // The workbench's default layout (code-server and recent VS
-        // Code) starts with the secondary sidebar open on the built-in
-        // Chat view. KISS Sorcar's chat replaces it: close the bar
-        // before opening the chat surface. In sidebar mode the
-        // focusChatInput below reopens it on the KISS chat view; in
-        // editor-tabs mode the chat is an editor tab and the bar
-        // stays closed.
-        await vscode.commands.executeCommand(
-          'workbench.action.closeAuxiliaryBar',
-        );
+      // Same discipline as the widen timer above: deactivation during
+      // an await clears `sidebarView`/`panelManager`, and the old
+      // `chatController(true)!` then dereferenced undefined and left
+      // this callback rejecting unhandled.
+      const view = sidebarView;
+      if (!view) return;
+      try {
+        if (firstLaunch) {
+          // The workbench's default layout (code-server and recent VS
+          // Code) starts with the secondary sidebar open on the
+          // built-in Chat view. KISS Sorcar's chat replaces it: close
+          // the bar before opening the chat surface. In sidebar mode
+          // the focusChatInput below reopens it on the KISS chat view;
+          // in editor-tabs mode the chat is an editor tab and the bar
+          // stays closed.
+          await vscode.commands.executeCommand(
+            'workbench.action.closeAuxiliaryBar',
+          );
+          if (sidebarView !== view) return;
+        }
+        const controller = chatController(true);
+        if (!controller) return;
+        await controller.focusChatInput();
+        if (sidebarView !== view) return;
+        await context.workspaceState.update('firstLaunchDone', true);
+      } catch (err) {
+        console.error('[KISS Sorcar] first-launch chat open failed:', err);
       }
-      await chatController(true)!.focusChatInput();
-      await context.workspaceState.update('firstLaunchDone', true);
     }, 1000);
     context.subscriptions.push({dispose: () => clearTimeout(autoOpenTimer)});
   }

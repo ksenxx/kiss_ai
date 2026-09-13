@@ -28,7 +28,9 @@ from kiss.agents.third_party_agents.weixin_agent import (
     WeixinAgent,
     WeixinChannelBackend,
     _config,
-    get_tools,
+)
+from kiss.agents.third_party_agents.weixin_agent import (
+    tools as module_tools,
 )
 
 
@@ -186,10 +188,10 @@ def test_auth_trio_persistence() -> None:
     assert agent._is_authenticated() is False
 
 
-def test_get_tools_module_function() -> None:
-    """Module-level get_tools() returns a non-empty tool list."""
+def test_tools_module_function() -> None:
+    """Module-level tools() returns a non-empty tool list."""
     _config.clear()
-    assert len(get_tools()) >= 3
+    assert len(module_tools()) >= 3
 
 
 def test_send_reuses_cached_token() -> None:

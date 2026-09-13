@@ -2,11 +2,11 @@
 
 > Open-source general-purpose AI agent for long-horizon tasks and AI discovery.
 
-**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon, and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. All agents run as daemons. Complex AI systems/techniques can be replaced with a paragraph of prompt in KISS Sorcar.
+**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon, and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. Agents run as daemons hosted by the local server (a standalone `sorcar` terminal command can also run a task without the daemon). Complex AI systems/techniques can be replaced with a paragraph of prompt in KISS Sorcar.
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
-- **Version:** 2026.9.3
+- **Version:** 2026.9.12
 - **License:** Apache-2.0
 - **Python:** 3.13+
 - **Website:** <https://kisssorcar.github.io/>
@@ -23,12 +23,12 @@
 | Multiple models from multiple vendors in the same task | Yes — mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | No — Anthropic Claude models only | No — one model per task |
 | Primary focus | Quality — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | Core agents lines of code | ~3000 | Unknown | Unknown |
-| Models in bundled catalog | 634 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| Models in bundled catalog | 660 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | Bring your own API key / endpoint | Yes — keys stay on your machine | Anthropic key | Routed through Cursor backend |
 | Open source | Yes — Apache-2.0 | Proprietary | Proprietary |
 | Price | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
 | Run on top of Claude Code / Codex CLI | Yes — `cc/*` and `codex/*` namespaces | N/A | No |
-| Messaging and communication channels | 32 third-party channel agents, including Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, and Home Assistant | Slack, mobile Remote Control, and research-preview channels; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel | Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel |
+| Messaging and communication channels | 43 third-party agents: 32 messaging channels (Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace | Slack, mobile Remote Control, and research-preview channels; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel | Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel |
 | Scheduled automations | Natural-language cron agent | — | — |
 | Wake word for voice interaction | Sorcar | N/A | N/A |
 
@@ -40,7 +40,8 @@
 - **Dynamic model switching and steering.** A running agent can change its own LLM mid-task (`set_model`), and you can inject user messages into a running agent to steer it on the fly.
 - **Git-worktree task isolation.** Each interactive task runs on an isolated git worktree branch that is auto-committed and squash-merged back when it finishes.
 - **Voice interaction.** With the `sorcar` wake word, KISS Sorcar behaves like a super-intelligent Alexa; it distinguishes among different speakers.
-- **32 channel agents.** Slack, Gmail, Email (IMAP/SMTP), WhatsApp, SMS, iMessage, Telegram, Discord, Signal, phone control, Home Assistant, and more.
+- **43 third-party agents.** 32 messaging channels — Slack, Gmail, Email (IMAP/SMTP), WhatsApp, SMS, iMessage, Telegram, Discord, Signal, phone control, Home Assistant, and more — plus service agents for GitHub, Notion, PostgreSQL, Brave Search, Firecrawl, and Google Workspace (Calendar, Drive, Docs, Sheets).
+- **Pre-run task classification.** A single fast non-agentic model call detects whether a task is a development task — non-development tasks (questions, research, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. Toggleable in the Settings panel.
 
 ## What Is in the Name
 

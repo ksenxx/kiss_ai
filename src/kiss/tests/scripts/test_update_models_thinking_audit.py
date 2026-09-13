@@ -118,7 +118,7 @@ class TestThinkingScaleDispatch:
             "o4-mini",
             "openrouter/openai/gpt-5.5",
             "openrouter/openai/gpt-5.6-sol",
-            "openrouter/~openai/gpt-latest",
+            "openrouter/~openai/gpt-sol-latest",
             "openrouter/openai/gpt-oss-120b",
             "openrouter/openai/gpt-oss-20b",
             "openrouter/openai/gpt-oss-safeguard-20b",

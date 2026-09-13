@@ -35,10 +35,13 @@ def test_settings_panel_html_has_new_inputs() -> None:
 
 def test_settings_panel_js_registers_new_keys() -> None:
     js = (_VSCODE_MEDIA / "main.js").read_text()
-    assert "'cfg-key-ZAI_API_KEY'" in js
-    assert "'cfg-key-MOONSHOT_API_KEY'" in js
-    assert "ZAI_API_KEY" in js
-    assert "MOONSHOT_API_KEY" in js
+    # main.js drives all cfg-key-* wiring from the single
+    # FIRST_PARTY_KEY_IDS inventory of bare env-var names, mapped to
+    # element ids with a "cfg-key-" prefix.
+    assert "'ZAI_API_KEY'," in js
+    assert "'MOONSHOT_API_KEY'," in js
+    assert "FIRST_PARTY_KEY_IDS" in js
+    assert "'cfg-key-' + k" in js
     assert "MINIMAX_API_KEY" not in js
     assert "minimax_api_key" not in js
 
