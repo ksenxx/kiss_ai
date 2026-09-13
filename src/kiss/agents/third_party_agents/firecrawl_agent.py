@@ -119,20 +119,51 @@ def _scrub_config_key() -> None:
 
 
 def _extra_hosts(base_url: str) -> tuple[str, ...]:
-    """Return the Muse enrollment hosts for a self-hosted base URL.
+    """Return the Muse enrollment origin for a Firecrawl base URL.
 
-    The cloud API host is already in the built-in allowlist, so only a
-    self-hosted instance's host needs enrolling with the credential.
+    A Firecrawl key belongs to exactly one server (the public cloud OR a
+    self-hosted instance), so the credential is strictly origin-bound:
+    the configured origin — host AND port — is always enrolled (there
+    is no built-in allowlist), and a self-hosted key can never be spent
+    against ``api.firecrawl.dev`` (or vice versa).
 
     Args:
         base_url: Configured Firecrawl base URL.
 
     Returns:
-        ``(host,)`` for a self-hosted instance, else ``()``.
+        ``("host:port",)``, or ``()`` when the URL has no host.
     """
-    host = (urlparse(base_url).hostname or "").lower()
-    if host and host != "api.firecrawl.dev":
-        return (host,)
+    from kiss.agents.third_party_agents.muse_auth._common import url_origin_entry
+
+    entry = url_origin_entry(base_url)
+    return (entry,) if entry else ()
+
+
+def _insecure_extra_hosts(base_url: str) -> tuple[str, ...]:
+    """Return the origins to enroll as consent-scoped plain-HTTP origins.
+
+    Only an explicit ``http://`` base URL to a non-loopback self-hosted
+    instance needs the exception (loopback plaintext is always allowed,
+    and HTTPS needs none).
+
+    Args:
+        base_url: Configured Firecrawl base URL.
+
+    Returns:
+        ``("host:port",)`` for a plain-HTTP non-loopback base URL,
+        else ``()``.
+    """
+    from kiss.agents.third_party_agents.muse_auth._common import (
+        canonical_host,
+        is_loopback_host,
+        url_origin_entry,
+    )
+
+    parsed = urlparse(base_url)
+    host = canonical_host(parsed.hostname or "")
+    if parsed.scheme == "http" and host and host != "api.firecrawl.dev" \
+            and not is_loopback_host(host):
+        return (url_origin_entry(base_url),)
     return ()
 
 
@@ -174,21 +205,37 @@ class FirecrawlChannelBackend(ToolMethodBackend):
             # Metadata-only read: an enrolled process needs base_url but
             # never the plaintext api_key (which may already be deleted).
             self._base_url = _read_base_url()
+            # Validate before any credential state changes: a malformed
+            # legacy base_url must not auto-migrate the key into a host
+            # scope Sentinel can never match, nor scrub the plaintext
+            # copy (the default cloud URL is always valid).
+            from kiss.agents.third_party_agents.muse_auth._common import valid_http_url
+
+            if not valid_http_url(self._base_url):
+                self._connection_info = (
+                    f"Firecrawl base_url {self._base_url!r} is not a valid "
+                    "http(s):// URL; fix config.json and reconnect."
+                )
+                return False
+            cfg = _config.load() or {}
+            if cfg.get("api_key"):
+                # A plaintext key in config.json is the newest user
+                # intent (initial migration, or a rotation done while
+                # Muse was off): it replaces any vault enrollment.
+                from kiss.agents.third_party_agents.muse_auth.client import store_credentials
+
+                store_credentials(
+                    "firecrawl",
+                    {"kind": "bearer", "token": cfg["api_key"]},
+                    [],
+                    hosts=_extra_hosts(self._base_url),
+                    insecure_hosts=_insecure_extra_hosts(self._base_url),
+                )
             handle = mint_surrogate("firecrawl")
             if handle is None:
-                # Vault-first: the legacy config key is only read when
-                # the vault has no enrollment yet (one-time migration).
-                from kiss.agents.third_party_agents.muse_auth.client import bearer_surrogate
-
-                cfg = _config.load() or {}
-                surrogate = bearer_surrogate(
-                    "firecrawl", cfg.get("api_key", ""), hosts=_extra_hosts(self._base_url)
-                )
-            else:
-                surrogate = handle.token
-            if not surrogate:
                 self._connection_info = "No Firecrawl credential in the Muse vault or config."
                 return False
+            surrogate = handle.token
             # The credential lives in the vault now; scrub any plaintext
             # copy left in config.json (keeping base_url) so enrolled
             # processes never touch a file holding the secret.
@@ -532,26 +579,48 @@ class FirecrawlAgent(BaseChannelAgent):
             """
             if not api_key.strip():
                 return "api_key cannot be empty."
+            from kiss.agents.third_party_agents.muse_auth._common import (
+                muse_auth_enabled,
+                valid_http_url,
+            )
+
+            if muse_auth_enabled():
+                # The key goes straight into the vault (never onto disk),
+                # transactionally: validate the base URL, write the
+                # non-secret base_url metadata FIRST, then store — a
+                # failure never leaves plaintext behind or destroys the
+                # prior credential without a replacement.
+                from kiss.agents.third_party_agents.muse_auth.client import (
+                    MuseAuthError,
+                    store_credentials,
+                )
+
+                base = base_url.strip() or _DEFAULT_BASE_URL
+                if base_url.strip() and not valid_http_url(base):
+                    return "base_url must be an http(s):// URL with a hostname and valid port."
+                try:
+                    if base_url.strip():
+                        save_json_config(_config.path, {"base_url": base})
+                    else:
+                        _config.clear()
+                    store_credentials(
+                        "firecrawl",
+                        {"kind": "bearer", "token": api_key.strip()},
+                        [],
+                        hosts=_extra_hosts(base),
+                        insecure_hosts=_insecure_extra_hosts(base),
+                    )
+                    agent._backend.connect()
+                except (MuseAuthError, OSError) as e:
+                    return json.dumps({"ok": False, "error": str(e)})
+                return json.dumps({"ok": True, "message": "Firecrawl configured."})
             cfg = {"api_key": api_key.strip()}
             if base_url.strip():
                 cfg["base_url"] = base_url.strip()
-            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
-
             try:
                 _config.save(cfg)
-                if muse_auth_enabled():
-                    # Re-enroll straight into the Muse vault: clear any
-                    # existing entry first so a rotated key (or changed
-                    # base_url host) replaces the old enrollment.
-                    from kiss.agents.third_party_agents.muse_auth.client import (
-                        clear_credentials,
-                    )
-
-                    clear_credentials("firecrawl")
-                    agent._backend.connect()
-                else:
-                    agent._backend._api_key = api_key.strip()
-                    agent._backend._base_url = base_url.strip() or _DEFAULT_BASE_URL
+                agent._backend._api_key = api_key.strip()
+                agent._backend._base_url = base_url.strip() or _DEFAULT_BASE_URL
             except Exception as e:
                 return json.dumps({"ok": False, "error": f"could not save config: {e}"})
             return json.dumps({"ok": True, "message": "Firecrawl configured."})

@@ -29,7 +29,6 @@ from __future__ import annotations
 import base64
 import contextlib
 import fcntl
-import ipaddress
 import os
 import re
 import socket
@@ -43,11 +42,17 @@ import requests
 from kiss.agents.third_party_agents.muse_auth._common import (
     PROTOCOL_VERSION,
     SURROGATE_PREFIX,
+    _is_ip_literal,
+    canonical_host,
+    canonical_host_entry,
     muse_auth_dir,
     recv_frame,
     send_frame,
     socket_path,
+    url_origin,
     valid_credential_header,
+    valid_credential_value,
+    valid_hostname,
     valid_service_name,
 )
 from kiss.agents.third_party_agents.muse_auth.sentinel import Sentinel
@@ -56,7 +61,28 @@ from kiss.agents.third_party_agents.muse_auth.vault import CredentialVault
 _HOP_HEADERS = ("connection", "keep-alive", "transfer-encoding", "content-length", "host")
 _UNDECODED_HEADERS = ("content-encoding", "transfer-encoding", "content-length")
 
-_HOSTNAME_RE = re.compile(r"[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?")
+
+# The bracket alternative accepts any IPv6 spelling; the bracket
+# contents are validated as a real IP by _valid_host_part.
+_PORT_SUFFIX_RE = re.compile(r"(?P<host>\[[^\]]+\]|[^:]+):(?P<port>[0-9]{1,5})")
+
+
+def _valid_host_part(host_part: str) -> bool:
+    """Return whether a (possibly bracketed) host part is acceptable.
+
+    A bracketed host part must be a real IPv6/IP literal (a bracketed
+    hostname is malformed); an unbracketed part may be a hostname or a
+    bare IP literal.
+
+    Args:
+        host_part: Host portion of an enrollment entry, lowercased.
+
+    Returns:
+        True when the host part is a valid host.
+    """
+    if host_part.startswith("[") and host_part.endswith("]"):
+        return _is_ip_literal(canonical_host(host_part[1:-1]))
+    return valid_hostname(host_part)
 
 
 def _invalid_hosts_reason(hosts: Any) -> str:
@@ -67,7 +93,8 @@ def _invalid_hosts_reason(hosts: Any) -> str:
 
     Returns:
         A human-readable error, or ``""`` when the hosts are acceptable
-        (a list of at most 16 plain lowercase hostnames/IP literals).
+        (a list of at most 16 lowercase hostnames/IP literals, each
+        optionally port-pinned as ``host:port`` / ``[ipv6]:port``).
     """
     if not isinstance(hosts, list):
         return "hosts must be a list of hostnames"
@@ -77,12 +104,12 @@ def _invalid_hosts_reason(hosts: Any) -> str:
         if not isinstance(host, str):
             return f"invalid enrollment host {str(host)[:80]!r}"
         candidate = host.strip().lower()
-        if _HOSTNAME_RE.fullmatch(candidate):
-            continue
-        try:
-            # IP literals (notably IPv6 like ``::1``) are valid hosts.
-            ipaddress.ip_address(candidate)
-        except ValueError:
+        pinned = _PORT_SUFFIX_RE.fullmatch(candidate)
+        if pinned:
+            if int(pinned.group("port")) > 65535:
+                return f"invalid enrollment host {str(host)[:80]!r}"
+            candidate = pinned.group("host")
+        if not _valid_host_part(candidate):
             return f"invalid enrollment host {str(host)[:80]!r}"
     return ""
 
@@ -107,8 +134,13 @@ class MuseAuthDaemon:
     def __init__(self) -> None:
         self.vault = CredentialVault()
         # Sentinel extends each service's allowlist with the hosts
-        # enrolled alongside its vault credential (self-hosted bases).
-        self.sentinel = Sentinel(hosts_provider=self.vault.enrolled_hosts)
+        # enrolled alongside its vault credential (self-hosted bases),
+        # and honors consent-time plain-HTTP exceptions for hosts the
+        # user enrolled from an http:// base URL.
+        self.sentinel = Sentinel(
+            hosts_provider=self.vault.enrolled_hosts,
+            insecure_hosts_provider=self.vault.enrolled_insecure_hosts,
+        )
         self._server: socket.socket | None = None
         self._stop = threading.Event()
 
@@ -140,15 +172,26 @@ class MuseAuthDaemon:
                 and not valid_credential_header(info.get("header"))
             ):
                 return {"ok": False, "error": "invalid credential header name"}
+            if (
+                isinstance(info, dict)
+                and info.get("kind") in ("header", "bearer")
+                and not valid_credential_value(info.get("token"))
+            ):
+                # A malformed value (control chars, stray whitespace)
+                # would make the HTTP stack raise errors that reflect
+                # the credential verbatim; refuse it at enrollment.
+                return {"ok": False, "error": "invalid credential token value"}
             hosts = request.get("hosts", [])
-            hosts_error = _invalid_hosts_reason(hosts)
+            insecure_hosts = request.get("insecure_hosts", [])
+            hosts_error = _invalid_hosts_reason(hosts) or _invalid_hosts_reason(insecure_hosts)
             if hosts_error:
                 return {"ok": False, "error": hosts_error}
             self.vault.store(
                 request["service"],
                 info,
                 request.get("scopes", []),
-                hosts=[str(h).strip().lower() for h in hosts],
+                hosts=[canonical_host_entry(str(h)) for h in hosts],
+                insecure_hosts=[canonical_host_entry(str(h)) for h in insecure_hosts],
             )
             return {"ok": True}
         if op == "clear_credentials":
@@ -231,8 +274,22 @@ class MuseAuthDaemon:
         decision = self.sentinel.decide(service, method, raw_url, effective_url=url)
         if decision.verdict != "allow":
             return {"ok": False, "denied": True, "error": decision.reason}
+        # Pin the whole request (initial send and every redirect hop) to
+        # the credential generation that was current while the surrogate
+        # was still live: a rotation that lands mid-request aborts it
+        # instead of letting an old-generation capability spend the new
+        # credential.  (Re-check the surrogate AFTER reading the
+        # generation: store() bumps the generation and invalidates
+        # surrogates under one vault lock, so a live surrogate here
+        # proves the generation read is current.)
+        generation = self.vault.generation(service)
+        if self.vault.surrogate_service(surrogate) != service:
+            return {
+                "ok": False,
+                "error": "unknown or stale surrogate token; re-connect the agent backend",
+            }
         try:
-            cred_header, cred_value = self.vault.resolve_header(service)
+            cred_header, cred_value = self.vault.resolve_header(service, generation)
         except Exception as e:
             return {"ok": False, "error": f"credential resolution failed: {e}"}
         if not valid_credential_header(cred_header):
@@ -254,9 +311,13 @@ class MuseAuthDaemon:
         try:
             resp = self._execute(service, method, url, out_headers, body,
                                  float(request.get("timeout", 120.0)),
-                                 cred_header=cred_header)
+                                 cred_header=cred_header, generation=generation)
         except Exception as e:
-            return {"ok": False, "error": f"network boundary request failed: {e}"}
+            # Exception text from the HTTP stack can reflect header
+            # values verbatim; never let the real credential cross back
+            # to the agent inside an error message.
+            message = str(e).replace(cred_value, "<redacted-credential>")
+            return {"ok": False, "error": f"network boundary request failed: {message}"}
         if isinstance(resp, str):
             return {"ok": False, "denied": True, "error": resp}
         # requests already decoded any content-encoding; drop headers
@@ -281,6 +342,7 @@ class MuseAuthDaemon:
         body: bytes | None,
         timeout: float,
         cred_header: str = "Authorization",
+        generation: str | None = None,
     ) -> requests.Response | str:
         """Execute a request, following redirects with per-hop authorization.
 
@@ -301,51 +363,84 @@ class MuseAuthDaemon:
             cred_header: Header carrying the real credential
                 (``Authorization`` or a header-kind credential's name
                 such as ``X-Subscription-Token``).
+            generation: Vault credential generation the request is
+                pinned to; redirect hops abort when it changes.
 
         Returns:
             The final :class:`requests.Response`, or a Sentinel denial
             reason string when a redirect hop is refused.
         """
-        real_cred = headers.get(cred_header, "")
-        resp = requests.request(
-            method, url, headers=headers, data=body, timeout=timeout, allow_redirects=False,
-        )
-        # Follow up to 5 redirects, re-authorizing each hop.
-        for _hop in range(5):
-            location = resp.headers.get("Location")
-            if not (resp.is_redirect and location):
-                return resp
-            next_url = requests.compat.urljoin(resp.url, location)  # type: ignore[attr-defined]
-            next_host = (urlparse(next_url).hostname or "").lower()
-            same_host = next_host == (urlparse(url).hostname or "").lower()
-            if resp.status_code in (301, 302, 303) and method not in ("GET", "HEAD"):
-                method, body = "GET", None
-            headers = dict(headers)
-            if not (same_host or next_host in self.sentinel.allowed_hosts(service)):
-                # Cross-host redirect off the allowlist: only bodyless
-                # GET/HEAD hops (download CDNs, signed URLs) may be
-                # followed, and never with the real credential.  A
-                # 307/308 keeps the request body, so following it would
-                # ship content to a host Sentinel denied.
-                self.sentinel.decide(service, method, next_url, effective_url=next_url)
-                if method not in ("GET", "HEAD") or body is not None:
-                    return (
-                        f"cross-host redirect to '{next_host}' would carry the request "
-                        f"body off the '{service}' allowlist; refusing to follow it"
-                    )
-                headers.pop(cred_header, None)
-            else:
-                decision = self.sentinel.decide(service, method, next_url,
-                                                effective_url=next_url)
-                if decision.verdict != "allow":
-                    return decision.reason
-                headers[cred_header] = real_cred
-            url = next_url
-            resp = requests.request(
+        # The boundary must be immune to ambient environment configs:
+        # an HTTP(S)_PROXY would re-route credentialed requests through
+        # an unauthorized intermediary and a ~/.netrc would overwrite
+        # the swapped Authorization header after the swap.
+        session = requests.Session()
+        session.trust_env = False
+        with session:
+            resp = session.request(
                 method, url, headers=headers, data=body,
                 timeout=timeout, allow_redirects=False,
             )
-        return resp
+            # Follow up to 5 redirects, re-authorizing each hop.
+            for _hop in range(5):
+                location = resp.headers.get("Location")
+                if not (resp.is_redirect and location):
+                    return resp
+                next_url = requests.compat.urljoin(resp.url, location)  # type: ignore[attr-defined]
+                next_parsed = urlparse(next_url)
+                prev_parsed = urlparse(url)
+                next_host = canonical_host(next_parsed.hostname or "")
+                # Same ORIGIN (host and effective port): the same
+                # hostname on another port is a different server and
+                # must re-qualify through the allowlist.
+                same_host = url_origin(
+                    next_parsed.scheme, next_parsed.hostname, next_parsed.port
+                ) == url_origin(prev_parsed.scheme, prev_parsed.hostname, prev_parsed.port)
+                if resp.status_code in (301, 302, 303) and method not in ("GET", "HEAD"):
+                    method, body = "GET", None
+                headers = dict(headers)
+                if not (same_host or self.sentinel.origin_allowed(service, next_url)):
+                    # Cross-host redirect off the allowlist: only bodyless
+                    # GET/HEAD hops (download CDNs, signed URLs) may be
+                    # followed, and never with the real credential.  A
+                    # 307/308 keeps the request body, so following it would
+                    # ship content to a host Sentinel denied.
+                    self.sentinel.decide(service, method, next_url, effective_url=next_url)
+                    if method not in ("GET", "HEAD") or body is not None:
+                        return (
+                            f"cross-host redirect to '{next_host}' would carry the request "
+                            f"body off the '{service}' allowlist; refusing to follow it"
+                        )
+                    headers.pop(cred_header, None)
+                else:
+                    decision = self.sentinel.decide(service, method, next_url,
+                                                    effective_url=next_url)
+                    if decision.verdict != "allow":
+                        return decision.reason
+                    # Re-resolve the credential for every authorized
+                    # hop, pinned to the request's vault generation: a
+                    # rotation landing mid-request aborts the request
+                    # instead of shipping either generation's token
+                    # under the other generation's host scope.
+                    try:
+                        hop_header, hop_value = self.vault.resolve_header(service, generation)
+                    except Exception:
+                        return (
+                            f"the '{service}' credential changed mid-request; "
+                            "re-connect the agent backend and retry"
+                        )
+                    if hop_header != cred_header:
+                        return (
+                            f"the '{service}' credential changed its header mid-request; "
+                            "re-connect the agent backend and retry"
+                        )
+                    headers[cred_header] = hop_value
+                url = next_url
+                resp = session.request(
+                    method, url, headers=headers, data=body,
+                    timeout=timeout, allow_redirects=False,
+                )
+            return resp
 
     def _serve_connection(self, conn: socket.socket) -> None:
         """Serve one accepted connection: authenticate, read, reply.

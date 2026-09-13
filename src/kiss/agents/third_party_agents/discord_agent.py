@@ -8,6 +8,14 @@ Provides authenticated access to Discord via a bot token. Uses the Discord
 REST API v10 directly via requests (no discord.py needed). Stores the token
 in ``~/.kiss/third_party_agents/discord/config.json``.
 
+In Muse-auth mode (``KISS_MUSE_AUTH=1``) the bot token lives in the
+Muse vault as a header-kind credential occupying the ``Authorization``
+header itself (Discord's scheme is ``Bot <token>``, not ``Bearer``):
+this process holds only a surrogate bearer, and the daemon swaps it
+for the real ``Authorization: Bot ...`` header at the network
+boundary.  The plaintext token is scrubbed from ``config.json`` after
+enrollment (the non-secret ``application_id``/``guild_ids`` survive).
+
 Usage::
 
     agent = DiscordAgent()
@@ -16,6 +24,7 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -30,11 +39,32 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
+    save_json_config,
 )
 
 _DISCORD_DIR = Path.home() / ".kiss" / "third_party_agents" / "discord"
 _API_BASE = "https://discord.com/api/v10"
 _config = ChannelConfig(_DISCORD_DIR, ("bot_token",))
+
+
+def _scrub_config_token() -> None:
+    """Remove a vault-migrated ``bot_token`` from config.json.
+
+    Finishes the Muse migration automatically: the non-secret
+    ``application_id`` and ``guild_ids`` metadata are kept and the file
+    is deleted when nothing but the token was stored.
+    """
+    try:
+        cfg = json.loads(_config.path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(cfg, dict) or "bot_token" not in cfg:
+        return
+    kept = {k: str(v) for k, v in cfg.items() if k != "bot_token" and v}
+    if kept:
+        save_json_config(_config.path, kept)
+    else:
+        _config.clear()
 
 
 def _snowflake_key(msg: dict) -> int:  # type: ignore[type-arg]
@@ -52,14 +82,58 @@ class DiscordChannelBackend(ToolMethodBackend):
         self._api_base = api_base or os.environ.get("DISCORD_API_BASE", _API_BASE)
         self._bot_token: str = ""
         self._bot_user_id: str = ""
+        self._http: Any = requests
+        self._muse: bool = False
         self._connection_info: str = ""
         self._last_message_id: str = ""
 
     def _headers(self) -> dict[str, str]:
+        if self._muse:
+            # ``_bot_token`` holds a surrogate: the daemon swaps this
+            # bearer for the real ``Authorization: Bot ...`` header
+            # (a header-kind vault credential) at the network boundary.
+            return {"Authorization": f"Bearer {self._bot_token}"}
         return {"Authorization": f"Bot {self._bot_token}"}
 
+    def _wire_muse(self) -> bool:
+        """Acquire a Discord surrogate and wire the boundary session.
+
+        A ``bot_token`` still in the legacy config is the newest user
+        intent (initial migration, or a rotation done while Muse was
+        off): it is enrolled as a header-kind credential
+        (``Authorization: Bot <token>``) replacing any vault entry, and
+        scrubbed from ``config.json`` only after the vault holds it.
+        No network round trip happens here.
+
+        Returns:
+            True when the backend holds a surrogate and boundary session.
+        """
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            MuseBoundarySession,
+            mint_surrogate,
+            store_credentials,
+        )
+
+        cfg = _config.load() or {}
+        token = cfg.get("bot_token", "")
+        if token:
+            store_credentials(
+                "discord",
+                {"kind": "header", "header": "Authorization", "token": f"Bot {token}"},
+                [],
+            )
+        handle = mint_surrogate("discord")
+        if handle is None:
+            self._connection_info = "No Discord credential in the Muse vault or config."
+            return False
+        _scrub_config_token()
+        self._bot_token = handle.token
+        self._http = MuseBoundarySession("discord")
+        self._muse = True
+        return True
+
     def _get(self, path: str, params: dict | None = None) -> Any:  # type: ignore[type-arg]
-        resp = requests.get(
+        resp = self._http.get(
             f"{self._api_base}{path}", headers=self._headers(), params=params, timeout=30
         )
         return resp.json()
@@ -81,7 +155,7 @@ class DiscordChannelBackend(ToolMethodBackend):
         Returns:
             The decoded JSON response body.
         """
-        resp = requests.post(
+        resp = self._http.post(
             f"{self._api_base}{path}", headers=self._headers(), json=json_body, timeout=30
         )
         if raise_on_error:
@@ -89,24 +163,32 @@ class DiscordChannelBackend(ToolMethodBackend):
         return resp.json()
 
     def _delete(self, path: str) -> Any:  # type: ignore[type-arg]
-        resp = requests.delete(f"{self._api_base}{path}", headers=self._headers(), timeout=30)
+        resp = self._http.delete(f"{self._api_base}{path}", headers=self._headers(), timeout=30)
         if resp.status_code == 204:  # pragma: no branch
             return {"ok": True}
         return resp.json()
 
     def _patch(self, path: str, json_body: dict | None = None) -> Any:  # type: ignore[type-arg]
-        resp = requests.patch(
+        resp = self._http.patch(
             f"{self._api_base}{path}", headers=self._headers(), json=json_body, timeout=30
         )
         return resp.json()
 
     def connect(self) -> bool:
         """Authenticate with Discord using the stored bot token."""
-        cfg = _config.load()
-        if not cfg:  # pragma: no branch
-            self._connection_info = "No Discord token found."
-            return False
-        self._bot_token = cfg["bot_token"]
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            # Vault-first surrogate wiring; validation below runs the
+            # /users/@me read through the daemon boundary (audited).
+            if not self._wire_muse():
+                return False
+        else:
+            cfg = _config.load()
+            if not cfg:  # pragma: no branch
+                self._connection_info = "No Discord token found."
+                return False
+            self._bot_token = cfg["bot_token"]
         try:
             result = self._get("/users/@me")
             if "id" in result:  # pragma: no branch
@@ -225,7 +307,7 @@ class DiscordChannelBackend(ToolMethodBackend):
         """
         del thread_ts
         try:
-            requests.post(
+            self._http.post(
                 f"{self._api_base}/channels/{channel_id}/typing",
                 headers=self._headers(),
                 timeout=30,
@@ -437,7 +519,7 @@ class DiscordChannelBackend(ToolMethodBackend):
 
             emoji_url = f"{self._api_base}/channels/{channel_id}/messages/{message_id}"
             emoji_url += f"/reactions/{quote(emoji)}/@me"
-            resp = requests.put(emoji_url, headers=self._headers(), timeout=30)
+            resp = self._http.put(emoji_url, headers=self._headers(), timeout=30)
             return json.dumps({"ok": resp.status_code == 204})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -531,6 +613,80 @@ class DiscordChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
+def _muse_authenticate(
+    backend: DiscordChannelBackend, bot_token: str, application_id: str, guild_ids: str
+) -> str:
+    """Enroll a bot token into the Muse vault and validate it at the boundary.
+
+    The plaintext token goes straight into the vault as a header-kind
+    credential (``Authorization: Bot <token>``), atomically replacing
+    any previous enrollment, and is never written to ``config.json``
+    (only the non-secret metadata is).  Validation runs ``/users/@me``
+    through the daemon boundary, so it is audited; an invalid token
+    leaves the vault empty (the previous credential was already
+    replaced by the user's explicit rotation).
+
+    Args:
+        backend: The agent's Discord backend to (re)wire.
+        bot_token: Discord bot token from the Developer Portal.
+        application_id: Optional application ID metadata.
+        guild_ids: Optional comma-separated guild ID metadata.
+
+    Returns:
+        JSON string with the validation result.
+    """
+    from kiss.agents.third_party_agents.muse_auth.client import (
+        MuseBoundarySession,
+        clear_credentials,
+        mint_surrogate,
+        store_credentials,
+    )
+
+    try:
+        # Overwrite-store: replaces the old vault entry in one step (no
+        # window where the vault is empty) and invalidates its surrogates.
+        store_credentials(
+            "discord",
+            {"kind": "header", "header": "Authorization", "token": f"Bot {bot_token}"},
+            [],
+        )
+        handle = mint_surrogate("discord")
+        backend._bot_token = handle.token if handle else ""
+        backend._http = MuseBoundarySession("discord")
+        backend._muse = True
+        result = backend._get("/users/@me")
+        if "id" in result:
+            meta = {
+                k: v
+                for k, v in (("application_id", application_id), ("guild_ids", guild_ids))
+                if v
+            }
+            # Never persist the token; also drop any stale plaintext
+            # copy a pre-Muse config may still hold.
+            if meta:
+                save_json_config(_config.path, meta)
+            else:
+                _config.clear()
+            return json.dumps(
+                {
+                    "ok": True,
+                    "message": "Discord token saved and validated (Muse-auth).",
+                    "username": result.get("username", ""),
+                    "id": result.get("id", ""),
+                }
+            )
+        error = json.dumps({"ok": False, "error": str(result)})
+    except Exception as e:
+        error = json.dumps({"ok": False, "error": str(e)})
+    # Roll the vault back so a bad token is not left enrolled.
+    with contextlib.suppress(Exception):
+        clear_credentials("discord")
+    backend._bot_token = ""
+    backend._http = requests
+    backend._muse = False
+    return error
+
+
 class DiscordAgent(BaseChannelAgent):
     """Channel agent with Discord REST API tools.
 
@@ -554,6 +710,22 @@ class DiscordAgent(BaseChannelAgent):
     def __init__(self) -> None:
         super().__init__("Discord Agent")
         self._backend = DiscordChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+            # Muse-auth mode: wire a vault surrogate and the boundary
+            # session (no network round trip); the real bot token never
+            # enters this process once migrated.  A daemon failure
+            # leaves the agent constructible (fail closed, tokenless) so
+            # its authenticate/clear tools stay available.
+            try:
+                self._backend._wire_muse()
+            except MuseAuthError as e:
+                self._backend._bot_token = ""
+                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            return
         cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._bot_token = cfg["bot_token"]
@@ -611,6 +783,12 @@ class DiscordAgent(BaseChannelAgent):
             bot_token = bot_token.strip()
             if not bot_token:  # pragma: no branch
                 return "bot_token cannot be empty."
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                return _muse_authenticate(
+                    agent._backend, bot_token, application_id.strip(), guild_ids.strip()
+                )
             agent._backend._bot_token = bot_token
             try:
                 result = agent._backend._get("/users/@me")
@@ -644,6 +822,14 @@ class DiscordAgent(BaseChannelAgent):
             """
             _config.clear()
             agent._backend._bot_token = ""
+            agent._backend._http = requests
+            agent._backend._muse = False
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("discord")
             return "Discord authentication cleared."
 
         def start_discord_browser_auth() -> str:
@@ -680,6 +866,13 @@ class DiscordAgent(BaseChannelAgent):
 def _make_backend() -> DiscordChannelBackend:
     """Create a configured backend for channel poll mode."""
     backend = DiscordChannelBackend()
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    if muse_auth_enabled():
+        if backend._wire_muse():
+            return backend
+        print("Not authenticated. Run: kiss-discord -t 'authenticate'")
+        sys.exit(1)
     cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-discord -t 'authenticate'")

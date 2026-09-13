@@ -263,7 +263,11 @@ def _checked(payload: dict[str, Any], timeout: float = _DEFAULT_TIMEOUT) -> dict
 
 
 def store_credentials(
-    service: str, creds: Any, scopes: list[str], hosts: tuple[str, ...] = ()
+    service: str,
+    creds: Any,
+    scopes: list[str],
+    hosts: tuple[str, ...] = (),
+    insecure_hosts: tuple[str, ...] = (),
 ) -> None:
     """Enroll a freshly obtained OAuth credential into the daemon vault.
 
@@ -277,12 +281,17 @@ def store_credentials(
         scopes: OAuth scopes the credential carries.
         hosts: Extra hostnames the credential may be spent against
             (consent-time allowlist extension for self-hosted bases).
+        insecure_hosts: Hostnames the credential may reach over plain
+            HTTP (consent-time exception when the user configured an
+            ``http://`` base URL, e.g. a LAN Home Assistant instance).
     """
     info = creds if isinstance(creds, dict) else json.loads(creds.to_json())
     frame = {"op": "store_credentials", "service": service,
              "authorized_user_info": info, "scopes": scopes}
     if hosts:
         frame["hosts"] = list(hosts)
+    if insecure_hosts:
+        frame["insecure_hosts"] = list(insecure_hosts)
     _checked(frame)
 
 
@@ -603,6 +612,7 @@ def bearer_surrogate(
     legacy_token: str,
     header: str = "",
     hosts: tuple[str, ...] = (),
+    insecure_hosts: tuple[str, ...] = (),
 ) -> str:
     """Return a surrogate for a plain token-authenticated service.
 
@@ -620,6 +630,8 @@ def bearer_surrogate(
             ``X-Subscription-Token``); empty means bearer.
         hosts: Extra hostnames to enroll with the credential (e.g. a
             self-hosted Firecrawl base URL's host).
+        insecure_hosts: Hostnames the credential may reach over plain
+            HTTP (consent-time exception for ``http://`` base URLs).
 
     Returns:
         The surrogate token, or ``""`` when the service is not
@@ -632,7 +644,7 @@ def bearer_surrogate(
             info = {"kind": "header", "header": header, "token": legacy_token}
         else:
             info = {"kind": "bearer", "token": legacy_token}
-        store_credentials(service, info, [], hosts=hosts)
+        store_credentials(service, info, [], hosts=hosts, insecure_hosts=insecure_hosts)
     handle = mint_surrogate(service)
     return handle.token if handle else ""
 

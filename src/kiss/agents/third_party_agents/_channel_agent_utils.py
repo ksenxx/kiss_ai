@@ -287,6 +287,26 @@ class ChannelConfig:
         """
         return load_json_config(self.path, self.required_keys)
 
+    def load_metadata(self) -> dict[str, str] | None:
+        """Load the config without enforcing the required keys.
+
+        Muse-auth migration scrubs the secret key out of ``config.json``
+        while non-secret settings (``base_url``, ``channel_model_name``,
+        ...) survive; :meth:`load` would report such a file as invalid,
+        but metadata readers still need those settings.
+
+        Returns:
+            The stored string dictionary, or ``None`` when the file is
+            missing or not a JSON object.
+        """
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        return {str(k): str(v) for k, v in data.items()}
+
     def save(self, data: dict[str, str]) -> None:
         """Save *data* to the config file with restricted permissions.
 
@@ -599,6 +619,25 @@ def derive_state_path(
         return cfg.path.parent / file_name
     slug = sanitize_state_component(agent_label or agent_cls.__name__)
     return kiss_home() / "third_party_agents" / "channel_state" / slug / file_name
+
+
+def channel_override_config(agent_cls: type) -> dict[str, str] | None:
+    """Return the persisted config metadata of an agent class's module.
+
+    Reads the module-level :class:`ChannelConfig` without enforcing its
+    required keys: a Muse-scrubbed ``config.json`` keeps its channel
+    model/budget overrides even after the secret key is gone.
+
+    Args:
+        agent_cls: The channel agent class whose module holds ``_config``.
+
+    Returns:
+        The stored string dictionary, or ``None`` when the module has no
+        :class:`ChannelConfig` or the file is missing/invalid.
+    """
+    module = sys.modules.get(agent_cls.__module__)
+    module_config = getattr(module, "_config", None) if module is not None else None
+    return module_config.load_metadata() if isinstance(module_config, ChannelConfig) else None
 
 
 def resolve_channel_overrides(
@@ -1825,9 +1864,7 @@ def channel_main(
         from kiss.core import config as core_config
         from kiss.core.models.model_info import get_default_model
 
-        module = sys.modules.get(agent_cls.__module__)
-        module_config = getattr(module, "_config", None) if module is not None else None
-        cfg = module_config.load() if isinstance(module_config, ChannelConfig) else None
+        cfg = channel_override_config(agent_cls)
         model_name, max_budget = resolve_channel_overrides(
             cfg,
             args.model_name,

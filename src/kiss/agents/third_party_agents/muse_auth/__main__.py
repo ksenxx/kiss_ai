@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
-from kiss.agents.third_party_agents.muse_auth._common import muse_auth_dir
+from kiss.agents.third_party_agents.muse_auth._common import muse_auth_dir, valid_http_url
 from kiss.agents.third_party_agents.muse_auth.client import (
     clear_credentials,
     enrolled_services,
@@ -48,13 +49,86 @@ _SERVICE_MODULES = {
 }
 
 # Plain token connectors: the legacy config.json key holding the token,
-# plus the credential header when it is not ``Authorization: Bearer``.
+# plus the credential header when it is not ``Authorization: Bearer``
+# and an optional value prefix for non-Bearer Authorization schemes
+# (Discord sends ``Authorization: Bot <token>``).
 _TOKEN_SERVICES: dict[str, dict[str, str]] = {
     "notion": {"key": "token"},
     "github": {"key": "token"},
     "firecrawl": {"key": "api_key"},
     "brave_search": {"key": "api_key", "header": "X-Subscription-Token"},
+    "discord": {"key": "bot_token", "header": "Authorization", "prefix": "Bot "},
+    "homeassistant": {"key": "token"},
+    "ntfy": {"key": "token"},
 }
+
+
+def _import_hosts(service: str, cfg: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the (hosts, insecure_hosts) to enroll for a legacy config.
+
+    Self-hosted connectors (Firecrawl, Home Assistant, ntfy) enroll
+    their configured base host with the credential; plain-``http://``
+    bases additionally enroll it as a consent-scoped insecure host.
+
+    Args:
+        service: Connector service name.
+        cfg: The parsed legacy ``config.json`` contents.
+
+    Returns:
+        ``(hosts, insecure_hosts)`` tuples (possibly empty).
+    """
+    if service == "firecrawl":
+        from kiss.agents.third_party_agents import firecrawl_agent
+
+        # Firecrawl is origin-bound with no built-in host, so a cloud
+        # key (no base_url) must still enroll the cloud origin.
+        base_url = str(cfg.get("base_url") or firecrawl_agent._DEFAULT_BASE_URL)
+        return (
+            firecrawl_agent._extra_hosts(base_url),
+            firecrawl_agent._insecure_extra_hosts(base_url),
+        )
+    if service == "homeassistant" and cfg.get("base_url"):
+        from kiss.agents.third_party_agents import homeassistant_agent as ha
+
+        base_url = str(cfg["base_url"])
+        return ha._extra_hosts(base_url), ha._insecure_extra_hosts(base_url)
+    if service == "ntfy":
+        from kiss.agents.third_party_agents import ntfy_agent
+
+        # ntfy is origin-bound with no built-in host, so a public-cloud
+        # token (no server configured) must still enroll ntfy.sh — the
+        # same default the connector's loader substitutes.
+        server = str(cfg.get("server") or ntfy_agent._DEFAULT_SERVER)
+        return ntfy_agent._extra_hosts(server), ntfy_agent._insecure_extra_hosts(server)
+    return (), ()
+
+
+def _scrub_imported_config(service: str) -> None:
+    """Remove a just-imported token from its legacy ``config.json``.
+
+    Completes the migration in the same command instead of leaving a
+    plaintext copy behind: non-secret metadata keys (``base_url``,
+    ``server``, ``application_id``, ...) survive, and the file is
+    deleted when nothing but the token was stored.
+
+    Args:
+        service: A :data:`_TOKEN_SERVICES` connector name.
+    """
+    from kiss.agents.third_party_agents._channel_agent_utils import save_json_config
+
+    key = _TOKEN_SERVICES[service]["key"]
+    path = muse_auth_dir().parent / "third_party_agents" / service / "config.json"
+    try:
+        cfg = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(cfg, dict) or key not in cfg:
+        return
+    kept = {k: str(v) for k, v in cfg.items() if k != key and v}
+    if kept:
+        save_json_config(path, kept)
+    else:
+        path.unlink()
 
 
 def _service_scopes(service: str) -> list[str]:
@@ -134,11 +208,13 @@ def _cmd_import(service: str) -> int:
 
     Google-OAuth services move their ``token.json`` (the plaintext file
     is deleted).  Token services (notion, github, firecrawl,
-    brave_search) copy the token out of their ``config.json``; delete
-    or blank that key manually to finish the migration, since the file
-    may hold other settings.  ``slack`` migrates the default
+    brave_search, discord, homeassistant, ntfy) move the token out of
+    their ``config.json``: the key is scrubbed after a successful store
+    while non-secret settings survive.  ``slack`` migrates the default
     workspace's bot token and deletes its plaintext file; other Slack
     workspaces migrate automatically on their first Muse-mode connect.
+    ``govee`` enrolls ``$GOVEE_API_KEY`` from the environment (there is
+    no config file); unset the shell export afterwards.
 
     Args:
         service: Connector service name.
@@ -158,6 +234,16 @@ def _cmd_import(service: str) -> int:
         print("migrated the default Slack workspace token into the Muse-auth vault "
               "and removed the plaintext token.")
         return 0
+    if service == "govee":
+        key = os.environ.get("GOVEE_API_KEY", "")
+        if not key:
+            print("GOVEE_API_KEY is not set in the environment", file=sys.stderr)
+            return 1
+        store_credentials(
+            "govee", {"kind": "header", "header": "Govee-API-Key", "token": key}, []
+        )
+        print("enrolled $GOVEE_API_KEY into the Muse-auth vault; you may unset it now.")
+        return 0
     if service in _TOKEN_SERVICES:
         spec = _TOKEN_SERVICES[service]
         path = muse_auth_dir().parent / "third_party_agents" / service / "config.json"
@@ -169,20 +255,49 @@ def _cmd_import(service: str) -> int:
         if not token:
             print(f"no '{spec['key']}' key in {path}", file=sys.stderr)
             return 1
+        # Validate a configured self-hosted URL the same way the
+        # authenticate tools do: a userinfo/malformed URL must not be
+        # migrated (its password would persist and the credential could
+        # not be spent).
+        url_key = {"firecrawl": "base_url", "homeassistant": "base_url", "ntfy": "server"}.get(
+            service
+        )
+        if url_key is not None:
+            raw_url = cfg.get(url_key)
+            if raw_url is None or raw_url == "":
+                # Null/absent/empty selects the documented default for
+                # the optional firecrawl/ntfy URLs (their loaders and
+                # _import_hosts substitute it).  Home Assistant is
+                # always self-hosted: without a base URL the credential
+                # would be stored hostless and unusable, so reject.
+                if service == "homeassistant":
+                    print(
+                        f"'{url_key}' in {path} is required and must be a "
+                        "valid http(s):// URL",
+                        file=sys.stderr,
+                    )
+                    return 1
+            elif not isinstance(raw_url, str) or not valid_http_url(raw_url):
+                # Non-string JSON values (false, 0, [], {}) are
+                # malformed configs, not "use the default".
+                print(
+                    f"'{url_key}' in {path} is not a valid http(s):// URL "
+                    "(no userinfo, valid host and port)",
+                    file=sys.stderr,
+                )
+                return 1
+        token = spec.get("prefix", "") + token
         header = spec.get("header", "")
         if header:
             info = {"kind": "header", "header": header, "token": token}
         else:
             info = {"kind": "bearer", "token": token}
-        hosts: tuple[str, ...] = ()
-        if service == "firecrawl" and cfg.get("base_url"):
-            from kiss.agents.third_party_agents.firecrawl_agent import _extra_hosts
-
-            hosts = _extra_hosts(str(cfg["base_url"]))
-        store_credentials(service, info, [], hosts=hosts)
+        hosts, insecure_hosts = _import_hosts(service, cfg)
+        store_credentials(service, info, [], hosts=hosts, insecure_hosts=insecure_hosts)
+        _scrub_imported_config(service)
         print(
-            f"imported the {service} token into the Muse-auth vault; "
-            f"remove the token from {path} to finish the migration."
+            f"imported the {service} token into the Muse-auth vault and scrubbed "
+            f"the plaintext copy from {path}."
         )
         return 0
     from kiss.agents.third_party_agents._google_workspace_utils import token_path

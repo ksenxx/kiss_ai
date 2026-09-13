@@ -7,6 +7,13 @@
 
 Reads the key from $GOVEE_API_KEY (already exported in ~/.zshrc).
 
+In Muse-auth mode (``KISS_MUSE_AUTH=1``) the key lives in the Muse
+vault as a header-kind credential ($GOVEE_API_KEY is enrolled once, on
+first use): this process only holds a surrogate, and the daemon swaps
+it into the real ``Govee-API-Key`` header at the network boundary.
+Device-state queries classify as reads; ``/device/control`` calls are
+writes and follow the Sentinel write policy (grants).
+
 Usage:
     ./govee.py list                       # show all devices
     ./govee.py state "Living room lamp"   # query current state
@@ -28,6 +35,9 @@ API = "https://openapi.api.govee.com/router/api/v1"
 
 EXCLUDED_NAMES = {"permanent outdoor lights", "string lights"}
 
+# Muse-mode boundary session and surrogate, created once per process.
+_MUSE_SESSION: tuple[Any, str] | None = None
+
 
 def _api_key() -> str:
     """Return the Govee API key from $GOVEE_API_KEY, exiting if it is not set."""
@@ -37,8 +47,89 @@ def _api_key() -> str:
     return key
 
 
+def _muse_session() -> tuple[Any, str]:
+    """Return the Muse boundary session and surrogate, enrolling on first use.
+
+    A ``govee`` credential already in the vault wins; otherwise
+    ``$GOVEE_API_KEY`` is enrolled once as a header-kind credential
+    (``Govee-API-Key``), after which the env var is no longer needed —
+    it is dropped from this process's environment either way (remove
+    the persistent shell export yourself; a child process cannot).
+
+    Returns:
+        ``(MuseBoundarySession, surrogate_token)``.
+    """
+    global _MUSE_SESSION
+    if _MUSE_SESSION is None:
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            MuseBoundarySession,
+            bearer_surrogate,
+        )
+
+        surrogate = bearer_surrogate(
+            "govee", os.environ.get("GOVEE_API_KEY", ""), header="Govee-API-Key"
+        )
+        if not surrogate:
+            sys.exit("error: GOVEE_API_KEY not set and no 'govee' Muse vault credential")
+        os.environ.pop("GOVEE_API_KEY", None)
+        _MUSE_SESSION = (MuseBoundarySession("govee"), surrogate)
+    return _MUSE_SESSION
+
+
+# The only boundary failure that provably happens BEFORE any bytes
+# reach the API host: the daemon rejecting a surrogate that died with a
+# restarted/rotated vault (a restarted daemon is re-spawned and rejects
+# the stale surrogate before forwarding).  A lost daemon socket reply
+# is NOT pre-egress — authd may already have forwarded the write — so
+# it is surfaced, never replayed.
+_PRE_EGRESS_ERRORS = ("stale surrogate",)
+
+
+def _muse_request(method: str, url: str, payload: dict | None) -> Any:
+    """Execute one request at the Muse boundary, surviving a daemon restart.
+
+    Surrogates die with the daemon, so a stale-surrogate rejection (or
+    a dead daemon socket) resets the cached session and retries once
+    with a freshly minted surrogate.  Only failures that occur before
+    network egress are retried: an ambiguous failure after the request
+    may have reached Govee is surfaced instead of replayed, so a
+    device-control write can never fire twice.
+
+    Args:
+        method: HTTP method.
+        url: Absolute request URL.
+        payload: Optional JSON body.
+
+    Returns:
+        The boundary :class:`requests.Response`.
+    """
+    from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+    global _MUSE_SESSION
+    for attempt in (0, 1):
+        session, surrogate = _muse_session()
+        # The surrogate travels as a bearer; the daemon swaps it into
+        # the real Govee-API-Key header at the network boundary.
+        headers = {"Authorization": f"Bearer {surrogate}", "Content-Type": "application/json"}
+        try:
+            return session.request(method, url, headers=headers, json=payload, timeout=60)
+        except MuseAuthError as e:
+            retriable = any(marker in str(e) for marker in _PRE_EGRESS_ERRORS)
+            if attempt or not retriable:
+                raise
+            _MUSE_SESSION = None
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def _request(path: str, payload: dict | None = None) -> dict:
     url = f"{API}{path}"
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    if muse_auth_enabled():
+        resp = _muse_request("POST" if payload else "GET", url, payload)
+        if resp.status_code >= 400:
+            sys.exit(f"error: HTTP {resp.status_code}: {resp.text[:500]}")
+        return dict(resp.json())
     headers = {"Govee-API-Key": _api_key(), "Content-Type": "application/json"}
     data = json.dumps(payload).encode() if payload else None
     req = Request(url, data=data, headers=headers, method="POST" if data else "GET")

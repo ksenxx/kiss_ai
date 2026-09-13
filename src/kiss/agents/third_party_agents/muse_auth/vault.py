@@ -20,6 +20,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import requests
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
@@ -75,6 +76,7 @@ class CredentialVault:
         authorized_user_info: dict[str, Any],
         scopes: list[str],
         hosts: list[str] | None = None,
+        insecure_hosts: list[str] | None = None,
     ) -> None:
         """Persist a service's real OAuth credential into the vault.
 
@@ -89,18 +91,56 @@ class CredentialVault:
                 (consent-time allowlist extension, e.g. a self-hosted
                 Firecrawl instance); merged with the built-in hosts by
                 Sentinel.
+            insecure_hosts: Hostnames the credential may reach over
+                plain HTTP (consent-time exception for services the
+                user pointed at an ``http://`` base URL, e.g. a LAN
+                Home Assistant instance); implicitly part of the host
+                allowlist.
         """
         with self._lock:
             payload: dict[str, Any] = {
                 "authorized_user_info": authorized_user_info,
                 "scopes": scopes,
+                # Every store starts a new generation: in-flight
+                # requests pinned to the previous generation abort
+                # instead of spending this credential (token refreshes
+                # rewrite the payload in place, preserving the
+                # generation, so they never abort anything).
+                "generation": secrets.token_hex(8),
             }
             if hosts:
                 payload["hosts"] = list(hosts)
+            if insecure_hosts:
+                payload["insecure_hosts"] = list(insecure_hosts)
             write_private_file(self._entry_path(service), json.dumps(payload))
+            # Surrogates minted against the old credential/host scope
+            # die with it, so an old handle can never spend the new
+            # token (or ship the old token under the new host scope).
+            self._surrogates = {s: svc for s, svc in self._surrogates.items() if svc != service}
+
+    def _payload(self, service: str) -> dict[str, Any]:
+        """Load a service's vault payload, tolerating absence.
+
+        Args:
+            service: Connector service name.
+
+        Returns:
+            The stored payload dict, or ``{}`` when the service is not
+            enrolled or the file is unreadable.
+        """
+        path = self._entry_path(service)
+        if not path.exists():
+            return {}
+        try:
+            return dict(json.loads(path.read_text()))
+        except (OSError, ValueError):
+            return {}
 
     def enrolled_hosts(self, service: str) -> tuple[str, ...]:
         """Return the extra hosts enrolled with a service's credential.
+
+        Insecure enrollment hosts are included: consenting to reach a
+        host over plain HTTP implies the host is allowed at all.
 
         Args:
             service: Connector service name.
@@ -110,14 +150,36 @@ class CredentialVault:
             service is not enrolled or declared none.
         """
         with self._lock:
-            path = self._entry_path(service)
-            if not path.exists():
-                return ()
-            try:
-                payload = json.loads(path.read_text())
-            except (OSError, ValueError):
-                return ()
-        return tuple(str(h) for h in payload.get("hosts", []))
+            payload = self._payload(service)
+        return tuple(str(h) for h in payload.get("hosts", [])) + tuple(
+            str(h) for h in payload.get("insecure_hosts", [])
+        )
+
+    def enrolled_insecure_hosts(self, service: str) -> tuple[str, ...]:
+        """Return the hosts the credential may reach over plain HTTP.
+
+        Args:
+            service: Connector service name.
+
+        Returns:
+            The consent-time insecure hostnames, or ``()``.
+        """
+        with self._lock:
+            payload = self._payload(service)
+        return tuple(str(h) for h in payload.get("insecure_hosts", []))
+
+    def generation(self, service: str) -> str:
+        """Return the current credential generation for *service*.
+
+        Args:
+            service: Connector service name.
+
+        Returns:
+            The generation nonce written by :meth:`store` (pre-upgrade
+            entries report ``""``, which stays stable across reads).
+        """
+        with self._lock:
+            return str(self._payload(service).get("generation", ""))
 
     def clear(self, service: str) -> None:
         """Delete a service's vault entry and invalidate its surrogates.
@@ -165,7 +227,7 @@ class CredentialVault:
         with self._lock:
             return self._surrogates.get(surrogate)
 
-    def resolve_header(self, service: str) -> tuple[str, str]:
+    def resolve_header(self, service: str, generation: str | None = None) -> tuple[str, str]:
         """Return the real credential as an outbound header (name, value) pair.
 
         ``{"kind": "header"}`` credentials (e.g. Brave Search's
@@ -175,13 +237,18 @@ class CredentialVault:
 
         Args:
             service: Connector service name.
-
-        Returns:
-            ``(header_name, header_value)`` for the boundary swap.
+            generation: When given, the vault generation the caller's
+                request is pinned to; resolution fails if the credential
+                was replaced since (a token refresh keeps the
+                generation, so it never trips this check).
 
         Raises:
             KeyError: When the service has no vault credential.
-            RuntimeError: When the stored credential is unusable.
+            RuntimeError: When the stored credential is unusable or was
+                replaced after the caller's request started.
+
+        Returns:
+            ``(header_name, header_value)`` for the boundary swap.
         """
         with self._lock:
             path = self._entry_path(service)
@@ -189,10 +256,35 @@ class CredentialVault:
                 raise KeyError(f"no vault credential for service '{service}'")
             info = json.loads(path.read_text())["authorized_user_info"]
         if info.get("kind") == "header":
+            # Header-kind credentials never call resolve_token, so the
+            # generation is checked here; other kinds are checked inside
+            # resolve_token (avoiding a redundant double-check).
+            with self._lock:
+                self._check_generation(service, generation)
             return str(info["header"]), str(info["token"])
-        return "Authorization", f"Bearer {self.resolve_token(service)}"
+        return "Authorization", f"Bearer {self.resolve_token(service, generation)}"
 
-    def resolve_token(self, service: str) -> str:
+    def _check_generation(self, service: str, generation: str | None) -> None:
+        """Raise if the stored generation no longer matches *generation*.
+
+        Must be called with the lock held.
+
+        Args:
+            service: Connector service name.
+            generation: The generation the caller's request is pinned
+                to; ``None`` skips the check.
+
+        Raises:
+            RuntimeError: When the credential was replaced since.
+        """
+        if generation is None:
+            return
+        if str(self._payload(service).get("generation", "")) != generation:
+            raise RuntimeError(
+                f"the '{service}' credential was replaced after this request started"
+            )
+
+    def resolve_token(self, service: str, generation: str | None = None) -> str:
         """Return a currently valid real bearer token for *service*.
 
         Loads the vault credential, refreshes it against Google's token
@@ -200,20 +292,25 @@ class CredentialVault:
 
         Args:
             service: Connector service name.
+            generation: When given, the vault generation the caller's
+                request is pinned to; resolution fails if the credential
+                was replaced since.
 
         Returns:
             The real OAuth2 access token.
 
         Raises:
             KeyError: When the service has no vault credential.
-            RuntimeError: When the stored credential is unusable and
-                cannot be refreshed.
+            RuntimeError: When the stored credential is unusable, cannot
+                be refreshed, or was replaced after the caller's request
+                started.
         """
         with self._lock:
             path = self._entry_path(service)
             if not path.exists():
                 raise KeyError(f"no vault credential for service '{service}'")
             payload = json.loads(path.read_text())
+            self._check_generation(service, generation)
             info = payload["authorized_user_info"]
             if info.get("kind") == "bearer":
                 # Plain bearer-token services (Notion, GitHub, ...):
@@ -224,7 +321,13 @@ class CredentialVault:
             if not creds.valid:
                 if not (creds.expired and creds.refresh_token):
                     raise RuntimeError(f"vault credential for '{service}' is not refreshable")
-                creds.refresh(Request())
+                # The refresh carries the refresh token to Google's
+                # token endpoint: like the boundary itself, it must be
+                # immune to ambient proxy/netrc environment configs.
+                session = requests.Session()
+                session.trust_env = False
+                with session:
+                    creds.refresh(Request(session=session))
                 payload["authorized_user_info"] = json.loads(creds.to_json())
                 write_private_file(path, json.dumps(payload))
             return str(creds.token)

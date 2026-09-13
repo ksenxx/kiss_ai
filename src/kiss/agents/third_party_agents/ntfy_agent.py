@@ -14,6 +14,14 @@ Stores config in ``~/.kiss/third_party_agents/ntfy/config.json`` with a
 required ``topic`` and optional ``server`` (default ``https://ntfy.sh``),
 ``token`` (sent as ``Authorization: Bearer``) and ``echo_tag``.
 
+In Muse-auth mode (``KISS_MUSE_AUTH=1``) a configured token lives in
+the Muse vault, enrolled together with a self-hosted server's host
+(flagged as a consent-scoped insecure host when the server URL is
+plain ``http://``), and every API call runs at the daemon boundary;
+the plaintext token is scrubbed from ``config.json`` after enrollment.
+A tokenless configuration (the public ntfy.sh works without one) has
+no credential to protect and stays on the legacy direct path.
+
 Usage::
 
     agent = NtfyAgent()
@@ -28,6 +36,7 @@ import sys
 import threading
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -36,6 +45,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
+    save_json_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +55,67 @@ _DEFAULT_ECHO_TAG = "kiss-sorcar"
 
 _NTFY_DIR = Path.home() / ".kiss" / "third_party_agents" / "ntfy"
 _config = ChannelConfig(_NTFY_DIR, ("topic",))
+
+
+def _scrub_config_token() -> None:
+    """Remove a vault-migrated ``token`` from config.json.
+
+    Finishes the Muse migration automatically: the non-secret ``topic``,
+    ``server`` and ``echo_tag`` keys are kept so the config file stays
+    loadable while never containing the secret again.
+    """
+    try:
+        cfg = json.loads(_config.path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(cfg, dict) or not cfg.get("token"):
+        return
+    kept = {k: str(v) for k, v in cfg.items() if k != "token" and v}
+    save_json_config(_config.path, kept)
+
+
+def _extra_hosts(server: str) -> tuple[str, ...]:
+    """Return the Muse enrollment origins for an ntfy server URL.
+
+    An ntfy access token belongs to exactly one server, so the
+    credential is origin-bound: only the configured server's origin —
+    host AND port, because the same hostname on another port is a
+    different server — is enrolled (there is no built-in allowlist),
+    and a self-hosted instance's token can never be spent against
+    public ``ntfy.sh``.
+
+    Args:
+        server: Configured ntfy server base URL.
+
+    Returns:
+        ``("host:port",)``, or ``()`` when the URL has no host.
+    """
+    from kiss.agents.third_party_agents.muse_auth._common import url_origin_entry
+
+    entry = url_origin_entry(server)
+    return (entry,) if entry else ()
+
+
+def _insecure_extra_hosts(server: str) -> tuple[str, ...]:
+    """Return the origins to enroll as consent-scoped plain-HTTP origins.
+
+    Args:
+        server: Configured ntfy server base URL.
+
+    Returns:
+        ``("host:port",)`` for a plain-HTTP non-loopback server, else ``()``.
+    """
+    from kiss.agents.third_party_agents.muse_auth._common import (
+        canonical_host,
+        is_loopback_host,
+        url_origin_entry,
+    )
+
+    parsed = urlparse(server)
+    host = canonical_host(parsed.hostname or "")
+    if parsed.scheme == "http" and host and not is_loopback_host(host):
+        return (url_origin_entry(server),)
+    return ()
 
 
 class NtfyChannelBackend(ToolMethodBackend):
@@ -61,6 +132,9 @@ class NtfyChannelBackend(ToolMethodBackend):
         self._topic: str = ""
         self._token: str = ""
         self._echo_tag: str = _DEFAULT_ECHO_TAG
+        self._http: Any = requests
+        self._muse: bool = False
+        self._muse_error: str = ""
         self._send_lock = threading.Lock()
         self._connection_info: str = ""
 
@@ -71,15 +145,112 @@ class NtfyChannelBackend(ToolMethodBackend):
             self._connection_info = "No ntfy config found."
             return False
         self._apply_config(cfg)
-        self._connection_info = f"ntfy configured: {self._server}/{self._topic}"
+        if self._muse_error:
+            # The configured token could not be wired through the Muse
+            # boundary: the backend is deliberately tokenless, so do not
+            # claim a working connection.
+            self._connection_info = self._muse_error
+            return False
+        suffix = " (Muse-auth)" if self._muse else ""
+        self._connection_info = f"ntfy configured: {self._server}/{self._topic}{suffix}"
         return True
 
     def _apply_config(self, cfg: dict[str, str]) -> None:
-        """Copy persisted config values onto the backend, applying defaults."""
+        """Copy persisted config values onto the backend, applying defaults.
+
+        In Muse-auth mode a configured (or previously vault-enrolled)
+        token is swapped for a surrogate and requests are rewired
+        through the daemon boundary; a tokenless configuration stays on
+        the legacy direct path because there is no credential to
+        protect.
+        """
         self._topic = cfg["topic"]
         self._server = (cfg.get("server") or _DEFAULT_SERVER).rstrip("/")
         self._token = cfg.get("token", "")
         self._echo_tag = cfg.get("echo_tag") or _DEFAULT_ECHO_TAG
+        self._http = requests
+        self._muse = False
+        self._muse_error = ""
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+            # An explicit ``token: ""`` in config.json (a tokenless
+            # rotation done while Muse was off) is authoritative user
+            # intent: it overrides any stale vault entry.  A scrubbed
+            # Muse config has NO token key, so this only fires for a
+            # deliberately-removed token.
+            explicit_tokenless = "token" in cfg and not cfg["token"]
+            try:
+                self._wire_muse(explicit_tokenless=explicit_tokenless)
+            except MuseAuthError as e:
+                # Fail closed: in Muse mode the real token must never
+                # be used on the direct path, so a failed wiring leaves
+                # the backend tokenless rather than falling back to it.
+                # The recorded error keeps connect() and the check tool
+                # honest about the broken credential.
+                self._token = ""
+                self._muse_error = f"ntfy Muse-auth wiring failed: {e}"
+                self._connection_info = self._muse_error
+
+    def _wire_muse(self, explicit_tokenless: bool = False) -> None:
+        """Enroll/mint the ntfy token surrogate and wire the boundary session.
+
+        A plaintext token in the just-read config is the newest user
+        intent (initial migration, or a rotation done while Muse was
+        off): it replaces any vault enrollment, and is scrubbed from
+        ``config.json`` only after the vault holds it.  Without a token
+        anywhere the backend stays legacy (nothing to protect).
+
+        Args:
+            explicit_tokenless: True when config.json carries an
+                explicit empty ``token`` (the user deliberately removed
+                it while Muse was off); any stale vault entry is dropped
+                so it cannot be silently revived.
+
+        Raises:
+            MuseAuthError: When the configured server URL is malformed,
+                the daemon rejects the enrollment, or the daemon is
+                unreachable (the caller resets the backend tokenless).
+        """
+        from kiss.agents.third_party_agents.muse_auth._common import valid_http_url
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            MuseAuthError,
+            MuseBoundarySession,
+            clear_credentials,
+            mint_surrogate,
+            store_credentials,
+        )
+
+        # Validate before any credential state changes: a malformed
+        # legacy server URL must not auto-migrate the token into a host
+        # scope Sentinel can never match, nor scrub the plaintext copy.
+        if not valid_http_url(self._server):
+            raise MuseAuthError(
+                f"configured ntfy server {self._server!r} is not a valid http(s):// URL; "
+                "fix config.json and reconnect"
+            )
+        if explicit_tokenless:
+            # Honor the deliberate removal: drop any stale vault entry
+            # and stay on the legacy tokenless direct path.
+            clear_credentials("ntfy")
+            return
+        if self._token:
+            store_credentials(
+                "ntfy",
+                {"kind": "bearer", "token": self._token},
+                [],
+                hosts=_extra_hosts(self._server),
+                insecure_hosts=_insecure_extra_hosts(self._server),
+            )
+        handle = mint_surrogate("ntfy")
+        if handle is None:
+            return
+        _scrub_config_token()
+        self._token = handle.token
+        self._http = MuseBoundarySession("ntfy")
+        self._muse = True
 
     def _auth_headers(self) -> dict[str, str]:
         """Return HTTP headers with Bearer authorization when a token is set."""
@@ -114,14 +285,18 @@ class NtfyChannelBackend(ToolMethodBackend):
             RuntimeError: If the poll request returns a non-200 status.
             requests.RequestException: If the HTTP request itself fails.
         """
-        resp = requests.get(
+        resp = self._http.get(
             f"{self._server}/{topic}/json",
             params={"poll": "1", "since": oldest or "all"},
             headers=self._auth_headers(),
             timeout=30,
         )
         if resp.status_code != 200:
-            raise RuntimeError(f"ntfy poll failed: HTTP {resp.status_code}")
+            # Include the body: a Muse-auth denial carries the grant
+            # instructions the user needs to approve the action.
+            raise RuntimeError(
+                f"ntfy poll failed: HTTP {resp.status_code}: {resp.text[:300]}"
+            )
         messages: list[dict[str, Any]] = []
         newest = oldest
         for line in resp.text.splitlines():
@@ -195,11 +370,13 @@ class NtfyChannelBackend(ToolMethodBackend):
         headers = self._auth_headers()
         headers["X-Tags"] = ",".join(self._echo_tags())
         with self._send_lock:
-            resp = requests.post(
+            resp = self._http.post(
                 f"{self._server}/{topic}", data=text.encode("utf-8"), headers=headers, timeout=30
             )
         if not 200 <= resp.status_code < 300:
-            raise RuntimeError(f"ntfy publish failed: HTTP {resp.status_code}")
+            raise RuntimeError(
+                f"ntfy publish failed: HTTP {resp.status_code}: {resp.text[:300]}"
+            )
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Return True when a polled message carries the echo tag.
@@ -246,7 +423,7 @@ class NtfyChannelBackend(ToolMethodBackend):
             if click_url:
                 headers["X-Click"] = click_url
             with self._send_lock:
-                resp = requests.post(
+                resp = self._http.post(
                     f"{self._server}/{self._topic}",
                     data=message.encode("utf-8"),
                     headers=headers,
@@ -254,7 +431,13 @@ class NtfyChannelBackend(ToolMethodBackend):
                 )
             if not 200 <= resp.status_code < 300:
                 return json.dumps(
-                    {"ok": False, "error": f"ntfy publish failed: HTTP {resp.status_code}"}
+                    {
+                        "ok": False,
+                        "error": (
+                            f"ntfy publish failed: HTTP {resp.status_code}: "
+                            f"{resp.text[:300]}"
+                        ),
+                    }
                 )
             try:
                 message_id = str(resp.json().get("id", ""))
@@ -305,8 +488,14 @@ class NtfyAgent(BaseChannelAgent):
             self._backend._apply_config(cfg)
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend is authenticated."""
-        return bool(self._backend._topic)
+        """Return True if the backend is authenticated.
+
+        A configured token whose Muse-boundary wiring failed leaves the
+        backend deliberately tokenless: it is NOT authenticated, so the
+        backend tools stay hidden and no request can slip out on the
+        direct transport without a credential.
+        """
+        return bool(self._backend._topic) and not self._backend._muse_error
 
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
@@ -325,6 +514,8 @@ class NtfyAgent(BaseChannelAgent):
                     "works without a token, self-hosted servers may need an "
                     "access token."
                 )
+            if agent._backend._muse_error:
+                return json.dumps({"ok": False, "error": agent._backend._muse_error})
             return json.dumps(
                 {
                     "ok": True,
@@ -357,6 +548,45 @@ class NtfyAgent(BaseChannelAgent):
                 "token": token.strip(),
                 "echo_tag": echo_tag.strip() or _DEFAULT_ECHO_TAG,
             }
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                # Transactional: the token goes straight into the vault
+                # (never onto disk) BEFORE any state changes, so a
+                # failed enrollment leaves the previous credential and
+                # config untouched.  A deliberately tokenless setup
+                # drops any stale vault credential instead.
+                from kiss.agents.third_party_agents.muse_auth._common import valid_http_url
+                from kiss.agents.third_party_agents.muse_auth.client import (
+                    MuseAuthError,
+                    clear_credentials,
+                    store_credentials,
+                )
+
+                if not valid_http_url(cfg["server"]):
+                    return "server must be an http(s):// URL with a hostname and valid port."
+                persisted = {k: v for k, v in cfg.items() if k != "token"}
+                try:
+                    # Write the non-secret metadata FIRST: it never holds
+                    # the token, so a failure here leaves the prior vault
+                    # credential and config intact (transactional order).
+                    _config.save(persisted)
+                    if cfg["token"]:
+                        store_credentials(
+                            "ntfy",
+                            {"kind": "bearer", "token": cfg["token"]},
+                            [],
+                            hosts=_extra_hosts(cfg["server"]),
+                            insecure_hosts=_insecure_extra_hosts(cfg["server"]),
+                        )
+                    else:
+                        clear_credentials("ntfy")
+                    agent._backend._apply_config(persisted)
+                except (MuseAuthError, OSError) as e:
+                    return json.dumps({"ok": False, "error": str(e)})
+                if agent._backend._muse_error:  # pragma: no cover - daemon race
+                    return json.dumps({"ok": False, "error": agent._backend._muse_error})
+                return json.dumps({"ok": True, "message": "ntfy configured."})
             _config.save(cfg)
             agent._backend._apply_config(cfg)
             return json.dumps({"ok": True, "message": "ntfy configured."})
@@ -372,6 +602,14 @@ class NtfyAgent(BaseChannelAgent):
             agent._backend._server = _DEFAULT_SERVER
             agent._backend._token = ""
             agent._backend._echo_tag = _DEFAULT_ECHO_TAG
+            agent._backend._http = requests
+            agent._backend._muse = False
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("ntfy")
             return "ntfy configuration cleared."
 
         return [check_ntfy_auth, authenticate_ntfy, clear_ntfy_auth]

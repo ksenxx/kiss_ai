@@ -9,6 +9,16 @@ long-lived access token (sent as ``Authorization: Bearer`` on every
 call).  Stores config in
 ``~/.kiss/third_party_agents/homeassistant/config.json``.
 
+In Muse-auth mode (``KISS_MUSE_AUTH=1``) the token lives in the Muse
+vault, enrolled together with the instance's host (Home Assistant is
+always self-hosted, so there is no built-in host allowlist).  When the
+configured ``base_url`` uses plain ``http://`` — common for LAN
+installs without TLS — the host is additionally enrolled as a
+consent-scoped *insecure host*, the only condition under which the
+Sentinel lets a real credential travel over plaintext to a
+non-loopback destination.  After enrollment the plaintext token is
+scrubbed from ``config.json`` (the non-secret ``base_url`` survives).
+
 Home Assistant's plain REST API has no meaningful inbound message
 stream, so this adapter is outbound-only: ``poll_messages`` always
 returns no messages and the ``--channel`` poll mode is disabled
@@ -30,7 +40,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -39,6 +49,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
+    save_json_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +83,92 @@ _HOMEASSISTANT_DIR = Path.home() / ".kiss" / "third_party_agents" / "homeassista
 _config = ChannelConfig(_HOMEASSISTANT_DIR, ("base_url", "token"))
 
 
+def _read_base_url() -> str:
+    """Return the configured base URL, tolerating a removed ``token``.
+
+    Muse-mode metadata read: after migration the plaintext ``token`` is
+    scrubbed from ``config.json``, which makes ``_config.load()`` (that
+    requires the key) return None — but the non-secret ``base_url``
+    must keep pointing at the user's instance.
+
+    Returns:
+        The configured base URL, or ``""`` when unconfigured.
+    """
+    try:
+        cfg = json.loads(_config.path.read_text())
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(cfg, dict):
+        return ""
+    return str(cfg.get("base_url") or "")
+
+
+def _scrub_config_token() -> None:
+    """Remove a vault-migrated ``token`` from config.json.
+
+    Finishes the Muse migration automatically: the non-secret
+    ``base_url`` metadata is kept and the file is deleted when nothing
+    but the token was stored.
+    """
+    try:
+        cfg = json.loads(_config.path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(cfg, dict) or "token" not in cfg:
+        return
+    if cfg.get("base_url"):
+        save_json_config(_config.path, {"base_url": str(cfg["base_url"])})
+    else:
+        _config.clear()
+
+
+def _extra_hosts(base_url: str) -> tuple[str, ...]:
+    """Return the Muse enrollment origins for a Home Assistant base URL.
+
+    Home Assistant has no built-in allowlist (every instance is
+    self-hosted), so the configured origin — host AND port, because the
+    same hostname on another port is a different server — is always
+    enrolled with the credential.
+
+    Args:
+        base_url: Configured Home Assistant base URL.
+
+    Returns:
+        ``("host:port",)``, or ``()`` when the URL has no host.
+    """
+    from kiss.agents.third_party_agents.muse_auth._common import url_origin_entry
+
+    entry = url_origin_entry(base_url)
+    return (entry,) if entry else ()
+
+
+def _insecure_extra_hosts(base_url: str) -> tuple[str, ...]:
+    """Return the origins to enroll as consent-scoped plain-HTTP origins.
+
+    Only an explicit ``http://`` base URL to a non-loopback host needs
+    the exception (loopback plaintext is always allowed, and HTTPS
+    needs none).
+
+    Args:
+        base_url: Configured Home Assistant base URL.
+
+    Returns:
+        ``("host:port",)`` for a plain-HTTP non-loopback base URL,
+        else ``()``.
+    """
+    from kiss.agents.third_party_agents.muse_auth._common import (
+        canonical_host,
+        is_loopback_host,
+        url_origin_entry,
+    )
+
+    parsed = urlparse(base_url)
+    host = canonical_host(parsed.hostname or "")
+    if parsed.scheme == "http" and host and not is_loopback_host(host):
+        return (url_origin_entry(base_url),)
+    return ()
+
+
 class HomeAssistantChannelBackend(ToolMethodBackend):
     """Channel backend for the Home Assistant REST API.
 
@@ -84,15 +181,80 @@ class HomeAssistantChannelBackend(ToolMethodBackend):
     def __init__(self) -> None:
         self._base_url: str = ""
         self._token: str = ""
+        self._http: Any = requests
+        self._muse: bool = False
         self._request_lock = threading.Lock()
         self._connection_info: str = ""
 
     def connect(self) -> bool:
         """Load the Home Assistant config from disk.
 
+        In Muse-auth mode (``KISS_MUSE_AUTH=1``) the real token lives in
+        the Muse vault (auto-enrolled from the legacy config on first
+        connect, together with the instance's host — flagged as a
+        consent-scoped insecure host when the base URL is plain
+        ``http://``); this process only holds a surrogate and every API
+        call is executed at the daemon boundary.
+
         Returns:
             True if a valid config with ``base_url`` and ``token`` was loaded.
         """
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import (
+                MuseBoundarySession,
+                mint_surrogate,
+            )
+
+            # Metadata-only read: an enrolled process needs base_url but
+            # never the plaintext token (which may already be deleted).
+            self._base_url = _read_base_url()
+            if not self._base_url:
+                self._connection_info = "No Home Assistant config found."
+                return False
+            # Validate before any credential state changes: a malformed
+            # legacy base_url (e.g. "http://localhost..:8123") must not
+            # auto-migrate the token into a host scope Sentinel can
+            # never match, nor scrub the plaintext copy.
+            from kiss.agents.third_party_agents.muse_auth._common import valid_http_url
+
+            if not valid_http_url(self._base_url):
+                self._connection_info = (
+                    f"Home Assistant base_url {self._base_url!r} is not a valid "
+                    "http(s):// URL; fix config.json and reconnect."
+                )
+                return False
+            muse_cfg = _config.load() or {}
+            if muse_cfg.get("token"):
+                # A plaintext token in config.json is the newest user
+                # intent (initial migration, or a rotation done while
+                # Muse was off): it replaces any vault enrollment.
+                from kiss.agents.third_party_agents.muse_auth.client import store_credentials
+
+                store_credentials(
+                    "homeassistant",
+                    {"kind": "bearer", "token": muse_cfg["token"]},
+                    [],
+                    hosts=_extra_hosts(self._base_url),
+                    insecure_hosts=_insecure_extra_hosts(self._base_url),
+                )
+            handle = mint_surrogate("homeassistant")
+            if handle is None:
+                self._connection_info = (
+                    "No Home Assistant credential in the Muse vault or config."
+                )
+                return False
+            # The credential lives in the vault now; scrub any plaintext
+            # copy left in config.json (keeping base_url).
+            _scrub_config_token()
+            self._token = handle.token
+            self._http = MuseBoundarySession("homeassistant")
+            self._muse = True
+            self._connection_info = (
+                f"Home Assistant configured at {self._base_url} (Muse-auth)"
+            )
+            return True
         cfg = _config.load()
         if not cfg:
             self._connection_info = "No Home Assistant config found."
@@ -115,12 +277,14 @@ class HomeAssistantChannelBackend(ToolMethodBackend):
             ``{"ok": false, "error": ...}`` on an HTTP error status.
         """
         url = self._base_url.rstrip("/") + path
+        # In Muse mode ``_token`` holds a surrogate: the daemon swaps it
+        # for the real long-lived token at the network boundary.
         headers = {
             "Authorization": f"Bearer {self._token}",
             "Content-Type": "application/json",
         }
         with self._request_lock:
-            resp = requests.request(method, url, headers=headers, json=payload, timeout=_TIMEOUT)
+            resp = self._http.request(method, url, headers=headers, json=payload, timeout=_TIMEOUT)
         if resp.status_code >= 400:
             return json.dumps({"ok": False, "error": f"HTTP {resp.status_code}: {resp.text[:500]}"})
         try:
@@ -302,6 +466,22 @@ class HomeAssistantAgent(BaseChannelAgent):
     def __init__(self) -> None:
         super().__init__("Home Assistant Agent")
         self._backend = HomeAssistantChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+            # Muse-auth mode: connect() wires a vault surrogate and the
+            # boundary session (no network round trip); the real token
+            # never enters this process once migrated.  A daemon failure
+            # leaves the agent constructible (fail closed, tokenless) so
+            # its authenticate/clear tools stay available.
+            try:
+                self._backend.connect()
+            except MuseAuthError as e:
+                self._backend._token = ""
+                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            return
         cfg = _config.load()
         if cfg:
             self._backend._base_url = cfg["base_url"]
@@ -345,6 +525,48 @@ class HomeAssistantAgent(BaseChannelAgent):
             """
             if not base_url.strip() or not token.strip():
                 return "base_url and token cannot be empty."
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                # Transactional: the token goes straight into the Muse
+                # vault (never onto disk) BEFORE any state changes, so
+                # a failed enrollment leaves the previous credential
+                # and config untouched; config.json only ever keeps the
+                # non-secret base_url.
+                from kiss.agents.third_party_agents.muse_auth._common import valid_http_url
+                from kiss.agents.third_party_agents.muse_auth.client import (
+                    MuseAuthError,
+                    store_credentials,
+                )
+
+                base = base_url.strip()
+                if not valid_http_url(base):
+                    return "base_url must be an http(s):// URL with a hostname and valid port."
+                try:
+                    # Write the non-secret metadata FIRST: it never holds
+                    # the token, so a failure here leaves the prior vault
+                    # credential and config intact (transactional order).
+                    save_json_config(_config.path, {"base_url": base})
+                    store_credentials(
+                        "homeassistant",
+                        {"kind": "bearer", "token": token.strip()},
+                        [],
+                        hosts=_extra_hosts(base),
+                        insecure_hosts=_insecure_extra_hosts(base),
+                    )
+                    # connect() mints a surrogate for the enrollment and
+                    # wires the boundary session.  Defense in depth:
+                    # with the credential just stored, connect() can
+                    # only fail by raising (caught below).
+                    if not agent._backend.connect():  # pragma: no cover
+                        return json.dumps(
+                            {"ok": False, "error": agent._backend._connection_info}
+                        )
+                except (MuseAuthError, OSError) as e:
+                    return json.dumps({"ok": False, "error": str(e)})
+                return json.dumps(
+                    {"ok": True, "message": "Home Assistant configured (Muse-auth)."}
+                )
             agent._backend._base_url = base_url.strip()
             agent._backend._token = token.strip()
             _config.save({"base_url": base_url.strip(), "token": token.strip()})
@@ -359,6 +581,12 @@ class HomeAssistantAgent(BaseChannelAgent):
             _config.clear()
             agent._backend._base_url = ""
             agent._backend._token = ""
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("homeassistant")
             return "Home Assistant configuration cleared."
 
         return [check_homeassistant_auth, authenticate_homeassistant, clear_homeassistant_auth]

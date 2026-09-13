@@ -53,8 +53,18 @@ SERVICE_HOSTS: dict[str, tuple[str, ...]] = {
     "notion": ("api.notion.com",),
     "github": ("api.github.com",),
     "slack": ("slack.com", "files.slack.com"),
-    "firecrawl": ("api.firecrawl.dev",),
     "brave_search": ("api.search.brave.com",),
+    "discord": ("discord.com",),
+    "govee": ("openapi.api.govee.com",),
+    # Home Assistant is always self-hosted; an ntfy access token and a
+    # Firecrawl API key each belong to exactly one server (the public
+    # cloud OR a self-hosted instance).  These services have NO built-in
+    # host: the credential is bound to the one origin enrolled with it,
+    # so a self-hosted key can never be spent against the cloud service
+    # (or vice versa) — strict origin binding.
+    "homeassistant": (),
+    "ntfy": (),
+    "firecrawl": (),
 }
 
 # Services that enroll one vault entry per workspace/account; a
@@ -112,14 +122,36 @@ def valid_credential_header(name: Any) -> bool:
     )
 
 
+# Visible-ASCII runs separated by single spaces: covers bearer tokens
+# and scheme-prefixed values like ``Bot <token>``, while rejecting
+# control characters (header injection) and leading/trailing/duplicate
+# whitespace (which some HTTP stacks reflect verbatim into errors).
+_CREDENTIAL_VALUE_RE = re.compile(r"[\x21-\x7e]+( [\x21-\x7e]+)*")
+
+
+def valid_credential_value(value: Any) -> bool:
+    """Return whether *value* may be sent as a credential header value.
+
+    Args:
+        value: Candidate token/header value (any type; non-strings fail).
+
+    Returns:
+        True when the value is a safe, canonical header value.
+    """
+    return isinstance(value, str) and _CREDENTIAL_VALUE_RE.fullmatch(value) is not None
+
+
 SURROGATE_PREFIX = "muse-sgt."
 
 # Daemon wire-protocol version.  Bumped whenever the daemon gains
 # semantics an older daemon would silently mishandle (v2: header-kind
-# credentials, enrollment hosts, service-aware action classes).  The
-# client restarts a running daemon whose ``status`` reports an older
-# protocol, so a detached pre-upgrade daemon cannot serve new clients.
-PROTOCOL_VERSION = 2
+# credentials, enrollment hosts, service-aware action classes; v3:
+# consent-scoped insecure enrollment hosts, which a v2 daemon would
+# silently drop from ``store_credentials`` and then deny every plain-
+# HTTP Home Assistant request).  The client restarts a running daemon
+# whose ``status`` reports an older protocol, so a detached pre-upgrade
+# daemon cannot serve new clients.
+PROTOCOL_VERSION = 3
 
 # One JSON object per line; requests carrying request/response bodies
 # are base64-encoded, so cap the frame to keep the daemon safe from
@@ -163,6 +195,205 @@ def socket_path() -> Path:
         return natural
     digest = hashlib.sha256(str(kiss_home()).encode()).hexdigest()[:12]
     return Path(f"/tmp/kiss-muse-{os.getuid()}-{digest}.sock")
+
+
+def canonical_host(host: str) -> str:
+    """Return the canonical form of a hostname for allowlist matching.
+
+    Lowercases and strips exactly one trailing DNS root dot:
+    ``Example.COM.`` and ``example.com`` are the same authority, and
+    rejecting the fully-qualified spelling would only produce false
+    denials.  Only one dot is removed — ``example.com..`` contains an
+    empty DNS label, so it canonicalizes to the still-malformed
+    ``example.com.`` and fails :func:`valid_hostname` instead of
+    collapsing into a valid name.
+
+    Args:
+        host: Hostname or IP literal.
+
+    Returns:
+        The canonical hostname.
+    """
+    return host.lower().removesuffix(".")
+
+
+def canonical_host_entry(entry: str) -> str:
+    """Canonicalize an allowlist entry that may carry a ``:port`` suffix.
+
+    Splits any ``host:port`` / ``[ipv6]:port`` suffix, canonicalizes the
+    host part (lowercase, drop a trailing DNS dot), and reassembles, so
+    a fully-qualified ``localhost.:8123`` becomes ``localhost:8123``.
+
+    Args:
+        entry: A bare host or a ``host:port`` allowlist entry.
+
+    Returns:
+        The canonical entry.
+    """
+    lowered = entry.strip().lower()
+    # The bracket alternative accepts any IPv6 spelling — IPv4-mapped
+    # (``::ffff:127.0.0.1``) and zone/scoped literals with RFC-6874
+    # ZoneIDs (``fe80::1%25eth-0``); the daemon validates the bracket
+    # contents as a real IP before enrolling it.
+    match = re.fullmatch(r"(?P<host>\[[^\]]+\]|[^:]+):(?P<port>[0-9]{1,5})", lowered)
+    if not match:
+        return canonical_host(lowered)
+    # Normalize the port to its integer form so a leading-zero entry
+    # (``h:00080``) matches a request whose parsed port is ``80``.
+    port = int(match.group("port"))
+    host = match.group("host")
+    if host.startswith("["):
+        return f"{host}:{port}"
+    return f"{canonical_host(host)}:{port}"
+
+
+def host_port_entry(host: str, port: int) -> str:
+    """Return the allowlist entry that pins a host to one port.
+
+    Args:
+        host: Canonical hostname or IP literal.
+        port: TCP port.
+
+    Returns:
+        ``host:port``, bracketing IPv6 literals (``[::1]:8080``).
+    """
+    if ":" in host:
+        return f"[{host}]:{port}"
+    return f"{host}:{port}"
+
+
+def url_origin(url_scheme: str, url_host: str | None, url_port: int | None) -> tuple[str, int]:
+    """Return the effective (host, port) origin of parsed URL parts.
+
+    Args:
+        url_scheme: URL scheme (``http``/``https``).
+        url_host: Parsed hostname (may be None).
+        url_port: Parsed explicit port (may be None).
+
+    Returns:
+        ``(canonical_host, effective_port)`` with the scheme default
+        port applied when none is explicit.
+    """
+    host = canonical_host(url_host or "")
+    port = url_port if url_port is not None else (443 if url_scheme == "https" else 80)
+    return host, port
+
+
+def _safe_port(parsed: Any) -> int | None:
+    """Return a parsed URL's port, treating a malformed port as absent.
+
+    ``urllib.parse.ParseResult.port`` raises ``ValueError`` for a
+    non-numeric or out-of-range port; callers on the enrollment path
+    validate the URL up front with :func:`valid_http_url`, but this
+    keeps the origin helpers total for any already-stored base URL.
+
+    Args:
+        parsed: A ``urlparse`` result.
+
+    Returns:
+        The port, or None when absent or malformed.
+    """
+    try:
+        port: int | None = parsed.port
+    except ValueError:
+        return None
+    return port
+
+
+_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def _is_ip_literal(candidate: str) -> bool:
+    """Return whether *candidate* is a valid IPv4/IPv6 literal.
+
+    Args:
+        candidate: Host string (no brackets, may carry an IPv6 zone id).
+
+    Returns:
+        True for a valid IP address literal.
+    """
+    try:
+        import ipaddress
+
+        ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    return True
+
+
+def valid_hostname(host: str) -> bool:
+    """Return whether *host* is a syntactically valid hostname or IP literal.
+
+    Hostnames are validated per DNS label (each 1-63 chars, no empty
+    labels), so a malformed ``bad..example`` is rejected; IPv4/IPv6
+    literals (including zone/scoped forms) are delegated to
+    :mod:`ipaddress`.
+
+    Args:
+        host: Candidate host (canonicalized before checking).
+
+    Returns:
+        True for RFC-1123 hostnames and IPv4/IPv6 literals.
+    """
+    candidate = canonical_host(host)
+    if candidate and len(candidate) <= 253 and all(
+        _LABEL_RE.fullmatch(label) for label in candidate.split(".")
+    ):
+        return True
+    return _is_ip_literal(candidate)
+
+
+def valid_http_url(url: str) -> bool:
+    """Return whether *url* is a usable ``http(s)://`` URL.
+
+    Requires an ``http``/``https`` scheme, a valid hostname/IP literal,
+    and a well-formed port; used to reject a base URL before any
+    credential state changes (a malformed host or port must not
+    partially migrate a vault).
+
+    Args:
+        url: Candidate base URL.
+
+    Returns:
+        True when the URL is safe to enroll against.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+        _ = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in ("http", "https")
+        and parsed.hostname is not None
+        and valid_hostname(parsed.hostname)
+        # Userinfo makes the HTTP stack derive Basic auth that clobbers
+        # the swapped credential header, and the password would be
+        # persisted as "non-secret" metadata — reject it up front.
+        and not parsed.username
+        and not parsed.password
+    )
+
+
+def url_origin_entry(url: str) -> str:
+    """Return the port-pinned allowlist entry for a base URL.
+
+    Self-hosted connector enrollments (Home Assistant, ntfy, Firecrawl)
+    bind their credential to one origin: the same hostname on another
+    port is a different server.
+
+    Args:
+        url: Base URL the user configured.
+
+    Returns:
+        ``host:port``, or ``""`` when the URL has no host.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    host, port = url_origin(parsed.scheme, parsed.hostname, _safe_port(parsed))
+    return host_port_entry(host, port) if host else ""
 
 
 def is_loopback_host(host: str) -> bool:
@@ -225,6 +456,10 @@ _SLACK_READ_API_METHODS = frozenset(
 # query).  Starting or cancelling a crawl job stays a write.
 _FIRECRAWL_READ_PATHS = ("/v2/scrape", "/v2/map", "/v2/search")
 
+# Govee's state query is a POST whose body only names the device;
+# /device/control (the actual actuation) stays a write.
+_GOVEE_READ_PATHS = ("/device/state",)
+
 
 def request_action(service: str, method: str, path: str) -> str:
     """Classify a concrete request into Muse's read/write action classes.
@@ -232,7 +467,8 @@ def request_action(service: str, method: str, path: str) -> str:
     Most REST connectors are classified by HTTP method via
     :func:`action_class`.  RPC-style APIs need service-specific rules:
     Slack sends every call as POST (the API method name is the last URL
-    path segment), and Firecrawl's retrieval endpoints take POST bodies.
+    path segment), Firecrawl's retrieval endpoints take POST bodies,
+    and Govee's device-state query is a POST naming the device.
 
     Args:
         service: Connector service name the surrogate is bound to.
@@ -253,6 +489,17 @@ def request_action(service: str, method: str, path: str) -> str:
         if method.upper() == "POST" and path.rstrip("/").endswith(_FIRECRAWL_READ_PATHS):
             return "read"
         return "write"
+    if service == "govee":
+        if method.upper() == "POST" and path.rstrip("/").endswith(_GOVEE_READ_PATHS):
+            return "read"
+        return action_class(method)
+    if service == "discord":
+        # The typing indicator is an ephemeral, harmless POST; treating
+        # it as a write would burn one-shot write grants before the
+        # actual message send they were meant for.
+        if method.upper() == "POST" and path.rstrip("/").endswith("/typing"):
+            return "read"
+        return action_class(method)
     return action_class(method)
 
 

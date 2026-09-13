@@ -40,10 +40,15 @@ from urllib.parse import urlparse
 
 from kiss.agents.third_party_agents._channel_agent_utils import write_private_file
 from kiss.agents.third_party_agents.muse_auth._common import (
+    _safe_port,
     builtin_hosts,
+    canonical_host,
+    canonical_host_entry,
+    host_port_entry,
     is_loopback_host,
     muse_auth_dir,
     request_action,
+    url_origin,
 )
 
 _DEFAULT_POLICY = {"read": "allow", "write": "ask"}
@@ -81,13 +86,20 @@ def grant_command(service: str, action: str) -> str:
 class Sentinel:
     """Policy engine, grant store, and audit logger for the daemon."""
 
-    def __init__(self, hosts_provider: Callable[[str], tuple[str, ...]]) -> None:
+    def __init__(
+        self,
+        hosts_provider: Callable[[str], tuple[str, ...]],
+        insecure_hosts_provider: Callable[[str], tuple[str, ...]],
+    ) -> None:
         self._lock = threading.Lock()
         # Session-scoped grants live only in daemon memory.
         self._session_grants: list[dict[str, Any]] = []
         # Returns the hosts enrolled with a service's vault credential
         # (the daemon passes CredentialVault.enrolled_hosts).
         self._hosts_provider = hosts_provider
+        # Returns the hosts the user consented to reach over plain HTTP
+        # at enrollment time (CredentialVault.enrolled_insecure_hosts).
+        self._insecure_hosts_provider = insecure_hosts_provider
 
     def _policy_path(self) -> Path:
         """Return the policy file path.
@@ -152,11 +164,50 @@ class Sentinel:
         """
         extra = self._load_policy().get("services", {}).get(service, {}).get("extra_hosts", [])
         enrolled = self._hosts_provider(service)
+        # Canonicalize policy/enrolled hosts (lowercase, drop a trailing
+        # DNS dot, normalize any :port) so an FQDN- or leading-zero-port
+        # entry matches a request origin canonicalized the same way.
         return (
             builtin_hosts(service)
-            + tuple(h.lower() for h in extra)
-            + tuple(h.lower() for h in enrolled)
+            + tuple(canonical_host_entry(h) for h in extra)
+            + tuple(canonical_host_entry(h) for h in enrolled)
         )
+
+    def origin_allowed(self, service: str, url: str) -> bool:
+        """Return whether *url*'s origin is on the service's allowlist.
+
+        Allowlist entries are either bare hostnames (built-in service
+        hosts, policy ``extra_hosts`` — any port) or port-pinned
+        ``host:port`` origins (self-hosted enrollments, where the same
+        hostname on another port is a different server).
+
+        Args:
+            service: Connector service name.
+            url: The effective request URL.
+
+        Returns:
+            True when the URL's host (or host:port origin) is allowed.
+        """
+        parsed = urlparse(url)
+        host, port = url_origin(parsed.scheme, parsed.hostname, _safe_port(parsed))
+        entries = self.allowed_hosts(service)
+        return host in entries or host_port_entry(host, port) in entries
+
+    def _insecure_origin(self, service: str, url: str) -> bool:
+        """Return whether *url* may carry the credential over plain HTTP.
+
+        Args:
+            service: Connector service name.
+            url: The effective request URL.
+
+        Returns:
+            True when the URL's host or host:port origin was enrolled as
+            a consent-time insecure host.
+        """
+        parsed = urlparse(url)
+        host, port = url_origin(parsed.scheme, parsed.hostname, _safe_port(parsed))
+        entries = tuple(canonical_host_entry(h) for h in self._insecure_hosts_provider(service))
+        return host in entries or host_port_entry(host, port) in entries
 
     def add_grant(self, service: str, action: str, scope: str, ttl: float = 0.0) -> str:
         """Record a user approval as a strict capability.
@@ -278,14 +329,23 @@ class Sentinel:
         # Classify on the effective path so a parser-differential raw
         # URL cannot masquerade a write API method as a read.
         action = request_action(service, method, effective.path)
-        host = (effective.hostname or "").lower()
+        host = canonical_host(effective.hostname or "")
         deny_reason = ""
         if parsed.username or parsed.password or effective.username or effective.password:
             deny_reason = "URLs with userinfo are not allowed at the boundary"
-        elif host not in self.allowed_hosts(service):
+        elif not self.origin_allowed(service, effective_url or url):
             deny_reason = f"host '{host}' is not in the '{service}' connector's allowlist"
-        elif effective.scheme != "https" and not is_loopback_host(host):
-            # Never hand a real bearer token to a plaintext transport.
+        elif effective.scheme != "https" and not (
+            is_loopback_host(host)
+            or (
+                effective.scheme == "http"
+                and self._insecure_origin(service, effective_url or url)
+            )
+        ):
+            # Never hand a real credential to a plaintext transport —
+            # unless the user enrolled this exact host from an http://
+            # base URL (consent-scoped exception, e.g. a LAN Home
+            # Assistant instance that has no TLS).
             deny_reason = f"non-HTTPS scheme '{effective.scheme}' to non-loopback host '{host}'"
         if deny_reason:
             decision = Decision("deny", deny_reason)
