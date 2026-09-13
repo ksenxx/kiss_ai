@@ -73,6 +73,15 @@ def _save_token(creds: Any) -> None:
     Args:
         creds: A ``google.oauth2.credentials.Credentials`` instance.
     """
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    if muse_auth_enabled():
+        # Muse-auth mode: the credential goes straight into the daemon
+        # vault; no agent-readable token.json is written.
+        from kiss.agents.third_party_agents.muse_auth.client import store_credentials
+
+        store_credentials("googlechat", creds, list(getattr(creds, "scopes", None) or []))
+        return
     write_private_file(_token_path(), creds.to_json())
 
 
@@ -98,6 +107,40 @@ def _load_service(sa_path: str = "") -> Any:
             return build("chat", "v1", credentials=creds)
         except Exception:
             pass
+
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    if muse_auth_enabled():
+        # Muse-auth mode: the user-OAuth token lives in the daemon
+        # vault; API calls carry a surrogate that the daemon swaps for
+        # the real token at the network boundary.  A leftover legacy
+        # ``token.json`` is migrated into the vault (and removed) so
+        # the user-OAuth path can never silently fall back to a
+        # real-credential service in this mode.  (Service-account auth
+        # signs JWTs locally and intentionally stays legacy, above.)
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            MuseHttp,
+            mint_surrogate,
+            store_credentials,
+        )
+
+        handle = mint_surrogate("googlechat")
+        if handle is None:
+            token_file = _token_path()
+            if token_file.exists():
+                try:
+                    store_credentials(
+                        "googlechat", json.loads(token_file.read_text()), _SCOPES
+                    )
+                    token_file.unlink()
+                    handle = mint_surrogate("googlechat")
+                except Exception:
+                    handle = None
+        if handle is None:
+            return None
+        return build(
+            "chat", "v1", http=MuseHttp("googlechat", handle.token), static_discovery=True
+        )
 
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
@@ -143,14 +186,26 @@ def _run_oauth_flow() -> Any:
     else:
         creds = cast(Credentials, flow.run_local_server(port=0))
     _save_token(creds)
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    if muse_auth_enabled():
+        # The real credential is now vaulted; build the service around
+        # a surrogate instead of the real token.
+        return _load_service()
     return build("chat", "v1", credentials=creds)
 
 
 def _clear_config() -> None:
-    """Delete the stored Google Chat credentials."""
+    """Delete the stored Google Chat credentials (legacy file and Muse vault)."""
     for path in [_token_path()]:
         if path.exists():  # pragma: no branch
             path.unlink()
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    if muse_auth_enabled():
+        from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+        clear_credentials("googlechat")
 
 
 class GoogleChatChannelBackend(ToolMethodBackend):
@@ -530,6 +585,32 @@ class GoogleChatAgent(BaseChannelAgent):
             """
             service = _load_service(service_account_json_path)
             if service is None and not service_account_json_path:  # pragma: no branch
+                if is_headless_environment():
+                    # Remote machine: hand back the consent URL to drive
+                    # in the built-in browser with the pages shown inline
+                    # in the chat webview.
+                    from kiss.agents.third_party_agents._google_workspace_utils import (
+                        RemoteOAuthSession,
+                        remote_oauth_instructions,
+                    )
+
+                    try:
+                        session = RemoteOAuthSession.start("googlechat", _SCOPES)
+                    except Exception as e:
+                        return json.dumps(
+                            {"ok": False, "error": f"OAuth flow failed for Google Chat: {e}"}
+                        )
+                    if session is not None:
+                        return json.dumps(
+                            {
+                                "ok": True,
+                                "status": "consent_required",
+                                "auth_url": session.auth_url,
+                                "instructions": remote_oauth_instructions(
+                                    "googlechat", "Google Chat", session.auth_url
+                                ),
+                            }
+                        )
                 service = _run_oauth_flow()
             if service is None:  # pragma: no branch
                 return (
@@ -559,7 +640,41 @@ class GoogleChatAgent(BaseChannelAgent):
             agent._backend._service = None
             return "Google Chat authentication cleared."
 
-        return [check_googlechat_auth, authenticate_googlechat, clear_googlechat_auth]
+        def finish_googlechat_auth() -> str:
+            """Complete a remote Google Chat OAuth consent.
+
+            Call after the consent pages (driven in the built-in browser and
+            shown inline in the chat webview) reach 'Authentication complete'.
+
+            Returns:
+                Authentication result, a pending status when consent is not
+                finished, or an error message.
+            """
+            from kiss.agents.third_party_agents._google_workspace_utils import (
+                RemoteOAuthSession,
+            )
+
+            creds, status = RemoteOAuthSession.finish("googlechat", _SCOPES)
+            if status == "pending":
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "status": "pending",
+                        "error": "Consent is not completed yet; finish the flow in "
+                                 "the browser, then call this tool again.",
+                    }
+                )
+            if creds is None:
+                return json.dumps({"ok": False, "error": f"OAuth flow failed: {status}"})
+            agent._backend._service = _load_service()
+            return json.dumps({"ok": True, "message": "Google Chat authentication successful."})
+
+        return [
+            check_googlechat_auth,
+            authenticate_googlechat,
+            clear_googlechat_auth,
+            finish_googlechat_auth,
+        ]
 
 
 def _make_backend() -> GoogleChatChannelBackend:

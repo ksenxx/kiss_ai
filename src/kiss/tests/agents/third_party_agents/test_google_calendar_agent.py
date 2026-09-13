@@ -81,6 +81,7 @@ _AUTH_TOOL_NAMES = [
     "authenticate_google_calendar",
     "clear_google_calendar_auth",
     "start_google_calendar_browser_setup",
+    "finish_google_calendar_auth",
 ]
 
 

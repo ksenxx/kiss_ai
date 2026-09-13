@@ -185,6 +185,7 @@ class GitHubChannelBackend(ToolMethodBackend):
     def __init__(self) -> None:
         self._base_url: str = "https://api.github.com"
         self._token: str = ""
+        self._http: Any = requests
         self._read_only: bool = False
         self._request_lock = threading.Lock()
         self._connection_info: str = ""
@@ -192,9 +193,43 @@ class GitHubChannelBackend(ToolMethodBackend):
     def connect(self) -> bool:
         """Load the GitHub config from disk.
 
+        In Muse-auth mode (``KISS_MUSE_AUTH=1``) the real personal
+        access token lives in the Muse vault (auto-enrolled from the
+        legacy config on first connect); this process only holds a
+        surrogate and every API call is executed at the daemon boundary.
+
         Returns:
             True if a valid config with a ``token`` was loaded.
         """
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import (
+                MuseBoundarySession,
+                mint_surrogate,
+            )
+
+            handle = mint_surrogate("github")
+            if handle is None:
+                # Vault-first: the legacy config token is only read when
+                # the vault has no enrollment yet (one-time migration).
+                from kiss.agents.third_party_agents.muse_auth.client import bearer_surrogate
+
+                cfg = _config.load()
+                surrogate = bearer_surrogate("github", (cfg or {}).get("token", ""))
+            else:
+                surrogate = handle.token
+            if not surrogate:
+                self._connection_info = "No GitHub credential in the Muse vault or config."
+                return False
+            self._token = surrogate
+            self._http = MuseBoundarySession("github")
+            # The read_only flag lives in config.json; read it leniently
+            # so it survives after the token key is migrated out.
+            self._read_only = self._relaxed_config().get("read_only", "false") == "true"
+            mode = "read-only" if self._read_only else "read-write"
+            self._connection_info = f"GitHub configured ({mode}, Muse-auth)."
+            return True
         cfg = _config.load()
         if not cfg:
             self._connection_info = "No GitHub config found."
@@ -204,6 +239,21 @@ class GitHubChannelBackend(ToolMethodBackend):
         mode = "read-only" if self._read_only else "read-write"
         self._connection_info = f"GitHub configured ({mode})."
         return True
+
+    def _relaxed_config(self) -> dict[str, str]:
+        """Read ``config.json`` without required-key validation.
+
+        After the token is migrated into the Muse vault the config may
+        legitimately lack the ``token`` key while still carrying
+        settings like ``read_only``.
+
+        Returns:
+            The raw config dict, or ``{}`` when missing/unreadable.
+        """
+        try:
+            return dict(json.loads(_config.path.read_text()))
+        except Exception:
+            return {}
 
     def _api(
         self,
@@ -236,7 +286,7 @@ class GitHubChannelBackend(ToolMethodBackend):
             "X-GitHub-Api-Version": "2022-11-28",
         }
         with self._request_lock:
-            resp = requests.request(
+            resp = self._http.request(
                 method, url, headers=headers, params=params, json=payload, timeout=_TIMEOUT
             )
         if resp.status_code >= 400:
@@ -1012,6 +1062,14 @@ class GitHubAgent(BaseChannelAgent):
     def __init__(self) -> None:
         super().__init__("GitHub Agent")
         self._backend = GitHubChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            # Muse-auth mode: connect() wires a vault surrogate and the
+            # boundary session; the real token never enters this process
+            # once migrated.
+            self._backend.connect()
+            return
         cfg = _config.load()
         if cfg:
             self._backend._token = cfg["token"]
@@ -1056,12 +1114,26 @@ class GitHubAgent(BaseChannelAgent):
             """
             if not token.strip():
                 return "token cannot be empty."
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
             try:
                 _config.save(
                     {"token": token.strip(), "read_only": "true" if read_only else "false"}
                 )
-                agent._backend._token = token.strip()
-                agent._backend._read_only = read_only
+                if muse_auth_enabled():
+                    # Re-enroll straight into the Muse vault: clear any
+                    # existing entry first so a rotated token replaces
+                    # the old one (connect() is vault-first and would
+                    # otherwise keep minting the stale credential).
+                    from kiss.agents.third_party_agents.muse_auth.client import (
+                        clear_credentials,
+                    )
+
+                    clear_credentials("github")
+                    agent._backend.connect()
+                else:
+                    agent._backend._token = token.strip()
+                    agent._backend._read_only = read_only
             except Exception as e:
                 return json.dumps(
                     {"ok": False, "error": f"failed to save GitHub config: {e}"}
@@ -1077,6 +1149,12 @@ class GitHubAgent(BaseChannelAgent):
             _config.clear()
             agent._backend._token = ""
             agent._backend._read_only = False
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("github")
             return "GitHub configuration cleared."
 
         return [check_github_auth, authenticate_github, clear_github_auth]

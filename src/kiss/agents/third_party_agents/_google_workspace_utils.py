@@ -22,15 +22,18 @@ one Google Cloud OAuth client can serve every Google adapter.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any, cast
 
+import requests
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 from kiss.agents.third_party_agents._backend_utils import is_headless_environment
 from kiss.agents.third_party_agents._channel_agent_utils import write_private_file
+from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 from kiss.core.config import kiss_home
 
 
@@ -92,10 +95,20 @@ def load_google_credentials(service: str, scopes: list[str]) -> Credentials | No
         service: Service directory name (e.g. ``"google_sheets"``).
         scopes: OAuth scopes the credentials must carry.
 
+    In Muse-auth mode (``KISS_MUSE_AUTH=1``) the real token stays in
+    the daemon vault and a surrogate-bearing handle is returned
+    instead; the agent process never reads ``token.json``.
+
     Returns:
-        Valid :class:`Credentials`, or ``None`` when missing, invalid,
-        or unrefreshable.
+        Valid :class:`Credentials`, a
+        :class:`~kiss.agents.third_party_agents.muse_auth.client.SurrogateCredentials`
+        in Muse-auth mode, or ``None`` when missing, invalid, or
+        unrefreshable.
     """
+    if muse_auth_enabled():
+        from kiss.agents.third_party_agents.muse_auth.client import mint_surrogate
+
+        return cast("Credentials | None", mint_surrogate(service))
     path = token_path(service)
     if not path.exists():
         return None
@@ -119,18 +132,34 @@ def load_google_credentials(service: str, scopes: list[str]) -> Credentials | No
     return None
 
 
-def save_google_credentials(service: str, creds: Credentials) -> None:
+def save_google_credentials(service: str, creds: Any) -> None:
     """Persist a service's OAuth2 credentials atomically with 0600 permissions.
+
+    In Muse-auth mode the credential goes into the daemon vault instead
+    of an agent-readable ``token.json``; surrogate handles are skipped
+    (there is nothing real to persist).
 
     Args:
         service: Service directory name.
-        creds: Google OAuth2 credentials to persist.
+        creds: Google OAuth2 credentials (or a surrogate handle) to persist.
     """
+    if muse_auth_enabled():
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            SurrogateCredentials,
+            store_credentials,
+        )
+
+        if not isinstance(creds, SurrogateCredentials):
+            store_credentials(service, creds, list(getattr(creds, "scopes", None) or []))
+        return
     write_private_file(token_path(service), creds.to_json())
 
 
 def clear_google_credentials(service: str) -> None:
     """Delete a service's stored OAuth2 token, if any.
+
+    Clears both the legacy ``token.json`` and, in Muse-auth mode, the
+    daemon vault entry (invalidating outstanding surrogates).
 
     Args:
         service: Service directory name.
@@ -138,6 +167,10 @@ def clear_google_credentials(service: str) -> None:
     path = token_path(service)
     if path.exists():
         path.unlink()
+    if muse_auth_enabled():
+        from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+        clear_credentials(service)
 
 
 def run_google_oauth_flow(service: str, scopes: list[str]) -> Credentials | None:
@@ -164,6 +197,10 @@ def run_google_oauth_flow(service: str, scopes: list[str]) -> Credentials | None
     else:
         creds = cast(Credentials, flow.run_local_server(port=0))
     save_google_credentials(service, creds)
+    if muse_auth_enabled():
+        # The real credential now lives in the daemon vault; hand the
+        # caller a surrogate so no real token stays in agent memory.
+        return load_google_credentials(service, scopes)
     return creds
 
 
@@ -230,29 +267,68 @@ def make_google_auth_tools(
             )
         return json.dumps({"ok": True, "message": f"{label} credentials are configured."})
 
+    missing_credentials_message = (
+        f"credentials.json not found for {label}. Download it from Google "
+        "Cloud Console > APIs & Services > Credentials > OAuth 2.0 Client "
+        f"IDs > Download JSON, then save it to "
+        f"{google_service_dir(service) / 'credentials.json'} (a copy at "
+        f"{google_service_dir('google') / 'credentials.json'} is shared by "
+        "all Google agents)."
+    )
+
+    def flow_failed(e: Exception) -> str:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": (
+                    f"OAuth flow failed for {label}: {e}. The credentials.json at "
+                    f"{credentials_path(service)} may be malformed; re-download it "
+                    "from Google Cloud Console."
+                ),
+            }
+        )
+
     def authenticate() -> str:
+        if is_headless_environment():
+            # Remote machine: the user cannot see a local browser, so
+            # hand the agent the consent URL to drive in its built-in
+            # browser with the pages shown inline in the chat webview.
+            try:
+                session = RemoteOAuthSession.start(service, scopes)
+            except Exception as e:
+                return flow_failed(e)
+            if session is None:
+                return missing_credentials_message
+            return json.dumps(
+                {
+                    "ok": True,
+                    "status": "consent_required",
+                    "auth_url": session.auth_url,
+                    "instructions": remote_oauth_instructions(service, label, session.auth_url),
+                }
+            )
         try:
             creds = run_google_oauth_flow(service, scopes)
         except Exception as e:
+            return flow_failed(e)
+        if creds is None:
+            return missing_credentials_message
+        on_credentials(creds)
+        return json.dumps({"ok": True, "message": f"{label} authentication successful."})
+
+    def finish_auth() -> str:
+        creds, status = RemoteOAuthSession.finish(service, scopes)
+        if status == "pending":
             return json.dumps(
                 {
                     "ok": False,
-                    "error": (
-                        f"OAuth flow failed for {label}: {e}. The credentials.json at "
-                        f"{credentials_path(service)} may be malformed; re-download it "
-                        "from Google Cloud Console."
-                    ),
+                    "status": "pending",
+                    "error": "Consent is not completed yet; finish the flow in the "
+                             "browser, then call this tool again.",
                 }
             )
         if creds is None:
-            expected = google_service_dir(service) / "credentials.json"
-            return (
-                f"credentials.json not found for {label}. Download it from Google "
-                "Cloud Console > APIs & Services > Credentials > OAuth 2.0 Client "
-                f"IDs > Download JSON, then save it to {expected} (a copy at "
-                f"{google_service_dir('google') / 'credentials.json'} is shared by "
-                "all Google agents)."
-            )
+            return json.dumps({"ok": False, "error": f"OAuth flow failed for {label}: {status}"})
         on_credentials(creds)
         return json.dumps({"ok": True, "message": f"{label} authentication successful."})
 
@@ -300,4 +376,214 @@ def make_google_auth_tools(
         "Returns:\n"
         "    Step-by-step instructions for navigating Google Cloud Console."
     )
-    return [check_auth, authenticate, clear_auth, start_browser_setup]
+    finish_auth.__name__ = f"finish_{service}_auth"
+    finish_auth.__doc__ = (
+        f"Complete a remote {label} OAuth consent started by "
+        f"authenticate_{service}().\n\n"
+        "Call after the consent pages (driven in the built-in browser and\n"
+        "shown inline in the chat webview) reach 'Authentication complete'.\n\n"
+        "Returns:\n"
+        "    Authentication result, a pending status when consent is not\n"
+        "    finished, or an error message."
+    )
+    return [check_auth, authenticate, clear_auth, start_browser_setup, finish_auth]
+
+
+def google_api_session(service: str) -> Any:
+    """Return the HTTP executor a Google REST backend should use.
+
+    Legacy mode returns the ``requests`` module (direct calls, real
+    token in the Authorization header).  In Muse-auth mode
+    (``KISS_MUSE_AUTH=1``) it returns a
+    :class:`~kiss.agents.third_party_agents.muse_auth.client.MuseBoundarySession`
+    that ships every request to the Muse-auth daemon, where Sentinel
+    authorizes it and the surrogate bearer token is swapped for the
+    real credential at the network boundary.
+
+    Args:
+        service: Connector service name (e.g. ``"google_drive"``).
+
+    Returns:
+        An object exposing ``request/get/post/put/patch/delete`` with
+        the ``requests`` API.
+    """
+    if muse_auth_enabled():
+        from kiss.agents.third_party_agents.muse_auth.client import MuseBoundarySession
+
+        return MuseBoundarySession(service)
+    return requests
+
+
+class _OAuthCallbackApp:
+    """Tiny WSGI app that records the OAuth redirect request URI."""
+
+    def __init__(self) -> None:
+        self.request_uri = ""
+
+    def __call__(self, environ: Any, start_response: Any) -> list[bytes]:
+        """Record the redirect URI and show a completion page.
+
+        Args:
+            environ: WSGI environment of the redirect request.
+            start_response: WSGI start-response callable.
+
+        Returns:
+            The completion page body.
+        """
+        import wsgiref.util
+
+        self.request_uri = wsgiref.util.request_uri(environ)
+        start_response("200 OK", [("Content-Type", "text/plain; charset=utf-8")])
+        return [b"Authentication complete. You can close this tab and return to the chat."]
+
+
+class RemoteOAuthSession:
+    """OAuth consent flow split for remote/headless machines.
+
+    ``InstalledAppFlow.run_local_server`` blocks until a browser
+    completes consent — useless on a remote machine where the user
+    cannot see a local browser window.  This session starts the
+    loopback redirect server in a background thread and hands back the
+    authorization URL so the agent can drive the consent pages in its
+    own built-in browser (which runs on this same machine, so the
+    ``localhost`` redirect completes here) while showing each page
+    inline in the chat webview via screenshots.  ``finish`` collects
+    the resulting credentials once consent completes.
+    """
+
+    _active: dict[str, RemoteOAuthSession] = {}
+
+    def __init__(self, service: str, scopes: list[str]) -> None:
+        import wsgiref.simple_server
+
+        class _QuietHandler(wsgiref.simple_server.WSGIRequestHandler):
+            """Redirect-server handler with request logging silenced."""
+
+            def log_message(self, *_args: Any) -> None:  # type: ignore[override]
+                """Silence per-request logging."""
+
+        self.service = service
+        self.scopes = scopes
+        flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path(service)), scopes)
+        self._app = _OAuthCallbackApp()
+        self._server = wsgiref.simple_server.make_server(
+            "localhost", 0, self._app, handler_class=_QuietHandler
+        )
+        flow.redirect_uri = f"http://localhost:{self._server.server_port}/"
+        self.auth_url, _ = flow.authorization_url()
+        self._flow = flow
+        self.credentials: Credentials | None = None
+        self.error = ""
+        self._cancelled = False
+        self._thread = threading.Thread(target=self._wait_for_consent, daemon=True)
+        self._thread.start()
+
+    def _wait_for_consent(self) -> None:
+        """Serve redirect requests until consent completes or cancelled.
+
+        A short poll timeout lets an abandoned/replaced session's thread
+        exit promptly instead of blocking forever on a single request.
+        """
+        self._server.timeout = 1.0
+        try:
+            while not self._cancelled and not self._app.request_uri:
+                self._server.handle_request()
+            if self._cancelled:
+                return
+            # oauthlib insists on https URLs; the loopback redirect is
+            # local, so upgrading the scheme string is safe (this is
+            # exactly what run_local_server does).
+            response = self._app.request_uri.replace("http://", "https://", 1)
+            self._flow.fetch_token(authorization_response=response)
+            self.credentials = cast(Credentials, self._flow.credentials)
+        except Exception as e:
+            self.error = str(e)
+        finally:
+            self._server.server_close()
+
+    def cancel(self) -> None:
+        """Stop the consent server so its background thread can exit."""
+        self._cancelled = True
+
+    @classmethod
+    def start(cls, service: str, scopes: list[str]) -> RemoteOAuthSession | None:
+        """Begin (or restart) a remote consent session for *service*.
+
+        A previously started, still-pending session for the same service
+        is cancelled and its server closed before the new one starts, so
+        abandoned consent servers/threads never accumulate.
+
+        Args:
+            service: Service directory name.
+            scopes: OAuth scopes to request.
+
+        Returns:
+            The running session, or ``None`` when no ``credentials.json``
+            exists for the service.
+        """
+        if not credentials_path(service).exists():
+            return None
+        previous = cls._active.pop(service, None)
+        if previous is not None:
+            previous.cancel()
+        session = cls(service, scopes)
+        cls._active[service] = session
+        return session
+
+    @classmethod
+    def finish(cls, service: str, scopes: list[str]) -> tuple[Any, str]:
+        """Collect the credentials of a completed consent session.
+
+        On success the credentials are persisted through
+        :func:`save_google_credentials` (vault in Muse-auth mode) and
+        the caller receives the mode-appropriate handle.
+
+        Args:
+            service: Service directory name.
+            scopes: OAuth scopes the session requested.
+
+        Returns:
+            ``(credentials, "ok")`` on success (a surrogate handle in
+            Muse-auth mode), ``(None, "pending")`` while consent is
+            still incomplete, or ``(None, error_message)`` when the
+            flow failed or no session was started.
+        """
+        session = cls._active.get(service)
+        if session is None:
+            return None, f"no OAuth session in progress; call authenticate_{service}() first"
+        session._thread.join(timeout=2.0)
+        if session._thread.is_alive():
+            return None, "pending"
+        del cls._active[service]
+        if session.credentials is None:
+            return None, session.error or "OAuth flow failed"
+        save_google_credentials(service, session.credentials)
+        if muse_auth_enabled():
+            return load_google_credentials(service, scopes), "ok"
+        return session.credentials, "ok"
+
+
+def remote_oauth_instructions(service: str, label: str, auth_url: str) -> str:
+    """Build the agent-facing instructions for a remote consent session.
+
+    Args:
+        service: Service directory name (used in the finish tool name).
+        label: Human-readable service label.
+        auth_url: The authorization URL to drive.
+
+    Returns:
+        Step-by-step instructions for completing consent in the agent's
+        built-in browser with the pages shown inline in the chat webview.
+    """
+    return (
+        f"The user cannot see a browser window on this machine, so complete the {label} "
+        "consent in YOUR built-in browser (it runs on this machine, so the localhost "
+        f"redirect completes here). Steps: 1) go_to_url('{auth_url}'). 2) After EVERY "
+        f"navigation, call screenshot(file_path='./tmp/{service}_auth_<step>.png') and "
+        "mention that exact file path in your reply text — the chat webview inlines the "
+        "image on every surface so the user can see the authentication page. 3) Use "
+        "ask_user_question() to collect the user's email, password, or 2FA code and enter "
+        "them with type_text(); never echo or store the password anywhere else. 4) When "
+        "the page says 'Authentication complete', call "
+        f"finish_{service}_auth() to store the token."
+    )

@@ -220,15 +220,46 @@ class NotionChannelBackend(ToolMethodBackend):
     def __init__(self) -> None:
         self._base_url: str = "https://api.notion.com/v1"
         self._token: str = ""
+        self._http: Any = requests
         self._request_lock = threading.Lock()
         self._connection_info: str = ""
 
     def connect(self) -> bool:
         """Load the Notion config from disk.
 
+        In Muse-auth mode (``KISS_MUSE_AUTH=1``) the real integration
+        token lives in the Muse vault (auto-enrolled from the legacy
+        config on first connect); this process only holds a surrogate
+        and every API call is executed at the daemon boundary.
+
         Returns:
             True if a valid config with a ``token`` was loaded.
         """
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import (
+                MuseBoundarySession,
+                mint_surrogate,
+            )
+
+            handle = mint_surrogate("notion")
+            if handle is None:
+                # Vault-first: the legacy config token is only read when
+                # the vault has no enrollment yet (one-time migration).
+                from kiss.agents.third_party_agents.muse_auth.client import bearer_surrogate
+
+                cfg = _config.load()
+                surrogate = bearer_surrogate("notion", (cfg or {}).get("token", ""))
+            else:
+                surrogate = handle.token
+            if not surrogate:
+                self._connection_info = "No Notion credential in the Muse vault or config."
+                return False
+            self._token = surrogate
+            self._http = MuseBoundarySession("notion")
+            self._connection_info = "Notion API configured (Muse-auth)."
+            return True
         cfg = _config.load()
         if not cfg:
             self._connection_info = "No Notion config found."
@@ -264,7 +295,7 @@ class NotionChannelBackend(ToolMethodBackend):
             "Content-Type": "application/json",
         }
         with self._request_lock:
-            resp = requests.request(
+            resp = self._http.request(
                 method, url, headers=headers, json=payload, params=params, timeout=_TIMEOUT
             )
         if resp.status_code >= 400:
@@ -751,6 +782,14 @@ class NotionAgent(BaseChannelAgent):
     def __init__(self) -> None:
         super().__init__("Notion Agent")
         self._backend = NotionChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            # Muse-auth mode: connect() wires a vault surrogate and the
+            # boundary session; the real token never enters this process
+            # once migrated.
+            self._backend.connect()
+            return
         cfg = _config.load()
         if cfg:
             self._backend._token = cfg["token"]
@@ -792,9 +831,23 @@ class NotionAgent(BaseChannelAgent):
             """
             if not token.strip():
                 return "token cannot be empty."
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
             try:
                 _config.save({"token": token.strip()})
-                agent._backend._token = token.strip()
+                if muse_auth_enabled():
+                    # Re-enroll straight into the Muse vault: clear any
+                    # existing entry first so a rotated token replaces
+                    # the old one (connect() is vault-first and would
+                    # otherwise keep minting the stale credential).
+                    from kiss.agents.third_party_agents.muse_auth.client import (
+                        clear_credentials,
+                    )
+
+                    clear_credentials("notion")
+                    agent._backend.connect()
+                else:
+                    agent._backend._token = token.strip()
             except Exception as e:
                 return json.dumps({"ok": False, "error": f"could not save config: {e}"})
             return json.dumps({"ok": True, "message": "Notion configured."})
@@ -807,6 +860,12 @@ class NotionAgent(BaseChannelAgent):
             """
             _config.clear()
             agent._backend._token = ""
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("notion")
             return "Notion configuration cleared."
 
         return [check_notion_auth, authenticate_notion, clear_notion_auth]

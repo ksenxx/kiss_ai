@@ -37,6 +37,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
     write_private_file,
 )
+from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 from kiss.core.config import kiss_home
 
 _SCOPES = [
@@ -75,9 +76,17 @@ def _credentials_path() -> Path:
 def _load_credentials() -> Credentials | None:
     """Load stored OAuth2 credentials from disk.
 
+    In Muse-auth mode (``KISS_MUSE_AUTH=1``) the real token stays in
+    the daemon vault and a surrogate-bearing handle is returned instead.
+
     Returns:
-        Valid Credentials object, or None if not found or expired.
+        Valid Credentials object (or a surrogate handle in Muse-auth
+        mode), or None if not found or expired.
     """
+    if muse_auth_enabled():
+        from kiss.agents.third_party_agents.muse_auth.client import mint_surrogate
+
+        return cast("Credentials | None", mint_surrogate("gmail"))
     path = _token_path()
     if not path.exists():
         return None
@@ -100,17 +109,34 @@ def _load_credentials() -> Credentials | None:
 def _save_credentials(creds: Credentials) -> None:
     """Save OAuth2 credentials to disk atomically with restricted permissions.
 
+    In Muse-auth mode the credential goes straight into the daemon
+    vault; no agent-readable ``token.json`` is written (surrogate
+    handles are skipped — there is nothing real to persist).
+
     Args:
-        creds: Google OAuth2 Credentials object.
+        creds: Google OAuth2 Credentials object (or a surrogate handle).
     """
+    if muse_auth_enabled():
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            SurrogateCredentials,
+            store_credentials,
+        )
+
+        if not isinstance(creds, SurrogateCredentials):
+            store_credentials("gmail", creds, list(getattr(creds, "scopes", None) or []))
+        return
     write_private_file(_token_path(), creds.to_json())
 
 
 def _clear_credentials() -> None:
-    """Delete the stored Gmail OAuth2 token."""
+    """Delete the stored Gmail OAuth2 token (legacy file and Muse vault)."""
     path = _token_path()
     if path.exists():
         path.unlink()
+    if muse_auth_enabled():
+        from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+        clear_credentials("gmail")
 
 
 def _run_oauth_flow() -> Credentials | None:
@@ -135,18 +161,31 @@ def _run_oauth_flow() -> Credentials | None:
     else:
         creds = cast(Credentials, flow.run_local_server(port=0))
     _save_credentials(creds)
+    if muse_auth_enabled():
+        # The real credential now lives in the daemon vault; hand back
+        # a surrogate so no real token stays in agent memory.
+        return _load_credentials()
     return creds
 
 
 def _build_service(creds: Credentials) -> Any:
     """Build a Gmail API service object.
 
+    With a surrogate handle (Muse-auth mode) the service routes every
+    API call through the Muse-auth daemon via
+    :class:`~kiss.agents.third_party_agents.muse_auth.client.MuseHttp`,
+    so this process never signs requests with a real token.
+
     Args:
-        creds: Valid OAuth2 Credentials.
+        creds: Valid OAuth2 Credentials or a Muse-auth surrogate handle.
 
     Returns:
         Gmail API service resource.
     """
+    from kiss.agents.third_party_agents.muse_auth.client import MuseHttp, SurrogateCredentials
+
+    if isinstance(creds, SurrogateCredentials):
+        return build("gmail", "v1", http=MuseHttp("gmail", creds.token), static_discovery=True)
     return build("gmail", "v1", credentials=creds)
 
 
@@ -954,8 +993,36 @@ class GmailAgent(BaseChannelAgent):
             ~/.kiss/third_party_agents/gmail/credentials.json.
 
             Returns:
-                Authentication result with email address, or error message.
+                Authentication result with email address, an inline
+                remote-consent handoff (auth_url + instructions) on
+                headless machines, or an error message.
             """
+            if is_headless_environment():
+                # Remote machine: the user cannot see a local browser, so
+                # hand back the consent URL to drive in the built-in
+                # browser with pages shown inline in the chat webview.
+                from kiss.agents.third_party_agents._google_workspace_utils import (
+                    RemoteOAuthSession,
+                    remote_oauth_instructions,
+                )
+
+                try:
+                    session = RemoteOAuthSession.start("gmail", _SCOPES)
+                except Exception as e:
+                    return json.dumps(
+                        {"ok": False, "error": f"OAuth flow failed for Gmail: {e}"}
+                    )
+                if session is not None:
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "status": "consent_required",
+                            "auth_url": session.auth_url,
+                            "instructions": remote_oauth_instructions(
+                                "gmail", "Gmail", session.auth_url
+                            ),
+                        }
+                    )
             creds = _run_oauth_flow()
             if creds is None:  # pragma: no branch
                 return (
@@ -1019,11 +1086,41 @@ class GmailAgent(BaseChannelAgent):
                 f"to {_credentials_path()}, then call authenticate_gmail()."
             )
 
+        def finish_gmail_auth() -> str:
+            """Complete a remote Gmail OAuth consent started by authenticate_gmail().
+
+            Call after the consent pages (driven in the built-in browser and
+            shown inline in the chat webview) reach 'Authentication complete'.
+
+            Returns:
+                Authentication result, a pending status when consent is not
+                finished, or an error message.
+            """
+            from kiss.agents.third_party_agents._google_workspace_utils import (
+                RemoteOAuthSession,
+            )
+
+            creds, status = RemoteOAuthSession.finish("gmail", _SCOPES)
+            if status == "pending":
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "status": "pending",
+                        "error": "Consent is not completed yet; finish the flow in "
+                                 "the browser, then call this tool again.",
+                    }
+                )
+            if creds is None:
+                return json.dumps({"ok": False, "error": f"OAuth flow failed: {status}"})
+            agent._backend._service = _build_service(creds)
+            return json.dumps({"ok": True, "message": "Gmail authentication successful."})
+
         return [
             check_gmail_auth,
             authenticate_gmail,
             clear_gmail_auth,
             start_gmail_browser_setup,
+            finish_gmail_auth,
         ]
 
 
