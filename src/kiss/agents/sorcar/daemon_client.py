@@ -273,9 +273,9 @@ def resolve_agent_path(agent_path: str | None) -> str:
     :func:`_resolve_py_file` for the resolution rules).
 
     Args:
-        agent_path: Path string of a Python file whose ``get_X()``
-            functions compute the run's parameters, or ``None``/empty
-            for no agent script.
+        agent_path: Path string of a Python file whose top-level
+            ``X()`` functions compute the run's parameters, or
+            ``None``/empty for no agent script.
 
     Returns:
         The absolute path as a string, or ``""`` when *agent_path* is
@@ -354,7 +354,8 @@ def run(
     auto_commit: bool = True,
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
-    web_tools: bool | None = None,
+    use_web_tools: bool | None = None,
+    classify_tasks: bool | None = None,
     is_parallel: bool = True,
     append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
@@ -383,8 +384,8 @@ def run(
             the tab's scope falling back to *work_dir*, unchanged from
             ordinary runs.  Irrelevant for a sub-agent run (non-empty
             *parent_task_id*), which gets no registry tab at all.
-            Like *timeout* and *sock_path* it is a
-            client/UI-transport parameter with no agent-script getter.
+            An agent script's ``scope_work_dir()`` getter overrides
+            this value on the daemon.
         parent_task_id: The persisted ``task_history`` row id of the
             CALLING task, when this run is dispatched on behalf of one
             (the ``run_agent`` tool).  Non-empty marks the run as a
@@ -395,8 +396,8 @@ def run(
             broadcast), the run's history row nests under the parent
             task, and a ``subagentDone`` broadcast stops the tab's
             running indicator when the run ends.  Empty (the default)
-            runs as an ordinary top-level task.  Like *scope_work_dir*
-            it is a client/UI-transport parameter with no agent-script
+            runs as an ordinary top-level task.  It is a
+            client/UI-transport parameter with no agent-script
             getter: a dispatched script must not be able to re-parent
             itself under an unrelated task.
         parent_tab_id: Frontend tab id of the calling task's tab,
@@ -444,40 +445,44 @@ def run(
             for each parameter ``X`` of this function except
             ``extension_agent_path`` itself (and the getter-less
             parameters noted below), calls the script's top-level
-            ``get_X()`` function — when the script defines one — and
+            ``X()`` function — when the script defines one — and
             uses its return value for ``X``, replacing the value passed
-            to this call.  A parameter whose ``get_X()`` the script
+            to this call.  A parameter whose ``X()`` the script
             does not define keeps the value passed here, which is the
             parameter's default when the caller did not pass one.  One
             getter is named differently from its parameter:
-            ``get_if_append_basic_tools()`` overrides
+            ``if_append_basic_tools()`` overrides
             *append_basic_tools*.
 
             Script format: a plain Python file defining any subset of
             these zero-argument top-level functions, each returning a
             value of the corresponding parameter's documented type::
 
-                def get_prompt() -> str: ...          # non-empty
-                def get_work_dir() -> str: ...
-                def get_model() -> str: ...
-                def get_chat_id() -> str: ...
-                def get_system_prompt() -> str: ...
-                def get_tools() -> str | Path | list | None: ...  # tools-file path or tool list
-                def get_use_worktree() -> bool: ...
-                def get_auto_commit() -> bool: ...
-                def get_max_budget() -> float | None: ...   # finite
-                def get_model_config() -> dict | None: ...
-                def get_if_append_basic_tools() -> bool: ...
-                def get_append_to_system_prompt() -> str: ...
-                def get_append_to_prompt() -> str: ...
+                def prompt() -> str: ...          # non-empty
+                def work_dir() -> str: ...
+                def model() -> str: ...
+                def chat_id() -> str: ...
+                def system_prompt() -> str: ...
+                def tools() -> str | Path | list | None: ...  # tools-file path or tool list
+                def use_worktree() -> bool: ...
+                def auto_commit() -> bool: ...
+                def max_budget() -> float | None: ...   # finite
+                def model_config() -> dict | None: ...
+                def if_append_basic_tools() -> bool: ...
+                def append_to_system_prompt() -> str: ...
+                def append_to_prompt() -> str: ...
+                def scope_work_dir() -> str: ...
+                def use_web_tools() -> bool | None: ...
+                def classify_tasks() -> bool | None: ...
+                def is_parallel() -> bool: ...
 
             The script may also define two hook getters with no
             corresponding parameter on this function (a callable
             cannot travel the wire, so the hooks exist ONLY as
             agent-script getters)::
 
-                def get_llm_call_hook() -> Callable | None: ...
-                def get_tool_call_hook() -> Callable | None: ...
+                def llm_call_hook() -> Callable | None: ...
+                def tool_call_hook() -> Callable | None: ...
 
             Each returns a callable — ``llm_call_hook`` and
             ``tool_call_hook`` respectively — (or ``None`` for "no
@@ -496,37 +501,38 @@ def run(
             apply to the task's own agent, not to sub-agents it spawns
             via ``run_parallel``.
 
-            The ``get_X()`` functions are never serialized by the
+            The ``X()`` functions are never serialized by the
             client — they run **in the daemon process**, exactly like a
-            tools file's ``get_tools()``.  ``get_tools()`` here returns
+            tools file's ``get_tools()``.  ``tools()`` here returns
             the *path* of a tools file (pass an absolute path — the
             daemon does not resolve it against this process's working
             directory), which the daemon then imports and whose
-            ``get_tools()`` it calls as if the path had been passed as
-            *tools*; a ``get_tools()`` that instead returns a *list*
-            of tool callables (the tools-file contract, as in the
-            channel agent modules) makes the script its own tools
-            file.  ``timeout``, *stop_on_timeout*, *sock_path*,
-            *scope_work_dir*, *parent_task_id*, *parent_tab_id*,
-            *web_tools*, and *is_parallel* have no
-            getters by design: the first three are client-transport
-            parameters — the script only runs on the daemon that
-            *sock_path* selects, *timeout* bounds this client's local
-            wait, and *stop_on_timeout* picks this client's timeout
-            behavior — *scope_work_dir* is the CALLING
-            client's tab-bar scope, which the dispatched script must
-            not be able to repoint at another workspace,
-            *parent_task_id* / *parent_tab_id* are the CALLING task's
-            identity, which the script must not be able to forge, and
-            *web_tools* / *is_parallel* always keep the values passed
-            to this call (their defaults when the caller passed
-            none).  The
+            ``get_tools()`` (or ``tools()``) it calls as if the path
+            had been passed as *tools*; a ``tools()`` that instead
+            returns a *list* of tool callables (the tools-file
+            contract, as in the channel agent modules) makes the
+            script its own tools file.  ``scope_work_dir()`` overrides
+            the tab-bar workspace scope of the run's tab (an empty
+            override scopes the tab to the run's work directory, like
+            an empty client-sent *scope_work_dir*); ``use_web_tools()``
+            and
+            ``classify_tasks()`` return a bool for a per-run override
+            or ``None`` for the daemon's configured default; and
+            ``is_parallel()`` returns a bool.  ``timeout``,
+            *stop_on_timeout*, *sock_path*, *parent_task_id*, and
+            *parent_tab_id* have no getters by design: the first three
+            are client-transport parameters — the script only runs on
+            the daemon that *sock_path* selects, *timeout* bounds this
+            client's local wait, and *stop_on_timeout* picks this
+            client's timeout behavior — and *parent_task_id* /
+            *parent_tab_id* are the CALLING task's identity, which the
+            script must not be able to forge.  The
             *extension_agent_path* itself is resolved against this process's
             working directory and validated eagerly, like *tools*.  A
             broken agent script (deleted before the daemon reads it,
-            raising at import time, a non-callable ``get_X``, a raising
-            ``get_X()``, or a wrong-typed return value) stops the task:
-            the daemon fails the run and the returned
+            raising at import time, a non-callable getter ``X``, a
+            raising ``X()``, or a wrong-typed return value) stops the
+            task: the daemon fails the run and the returned
             :class:`TaskResult` carries the diagnostic error in its
             ``text`` with ``success=False``.
         use_worktree: Run the task in an isolated git worktree.
@@ -538,8 +544,22 @@ def run(
         model_config: Per-task model configuration override (custom
             endpoint / headers); ``None`` uses the daemon's configured
             model endpoint.  Must be JSON-serializable.
-        web_tools: Per-task browser-tool enablement override; ``None``
-            uses the daemon's configured default.
+        use_web_tools: Per-task browser-tool enablement override,
+            mapped to the agent's ``web_tools`` toggle
+            (:meth:`kiss.agents.sorcar.sorcar_agent.SorcarAgent.run`);
+            ``None`` uses the daemon's configured default (the
+            settings panel's "Use web tools" checkbox, persisted as
+            ``use_web_browser``).
+        classify_tasks: Per-task override of pre-run task
+            classification (``kiss.agents.sorcar.task_classifier``),
+            which runs one lightweight non-agentic LLM call before the
+            task to pick the system prompt (lite vs. full) and decide
+            worktree isolation for the run.  ``True`` forces
+            classification on, ``False`` skips it — the run then keeps
+            the *use_worktree* value passed here and the full system
+            prompt — and ``None`` (the default) uses the daemon's
+            configured default (the settings panel's "Classify tasks
+            before running" checkbox, persisted as ``classify_tasks``).
         is_parallel: Whether the agent may spawn parallel sub-agents.
             Defaults to True.
         append_basic_tools: Whether the agent gets the built-in basic
@@ -549,7 +569,7 @@ def run(
             Defaults to True.  When False the agent's ONLY tools are
             ``finish`` and the caller-supplied tools — the ones
             returned by the *tools* file's ``get_tools()`` — so the
-            *web_tools* and *is_parallel* toggles have no tools left
+            *use_web_tools* and *is_parallel* toggles have no tools left
             to act on.  The default system prompt (``SYSTEM.md``)
             assumes the basic toolset (e.g. it mandates a first
             ``Read("./SORCAR.md")`` call), so a restricted run should
@@ -691,7 +711,8 @@ def run(
             "autoCommit": auto_commit,
             "maxBudget": max_budget,
             "modelConfig": model_config,
-            "webTools": web_tools,
+            "webTools": use_web_tools,
+            "classifyTasks": classify_tasks,
             "useParallel": is_parallel,
             "appendBasicTools": append_basic_tools,
             "appendToSystemPrompt": append_to_system_prompt,

@@ -287,9 +287,9 @@ class TestOpenAIXhighDefault:
     def test_openrouter_gpt_latest_alias_defaults_to_high(
         self, capture_server: str
     ) -> None:
-        """openrouter/~openai/gpt-latest base entry defaults to ``high``."""
+        """openrouter/~openai/gpt-sol-latest base entry defaults to ``high``."""
         m = OpenAICompatibleModel(
-            "openrouter/~openai/gpt-latest",
+            "openrouter/~openai/gpt-sol-latest",
             base_url=capture_server,
             api_key="test-key",
         )
@@ -297,14 +297,14 @@ class TestOpenAIXhighDefault:
         m.generate()
         body = _CapturingHandler.captured_bodies[-1]
         assert body.get("reasoning_effort") == "high"
-        assert body.get("model") == "~openai/gpt-latest"
+        assert body.get("model") == "~openai/gpt-sol-latest"
 
     def test_openrouter_gpt_latest_xhigh_alias_routes_to_base(
         self, capture_server: str
     ) -> None:
         """The synthetic -xhigh alias of an openrouter latest entry routes too."""
         m = OpenAICompatibleModel(
-            "openrouter/~openai/gpt-latest-xhigh",
+            "openrouter/~openai/gpt-sol-latest-xhigh",
             base_url=capture_server,
             api_key="test-key",
         )
@@ -312,7 +312,7 @@ class TestOpenAIXhighDefault:
         m.generate()
         body = _CapturingHandler.captured_bodies[-1]
         assert body.get("reasoning_effort") == "xhigh"
-        assert body.get("model") == "~openai/gpt-latest"
+        assert body.get("model") == "~openai/gpt-sol-latest"
 
     def test_unknown_model_does_not_default(self, capture_server: str) -> None:
         """A model name not present in MODEL_INFO must NOT receive xhigh.

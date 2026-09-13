@@ -19,7 +19,6 @@ import ctypes
 import logging
 import math
 import queue
-import re
 import threading
 import time
 import uuid
@@ -386,9 +385,49 @@ def parse_task_tags(text: str) -> list[str]:
     Returns:
         List of task strings.  Always contains at least one element.
     """
-    tasks = [m.strip() for m in re.findall(r"<task>(.*?)</task>", text, re.DOTALL)]
-    tasks = [t for t in tasks if t]
+    tasks = [t for t in _task_tag_blocks(text) if t]
     return tasks if tasks else [text]
+
+
+def _task_tag_blocks(text: str) -> list[str]:
+    """Return the stripped contents of every ``<task>...</task>`` block.
+
+    Equivalent to ``re.findall(r"<task>(.*?)</task>", text, re.DOTALL)``
+    but linear: the lazy regex rescanned to the end of the text for
+    every unclosed opener, which is quadratic on pasted input that
+    repeats ``<task>`` (and ``re`` holds the GIL while scanning).
+    """
+    blocks: list[str] = []
+    cursor = 0
+    while True:
+        start = text.find("<task>", cursor)
+        if start == -1:
+            return blocks
+        end = text.find("</task>", start + len("<task>"))
+        if end == -1:
+            return blocks
+        blocks.append(text[start + len("<task>") : end].strip())
+        cursor = end + len("</task>")
+
+
+def contains_task_tags(text: str) -> bool:
+    """True when *text* carries at least one non-empty ``<task>`` block.
+
+    Used by the command handlers to decide how to treat a message the
+    user sends while a task is running: a plain message is injected
+    into the live agent's conversation as a steering instruction,
+    whereas a ``<task>...</task>`` list is queued on the state's
+    ``queued_followup_tasks`` and executed one-by-one as additional
+    sequential subtasks once the current task finishes.
+
+    Args:
+        text: The user message to inspect.
+
+    Returns:
+        ``True`` when :func:`parse_task_tags` would return the tagged
+        blocks rather than falling back to the whole text.
+    """
+    return any(_task_tag_blocks(text))
 
 
 def _release_worktree_without_merging(
@@ -459,9 +498,11 @@ def _release_worktree_without_merging(
             f"it with: git checkout {branch}"
         ))
         return
-    with agent._warning_lock:
-        stranded = agent._merge_conflict_warning
-    agent._set_warnings(merge=f"{reason} {stranded}" if stranded else reason)
+    # The preserve above may have left a warning saying where the
+    # work is (e.g. hook-refused commit); put the reason in front of it
+    # atomically, so a flush racing this call can neither re-deliver
+    # that warning nor have a concurrent write overwritten.
+    agent.add_warning(reason, prepend=True)
 
 
 def _wt_merge_on_repo(state: AgentState, repo: Path | None) -> bool:
@@ -590,6 +631,7 @@ class _TaskRunnerMixin:
             chat_id: str | None = None,
             title: str | None = None,
             work_dir: str | None = None,
+            scope_work_dir: str | None = None,
             task_id: str | None = None,
             create: bool = False,
         ) -> int: ...
@@ -691,12 +733,14 @@ class _TaskRunnerMixin:
             state = self._resolve_run_state(cmd)
             # The dispatch handler fixed ``state.chat_id`` from the
             # client-sent ``chatId`` before this thread started, so a
-            # ``get_chat_id()`` override must be re-applied to the state —
+            # ``chat_id()`` override must be re-applied to the state —
             # ``_run_task_inner`` binds the agent's chat from it.  Gated on
-            # the OVERRIDDEN set: without a ``get_chat_id()`` getter the
+            # the OVERRIDDEN set: without a ``chat_id()`` getter the
             # state's chat id (possibly carried over from the tab's
             # previous run) must stay untouched.
-            if overridden_fields & {"chatId", "prompt", "workDir"}:
+            if overridden_fields & {
+                "chatId", "prompt", "workDir", "tabScopeWorkDir",
+            }:
                 override_chat_id: str | None = None
                 if "chatId" in overridden_fields:
                     # An empty override means "fresh chat" — mint the id
@@ -726,6 +770,23 @@ class _TaskRunnerMixin:
                         # as the EFFECTIVE directory the run uses.
                         (cmd["workDir"] or self.work_dir)
                         if "workDir" in overridden_fields
+                        else None
+                    ),
+                    scope_work_dir=(
+                        # A ``scope_work_dir()`` override re-pins the tab's
+                        # workspace-visibility scope, which the dispatch
+                        # handler pinned from the client-sent
+                        # ``tabScopeWorkDir`` before this thread started.
+                        # ``update_tab`` keeps the current scope for an
+                        # empty value, so an EMPTY override (meaning "scope
+                        # to the run's work dir", like an empty client-sent
+                        # scope) must be pinned as the effective work
+                        # directory — mirroring the ``workDir`` re-pin.
+                        (
+                            str(cmd["tabScopeWorkDir"] or "")
+                            or str(cmd.get("workDir") or self.work_dir)
+                        )
+                        if "tabScopeWorkDir" in overridden_fields
                         else None
                     ),
                 )
@@ -840,6 +901,11 @@ class _TaskRunnerMixin:
                     state.user_answer_queue = None
                     state.pending_user_messages.clear()
                     state.unattributed_prompt_echoes.clear()
+                    # Queued ``<task>`` follow-ups that were never
+                    # drained (the run failed, was stopped, or the
+                    # message landed after the last drain point) must
+                    # not leak into a later run on the same tab.
+                    state.queued_followup_tasks.clear()
                     state.is_task_active = False
                     state.is_running_non_wt = False
                     state.non_wt_repo_root = None
@@ -1103,6 +1169,13 @@ class _TaskRunnerMixin:
                 if existing.user_answer_queue is None:
                     existing.user_answer_queue = queue.Queue(maxsize=1)
                 existing.task_thread = threading.current_thread()
+                # A reused idle state carries the PREVIOUS run's
+                # closed follow-up queue; left set, every later
+                # ``<task>`` steering message on this tab would be
+                # steered instead of queued.  Re-open it (and drop any
+                # stale leftovers) for the new run.
+                existing.queued_followup_tasks.clear()
+                existing.followup_queue_closed = False
                 cmd["_state_key"] = existing.task_id
                 return existing
             state = AgentState(
@@ -1274,6 +1347,46 @@ class _TaskRunnerMixin:
             append_to_system_prompt, append_to_prompt,
         )
 
+        # Pre-run task classification (kiss.agents.sorcar.task_classifier),
+        # resolved HERE — before the main-tree claim checks and worktree
+        # bookkeeping below — so this runner and the agent agree on ONE
+        # effective worktree mode for the whole submission: an
+        # ``is_development`` verdict decides worktree isolation, and the
+        # claims, merge presentation, auto-commit paths, and persistence
+        # all key off the same value.  The verdict is pre-seeded into
+        # the agent (``classify_task_for_run``), which reuses it for its
+        # own worktree gating and system prompt selection instead of
+        # re-classifying inside the run.  Only this run's effective mode
+        # changes; the persisted ``is_worktree`` setting is never
+        # written.  A disabled or failed classification leaves
+        # ``use_worktree`` exactly as the client requested.
+        from kiss.core.vscode_config import build_model_config, load_config
+
+        _raw_mc_early = cmd.get("modelConfig")
+        # Per-run classification toggle: the ``classifyTasks`` wire
+        # field (``classify_tasks`` on ``kiss.server.sorcar.run``).
+        # Absent or malformed means "no override" — the persisted
+        # "Classify tasks before running" setting decides, exactly
+        # like ``webTools`` falls back to "Use web tools".
+        _raw_classify = cmd.get("classifyTasks")
+        _classify_enabled = (
+            _raw_classify if isinstance(_raw_classify, bool) else None
+        )
+        _classify_verdict = agent.classify_task_for_run(
+            model_name=model,
+            task=prompt + append_to_prompt,
+            model_config=(
+                _raw_mc_early
+                if isinstance(_raw_mc_early, dict)
+                else build_model_config(load_config())
+            ),
+            enabled=_classify_enabled,
+        )
+        if _classify_verdict is not None:
+            use_worktree = _classify_verdict.is_development
+            with self._state_lock:
+                state.use_worktree = use_worktree
+
         if not use_worktree:
             repo = GitWorktreeOps.discover_repo(Path(work_dir))
             with self._state_lock:
@@ -1403,6 +1516,17 @@ class _TaskRunnerMixin:
             _cfg_budget = float(_vcfg["max_budget"])
             _cfg_web = _vcfg.get("use_web_browser", True)
             _model_config = build_model_config(_vcfg)
+            # A settings-panel custom model (a ~/.kiss/MY_MODELS.json
+            # entry carrying an endpoint) runs against ITS OWN
+            # endpoint / key / headers: the per-model config wins over
+            # the global custom-endpoint fallback above, or the run
+            # would silently target whatever endpoint the global
+            # config last held.
+            from kiss.core.models.model_info import custom_model_config
+
+            _my_model_config = custom_model_config(model)
+            if _my_model_config is not None:
+                _model_config = _my_model_config
             _agent_budget = coerce_budget_override(cmd.get("maxBudget"))
             _raw_web = cmd.get("webTools")
             _agent_web = _raw_web if isinstance(_raw_web, bool) else None
@@ -1419,8 +1543,8 @@ class _TaskRunnerMixin:
                 if isinstance(_raw_model_config, dict)
                 else None
             )
-            # Agent-script hooks (``get_llm_call_hook`` /
-            # ``get_tool_call_hook``), staged onto the command dict by
+            # Agent-script hooks (``llm_call_hook`` /
+            # ``tool_call_hook``), staged onto the command dict by
             # ``apply_agent_overrides``.  Guarded with ``callable``:
             # the fields never travel the wire as callables, so a
             # (buggy or malicious) client that sends them as JSON
@@ -1450,7 +1574,16 @@ class _TaskRunnerMixin:
             # without the tools the client asked for.
             client_tools = load_tools_file(cmd.get("toolsFile"))
 
-            for subtask_index, task_prompt in enumerate(subtasks):
+            # A ``while`` over a growable list, not a ``for``: a
+            # steering message of ``<task>`` blocks sent while a
+            # subtask runs is queued on
+            # ``state.queued_followup_tasks`` (see
+            # ``_cmd_append_user_message``) and drained below after
+            # the subtask finishes, extending this list so the queued
+            # tasks run one-by-one as further sequential subtasks.
+            subtask_index = 0
+            while subtask_index < len(subtasks):
+                task_prompt = subtasks[subtask_index]
                 state.last_user_prompt = task_prompt
                 state.last_result_summary = ""
                 # Reset per subtask: a later subtask that fails must not
@@ -1558,6 +1691,13 @@ class _TaskRunnerMixin:
                     )
                     state.last_result_summary = result_summary
                 if subtask_failed:
+                    with self._state_lock:
+                        # A failure aborts the queued follow-ups, so
+                        # no further drain will happen: close the
+                        # queue so late ``<task>`` messages take the
+                        # steering path instead of being silently
+                        # cleared by the end-of-run cleanup.
+                        state.followup_queue_closed = True
                     already_broadcast = bool(
                         getattr(subtask_exc, "terminal_result_broadcast", False)
                     )
@@ -1569,6 +1709,35 @@ class _TaskRunnerMixin:
                             tab_id=tab_id,
                         )
                     break
+                # Drain follow-up tasks the user queued mid-run with a
+                # ``<task>``-tagged steering message BEFORE deciding
+                # whether this subtask is the last one: extending
+                # ``subtasks`` here makes the just-finished subtask an
+                # intermediate one, so its row is persisted below and
+                # the queued tasks then run one-by-one exactly like
+                # the subtasks of a multi-``<task>`` submission.
+                with self._state_lock:
+                    queued_followups = list(state.queued_followup_tasks)
+                    state.queued_followup_tasks.clear()
+                    if not queued_followups and subtask_index >= len(subtasks) - 1:
+                        # This was the LAST drain (the loop is about
+                        # to exit) and it found nothing: close the
+                        # queue in the same critical section, so a
+                        # ``<task>`` message racing this drain either
+                        # landed above and runs, or arrives after
+                        # closure and takes the plain steering path —
+                        # never accepted-and-then-dropped (see
+                        # ``_route_prompt_to_owner``).
+                        state.followup_queue_closed = True
+                if queued_followups:
+                    if append_to_prompt:
+                        # Same executed-prompt suffix contract as the
+                        # pre-loop application to the submitted
+                        # subtasks.
+                        queued_followups = [
+                            t + append_to_prompt for t in queued_followups
+                        ]
+                    subtasks.extend(queued_followups)
                 if subtask_index < len(subtasks) - 1:
                     # _persist_subtask_row's cleanup_task frees this
                     # subtask's changed-path record; take it first so
@@ -1599,6 +1768,7 @@ class _TaskRunnerMixin:
                         use_worktree=use_worktree,
                         sub_start_ms=sub_start_ms,
                     )
+                subtask_index += 1
         except BaseException as _outer_exc:
             if result_summary == "Agent Failed Abruptly":
                 # ``_stop_interrupt_wrapped``: a stop injected while
@@ -1627,6 +1797,14 @@ class _TaskRunnerMixin:
                 tab_id=tab_id,
             )
         finally:
+            with self._state_lock:
+                # The subtask loop is over on every path (normal exit
+                # and the outer-exception one), so no drain of
+                # ``queued_followup_tasks`` can happen any more; from
+                # here on a ``<task>`` message must take the plain
+                # steering path (see ``_route_prompt_to_owner``)
+                # rather than be queued, echoed and silently dropped.
+                state.followup_queue_closed = True
             end_event_broadcast = False
             # Whether the LAST child row's ``subagentDone`` went out on
             # the normal path below; the mandatory-cleanup finally
@@ -2252,11 +2430,25 @@ class _TaskRunnerMixin:
                 owner_state,
                 task_thread,
             )
-            threading.Thread(
-                target=self._force_stop_thread,
-                args=(task_thread, still_owns),
-                daemon=True,
-            ).start()
+            try:
+                threading.Thread(
+                    target=self._force_stop_thread,
+                    args=(task_thread, still_owns),
+                    daemon=True,
+                ).start()
+            except RuntimeError:
+                # Thread exhaustion ("can't start new thread"): the stop
+                # is already acknowledged and the event set, so a task
+                # blocked in a non-cooperative call would otherwise
+                # never be interrupted.  Enforce inline instead; the
+                # watchdog's waits are bounded, and this handler runs on
+                # an executor thread, not the event loop.
+                logger.warning(
+                    "Stop watchdog thread for tab %s could not be started; "
+                    "enforcing the stop inline",
+                    tab_id, exc_info=True,
+                )
+                self._force_stop_thread(task_thread, still_owns)
 
     def _broadcast_stop_ack(self, tab_id: str, accepted: bool) -> None:
         """Tell *tab_id* that its Stop click was received.

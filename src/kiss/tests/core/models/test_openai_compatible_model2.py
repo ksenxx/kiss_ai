@@ -642,9 +642,9 @@ class TestEndpointAndDefaults:
     def test_openrouter_gpt_latest_alias_defaults_high(
         self, capture_server: str
     ) -> None:
-        """openrouter/~openai/gpt-latest also defaults to high."""
+        """openrouter/~openai/gpt-sol-latest also defaults to high."""
         m = OpenAICompatibleModel2(
-            "openrouter/~openai/gpt-latest",
+            "openrouter/~openai/gpt-sol-latest",
             base_url=capture_server,
             api_key="k",
         )

@@ -66,13 +66,13 @@ functions — the daemon loads the file itself, so the tools execute
                         tools="my_tools.py")
 
 Similarly, ``extension_agent_path="/path/to/my_agent.py"`` names an *agent
-script* — a Sorcar Extension Agent (SEA) — whose top-level ``get_X()``
+script* — a Sorcar Extension Agent (SEA) — whose top-level ``X()``
 functions compute the run's parameters on the daemon — e.g. a
-``get_model()`` overrides *model*, a
-``get_prompt()`` overrides *prompt* — while parameters without a getter
+``model()`` overrides *model*, a
+``prompt()`` overrides *prompt* — while parameters without a getter
 keep the values passed to :func:`run` (see the :func:`run` docstring
 for the script format).  The script may additionally define
-``get_llm_call_hook()`` / ``get_tool_call_hook()``, returning functions
+``llm_call_hook()`` / ``tool_call_hook()``, returning functions
 ``llm_call_hook`` and ``tool_call_hook`` that the daemon passes to the
 underlying :class:`kiss.core.kiss_agent.KISSAgent` (see
 :meth:`~kiss.core.kiss_agent.KISSAgent.run`); these two have no
@@ -257,6 +257,9 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("selectModel", required=("model",)),
     ApiCommand("getConfig"),
     ApiCommand("saveConfig", required=("config",)),
+    ApiCommand("getMyModels"),
+    ApiCommand("saveMyModel", required=("name",)),
+    ApiCommand("deleteMyModel", required=("name",)),
     ApiCommand("getDefaultModel", handler="get_default_model"),
     ApiCommand("readKissConfig", handler="read_kiss_config"),
     ApiCommand(
@@ -269,6 +272,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("recordFileUsage", required=("path",)),
     ApiCommand("openFile", required=("path",), handler="open_file"),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
+    ApiCommand("getInfoFile", handler="get_info_file"),
     ApiCommand("shareChat", required=("chatId", "html"), handler="share_chat"),
     ApiCommand(
         "shareChatTasks", required=("chatId",), handler="share_chat_tasks"
@@ -461,6 +465,10 @@ class ServerBackend(Protocol):
     ) -> None: ...
 
     async def _handle_check_paths(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_get_info_file(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
@@ -981,6 +989,25 @@ class ServerApi:
         if ctx.is_uds:
             return
         await self._backend._handle_check_paths(cmd, ctx.endpoint)
+
+    async def get_info_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Report the contents of ``tmp/info.md`` to a remote-web client.
+
+        The remote webapp's docked task-info panel (desktop mode only)
+        polls this command so its info subpanel can mirror the
+        ``tmp/info.md`` file under the active tab's work dir — empty
+        when the file does not exist.  UDS clients (VS Code windows)
+        never show that panel, so a UDS-delivered ``getInfoFile`` is
+        dropped as a defensive no-op, exactly like ``checkPaths``.
+
+        Args:
+            cmd: The ``getInfoFile`` command (optional ``workDir``,
+                ``tabId``, ``knownSig``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_get_info_file(cmd, ctx.endpoint)
 
     async def share_chat(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Write a chat webview's transcript as a standalone HTML page.

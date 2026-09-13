@@ -366,7 +366,7 @@ def main() -> None:
     channel_main(NostrAgent, "kiss-nostr")
 
 
-def get_tools() -> list:
+def tools() -> list:
     """Return the Nostr channel tools (``kiss.server.sorcar.run`` tools-file contract).
 
     Called by the kiss-web daemon when this module's path is passed as

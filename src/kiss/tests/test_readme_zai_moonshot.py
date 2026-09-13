@@ -12,6 +12,8 @@ import json
 import re
 from pathlib import Path
 
+from kiss.core.models.model_info import get_model_provider
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _README = _REPO_ROOT / "README.md"
 _MODEL_INFO = _REPO_ROOT / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
@@ -26,26 +28,33 @@ def _model_info() -> dict[str, dict[str, object]]:
     return data
 
 
+# Runtime routing label -> README category label; mirrors
+# kiss.scripts.update_models._PROVIDER_LABEL_TO_README_CATEGORY.
+_README_CATEGORY_LABELS = {
+    "OpenAI": "OpenAI",
+    "Anthropic": "Anthropic",
+    "Gemini": "Gemini",
+    "Together": "Together AI",
+    "Z.AI": "Z.AI",
+    "Moonshot": "Moonshot AI",
+    "OpenRouter": "OpenRouter",
+    "Claude Code CLI": "Claude Code CLI (`cc/*`)",
+    "Codex CLI": "Codex CLI (`codex/*`)",
+}
+
+
 def _provider_category(model_name: str) -> str:
-    if model_name.startswith("openrouter/"):
-        return "OpenRouter"
-    if model_name.startswith("cc/"):
-        return "Claude Code CLI (`cc/*`)"
-    if model_name.startswith("codex/"):
-        return "Codex CLI (`codex/*`)"
-    if model_name.startswith("claude-"):
-        return "Anthropic"
-    if model_name.startswith("glm-"):
-        return "Z.AI"
-    if model_name.startswith("kimi-") or model_name.startswith("moonshot-"):
-        return "Moonshot AI"
-    if model_name.startswith("gemini-") or model_name.startswith("google/"):
-        return "Gemini / Google"
-    if model_name.startswith(
-        ("gpt-", "o", "computer-use-preview", "text-embedding-")
-    ):
-        return "OpenAI"
-    return "Together AI"
+    """README category for ``model_name``, grouped by ROUTING provider.
+
+    Uses the runtime routing table
+    (:func:`kiss.core.models.model_info.get_model_provider`) — the same
+    single source the README rewriter consults — so the open-weight
+    ``openai/gpt-oss-*`` and ``google/gemma-*`` models count under
+    Together AI (they are served with a ``TOGETHER_API_KEY``) rather than
+    under the OpenAI/Gemini vendor families. A ``KeyError`` here means a
+    catalog model that no registered provider routes.
+    """
+    return _README_CATEGORY_LABELS[get_model_provider(model_name)]
 
 
 def _provider_counts() -> dict[str, int]:

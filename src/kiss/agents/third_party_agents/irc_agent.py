@@ -96,7 +96,7 @@ class IRCChannelBackend(ToolMethodBackend):
     def _send_raw(self, line: str) -> None:
         """Send a raw IRC line, connecting on demand.
 
-        A fresh backend built by this module's ``get_tools()`` inside
+        A fresh backend built by this module's ``tools()`` inside
         the kiss-web daemon starts disconnected; the first send
         connects it from the persisted config instead of silently
         dropping the line.
@@ -526,7 +526,7 @@ def main() -> None:
     )
 
 
-def get_tools() -> list:
+def tools() -> list:
     """Return the IRC channel tools (``kiss.server.sorcar.run`` tools-file contract).
 
     Called by the kiss-web daemon when this module's path is passed as

@@ -179,8 +179,11 @@ export class AgentClient extends EventEmitter {
       this._reconnectTimer = null;
     }
     if (this._socket) {
+      // Disposal is cancellation, not a graceful goodbye: end() would
+      // keep the socket -- and whatever it still has buffered -- alive
+      // until the daemon reads it, which a wedged daemon never does.
       try {
-        this._socket.end();
+        this._socket.destroy();
       } catch {}
       this._socket = null;
     }

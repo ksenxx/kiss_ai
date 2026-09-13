@@ -6,9 +6,10 @@
 
 Desktop mode (viewport >= 900px) docks a task-info panel on the RIGHT
 of the chat: the twin of the left task-history panel.  It lists the
-task meta information — tokens, cost, steps, time, machine name — as a
-bulleted list and REPLACES the ``#tab-status-bar`` strip that used to
-render those values at the top of the chat panel.
+task meta information — tokens, cost, steps, time, machine name,
+workdir, max budget — as a bulleted list and REPLACES the
+``#tab-status-bar`` strip that used to render those values at the top
+of the chat panel.
 
 These tests render the REAL page returned by
 :func:`kiss.server.web_server._build_html` (same ``media/chat.html``
@@ -20,9 +21,9 @@ Covered behavior:
 
 * The panel is docked at the right edge and takes one fifth of the
   browser window, and ``#app`` clears it.
-* The five meta values render as bullet items (a real ``<ul>`` with
+* The seven meta values render as bullet items (a real ``<ul>`` with
   ``list-style-type: disc``) with the Tokens / Cost / Steps / Time /
-  Machine labels.
+  Machine / Workdir / Max budget labels.
 * Whatever the app writes into the status-bar spans (tokens, cost,
   steps, the running timer text and its color, the machine name) is
   mirrored live into the panel.
@@ -222,8 +223,8 @@ def test_meta_values_render_as_a_bulleted_list(
     browser: Browser,
     remote_url: str,
 ) -> None:
-    """The panel lists Tokens / Cost / Steps / Time / Machine as real
-    ``<ul>`` bullet items."""
+    """The panel lists Tokens / Cost / Steps / Time / Machine /
+    Workdir / Max budget as real ``<ul>`` bullet items."""
     page = _open_desktop_page(browser, remote_url, 1280)
     try:
         listing = page.evaluate(_META_LIST_JS)
@@ -232,13 +233,15 @@ def test_meta_values_render_as_a_bulleted_list(
             "the meta items must render as a bulleted list, got "
             f"list-style-type: {listing['listStyle']}"
         )
-        assert listing["displays"] == ["list-item"] * 5, listing
+        assert listing["displays"] == ["list-item"] * 7, listing
         assert listing["labels"] == [
             "Tokens:",
             "Cost:",
             "Steps:",
             "Time:",
             "Machine:",
+            "Workdir:",
+            "Max budget:",
         ], listing
         # Before any task ran the numeric values show the em-dash
         # placeholder and the time mirrors the "Ready" status.

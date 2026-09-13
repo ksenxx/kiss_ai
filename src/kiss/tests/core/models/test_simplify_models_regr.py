@@ -282,6 +282,50 @@ def test_function_to_openai_tool_schema() -> None:
     assert m._resolve_openai_tools_schema({"_sample_tool": _sample_tool}, None) == schema
 
 
+def test_function_to_openai_tool_resolves_pep563_string_annotations() -> None:
+    """PEP 563 string annotations resolve to real JSON-schema types.
+
+    Modules with ``from __future__ import annotations`` (every channel
+    agent) expose signature annotations as strings like ``"int"``;
+    the schema builder must resolve them via ``typing.get_type_hints``
+    instead of falling through to ``{"type": "string"}``.
+    """
+
+    def pep563_tool(path: str, count: int = 3, deep: bool = False, ratio: float = 0.5) -> str:
+        """Scan a path.
+
+        Args:
+            path: The path to scan.
+            count: How many entries.
+            deep: Whether to recurse.
+            ratio: Sampling ratio.
+        """
+        return path
+
+    # Simulate PEP 563: the raw annotations become unevaluated strings.
+    pep563_tool.__annotations__ = {
+        "path": "str", "count": "int", "deep": "bool", "ratio": "float", "return": "str",
+    }
+    m = _ConcreteModel("m")
+    props = m._function_to_openai_tool(pep563_tool)["function"]["parameters"]["properties"]
+    assert props["path"]["type"] == "string"
+    assert props["count"]["type"] == "integer"
+    assert props["deep"]["type"] == "boolean"
+    assert props["ratio"]["type"] == "number"
+
+    def unresolvable(x: str) -> None:
+        """Doc.
+
+        Args:
+            x: Value.
+        """
+
+    # An annotation naming an unknown type makes get_type_hints raise.
+    unresolvable.__annotations__ = {"x": "NoSuchTypeAnywhere", "return": "None"}
+    props = m._function_to_openai_tool(unresolvable)["function"]["parameters"]["properties"]
+    assert props["x"]["type"] == "string"  # get_type_hints fails -> raw fallback
+
+
 def test_python_type_to_json_schema_variants() -> None:
     """Type-annotation conversion covers unions, containers and fallbacks."""
     m = _ConcreteModel("m")

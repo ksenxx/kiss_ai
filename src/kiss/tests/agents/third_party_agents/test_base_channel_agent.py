@@ -111,6 +111,7 @@ _POLL_MODULES = [
     "kiss.agents.third_party_agents.sms_agent",
     "kiss.agents.third_party_agents.synology_chat_agent",
     "kiss.agents.third_party_agents.telegram_agent",
+    "kiss.agents.third_party_agents.whatsapp_agent",
     "kiss.agents.third_party_agents.zalo_agent",
 ]
 
@@ -120,7 +121,6 @@ _NO_POLL_MODULES = [
     "kiss.agents.third_party_agents.nostr_agent",
     "kiss.agents.third_party_agents.tlon_agent",
     "kiss.agents.third_party_agents.twitch_agent",
-    "kiss.agents.third_party_agents.whatsapp_agent",
 ]
 
 
