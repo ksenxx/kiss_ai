@@ -274,6 +274,13 @@
             <input type="checkbox" id="cfg-classify-tasks" checked>
             Classify tasks before running
           </label>
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-use-memory" checked>
+            Use persistent memory
+          </label>
+          <label class="config-label">Memory directory
+            <input type="text" id="cfg-memory-dir" placeholder="~/.kiss/memories">
+          </label>
           <!-- VS Code only (main.js unhides it outside the remote web
                app): chats as editor tabs instead of the sidebar view.
                Not part of the daemon config — the change posts

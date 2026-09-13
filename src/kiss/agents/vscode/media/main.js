@@ -2849,6 +2849,7 @@
   );
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
   const classifyTasksToggleBtn = document.getElementById('cfg-classify-tasks');
+  const memoryToggleBtn = document.getElementById('cfg-use-memory');
   const shareBtn = document.getElementById('share-btn');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
@@ -12961,6 +12962,8 @@
     // ``webTools`` override.
     webToolsStateKnown = true;
     setChecked(classifyTasksToggleBtn, cfg.classify_tasks !== false);
+    setChecked(memoryToggleBtn, cfg.use_memory !== false);
+    setValue('cfg-memory-dir', cfg.memory_dir || '');
     // Recorded even while an edit is active (the boxes themselves are
     // skipped below), so cancelling the edit restores the latest
     // authoritative values — see cancelCustomModelEdit.
@@ -13029,6 +13032,12 @@
       cfg.classify_tasks = !!(
         classifyTasksToggleBtn && classifyTasksToggleBtn.checked
       );
+    }
+    if (want('cfg-use-memory')) {
+      cfg.use_memory = !!(memoryToggleBtn && memoryToggleBtn.checked);
+    }
+    if (want('cfg-memory-dir')) {
+      cfg.memory_dir = el('cfg-memory-dir').value.trim();
     }
     if (want('cfg-custom-endpoint')) {
       cfg.custom_endpoint = el('cfg-custom-endpoint').value.trim();
