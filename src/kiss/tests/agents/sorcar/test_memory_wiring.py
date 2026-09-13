@@ -4,10 +4,10 @@
 # add your name here
 """End-to-end tests for the SorcarAgent persistent-memory wiring.
 
-The ``use_memory`` config flag (or the ``KISS_USE_MEMORY`` environment
-variable) gives every SorcarAgent run the six ``memory_*`` tools and the
-``MEMORY_PROTOCOL`` system-prompt block, with pages under
-``$KISS_HOME/memories`` by default.  Offline tests cover the settings
+The ``use_memory`` config flag (on by default, overridable by the
+``KISS_USE_MEMORY`` environment variable) gives every SorcarAgent run the
+seven ``memory_*`` tools and the ``MEMORY_PROTOCOL`` system-prompt block,
+with pages under ``$KISS_HOME/memories``.  Offline tests cover the settings
 resolution; live tests run a real agent on ``claude-haiku-4-5`` and
 inspect the actual system prompt the run installed on the live model
 (``model_config["system_instruction"]``, where KISSAgent.run puts it).
@@ -48,21 +48,21 @@ def _write_config(home: Path, cfg: dict[str, Any]) -> None:
 
 
 class TestMemorySettings:
-    def test_default_is_off_with_kiss_home_memories(
+    def test_default_is_on_with_kiss_home_memories(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         home = _home(monkeypatch, tmp_path)
-        enabled, root = _memory_settings()
-        assert enabled is False
-        assert root == home / "memories"
-
-    def test_config_flag_enables(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        home = _home(monkeypatch, tmp_path)
-        _write_config(home, {"use_memory": True})
         enabled, root = _memory_settings()
         assert enabled is True
+        assert root == home / "memories"
+
+    def test_config_flag_disables(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        home = _home(monkeypatch, tmp_path)
+        _write_config(home, {"use_memory": False})
+        enabled, root = _memory_settings()
+        assert enabled is False
         assert root == home / "memories"
 
     def test_config_memory_dir_overrides_root(
@@ -128,8 +128,16 @@ class TestMemoryRootForRun:
     def test_config_off_yields_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        _home(monkeypatch, tmp_path)
+        home = _home(monkeypatch, tmp_path)
+        _write_config(home, {"use_memory": False})
         assert _memory_root_for_run(True, None, "claude-haiku-4-5") is None
+
+    def test_default_on_yields_memory_root(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        home = _home(monkeypatch, tmp_path)
+        root = _memory_root_for_run(True, None, "claude-haiku-4-5")
+        assert root == home / "memories"
 
     def test_append_basic_tools_false_gates(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -149,6 +157,18 @@ class TestMemoryRootForRun:
     ) -> None:
         self._enable(monkeypatch, tmp_path)
         assert _memory_root_for_run(True, None, model) is None
+
+    def test_caller_system_instruction_gates(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A caller-supplied system_instruction replaces the composed prompt
+        (KISSAgent.run only setdefault-s it), so MEMORY_PROTOCOL would never
+        reach the model and the tools must not be registered without it."""
+        self._enable(monkeypatch, tmp_path)
+        root = _memory_root_for_run(
+            True, None, "claude-haiku-4-5", caller_system_instruction=True
+        )
+        assert root is None
 
 
 def _run_capturing_system_prompt(
@@ -223,11 +243,11 @@ class TestMemoryWiringLive:
         )
         assert "7481" in result
 
-    def test_memory_off_by_default(
+    def test_memory_off_when_disabled(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         home = _home(monkeypatch, tmp_path)
-        _write_config(home, {"classify_tasks": False})
+        _write_config(home, {"use_memory": False, "classify_tasks": False})
         work = tmp_path / "work"
         work.mkdir()
         agent = SorcarAgent("memory-off")
@@ -239,6 +259,36 @@ class TestMemoryWiringLive:
             work,
         )
         assert MEMORY_PROTOCOL not in system
+        assert "NO-MEMORY" in result
+        assert not (home / "memories").exists()
+
+    def test_caller_system_instruction_disables_memory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A run whose model_config carries its own system_instruction gets
+        neither MEMORY_PROTOCOL (which that instruction suppresses) nor the
+        memory_* tools, even though memory is on by default."""
+        home = _home(monkeypatch, tmp_path)
+        _write_config(home, {"classify_tasks": False})
+        work = tmp_path / "work"
+        work.mkdir()
+        agent = SorcarAgent("memory-caller-prompt")
+        result = agent.run(
+            model_name="claude-haiku-4-5",
+            prompt_template=(
+                "If a tool named memory_search is available to you, finish with "
+                "the summary HAVE-MEMORY; otherwise finish with the summary "
+                "NO-MEMORY. Do not call any other tool."
+            ),
+            model_config={
+                "system_instruction": "Follow the user's instructions exactly."
+            },
+            work_dir=str(work),
+            web_tools=False,
+            is_parallel=False,
+            max_steps=10,
+            verbose=False,
+        )
         assert "NO-MEMORY" in result
         assert not (home / "memories").exists()
 

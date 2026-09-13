@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
 from array import array
@@ -124,6 +125,25 @@ class ModelEmbedder:
         return vector
 
 
+def default_embedder() -> Embedder:
+    """The best embedder the current process can actually run.
+
+    :class:`ModelEmbedder` with :data:`DEFAULT_EMBEDDING_MODEL` when an
+    ``OPENAI_API_KEY`` is present in the environment (the daemon loads the
+    key store into the environment at startup), else the fully offline
+    :func:`hashed_embedding`.  Each embedder names its own index file
+    (``text-embedding-3-small.sqlite3`` vs ``hashed-bow-v1.sqlite3``), so a
+    store used first without a key and later with one never mixes vectors:
+    the second embedder simply builds its own index beside the first.
+
+    Returns:
+        An :data:`Embedder` callable safe to invoke in this process.
+    """
+    if os.environ.get("OPENAI_API_KEY", "").strip():
+        return ModelEmbedder()
+    return hashed_embedding
+
+
 def model_code_for_filename(model_name: str) -> str:
     """Map a model name to the filename-safe prefix of its index file.
 
@@ -177,7 +197,7 @@ class VectorIndex:
     Args:
         memory: The page directory to index.
         embed: Function mapping text to an embedding vector. Defaults to
-            :class:`ModelEmbedder` with :data:`DEFAULT_EMBEDDING_MODEL`.
+            :func:`default_embedder`.
         model_code: Identifier of the embedding model, used to name the index
             file so indexes from different models never mix. Defaults to the
             embedder's ``model_name`` when it has one, else
@@ -192,7 +212,7 @@ class VectorIndex:
     ) -> None:
         self.memory = memory
         if embed is None:
-            embed = ModelEmbedder()
+            embed = default_embedder()
         self.embed = embed
         if model_code is None:
             model_code = str(getattr(embed, "model_name", "") or HASHED_EMBEDDING_MODEL_CODE)

@@ -10,9 +10,11 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.memoryfield.index import (
+    DEFAULT_EMBEDDING_MODEL,
     HASHED_EMBEDDING_MODEL_CODE,
     ModelEmbedder,
     VectorIndex,
+    default_embedder,
     deserialize_float32,
     hashed_embedding,
     model_code_for_filename,
@@ -150,13 +152,38 @@ def test_index_skips_rows_with_foreign_dimension(
     assert "stored dimension 1024 != query dimension 64" in caplog.text
 
 
-def test_index_default_model_code_comes_from_embedder(tmp_path: Path) -> None:
+def test_index_default_model_code_comes_from_embedder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     memory = MemoryDir(tmp_path)
     index = VectorIndex(memory, embed=ModelEmbedder("text-embedding-3-small"))
     assert index.model_code == "text-embedding-3-small"
     assert index.path.name == "text-embedding-3-small.sqlite3"
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
     default = VectorIndex(memory)
     assert default.model_code == "text-embedding-3-small"
+    monkeypatch.delenv("OPENAI_API_KEY")
+    offline = VectorIndex(memory)
+    assert offline.model_code == HASHED_EMBEDDING_MODEL_CODE
+    assert offline.path.name == "hashed-bow-v1.sqlite3"
+
+
+def test_default_embedder_uses_model_when_key_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
+    embed = default_embedder()
+    assert isinstance(embed, ModelEmbedder)
+    assert embed.model_name == DEFAULT_EMBEDDING_MODEL
+
+
+def test_default_embedder_falls_back_offline_without_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert default_embedder() is hashed_embedding
+    monkeypatch.setenv("OPENAI_API_KEY", "   ")  # blank counts as absent
+    assert default_embedder() is hashed_embedding
 
 
 def test_index_rejects_foreign_model_code_and_symlinked_path(tmp_path: Path) -> None:

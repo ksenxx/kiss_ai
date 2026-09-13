@@ -55,10 +55,11 @@ class MemoryTools:
 
     Args:
         root: The memory directory (created on first write).
-        embed: Embedding function; defaults to the framework's
-            ``text-embedding-3-small`` model. Pass
-            :func:`kiss.agents.memoryfield.index.hashed_embedding` for a
-            fully offline memory.
+        embed: Embedding function; defaults to
+            :func:`kiss.agents.memoryfield.index.default_embedder` — the
+            framework's ``text-embedding-3-small`` model when an
+            ``OPENAI_API_KEY`` is available, else the fully offline
+            :func:`kiss.agents.memoryfield.index.hashed_embedding`.
         model_code: Overrides the embedding-model identifier used to name the
             index file.
     """

@@ -72,10 +72,11 @@ def _memory_root_for_run(
     append_basic_tools: bool,
     docker_image: str | None,
     model_name: str,
+    caller_system_instruction: bool = False,
 ) -> Path | None:
     """The memory directory this run should use, or None for no memory.
 
-    Memory rides with the built-in toolset, so three gates precede the
+    Memory rides with the built-in toolset, so four gates precede the
     user's ``use_memory`` setting (see :func:`_memory_settings`):
 
     * ``append_basic_tools=False`` strips the run down to ``finish`` plus
@@ -88,17 +89,23 @@ def _memory_root_for_run(
     * Run-to-completion CLI models (``cc/*``, ``codex/*``) never see
       KISS-registered tools, so they get neither the tools nor a protocol
       demanding them.
+    * A caller-supplied ``model_config["system_instruction"]`` replaces
+      the whole composed prompt (``KISSAgent.run`` only ``setdefault``-s
+      it), so ``MEMORY_PROTOCOL`` would never reach the model; the tools
+      must not be registered without the protocol that governs them.
 
     Args:
         append_basic_tools: Whether the run builds the built-in toolset.
         docker_image: The run's Docker image, if any.
         model_name: The resolved model name the run will use.
+        caller_system_instruction: Whether the caller's ``model_config``
+            carries its own ``system_instruction``.
 
     Returns:
         The memory root when every gate and the config flag allow it,
         else None.
     """
-    if not append_basic_tools or docker_image:
+    if not append_basic_tools or docker_image or caller_system_instruction:
         return None
     if model_runs_task_to_completion(model_name):
         return None
@@ -110,7 +117,7 @@ def _memory_settings() -> tuple[bool, Path]:
     """Return whether persistent agent memory is enabled and where it lives.
 
     The toggle is the ``use_memory`` key of ``~/.kiss/config.json`` (see
-    :data:`kiss.core.vscode_config.DEFAULTS`, default off).  The
+    :data:`kiss.core.vscode_config.DEFAULTS`, default on).  The
     ``KISS_USE_MEMORY`` environment variable, when non-empty, wins over
     the stored value — ``0``/``false``/``no``/``off`` (any case) disable,
     anything else enables — so one process or test can flip memory
@@ -131,7 +138,7 @@ def _memory_settings() -> tuple[bool, Path]:
     if env:
         enabled = env not in ("0", "false", "no", "off")
     else:
-        enabled = bool(cfg.get("use_memory", False))
+        enabled = bool(cfg.get("use_memory", True))
     raw_dir = str(cfg.get("memory_dir", "")).strip()
     root = Path(raw_dir).expanduser() if raw_dir else kiss_home() / "memories"
     return enabled, root
@@ -2007,6 +2014,9 @@ class SorcarAgent(RelentlessAgent):
                 self._append_basic_tools,
                 docker_image,
                 self._resolve_model_name(model_name),
+                caller_system_instruction=bool(
+                    (model_config or {}).get("system_instruction")
+                ),
             )
             if memory_root is not None:
                 self._memory_tools = MemoryTools(memory_root)

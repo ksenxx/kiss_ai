@@ -20,6 +20,19 @@ def make_tools(root: Path) -> MemoryTools:
     return MemoryTools(root, embed=hashed_embedding)
 
 
+def test_tools_default_embedder_is_offline_without_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no OPENAI_API_KEY, MemoryTools works end-to-end fully offline."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    tools = MemoryTools(tmp_path / "memory")
+    assert tools.memory_write(
+        "offline-page", "Memory works without any API key via the hashed embedder."
+    ).startswith("Wrote offline-page.md")
+    assert "offline-page" in tools.memory_search("hashed embedder without API key")
+    assert tools.index.path.name == "hashed-bow-v1.sqlite3"
+
+
 def test_tools_full_lifecycle(tmp_path: Path) -> None:
     tools = make_tools(tmp_path / "memory")
     names = [t.__name__ for t in tools.tools()]

@@ -7,7 +7,7 @@
 A memory is a flat directory of short Markdown pages with YAML frontmatter
 (:mod:`kiss.agents.memoryfield.pages`) plus one regenerable SQLite index of
 embeddings (:mod:`kiss.agents.memoryfield.index`). :class:`MemoryTools` turns
-that into six agent tools; :mod:`kiss.agents.memoryfield.evaluate` measures
+that into seven agent tools; :mod:`kiss.agents.memoryfield.evaluate` measures
 recall against real past Sorcar tasks.
 """
 
@@ -17,6 +17,7 @@ from kiss.agents.memoryfield.index import (
     SearchHit,
     SyncReport,
     VectorIndex,
+    default_embedder,
     hashed_embedding,
 )
 from kiss.agents.memoryfield.pages import MemoryDir, Page
@@ -32,5 +33,6 @@ __all__ = [
     "SearchHit",
     "SyncReport",
     "VectorIndex",
+    "default_embedder",
     "hashed_embedding",
 ]
