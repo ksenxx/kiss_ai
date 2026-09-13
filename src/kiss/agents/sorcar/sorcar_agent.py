@@ -73,6 +73,7 @@ def _memory_root_for_run(
     docker_image: str | None,
     model_name: str,
     caller_system_instruction: bool = False,
+    use_memory_override: bool | None = None,
 ) -> Path | None:
     """The memory directory this run should use, or None for no memory.
 
@@ -94,22 +95,33 @@ def _memory_root_for_run(
       it), so ``MEMORY_PROTOCOL`` would never reach the model; the tools
       must not be registered without the protocol that governs them.
 
+    The gates are hard invariants — an explicit *use_memory_override*
+    never bypasses them.  Past the gates, a boolean override is the
+    caller's per-run choice and wins over both the ``KISS_USE_MEMORY``
+    environment variable and the stored ``use_memory`` setting; ``None``
+    (the default) keeps the :func:`_memory_settings` resolution.
+
     Args:
         append_basic_tools: Whether the run builds the built-in toolset.
         docker_image: The run's Docker image, if any.
         model_name: The resolved model name the run will use.
         caller_system_instruction: Whether the caller's ``model_config``
             carries its own ``system_instruction``.
+        use_memory_override: Per-run memory toggle — ``True`` enables
+            (subject to the gates above), ``False`` disables, ``None``
+            falls back to the environment/config default.
 
     Returns:
-        The memory root when every gate and the config flag allow it,
-        else None.
+        The memory root when every gate and the effective toggle allow
+        it, else None.
     """
     if not append_basic_tools or docker_image or caller_system_instruction:
         return None
     if model_runs_task_to_completion(model_name):
         return None
     enabled, root = _memory_settings()
+    if use_memory_override is not None:
+        enabled = use_memory_override
     return root if enabled else None
 
 
@@ -968,6 +980,10 @@ class SorcarAgent(RelentlessAgent):
         # KISS_USE_MEMORY environment variable) enables it; None keeps
         # the run memory-free.  :meth:`_get_tools` registers its tools.
         self._memory_tools: MemoryTools | None = None
+        # Per-run memory toggle (:meth:`run`'s *use_memory*), kept on
+        # self so the ``run_parallel`` fan-out — which executes DURING
+        # the run — forwards the same override to every sub-agent.
+        self._use_memory_override: bool | None = None
         self._use_web_tools: bool = True
         self._is_parallel: bool = True
         self._append_basic_tools: bool = True
@@ -1181,6 +1197,7 @@ class SorcarAgent(RelentlessAgent):
                     getattr(self, "_system_prompt_suffix", "") or ""
                 ),
                 web_tools=self._use_web_tools,
+                use_memory=self._use_memory_override,
             )
         finally:
             # stop() joins the monitor BEFORE the offsets bump below so a
@@ -1902,6 +1919,7 @@ class SorcarAgent(RelentlessAgent):
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None,
         tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
+        use_memory: bool | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -1965,12 +1983,26 @@ class SorcarAgent(RelentlessAgent):
                 result.  Applies to this agent only, not to
                 ``run_parallel`` sub-agents.  Defaults to None (no
                 hook).
+            use_memory: Per-run persistent-memory toggle
+                (:mod:`kiss.agents.memoryfield`).  ``True`` gives the
+                run the ``memory_*`` tools and the ``MEMORY_PROTOCOL``
+                prompt block, ``False`` withholds them, and ``None``
+                (the default) falls back to the ``KISS_USE_MEMORY``
+                environment variable / the stored ``use_memory``
+                setting (see :func:`_memory_settings`).  A boolean
+                never bypasses the hard gates of
+                :func:`_memory_root_for_run` (stripped basic tools,
+                Docker runs, run-to-completion CLI models, a caller
+                ``model_config["system_instruction"]``).  Forwarded to
+                every ``run_parallel`` sub-agent, so one override
+                governs the whole task tree.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
+        self._use_memory_override = use_memory
         self._is_parallel = is_parallel
         self._append_basic_tools = append_basic_tools
         # Stored on self (not just a local) so the ``run_parallel``
@@ -2017,6 +2049,7 @@ class SorcarAgent(RelentlessAgent):
                 caller_system_instruction=bool(
                     (model_config or {}).get("system_instruction")
                 ),
+                use_memory_override=use_memory,
             )
             if memory_root is not None:
                 self._memory_tools = MemoryTools(memory_root)
@@ -2200,6 +2233,7 @@ def run_tasks_parallel(
     base_system_prompt: str = "",
     system_prompt_suffix: str = "",
     web_tools: bool = True,
+    use_memory: bool | None = None,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -2292,6 +2326,12 @@ def run_tasks_parallel(
             forwarded to each sub-agent's ``run``.  A parent running
             without web tools (``run(web_tools=False)``) passes False
             so its children cannot re-acquire the browser it was denied.
+        use_memory: Per-run persistent-memory toggle forwarded to each
+            sub-agent's ``run`` (see :meth:`SorcarAgent.run`'s
+            *use_memory*), so a parent run's explicit override governs
+            its whole task tree.  ``None`` (the default) lets each
+            sub-agent fall back to the environment/config default,
+            exactly like the parent did.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -2376,6 +2416,7 @@ def run_tasks_parallel(
                 base_system_prompt=base_system_prompt,
                 system_prompt=system_prompt_suffix or None,
                 web_tools=web_tools,
+                use_memory=use_memory,
             )
             return result
         except KeyboardInterrupt:

@@ -16,15 +16,17 @@ inspect the actual system prompt the run installed on the live model
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from kiss.agents.memoryfield.tools import MEMORY_PROTOCOL
+from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _memory_root_for_run,
     _memory_settings,
+    run_tasks_parallel,
 )
 
 live_api = pytest.mark.live_api
@@ -169,6 +171,182 @@ class TestMemoryRootForRun:
             True, None, "claude-haiku-4-5", caller_system_instruction=True
         )
         assert root is None
+
+
+class TestUseMemoryOverride:
+    """The per-run ``use_memory`` override (``SorcarAgent.run``'s new
+    parameter, ``kiss.server.sorcar.run``'s ``useMemory`` wire field).
+
+    A boolean override is the caller's per-run choice: it wins over
+    both the stored ``use_memory`` setting and the ``KISS_USE_MEMORY``
+    environment variable, but never bypasses the hard safety gates.
+    ``None`` keeps the ``_memory_settings`` resolution.
+    """
+
+    def test_true_overrides_config_off(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        home = _home(monkeypatch, tmp_path)
+        _write_config(home, {"use_memory": False})
+        root = _memory_root_for_run(
+            True, None, "claude-haiku-4-5", use_memory_override=True
+        )
+        assert root == home / "memories"
+
+    def test_false_overrides_default_on(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _home(monkeypatch, tmp_path)
+        root = _memory_root_for_run(
+            True, None, "claude-haiku-4-5", use_memory_override=False
+        )
+        assert root is None
+
+    def test_true_overrides_env_disable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        home = _home(monkeypatch, tmp_path)
+        monkeypatch.setenv("KISS_USE_MEMORY", "0")
+        root = _memory_root_for_run(
+            True, None, "claude-haiku-4-5", use_memory_override=True
+        )
+        assert root == home / "memories"
+
+    def test_false_overrides_env_enable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        home = _home(monkeypatch, tmp_path)
+        _write_config(home, {"use_memory": False})
+        monkeypatch.setenv("KISS_USE_MEMORY", "1")
+        root = _memory_root_for_run(
+            True, None, "claude-haiku-4-5", use_memory_override=False
+        )
+        assert root is None
+
+    def test_none_falls_back_to_config(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        home = _home(monkeypatch, tmp_path)
+        _write_config(home, {"use_memory": False})
+        assert (
+            _memory_root_for_run(
+                True, None, "claude-haiku-4-5", use_memory_override=None
+            )
+            is None
+        )
+        _write_config(home, {"use_memory": True})
+        assert (
+            _memory_root_for_run(
+                True, None, "claude-haiku-4-5", use_memory_override=None
+            )
+            == home / "memories"
+        )
+
+    def test_true_never_bypasses_hard_gates(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An explicit True stays gated: stripped basic tools, Docker,
+        run-to-completion CLI models, and a caller system_instruction
+        all keep the run memory-free."""
+        _home(monkeypatch, tmp_path)
+        gated = [
+            _memory_root_for_run(
+                False, None, "claude-haiku-4-5", use_memory_override=True
+            ),
+            _memory_root_for_run(
+                True, "python:3.12", "claude-haiku-4-5",
+                use_memory_override=True,
+            ),
+            _memory_root_for_run(
+                True, None, "cc/claude-fable-5", use_memory_override=True
+            ),
+            _memory_root_for_run(
+                True, None, "claude-haiku-4-5",
+                caller_system_instruction=True, use_memory_override=True,
+            ),
+        ]
+        assert gated == [None, None, None, None]
+
+
+class TestFanOutForwardsUseMemory:
+    """``run_tasks_parallel`` forwards the parent's ``use_memory`` override
+    to every sub-agent, so one explicit override governs the whole task
+    tree while ``None`` lets each child fall back to the config default.
+
+    Like the daemon suites in ``tests/server``, the only replaced
+    boundary is the LLM itself: ``SorcarAgent``'s parent ``run`` is
+    swapped for a recorder while the real fan-out pipeline (chat
+    allocation, task persistence, the memory decision in
+    ``SorcarAgent.run``) executes against an isolated ``KISS_HOME``.
+    """
+
+    @pytest.fixture()
+    def recorded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> list[dict[str, Any]]:
+        home = _home(monkeypatch, tmp_path)
+        _write_config(home, {"use_memory": True})
+        monkeypatch.setattr(_persistence, "_KISS_DIR", home)
+        monkeypatch.setattr(_persistence, "_DB_PATH", home / "sorcar.db")
+        monkeypatch.setattr(_persistence, "_db_conn", None)
+        (tmp_path / "work").mkdir(exist_ok=True)
+        seen: list[dict[str, Any]] = []
+        parent_class = cast(Any, SorcarAgent.__mro__[1])
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen.append({
+                "override": self_agent._use_memory_override,
+                "memory_tools": self_agent._memory_tools,
+            })
+            return "success: true\nis_continue: false\nsummary: ok\n"
+
+        monkeypatch.setattr(parent_class, "run", stub_run)
+        return seen
+
+    def test_false_reaches_every_sub_agent(
+        self, recorded: list[dict[str, Any]], tmp_path: Path
+    ) -> None:
+        results = run_tasks_parallel(
+            ["record a", "record b"],
+            max_workers=2,
+            model_name="claude-haiku-4-5",
+            work_dir=str(tmp_path / "work"),
+            use_memory=False,
+        )
+        assert len(results) == 2
+        assert [entry["override"] for entry in recorded] == [False, False]
+        assert all(entry["memory_tools"] is None for entry in recorded)
+
+    def test_default_none_lets_children_use_config(
+        self, recorded: list[dict[str, Any]], tmp_path: Path
+    ) -> None:
+        results = run_tasks_parallel(
+            ["record"],
+            max_workers=1,
+            model_name="claude-haiku-4-5",
+            work_dir=str(tmp_path / "work"),
+        )
+        assert len(results) == 1
+        assert recorded[0]["override"] is None
+        assert recorded[0]["memory_tools"] is not None
+
+    def test_run_parallel_tool_forwards_parent_override(
+        self, recorded: list[dict[str, Any]], tmp_path: Path
+    ) -> None:
+        """The ``run_parallel`` tool closure passes the PARENT's stored
+        override on, so an LLM-triggered fan-out inherits it too."""
+        agent = SorcarAgent("memory-fanout-parent")
+        agent._use_web_tools = False
+        agent._use_memory_override = False
+        agent.work_dir = str(tmp_path / "work")
+        run_parallel = next(
+            t
+            for t in agent._get_tools()
+            if getattr(t, "__name__", "") == "run_parallel"
+        )
+        run_parallel('["record via tool"]', max_workers="1")
+        assert [entry["override"] for entry in recorded] == [False]
+        assert recorded[0]["memory_tools"] is None
 
 
 def _run_capturing_system_prompt(

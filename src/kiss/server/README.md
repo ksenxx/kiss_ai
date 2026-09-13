@@ -153,6 +153,7 @@ except `append_basic_tools`, whose getter is
 | `scope_work_dir()`       | `str`                           | `""` (scope = work dir)   | `tabScopeWorkDir`   |
 | `use_web_tools()`        | `bool` or `None`                | `None` (daemon default)   | `webTools`          |
 | `classify_tasks()`       | `bool` or `None`                | `None` (daemon default)   | `classifyTasks`     |
+| `use_memory()`           | `bool` or `None`                | `None` (daemon default)   | `useMemory`         |
 | `is_parallel()`          | `bool`                          | `True`                    | `useParallel`       |
 
 When a getter is absent, the caller's value is used (which is the
@@ -206,6 +207,18 @@ The parameters without getters:
   `None` falls back to the daemon's configured default (the settings
   panel's "Classify tasks before running" checkbox, persisted as
   `classify_tasks`).
+- **`use_memory()`** — per-run persistent agent memory
+  (`kiss.agents.memoryfield`): the seven `memory_*` tools plus the
+  memory protocol prompt block.  `True` enables, `False` disables,
+  `None` falls back to the daemon's configured default (the settings
+  panel's "Use persistent memory" checkbox, persisted as
+  `use_memory`, or the daemon process's `KISS_USE_MEMORY` environment
+  variable).  The override is forwarded to `run_parallel` sub-agents
+  and never bypasses the memory safety gates: a run without the basic
+  toolset, a Docker run, a run-to-completion CLI model (`cc/*`,
+  `codex/*`), or a caller-supplied
+  `model_config["system_instruction"]` stays memory-free even with
+  `True`.
 - **`is_parallel()`** — whether the agent may spawn parallel
   sub-agents (`run_parallel`).
 
@@ -627,6 +640,7 @@ def run(
     model_config: dict[str, Any] | None = None,
     use_web_tools: bool | None = None,
     classify_tasks: bool | None = None,
+    use_memory: bool | None = None,
     is_parallel: bool = True,
     append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
@@ -655,7 +669,7 @@ class TaskResult:
 | Aspect | SEA (`extension_agent_path`) | Tools file (`tools`) |
 |--------|------------------------------------------|----------------------|
 | **Purpose** | Override run parameters AND supply tools | Supply tools only |
-| **Getter functions** | `prompt()`, `model()`, `system_prompt()`, `tools()`, etc. (17 total, plus 2 hooks) | `get_tools()` (or `tools()`) only |
+| **Getter functions** | `prompt()`, `model()`, `system_prompt()`, `tools()`, etc. (18 total, plus 2 hooks) | `get_tools()` (or `tools()`) only |
 | **Required function** | None — define only the getters you need | Must define `get_tools()` (or `tools()`) |
 | **Can be combined** | Yes — `tools()` can point to a separate tools file | N/A |
 | **Can be self-contained** | Yes — return a list from `tools()` and the script becomes its own tools file | Always self-contained |

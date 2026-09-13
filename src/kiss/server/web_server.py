@@ -6241,6 +6241,10 @@ class RemoteAccessServer:
             # before running" setting (config key ``classify_tasks``)
             # when no boolean override is carried.
             "classifyTasks": cmd.get("classifyTasks"),
+            # Same contract for persistent memory: absent/non-bool
+            # means "no per-run override" and the agent resolves the
+            # persisted ``use_memory`` setting itself.
+            "useMemory": cmd.get("useMemory"),
             # Carried over from the ``submit`` this run was built from:
             # ``_run_cmd`` bypasses the dispatcher that stamps it, so
             # without this a browser-launched task would record an

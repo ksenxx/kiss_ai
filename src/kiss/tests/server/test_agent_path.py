@@ -199,6 +199,9 @@ class AgentPathApiTest(unittest.TestCase):
             seen["_is_parallel_attr"] = getattr(
                 self_agent, "_is_parallel", None,
             )
+            seen["_use_memory_attr"] = getattr(
+                self_agent, "_use_memory_override", "MISSING",
+            )
             seen["_base_system_prompt_attr"] = getattr(
                 self_agent, "_base_system_prompt", None,
             )
@@ -304,6 +307,12 @@ class AgentPathApiTest(unittest.TestCase):
                 return False
 
 
+            def use_memory():
+                # Supported getter: the script's False must win over
+                # the client-passed True.
+                return False
+
+
             def is_parallel():
                 # Supported getter too; the script's False wins.
                 return False
@@ -339,6 +348,7 @@ class AgentPathApiTest(unittest.TestCase):
             max_budget=9.5,
             model_config={"base_url": "http://client:1/v1"},
             use_web_tools=True,
+            use_memory=True,
             is_parallel=True,
             sock_path=self.sock_path,
             timeout=60,
@@ -362,6 +372,10 @@ class AgentPathApiTest(unittest.TestCase):
         # client-passed True values.
         assert seen["_web_tools_attr"] is False
         assert seen["_is_parallel_attr"] is False
+        # ``use_memory()`` is an agent-script getter too: the script's
+        # False overrides the client-passed True, so the run built no
+        # memory tools.
+        assert seen["_use_memory_attr"] is False
         assert [t.__name__ for t in seen["tools"]] == ["scripted_tool"]
         assert seen["tools"][0](x=21) == 42
 

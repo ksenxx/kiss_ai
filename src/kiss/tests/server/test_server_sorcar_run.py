@@ -904,7 +904,7 @@ class SorcarRunApiTest(unittest.TestCase):
 
     def test_per_task_overrides_forwarded(self) -> None:
         """``max_budget`` / ``model_config`` / ``use_web_tools`` /
-        ``is_parallel`` reach the daemon-built agent."""
+        ``use_memory`` / ``is_parallel`` reach the daemon-built agent."""
         seen: dict[str, Any] = {}
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
@@ -912,6 +912,15 @@ class SorcarRunApiTest(unittest.TestCase):
             seen["model_config"] = kwargs.get("model_config")
             seen["web_tools"] = getattr(self_agent, "_use_web_tools", None)
             seen["is_parallel"] = getattr(self_agent, "_is_parallel", None)
+            seen["use_memory"] = getattr(
+                self_agent, "_use_memory_override", "MISSING",
+            )
+            # Recorded DURING the run, before SorcarAgent.run's finally
+            # clears it: with the explicit False below the memory
+            # decision must have built NO MemoryTools.
+            seen["memory_tools"] = getattr(
+                self_agent, "_memory_tools", "MISSING",
+            )
             raw = "success: true\nis_continue: false\nsummary: ok\n"
             printer = kwargs.get("printer")
             if printer is not None:
@@ -930,6 +939,7 @@ class SorcarRunApiTest(unittest.TestCase):
             max_budget=2.5,
             model_config={"base_url": "http://localhost:9999/v1"},
             use_web_tools=False,
+            use_memory=False,
             is_parallel=True,
         )
         assert result.success is True
@@ -939,14 +949,16 @@ class SorcarRunApiTest(unittest.TestCase):
         }
         assert seen["web_tools"] is False
         assert seen["is_parallel"] is True
+        assert seen["use_memory"] is False
+        assert seen["memory_tools"] is None
 
     def test_malformed_override_fields_ignored(self) -> None:
         """Malformed override fields fall back to the daemon config.
 
         The daemon treats the ``run`` command as untrusted input: a
-        boolean ``maxBudget``, a non-dict ``modelConfig``, and a
-        non-boolean ``webTools`` are ignored rather than applied or
-        crashing the task thread.
+        boolean ``maxBudget``, a non-dict ``modelConfig``, a
+        non-boolean ``webTools``, and a non-boolean ``useMemory`` are
+        ignored rather than applied or crashing the task thread.
         """
         seen: dict[str, Any] = {}
 
@@ -954,6 +966,9 @@ class SorcarRunApiTest(unittest.TestCase):
             seen["max_budget"] = kwargs.get("max_budget")
             seen["model_config"] = kwargs.get("model_config")
             seen["web_tools"] = getattr(self_agent, "_use_web_tools", None)
+            seen["use_memory"] = getattr(
+                self_agent, "_use_memory_override", "MISSING",
+            )
             return "success: true\nis_continue: false\nsummary: ok\n"
 
         self._parent_class.run = stub_run
@@ -963,6 +978,7 @@ class SorcarRunApiTest(unittest.TestCase):
                 "maxBudget": True,
                 "modelConfig": "junk",
                 "webTools": "yes",
+                "useMemory": "yes",
             },
         )
         assert isinstance(seen["max_budget"], float)
@@ -972,6 +988,10 @@ class SorcarRunApiTest(unittest.TestCase):
         ), "malformed modelConfig must not reach the agent"
         assert seen["model_config"] != "junk"
         assert seen["web_tools"] is True, "config default web tools apply"
+        assert seen["use_memory"] is None, (
+            "a malformed useMemory means no per-run override — the agent "
+            "falls back to the persisted setting"
+        )
 
     def test_classify_tasks_override_forwarded(self) -> None:
         """The per-run ``classify_tasks`` toggle reaches the classifier.
@@ -1084,6 +1104,65 @@ class SorcarRunApiTest(unittest.TestCase):
         assert seen["web_tools"] is True, (
             "the per-run use_web_tools=True override must beat the "
             "persisted setting"
+        )
+
+    def test_use_memory_true_beats_persisted_off(self) -> None:
+        """An explicit ``use_memory=True`` beats the persisted ``False``.
+
+        With the settings panel's "Use persistent memory" checkbox off
+        (config key ``use_memory``), a run WITHOUT an override must stay
+        memory-free, and an explicit ``use_memory=True`` on the same
+        daemon must build the memory tools anyway (the run hits none of
+        the hard gates: basic tools on, no Docker, an API model, no
+        caller ``system_instruction``).
+        """
+        vscode_config.save_config({"use_memory": False})
+        seen: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen["use_memory"] = getattr(
+                self_agent, "_use_memory_override", "MISSING",
+            )
+            seen["memory_tools"] = getattr(
+                self_agent, "_memory_tools", "MISSING",
+            )
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer")
+            if printer is not None:
+                printer.print(
+                    raw, type="result", step_count=1,
+                    total_tokens=1, cost="$0.0001",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "run under the persisted memory-off setting",
+            work_dir=self.repo,
+            use_worktree=False,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        assert seen["use_memory"] is None
+        assert seen["memory_tools"] is None, (
+            "the persisted use_memory=False setting never reached the "
+            "agent"
+        )
+
+        result = sorcar.run(
+            "run with an explicit per-run memory override",
+            work_dir=self.repo,
+            use_worktree=False,
+            use_memory=True,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        assert seen["use_memory"] is True
+        assert seen["memory_tools"] is not None, (
+            "the per-run use_memory=True override must beat the "
+            "persisted setting and build the memory tools"
         )
 
     def test_custom_system_prompt_replaces_default(self) -> None:

@@ -428,6 +428,86 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             keys.ANTHROPIC_API_KEY = saved_key
             agent_state.agent_states.clear()
 
+    async def test_submit_forwards_use_memory_to_run(self) -> None:
+        """A webapp ``submit`` with ``useMemory: false`` reaches the agent.
+
+        The per-run persistent-memory override rides the ``submit``
+        command as the ``useMemory`` field; the web server's submit →
+        run translation must forward it so ``task_runner`` passes
+        ``use_memory=False`` to the agent instead of silently falling
+        back to the persisted ``use_memory`` config default.
+        """
+        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+        from kiss.core import config as config_module
+        from kiss.core.models.model_info import get_available_models
+        from kiss.server import agent_state
+
+        keys = config_module.DEFAULT_CONFIG
+        saved_key = keys.ANTHROPIC_API_KEY
+        keys.ANTHROPIC_API_KEY = "test-anthropic-key"
+        try:
+            available = get_available_models()
+            self.assertTrue(available, "no model available with fake key")
+            model = next(m for m in available if m.startswith("claude-"))
+
+            tab_id = "tab-parity-usememory"
+            agent = WorktreeSorcarAgent("Sorcar VS Code")
+            ran = threading.Event()
+            seen_kwargs: dict[str, Any] = {}
+
+            def fake_run(**kwargs: Any) -> None:
+                seen_kwargs.update(kwargs)
+                ran.set()
+
+            agent.run = fake_run  # type: ignore[assignment]
+            seed = agent_state.AgentState(
+                "parity-usememory-seed",
+                agent=agent,
+                tab_id=tab_id,
+                server_owned=True,
+            )
+            agent_state.register(seed)
+
+            work_dir = Path(self.tmpdir) / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+
+            reader, writer = await self._connect()
+            try:
+                await self._send(writer, {
+                    "type": "submit",
+                    "tabId": tab_id,
+                    "prompt": "do a thing without persistent memory",
+                    "model": model,
+                    "workDir": str(work_dir),
+                    "attachments": [],
+                    "useWorktree": False,
+                    "useParallel": False,
+                    "autoCommit": True,
+                    "useMemory": False,
+                })
+                _, seen = await self._drain_until(reader, "setTaskText")
+                self._assert_no_unknown_command(seen)
+                self.assertTrue(
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, ran.wait, 10.0,
+                    ),
+                    "stub agent.run never started",
+                )
+                self.assertIs(
+                    seen_kwargs.get("use_memory"),
+                    False,
+                    "useMemory was dropped on the submit → run path",
+                )
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+        finally:
+            keys.ANTHROPIC_API_KEY = saved_key
+            agent_state.agent_states.clear()
+
     async def test_submit_forwards_classify_tasks_to_run(self) -> None:
         """A webapp ``submit`` with ``classifyTasks: false`` reaches the
         classifier gate.

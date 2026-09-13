@@ -356,6 +356,7 @@ def run(
     model_config: dict[str, Any] | None = None,
     use_web_tools: bool | None = None,
     classify_tasks: bool | None = None,
+    use_memory: bool | None = None,
     is_parallel: bool = True,
     append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
@@ -474,6 +475,7 @@ def run(
                 def scope_work_dir() -> str: ...
                 def use_web_tools() -> bool | None: ...
                 def classify_tasks() -> bool | None: ...
+                def use_memory() -> bool | None: ...
                 def is_parallel() -> bool: ...
 
             The script may also define two hook getters with no
@@ -514,9 +516,9 @@ def run(
             script its own tools file.  ``scope_work_dir()`` overrides
             the tab-bar workspace scope of the run's tab (an empty
             override scopes the tab to the run's work directory, like
-            an empty client-sent *scope_work_dir*); ``use_web_tools()``
-            and
-            ``classify_tasks()`` return a bool for a per-run override
+            an empty client-sent *scope_work_dir*);
+            ``use_web_tools()``, ``classify_tasks()``, and
+            ``use_memory()`` return a bool for a per-run override
             or ``None`` for the daemon's configured default; and
             ``is_parallel()`` returns a bool.  ``timeout``,
             *stop_on_timeout*, *sock_path*, *parent_task_id*, and
@@ -560,6 +562,23 @@ def run(
             prompt — and ``None`` (the default) uses the daemon's
             configured default (the settings panel's "Classify tasks
             before running" checkbox, persisted as ``classify_tasks``).
+        use_memory: Per-task persistent-memory override
+            (``kiss.agents.memoryfield``), mapped to the agent's
+            ``use_memory`` toggle
+            (:meth:`kiss.agents.sorcar.sorcar_agent.SorcarAgent.run`).
+            ``True`` gives the run (and its ``run_parallel``
+            sub-agents) the ``memory_*`` tools plus the
+            ``MEMORY_PROTOCOL`` prompt block, ``False`` withholds
+            them, and ``None`` (the default) uses the daemon's
+            configured default (the settings panel's "Use persistent
+            memory" checkbox, persisted as ``use_memory``, or the
+            daemon process's ``KISS_USE_MEMORY`` environment
+            variable).  A boolean override never bypasses the memory
+            safety gates: a run without the basic toolset
+            (*append_basic_tools* false), a Docker run, a
+            run-to-completion CLI model (``cc/*``, ``codex/*``), or a
+            caller-supplied ``model_config["system_instruction"]``
+            stays memory-free even with ``True``.
         is_parallel: Whether the agent may spawn parallel sub-agents.
             Defaults to True.
         append_basic_tools: Whether the agent gets the built-in basic
@@ -713,6 +732,7 @@ def run(
             "modelConfig": model_config,
             "webTools": use_web_tools,
             "classifyTasks": classify_tasks,
+            "useMemory": use_memory,
             "useParallel": is_parallel,
             "appendBasicTools": append_basic_tools,
             "appendToSystemPrompt": append_to_system_prompt,
