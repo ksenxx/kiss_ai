@@ -991,12 +991,14 @@ class ServerApi:
         await self._backend._handle_check_paths(cmd, ctx.endpoint)
 
     async def get_info_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Report the contents of ``tmp/info.md`` to a remote-web client.
+        """Report the contents of ``tmp/PROGRESS.md`` to a remote-web client.
 
         The remote webapp's docked task-info panel (desktop mode only)
         polls this command so its info subpanel can mirror the
-        ``tmp/info.md`` file under the active tab's work dir — empty
-        when the file does not exist.  UDS clients (VS Code windows)
+        ``tmp/PROGRESS.md`` file under the active tab's work dir — the
+        tab's worktree dir wins while a worktree-mode task runs there,
+        and the panel is empty when the file does not exist.  UDS
+        clients (VS Code windows)
         never show that panel, so a UDS-delivered ``getInfoFile`` is
         dropped as a defensive no-op, exactly like ``checkPaths``.
 

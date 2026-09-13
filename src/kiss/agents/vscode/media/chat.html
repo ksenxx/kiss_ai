@@ -202,14 +202,16 @@
         <li class="meta-item"><span class="meta-label">Workdir:</span><span id="meta-workdir" class="meta-value">&mdash;</span></li>
         <li class="meta-item"><span class="meta-label">Max budget:</span><span id="meta-max-budget" class="meta-value">&mdash;</span></li>
       </ul>
-      <!-- Info subpanel: mirrors the RUNNING task's ./tmp/info.md
-           (main.js polls getInfoFile every couple of seconds) and
-           fills all the panel space the list above leaves free.  While
-           there is nothing to show — no running task, or no file —
-           main.js keeps the `visible` class off and the whole
-           subpanel, header included, stays hidden. -->
-      <div id="meta-info" aria-label="tmp/info.md">
-        <div class="sidebar-hdr">tmp/info.md</div>
+      <!-- Info subpanel: mirrors the RUNNING task's ./tmp/PROGRESS.md
+           (main.js polls getInfoFile every second, so the panel
+           refreshes as soon as the file changes; a worktree-mode task's
+           copy is read from its worktree) and fills all the panel space
+           the list above leaves free.  While there is nothing to show —
+           no running task, or no file — main.js keeps the `visible`
+           class off and the whole subpanel, header included, stays
+           hidden. -->
+      <div id="meta-info" aria-label="tmp/PROGRESS.md">
+        <div class="sidebar-hdr">tmp/PROGRESS.md</div>
         <div id="meta-info-content" class="md-body"></div>
       </div>
       <div id="meta-resizer" role="separator" aria-orientation="vertical" aria-label="Resize task info panel" aria-controls="meta-panel" tabindex="0"></div>

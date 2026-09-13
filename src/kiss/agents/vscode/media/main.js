@@ -2902,9 +2902,11 @@
 
   // metainfo-coverage:start
   // The info subpanel of the docked task-info panel (#meta-info,
-  // remote desktop mode only) mirrors ./tmp/info.md under the active
-  // tab's workdir.  The daemon owns the file, so the client polls
-  // getInfoFile every couple of seconds; the reply's sig (mtime+size
+  // remote desktop mode only) mirrors ./tmp/PROGRESS.md under the
+  // active tab's workdir (the daemon prefers the tab's worktree copy
+  // while a worktree-mode task runs).  The daemon owns the file, so
+  // the client polls getInfoFile every second — the panel refreshes as
+  // soon as the file changes; the reply's sig (path+mtime+size
   // fingerprint) makes an unchanged file cost one stat per poll, and
   // a missing file renders as an empty subpanel.
   const metaInfoEl = document.getElementById('meta-info');
@@ -2921,7 +2923,7 @@
   /**
    * Paint *html* into the info subpanel's content div.  The `visible`
    * class on #meta-info follows: while there is nothing to show the
-   * WHOLE subpanel — the tmp/info.md header included — stays hidden,
+   * WHOLE subpanel — the tmp/PROGRESS.md header included — stays hidden,
    * so an idle tab or a missing file leaves no trace in the panel.
    *
    * @param {string} html Sanitized markup, '' to empty and hide.
@@ -2932,10 +2934,10 @@
     if (metaInfoEl) metaInfoEl.classList.toggle('visible', html !== '');
   }
 
-  /** Ask the daemon for tmp/info.md under the subpanel's workdir. */
+  /** Ask the daemon for tmp/PROGRESS.md under the subpanel's workdir. */
   function requestInfoFile() {
     if (!metaInfoContent) return;
-    // Only a RUNNING task has a live tmp/info.md worth mirroring; an
+    // Only a RUNNING task has a live tmp/PROGRESS.md worth mirroring; an
     // idle tab's subpanel stays empty and costs the daemon nothing.
     if (!isRunning) return;
     if (!document.body.classList.contains('remote-desktop')) return;
@@ -2958,7 +2960,7 @@
    * drives both), so the subpanel can never read one directory while
    * the row names another.  A change invalidates the held signature
    * and clears the shown contents right away — the old workdir's
-   * info.md must not survive a tab or config switch, and a late reply
+   * PROGRESS.md must not survive a tab or config switch, and a late reply
    * for the former workdir no longer matches — then polls immediately
    * instead of waiting out the interval.
    */
@@ -2981,7 +2983,7 @@
    * (or the user switches to an idle tab) the subpanel empties and
    * hides right away — a late reply for the finished task no longer
    * matches the bumped generation — and when one starts, the first
-   * poll fires immediately instead of waiting out the 2s interval.
+   * poll fires immediately instead of waiting out the 1s interval.
    *
    * @param {boolean} running Whether the visible tab is now running.
    */
@@ -3024,17 +3026,20 @@
   let metaInfoTimer = null;
 
   /**
-   * Start or stop the 2s info-file poll to match remote desktop mode.
-   * Called by applyRemoteDesktop whenever the mode is (re)applied.  A
-   * timer that ran unconditionally would tick forever in webviews that
-   * can never show the panel (the VS Code extension, phone-sized
-   * remote windows) — and would keep every jsdom-hosted webview's node
-   * process alive after its tests finish.
+   * Start or stop the 1s info-file poll to match remote desktop mode.
+   * The short interval keeps the mirrored tmp/PROGRESS.md fresh — the
+   * panel repaints within a second of the file changing, and the sig
+   * check keeps an unchanged file at one stat per poll.  Called by
+   * applyRemoteDesktop whenever the mode is (re)applied.  A timer that
+   * ran unconditionally would tick forever in webviews that can never
+   * show the panel (the VS Code extension, phone-sized remote windows)
+   * — and would keep every jsdom-hosted webview's node process alive
+   * after its tests finish.
    */
   function syncMetaInfoPolling() {
     const want = document.body.classList.contains('remote-desktop');
     if (want && metaInfoTimer === null) {
-      metaInfoTimer = setInterval(requestInfoFile, 2000);
+      metaInfoTimer = setInterval(requestInfoFile, 1000);
       requestInfoFile();
     } else if (!want && metaInfoTimer !== null) {
       clearInterval(metaInfoTimer);
@@ -3170,7 +3175,7 @@
    * falls back to the tab's pinned workdir and the configured default
    * budget.  The workdir shown here is also adopted as the info
    * subpanel's poll target (setMetaInfoWorkDir), keeping the row and
-   * the mirrored tmp/info.md in the same directory.
+   * the mirrored tmp/PROGRESS.md in the same directory.
    *
    * @param {object|null} s A task_settings event's settings payload.
    */

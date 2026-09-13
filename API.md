@@ -268,7 +268,7 @@
   - `cmd`: The ``checkPaths`` command.
   - `ctx`: The transport context of the current call.
 
-- **get_info_file** — Report the contents of ``tmp/info.md`` to a remote-web client. The remote webapp's docked task-info panel (desktop mode only) polls this command so its info subpanel can mirror the ``tmp/info.md`` file under the active tab's work dir — empty when the file does not exist.  UDS clients (VS Code windows) never show that panel, so a UDS-delivered ``getInfoFile`` is dropped as a defensive no-op, exactly like ``checkPaths``.<br/>`async get_info_file(cmd: dict[str, Any], ctx: ApiContext) -> None`
+- **get_info_file** — Report the contents of ``tmp/PROGRESS.md`` to a remote-web client. The remote webapp's docked task-info panel (desktop mode only) polls this command so its info subpanel can mirror the ``tmp/PROGRESS.md`` file under the active tab's work dir — the tab's worktree dir wins while a worktree-mode task runs there, and the panel is empty when the file does not exist.  UDS clients (VS Code windows) never show that panel, so a UDS-delivered ``getInfoFile`` is dropped as a defensive no-op, exactly like ``checkPaths``.<br/>`async get_info_file(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``getInfoFile`` command (optional ``workDir``, ``tabId``, ``knownSig``).
   - `ctx`: The transport context of the current call.
 

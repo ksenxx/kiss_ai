@@ -5742,15 +5742,21 @@ class RemoteAccessServer:
     async def _handle_get_info_file(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None:
-        """Send a remote-web client the contents of ``tmp/info.md``.
+        """Send a remote-web client the contents of ``tmp/PROGRESS.md``.
 
         Handles the ``getInfoFile`` command polled by ``media/main.js``
         for the info subpanel of the docked task-info panel (remote
-        desktop mode): the subpanel mirrors ``tmp/info.md`` under the
-        command's ``workDir`` (falling back to the daemon work dir
+        desktop mode): the subpanel mirrors ``tmp/PROGRESS.md`` under
+        the command's ``workDir`` (falling back to the daemon work dir
         exactly like the other file handlers), and shows nothing when
-        the file does not exist.  The reply is sent directly to the
-        requesting *endpoint* — never broadcast — with the shape::
+        the file does not exist.  A task running in worktree mode
+        maintains its ``tmp/PROGRESS.md`` inside the worktree, so when
+        the tab has a recorded worktree dir
+        (:meth:`WebPrinter.worktree_dir_for_tab`, recorded at
+        ``worktree_created`` — i.e. while the task is still running)
+        the worktree's copy is tried FIRST and the workDir's copy is
+        the fallback.  The reply is sent directly to the requesting
+        *endpoint* — never broadcast — with the shape::
 
             {"type": "infoFile", "exists": <bool>, "sig": <str>,
              "content": <utf-8 text>,           # changed or missing
@@ -5764,11 +5770,13 @@ class RemoteAccessServer:
         value may differ from what the client sent (root paths are
         blanked and re-pinned by ``ServerApi.dispatch``).
 
-        ``sig`` fingerprints the file (``"<mtime_ns>:<size>"``, ``""``
-        when missing); a poll whose ``knownSig`` matches it is answered
-        with ``unchanged: true`` and no ``content``, so an idle file
-        costs a stat per poll instead of a re-read and re-send.  A
-        missing, unreadable, non-regular or oversized
+        ``sig`` fingerprints the file (``"<path>:<mtime_ns>:<size>"``,
+        ``""`` when missing — the path prefix makes a switch between
+        the worktree's and the workDir's copy always look changed); a
+        poll whose ``knownSig`` matches it is answered with
+        ``unchanged: true`` and no ``content``, so an idle file costs
+        a stat per poll instead of a re-read and re-send.  A missing,
+        unreadable, non-regular or oversized
         (:data:`_OPEN_FILE_MAX_BYTES`) file replies ``exists: false``
         with empty content — the client renders that as an empty
         subpanel rather than an error.
@@ -5792,6 +5800,11 @@ class RemoteAccessServer:
         tab_id = self._cmd_str(cmd, "tabId")
         known_sig = self._cmd_str(cmd, "knownSig")
         token = self._cmd_str(cmd, "token")
+        # A worktree task keeps its tmp/PROGRESS.md inside the worktree
+        # (recorded per tab at worktree_created, so it is known while
+        # the task is still running): that copy is the poll's primary
+        # candidate, the workDir's copy the fallback.
+        wt_dir = self._printer.worktree_dir_for_tab(tab_id) if tab_id else ""
 
         def _read_info() -> dict[str, Any]:
             reply: dict[str, Any] = {
@@ -5803,45 +5816,50 @@ class RemoteAccessServer:
                 "sig": "",
                 "content": "",
             }
-            path = Path(work_dir) / "tmp" / "info.md"
-            try:
-                fd = os.open(
-                    str(path),
-                    os.O_RDONLY | getattr(os, "O_NONBLOCK", 0),
+            candidates: list[Path] = []
+            if wt_dir and wt_dir != work_dir:
+                candidates.append(Path(wt_dir) / "tmp" / "PROGRESS.md")
+            candidates.append(Path(work_dir) / "tmp" / "PROGRESS.md")
+            for path in candidates:
+                try:
+                    fd = os.open(
+                        str(path),
+                        os.O_RDONLY | getattr(os, "O_NONBLOCK", 0),
+                    )
+                except OSError:
+                    continue
+                try:
+                    st = os.fstat(fd)
+                    if (
+                        not stat_module.S_ISREG(st.st_mode)
+                        or st.st_size > _OPEN_FILE_MAX_BYTES
+                    ):
+                        continue
+                    sig = f"{path}:{st.st_mtime_ns}:{st.st_size}"
+                    if known_sig and known_sig == sig:
+                        reply["exists"] = True
+                        reply["sig"] = sig
+                        reply["unchanged"] = True
+                        del reply["content"]
+                        return reply
+                    chunks: list[bytes] = []
+                    remaining = st.st_size
+                    while remaining > 0:
+                        chunk = os.read(fd, remaining)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        remaining -= len(chunk)
+                except OSError:
+                    continue
+                finally:
+                    os.close(fd)
+                reply["exists"] = True
+                reply["sig"] = sig
+                reply["content"] = b"".join(chunks).decode(
+                    "utf-8", errors="replace",
                 )
-            except OSError:
                 return reply
-            try:
-                st = os.fstat(fd)
-                if (
-                    not stat_module.S_ISREG(st.st_mode)
-                    or st.st_size > _OPEN_FILE_MAX_BYTES
-                ):
-                    return reply
-                sig = f"{st.st_mtime_ns}:{st.st_size}"
-                if known_sig and known_sig == sig:
-                    reply["exists"] = True
-                    reply["sig"] = sig
-                    reply["unchanged"] = True
-                    del reply["content"]
-                    return reply
-                chunks: list[bytes] = []
-                remaining = st.st_size
-                while remaining > 0:
-                    chunk = os.read(fd, remaining)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    remaining -= len(chunk)
-            except OSError:
-                return reply
-            finally:
-                os.close(fd)
-            reply["exists"] = True
-            reply["sig"] = sig
-            reply["content"] = b"".join(chunks).decode(
-                "utf-8", errors="replace",
-            )
             return reply
 
         reply = await asyncio.to_thread(_read_info)

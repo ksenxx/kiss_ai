@@ -9,7 +9,7 @@
 // * #meta-workdir / #meta-max-budget rows fall back to configData
 //   values (config.work_dir / config.max_budget) and adopt a live
 //   task's task_settings (work_dir / max_budget) when they arrive,
-// * the 2s getInfoFile poll runs only in remote desktop mode and only
+// * the 1s getInfoFile poll runs only in remote desktop mode and only
 //   while the visible tab has a RUNNING task, and carries the active
 //   workdir plus the last known signature,
 // * an infoFile reply paints #meta-info-content with the file's
@@ -186,6 +186,17 @@ async function main() {
       await sleep(2400);
       const polls = wv.posted.filter(m => m.type === 'getInfoFile');
       assert.ok(polls.length >= 1, 'a getInfoFile poll must have fired');
+      assert.ok(
+        polls.length >= 2,
+        'the 1s interval must fire repeatedly so a changed ' +
+          'tmp/PROGRESS.md repaints within about a second',
+      );
+      const hdr = win.document.querySelector('#meta-info .sidebar-hdr');
+      assert.strictEqual(
+        hdr.textContent,
+        'tmp/PROGRESS.md',
+        'the subpanel header must name tmp/PROGRESS.md',
+      );
       const poll = polls[polls.length - 1];
       assert.strictEqual(poll.workDir, '/cfg/dir');
       assert.strictEqual(poll.knownSig, '');
@@ -240,7 +251,7 @@ async function main() {
       assert.strictEqual(content.innerHTML, html);
 
       // The file vanished: the subpanel empties AND hides entirely —
-      // the tmp/info.md header must not linger over a blank body.
+      // the tmp/PROGRESS.md header must not linger over a blank body.
       send(win, {
         type: 'infoFile',
         workDir: '/cfg/dir',
@@ -327,7 +338,7 @@ async function main() {
   });
 
   await test(
-    'markdown from info.md is sanitized before it hits the DOM',
+    'markdown from PROGRESS.md is sanitized before it hits the DOM',
     async () => {
       const wv = makeWebview();
       const win = wv.win;
