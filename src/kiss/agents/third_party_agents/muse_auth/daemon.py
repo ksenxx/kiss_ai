@@ -29,7 +29,9 @@ from __future__ import annotations
 import base64
 import contextlib
 import fcntl
+import ipaddress
 import os
+import re
 import socket
 import struct
 import threading
@@ -39,11 +41,13 @@ from urllib.parse import urlparse
 import requests
 
 from kiss.agents.third_party_agents.muse_auth._common import (
+    PROTOCOL_VERSION,
     SURROGATE_PREFIX,
     muse_auth_dir,
     recv_frame,
     send_frame,
     socket_path,
+    valid_credential_header,
     valid_service_name,
 )
 from kiss.agents.third_party_agents.muse_auth.sentinel import Sentinel
@@ -51,6 +55,36 @@ from kiss.agents.third_party_agents.muse_auth.vault import CredentialVault
 
 _HOP_HEADERS = ("connection", "keep-alive", "transfer-encoding", "content-length", "host")
 _UNDECODED_HEADERS = ("content-encoding", "transfer-encoding", "content-length")
+
+_HOSTNAME_RE = re.compile(r"[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?")
+
+
+def _invalid_hosts_reason(hosts: Any) -> str:
+    """Validate enrollment-time extra hosts; return the rejection reason.
+
+    Args:
+        hosts: The ``hosts`` list from a ``store_credentials`` frame.
+
+    Returns:
+        A human-readable error, or ``""`` when the hosts are acceptable
+        (a list of at most 16 plain lowercase hostnames/IP literals).
+    """
+    if not isinstance(hosts, list):
+        return "hosts must be a list of hostnames"
+    if len(hosts) > 16:
+        return "at most 16 enrollment hosts are allowed"
+    for host in hosts:
+        if not isinstance(host, str):
+            return f"invalid enrollment host {str(host)[:80]!r}"
+        candidate = host.strip().lower()
+        if _HOSTNAME_RE.fullmatch(candidate):
+            continue
+        try:
+            # IP literals (notably IPv6 like ``::1``) are valid hosts.
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            return f"invalid enrollment host {str(host)[:80]!r}"
+    return ""
 
 
 def _peer_uid(conn: socket.socket) -> int:
@@ -72,7 +106,9 @@ class MuseAuthDaemon:
 
     def __init__(self) -> None:
         self.vault = CredentialVault()
-        self.sentinel = Sentinel()
+        # Sentinel extends each service's allowlist with the hosts
+        # enrolled alongside its vault credential (self-hosted bases).
+        self.sentinel = Sentinel(hosts_provider=self.vault.enrolled_hosts)
         self._server: socket.socket | None = None
         self._stop = threading.Event()
 
@@ -95,10 +131,24 @@ class MuseAuthDaemon:
             services = (
                 sorted(p.stem for p in vault_dir.glob("*.json")) if vault_dir.exists() else []
             )
-            return {"ok": True, "services": services}
+            return {"ok": True, "services": services, "protocol": PROTOCOL_VERSION}
         if op == "store_credentials":
+            info = request["authorized_user_info"]
+            if (
+                isinstance(info, dict)
+                and info.get("kind") == "header"
+                and not valid_credential_header(info.get("header"))
+            ):
+                return {"ok": False, "error": "invalid credential header name"}
+            hosts = request.get("hosts", [])
+            hosts_error = _invalid_hosts_reason(hosts)
+            if hosts_error:
+                return {"ok": False, "error": hosts_error}
             self.vault.store(
-                request["service"], request["authorized_user_info"], request.get("scopes", [])
+                request["service"],
+                info,
+                request.get("scopes", []),
+                hosts=[str(h).strip().lower() for h in hosts],
             )
             return {"ok": True}
         if op == "clear_credentials":
@@ -182,22 +232,29 @@ class MuseAuthDaemon:
         if decision.verdict != "allow":
             return {"ok": False, "denied": True, "error": decision.reason}
         try:
-            real_token = self.vault.resolve_token(service)
+            cred_header, cred_value = self.vault.resolve_header(service)
         except Exception as e:
             return {"ok": False, "error": f"credential resolution failed: {e}"}
+        if not valid_credential_header(cred_header):
+            # Defense in depth: enrollment already validates this.
+            return {"ok": False, "error": f"vault credential for '{service}' "
+                                          f"names an unsafe header"}
         # Preserve the caller's own headers (Notion-Version, Accept,
-        # multipart Content-Type, ...); only drop hop-by-hop headers and
-        # every Authorization variant, then set exactly one real bearer
-        # so a duplicate header cannot smuggle a value past the swap.
+        # multipart Content-Type, ...); only drop hop-by-hop headers,
+        # every Authorization variant, and every copy of the credential
+        # header, then set exactly one real credential so a duplicate
+        # header cannot smuggle a value past the swap.
         out_headers = {
             k: v
             for k, v in headers.items()
-            if k.lower() not in _HOP_HEADERS and k.lower() != "authorization"
+            if k.lower() not in _HOP_HEADERS
+            and k.lower() not in ("authorization", cred_header.lower())
         }
-        out_headers["Authorization"] = f"Bearer {real_token}"
+        out_headers[cred_header] = cred_value
         try:
             resp = self._execute(service, method, url, out_headers, body,
-                                 float(request.get("timeout", 120.0)))
+                                 float(request.get("timeout", 120.0)),
+                                 cred_header=cred_header)
         except Exception as e:
             return {"ok": False, "error": f"network boundary request failed: {e}"}
         if isinstance(resp, str):
@@ -223,10 +280,11 @@ class MuseAuthDaemon:
         headers: dict[str, str],
         body: bytes | None,
         timeout: float,
+        cred_header: str = "Authorization",
     ) -> requests.Response | str:
         """Execute a request, following redirects with per-hop authorization.
 
-        Each hop is evaluated by Sentinel.  The real bearer token is
+        Each hop is evaluated by Sentinel.  The real credential is
         only sent to hosts on the service's allowlist; a redirect to any
         other host (e.g. a Google download CDN or signed URL) is
         followed without the credential so the token can never leak off
@@ -237,15 +295,18 @@ class MuseAuthDaemon:
             service: Connector service name.
             method: HTTP method.
             url: Absolute request URL (already authorized for hop 0).
-            headers: Outgoing headers including the real bearer token.
+            headers: Outgoing headers including the real credential.
             body: Request body bytes, or None.
             timeout: Per-request timeout in seconds.
+            cred_header: Header carrying the real credential
+                (``Authorization`` or a header-kind credential's name
+                such as ``X-Subscription-Token``).
 
         Returns:
             The final :class:`requests.Response`, or a Sentinel denial
             reason string when a redirect hop is refused.
         """
-        real_auth = headers.get("Authorization", "")
+        real_cred = headers.get(cred_header, "")
         resp = requests.request(
             method, url, headers=headers, data=body, timeout=timeout, allow_redirects=False,
         )
@@ -261,16 +322,24 @@ class MuseAuthDaemon:
                 method, body = "GET", None
             headers = dict(headers)
             if not (same_host or next_host in self.sentinel.allowed_hosts(service)):
-                # Cross-host redirect: never forward the real credential;
-                # audit it as a followed egress but do not re-swap a token.
-                headers.pop("Authorization", None)
+                # Cross-host redirect off the allowlist: only bodyless
+                # GET/HEAD hops (download CDNs, signed URLs) may be
+                # followed, and never with the real credential.  A
+                # 307/308 keeps the request body, so following it would
+                # ship content to a host Sentinel denied.
                 self.sentinel.decide(service, method, next_url, effective_url=next_url)
+                if method not in ("GET", "HEAD") or body is not None:
+                    return (
+                        f"cross-host redirect to '{next_host}' would carry the request "
+                        f"body off the '{service}' allowlist; refusing to follow it"
+                    )
+                headers.pop(cred_header, None)
             else:
                 decision = self.sentinel.decide(service, method, next_url,
                                                 effective_url=next_url)
                 if decision.verdict != "allow":
                     return decision.reason
-                headers["Authorization"] = real_auth
+                headers[cred_header] = real_cred
             url = next_url
             resp = requests.request(
                 method, url, headers=headers, data=body,

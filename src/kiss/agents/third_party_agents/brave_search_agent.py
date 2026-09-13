@@ -71,15 +71,54 @@ class BraveSearchChannelBackend(ToolMethodBackend):
     def __init__(self) -> None:
         self._base_url: str = _DEFAULT_BASE_URL
         self._api_key: str = ""
+        self._http: Any = requests
+        self._muse: bool = False
         self._request_lock = threading.Lock()
         self._connection_info: str = ""
 
     def connect(self) -> bool:
         """Load the Brave Search config from disk.
 
+        In Muse-auth mode (``KISS_MUSE_AUTH=1``) the real subscription
+        token lives in the Muse vault as a header-kind credential
+        (auto-enrolled from the legacy config on first connect); this
+        process only holds a surrogate, sent as a bearer to the daemon,
+        which swaps it into the real ``X-Subscription-Token`` header at
+        the network boundary.
+
         Returns:
             True if a valid config with ``api_key`` was loaded.
         """
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import (
+                MuseBoundarySession,
+                mint_surrogate,
+            )
+
+            handle = mint_surrogate("brave_search")
+            if handle is None:
+                # Vault-first: the legacy config key is only read when
+                # the vault has no enrollment yet (one-time migration).
+                from kiss.agents.third_party_agents.muse_auth.client import bearer_surrogate
+
+                cfg = _config.load()
+                surrogate = bearer_surrogate(
+                    "brave_search",
+                    (cfg or {}).get("api_key", ""),
+                    header="X-Subscription-Token",
+                )
+            else:
+                surrogate = handle.token
+            if not surrogate:
+                self._connection_info = "No Brave Search credential in the Muse vault or config."
+                return False
+            self._api_key = surrogate
+            self._http = MuseBoundarySession("brave_search")
+            self._muse = True
+            self._connection_info = "Brave Search API key configured (Muse-auth)."
+            return True
         cfg = _config.load()
         if not cfg:
             self._connection_info = "No Brave Search config found."
@@ -103,12 +142,15 @@ class BraveSearchChannelBackend(ToolMethodBackend):
             requests.RequestException: On a transport failure.
         """
         url = self._base_url.rstrip("/") + path
-        headers = {
-            "X-Subscription-Token": self._api_key,
-            "Accept": "application/json",
-        }
+        headers = {"Accept": "application/json"}
+        if self._muse:
+            # The surrogate travels as a bearer; the daemon swaps it
+            # into the real X-Subscription-Token at the boundary.
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        else:
+            headers["X-Subscription-Token"] = self._api_key
         with self._request_lock:
-            resp = requests.get(url, headers=headers, params=params, timeout=_TIMEOUT)
+            resp = self._http.get(url, headers=headers, params=params, timeout=_TIMEOUT)
         if resp.status_code >= 400:
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:500]}")
         return resp.json()
@@ -308,6 +350,14 @@ class BraveSearchAgent(BaseChannelAgent):
     def __init__(self) -> None:
         super().__init__("Brave Search Agent")
         self._backend = BraveSearchChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            # Muse-auth mode: connect() wires a vault surrogate and the
+            # boundary session; the real key never enters this process
+            # once migrated.
+            self._backend.connect()
+            return
         cfg = _config.load()
         if cfg:
             self._backend._api_key = cfg["api_key"]
@@ -348,9 +398,23 @@ class BraveSearchAgent(BaseChannelAgent):
             """
             if not api_key.strip():
                 return "api_key cannot be empty."
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
             try:
                 _config.save({"api_key": api_key.strip()})
-                agent._backend._api_key = api_key.strip()
+                if muse_auth_enabled():
+                    # Re-enroll straight into the Muse vault: clear any
+                    # existing entry first so a rotated key replaces
+                    # the old one (connect() is vault-first and would
+                    # otherwise keep minting the stale credential).
+                    from kiss.agents.third_party_agents.muse_auth.client import (
+                        clear_credentials,
+                    )
+
+                    clear_credentials("brave_search")
+                    agent._backend.connect()
+                else:
+                    agent._backend._api_key = api_key.strip()
             except Exception as e:
                 return json.dumps({"ok": False, "error": f"could not save config: {e}"})
             return json.dumps({"ok": True, "message": "Brave Search configured."})
@@ -363,6 +427,12 @@ class BraveSearchAgent(BaseChannelAgent):
             """
             _config.clear()
             agent._backend._api_key = ""
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("brave_search")
             return "Brave Search configuration cleared."
 
         return [check_brave_search_auth, authenticate_brave_search, clear_brave_search_auth]

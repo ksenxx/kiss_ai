@@ -69,18 +69,55 @@ class CredentialVault:
         """
         return self._entry_path(service).exists()
 
-    def store(self, service: str, authorized_user_info: dict[str, Any], scopes: list[str]) -> None:
+    def store(
+        self,
+        service: str,
+        authorized_user_info: dict[str, Any],
+        scopes: list[str],
+        hosts: list[str] | None = None,
+    ) -> None:
         """Persist a service's real OAuth credential into the vault.
 
         Args:
             service: Connector service name.
             authorized_user_info: Google authorized-user JSON dict
-                (token, refresh_token, client_id, client_secret, ...).
+                (token, refresh_token, client_id, client_secret, ...),
+                or ``{"kind": "bearer"|"header", ...}`` for plain-token
+                services.
             scopes: OAuth scopes the credential was granted.
+            hosts: Extra hostnames the credential may be spent against
+                (consent-time allowlist extension, e.g. a self-hosted
+                Firecrawl instance); merged with the built-in hosts by
+                Sentinel.
         """
         with self._lock:
-            payload = {"authorized_user_info": authorized_user_info, "scopes": scopes}
+            payload: dict[str, Any] = {
+                "authorized_user_info": authorized_user_info,
+                "scopes": scopes,
+            }
+            if hosts:
+                payload["hosts"] = list(hosts)
             write_private_file(self._entry_path(service), json.dumps(payload))
+
+    def enrolled_hosts(self, service: str) -> tuple[str, ...]:
+        """Return the extra hosts enrolled with a service's credential.
+
+        Args:
+            service: Connector service name.
+
+        Returns:
+            Hostnames stored at enrollment time, or ``()`` when the
+            service is not enrolled or declared none.
+        """
+        with self._lock:
+            path = self._entry_path(service)
+            if not path.exists():
+                return ()
+            try:
+                payload = json.loads(path.read_text())
+            except (OSError, ValueError):
+                return ()
+        return tuple(str(h) for h in payload.get("hosts", []))
 
     def clear(self, service: str) -> None:
         """Delete a service's vault entry and invalidate its surrogates.
@@ -127,6 +164,33 @@ class CredentialVault:
         """
         with self._lock:
             return self._surrogates.get(surrogate)
+
+    def resolve_header(self, service: str) -> tuple[str, str]:
+        """Return the real credential as an outbound header (name, value) pair.
+
+        ``{"kind": "header"}`` credentials (e.g. Brave Search's
+        ``X-Subscription-Token``) are sent verbatim in their declared
+        header; every other kind resolves through
+        :meth:`resolve_token` into ``Authorization: Bearer <token>``.
+
+        Args:
+            service: Connector service name.
+
+        Returns:
+            ``(header_name, header_value)`` for the boundary swap.
+
+        Raises:
+            KeyError: When the service has no vault credential.
+            RuntimeError: When the stored credential is unusable.
+        """
+        with self._lock:
+            path = self._entry_path(service)
+            if not path.exists():
+                raise KeyError(f"no vault credential for service '{service}'")
+            info = json.loads(path.read_text())["authorized_user_info"]
+        if info.get("kind") == "header":
+            return str(info["header"]), str(info["token"])
+        return "Authorization", f"Bearer {self.resolve_token(service)}"
 
     def resolve_token(self, service: str) -> str:
         """Return a currently valid real bearer token for *service*.

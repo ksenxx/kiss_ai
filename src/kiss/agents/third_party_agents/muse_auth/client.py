@@ -31,6 +31,7 @@ from requests.structures import CaseInsensitiveDict
 from requests.utils import get_encoding_from_headers
 
 from kiss.agents.third_party_agents.muse_auth._common import (
+    PROTOCOL_VERSION,
     muse_auth_dir,
     muse_auth_enabled,
     recv_frame,
@@ -45,6 +46,7 @@ __all__ = [
     "MuseHttp",
     "SurrogateCredentials",
     "clear_credentials",
+    "enrolled_services",
     "grant",
     "mint_surrogate",
     "muse_auth_enabled",
@@ -100,18 +102,97 @@ def _daemon_running() -> bool:
         probe.close()
 
 
-def ensure_daemon() -> None:
-    """Start the Muse-auth daemon if it is not already running.
+def _raw_op(payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any] | None:
+    """Send one frame to an already-running daemon without auto-spawn.
 
-    Spawns ``python -m kiss.agents.third_party_agents.muse_auth.daemon``
-    fully detached (its log goes to ``$KISS_HOME/muse_auth/daemon.log``)
-    and waits for the socket to accept connections.
+    Args:
+        payload: Request frame (must include ``op``).
+        timeout: Socket timeout in seconds.
+
+    Returns:
+        The response frame, or None when no daemon answers.
+    """
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(str(socket_path()))
+        send_frame(sock, payload)
+        return recv_frame(sock)
+    except (OSError, ValueError):
+        return None
+    finally:
+        sock.close()
+
+
+def _daemon_protocol() -> int | None:
+    """Return the running daemon's protocol version.
+
+    Returns:
+        The version from its ``status`` reply (pre-versioning daemons
+        report none and count as 1), 0 for a listener that answers
+        garbage, or None when no daemon is running.
+    """
+    reply = _raw_op({"op": "status"})
+    if reply is None:
+        return None
+    if not reply.get("ok"):
+        return 0
+    try:
+        return int(reply.get("protocol", 1))
+    except (TypeError, ValueError):
+        return 0
+
+
+# Identity of the socket file whose daemon this process verified as
+# protocol-compatible.  A daemon binds a fresh socket file, so any
+# listener replacement changes the identity (the ctime guards against
+# inode-number reuse after unlink) and forces a new handshake; the
+# per-op fast path stays a cheap stat + connect probe.
+_verified_socket_id: tuple[int, int, int] | None = None
+
+
+def _socket_id() -> tuple[int, int, int] | None:
+    """Return the daemon socket file's identity.
+
+    Returns:
+        ``(st_dev, st_ino, st_ctime_ns)``, or None when the socket path
+        is absent.
+    """
+    try:
+        stat = os.stat(socket_path())
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_ctime_ns)
+
+
+def ensure_daemon() -> None:
+    """Start a protocol-compatible Muse-auth daemon if none is running.
+
+    A running daemon whose ``status`` reports an older protocol (a
+    detached pre-upgrade survivor that would mishandle header-kind
+    credentials or enrollment hosts) is stopped first.  Spawns
+    ``python -m kiss.agents.third_party_agents.muse_auth.daemon`` fully
+    detached (its log goes to ``$KISS_HOME/muse_auth/daemon.log``) and
+    waits for a compatible daemon to accept connections.
 
     Raises:
-        MuseAuthError: When the daemon does not come up within 15s.
+        MuseAuthError: When a compatible daemon does not come up within 15s.
     """
-    if _daemon_running():
+    global _verified_socket_id
+    socket_id = _socket_id()
+    if socket_id is not None and socket_id == _verified_socket_id and _daemon_running():
         return
+    protocol = _daemon_protocol()
+    if protocol == PROTOCOL_VERSION:
+        _verified_socket_id = _socket_id()
+        return
+    if protocol is not None:
+        # Incompatible daemon: ask it to stop and wait for the socket
+        # to die before spawning the current version.
+        _raw_op({"op": "stop"})
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and _daemon_running():
+            time.sleep(0.05)
     directory = muse_auth_dir()
     directory.mkdir(parents=True, exist_ok=True)
     with contextlib.suppress(OSError):
@@ -127,7 +208,8 @@ def ensure_daemon() -> None:
         )
     deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
-        if _daemon_running():
+        if _daemon_protocol() == PROTOCOL_VERSION:
+            _verified_socket_id = _socket_id()
             return
         time.sleep(0.05)
     raise MuseAuthError(
@@ -180,7 +262,9 @@ def _checked(payload: dict[str, Any], timeout: float = _DEFAULT_TIMEOUT) -> dict
     return reply
 
 
-def store_credentials(service: str, creds: Any, scopes: list[str]) -> None:
+def store_credentials(
+    service: str, creds: Any, scopes: list[str], hosts: tuple[str, ...] = ()
+) -> None:
     """Enroll a freshly obtained OAuth credential into the daemon vault.
 
     The real token crosses into the daemon once, right after the OAuth
@@ -191,12 +275,15 @@ def store_credentials(service: str, creds: Any, scopes: list[str]) -> None:
         creds: ``google.oauth2.credentials.Credentials`` or an
             authorized-user info dict.
         scopes: OAuth scopes the credential carries.
+        hosts: Extra hostnames the credential may be spent against
+            (consent-time allowlist extension for self-hosted bases).
     """
     info = creds if isinstance(creds, dict) else json.loads(creds.to_json())
-    _checked(
-        {"op": "store_credentials", "service": service,
-         "authorized_user_info": info, "scopes": scopes}
-    )
+    frame = {"op": "store_credentials", "service": service,
+             "authorized_user_info": info, "scopes": scopes}
+    if hosts:
+        frame["hosts"] = list(hosts)
+    _checked(frame)
 
 
 def vault_has_credentials(service: str) -> bool:
@@ -208,7 +295,18 @@ def vault_has_credentials(service: str) -> bool:
     Returns:
         True when the service is enrolled.
     """
-    return service in _checked({"op": "status"}).get("services", [])
+    return service in enrolled_services()
+
+
+def enrolled_services() -> list[str]:
+    """Return every service enrolled in the daemon vault.
+
+    Includes workspace-keyed names such as ``slack-<slug>-<hash>``.
+
+    Returns:
+        Sorted service names.
+    """
+    return [str(s) for s in _checked({"op": "status"}).get("services", [])]
 
 
 def mint_surrogate(service: str) -> SurrogateCredentials | None:
@@ -500,8 +598,13 @@ class MuseHttp:
         return info, base64.b64decode(reply.get("body_b64", ""))
 
 
-def bearer_surrogate(service: str, legacy_token: str) -> str:
-    """Return a surrogate for a plain bearer-token service.
+def bearer_surrogate(
+    service: str,
+    legacy_token: str,
+    header: str = "",
+    hosts: tuple[str, ...] = (),
+) -> str:
+    """Return a surrogate for a plain token-authenticated service.
 
     Prefers an existing vault enrollment; otherwise enrolls
     *legacy_token* (read once from the service's legacy config) into
@@ -512,6 +615,11 @@ def bearer_surrogate(service: str, legacy_token: str) -> str:
     Args:
         service: Connector service name (e.g. ``"notion"``).
         legacy_token: Real token from legacy storage; may be empty.
+        header: Header the real token is sent in when it is not an
+            ``Authorization: Bearer`` credential (e.g. Brave Search's
+            ``X-Subscription-Token``); empty means bearer.
+        hosts: Extra hostnames to enroll with the credential (e.g. a
+            self-hosted Firecrawl base URL's host).
 
     Returns:
         The surrogate token, or ``""`` when the service is not
@@ -520,7 +628,11 @@ def bearer_surrogate(service: str, legacy_token: str) -> str:
     if not vault_has_credentials(service):
         if not legacy_token:
             return ""
-        store_credentials(service, {"kind": "bearer", "token": legacy_token}, [])
+        if header:
+            info = {"kind": "header", "header": header, "token": legacy_token}
+        else:
+            info = {"kind": "bearer", "token": legacy_token}
+        store_credentials(service, info, [], hosts=hosts)
     handle = mint_surrogate(service)
     return handle.token if handle else ""
 

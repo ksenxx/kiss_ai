@@ -20,9 +20,11 @@ Usage::
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -41,6 +43,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     load_json_config,
     save_json_config,
 )
+from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +52,11 @@ def _call_with_retry(fn: Any, what: str) -> Any:
     """Call a Slack API function, retrying transient network errors.
 
     Retries up to 3 times on ``OSError`` (e.g. SSL handshake timeouts,
-    connection resets) with exponential backoff.
+    connection resets) or ``MuseAuthError`` (Muse-mode boundary
+    transport failures, which replace urllib's ``OSError`` family)
+    with exponential backoff.  Sentinel policy denials are ordinary
+    Slack API error responses, not transport errors, so they are never
+    retried here.
 
     Args:
         fn: Zero-argument callable performing the API request.
@@ -61,12 +68,13 @@ def _call_with_retry(fn: Any, what: str) -> Any:
 
     Raises:
         OSError: When all 3 attempts fail.
+        MuseAuthError: When all 3 attempts fail at the Muse boundary.
     """
-    last_err: OSError | None = None
+    last_err: OSError | MuseAuthError | None = None
     for attempt in range(3):  # pragma: no branch
         try:
             return fn()
-        except OSError as e:
+        except (OSError, MuseAuthError) as e:
             last_err = e
             if attempt < 2:  # pragma: no branch
                 logger.warning(
@@ -149,6 +157,68 @@ def _save_token(token: str, workspace: str = "default") -> None:
     save_json_config(_token_path(workspace), {"access_token": token.strip()})
 
 
+def _muse_service(workspace: str = "default") -> str:
+    """Return the Muse vault service name for a Slack workspace.
+
+    The default workspace enrolls as ``slack``; other workspaces get a
+    deterministic ``slack-<slug>-<hash>`` name.  The 64-bit digest of
+    the exact workspace label disambiguates workspaces whose names
+    collide after lowercasing/sanitizing (a 32-bit digest admits
+    practical birthday collisions that would hand one workspace the
+    other's token).
+
+    Args:
+        workspace: Workspace identifier used to key the token storage.
+
+    Returns:
+        A valid Muse service name.
+    """
+    if workspace == "default":
+        return "slack"
+    slug = re.sub(r"[^a-z0-9_-]", "-", workspace.lower())[:40]
+    digest = hashlib.sha256(workspace.encode()).hexdigest()[:16]
+    return f"slack-{slug}-{digest}"
+
+
+def _muse_web_client(workspace: str, base_url: str = "https://slack.com/api/") -> WebClient | None:
+    """Build a Muse-boundary WebClient for *workspace*.
+
+    Vault-first: mints a surrogate for the workspace's enrolled
+    credential, migrating a legacy on-disk bot token into the vault
+    when no enrollment exists yet.  The returned client only ever
+    holds the surrogate; the daemon swaps in the real ``xoxb-`` token
+    at the network boundary.
+
+    Args:
+        workspace: Workspace identifier used to key the token storage.
+        base_url: Slack Web API base URL (tests point this at an
+            emulated API).
+
+    Returns:
+        A connected-capable client, or None when neither the vault nor
+        the legacy token file has a credential.
+    """
+    from kiss.agents.third_party_agents.muse_auth.client import bearer_surrogate, mint_surrogate
+    from kiss.agents.third_party_agents.muse_auth.slack_transport import MuseWebClient
+
+    service = _muse_service(workspace)
+    handle = mint_surrogate(service)
+    if handle is not None:
+        surrogate = handle.token
+    else:
+        # One-time migration: the legacy token is only read when the
+        # vault has no enrollment yet.  Slack's token file holds
+        # nothing but the token, so a successful enrollment deletes
+        # the plaintext to finish the migration.
+        legacy = _load_token(workspace) or ""
+        surrogate = bearer_surrogate(service, legacy)
+        if surrogate and legacy:
+            _clear_token(workspace)
+    if not surrogate:
+        return None
+    return MuseWebClient(service, surrogate, base_url=base_url)
+
+
 def _clear_token(workspace: str = "default") -> None:
     """Delete the stored Slack bot token for a workspace.
 
@@ -170,27 +240,46 @@ class SlackChannelBackend(ToolMethodBackend):
         self._bot_user_id: str = ""
         self._connection_info: str = ""
         self._workspace = workspace
+        self._api_base_url: str = "https://slack.com/api/"
 
     def connect(self) -> bool:
         """Authenticate with Slack using the stored bot token.
 
         Uses the workspace set at construction time to load the
-        appropriate token.
+        appropriate token.  In Muse-auth mode (``KISS_MUSE_AUTH=1``)
+        the real bot token lives in the Muse vault (auto-enrolled from
+        the legacy token file on first connect); this process only
+        holds a surrogate and every Web API call is executed at the
+        daemon boundary.
 
         Returns:
             True on success, False on failure.
         """
-        token = _load_token(self._workspace)
-        if not token:
-            self._connection_info = (
-                "No Slack token found. Please store a bot token first.\n"
-                "Run: uv run python -m kiss.agents.third_party_agents"
-                ".slack_agent --task 'check auth'\n"
-                "Or manually save token to "
-                f"~/.kiss/third_party_agents/slack/{self._workspace}/token.json"
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            client = _muse_web_client(self._workspace, base_url=self._api_base_url)
+            if client is None:
+                self._connection_info = (
+                    "No Slack credential in the Muse vault or on disk for "
+                    f"workspace {self._workspace!r}. Store a bot token first."
+                )
+                return False
+            self._client = client
+        else:
+            token = _load_token(self._workspace)
+            if not token:
+                self._connection_info = (
+                    "No Slack token found. Please store a bot token first.\n"
+                    "Run: uv run python -m kiss.agents.third_party_agents"
+                    ".slack_agent --task 'check auth'\n"
+                    "Or manually save token to "
+                    f"~/.kiss/third_party_agents/slack/{self._workspace}/token.json"
+                )
+                return False
+            self._client = WebClient(
+                token=token, base_url=self._api_base_url, retry_handlers=[]
             )
-            return False
-        self._client = WebClient(token=token, retry_handlers=[])
         try:
             auth = self._client.auth_test()
             self._bot_user_id = auth.get("user_id", "")
@@ -846,6 +935,13 @@ class SlackAgent(BaseChannelAgent):
     def __init__(self, workspace: str = "default") -> None:
         super().__init__("Slack Agent", workspace=workspace)
         self._backend = SlackChannelBackend(workspace=workspace)
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            # Muse-auth mode: the client holds only a vault surrogate;
+            # the real token never enters this process once migrated.
+            self._backend._client = _muse_web_client(workspace)
+            return
         token = _load_token(workspace)
         if token:
             self._backend._client = WebClient(token=token, retry_handlers=[])
@@ -904,7 +1000,54 @@ class SlackAgent(BaseChannelAgent):
             token = token.strip()
             if not token:
                 return "Token cannot be empty."
-            agent._backend._client = WebClient(token=token, retry_handlers=[])
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                # Enroll first, then validate through the boundary: the
+                # plaintext token goes straight into the vault (clearing
+                # any old entry so rotation replaces it), auth.test is
+                # policy-checked and audited like every other call, and
+                # no plaintext token.json is written.
+                from kiss.agents.third_party_agents.muse_auth.client import (
+                    clear_credentials,
+                    store_credentials,
+                )
+
+                service = _muse_service(agent.workspace)
+                clear_credentials(service)
+                store_credentials(service, {"kind": "bearer", "token": token}, [])
+                client = _muse_web_client(
+                    agent.workspace, base_url=agent._backend._api_base_url
+                )
+                try:
+                    if client is None:
+                        raise SlackApiError("vault enrollment failed", None)
+                    resp = client.auth_test()
+                except (SlackApiError, MuseAuthError) as e:
+                    # Roll back on EVERY failed validation path — an API
+                    # rejection or a boundary transport failure — so an
+                    # unvalidated token never stays enrolled/mintable.
+                    clear_credentials(service)
+                    agent._backend._client = None
+                    return json.dumps(
+                        {"ok": False, "error": f"Token validation failed: {e}"}
+                    )
+                # Non-secret marker so --list-workspaces can discover a
+                # workspace whose only credential lives in the vault.
+                _token_path(agent.workspace).parent.mkdir(parents=True, exist_ok=True)
+                agent._backend._client = client
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "message": "Slack token enrolled in the Muse vault and validated.",
+                        "team": resp.get("team", ""),
+                        "user": resp.get("user", ""),
+                        "workspace": agent.workspace,
+                    }
+                )
+            agent._backend._client = WebClient(
+                token=token, base_url=agent._backend._api_base_url, retry_handlers=[]
+            )
             try:
                 resp = agent._backend._client.auth_test()
                 _save_token(token, workspace=agent.workspace)
@@ -929,6 +1072,12 @@ class SlackAgent(BaseChannelAgent):
             """
             _clear_token(workspace=agent.workspace)
             agent._backend._client = None
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials(_muse_service(agent.workspace))
             return "Slack authentication cleared."
 
         def start_slack_browser_auth() -> str:
@@ -963,44 +1112,78 @@ class SlackAgent(BaseChannelAgent):
         ]
 
 
-def _delete_workspace(workspace: str) -> None:
-    """Delete a workspace's token directory from disk.
+def _workspace_vault_file(workspace: str) -> Path:
+    """Return the Muse vault file backing a workspace's credential.
 
-    Removes the entire ``~/.kiss/third_party_agents/slack/{workspace}/`` directory,
-    including the token file and any other workspace-specific files.
+    Checked directly on disk so vault-awareness does not spin up the
+    daemon when nothing is enrolled.
+
+    Args:
+        workspace: Workspace identifier.
+
+    Returns:
+        Path to ``$KISS_HOME/muse_auth/vault/<service>.json``.
+    """
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_dir
+
+    return muse_auth_dir() / "vault" / f"{_muse_service(workspace)}.json"
+
+
+def _delete_workspace(workspace: str) -> None:
+    """Delete a workspace's token directory and Muse vault credential.
+
+    Removes the entire ``~/.kiss/third_party_agents/slack/{workspace}/``
+    directory (token file plus any other workspace-specific files) and,
+    when the workspace is enrolled in the Muse vault, clears that
+    credential too so deletion leaves nothing mintable behind.
 
     Args:
         workspace: Workspace identifier to delete.
     """
     ws_dir = _SLACK_DIR / workspace
-    if not ws_dir.is_dir():
+    vault_file = _workspace_vault_file(workspace)
+    if not ws_dir.is_dir() and not vault_file.exists():
         print(f"Workspace {workspace!r} not found.")
         sys.exit(1)
-    shutil.rmtree(ws_dir)
+    if ws_dir.is_dir():
+        shutil.rmtree(ws_dir)
+    if vault_file.exists():
+        from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+        clear_credentials(_muse_service(workspace))
     print(f"Workspace {workspace!r} deleted.")
 
 
 def _list_workspaces() -> None:
     """Display all authenticated Slack workspaces and their token status.
 
-    Scans ``~/.kiss/third_party_agents/slack/`` for workspace subdirectories
-    containing ``token.json`` files.  For each workspace, validates the
-    token against the Slack API and prints the workspace name, status,
-    team name, and bot user.
+    Scans ``~/.kiss/third_party_agents/slack/`` for workspace
+    subdirectories containing ``token.json`` files and includes
+    workspaces whose credential lives only in the Muse vault.
+    Vault-backed workspaces print a ``✓ vault`` status (the plaintext
+    is gone, so no direct validation happens here); plaintext tokens
+    are validated against the Slack API with the workspace name,
+    status, team name, and bot user.
     """
-    if not _SLACK_DIR.is_dir():
-        print("No workspaces found.")
-        return
     workspaces: list[str] = []
-    for entry in sorted(_SLACK_DIR.iterdir()):
-        if entry.is_dir() and (entry / "token.json").is_file():
-            workspaces.append(entry.name)
+    if _SLACK_DIR.is_dir():
+        for entry in sorted(_SLACK_DIR.iterdir()):
+            has_token = (entry / "token.json").is_file()
+            if entry.is_dir() and (has_token or _workspace_vault_file(entry.name).exists()):
+                workspaces.append(entry.name)
+    # The default workspace may exist only as a Muse vault enrollment
+    # (its plaintext token file is deleted after migration).
+    if "default" not in workspaces and _workspace_vault_file("default").exists():
+        workspaces.insert(0, "default")
     if not workspaces:
         print("No workspaces found.")
         return
     print(f"{'Workspace':<20} {'Status':<12} {'Team':<20} {'Bot User'}")
     print("-" * 72)
     for ws in workspaces:
+        if _workspace_vault_file(ws).exists():
+            print(f"{ws:<20} {'✓ vault':<12} {'-':<20} -")
+            continue
         token = _load_token(ws)
         if not token:
             print(f"{ws:<20} {'no token':<12} {'-':<20} -")
@@ -1024,6 +1207,18 @@ def _make_backend(workspace: str = "default") -> SlackChannelBackend:
         workspace: Workspace identifier for token lookup.
     """
     backend = SlackChannelBackend(workspace=workspace)
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    if muse_auth_enabled():
+        client = _muse_web_client(workspace)
+        if client is None:
+            print(
+                f"Not authenticated for workspace {workspace!r}. "
+                f"Run: kiss-slack --workspace {workspace} -t 'authenticate'"
+            )
+            sys.exit(1)
+        backend._client = client
+        return backend
     token = _load_token(workspace)
     if not token:  # pragma: no branch
         print(

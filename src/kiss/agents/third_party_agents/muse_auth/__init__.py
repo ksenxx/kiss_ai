@@ -2,12 +2,13 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Meta-Muse-style credential isolation for the Google connectors.
+"""Meta-Muse-style credential isolation for the connectors.
 
 This package ports the authentication architecture Meta published for
 its Muse personal agent (research.meta.ai, "How We Built Safety Into
 Muse", September 2026) to the KISS third-party connectors (Gmail,
-Google Drive, Calendar, Docs, Sheets):
+Google Drive, Calendar, Docs, Sheets, Google Chat, Notion, GitHub,
+Slack, Firecrawl, Brave Search):
 
 * **authd / vault** (:mod:`.vault`) — a daemon-owned credential store.
   OAuth tokens live in ``$KISS_HOME/muse_auth/vault/`` (0700/0600) and

@@ -32,6 +32,7 @@ import math
 import secrets
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,10 +40,10 @@ from urllib.parse import urlparse
 
 from kiss.agents.third_party_agents._channel_agent_utils import write_private_file
 from kiss.agents.third_party_agents.muse_auth._common import (
-    SERVICE_HOSTS,
-    action_class,
+    builtin_hosts,
     is_loopback_host,
     muse_auth_dir,
+    request_action,
 )
 
 _DEFAULT_POLICY = {"read": "allow", "write": "ask"}
@@ -80,10 +81,13 @@ def grant_command(service: str, action: str) -> str:
 class Sentinel:
     """Policy engine, grant store, and audit logger for the daemon."""
 
-    def __init__(self) -> None:
+    def __init__(self, hosts_provider: Callable[[str], tuple[str, ...]]) -> None:
         self._lock = threading.Lock()
         # Session-scoped grants live only in daemon memory.
         self._session_grants: list[dict[str, Any]] = []
+        # Returns the hosts enrolled with a service's vault credential
+        # (the daemon passes CredentialVault.enrolled_hosts).
+        self._hosts_provider = hosts_provider
 
     def _policy_path(self) -> Path:
         """Return the policy file path.
@@ -135,8 +139,10 @@ class Sentinel:
     def allowed_hosts(self, service: str) -> tuple[str, ...]:
         """Return the effective host allowlist for *service*.
 
-        Built-in hosts from :data:`SERVICE_HOSTS` plus any
-        ``extra_hosts`` configured for the service in the policy file.
+        Built-in hosts from :func:`builtin_hosts`, plus any
+        ``extra_hosts`` configured for the service in the policy file,
+        plus hosts enrolled alongside the vault credential (e.g. a
+        self-hosted Firecrawl instance).
 
         Args:
             service: Connector service name.
@@ -145,7 +151,12 @@ class Sentinel:
             Tuple of allowed hostnames (lowercase).
         """
         extra = self._load_policy().get("services", {}).get(service, {}).get("extra_hosts", [])
-        return SERVICE_HOSTS.get(service, ()) + tuple(h.lower() for h in extra)
+        enrolled = self._hosts_provider(service)
+        return (
+            builtin_hosts(service)
+            + tuple(h.lower() for h in extra)
+            + tuple(h.lower() for h in enrolled)
+        )
 
     def add_grant(self, service: str, action: str, scope: str, ttl: float = 0.0) -> str:
         """Record a user approval as a strict capability.
@@ -262,9 +273,11 @@ class Sentinel:
             A :class:`Decision`; ``ask`` verdicts carry instructions
             for obtaining a grant.
         """
-        action = action_class(method)
         parsed = urlparse(url)
         effective = urlparse(effective_url or url)
+        # Classify on the effective path so a parser-differential raw
+        # URL cannot masquerade a write API method as a read.
+        action = request_action(service, method, effective.path)
         host = (effective.hostname or "").lower()
         deny_reason = ""
         if parsed.username or parsed.password or effective.username or effective.password:

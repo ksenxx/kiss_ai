@@ -29,12 +29,12 @@ import sys
 from kiss.agents.third_party_agents.muse_auth._common import muse_auth_dir
 from kiss.agents.third_party_agents.muse_auth.client import (
     clear_credentials,
+    enrolled_services,
     ensure_daemon,
     grant,
     revoke,
     stop_daemon,
     store_credentials,
-    vault_has_credentials,
 )
 
 # Google-OAuth connector service name -> module holding its _SCOPES.
@@ -47,8 +47,14 @@ _SERVICE_MODULES = {
     "googlechat": "kiss.agents.third_party_agents.googlechat_agent",
 }
 
-# Plain bearer-token connectors: legacy config.json key holding the token.
-_BEARER_SERVICES = {"notion": "token", "github": "token"}
+# Plain token connectors: the legacy config.json key holding the token,
+# plus the credential header when it is not ``Authorization: Bearer``.
+_TOKEN_SERVICES: dict[str, dict[str, str]] = {
+    "notion": {"key": "token"},
+    "github": {"key": "token"},
+    "firecrawl": {"key": "api_key"},
+    "brave_search": {"key": "api_key", "header": "X-Subscription-Token"},
+}
 
 
 def _service_scopes(service: str) -> list[str]:
@@ -79,10 +85,10 @@ def _cmd_status() -> int:
         Process exit code.
     """
     ensure_daemon()
-    known = list(_SERVICE_MODULES) + sorted(_BEARER_SERVICES)
-    enrolled = [s for s in known if vault_has_credentials(s)]
+    # Everything in the vault, unfiltered, so workspace-keyed names
+    # (slack-<slug>-<hash>) and custom services show up too.
     print(json.dumps({
-        "enrolled": enrolled,
+        "enrolled": enrolled_services(),
         "vault_dir": str(muse_auth_dir() / "vault"),
         "policy": str(muse_auth_dir() / "policy.json"),
         "audit": str(muse_auth_dir() / "audit.jsonl"),
@@ -127,9 +133,12 @@ def _cmd_import(service: str) -> int:
     """Migrate a legacy plaintext credential into the vault.
 
     Google-OAuth services move their ``token.json`` (the plaintext file
-    is deleted).  Bearer services (notion, github) copy the token out
-    of their ``config.json``; delete or blank that key manually to
-    finish the migration, since the file may hold other settings.
+    is deleted).  Token services (notion, github, firecrawl,
+    brave_search) copy the token out of their ``config.json``; delete
+    or blank that key manually to finish the migration, since the file
+    may hold other settings.  ``slack`` migrates the default
+    workspace's bot token and deletes its plaintext file; other Slack
+    workspaces migrate automatically on their first Muse-mode connect.
 
     Args:
         service: Connector service name.
@@ -137,16 +146,40 @@ def _cmd_import(service: str) -> int:
     Returns:
         Process exit code.
     """
-    if service in _BEARER_SERVICES:
+    if service == "slack":
+        from kiss.agents.third_party_agents.slack_agent import _load_token, _token_path
+
+        token = _load_token("default")
+        if not token:
+            print(f"no legacy token at {_token_path('default')}", file=sys.stderr)
+            return 1
+        store_credentials("slack", {"kind": "bearer", "token": token}, [])
+        _token_path("default").unlink()
+        print("migrated the default Slack workspace token into the Muse-auth vault "
+              "and removed the plaintext token.")
+        return 0
+    if service in _TOKEN_SERVICES:
+        spec = _TOKEN_SERVICES[service]
         path = muse_auth_dir().parent / "third_party_agents" / service / "config.json"
         if not path.exists():
             print(f"no legacy config at {path}", file=sys.stderr)
             return 1
-        token = json.loads(path.read_text()).get(_BEARER_SERVICES[service], "")
+        cfg = json.loads(path.read_text())
+        token = cfg.get(spec["key"], "")
         if not token:
-            print(f"no '{_BEARER_SERVICES[service]}' key in {path}", file=sys.stderr)
+            print(f"no '{spec['key']}' key in {path}", file=sys.stderr)
             return 1
-        store_credentials(service, {"kind": "bearer", "token": token}, [])
+        header = spec.get("header", "")
+        if header:
+            info = {"kind": "header", "header": header, "token": token}
+        else:
+            info = {"kind": "bearer", "token": token}
+        hosts: tuple[str, ...] = ()
+        if service == "firecrawl" and cfg.get("base_url"):
+            from kiss.agents.third_party_agents.firecrawl_agent import _extra_hosts
+
+            hosts = _extra_hosts(str(cfg["base_url"]))
+        store_credentials(service, info, [], hosts=hosts)
         print(
             f"imported the {service} token into the Muse-auth vault; "
             f"remove the token from {path} to finish the migration."
