@@ -903,7 +903,7 @@ class SorcarRunApiTest(unittest.TestCase):
                 )
 
     def test_per_task_overrides_forwarded(self) -> None:
-        """``max_budget`` / ``model_config`` / ``web_tools`` /
+        """``max_budget`` / ``model_config`` / ``use_web_tools`` /
         ``is_parallel`` reach the daemon-built agent."""
         seen: dict[str, Any] = {}
 
@@ -929,7 +929,7 @@ class SorcarRunApiTest(unittest.TestCase):
             timeout=60,
             max_budget=2.5,
             model_config={"base_url": "http://localhost:9999/v1"},
-            web_tools=False,
+            use_web_tools=False,
             is_parallel=True,
         )
         assert result.success is True
@@ -972,6 +972,119 @@ class SorcarRunApiTest(unittest.TestCase):
         ), "malformed modelConfig must not reach the agent"
         assert seen["model_config"] != "junk"
         assert seen["web_tools"] is True, "config default web tools apply"
+
+    def test_classify_tasks_override_forwarded(self) -> None:
+        """The per-run ``classify_tasks`` toggle reaches the classifier.
+
+        ``kiss.server.sorcar.run(classify_tasks=...)`` rides the wire
+        as ``classifyTasks`` and the task runner must hand it to
+        ``classify_task_for_run(enabled=...)`` — the run-side gate of
+        the settings panel's "Classify tasks before running" option.
+        Absent and malformed values mean "no override" (``None``), the
+        same untrusted-input contract as ``webTools``.  The suite-wide
+        ``KISS_DISABLE_TASK_CLASSIFIER=1`` kill switch keeps the real
+        ``classify_task_for_run`` from ever calling a model here, so
+        the full daemon pipeline runs with only the ``run`` stub.
+        """
+        seen_enabled: list[Any] = []
+        original_classify = SorcarAgent.classify_task_for_run
+
+        def recording_classify(
+            self_agent: Any, *args: Any, **kwargs: Any,
+        ) -> Any:
+            seen_enabled.append(kwargs.get("enabled"))
+            return original_classify(self_agent, *args, **kwargs)
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer")
+            if printer is not None:
+                printer.print(
+                    raw, type="result", step_count=1,
+                    total_tokens=1, cost="$0.0001",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+        SorcarAgent.classify_task_for_run = recording_classify  # type: ignore[assignment,method-assign]
+        try:
+            for override in (False, True):
+                result = sorcar.run(
+                    "task with a classification override",
+                    work_dir=self.repo,
+                    use_worktree=False,
+                    classify_tasks=override,
+                    sock_path=self.sock_path,
+                    timeout=60,
+                )
+                assert result.success is True
+            # No parameter passed: the wire carries null → no override.
+            result = sorcar.run(
+                "task without a classification override",
+                work_dir=self.repo,
+                use_worktree=False,
+                sock_path=self.sock_path,
+                timeout=60,
+            )
+            assert result.success is True
+            # A malformed (non-boolean) classifyTasks is ignored.
+            self._raw_daemon_run("", extra_cmd={"classifyTasks": "yes"})
+        finally:
+            SorcarAgent.classify_task_for_run = original_classify  # type: ignore[method-assign]
+        assert seen_enabled == [False, True, None, None], (
+            "classify_tasks was not forwarded verbatim on the "
+            "run → classify_task_for_run path"
+        )
+
+    def test_persisted_use_web_tools_setting_applies(self) -> None:
+        """The settings panel's "Use web tools" checkbox binds the run.
+
+        The checkbox persists as config key ``use_web_browser``: a run
+        WITHOUT a per-run ``use_web_tools`` override must fall back to
+        the persisted ``False``, and an explicit ``use_web_tools=True``
+        on the same daemon must beat the persisted setting.
+        """
+        vscode_config.save_config({"use_web_browser": False})
+        seen: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen["web_tools"] = getattr(self_agent, "_use_web_tools", None)
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer")
+            if printer is not None:
+                printer.print(
+                    raw, type="result", step_count=1,
+                    total_tokens=1, cost="$0.0001",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "run under the persisted web-tools setting",
+            work_dir=self.repo,
+            use_worktree=False,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        assert seen["web_tools"] is False, (
+            "the persisted use_web_browser=False setting never reached "
+            "the agent"
+        )
+
+        result = sorcar.run(
+            "run with an explicit per-run override",
+            work_dir=self.repo,
+            use_worktree=False,
+            use_web_tools=True,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        assert seen["web_tools"] is True, (
+            "the per-run use_web_tools=True override must beat the "
+            "persisted setting"
+        )
 
     def test_custom_system_prompt_replaces_default(self) -> None:
         """A non-empty ``system_prompt`` replaces the SYSTEM.md prompt.
@@ -1269,21 +1382,21 @@ class SorcarRunApiTest(unittest.TestCase):
         assert entry["scopeWorkDir"] == workspace
 
     def test_scope_survives_agent_script_work_dir_override(self) -> None:
-        """A ``get_work_dir()`` override re-pins ``workDir``, not the scope.
+        """A ``work_dir()`` override re-pins ``workDir``, not the scope.
 
-        The cron agent script overrides the execution directory via
-        ``get_work_dir()``, and ``_run_task`` re-pins the registry
+        The agent script overrides the execution directory via
+        ``work_dir()``, and ``_run_task`` re-pins the registry
         tab's ``workDir`` to the overridden value.  The tab's
         ``scopeWorkDir`` must survive that re-pin — it is what keeps a
         ``run_agent``-dispatched cron tab visible in the CALLING
-        workspace — which holds because ``scope_work_dir`` is
-        deliberately absent from ``PARAM_FIELDS``.
+        workspace — because a script without a ``scope_work_dir()``
+        getter must not disturb the client-sent scope.
         """
         captured: dict[str, Any] = {}
         override_dir = str(Path(self.tmpdir) / "script_work")
         agent_script = Path(self.tmpdir) / "scoped_agent.py"
         agent_script.write_text(
-            "def get_work_dir() -> str:\n"
+            "def work_dir() -> str:\n"
             f"    return {override_dir!r}\n"
         )
 
@@ -1323,10 +1436,114 @@ class SorcarRunApiTest(unittest.TestCase):
         assert len(api_tabs) == 1, f"expected one api tab, got {api_tabs!r}"
         entry = api_tabs[0]
         assert entry["workDir"] == override_dir, (
-            "get_work_dir() must re-pin the registry workDir"
+            "work_dir() must re-pin the registry workDir"
         )
         assert entry["scopeWorkDir"] == workspace, (
             "the workDir re-pin must not clobber the visibility scope"
+        )
+
+    def test_scope_work_dir_getter_repins_the_scope(self) -> None:
+        """A ``scope_work_dir()`` override re-pins the tab's scope.
+
+        The dispatch handler pins the registry scope from the
+        client-sent ``tabScopeWorkDir`` before the worker thread runs;
+        the script's ``scope_work_dir()`` override must then win, so
+        clients scope the tab to the SCRIPT's workspace.
+        """
+        captured: dict[str, Any] = {}
+        script_scope = str(Path(self.tmpdir) / "script_workspace")
+        agent_script = Path(self.tmpdir) / "scope_agent.py"
+        agent_script.write_text(
+            "def scope_work_dir() -> str:\n"
+            f"    return {script_scope!r}\n"
+        )
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            self_agent.total_tokens_used = 1
+            self_agent.budget_used = 0.0
+            self_agent.total_steps = 1
+            captured["tabs"] = [
+                dict(entry)
+                for entry in self.server._vscode_server.tab_registry.snapshot()
+                if entry["tabId"].startswith("api-")
+            ]
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer") or getattr(
+                self_agent, "printer", None,
+            )
+            if printer is not None:
+                printer.print(raw, type="result", step_count=1)
+            return raw
+
+        self._parent_class.run = stub_run
+        client_scope = str(Path(self.tmpdir) / "client_workspace")
+        result = sorcar.run(
+            "say hi",
+            work_dir=str(Path(self.tmpdir) / "scope_exec_work"),
+            scope_work_dir=client_scope,
+            extension_agent_path=str(agent_script),
+            use_worktree=False,
+            auto_commit=False,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        api_tabs = captured.get("tabs") or []
+        assert len(api_tabs) == 1, f"expected one api tab, got {api_tabs!r}"
+        assert api_tabs[0]["scopeWorkDir"] == script_scope, (
+            "scope_work_dir() must re-pin the registry scope"
+        )
+
+    def test_empty_scope_work_dir_getter_scopes_to_work_dir(self) -> None:
+        """An EMPTY ``scope_work_dir()`` override falls back to the work dir.
+
+        ``TabRegistry.update_tab`` keeps the current scope for an empty
+        value, so the re-pin must translate the empty override into the
+        run's effective work directory — otherwise a caller-supplied
+        scope would silently survive the script's reset.
+        """
+        captured: dict[str, Any] = {}
+        agent_script = Path(self.tmpdir) / "clear_scope_agent.py"
+        agent_script.write_text(
+            "def scope_work_dir() -> str:\n"
+            "    return ''\n"
+        )
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            self_agent.total_tokens_used = 1
+            self_agent.budget_used = 0.0
+            self_agent.total_steps = 1
+            captured["tabs"] = [
+                dict(entry)
+                for entry in self.server._vscode_server.tab_registry.snapshot()
+                if entry["tabId"].startswith("api-")
+            ]
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer") or getattr(
+                self_agent, "printer", None,
+            )
+            if printer is not None:
+                printer.print(raw, type="result", step_count=1)
+            return raw
+
+        self._parent_class.run = stub_run
+        exec_dir = str(Path(self.tmpdir) / "clear_scope_work")
+        result = sorcar.run(
+            "say hi",
+            work_dir=exec_dir,
+            scope_work_dir=str(Path(self.tmpdir) / "caller_scope"),
+            extension_agent_path=str(agent_script),
+            use_worktree=False,
+            auto_commit=False,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        api_tabs = captured.get("tabs") or []
+        assert len(api_tabs) == 1, f"expected one api tab, got {api_tabs!r}"
+        assert api_tabs[0]["scopeWorkDir"] == exec_dir, (
+            "an empty scope override must re-scope the tab to the "
+            "run's work directory"
         )
 
     def test_no_daemon_raises_connection_error(self) -> None:
@@ -1380,7 +1597,7 @@ class SorcarRunApiTest(unittest.TestCase):
         from kiss.agents.sorcar import cron_agent
         from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
 
-        # No get_model(): the daemon's default model applies (the run
+        # No model(): the daemon's default model applies (the run
         # is stubbed, so no model API call ever happens, but the model
         # name must pass the runner's availability guard).
         script = Path(self.tmpdir) / "noop_dispatch_agent.py"

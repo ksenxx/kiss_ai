@@ -64,12 +64,12 @@ class TestResolveAgentPath:
 
     def test_str_resolves_absolutely(self, tmp_path: Path) -> None:
         script = tmp_path / "agent.py"
-        script.write_text("def get_model():\n    return 'm'\n")
+        script.write_text("def model():\n    return 'm'\n")
         assert resolve_agent_path(str(script)) == str(script.resolve())
 
     def test_path_object_rejected(self, tmp_path: Path) -> None:
         script = tmp_path / "agent.py"
-        script.write_text("def get_model():\n    return 'm'\n")
+        script.write_text("def model():\n    return 'm'\n")
         with pytest.raises(
             ValueError,
             match=r"agent_path must be a string path to a Python file, "

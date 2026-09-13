@@ -146,14 +146,14 @@ def test_authenticate_rejects_bad_input() -> None:
     assert not _config.path.exists()
 
 
-def test_get_tools_module_function() -> None:
-    """The module-level ``get_tools()`` returns a non-empty tool list."""
-    tools = a2a_mod.get_tools()
+def test_tools_module_function() -> None:
+    """The module-level ``tools()`` returns a non-empty tool list."""
+    tools = a2a_mod.tools()
     assert tools
     assert _AUTH_TRIO <= _tool_names(tools)
 
 
-def test_inbound_outbound_end_to_end() -> None:
+def test_inbound_outbound_end_to_end(refusing_port: int) -> None:
     """Full lifecycle over real HTTP: card, auth, send, poll, reply, get."""
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
@@ -267,7 +267,7 @@ def test_inbound_outbound_end_to_end() -> None:
         assert got["result"]["artifacts"][0]["parts"][0]["text"] == "pong"
 
         # Outbound tools never raise on unreachable peers.
-        dead = f"http://127.0.0.1:{_free_port()}"
+        dead = f"http://127.0.0.1:{refusing_port}"
         assert json.loads(peer.a2a_discover(dead))["ok"] is False
         assert json.loads(peer.a2a_call(dead, "hi"))["ok"] is False
         assert json.loads(peer.a2a_get_task(dead, "t1"))["ok"] is False

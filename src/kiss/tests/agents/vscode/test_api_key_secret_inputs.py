@@ -86,17 +86,36 @@ class TestEyeToggleWiringInMainJs(unittest.TestCase):
             "and attaches the eye toggle cloned from the remote-password "
             "toggle.",
         )
+        # The ids are derived from the FIRST_PARTY_KEY_IDS inventory of
+        # bare env-var names ("cfg-key-" + name), plus the custom-model
+        # key input, and the resulting list is piped into
+        # setupSecretInput.
         self.assertIn(
-            "].forEach(setupSecretInput)",
+            "FIRST_PARTY_KEY_IDS.map(k => 'cfg-key-' + k)",
+            js,
+            "setupEventListeners must derive the cfg-key-* input ids "
+            "from the FIRST_PARTY_KEY_IDS inventory.",
+        )
+        self.assertIn(
+            ".concat(['cfg-custom-api-key'])",
+            js,
+            "the custom-model API-key input must also get the secret "
+            "toggle.",
+        )
+        self.assertIn(
+            ".forEach(setupSecretInput)",
             js,
             "setupEventListeners must wire setupSecretInput over the "
             "API-key input ids.",
         )
         for input_id in API_KEY_INPUT_IDS:
+            bare = input_id.removeprefix("cfg-key-")
             self.assertIn(
-                f"'{input_id}'",
+                f"'{bare}'",
                 js,
-                f"{input_id} must be in the setupSecretInput wiring list.",
+                f"{bare} must be in the FIRST_PARTY_KEY_IDS inventory "
+                "(or wired directly) so its input gets the secret "
+                "toggle.",
             )
 
     def test_toggle_flips_between_password_and_text(self) -> None:

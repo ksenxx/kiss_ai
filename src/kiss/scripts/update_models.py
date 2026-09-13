@@ -20,7 +20,8 @@ user-local ``~/.kiss/MODEL_INFO.json``, which the installer seeds from the
 bundled catalog and which an installed KISS Sorcar reads at runtime (see
 ``kiss.core.models.model_info``); the settings panel's "Update Models"
 button runs this script against that copy.  When a non-default target is
-updated, the repo's ``README.md`` catalog totals are left untouched.  The
+updated, the repo's ``README.md`` catalog totals and per-provider model
+lists are left untouched.  The
 write is atomic (temp file + ``os.replace``) because ``model_info`` loads
 the catalog at import time, so a truncating rewrite would break every
 process that starts while the script is running.
@@ -1883,33 +1884,60 @@ def apply_updates_to_file(
     print(f"  Written to {MODEL_INFO_PATH}")
 
 
+# Runtime routing label (from model_info.get_model_provider) -> README
+# category label. The README spells some labels differently: "Together AI"
+# / "Moonshot AI" carry the vendor suffix, and the CLI categories keep the
+# backticked prefix so the table row can be matched verbatim by
+# tests/test_readme_zai_moonshot. There is deliberately no "Unknown" entry:
+# a catalog model that no provider routes must fail the sync loudly
+# (KeyError) instead of being silently miscounted.
+_PROVIDER_LABEL_TO_README_CATEGORY: dict[str, str] = {
+    "OpenAI": "OpenAI",
+    "Anthropic": "Anthropic",
+    "Gemini": "Gemini",
+    "Together": "Together AI",
+    "Z.AI": "Z.AI",
+    "Moonshot": "Moonshot AI",
+    "OpenRouter": "OpenRouter",
+    "Claude Code CLI": "Claude Code CLI (`cc/*`)",
+    "Codex CLI": "Codex CLI (`codex/*`)",
+}
+
+
 def _readme_provider_category(model_name: str) -> str:
     """Return the README provider-category label for ``model_name``.
 
-    Mirrors ``tests/test_readme_zai_moonshot._provider_category`` so that
-    counts emitted into ``README.md`` are guaranteed to agree with the
-    test's expectations after :func:`sync_readme_catalog` rewrites the
-    "Models Supported" section. The ``cc/*`` and ``codex/*`` labels keep
-    the backticks (and matching parentheses) so they can be matched
-    verbatim by the test's ``| Provider | count |`` regex.
+    Categories follow the provider that ROUTES the model, looked up from
+    the single runtime routing table
+    (:func:`kiss.core.models.model_info.get_model_provider`) rather than a
+    duplicated prefix list — so the open-weight ``openai/gpt-oss-*`` and
+    ``google/gemma-*`` models count under Together AI (they are served
+    with a ``TOGETHER_API_KEY``), and any future routing change is
+    reflected here automatically.
+
+    Raises:
+        KeyError: If no registered provider routes ``model_name``.
     """
-    if model_name.startswith("openrouter/"):
-        return "OpenRouter"
-    if model_name.startswith("cc/"):
-        return "Claude Code CLI (`cc/*`)"
-    if model_name.startswith("codex/"):
-        return "Codex CLI (`codex/*`)"
-    if model_name.startswith("claude-"):
-        return "Anthropic"
-    if model_name.startswith("glm-"):
-        return "Z.AI"
-    if model_name.startswith(("kimi-", "moonshot-")):
-        return "Moonshot AI"
-    if model_name.startswith(("gemini-", "google/")):
-        return "Gemini / Google"
-    if model_name.startswith(("gpt-", "o", "computer-use-preview", "text-embedding-")):
-        return "OpenAI"
-    return "Together AI"
+    from kiss.core.models.model_info import get_model_provider
+
+    return _PROVIDER_LABEL_TO_README_CATEGORY[get_model_provider(model_name)]
+
+
+# Every label _readme_provider_category can return, i.e. every per-provider
+# section of the README's "Full model list". sync_readme_catalog iterates
+# this fixed tuple (not just the categories present in the catalog) so a
+# category whose models were all removed is still synced to zero.
+_README_CATEGORIES: tuple[str, ...] = (
+    "OpenAI",
+    "Anthropic",
+    "Gemini",
+    "Together AI",
+    "Z.AI",
+    "Moonshot AI",
+    "OpenRouter",
+    "Claude Code CLI (`cc/*`)",
+    "Codex CLI (`codex/*`)",
+)
 
 
 def _summary_label(category: str) -> str:
@@ -1924,18 +1952,21 @@ def _summary_label(category: str) -> str:
 
 
 def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
-    """Rewrite the catalog totals in ``README.md`` to match MODEL_INFO.json.
+    """Rewrite the catalog section in ``README.md`` to match MODEL_INFO.json.
 
     Updates the catalog totals, capability counts, per-provider table
-    counts, and ``<summary>`` headers in place using targeted regex
-    substitutions, leaving the rest of the file untouched. Returns
-    ``True`` when the file was modified.
+    counts, and — for every per-provider ``<details>`` block — both the
+    ``<summary>`` count and the full sorted bullet list of model names, so
+    the README's "Full model list" can never drift from the catalog. All
+    edits are targeted regex substitutions that leave the rest of the file
+    untouched. Returns ``True`` when the file was modified.
     """
     data: dict[str, dict[str, Any]] = json.loads(model_info_path.read_text(encoding="utf-8"))
-    counts: dict[str, int] = {}
+    groups: dict[str, list[str]] = {}
     for name in data:
         category = _readme_provider_category(name)
-        counts[category] = counts.get(category, 0) + 1
+        groups.setdefault(category, []).append(name)
+    counts = {category: len(names) for category, names in groups.items()}
     total = sum(counts.values())
     cat_count = len(counts)
     generation = sum(1 for entry in data.values() if entry.get("gen"))
@@ -1971,12 +2002,32 @@ def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
         text,
     )
 
-    for category, count in counts.items():
+    # Iterate over every known category (not just those present in the
+    # catalog) so a category whose last model was removed still gets its
+    # table count and list emptied instead of drifting.
+    for category in _README_CATEGORIES:
+        names = groups.get(category, [])
+        count = len(names)
         table_pat = rf"(\| {re.escape(category)} \| )\d+( \|)"
         text = re.sub(table_pat, rf"\g<1>{count}\g<2>", text)
         summary = _summary_label(category)
-        details_pat = rf"(<summary><strong>{re.escape(summary)} \()\d+(\)</strong></summary>)"
-        text = re.sub(details_pat, rf"\g<1>{count}\g<2>", text)
+        # Rewrite the whole <details> body: the <summary> count and the
+        # full sorted bullet list of model names. The body is matched
+        # line-by-line up to the closing </details> (never crossing it),
+        # so empty, drifted, or malformed bodies are all regenerated.
+        block_pat = (
+            rf"<summary><strong>{re.escape(summary)} \(\d+\)</strong></summary>\n"
+            rf"(?:(?!</details>)[^\n]*\n)*</details>"
+        )
+        bullets = "".join(f"- `{name}`\n" for name in sorted(names))
+        body = f"\n{bullets}\n" if bullets else "\n"
+        block = f"<summary><strong>{summary} ({count})</strong></summary>\n{body}</details>"
+        text, block_hits = re.subn(block_pat, block.replace("\\", r"\\"), text)
+        if block_hits == 0:
+            # No <details> body found (e.g. trimmed README copies): still
+            # keep the <summary> count in sync.
+            details_pat = rf"(<summary><strong>{re.escape(summary)} \()\d+(\)</strong></summary>)"
+            text = re.sub(details_pat, rf"\g<1>{count}\g<2>", text)
 
     if text == original:
         return False
@@ -1990,7 +2041,8 @@ def _run_scrub_only(dry_run: bool = False) -> None:
     Reads ``MODEL_INFO.json`` directly (rather than going through
     ``get_current_model_info``) so the script can run without importing
     any provider backends, then writes the trimmed JSON and refreshes the
-    README's catalog totals. Used to apply provider-removal fixes (e.g.
+    README's catalog totals and per-provider model lists. Used to apply
+    provider-removal fixes (e.g.
     purging MiniMax) without requiring any vendor API keys.
     """
     print("=" * 60)
@@ -2010,7 +2062,7 @@ def _run_scrub_only(dry_run: bool = False) -> None:
     _write_model_info_json(MODEL_INFO_PATH, data)
     print(f"  Written to {MODEL_INFO_PATH}")
     if _writes_default_catalog():
-        print("\n[3/3] Syncing README catalog totals...")
+        print("\n[3/3] Syncing README catalog totals and model lists...")
         changed = sync_readme_catalog(README_PATH, MODEL_INFO_PATH)
         print(f"  README updated: {changed} ({README_PATH})")
     else:
@@ -2043,7 +2095,7 @@ def main() -> None:
         help=(
             "Offline mode: skip vendor API fetches, drop catalog entries "
             "belonging to permanently excluded providers, and resync "
-            "README.md catalog totals. Requires no API keys."
+            "README.md catalog totals and model lists. Requires no API keys."
         ),
     )
     parser.add_argument("--verbose", "-v", action="store_true")
@@ -2239,7 +2291,7 @@ def main() -> None:
     apply_updates_to_file(updates, new_models, deprecated, current, dry_run=args.dry_run)
 
     if not args.dry_run and _writes_default_catalog() and README_PATH.exists():
-        print("\n  Syncing README catalog totals...")
+        print("\n  Syncing README catalog totals and model lists...")
         changed = sync_readme_catalog(README_PATH, MODEL_INFO_PATH)
         print(f"  README updated: {changed} ({README_PATH})")
 

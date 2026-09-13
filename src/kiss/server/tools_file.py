@@ -9,11 +9,13 @@ tools as a *file path* to a Python module rather than as live callables
 — the client never serializes Python functions.  The client validates
 and resolves the path (:func:`resolve_tools_file`) and sends it on the
 ``run`` command's ``toolsFile`` field; the daemon imports the file and
-calls its required top-level ``get_tools()`` function, which returns
+calls its required top-level ``get_tools()`` function — or, when the
+module defines none, its ``tools()`` function (the agent-script
+spelling, so an SEA can double as its own tools file) — which returns
 the callables the agent may invoke (:func:`load_tools_file`).  The
 tools therefore execute in the daemon process, exactly like native
 agent tools.  A broken tools file (malformed field, missing file,
-import failure, missing or misbehaving ``get_tools()``) raises
+import failure, missing or misbehaving getter) raises
 :exc:`ToolsFileError` so the task stops with a diagnostic error
 instead of silently running without the requested tools.
 """
@@ -68,7 +70,8 @@ class ToolsFileError(Exception):
     Raised by :func:`load_tools_file` when the ``toolsFile`` wire field
     is malformed, names a missing or non-``.py`` path, names a file
     that raises at import time, or names a module whose ``get_tools()``
-    is missing, raises, or returns anything but callables.  The task
+    (or fallback ``tools()``) is missing, raises, or returns anything
+    but callables.  The task
     runner's generic task-error handling turns the raise into a failed
     task result whose text carries this exception's diagnostic message,
     so a broken tools file stops the task loudly instead of silently
@@ -156,11 +159,12 @@ def execute_python_file(
 
 
 def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
-    """Import a tools file and return the tools its ``get_tools()`` picks.
+    """Import a tools file and return the tools its getter picks.
 
     Daemon-side counterpart of :func:`resolve_tools_file`: imports the
     Python file named by a ``run`` command's ``toolsFile`` field and
-    calls the module's top-level ``get_tools()`` function, which must
+    calls the module's top-level ``get_tools()`` function — or its
+    ``tools()`` function when no ``get_tools`` is defined — which must
     return the callables the agent may invoke.  The file's author —
     not the daemon — decides which of the module's functions become
     tools, so no scanning or suitability filtering happens here.
@@ -171,10 +175,13 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
 
     A broken tools file stops the task: a malformed field value, a
     missing file, a module that fails to import, a missing or raising
-    ``get_tools()``, or a ``get_tools()`` return value that is not a
-    list/tuple of callables raises :exc:`ToolsFileError` with a
-    diagnostic message instead of silently running the task without
-    the requested tools.
+    getter, or a getter return value that is not a list/tuple of
+    callables raises :exc:`ToolsFileError` with a diagnostic message
+    instead of silently running the task without the requested tools.
+
+    An agent script (SEA) whose ``tools()`` returns the tool callables
+    doubles as its own tools file: when the module defines no
+    ``get_tools()``, its ``tools()`` is called instead.
 
     Args:
         raw_path: The ``toolsFile`` field of a ``run`` command —
@@ -182,14 +189,15 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
             :func:`resolve_tools_file`, but treated as untrusted.
 
     Returns:
-        The tool callables returned by the module's ``get_tools()``.
+        The tool callables returned by the module's ``get_tools()``
+        (or fallback ``tools()``).
 
     Raises:
         ToolsFileError: When *raw_path* is not a string, is not the
             path of an existing ``.py`` file, names a module that
             raises at import time, or names a module whose
-            ``get_tools()`` is missing, raises, or returns anything
-            but a list/tuple of callables.
+            ``get_tools()`` (or fallback ``tools()``) is missing,
+            raises, or returns anything but a list/tuple of callables.
     """
     # ``None``/empty mean "no extra tools"; isinstance is checked FIRST
     # (before the == comparison) because comparing an untrusted
@@ -199,26 +207,33 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
     if isinstance(raw_path, str) and raw_path == "":
         return []
     namespace = execute_python_file(raw_path, ToolsFileError, "tools file")
-    get_tools = namespace.get("get_tools")
+    # ``get_tools()`` is the tools-file contract; ``tools()`` is the
+    # agent-script (SEA) spelling, accepted so an SEA whose ``tools()``
+    # returns the tool callables can double as its own tools file.  A
+    # module defining both uses ``get_tools()``.
+    getter_name = "get_tools" if "get_tools" in namespace else "tools"
+    get_tools = namespace.get(getter_name)
     if not callable(get_tools):
         raise ToolsFileError(
             f"tools file {raw_path!r} must define a top-level "
-            f"get_tools() function returning the tool callables"
+            f"get_tools() (or tools()) function returning the tool "
+            f"callables"
         )
     try:
         returned = get_tools()
     except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
         logger.warning(
-            "get_tools() of toolsFile %r raised", raw_path, exc_info=True
+            "%s() of toolsFile %r raised", getter_name, raw_path,
+            exc_info=True,
         )
         raise ToolsFileError(
-            f"get_tools() of tools file {raw_path!r} raised: "
+            f"{getter_name}() of tools file {raw_path!r} raised: "
             f"{_safe_message(exc)}"
         ) from exc
     if not isinstance(returned, (list, tuple)):
         raise ToolsFileError(
-            f"get_tools() of tools file {raw_path!r} must return a list "
-            f"or tuple of callables, got {type(returned).__name__}"
+            f"{getter_name}() of tools file {raw_path!r} must return a "
+            f"list or tuple of callables, got {type(returned).__name__}"
         )
     # Validate inside a BaseException guard: the returned value is
     # untrusted module data, so even iterating it (a list subclass
@@ -230,20 +245,21 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
         for index, tool in enumerate(tools):
             if not callable(tool):
                 raise ToolsFileError(
-                    f"get_tools() of tools file {raw_path!r} returned a "
-                    f"non-callable entry at index {index} "
+                    f"{getter_name}() of tools file {raw_path!r} returned "
+                    f"a non-callable entry at index {index} "
                     f"(type {type(tool).__name__})"
                 )
     except ToolsFileError:
         raise
     except BaseException as exc:  # noqa: BLE001 — untrusted module data may raise anything
         logger.warning(
-            "Validating get_tools() result of toolsFile %r raised",
+            "Validating %s() result of toolsFile %r raised",
+            getter_name,
             raw_path,
             exc_info=True,
         )
         raise ToolsFileError(
-            f"get_tools() of tools file {raw_path!r} returned a broken "
-            f"value: {_safe_message(exc)}"
+            f"{getter_name}() of tools file {raw_path!r} returned a "
+            f"broken value: {_safe_message(exc)}"
         ) from exc
     return tools

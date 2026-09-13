@@ -691,6 +691,167 @@ _db_conn: sqlite3.Connection | None = None
 _thread_local = threading.local()
 _db_generation: int = 0
 
+#: Every connection :func:`_get_db` has opened in this process and not
+#: yet closed, keyed by ``id(conn)`` -> ``(conn, owning thread, db
+#: path)``.  ``sqlite3.Connection`` cannot be weakly referenced, so a
+#: connection whose owning thread died without ``_close_thread_db()``
+#: is closed and dropped by :func:`_prune_dead_thread_conns` instead of
+#: being pinned here forever.  Guarded by ``_init_tables_lock``.  Exists
+#: for one purpose: the orphaned-sidecar recovery in
+#: :func:`_recover_orphaned_sidecars` has to close ALL connections to a
+#: database — see :func:`_sidecars_orphaned`.
+_open_conns: dict[int, tuple[sqlite3.Connection, threading.Thread, str]] = {}
+
+#: Per database path: ``(db_file_id, shm_file_id)`` of the ``-shm``
+#: sidecar the connections in this process are mapped to.  An entry
+#: exists exactly while at least one registered connection to that
+#: path is open (SQLite deletes the sidecars on the last close, so the
+#: next connection records a fresh identity).  Guarded by
+#: ``_init_tables_lock`` for writes; read without the lock (a stale read
+#: only delays detection by one call).
+_attached_shm: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {}
+
+
+def _path_has_open_conns(path: str) -> bool:
+    """Return whether any registered connection to *path* is open."""
+    return any(p == path for _c, _o, p in _open_conns.values())
+
+
+def _drop_open_conn_locked(key: int) -> None:
+    """Forget registry entry *key*; drop the path's ``-shm`` identity if
+    it was the last connection to that path.  Caller holds the lock."""
+    entry = _open_conns.pop(key, None)
+    if entry is not None and not _path_has_open_conns(entry[2]):
+        _attached_shm.pop(entry[2], None)
+
+
+def _prune_dead_thread_conns() -> None:
+    """Close and forget connections whose owning thread has exited.
+
+    Caller holds ``_init_tables_lock``.  A thread that ended without
+    calling ``_close_thread_db()`` used to leave its connection to the
+    garbage collector; the registry pins it, so it is closed here.
+    """
+    for key, (conn, owner, _path) in list(_open_conns.items()):
+        if not owner.is_alive():
+            _drop_open_conn_locked(key)
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def _sidecars_orphaned(
+    current_path: str, current_id: tuple[int, int] | None,
+) -> bool:
+    """Return ``True`` when this process is mapped to a dead ``-shm``.
+
+    SQLite maps exactly ONE ``-shm`` per process per database inode —
+    shared by every connection in the process — but opens the ``-wal``
+    by *name* for each connection.  When something outside this process
+    unlinks ``sorcar.db-wal``/``sorcar.db-shm`` (the daemon was found
+    holding sixteen descriptors to ``sorcar.db-wal (deleted)``), the
+    connections that are already open keep working against a deleted
+    inode (so every frame they commit is lost on a hard kill), other
+    processes read a database missing those frames, and every NEW
+    connection in this process inherits the dead ``-shm`` mapping while
+    opening a fresh ``-wal`` — the two disagree and the connection fails
+    with ``sqlite3.OperationalError: disk I/O error``
+    (``SQLITE_IOERR_SHORT_READ``).  That is the "every new task fails
+    within 100 ms" failure.
+
+    The condition is detected by identity: the ``-shm`` on disk (missing,
+    or a different inode because another process already recreated it)
+    is not the one this process attached to.  A transient ``os.stat``
+    failure (:data:`_FILE_ID_UNKNOWN`) proves nothing and is ignored.
+
+    Args:
+        current_path: The active database path.
+        current_id: Identity of the database file itself (already
+            computed by the caller); the recorded ``-shm`` identity only
+            applies to connections opened against this same file.
+    """
+    attached = _attached_shm.get(current_path)
+    if attached is None:
+        return False
+    db_id, shm_id = attached
+    if db_id != current_id:
+        return False
+    on_disk = _db_file_identity(current_path + "-shm")
+    if on_disk is _FILE_ID_UNKNOWN or on_disk == shm_id:
+        return False
+    # The -shm differs.  Re-stat the database file AFTER the -shm so a
+    # concurrent deletion of the whole database (db, then -wal, then
+    # -shm — the redirect/delete pattern of the test fixtures) is not
+    # mistaken for an orphaned mapping: a deleted or replaced database
+    # is handled per thread by the identity check in ``_get_db``.
+    return _db_file_identity(current_path) == db_id
+
+
+def _recover_orphaned_sidecars(current_path: str) -> None:
+    """Drop the dead ``-shm`` mapping: checkpoint, close every connection.
+
+    Called by :func:`_get_db` when :func:`_sidecars_orphaned` is true or
+    when a brand-new connection failed with ``SQLITE_IOERR``.  While the
+    old mapping is still valid, the frames this process committed into
+    the deleted ``-wal`` are folded into the main file with a passive
+    checkpoint (so they survive), then EVERY open connection to
+    *current_path* in the process is interrupted and closed — SQLite
+    releases the shared ``-shm`` mapping only when the last connection
+    using it closes, so closing just the calling thread's connection
+    would leave every new connection failing.  The generation counter
+    is bumped so each other thread's next ``_get_db()`` reconnects (its
+    cached handle is already closed); a statement in flight on another
+    thread fails once with ``ProgrammingError`` instead of that thread
+    keeping the dead mapping alive for the life of the process.
+
+    Idempotent under ``_init_tables_lock``: a racing thread that finds
+    the mapping already dropped returns without doing anything.
+    """
+    global _db_conn, _db_generation
+    with _init_tables_lock:
+        if current_path not in _attached_shm:
+            return
+        _prune_dead_thread_conns()
+        doomed = [
+            (key, conn) for key, (conn, _owner, path) in _open_conns.items()
+            if path == current_path
+        ]
+        logger.error(
+            "%s-wal/-shm were deleted or replaced under this process while "
+            "%d connection(s) were open; checkpointing and reconnecting "
+            "every thread (new connections were failing with 'disk I/O "
+            "error' until now)",
+            current_path,
+            len(doomed),
+        )
+        for _key, conn in doomed:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                break
+            except sqlite3.Error:
+                continue
+        for key, conn in doomed:
+            try:
+                conn.interrupt()
+            except sqlite3.Error:
+                pass
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+            _drop_open_conn_locked(key)
+        _attached_shm.pop(current_path, None)
+        _db_conn = None
+        _db_generation += 1
+    _invalidate_chat_context_cache("")
+
+
+def _forget_open_conn(conn: sqlite3.Connection) -> None:
+    """Remove *conn* from :data:`_open_conns` (no-op if absent)."""
+    with _init_tables_lock:
+        _drop_open_conn_locked(id(conn))
+
 
 def _close_cached_thread_conn() -> sqlite3.Connection | None:
     """Close and forget the CALLING thread's cached connection.
@@ -707,6 +868,7 @@ def _close_cached_thread_conn() -> sqlite3.Connection | None:
     """
     tl_conn: sqlite3.Connection | None = getattr(_thread_local, "conn", None)
     if tl_conn is not None:
+        _forget_open_conn(tl_conn)
         try:
             tl_conn.close()
         except Exception:
@@ -1397,7 +1559,12 @@ def _get_db() -> sqlite3.Connection:
     * ``_DB_PATH`` changes (test redirects), or
     * the file at ``_DB_PATH`` is deleted or replaced on disk (its
       ``(st_dev, st_ino)`` identity no longer matches the one the
-      cached connection was opened against).
+      cached connection was opened against), or
+    * the ``-shm`` sidecar this process is mapped to was deleted or
+      replaced on disk (:func:`_sidecars_orphaned`) — then EVERY
+      connection in the process is closed first
+      (:func:`_recover_orphaned_sidecars`), because a new connection
+      cannot work while any old one keeps the dead mapping alive.
 
     The process-global ``_db_conn`` is deliberately NOT part of that
     validity test: it names whichever connection was created last by
@@ -1410,11 +1577,15 @@ def _get_db() -> sqlite3.Connection:
     tl_conn: sqlite3.Connection | None = getattr(tl, "conn", None)
     tl_gen: int = getattr(tl, "gen", -1)
     tl_path: str | None = getattr(tl, "path", None)
-    gen_snapshot = _db_generation
     current_path = str(_DB_PATH)
     current_id = _db_file_identity(current_path)
     if current_id is not _FILE_ID_UNKNOWN:
         _maybe_reset_caches(current_path, current_id)
+    if _sidecars_orphaned(current_path, current_id):
+        _recover_orphaned_sidecars(current_path)
+    # Read AFTER the recovery above: it bumps the generation, and this
+    # thread's cached handle (closed by it) must be seen as stale.
+    gen_snapshot = _db_generation
 
     if (
         tl_conn is not None
@@ -1441,12 +1612,56 @@ def _get_db() -> sqlite3.Connection:
         # later call would hand out as valid.
         tl.conn = None
         tl.file_id = None
+        _forget_open_conn(tl_conn)
         try:
             tl_conn.close()
         except Exception:
             pass
 
     _ensure_kiss_dir()
+    try:
+        conn = _open_db_connection(current_path)
+    except sqlite3.OperationalError as exc:
+        code = getattr(exc, "sqlite_errorcode", 0) or 0
+        if code & 0xFF != sqlite3.SQLITE_IOERR or current_path not in _attached_shm:
+            raise
+        # A fresh connection failing with SQLITE_IOERR while older ones
+        # are open is the dead -shm mapping (see ``_sidecars_orphaned``)
+        # caught before the identity check could see it — e.g. the
+        # sidecars were unlinked between the stat above and the open.
+        _recover_orphaned_sidecars(current_path)
+        # The recovery bumped the generation; snapshot again BEFORE the
+        # reopen (never after: a ``_close_db`` racing the open must
+        # still retire this connection on the next call).
+        gen_snapshot = _db_generation
+        conn = _open_db_connection(current_path)
+
+    tl.conn = conn
+    tl.gen = gen_snapshot
+    tl.path = current_path
+    tl.file_id = _db_file_identity(current_path)
+    _db_conn = conn
+    return conn
+
+
+def _open_db_connection(current_path: str) -> sqlite3.Connection:
+    """Open, configure and register one new connection to *current_path*.
+
+    Runs the WAL pragma (retried while another connection holds the
+    database busy), the schema migration and table initialisation under
+    ``_init_tables_lock``, then records the connection in
+    :data:`_open_conns` and — for the first connection to this database
+    file — the identity of the ``-shm`` sidecar the process is now
+    mapped to (:data:`_attached_shm`), which is what
+    :func:`_sidecars_orphaned` later compares against.
+
+    Args:
+        current_path: The database file to open.
+
+    Returns:
+        The configured connection.  On any failure the half-open
+        connection is closed before the exception propagates.
+    """
     # Deliberately NO manual cleanup of stale ``-wal``/``-shm``
     # sidecars here.  Application-level unlink of SQLite's sidecar
     # files is impossible to make safe: any check-then-unlink is racy
@@ -1463,34 +1678,58 @@ def _get_db() -> sqlite3.Connection:
         timeout=10,
         isolation_level=None,
     )
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.row_factory = sqlite3.Row
-    with _init_tables_lock:
-        wal_deadline = time.monotonic() + 30.0
-        while True:
-            try:
-                conn.execute("PRAGMA journal_mode=WAL")
-                break
-            except sqlite3.OperationalError as exc:
-                code = getattr(exc, "sqlite_errorcode", None)
-                busy = (
-                    code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-                    if code is not None
-                    else "locked" in str(exc).lower()
-                    or "busy" in str(exc).lower()
-                )
-                if not busy or time.monotonic() >= wal_deadline:
-                    raise
-                time.sleep(0.05)
-        _migrate_old_schema_if_needed(conn)
-        _init_tables(conn)
-
-    tl.conn = conn
-    tl.gen = gen_snapshot
-    tl.path = current_path
-    tl.file_id = _db_file_identity(current_path)
-    _db_conn = conn
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
+        with _init_tables_lock:
+            wal_deadline = time.monotonic() + 30.0
+            while True:
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    code = getattr(exc, "sqlite_errorcode", None)
+                    busy = (
+                        code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                        if code is not None
+                        else "locked" in str(exc).lower()
+                        or "busy" in str(exc).lower()
+                    )
+                    if not busy or time.monotonic() >= wal_deadline:
+                        raise
+                    time.sleep(0.05)
+            _migrate_old_schema_if_needed(conn)
+            _init_tables(conn)
+            # The first live connection is the one that created (or
+            # re-created) the process's -shm mapping; a later one only
+            # joins it.  Re-record for the first so an identity left
+            # over from a fully closed earlier generation (SQLite
+            # deletes the sidecars on the last close) is not compared
+            # against the new mapping.
+            _prune_dead_thread_conns()
+            first_live = not _path_has_open_conns(current_path)
+            _open_conns[id(conn)] = (
+                conn, threading.current_thread(), current_path,
+            )
+            db_id = _db_file_identity(current_path)
+            shm_id = _db_file_identity(current_path + "-shm")
+            attached = _attached_shm.get(current_path)
+            if (
+                db_id is not None
+                and db_id is not _FILE_ID_UNKNOWN
+                and shm_id is not None
+                and shm_id is not _FILE_ID_UNKNOWN
+                and (first_live or attached is None or attached[0] != db_id)
+            ):
+                _attached_shm[current_path] = (db_id, shm_id)
+    except BaseException:
+        _forget_open_conn(conn)
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+        raise
     return conn
 
 
@@ -1958,7 +2197,12 @@ def _recover_orphaned_tasks(
     for any row that still carries the sentinel AND whose id is not
     in *active_task_ids* (the currently-running tasks in THIS
     process), and rewrite ``result`` to a diagnostic message that
-    truthfully describes what happened.  The still-zero progress
+    truthfully describes what happened.  A sentinel row whose final
+    result survives in the plain-file sidecar journal (see
+    :func:`_journal_final_result`) actually FINISHED — its committed
+    result was lost by the database afterwards (WAL discarded after a
+    ``disk I/O error``) — so the journalled result is restored instead
+    of the "process killed" message.  The still-zero progress
     columns of each rewritten row are then backfilled from the task's
     surviving events (see :func:`_backfill_orphan_progress`) so the
     history sidebar shows the real last-known step/token/cost state
@@ -2010,35 +2254,63 @@ def _recover_orphaned_tasks(
     if created_before is not None:
         select_sql += "AND timestamp < ? "
         params.append(float(created_before))
+    sidecar = _final_results_path(str(_DB_PATH))
+    journalled = _load_final_results(sidecar)
     with _rw_lock.write_lock(), _immediate_txn(db):
         candidates = db.execute(select_sql, params).fetchall()
-        dead_rowids = [
-            int(row["rid"])
+        dead_rows = [
+            (int(row["rid"]), str(row["id"] or ""))
             for row in candidates
             if str(row["id"] or "") not in active_ids
             and not _owner_is_alive(row["owner"] or "")
         ]
-        _log_orphaned_task_forensics(db, dead_rowids)
+        # A dead row whose final result survives in the sidecar journal
+        # was NOT killed mid-task: its result was saved to the database
+        # but the committed pages were later lost (e.g. the 2026-09-12
+        # WAL loss after a ``disk I/O error``).  Restore the journalled
+        # result instead of mislabeling the task as "process killed".
+        restored_rowids = [
+            rid for rid, tid in dead_rows if tid in journalled
+        ]
+        killed_rowids = [
+            rid for rid, tid in dead_rows if tid not in journalled
+        ]
+        _log_orphaned_task_forensics(db, killed_rowids)
         rowcount = 0
-        if dead_rowids:
-            placeholders = ",".join(["?"] * len(dead_rowids))
+        for rid, tid in dead_rows:
+            if tid not in journalled:
+                continue
+            cursor = db.execute(
+                "UPDATE task_history SET result = ? "
+                "WHERE rowid = ? AND result = ?",
+                [journalled[tid], rid, "Agent Failed Abruptly"],
+            )
+            rowcount += cursor.rowcount or 0
+            logger.warning(
+                "Task result lost by the database was restored from "
+                "the final-results journal: id=%s", tid,
+            )
+        if killed_rowids:
+            placeholders = ",".join(["?"] * len(killed_rowids))
             cursor = db.execute(
                 "UPDATE task_history SET result = ? "
                 f"WHERE rowid IN ({placeholders}) AND result = ?",
                 [
                     "Task terminated unexpectedly (process killed)",
-                    *dead_rowids,
+                    *killed_rowids,
                     "Agent Failed Abruptly",
                 ],
             )
-            rowcount = cursor.rowcount or 0
-            _backfill_orphan_progress(db, dead_rowids)
+            rowcount += cursor.rowcount or 0
+        if restored_rowids or killed_rowids:
+            _backfill_orphan_progress(db, restored_rowids + killed_rowids)
     if rowcount:
         logger.warning(
             "Recovered %d orphaned task(s) from prior process kill",
             rowcount,
         )
         _invalidate_chat_context_cache("")
+    _prune_final_results_journal(sidecar)
     return rowcount
 
 
@@ -2172,6 +2444,12 @@ def _save_task_result(
 ) -> None:
     """Save just the result summary for a task (no event table changes).
 
+    The result is additionally journalled to a plain-file sidecar
+    (see :func:`_journal_final_result`) so the startup orphan sweep
+    can restore it if the database write is later lost to an I/O
+    failure — the sweep would otherwise mislabel the finished task as
+    "process killed".
+
     Args:
         result: The task result text to store in the history entry.
         task_id: Stable row id to update when available.
@@ -2180,6 +2458,8 @@ def _save_task_result(
     affected_chat_id = _update_task_column("result", result, task_id, task)
     if affected_chat_id is None:
         return
+    if is_task_history_id(task_id):
+        _journal_final_result(str(task_id), result)
     _invalidate_chat_context_cache(affected_chat_id)
 
 
@@ -2421,6 +2701,152 @@ def _persist_batch_with_retry(batch: list[tuple[str, str, float, str]]) -> None:
 def _failed_events_path(db_path: str) -> str:
     """Return the journal path holding unwritable events for *db_path*."""
     return db_path + ".failed_events.jsonl"
+
+
+def _final_results_path(db_path: str) -> str:
+    """Return the sidecar path journalling final task results for *db_path*."""
+    return db_path + ".final_results.jsonl"
+
+
+#: Journalled final results older than this are pruned at sweep time.
+#: By then the row either kept its committed result (the journal entry
+#: was never needed) or an earlier sweep already restored it.
+_FINAL_RESULTS_MAX_AGE_S = 30 * 24 * 3600.0
+
+
+def _journal_final_result(task_id: str, result: str) -> None:
+    """Best-effort append of a task's final result to a sidecar file.
+
+    SQLite alone is not a sufficient store for the terminal ``result``
+    of a task: in the 2026-09-12 incident the database entered a
+    ``disk I/O error`` state, every WAL frame committed during the
+    final minutes of a task was silently discarded when the next
+    process opened the file, and the startup sweep
+    (:func:`_recover_orphaned_tasks`) — seeing the creation sentinel
+    where the successful result used to be — mislabeled the finished
+    task as "process killed".
+
+    The remedy is a plain append-only JSON-lines sidecar next to the
+    database: a medium that does not share SQLite's failure modes.  The
+    sweep consults it before declaring a sentinel row killed and
+    restores the journalled result instead (see
+    :func:`_load_final_results`).
+
+    The append is serialised against concurrent appends and the
+    sweep-time prune in other processes by
+    :func:`_journal_file_lock`.  Failures are logged and swallowed:
+    the journal is a safety net, and the primary database write has
+    already succeeded when this runs.
+
+    Args:
+        task_id: History row id whose result was just saved.
+        result: The result text that was written to the database.
+    """
+    sidecar = _final_results_path(str(_DB_PATH))
+    line = json.dumps(
+        {"task_id": task_id, "result": result, "ts": time.time()}
+    )
+    with _journal_lock:
+        try:
+            with _journal_file_lock(sidecar):
+                # A process killed mid-append can leave a torn last
+                # record with no trailing newline; appending directly
+                # onto that fragment would fuse THIS record into one
+                # malformed line and lose it too.  Terminate any torn
+                # tail first so only the torn record is discarded.
+                prefix = ""
+                if os.path.exists(sidecar) and os.path.getsize(sidecar):
+                    with open(sidecar, "rb") as tail:
+                        tail.seek(-1, os.SEEK_END)
+                        if tail.read(1) != b"\n":
+                            prefix = "\n"
+                with open(sidecar, "a", encoding="utf-8") as stream:
+                    stream.write(prefix + line + "\n")
+        except OSError:
+            logger.warning(
+                "final result for task %s could not be journalled in %s",
+                task_id, sidecar, exc_info=True,
+            )
+
+
+def _load_final_results(sidecar: str) -> dict[str, str]:
+    """Load the journalled final results from *sidecar*, last write wins.
+
+    Args:
+        sidecar: Path returned by :func:`_final_results_path`.
+
+    Returns:
+        Mapping of task id to its most recently journalled result.
+        Missing or unreadable files and corrupt lines (a torn write
+        from a killed process) yield/skip to an empty or partial map.
+    """
+    results: dict[str, str] = {}
+    try:
+        with open(sidecar, encoding="utf-8") as stream:
+            for raw in stream:
+                try:
+                    entry = json.loads(raw)
+                    task_id = entry["task_id"]
+                    result = entry["result"]
+                except (ValueError, TypeError, KeyError):
+                    continue
+                if isinstance(task_id, str) and isinstance(result, str):
+                    results[task_id] = result
+    except OSError:
+        return results
+    return results
+
+
+def _prune_final_results_journal(sidecar: str) -> None:
+    """Drop journal entries older than :data:`_FINAL_RESULTS_MAX_AGE_S`.
+
+    Called after each orphan sweep so the sidecar stays a bounded
+    incident log (one small line per finished task) instead of growing
+    forever.  The rewrite happens under :func:`_journal_file_lock` and
+    lands via an atomic rename, so a concurrent append in another
+    process is either retained or ordered after the prune — never
+    torn.  That guarantee needs the inter-process flock, so on
+    platforms without ``fcntl`` (Windows) the prune is skipped
+    entirely: a rename replacing the journal with a pre-append
+    snapshot would silently drop the record a peer just appended,
+    and an unbounded-but-intact journal is the lesser harm.  All
+    failures are logged and swallowed.
+
+    Args:
+        sidecar: Path returned by :func:`_final_results_path`.
+    """
+    if _fcntl is None:  # pragma: no cover — Windows has no flock
+        return
+    cutoff = time.time() - _FINAL_RESULTS_MAX_AGE_S
+    with _journal_lock:
+        try:
+            with _journal_file_lock(sidecar):
+                if not os.path.exists(sidecar):
+                    return
+                kept: list[str] = []
+                pruned = False
+                with open(sidecar, encoding="utf-8") as stream:
+                    for raw in stream:
+                        try:
+                            entry_ts = float(json.loads(raw)["ts"])
+                        except (ValueError, TypeError, KeyError):
+                            pruned = True
+                            continue
+                        if entry_ts >= cutoff:
+                            kept.append(raw)
+                        else:
+                            pruned = True
+                if not pruned:
+                    return
+                tmp_path = sidecar + ".pruning"
+                with open(tmp_path, "w", encoding="utf-8") as stream:
+                    stream.writelines(kept)
+                os.replace(tmp_path, sidecar)
+        except OSError:
+            logger.warning(
+                "final-results journal %s could not be pruned",
+                sidecar, exc_info=True,
+            )
 
 
 #: Suffix of a journal file a replayer has taken ownership of.  The

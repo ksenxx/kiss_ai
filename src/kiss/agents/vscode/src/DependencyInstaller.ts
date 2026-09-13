@@ -15,6 +15,7 @@ import {
   probeDaemonHealth,
   daemonHasActiveTasks,
   decideRestart,
+  sleep,
 } from './daemonHealth';
 import {verifyDaemonStartup} from './daemonRestartVerify';
 import {restartLaunchAgent} from './macLaunchd';
@@ -32,6 +33,16 @@ const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '';
 // sockets, config.json, markers, logs — must live under the same root.
 const LOG_DIR = kissHomeDir();
 const LOG_FILE = path.join(LOG_DIR, 'install.log');
+
+// Synchronous probes run on the extension-host event loop, so they must
+// never wait on a hung child (e.g. a PATH entry on a stalled mount).
+const SYNC_PROBE_TIMEOUT_MS = 5_000;
+
+// Ceiling for one install step (`uv sync`, Playwright downloads).  Even
+// a slow first-time install finishes well inside it; without a ceiling
+// a stalled child left setup and its progress toast pending for ever.
+const INSTALL_STEP_TIMEOUT_MS = 30 * 60_000;
+
 const MIN_PYTHON_MAJOR = 3;
 const MIN_PYTHON_MINOR = 13;
 const UV_VERSION = '0.11.2';
@@ -178,31 +189,44 @@ export async function fetchUvStyleSha256(
   return m ? m[1] : null;
 }
 
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
 function spawnCollect(
   cmd: string,
   args: string[],
-  opts: {cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number},
+  opts: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+    /**
+     * Run the child in its own process group (POSIX) so that on timeout
+     * the whole tree -- e.g. `uv sync` and the build backends it spawned
+     * -- is killed, not just the direct child.
+     */
+    killGroup?: boolean;
+  },
 ): Promise<{code: number | null; stdout: string; stderr: string}> {
   return new Promise((resolve, reject) => {
+    const ownGroup = !!opts.killGroup && process.platform !== 'win32';
     const proc = spawn(cmd, args, {
       cwd: opts.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: opts.env,
+      detached: ownGroup,
     });
     let stdout = '';
     let stderr = '';
     const timer = opts.timeoutMs
       ? setTimeout(() => {
+          if (ownGroup && proc.pid) {
+            try {
+              process.kill(-proc.pid, 'SIGKILL');
+            } catch {}
+          }
           proc.kill('SIGKILL');
-          reject(
-            new Error(
-              `${cmd} ${args.join(' ')} timed out after ${opts.timeoutMs}ms`,
-            ),
+          const err: NodeJS.ErrnoException = new Error(
+            `${cmd} ${args.join(' ')} timed out after ${opts.timeoutMs}ms`,
           );
+          err.code = 'ETIMEDOUT';
+          reject(err);
         }, opts.timeoutMs)
       : undefined;
     proc.stdout?.on('data', (d: Buffer) => {
@@ -273,47 +297,98 @@ function windowsZipInstall(
   );
 }
 
-export function getFallbackDefaultModel(): string {
+/** The default model implied by the API keys in the environment, if any. */
+function envDefaultModel(): string | null {
   const env = process.env;
   if (env.ANTHROPIC_API_KEY) return 'claude-opus-4-7';
   if (env.OPENAI_API_KEY) return 'gpt-5.6-luna';
   if (env.GEMINI_API_KEY) return 'gemini-3.6-flash';
   if (env.OPENROUTER_API_KEY) return 'openrouter/anthropic/claude-opus-4.7';
   if (env.TOGETHER_API_KEY) return 'moonshotai/Kimi-K3';
-  const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+  return null;
+}
+
+async function commandExistsAsync(cmd: string): Promise<boolean> {
   try {
-    execFileSync(whichCmd, ['claude'], {stdio: 'ignore', timeout: 2_000});
-    return 'cc/opus';
-  } catch {}
-  try {
-    execFileSync(whichCmd, ['codex'], {stdio: 'ignore', timeout: 2_000});
-    return 'codex/default';
-  } catch {}
+    const r = await spawnCollect(
+      process.platform === 'win32' ? 'where' : 'which',
+      [cmd],
+      {timeoutMs: 2_000},
+    );
+    return r.code === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Default model when KISS's own catalog cannot be consulted: the
+ * environment's API keys, then an installed Claude Code / Codex CLI.
+ */
+export async function getFallbackDefaultModel(): Promise<string> {
+  const fromEnv = envDefaultModel();
+  if (fromEnv) return fromEnv;
+  if (await commandExistsAsync('claude')) return 'cc/opus';
+  if (await commandExistsAsync('codex')) return 'codex/default';
   return 'No model';
 }
 
-export function getDefaultModel(): string {
+let lastResolvedDefaultModel: string | null = null;
+let defaultModelInFlight: Promise<string> | null = null;
+
+/**
+ * A default model available synchronously WITHOUT spawning anything:
+ * the most recent `resolveDefaultModel()` result, else the model implied
+ * by the environment's API keys, else "No model".  Callers on the
+ * extension-host event loop (view constructors, activation) start from
+ * this and adopt `resolveDefaultModel()`'s answer when it arrives.
+ */
+export function provisionalDefaultModel(): string {
+  return lastResolvedDefaultModel ?? envDefaultModel() ?? 'No model';
+}
+
+/**
+ * Resolve the default model asynchronously: KISS's `get_default_model()`
+ * via `uv run` (15s deadline), falling back to
+ * `getFallbackDefaultModel()`.  Concurrent callers share one lookup.
+ */
+export function resolveDefaultModel(): Promise<string> {
+  if (!defaultModelInFlight) {
+    defaultModelInFlight = resolveDefaultModelImpl()
+      .then(model => {
+        lastResolvedDefaultModel = model;
+        return model;
+      })
+      .finally(() => {
+        defaultModelInFlight = null;
+      });
+  }
+  return defaultModelInFlight;
+}
+
+async function resolveDefaultModelImpl(): Promise<string> {
   const uvPath = findUvPath();
   const kissProject = findKissProject();
-  if (!uvPath || !kissProject) return getFallbackDefaultModel();
-  try {
-    const out = execFileSync(
-      uvPath,
-      [
-        'run',
-        '--directory',
-        kissProject,
-        'python',
-        '-c',
-        'from kiss.core.models.model_info import get_default_model; ' +
-          'print(get_default_model())',
-      ],
-      {encoding: 'utf-8', timeout: 15_000, stdio: ['ignore', 'pipe', 'ignore']},
-    ).trim();
-    return out || getFallbackDefaultModel();
-  } catch {
-    return getFallbackDefaultModel();
+  if (uvPath && kissProject) {
+    try {
+      const out = await spawnPromise(
+        uvPath,
+        [
+          'run',
+          '--directory',
+          kissProject,
+          'python',
+          '-c',
+          'from kiss.core.models.model_info import get_default_model; ' +
+            'print(get_default_model())',
+        ],
+        undefined,
+        15_000,
+      );
+      if (out) return out;
+    } catch {}
   }
+  return getFallbackDefaultModel();
 }
 
 async function runFinalization(
@@ -427,7 +502,7 @@ async function ensureDependenciesImpl(): Promise<void> {
   }
 
   if (uvPath && venvExists) {
-    const pyStatus = checkPythonVersion(uvPath, kissProjectPath);
+    const pyStatus = await checkPythonVersion(uvPath, kissProjectPath);
     if (pyStatus === 'too_old') {
       log('Python version too old — removing .venv for recreation');
       try {
@@ -480,7 +555,7 @@ async function ensureDependenciesImpl(): Promise<void> {
           );
         }
       });
-    if (!gitWorks()) {
+    if (!(await gitWorks())) {
       void installGit().then(installed => {
         if (!installed) {
           showWarningNotification(
@@ -526,7 +601,7 @@ async function ensureDependenciesImpl(): Promise<void> {
           progress.report({increment: 20});
         }
 
-        if (!gitWorks()) {
+        if (!(await gitWorks())) {
           progress.report({message: 'Installing git...'});
           const gitInstalled = await installGit();
           if (!gitInstalled) {
@@ -553,7 +628,7 @@ async function ensureDependenciesImpl(): Promise<void> {
           progress.report({increment: 50});
         }
 
-        if (checkPythonVersion(uvPath, kissProjectPath) !== 'ok') {
+        if ((await checkPythonVersion(uvPath, kissProjectPath)) !== 'ok') {
           showErrorNotification(
             `KISS Sorcar requires Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+. ` +
               `Please install Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} or later and restart VS Code.`,
@@ -608,16 +683,20 @@ async function ensureDependenciesImpl(): Promise<void> {
   }
 }
 
-export function pidsOnPort(port: number): string[] {
+/**
+ * PIDs listening on TCP *port*, via `lsof`; empty when none or when
+ * `lsof` fails.  Asynchronous: a slow `lsof` must not freeze the
+ * extension host for its 3s deadline on every poll.
+ */
+export async function pidsOnPort(port: number): Promise<string[]> {
   try {
-    return execFileSync('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'], {
-      encoding: 'utf-8',
-      timeout: 3000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-      .trim()
-      .split('\n')
-      .filter(Boolean);
+    const r = await spawnCollect(
+      'lsof',
+      ['-ti', `tcp:${port}`, '-sTCP:LISTEN'],
+      {timeoutMs: 3000},
+    );
+    if (r.code !== 0) return [];
+    return r.stdout.trim().split('\n').filter(Boolean);
   } catch {
     return [];
   }
@@ -631,15 +710,33 @@ function killPids(pids: string[], signal: NodeJS.Signals): void {
   }
 }
 
-function killProcessOnPort(port: number): void {
-  const pids = pidsOnPort(port);
+/**
+ * SIGTERM whatever listens on *port* and wait (asynchronously) for it to
+ * go away, escalating to SIGKILL after 3s.
+ *
+ * The wait between polls must not block: this runs on the extension
+ * host's event loop, and a synchronous 3s sleep froze every other
+ * extension, the daemon client's socket and the webview for the whole
+ * of the old daemon's shutdown.
+ */
+async function killProcessOnPort(port: number): Promise<void> {
+  const pids = await pidsOnPort(port);
   if (pids.length === 0) return;
   killPids(pids, 'SIGTERM');
   for (let i = 0; i < 6; i++) {
-    if (pidsOnPort(port).length === 0) return;
-    sleepSync(500);
+    if ((await pidsOnPort(port)).length === 0) return;
+    await sleep(500);
   }
-  killPids(pidsOnPort(port), 'SIGKILL');
+  killPids(await pidsOnPort(port), 'SIGKILL');
+}
+
+async function systemctlRestartKissWeb(): Promise<void> {
+  await spawnPromise(
+    'systemctl',
+    ['--user', 'restart', '--no-block', 'kiss-web'],
+    undefined,
+    10000,
+  );
 }
 
 function spawnKissWebDirect(kissWebBin: string, workDir: string): void {
@@ -918,7 +1015,7 @@ async function restartKissWebDaemonLocked(
       `${activeTasks.ok ? activeTasks.count : 'unknown(' + activeTasks.reason + ')'}`,
   );
 
-  killProcessOnPort(8787);
+  await killProcessOnPort(8787);
 
   let reissueRestart: (() => void | Promise<void>) | null = null;
 
@@ -983,7 +1080,7 @@ async function restartKissWebDaemonLocked(
 
       fs.writeFileSync(plistFile, plistContent);
 
-      const uid = execFileSync('id', ['-u'], {encoding: 'utf-8'}).trim();
+      const uid = await spawnPromise('id', ['-u'], undefined, 5_000);
       reissueRestart = async () => {
         const res = await restartLaunchAgent({
           serviceTarget: `gui/${uid}/${plistLabel}`,
@@ -1045,38 +1142,37 @@ StandardError=append:${uLogDir}/kiss-web-stderr.log
 WantedBy=default.target
 `;
       fs.writeFileSync(serviceFile, serviceContent);
-      execSync('systemctl --user daemon-reload', {
-        stdio: 'ignore',
-        timeout: 10000,
-      });
+      await spawnPromise(
+        'systemctl',
+        ['--user', 'daemon-reload'],
+        undefined,
+        10000,
+      );
       // --no-block queues the restart job and returns immediately.  A
       // blocking restart waits for the old daemon to finish shutting
       // down, which can take longer than the 10s timeout (tunnel
       // cleanup; the daemon's SIGTERM failsafe allows 30s).  The
-      // ETIMEDOUT that execSync then threw was misread as "systemd
-      // failed" and triggered the direct-spawn fallback below — while
-      // systemd's restart job was still in flight — leaving TWO
-      // daemons racing for port 8787 and systemd crash-looping every
-      // RestartSec against the rogue's listener.
-      execSync('systemctl --user restart --no-block kiss-web', {
-        stdio: 'ignore',
-        timeout: 10000,
-      });
+      // ETIMEDOUT that the restart call then threw was misread as
+      // "systemd failed" and triggered the direct-spawn fallback below
+      // — while systemd's restart job was still in flight — leaving
+      // TWO daemons racing for port 8787 and systemd crash-looping
+      // every RestartSec against the rogue's listener.
+      //
+      // All of these are awaited rather than run synchronously: a slow
+      // systemd DBus round-trip must not freeze the extension host.
+      await systemctlRestartKissWeb();
       const username = os.userInfo().username;
       try {
-        execFileSync('loginctl', ['enable-linger', username], {
-          stdio: 'ignore',
-          timeout: 5000,
-        });
+        await spawnPromise(
+          'loginctl',
+          ['enable-linger', username],
+          undefined,
+          5000,
+        );
       } catch {}
       log(`kiss-web systemd user service restarted: ${serviceFile}`);
       systemdOk = true;
-      reissueRestart = () => {
-        execSync('systemctl --user restart --no-block kiss-web', {
-          stdio: 'ignore',
-          timeout: 10000,
-        });
-      };
+      reissueRestart = systemctlRestartKissWeb;
     } catch (err) {
       log(
         'Failed to restart kiss-web daemon via systemd (Linux): ' +
@@ -1292,7 +1388,10 @@ export function installCliScript(
       // `where` on Windows emits CRLF line endings and may print several
       // matches; splitting on '\n' alone left a trailing '\r' on the first
       // line, which then got baked into the generated sorcar.cmd.
-      absUvPath = execSync(whichCmd, {encoding: 'utf-8'})
+      absUvPath = execSync(whichCmd, {
+        encoding: 'utf-8',
+        timeout: SYNC_PROBE_TIMEOUT_MS,
+      })
         .trim()
         .split(/\r?\n/)[0]
         .trim();
@@ -1416,16 +1515,17 @@ async function installUv(): Promise<string | null> {
   }
 }
 
-function checkPythonVersion(
+async function checkPythonVersion(
   uvPath: string,
   cwd: string,
-): 'ok' | 'too_old' | 'error' {
+): Promise<'ok' | 'too_old' | 'error'> {
   try {
-    const output = execFileSync(uvPath, ['run', 'python', '--version'], {
+    const output = await spawnPromise(
+      uvPath,
+      ['run', 'python', '--version'],
       cwd,
-      encoding: 'utf-8',
-      timeout: 30_000,
-    }).trim();
+      30_000,
+    );
     const match = output.match(/Python\s+(\d+)\.(\d+)/);
     if (!match) return 'error';
     const major = parseInt(match[1], 10);
@@ -1483,6 +1583,7 @@ function commandExists(cmd: string): boolean {
   try {
     execFileSync(process.platform === 'win32' ? 'where' : 'which', [cmd], {
       stdio: 'ignore',
+      timeout: SYNC_PROBE_TIMEOUT_MS,
     });
     return true;
   } catch {
@@ -1490,14 +1591,10 @@ function commandExists(cmd: string): boolean {
   }
 }
 
-function gitWorks(): boolean {
+async function gitWorks(): Promise<boolean> {
   try {
-    const output = execSync('git --version', {
-      encoding: 'utf-8',
-      timeout: 10_000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    return output.includes('git version');
+    const r = await spawnCollect('git', ['--version'], {timeoutMs: 10_000});
+    return r.code === 0 && r.stdout.includes('git version');
   } catch {
     return false;
   }
@@ -1522,7 +1619,7 @@ async function installGit(): Promise<boolean> {
       log('Installing git via Homebrew...');
       try {
         await execPromise('brew install git');
-        if (gitWorks()) {
+        if (await gitWorks()) {
           log('Git installed via Homebrew');
           return true;
         }
@@ -1534,7 +1631,10 @@ async function installGit(): Promise<boolean> {
     }
 
     try {
-      execSync('xcode-select -p', {stdio: 'ignore'});
+      execSync('xcode-select -p', {
+        stdio: 'ignore',
+        timeout: SYNC_PROBE_TIMEOUT_MS,
+      });
       log('Xcode CLT present but git not working');
       return false;
     } catch {}
@@ -1546,7 +1646,7 @@ async function installGit(): Promise<boolean> {
 
     for (let i = 0; i < 120; i++) {
       await new Promise(resolve => setTimeout(resolve, 5_000));
-      if (gitWorks()) {
+      if (await gitWorks()) {
         log('Git installed via Xcode Command Line Tools');
         return true;
       }
@@ -1568,7 +1668,7 @@ async function installGit(): Promise<boolean> {
         log(`Installing git via ${bin}...`);
         try {
           await execPromise(cmd);
-          if (gitWorks()) {
+          if (await gitWorks()) {
             log(`Git installed via ${bin}`);
             return true;
           }
@@ -1738,10 +1838,18 @@ async function runAsync(
     r = await spawnCollect(cmd, args, {
       cwd,
       env: {...process.env, PYTHONUNBUFFERED: '1'},
-      timeoutMs: 0,
+      timeoutMs: INSTALL_STEP_TIMEOUT_MS,
+      killGroup: true,
     });
   } catch (err) {
     log(`Spawn error [${cmdLine}]: ${(err as Error).message}`);
+    if ((err as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+      throw new Error(
+        `${cmdLine} did not finish within ` +
+          `${INSTALL_STEP_TIMEOUT_MS / 60_000} minutes and was killed; ` +
+          'reload the window to retry',
+      );
+    }
     throw err;
   }
   const output = r.stdout + r.stderr;
@@ -2158,7 +2266,7 @@ function readKissConfigOnce():
   return {ok: false, reason: 'shape'};
 }
 
-function readKissConfig(): Record<string, unknown> {
+async function readKissConfig(): Promise<Record<string, unknown>> {
   const configPath = path.join(LOG_DIR, 'config.json');
   const RETRIES = 5;
   const BACKOFF_MS = 100;
@@ -2173,7 +2281,9 @@ function readKissConfig(): Record<string, unknown> {
       return {};
     }
     if (attempt < RETRIES - 1) {
-      sleepSync(BACKOFF_MS);
+      // The file is being rewritten by the daemon; back off without
+      // blocking the extension host's event loop.
+      await sleep(BACKOFF_MS);
     }
   }
   if (last.reason === 'empty') {
@@ -2271,8 +2381,8 @@ export function saveKissConfig(
   // audit0902-coverage:end
 }
 
-function getStoredRemotePassword(): string {
-  const cfg = readKissConfig();
+async function getStoredRemotePassword(): Promise<string> {
+  const cfg = await readKissConfig();
   const existing = cfg['remote_password'];
   if (typeof existing === 'string' && existing.length > 0) {
     return existing;
@@ -2493,7 +2603,7 @@ export async function ensureRemotePassword(
   pollMs: number = REMOTE_PASSWORD_POLL_MS,
 ): Promise<void> {
   // audit0903-coverage:start
-  if (getStoredRemotePassword()) {
+  if (await getStoredRemotePassword()) {
     log('ensureRemotePassword: password already set — skipping prompt');
     return;
   }
@@ -2503,7 +2613,7 @@ export async function ensureRemotePassword(
   );
   await new Promise(resolve => setTimeout(resolve, 2000));
 
-  if (getStoredRemotePassword()) {
+  if (await getStoredRemotePassword()) {
     log('ensureRemotePassword: password found on retry — skipping prompt');
     return;
   }
@@ -2567,7 +2677,7 @@ async function ensureRemotePasswordLocked(
   // audit0903-coverage:start
   // Re-check under the lock: a previous holder (or a takeover) may have
   // saved a password between our pre-lock read and the lock creation.
-  if (getStoredRemotePassword()) {
+  if (await getStoredRemotePassword()) {
     log(
       'ensureRemotePassword: password saved while acquiring the lock — ' +
         'skipping prompt',

@@ -103,15 +103,16 @@ class TestWritePrivateFile:
                     errors.append(f"bad mode {oct(_mode(target))}")
                     return
 
-        threads = [threading.Thread(target=writer, args=(i,)) for i in range(4)]
-        observer = threading.Thread(target=reader)
+        threads = [threading.Thread(target=writer, args=(i,), daemon=True) for i in range(4)]
+        observer = threading.Thread(target=reader, daemon=True)
         observer.start()
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(timeout=60.0)
         stop.set()
-        observer.join()
+        observer.join(timeout=60.0)
+        assert not any(t.is_alive() for t in [*threads, observer]), "writer or reader hung"
         assert errors == []
         assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
 

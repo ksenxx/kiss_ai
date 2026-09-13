@@ -1,8 +1,8 @@
 # Messaging & Third-Party Agents
 
-> KISS Sorcar includes 32 third-party channel agents that act on messaging services, mailboxes, and devices on your behalf, plus infrastructure agents and a Govee smart-home CLI.
+> KISS Sorcar includes 43 third-party agents that act on messaging services, mailboxes, devices, and web services on your behalf — 32 messaging-channel agents and 9 service agents — plus infrastructure agents and a Govee smart-home CLI.
 
-## The 32 Channel Agents
+## The 32 Messaging-Channel Agents
 
 - BlueBubbles
 - DingTalk
@@ -37,7 +37,21 @@
 - WhatsApp
 - Zalo
 
-In a chat task, just say what you want ("send 'running late' to Alice on WhatsApp") — Sorcar dispatches the matching channel agent through its `run_agent` tool. Each channel also has its own CLI entry point (`kiss-slack`, `kiss-gmail`, `kiss-whatsapp`, ...) for running channel tasks directly from the shell.
+## The 9 Service Agents
+
+Nine service agents give Sorcar authenticated API tools for productivity and data services:
+
+- Brave Search (`kiss-brave`)
+- Firecrawl (`kiss-firecrawl`)
+- GitHub (`kiss-github`)
+- Google Calendar (`kiss-gcal`)
+- Google Docs (`kiss-gdocs`)
+- Google Drive (`kiss-gdrive`)
+- Google Sheets (`kiss-gsheets`)
+- Notion (`kiss-notion`)
+- PostgreSQL (`kiss-postgres`)
+
+In a chat task, just say what you want ("send 'running late' to Alice on WhatsApp", "list my open GitHub PRs") — Sorcar dispatches the matching agent through its `run_agent` tool. Each agent also has its own CLI entry point (`kiss-slack`, `kiss-gmail`, `kiss-whatsapp`, ...) for running tasks directly from the shell.
 
 ## Infrastructure Agents
 
@@ -52,19 +66,19 @@ KISS Sorcar also ships a **Govee smart-home CLI** for controlling IoT lights (on
 ## Example Prompts
 
 ```text
-Can you authenticate me with the <<workspace name>> workspace on Slack?
+Authenticate slack workspace <<workspace name>>.
 ```
 
 ```text
-Can you authenticate me with Gmail?
+Authenticate Gmail [, or gcal, gdrive, gdoc, gsheets]?
 ```
 
 ```text
-Can you send "Hello from Sorcar!" to 1-800-772-1213?
+Can you send "Hello from Sorcar!" to 1-800-999-9999?
 ```
 
 ```text
-Can you check my gmail every hour and ping me on slack if there is any important
+Can you check my Gmail every hour and ping me on Slack if there is any important
 email that needs my immediate attention?
 ```
 

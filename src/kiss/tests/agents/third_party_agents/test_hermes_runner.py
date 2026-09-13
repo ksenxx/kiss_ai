@@ -621,6 +621,7 @@ class TestPairingAdminCli:
         admin = threading.Thread(
             target=_handle_pairing_admin,
             args=(TelegramAgent, "Telegram", "default", "pair-lockrace", "abcd1234", False),
+            daemon=True,
         )
         with channel_state_lock(state_path, blocking=False) as lock_fp:
             assert lock_fp is not None

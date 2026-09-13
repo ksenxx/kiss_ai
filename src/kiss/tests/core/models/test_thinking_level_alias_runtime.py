@@ -91,8 +91,8 @@ def test_strip_thinking_alias_resolves_full_openrouter_keys() -> None:
         == "openrouter/openai/gpt-5.6-sol"
     )
     assert (
-        _strip_thinking_alias("openrouter/~openai/gpt-latest-high")
-        == "openrouter/~openai/gpt-latest"
+        _strip_thinking_alias("openrouter/~openai/gpt-sol-latest-high")
+        == "openrouter/~openai/gpt-sol-latest"
     )
 
 
@@ -104,10 +104,10 @@ def test_strip_thinking_alias_requires_exact_catalog_key() -> None:
     fuzzy tail-scan lookup rewrote it and silently changed which model was
     invoked.
     """
-    assert MODEL_INFO["openrouter/~openai/gpt-latest-high"].alias_of
-    assert "gpt-latest-high" not in MODEL_INFO
-    assert _strip_thinking_alias("gpt-latest-high") == "gpt-latest-high"
-    assert _provider_model_name("gpt-latest-high") == "gpt-latest-high"
+    assert MODEL_INFO["openrouter/~openai/gpt-sol-latest-high"].alias_of
+    assert "gpt-sol-latest-high" not in MODEL_INFO
+    assert _strip_thinking_alias("gpt-sol-latest-high") == "gpt-sol-latest-high"
+    assert _provider_model_name("gpt-sol-latest-high") == "gpt-sol-latest-high"
 
 
 def test_strip_thinking_alias_keeps_real_upstream_high_models() -> None:

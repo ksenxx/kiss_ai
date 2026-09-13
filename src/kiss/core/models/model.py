@@ -26,6 +26,7 @@ import subprocess
 import threading
 import time
 import types as types_module
+import typing
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Collection, Iterator
@@ -366,6 +367,13 @@ def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
     cursor = 0
     for match in BINARY_ATTACHMENT_OPEN_RE.finditer(text):
         open_start, open_end = match.span()
+        if open_start < cursor:
+            # An opener inside the block just consumed (only possible in
+            # text that quotes the sentinel, e.g. a Read of this file).
+            # Skipping it keeps the scan linear: without this, every
+            # such opener re-searched for the same closer and re-decoded
+            # the overlapping payload, which is quadratic.
+            continue
         close_idx = text.find(BINARY_ATTACHMENT_CLOSE, open_end)
         if close_idx == -1:  # pragma: no cover – defensive: malformed sentinel
             break
@@ -1171,11 +1179,21 @@ class Model(ABC):
 
         param_descriptions = self._parse_docstring_params(doc)
 
+        # Under ``from __future__ import annotations`` (PEP 563) the
+        # signature's raw annotations are strings like ``"int"``, which
+        # would fall through the type mapping to ``{"type": "string"}``.
+        # Resolve them to real types so int/bool/float parameters keep
+        # their proper JSON-schema types.
+        try:
+            hints = typing.get_type_hints(func)
+        except Exception:
+            hints = {}
+
         properties: dict[str, Any] = {}
         required: list[str] = []
 
         for param_name, param in sig.parameters.items():
-            param_type = param.annotation
+            param_type = hints.get(param_name, param.annotation)
             param_schema = self._python_type_to_json_schema(param_type)
 
             if param_name in param_descriptions:
@@ -1584,6 +1602,13 @@ class _CLIProcess:
         self._timeout = timeout
         self._deadline = time.monotonic() + timeout
         try:
+            # errors="replace": a hook, plugin or shell command the CLI
+            # runs can print bytes in any encoding.  With the strict
+            # default the first undecodable byte raises inside a drain
+            # thread, which then stops reading: on stderr the child
+            # blocks in write(2) once the pipe is full and the turn is
+            # killed as a stall; on stdout everything after the byte is
+            # silently dropped and a truncated answer reported as done.
             self._proc = subprocess.Popen(
                 args,
                 stdin=subprocess.PIPE,
@@ -1591,6 +1616,7 @@ class _CLIProcess:
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 cwd=cwd,
             )
         except OSError as e:
@@ -1970,11 +1996,20 @@ class _ToolCallFilteredStream:
         return self
 
     def __exit__(self, *exc_info: Any) -> None:
-        """Release buffered text, restore the callbacks and clear the mark."""
-        self._flush()
-        self._model.token_callback = self._token_callback
-        self._model.thinking_callback = self._thinking_callback
-        self._model._tool_bearing_turn = False
+        """Release buffered text, restore the callbacks and clear the mark.
+
+        The flush hands held text to the original token callback, which
+        in production raises ``KeyboardInterrupt`` once the user has
+        pressed Stop; the restoration must still happen, or the reused
+        adapter keeps streaming through this dead filter and treats its
+        next ordinary turn as tool-bearing.
+        """
+        try:
+            self._flush()
+        finally:
+            self._model.token_callback = self._token_callback
+            self._model.thinking_callback = self._thinking_callback
+            self._model._tool_bearing_turn = False
 
     def _emit(self, text: str) -> None:
         """Send *text* onward, if there is any and anyone is listening."""

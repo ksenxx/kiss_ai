@@ -53,6 +53,7 @@ from kiss.core import config as config_module
 from kiss.core.models.model_info import (
     MODEL_INFO,
     get_default_model,
+    list_custom_models,
 )
 from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
@@ -888,12 +889,37 @@ class VSCodeServer(
                 }
             )
 
-        from kiss.core.vscode_config import get_custom_model_entry, load_config
+        from kiss.core.vscode_config import (
+            _parse_custom_headers,
+            get_custom_model_entry,
+            load_config,
+        )
 
         cfg = load_config()
         custom = get_custom_model_entry(cfg)
         if custom:
             models_list.insert(0, custom)
+
+        # Settings-panel custom models (~/.kiss/MY_MODELS.json entries
+        # carrying an endpoint) are selectable right away — they are not
+        # in MODEL_INFO until the next restart, so the picker lists them
+        # from the file, shaped exactly like the config-based custom
+        # entry above.  Names already listed (a catalog model the entry
+        # merely overrides) are left as the catalog reported them.
+        listed_names = {m["name"] for m in models_list}
+        for cm in list_custom_models():
+            if not cm["endpoint"] or cm["name"] in listed_names:
+                continue
+            models_list.insert(0, {
+                "name": cm["name"],
+                "inp": 0,
+                "out": 0,
+                "uses": usage.get(cm["name"], 0),
+                "vendor": "Custom",
+                "endpoint": cm["endpoint"],
+                "api_key": cm["api_key"],
+                "extra_headers": _parse_custom_headers(cm["headers"]),
+            })
 
         available_names = {m["name"] for m in models_list}
         with self._state_lock:
@@ -1277,6 +1303,10 @@ class VSCodeServer(
                     busy = True
                 else:
                     state.is_merging = True
+                    # Published with every claim that retires a
+                    # worktree so shutdown's ``_await_active_merges``
+                    # waits for it (see ``_finalize_pending_worktree``).
+                    state.merge_thread = threading.current_thread()
         # Sub-agent tabs are not in the registry, so their close
         # cannot mirror via ``tabs_state``: broadcast a canonical
         # close event instead.  Every client removes the tab, so a
@@ -1328,6 +1358,7 @@ class VSCodeServer(
             if state.busy():
                 return
             state.is_merging = True
+            state.merge_thread = threading.current_thread()
         self._teardown_tab_resources(tab_id, state)
 
     def _teardown_tab_resources(
@@ -1391,6 +1422,7 @@ class VSCodeServer(
                     claim_retained = bool(getattr(wt_agent, "_wt_pending", False))
             with self._state_lock:
                 state.is_merging = False
+                state.merge_thread = None
                 if removal_token is not None and self.tab_registry.republished_since(
                     tab_id, removal_token
                 ):

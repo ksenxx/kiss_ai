@@ -112,14 +112,15 @@ class TestGoogleChatSaveToken:
             for i in range(100):
                 _save_token(_make_creds(f"token-{idx}-{i}"))
 
-        observer = threading.Thread(target=reader)
-        writers = [threading.Thread(target=writer, args=(i,)) for i in range(4)]
+        observer = threading.Thread(target=reader, daemon=True)
+        writers = [threading.Thread(target=writer, args=(i,), daemon=True) for i in range(4)]
         observer.start()
         for t in writers:
             t.start()
         for t in writers:
-            t.join()
+            t.join(timeout=60.0)
         stop.set()
-        observer.join()
+        observer.join(timeout=60.0)
+        assert not any(t.is_alive() for t in [*writers, observer]), "writer or reader hung"
         assert errors == []
         assert [p.name for p in token_file.parent.iterdir()] == [token_file.name]

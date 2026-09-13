@@ -518,12 +518,13 @@ class TestH5KeyFilePermissions(unittest.TestCase):
 
 
 class TestH6StderrReaderCleanup(unittest.TestCase):
-    """The reader thread must exit promptly once the subprocess emits any
-    further stderr line OR dies, after a timeout has elapsed.
+    """The stderr drain thread lives exactly as long as the subprocess.
 
-    Without the fix, the reader thread runs until the parent process
-    terminates the subprocess, leaking one daemon thread per timed-out
-    tunnel restart.
+    One drain thread per live ``cloudflared`` process is expected: the
+    callers keep the process after the URL wait times out (metrics
+    fallback / named tunnel), so the thread must keep draining stderr
+    until EOF or the 64 KiB pipe fills and wedges cloudflared.  It must
+    exit promptly once the subprocess dies.
     """
 
     def test_reader_exits_when_proc_dies_after_timeout(self) -> None:
@@ -540,30 +541,41 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
             stderr=subprocess.PIPE,
             text=True,
         )
+        drain_name = f"cloudflared-stderr-drain-{proc.pid}"
         try:
             url = _read_url_from_stderr(
                 proc, _parse_quick_tunnel_url, timeout=0.05,
             )
             self.assertIsNone(url)
+            # Pin the name the leak check below looks for: a renamed
+            # drain thread would otherwise make that check vacuous.
+            self.assertTrue(
+                any(t.name == drain_name for t in threading.enumerate()),
+                "drain thread must be running while the child lives",
+            )
             proc.wait(timeout=2)
-            time.sleep(0.3)
-            for t in threading.enumerate():
-                self.assertNotEqual(
-                    t.name, "_stderr_reader_loop",
-                    "reader thread leaked after proc death",
-                )
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and any(
+                t.name == drain_name for t in threading.enumerate()
+            ):
+                time.sleep(0.05)
+            self.assertFalse(
+                any(t.name == drain_name for t in threading.enumerate()),
+                "reader thread leaked after proc death",
+            )
         finally:
             if proc.poll() is None:
                 proc.terminate()
                 proc.wait(timeout=2)
 
-    def test_reader_exits_after_stop_event_on_next_line(self) -> None:
-        """After timeout the stop_event is set; reader exits at next line."""
+    def test_reader_keeps_draining_after_timeout_until_proc_exits(self) -> None:
+        """After the URL wait times out the drain thread stays alive while
+        the child keeps writing, and exits once the child ends."""
         proc = subprocess.Popen(
             [
                 sys.executable, "-u", "-c",
                 "import sys, time\n"
-                "for i in range(30):\n"
+                "for i in range(10):\n"
                 "    sys.stderr.write(f'tick {i}\\n')\n"
                 "    sys.stderr.flush()\n"
                 "    time.sleep(0.1)\n",
@@ -572,28 +584,28 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
             stderr=subprocess.PIPE,
             text=True,
         )
+        drain_name = f"cloudflared-stderr-drain-{proc.pid}"
         try:
-            initial = {t.ident for t in threading.enumerate()}
             url = _read_url_from_stderr(
                 proc, _parse_quick_tunnel_url, timeout=0.3,
             )
             self.assertIsNone(url)
+            self.assertIsNone(proc.poll(), "child should still be running")
+            alive = [t for t in threading.enumerate() if t.name == drain_name]
+            self.assertEqual(
+                len(alive), 1,
+                "drain thread must keep reading stderr while the child lives",
+            )
 
-            deadline = time.monotonic() + 1.5
-            new_threads_alive: list[threading.Thread] = []
-            while time.monotonic() < deadline:
-                new_threads_alive = [
-                    t for t in threading.enumerate()
-                    if t.ident not in initial and t.is_alive()
-                    and t.name != "MainThread"
-                ]
-                if not new_threads_alive:
-                    break
+            proc.wait(timeout=5)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and any(
+                t.name == drain_name for t in threading.enumerate()
+            ):
                 time.sleep(0.05)
-
             self.assertFalse(
-                new_threads_alive,
-                f"reader thread leaked after timeout: {new_threads_alive!r}",
+                any(t.name == drain_name for t in threading.enumerate()),
+                "drain thread must exit at stderr EOF",
             )
         finally:
             if proc.poll() is None:

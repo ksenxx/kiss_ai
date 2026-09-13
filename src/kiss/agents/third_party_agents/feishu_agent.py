@@ -486,7 +486,7 @@ def main() -> None:
     )
 
 
-def get_tools() -> list:
+def tools() -> list:
     """Return the Feishu/Lark channel tools (``kiss.server.sorcar.run`` tools-file contract).
 
     Called by the kiss-web daemon when this module's path is passed as

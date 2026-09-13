@@ -14,6 +14,10 @@
 //    PNG, not the monochrome gray SVG
 // These are declarative package.json contributions VS Code reads
 // directly, so the manifest is the runtime behavior being verified.
+// In editor-tabs mode the whole editor-actions toolbar (and with it
+// these four buttons) is relocated to the window title bar above via
+// `workbench.editor.editorActionsLocation` — see
+// src/editorActionsLocation.ts and editorActionsTitleBar.test.js.
 
 'use strict';
 

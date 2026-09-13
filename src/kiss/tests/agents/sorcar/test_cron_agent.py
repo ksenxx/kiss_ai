@@ -423,11 +423,11 @@ def test_agent_script_getters(tmp_path: Path) -> None:
     # The agent-script contract used by run_agent("cron", ...): the
     # dispatched session runs in ~/.kiss/cron/work with no git
     # lifecycle.
-    work_dir = cron_agent.get_work_dir()
+    work_dir = cron_agent.work_dir()
     assert work_dir == str(tmp_path / "cron" / "work")
     assert Path(work_dir).is_dir()
-    assert cron_agent.get_use_worktree() is False
-    assert cron_agent.get_auto_commit() is False
+    assert cron_agent.use_worktree() is False
+    assert cron_agent.auto_commit() is False
     assert "cron_job" in cron_agent.CRON_DISPATCH_PREAMBLE
 
 

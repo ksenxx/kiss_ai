@@ -7,8 +7,9 @@
 ``_migrate_legacy_rc_keys()`` used to make its migrate-or-not decision
 (read the canonical store, scan/source the shell RCs) under only the
 process-local ``_config_lock``; the cross-process sidecar flock was
-acquired only later, inside ``_edit_api_keys_env_file()``, when the
-stale snapshot was already committed to.  A second process sharing the
+acquired only later, around the store edit that is now
+``_edit_api_keys_env_file_locked()``, when the stale snapshot was
+already committed to.  A second process sharing the
 same ``$KISS_HOME`` could therefore complete a full ``save_api_key(key,
 "")`` deletion — canonical store scrubbed under the sidecar flock, RC
 assignment removed under the RC flock — inside that window, after which
@@ -34,11 +35,13 @@ deletion then removes the migrated key; deletion first — the migration
 finds nothing to import.  Either way the key stays deleted.
 
 Branch coverage: the fix adds no new branches — it widens the span of
-existing lock acquisitions and splits ``_edit_api_keys_env_file`` into a
-lock-taking wrapper plus a locked body.  The wrapper's path is covered
-here (via ``load_api_keys``/``save_api_key``) and by the pre-existing
-``test_vscode_config.py`` suites, which drive every store-edit branch
-through the same split functions.
+existing lock acquisitions so that the store edit,
+``_edit_api_keys_env_file_locked``, runs only inside a caller-held
+``_config_lock`` + store-flock section (the former standalone wrapper
+that took those locks itself had no callers and was removed).  That
+locked helper is covered here (via ``load_api_keys``/``save_api_key``)
+and by the pre-existing ``test_vscode_config.py`` suites, which drive
+every store-edit branch through it.
 """
 
 from __future__ import annotations

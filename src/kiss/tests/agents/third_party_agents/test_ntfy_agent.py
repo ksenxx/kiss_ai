@@ -28,7 +28,9 @@ from kiss.agents.third_party_agents.ntfy_agent import (
     NtfyAgent,
     NtfyChannelBackend,
     _config,
-    get_tools,
+)
+from kiss.agents.third_party_agents.ntfy_agent import (
+    tools as module_tools,
 )
 from kiss.core.config import kiss_home
 
@@ -181,9 +183,9 @@ def test_authenticate_rejects_empty_topic() -> None:
     assert not _config.path.exists()
 
 
-def test_get_tools_module_function() -> None:
-    """The module-level get_tools() returns a non-empty tool list."""
-    tools = get_tools()
+def test_tools_module_function() -> None:
+    """The module-level tools() returns a non-empty tool list."""
+    tools = module_tools()
     assert tools
     assert "check_ntfy_auth" in {t.__name__ for t in tools}
 

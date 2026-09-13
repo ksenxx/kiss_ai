@@ -323,7 +323,7 @@ def test_run_agent_tool_returns_result_when_finish_races_timeout(
     daemon = _RacingFinishDaemon(finish_delay=0.6)
     monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
     script = tmp_path / "helper.py"
-    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    script.write_text("def model() -> str:\n    return 'm'\n")
     try:
         out = make_run_agent_tool(str(tmp_path))(
             str(script), "finishes while stop is in flight", timeout="0.3",
@@ -409,7 +409,7 @@ def test_run_agent_tool_reports_unconfirmed_stop_despite_result(
     daemon = _RacingFinishDaemon(finish_delay=0.6, send_terminal_status=False)
     monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
     script = tmp_path / "helper.py"
-    script.write_text("def get_model() -> str:\n    return 'm'\n")
+    script.write_text("def model() -> str:\n    return 'm'\n")
     try:
         out = make_run_agent_tool(str(tmp_path))(
             str(script), "finishes without terminal status", timeout="0.3",

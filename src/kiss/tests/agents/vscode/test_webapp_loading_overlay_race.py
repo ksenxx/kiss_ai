@@ -74,7 +74,10 @@ def test_overlay_lifts_when_auth_beats_main_js_load(browser, harness) -> None:
     page.route("**/main.js*", _stall_main_js)
     try:
         page.goto(harness.base_url + "/")
-        page.wait_for_selector("#task-input", state="visible", timeout=15000)
+        # 30 s matches every other Playwright wait in the suite: 15 s
+        # proved too tight when the full suite runs ~30 pytest
+        # processes in parallel and Chromium startup is CPU-starved.
+        page.wait_for_selector("#task-input", state="visible", timeout=30000)
         overlay_display = page.evaluate(
             "() => document.getElementById('kiss-server-loading').style.display"
         )
@@ -98,6 +101,6 @@ def test_overlay_lifts_on_normal_load(browser, harness) -> None:
     page = context.new_page()
     try:
         page.goto(harness.base_url + "/")
-        page.wait_for_selector("#task-input", state="visible", timeout=15000)
+        page.wait_for_selector("#task-input", state="visible", timeout=30000)
     finally:
         context.close()

@@ -437,6 +437,9 @@ class AnthropicModel(Model):
             thinking_callback=thinking_callback,
         )
         self.api_key = api_key
+        # The (api_key, workspace_id) pair the current client was built
+        # from, so initialize() rebuilds it only on a real change.
+        self._client_inputs: tuple[str, str] | None = None
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initializes the conversation with an initial user prompt.
@@ -456,14 +459,25 @@ class AnthropicModel(Model):
         # from the ANTHROPIC_WORKSPACE_ID environment variable, which
         # load_api_keys() imports from ~/.kiss/api_keys.env at daemon
         # startup and ./rsorcar ships to remote installs.
+        #
+        # The client is built once and reused across runs (KISSAgent
+        # reuses the adapter and calls initialize() per run): rebuilding
+        # it every time abandons a whole httpx connection pool to the
+        # garbage collector for nothing.  It is rebuilt only when the
+        # inputs it was constructed from changed.
         workspace_id = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
-        default_headers = {"anthropic-workspace-id": workspace_id} if workspace_id else None
-        self.client = Anthropic(
-            api_key=self.api_key,
-            timeout=httpx.Timeout(self._stream_stall_timeout, connect=_CONNECT_TIMEOUT),
-            max_retries=_MAX_RETRIES,
-            default_headers=default_headers,
-        )
+        inputs = (self.api_key, workspace_id)
+        if self.client is None or inputs != self._client_inputs:
+            default_headers = (
+                {"anthropic-workspace-id": workspace_id} if workspace_id else None
+            )
+            self.client = Anthropic(
+                api_key=self.api_key,
+                timeout=httpx.Timeout(self._stream_stall_timeout, connect=_CONNECT_TIMEOUT),
+                max_retries=_MAX_RETRIES,
+                default_headers=default_headers,
+            )
+            self._client_inputs = inputs
         content: str | list[dict[str, Any]] = prompt
         if attachments:
             blocks = _attachments_to_blocks(attachments)

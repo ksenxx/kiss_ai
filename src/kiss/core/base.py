@@ -23,16 +23,24 @@ logger = logging.getLogger(__name__)
 
 _kiss_pkg_dir = Path(__file__).parent.parent
 SYSTEM_PROMPT = (_kiss_pkg_dir / "SYSTEM.md").read_text(encoding="utf-8")
+SYSTEM_PROMPT_LITE = (_kiss_pkg_dir / "SYSTEM_LITE.md").read_text(encoding="utf-8")
+"""Reduced system prompt used for tasks the pre-run classifier deems simple.
+
+Same identity and output contract as ``SYSTEM.md`` without the software
+development, testing, and web-research machinery; selected by
+``SorcarAgent.run`` when the task classifier reports ``is_simple`` (see
+``kiss.agents.sorcar.task_classifier``).
+"""
 
 if sys.platform == "win32":  # pragma: no branch
     if shutil.which("bash"):  # pragma: no branch
-        SYSTEM_PROMPT += (
+        _WINDOWS_SUFFIX = (
             "\n\n## Windows Environment\n"
             "- This machine runs Windows with Git Bash available. "
             "Use bash commands as normal.\n"
         )
     else:
-        SYSTEM_PROMPT += (
+        _WINDOWS_SUFFIX = (
             "\n\n## Windows Environment\n"
             "- This machine runs Windows without bash. "
             "Use PowerShell syntax for the Bash tool. "
@@ -40,6 +48,8 @@ if sys.platform == "win32":  # pragma: no branch
             "`Select-String` instead of `grep`, "
             "`Get-Content` instead of `cat`.\n"
         )
+    SYSTEM_PROMPT += _WINDOWS_SUFFIX
+    SYSTEM_PROMPT_LITE += _WINDOWS_SUFFIX
 
 
 class Base:

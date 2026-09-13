@@ -102,6 +102,9 @@ function doneLabelFor(start, end) { return 'Done'; }
 // stream-tail sweep coalescing change; spied like the others so the
 // extracted source runs unmodified.
 function flushStreamTailSweep() { calls.push('flushStreamTailSweep'); }
+// Collaborator added when the docked task-info panel gained a live
+// running/idle mirror; spied like the others.
+function syncMetaInfoRunning(running) { calls.push('syncMetaInfoRunning'); }
 
 """
         + set_running_state_src

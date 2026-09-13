@@ -12,7 +12,6 @@ actual wire behavior with no mocks or test doubles.
 from __future__ import annotations
 
 import json
-import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -97,14 +96,10 @@ def test_send_typing_swallows_http_error(mm_server) -> None:
     assert len(mm_server.requests) == 1
 
 
-def test_send_typing_swallows_unreachable_server() -> None:
+def test_send_typing_swallows_unreachable_server(refusing_port: int) -> None:
     """An unreachable server (closed port) must not raise."""
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
     backend = MattermostChannelBackend(
-        base_url=f"http://127.0.0.1:{port}", token="test-token"
+        base_url=f"http://127.0.0.1:{refusing_port}", token="test-token"
     )
     backend.send_typing("chan1")
 

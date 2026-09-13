@@ -41,6 +41,13 @@ import pytest
 # defeat the gate.  The pool's own tests re-enable it explicitly.
 os.environ["KISS_DISABLE_WORKTREE_POOL"] = "1"
 
+# Pre-run task classification (kiss.agents.sorcar.task_classifier) must
+# not run during the test suite: it would issue an extra real-LLM call
+# before every Sorcar run and could flip worktree/system-prompt behavior
+# that tests assert on.  Set unconditionally, like the worktree-pool
+# gate; the classifier's own tests re-enable it explicitly.
+os.environ["KISS_DISABLE_TASK_CLASSIFIER"] = "1"
+
 # Target soft limit for RLIMIT_NOFILE. 4096 comfortably covers the full test
 # suite (~4200 tests with sockets, subprocesses, tempfiles) while staying well
 # below typical hard limits on Linux/macOS CI runners.

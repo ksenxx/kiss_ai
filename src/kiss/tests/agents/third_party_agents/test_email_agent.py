@@ -14,9 +14,7 @@ from __future__ import annotations
 
 import email
 import json
-import os
 import sys
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -29,7 +27,9 @@ from kiss.agents.third_party_agents.email_agent import (
     _config,
     _is_automated_mail,
     _normalize_mail,
-    get_tools,
+)
+from kiss.agents.third_party_agents.email_agent import (
+    tools as module_tools,
 )
 
 _AUTH_TRIO = {"check_email_auth", "authenticate_email", "clear_email_auth"}
@@ -37,18 +37,9 @@ _BACKEND_TOOLS = {"send_email", "list_unread_emails", "read_email", "mark_email_
 
 
 @pytest.fixture(autouse=True)
-def _isolated_kiss_home(tmp_path: Path) -> Iterator[Path]:
-    """Point ``KISS_HOME`` at a fresh temp dir so tests never touch ~/.kiss."""
-    saved = os.environ.get("KISS_HOME")
-    home = tmp_path / "kiss_home"
-    os.environ["KISS_HOME"] = str(home)
-    try:
-        yield home
-    finally:
-        if saved is None:
-            os.environ.pop("KISS_HOME", None)
-        else:
-            os.environ["KISS_HOME"] = saved
+def _isolated_kiss_home(isolated_kiss_home: Path) -> Path:
+    """Apply the shared per-test ``KISS_HOME`` isolation to every test here."""
+    return isolated_kiss_home
 
 
 def _tool(agent: EmailAgent, name: str):
@@ -189,9 +180,9 @@ class TestAuthFlow:
             "starttls",
         )
 
-    def test_module_get_tools(self) -> None:
-        """The module-level get_tools() returns a non-empty tool list."""
-        tools = get_tools()
+    def test_module_tools(self) -> None:
+        """The module-level tools() returns a non-empty tool list."""
+        tools = module_tools()
         assert tools
         assert _AUTH_TRIO <= {t.__name__ for t in tools}
 

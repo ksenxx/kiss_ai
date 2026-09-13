@@ -395,7 +395,9 @@ class TestRaceSetupRespectsRepoLock:
         end = src.index("\n    def ", start + 1)
         body = src[start:end]
 
-        lock_idx = body.find("with repo_lock(repo):")
+        # Matched without the trailing colon: the statement also takes
+        # ``_reclaim_process_lock(repo)`` in the same ``with``.
+        lock_idx = body.find("with repo_lock(repo)")
         copy_idx = body.find("GitWorktreeOps.copy_dirty_state")
         baseline_idx = body.find("GitWorktreeOps.save_baseline_commit")
         assert lock_idx != -1, (

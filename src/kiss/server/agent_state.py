@@ -65,6 +65,8 @@ class AgentState:
         "pending_ask_question",
         "pending_user_messages",
         "unattributed_prompt_echoes",
+        "queued_followup_tasks",
+        "followup_queue_closed",
         "is_task_active",
         "is_merging",
         "merge_thread",
@@ -114,6 +116,24 @@ class AgentState:
         self.pending_ask_question: str = ""
         self.pending_user_messages: list[str] = []
         self.unattributed_prompt_echoes: list[str] = []
+        # Follow-up tasks the user queued mid-run by sending a
+        # steering message wrapped in ``<task>...</task>`` tags.
+        # Unlike ``pending_user_messages`` (injected into the LIVE
+        # model conversation before the next step), these run as
+        # additional sequential subtasks of the same submission once
+        # the current task finishes (drained by the task runner's
+        # per-subtask loop).  Read/written under :data:`STATE_LOCK`.
+        self.queued_followup_tasks: list[str] = []
+        # Raised (under :data:`STATE_LOCK`) the moment the runner's
+        # subtask loop decides no further drain of
+        # ``queued_followup_tasks`` will happen — the final drain
+        # found the queue empty, a subtask failed, or the run entered
+        # its end-of-run finalization.  From then on a ``<task>``
+        # message routes to the plain steering path instead of being
+        # queued: a task queued after the last drain would be echoed
+        # to the user and then silently discarded by the end-of-run
+        # cleanup.  Never reset: each run creates a fresh state.
+        self.followup_queue_closed: bool = False
         self.is_task_active: bool = is_task_active
         self.is_merging: bool = False
         # The thread executing an interactive merge/discard, so

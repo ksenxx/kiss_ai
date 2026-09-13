@@ -97,14 +97,14 @@ def atomic_write_text(target: Path, content: str, mode: int | None = None) -> No
         # then published as a permanently truncated file.
         with os.fdopen(fd, "wb") as staged:
             staged.write(content.encode("utf-8"))
+        # Applied to the staged file only: os.replace moves the inode,
+        # mode included, so a second chmod on the target would be a no-op.
         if mode is not None:
             _try_chmod(tmp, mode)
         os.replace(tmp, target)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
-    if mode is not None:
-        _try_chmod(str(target), mode)
 
 
 def _try_chmod(path: str, mode: int) -> None:

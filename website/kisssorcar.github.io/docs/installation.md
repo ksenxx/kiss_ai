@@ -10,6 +10,8 @@ curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install
 
 The installer targets macOS and Linux on `x86_64`, `aarch64`, and `arm64`. It installs or checks the tools needed to run KISS Sorcar and build/install the VS Code extension.
 
+If the Update button in the settings UI fails, run the full installation command again. It will not delete your history.
+
 ## Python Package Install
 
 If you only want the Python package (the `kiss-web` daemon, the Python client API, and the messaging-agent entry points):
@@ -37,6 +39,8 @@ export GEMINI_API_KEY=...
 ```
 
 You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the VS Code extension or web app — useful for local or self-hosted models.
+
+You can register your own models (e.g. a local vLLM/Ollama endpoint or a provider model not in the bundled catalog) in the **Custom Models** section of the Settings panel; entries are stored in `~/.kiss/MY_MODELS.json` and appear in the model picker alongside the bundled catalog.
 
 ## VS Code Extension
 

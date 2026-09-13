@@ -28,7 +28,9 @@ from kiss.agents.third_party_agents.simplex_agent import (
     SimpleXAgent,
     SimpleXChannelBackend,
     _config,
-    get_tools,
+)
+from kiss.agents.third_party_agents.simplex_agent import (
+    tools as module_tools,
 )
 
 _NEW_CHAT_ITEMS_EVENT: dict[str, Any] = {
@@ -126,11 +128,9 @@ def _handler(conn: ServerConnection) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_kiss_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point KISS_HOME at a per-test temp dir so ~/.kiss is never touched."""
-    home = tmp_path / "kiss_home"
-    monkeypatch.setenv("KISS_HOME", str(home))
-    return home
+def _isolated_kiss_home(isolated_kiss_home: Path) -> Path:
+    """Apply the shared per-test ``KISS_HOME`` isolation to every test here."""
+    return isolated_kiss_home
 
 
 @pytest.fixture
@@ -214,11 +214,11 @@ def test_authenticate_rejects_empty_url() -> None:
     assert not _config.path.exists()
 
 
-def test_get_tools_module_function() -> None:
-    """get_tools() returns a non-empty list (at least the auth trio)."""
-    tools = get_tools()
+def test_tools_module_function() -> None:
+    """tools() returns a non-empty list (at least the auth trio)."""
+    tools = module_tools()
     assert len(tools) >= 3
-    assert simplex_mod.get_tools.__doc__
+    assert simplex_mod.tools.__doc__
 
 
 def test_end_to_end_over_real_websocket(simplex_server: str) -> None:

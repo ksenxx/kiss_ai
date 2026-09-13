@@ -8,11 +8,11 @@ Can you change the step \<<specify step>> as follows: \<<whatever way you want t
 
 ## Task
 
-Can you authenticate me with the \<<workspace name>> workspace on Slack?
+Authenticate slack workspace \<<workspace name>>.
 
 ## Task
 
-Can you authenticate me with Gmail?
+Authenticate Gmail [, or gcal, gdrive, gdoc, gsheets]?
 
 ## Task
 
@@ -20,11 +20,11 @@ Can you check my Gmail every hour and ping me on Slack if there is any important
 
 ## Task
 
-Can you authenticate me with the iMessage agent?
+Authenticate iMessage.
 
 ## Task
 
-Can you send "Hello from Sorcar!" to 1-800-772-1213?
+Can you send "Hello from Sorcar!" to 1-800-999-9999?
 
 ## Task
 
