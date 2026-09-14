@@ -152,6 +152,8 @@ const calls = {
     adoptRegistryTabs: [],
     closeAll: 0,
     openChat: [],
+    watchEditorTabs: 0,
+    ensureChatOpen: [],
   },
   controller: {
     focusChatInput: 0,
@@ -276,6 +278,38 @@ class FakePanelManager {
   registerSerializer() {
     return makeDisposable();
   }
+  watchEditorTabs() {
+    calls.manager.watchEditorTabs += 1;
+    return makeDisposable();
+  }
+  // Mirrors the real manager: live panels first, then the tabGroups
+  // model (restored placeholders), -1 / false when the API is absent.
+  chatEditorTabCount() {
+    const groups = vscodeStub.window.tabGroups && vscodeStub.window.tabGroups.all;
+    if (!groups) return -1;
+    let count = 0;
+    for (const group of groups) {
+      for (const tab of group.tabs) {
+        const viewType = tab.input && tab.input.viewType;
+        if (typeof viewType === 'string' && viewType.includes('kissSorcar.chatTab')) {
+          count += 1;
+        }
+      }
+    }
+    return count;
+  }
+  hasChatEditorTab() {
+    if (fakePanelCount > 0) return true;
+    return this.chatEditorTabCount() > 0;
+  }
+  ensureChatOpen(opts) {
+    calls.manager.ensureChatOpen.push(!!(opts && opts.preserveFocus));
+    if (!editorTabsMode) return undefined;
+    if (this.hasChatEditorTab()) return undefined;
+    const controller = this.openNewChat();
+    if (!(opts && opts.preserveFocus)) void controller.focusChatInput();
+    return controller;
+  }
   openNewChat() {
     calls.manager.openNewChat += 1;
     fakePanelCount += 1;
@@ -384,6 +418,17 @@ async function runTest() {
 
   extension.activate(ctx);
   assert.ok(commands.has('kissSorcar.openSettings'), 'openSettings command');
+
+  // --- the one-chat invariant at activation ----------------------------
+  // The tabGroups backstop is always subscribed; the activation open is
+  // asked for in the background and, with the mode OFF, opens nothing.
+  assert.strictEqual(calls.manager.watchEditorTabs, 1, 'tabs backstop wired');
+  assert.deepStrictEqual(
+    calls.manager.ensureChatOpen,
+    [true],
+    'activation checks the invariant without stealing focus',
+  );
+  assert.strictEqual(calls.manager.openNewChat, 0, 'mode off: no chat tab');
 
   // --- sidebar mode (default) -----------------------------------------
   await commands.get('kissSorcar.openSettings')();
@@ -783,7 +828,25 @@ async function runTest() {
   };
   await ctx2.workspaceState.update('firstLaunchDone', true);
   await ctx2.workspaceState.update('sidebarWidened', true);
+  // Mode ON, no chat editor tab anywhere: activation opens the one
+  // chat tab the invariant demands, in the background.
+  fakePanelCount = 0;
+  vscodeStub.window.tabGroups = {all: []};
+  const openBeforeActivate2 = calls.manager.openNewChat;
+  const ensureBeforeActivate2 = calls.manager.ensureChatOpen.length;
   extension.activate(ctx2);
+  assert.strictEqual(calls.manager.watchEditorTabs, 2, 'backstop re-wired');
+  assert.deepStrictEqual(
+    calls.manager.ensureChatOpen.slice(ensureBeforeActivate2),
+    [true],
+    'activation asks for a background chat',
+  );
+  assert.strictEqual(
+    calls.manager.openNewChat,
+    openBeforeActivate2 + 1,
+    'mode on with no chat tab: activation opens one',
+  );
+  assert.strictEqual(fakePanelCount, 1);
   vscodeStub.window.tabGroups = {
     all: [{tabs: [{input: {viewType: 'mainThreadWebview-kissSorcar.chatTab'}}]}],
   };

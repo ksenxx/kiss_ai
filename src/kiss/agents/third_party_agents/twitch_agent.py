@@ -27,6 +27,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
+    save_json_config,
 )
 
 _TWITCH_DIR = Path.home() / ".kiss" / "third_party_agents" / "twitch"
@@ -40,6 +41,32 @@ _config = ChannelConfig(
 )
 
 
+def _scrub_config_secrets() -> None:
+    """Remove vault-migrated secrets from config.json.
+
+    Finishes the Muse migration automatically: the ``access_token``
+    lives in the vault and the unused ``client_secret`` must not linger
+    in plaintext either; the non-secret ``client_id``/``channel_name``
+    metadata is kept and the file is deleted when nothing else was
+    stored.
+    """
+    try:
+        cfg = json.loads(_config.path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(cfg, dict) or not ("access_token" in cfg or "client_secret" in cfg):
+        return
+    kept = {
+        k: str(v)
+        for k, v in cfg.items()
+        if k not in ("access_token", "client_secret") and v
+    }
+    if kept:
+        save_json_config(_config.path, kept)
+    else:
+        _config.clear()
+
+
 class TwitchChannelBackend(ToolMethodBackend):
     """Channel backend for Twitch Helix API."""
 
@@ -48,16 +75,55 @@ class TwitchChannelBackend(ToolMethodBackend):
         self._client_id: str = ""
         self._access_token: str = ""
         self._user_id: str = ""
+        self._http: Any = requests
+        self._muse: bool = False
         self._connection_info: str = ""
 
     def _headers(self) -> dict[str, str]:
+        # In Muse mode ``_access_token`` holds a surrogate: the daemon
+        # swaps this bearer for the real OAuth token at the network
+        # boundary.  The Client-ID is not a secret and travels as-is.
         return {
             "Client-ID": self._client_id,
             "Authorization": f"Bearer {self._access_token}",
         }
 
+    def _wire_muse(self) -> bool:
+        """Acquire a Twitch surrogate and wire the boundary session.
+
+        An ``access_token`` still in the legacy config is the newest
+        user intent (initial migration, or a rotation done while Muse
+        was off): it is enrolled as a bearer credential replacing any
+        vault entry, and scrubbed from ``config.json`` (together with
+        the unused ``client_secret``) only after the vault holds it.
+        No network round trip happens here.
+
+        Returns:
+            True when the backend holds a surrogate and boundary session.
+        """
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            MuseBoundarySession,
+            mint_surrogate,
+            store_credentials,
+        )
+
+        cfg = _config.load_metadata() or {}
+        token = cfg.get("access_token", "")
+        if token:
+            store_credentials("twitch", {"kind": "bearer", "token": token}, [])
+        handle = mint_surrogate("twitch")
+        if handle is None:
+            self._connection_info = "No Twitch credential in the Muse vault or config."
+            return False
+        _scrub_config_secrets()
+        self._client_id = cfg.get("client_id", "")
+        self._access_token = handle.token
+        self._http = MuseBoundarySession("twitch")
+        self._muse = True
+        return True
+
     def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
-        resp = requests.get(
+        resp = self._http.get(
             f"{self._helix_base}{path}", headers=self._headers(), params=params, timeout=30
         )
         result: dict[str, Any] = resp.json() if resp.content else {}
@@ -66,7 +132,7 @@ class TwitchChannelBackend(ToolMethodBackend):
         return result
 
     def _post(self, path: str, json_body: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
-        resp = requests.post(
+        resp = self._http.post(
             f"{self._helix_base}{path}", headers=self._headers(), json=json_body, timeout=30
         )
         result: dict[str, Any] = resp.json() if resp.content else {"ok": True}
@@ -76,12 +142,20 @@ class TwitchChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Authenticate with Twitch using stored config."""
-        cfg = _config.load()
-        if not cfg:  # pragma: no branch
-            self._connection_info = "No Twitch config found."
-            return False
-        self._client_id = cfg["client_id"]
-        self._access_token = cfg["access_token"]
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            # Vault-first surrogate wiring; validation below runs the
+            # /users read through the daemon boundary (audited).
+            if not self._wire_muse():
+                return False
+        else:
+            cfg = _config.load()
+            if not cfg:  # pragma: no branch
+                self._connection_info = "No Twitch config found."
+                return False
+            self._client_id = cfg["client_id"]
+            self._access_token = cfg["access_token"]
         try:
             result = self._get("/users")
             if "data" in result:  # pragma: no branch
@@ -314,12 +388,88 @@ class TwitchChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
+def _muse_authenticate(
+    backend: TwitchChannelBackend, client_id: str, access_token: str, channel_name: str
+) -> str:
+    """Enroll a Twitch access token into the Muse vault and validate it.
+
+    The plaintext token goes straight into the vault as a bearer
+    credential, atomically replacing any previous enrollment, and is
+    never written to ``config.json`` (only the non-secret
+    ``client_id``/``channel_name`` metadata is — written first, so a
+    failed enrollment leaves no token on disk).  The ``client_secret``
+    is never persisted in Muse mode: the connector does not use it, and
+    an unused plaintext secret must not linger.  Validation runs
+    ``/users`` through the daemon boundary, so it is audited; an invalid
+    token leaves the vault empty.
+
+    Args:
+        backend: The agent's Twitch backend to (re)wire.
+        client_id: Twitch app client ID (not a secret).
+        access_token: OAuth2 access token.
+        channel_name: Optional default channel metadata.
+
+    Returns:
+        JSON string with the validation result.
+    """
+    import contextlib
+
+    from kiss.agents.third_party_agents.muse_auth.client import (
+        clear_credentials,
+        store_credentials,
+    )
+
+    try:
+        meta = {k: v for k, v in (("client_id", client_id), ("channel_name", channel_name)) if v}
+        save_json_config(_config.path, meta)
+        store_credentials("twitch", {"kind": "bearer", "token": access_token}, [])
+        if backend._wire_muse():  # pragma: no branch - credential was just stored
+            result = backend._get("/users")
+            if "data" in result:
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "message": "Twitch credentials saved (Muse-auth).",
+                        "login": result["data"][0].get("login", "") if result["data"] else "",
+                    }
+                )
+            error = json.dumps({"ok": False, "error": str(result)})
+        else:  # pragma: no cover - defense in depth
+            error = json.dumps({"ok": False, "error": backend._connection_info})
+    except Exception as e:
+        error = json.dumps({"ok": False, "error": str(e)})
+    # Roll the vault back so a bad token is not left enrolled.
+    with contextlib.suppress(Exception):
+        clear_credentials("twitch")
+    backend._access_token = ""
+    backend._http = requests
+    backend._muse = False
+    return error
+
+
 class TwitchAgent(BaseChannelAgent):
     """Channel agent with Twitch Helix API tools."""
 
     def __init__(self) -> None:
         super().__init__("Twitch Agent")
         self._backend = TwitchChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+            # Muse-auth mode: wire a vault surrogate and the boundary
+            # session (no network round trip); the real token never
+            # enters this process once migrated.  A daemon failure
+            # leaves the agent constructible (fail closed, tokenless)
+            # so its authenticate/clear tools stay available.
+            try:
+                self._backend._wire_muse()
+            except MuseAuthError as e:
+                self._backend._access_token = ""
+                self._backend._client_id = ""
+                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            return
         cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._client_id = cfg["client_id"]
@@ -327,6 +477,13 @@ class TwitchAgent(BaseChannelAgent):
 
     def _is_authenticated(self) -> bool:
         """Return True if the backend is authenticated."""
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            # In Muse mode only a wired boundary session counts: after a
+            # failed enrollment rollback the backend holds no credential
+            # and must not fall back to direct legacy requests.
+            return self._backend._muse and bool(self._backend._access_token)
         return bool(self._backend._client_id)
 
     def _get_auth_tools(self) -> list:
@@ -339,7 +496,7 @@ class TwitchAgent(BaseChannelAgent):
             Returns:
                 Authentication status or instructions.
             """
-            if not agent._backend._client_id:  # pragma: no branch
+            if not agent._is_authenticated():  # pragma: no branch
                 return (
                     "Not authenticated with Twitch. Use authenticate_twitch() to configure.\n"
                     "You need client_id, client_secret, and access_token from "
@@ -380,6 +537,12 @@ class TwitchAgent(BaseChannelAgent):
             for val, name in [(client_id, "client_id"), (access_token, "access_token")]:
                 if not val.strip():  # pragma: no branch
                     return f"{name} cannot be empty."
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                return _muse_authenticate(
+                    agent._backend, client_id.strip(), access_token.strip(), channel_name.strip()
+                )
             agent._backend._client_id = client_id.strip()
             agent._backend._access_token = access_token.strip()
             try:
@@ -413,6 +576,14 @@ class TwitchAgent(BaseChannelAgent):
             _config.clear()
             agent._backend._client_id = ""
             agent._backend._access_token = ""
+            agent._backend._http = requests
+            agent._backend._muse = False
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("twitch")
             return "Twitch authentication cleared."
 
         return [check_twitch_auth, authenticate_twitch, clear_twitch_auth]

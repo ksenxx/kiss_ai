@@ -51,6 +51,7 @@ _AUTH_TOOL_NAMES = [
     "authenticate_google_docs",
     "clear_google_docs_auth",
     "start_google_docs_browser_setup",
+    "finish_google_docs_auth",
 ]
 
 _BACKEND_TOOL_NAMES = {

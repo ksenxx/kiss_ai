@@ -652,7 +652,7 @@ body.remote-chat .running-item-ids::before {
   }
 
   /* The info subpanel below the task-info list mirrors the active
-     workdir's tmp/info.md (getInfoFile poll in main.js).  Its flex
+     workdir's tmp/PROGRESS.md (getInfoFile poll in main.js).  Its flex
      basis is 0 so its own content never squeezes the list above:
      it grows into exactly the space the list leaves free — the rest
      of the panel — and scrolls inside.  While there is nothing to

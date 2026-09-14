@@ -130,7 +130,14 @@ class TestSaveJsonConfig:
         }
         if _IS_POSIX:  # pragma: no branch
             assert _mode(path) == 0o600
-        assert [p.name for p in path.parent.iterdir()] == ["config.json"]
+        # save_json_config now serializes writers with a persistent
+        # ``config.json.lock`` sibling (fcntl.flock), like the daemon's
+        # ``daemon.lock``; no temp files leak, and the lock is the only
+        # extra artifact.
+        assert sorted(p.name for p in path.parent.iterdir()) == [
+            "config.json",
+            "config.json.lock",
+        ]
 
     def test_channel_config_facade(self, tmp_path: Path) -> None:
         """The ChannelConfig facade round-trips through the atomic writer."""

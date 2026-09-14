@@ -32,12 +32,13 @@ import yaml
 
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.agents.sorcar.sorcar_agent import (
+    MIN_SUBAGENT_BUDGET,
     SorcarAgent,
     _attribute_sub_usage,
     run_tasks_parallel,
 )
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.kiss_error import KISSError
+from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.tests.core.test_budget_enforcement_e2e import (
     _CHEAP,
     _EXPENSIVE,
@@ -178,25 +179,25 @@ class TestSubagentBudgetShare:
 
     def test_share_divides_remaining_budget(self) -> None:
         agent = SorcarAgent("share")
-        agent.max_budget = 1.2
-        agent.budget_used = 0.2
+        agent.max_budget = 6.0
+        agent.budget_used = 1.0
         agent._current_executor = None
-        assert agent._subagent_budget_share(4) == pytest.approx(0.2)
+        assert agent._subagent_budget_share(4) == pytest.approx(1.0)
 
         executor = KISSAgent("share-executor")
-        executor.budget_used = 0.2
+        executor.budget_used = 1.0
         agent._current_executor = executor
-        assert agent._subagent_budget_share(2) == pytest.approx(0.8 / 3)
+        assert agent._subagent_budget_share(2) == pytest.approx(4.0 / 3)
 
     def test_single_subagent_cannot_consume_parent_remainder(self) -> None:
         """Even a one-item fan-out must reserve budget for the main agent
         to process the result and finish; otherwise that one sub-agent can
         consume the entire remaining main-task budget."""
         agent = SorcarAgent("share-single")
-        agent.max_budget = 1.0
+        agent.max_budget = 2.2
         agent.budget_used = 0.2
         agent._current_executor = None
-        assert agent._subagent_budget_share(1) == pytest.approx(0.4)
+        assert agent._subagent_budget_share(1) == pytest.approx(1.0)
 
     def test_share_guards_zero_tasks(self) -> None:
         agent = SorcarAgent("share-zero")
@@ -210,7 +211,70 @@ class TestSubagentBudgetShare:
         agent.max_budget = 1.0
         agent.budget_used = 1.0
         agent._current_executor = None
-        with pytest.raises(KISSError, match="budget"):
+        with pytest.raises(BudgetExceededError, match="budget"):
+            agent._subagent_budget_share(2)
+
+
+class TestSubagentBudgetFloor:
+    """Fan-outs whose per-child share is below ``MIN_SUBAGENT_BUDGET``
+    must be refused instead of spawning doomed sub-agents.
+
+    Reproduces the production stall where recursive ``run_parallel``
+    fan-outs split a parent's remainder down to ~$0.03 per child; each
+    child's FIRST LLM step (it resumes the parent's chat context) cost
+    more than its whole budget, so dozens of sub-agents were killed on
+    step 1 having done nothing.
+    """
+
+    def test_share_below_floor_refused_with_plain_kiss_error(self) -> None:
+        """A sliver share must raise a plain ``KISSError`` — NOT
+        ``BudgetExceededError``, which ``_execute_tool`` re-raises and
+        thereby kills the whole parent agent.  A plain ``KISSError``
+        becomes an actionable tool-error string so the parent model can
+        do the work inline instead."""
+        agent = SorcarAgent("share-starved")
+        agent.max_budget = 0.25
+        agent.budget_used = 0.0
+        agent._current_executor = None
+        with pytest.raises(KISSError, match="Refusing to spawn") as exc_info:
+            agent._subagent_budget_share(7)
+        assert not isinstance(exc_info.value, BudgetExceededError)
+        assert "inline" in str(exc_info.value)
+
+    def test_share_at_floor_allowed(self) -> None:
+        """A share exactly at the floor must still be handed out."""
+        agent = SorcarAgent("share-at-floor")
+        agent.max_budget = MIN_SUBAGENT_BUDGET * 3
+        agent.budget_used = 0.0
+        agent._current_executor = None
+        assert agent._subagent_budget_share(2) == pytest.approx(
+            MIN_SUBAGENT_BUDGET
+        )
+
+    def test_share_at_floor_allowed_despite_float_rounding(self) -> None:
+        """A mathematically exact floor share must not be refused when
+        float subtraction rounds it a few ULPs below the floor:
+        ``1.13 - 0.13`` is ``0.9999999999999999``, so a one-child share
+        computes as ``0.49999999999999994`` — still $0.50 in currency
+        terms."""
+        agent = SorcarAgent("share-floor-rounding")
+        agent.max_budget = 1.13
+        agent.budget_used = 0.13
+        agent._current_executor = None
+        assert agent._subagent_budget_share(1) == pytest.approx(
+            MIN_SUBAGENT_BUDGET
+        )
+
+    def test_live_executor_spend_counts_towards_floor(self) -> None:
+        """The live executor session's own spend shrinks the remainder,
+        so it can push a previously viable share below the floor."""
+        agent = SorcarAgent("share-live-floor")
+        agent.max_budget = 2.0
+        agent.budget_used = 0.0
+        executor = KISSAgent("share-live-floor-executor")
+        executor.budget_used = 1.5
+        agent._current_executor = executor
+        with pytest.raises(KISSError, match="Refusing to spawn"):
             agent._subagent_budget_share(2)
 
 
@@ -246,10 +310,13 @@ class TestRunTasksParallelBudgetCap:
 
 
 def _assert_distributed(parent: SorcarAgent, url: str, td: str) -> None:
-    """Run *parent* with a $0.10 budget; its run_parallel spawns two
-    expensive sub-agents.  Each sub-agent must be capped to ~half the
-    remaining budget (stopping after ONE $0.375 call), and the parent must
-    stop once the attributed spend exceeds its budget."""
+    """Run *parent* with a $2.00 budget; its run_parallel spawns two
+    expensive sub-agents, each capped to ~a third of the remaining
+    budget (~$0.66 — comfortably above ``MIN_SUBAGENT_BUDGET``, so the
+    fan-out is allowed).  Each sub-agent stops after ONE $0.375 call
+    (the fake 500k-token response also exhausts the model's context
+    window), and both subs' spend must be attributed back to the
+    parent (~$0.75 total)."""
     try:
         parent.run(
             prompt_template="Run two probes in parallel.",
@@ -259,7 +326,7 @@ def _assert_distributed(parent: SorcarAgent, url: str, td: str) -> None:
             is_parallel=True,
             max_steps=5,
             max_sub_sessions=2,
-            max_budget=0.10,
+            max_budget=2.0,
         )
     except KISSError:
         pass
@@ -269,7 +336,7 @@ def _assert_distributed(parent: SorcarAgent, url: str, td: str) -> None:
     )
     assert parent.budget_used < 1.6, (
         f"Parent budget_used ${parent.budget_used:.4f}: sub-agents were not "
-        f"capped to a share of the parent's $0.10 budget — a sub-agent "
+        f"capped to a share of the parent's $2.00 budget — a sub-agent "
         f"could spend the whole configured budget."
     )
 
@@ -292,5 +359,77 @@ class TestParallelBudgetDistributionE2E:
         try:
             with tempfile.TemporaryDirectory() as td:
                 _assert_distributed(ChatSorcarAgent("dist-chat-parent"), url, td)
+        finally:
+            srv.shutdown()
+
+
+class _CountingParallelParentHandler(_ParallelParentHandler):
+    """``_ParallelParentHandler`` that counts served sub-agent requests."""
+
+    probe_requests = 0
+
+    def do_POST(self) -> None:  # noqa: N802
+        # Peek at the body via the parent's routing by re-implementing
+        # only the counter; the response logic stays in the parent.
+        # BaseHTTPRequestHandler bodies can only be read once, so count
+        # here and delegate the already-parsed decision to a copy of the
+        # parent's logic.
+        body = _read_body(self)
+        try:
+            messages = json.loads(body).get("messages", [])
+        except Exception:
+            messages = []
+        has_tool_result = any(m.get("role") == "tool" for m in messages)
+        text = json.dumps(messages)
+        if has_tool_result:
+            resp = _tool_call_response(
+                "finish", '{"result": "parent-done"}', *_CHEAP
+            )
+        elif "BUDGETPROBE" in text:
+            type(self).probe_requests += 1
+            resp = _tool_call_response("noop", "{}", *_EXPENSIVE)
+        else:
+            args = json.dumps(
+                {"tasks": '["BUDGETPROBE alpha", "BUDGETPROBE beta"]'}
+            )
+            resp = _tool_call_response("run_parallel", args, *_CHEAP)
+        _send_json(self, resp)
+
+
+class TestStarvedFanOutRefusedE2E:
+    """End-to-end reproduction of the recursive-fan-out stall: a parent
+    whose remaining budget cannot fund viable sub-agents must NOT spawn
+    them.  ``run_parallel`` returns an actionable tool error instead,
+    and the parent survives to finish inline."""
+
+    def test_run_parallel_refused_no_subagents_spawned(self) -> None:
+        _CountingParallelParentHandler.probe_requests = 0
+        srv, url = _start_server(_CountingParallelParentHandler)
+        parent = SorcarAgent("starved-parent")
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                result = parent.run(
+                    prompt_template="Run two probes in parallel.",
+                    model_name="gpt-4o-mini",
+                    model_config={"base_url": url, "api_key": "test-key"},
+                    work_dir=td,
+                    is_parallel=True,
+                    max_steps=5,
+                    max_sub_sessions=2,
+                    max_budget=0.30,
+                )
+            assert _CountingParallelParentHandler.probe_requests == 0, (
+                f"{_CountingParallelParentHandler.probe_requests} sub-agent "
+                f"model requests were served — doomed sub-agents were "
+                f"spawned despite a ${0.30/3:.2f} per-child share below the "
+                f"${MIN_SUBAGENT_BUDGET:.2f} floor."
+            )
+            assert "parent-done" in result, (
+                f"Parent did not finish inline after the refusal: {result!r}"
+            )
+            assert parent.budget_used < 0.30, (
+                f"Parent spent ${parent.budget_used:.4f} — sub-agents burned "
+                f"budget despite the fan-out refusal."
+            )
         finally:
             srv.shutdown()

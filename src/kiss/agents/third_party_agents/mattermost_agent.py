@@ -29,6 +29,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
+    save_json_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,173 @@ _config = ChannelConfig(
         "token",
     ),
 )
+
+
+def _base_url_from_config(cfg: dict[str, Any]) -> str:
+    """Compose the server base URL from Mattermost config fields.
+
+    Args:
+        cfg: Parsed ``config.json`` contents (``url``, and optional
+            ``scheme``/``port``).
+
+    Returns:
+        ``scheme://url:port``, or ``""`` when the config has no usable
+        ``url``/``scheme``/``port``.  Non-string JSON values for
+        ``url``/``scheme`` (and boolean ``port``) are malformed configs,
+        not defaults: ``true`` must not become the hostname ``"True"``.
+    """
+    host = cfg.get("url")
+    if not isinstance(host, str) or not host:
+        return ""
+    scheme = cfg.get("scheme")
+    if scheme in (None, ""):
+        scheme = "https"
+    elif not isinstance(scheme, str) or scheme not in ("http", "https"):
+        return ""
+    raw_port = cfg.get("port")
+    if raw_port in (None, ""):
+        port = 443
+    elif isinstance(raw_port, bool) or not isinstance(raw_port, int | str):
+        # bool is an int subtype (true must not become port 1), and
+        # floats/other JSON types are malformed rather than truncatable
+        # (443.9 must not silently become 443).
+        return ""
+    else:
+        try:
+            port = int(raw_port)
+        except ValueError:
+            return ""
+    return f"{scheme}://{host}:{port}"
+
+
+def _scrub_config_token() -> None:
+    """Remove a vault-migrated ``token`` from config.json.
+
+    Finishes the Muse migration automatically: the non-secret ``url``/
+    ``port``/``scheme`` metadata is kept and the file is deleted when
+    nothing but the token was stored.
+    """
+    try:
+        cfg = json.loads(_config.path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(cfg, dict) or "token" not in cfg:
+        return
+    kept = {k: str(v) for k, v in cfg.items() if k != "token" and v}
+    if kept:
+        save_json_config(_config.path, kept)
+    else:
+        _config.clear()
+
+
+class _MuseMattermostDriver:
+    """Minimal ``mattermostdriver``-compatible client for Muse-auth mode.
+
+    Implements exactly the endpoint methods the backend uses, executing
+    every call at the Muse daemon boundary with a surrogate bearer (the
+    daemon swaps in the real personal access token).  The real
+    ``mattermostdriver`` groups endpoints into namespaces
+    (``driver.users.get_user``, ``driver.posts.create_post``, ...); the
+    method names this backend uses are unique across those namespaces,
+    so one object serves as every namespace.
+    """
+
+    def __init__(self, base_url: str, surrogate: str) -> None:
+        from kiss.agents.third_party_agents.muse_auth.client import MuseBoundarySession
+
+        self._api_base = base_url.rstrip("/") + "/api/v4"
+        self._surrogate = surrogate
+        self._session = MuseBoundarySession("mattermost")
+        self.users = self
+        self.teams = self
+        self.channels = self
+        self.posts = self
+        self.reactions = self
+
+    def _call(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        json_body: Any = None,
+    ) -> Any:
+        """Execute one REST call at the boundary, raising on HTTP errors.
+
+        Args:
+            method: HTTP method.
+            path: API path under ``/api/v4``.
+            params: Optional query parameters.
+            json_body: Optional JSON body.
+
+        Returns:
+            The decoded JSON response (``{}`` for empty bodies).
+
+        Raises:
+            RuntimeError: On any HTTP error status (mirroring the real
+                driver, which raises on non-2xx responses).
+        """
+        resp = self._session.request(
+            method,
+            f"{self._api_base}{path}",
+            headers={"Authorization": f"Bearer {self._surrogate}"},
+            params=params,
+            json=json_body,
+            timeout=30,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Mattermost API {method} {path} failed: "
+                f"HTTP {resp.status_code} {resp.text[:300]}"
+            )
+        return resp.json() if resp.content else {}
+
+    def login(self) -> Any:
+        """Validate the credential by fetching the authenticated user."""
+        return self._call("GET", "/users/me")
+
+    def get_user(self, user_id: str) -> Any:
+        """Return one user by ID or username (``"me"`` for the bot)."""
+        return self._call("GET", f"/users/{user_id}")
+
+    def get_users(self, params: dict[str, Any] | None = None) -> Any:
+        """Return a page of users, honoring the driver's filter params."""
+        return self._call("GET", "/users", params=params)
+
+    def get_teams(self) -> Any:
+        """Return the teams visible to the authenticated user."""
+        return self._call("GET", "/teams")
+
+    def get_channels_for_user(
+        self, user_id: str, team_id: str, params: dict[str, Any] | None = None
+    ) -> Any:
+        """Return a user's channels in one team."""
+        return self._call("GET", f"/users/{user_id}/teams/{team_id}/channels", params=params)
+
+    def get_channel(self, channel_id: str) -> Any:
+        """Return one channel by ID."""
+        return self._call("GET", f"/channels/{channel_id}")
+
+    def create_direct_message_channel(self, options: Any) -> Any:
+        """Create (or fetch) the DM channel between two user IDs."""
+        return self._call("POST", "/channels/direct", json_body=options)
+
+    def get_posts_for_channel(
+        self, channel_id: str, params: dict[str, Any] | None = None
+    ) -> Any:
+        """Return a channel's posts page (``since``/``page`` params)."""
+        return self._call("GET", f"/channels/{channel_id}/posts", params=params)
+
+    def create_post(self, options: Any) -> Any:
+        """Create a post from a driver-style options dict."""
+        return self._call("POST", "/posts", json_body=options)
+
+    def delete_post(self, post_id: str) -> Any:
+        """Delete one post by ID."""
+        return self._call("DELETE", f"/posts/{post_id}")
+
+    def create_reaction(self, options: Any) -> Any:
+        """Add a reaction from a driver-style options dict."""
+        return self._call("POST", "/reactions", json_body=options)
 
 
 class MattermostChannelBackend(ToolMethodBackend):
@@ -60,9 +228,86 @@ class MattermostChannelBackend(ToolMethodBackend):
         self._connection_info: str = ""
         self._base_url: str = base_url.rstrip("/")
         self._token: str = token
+        self._http: Any = requests
+        self._muse: bool = False
+
+    def _wire_muse(self) -> bool:
+        """Acquire a Mattermost surrogate and wire the boundary driver.
+
+        A ``token`` still in the legacy config is the newest user intent
+        (initial migration, or a rotation done while Muse was off): it
+        is enrolled as a bearer credential bound to the configured
+        server origin (flagged as a consent-scoped insecure host when
+        the scheme is plain ``http``), and scrubbed from ``config.json``
+        only after the vault holds it.  No network round trip happens
+        here.
+
+        Returns:
+            True when the backend holds a surrogate and boundary driver.
+        """
+        from kiss.agents.third_party_agents.muse_auth._common import (
+            insecure_origin_hosts,
+            origin_hosts,
+            valid_http_url,
+        )
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            MuseBoundarySession,
+            mint_surrogate,
+            store_credentials,
+        )
+
+        cfg = _config.load_metadata() or {}
+        base = _base_url_from_config(cfg)
+        if not base:
+            self._connection_info = "No Mattermost config found."
+            return False
+        # Validate before any credential state changes: a malformed
+        # legacy URL must not auto-migrate the token into a host scope
+        # Sentinel can never match, nor scrub the plaintext copy.
+        if not valid_http_url(base):
+            self._connection_info = (
+                f"Mattermost server URL {base!r} is not a valid http(s):// URL; "
+                "fix config.json and reconnect."
+            )
+            return False
+        token = cfg.get("token", "")
+        if token:
+            store_credentials(
+                "mattermost",
+                {"kind": "bearer", "token": token},
+                [],
+                hosts=origin_hosts(base),
+                insecure_hosts=insecure_origin_hosts(base),
+            )
+        handle = mint_surrogate("mattermost")
+        if handle is None:
+            self._connection_info = "No Mattermost credential in the Muse vault or config."
+            return False
+        _scrub_config_token()
+        self._base_url = base
+        self._token = handle.token
+        self._http = MuseBoundarySession("mattermost")
+        self._muse = True
+        self._driver = _MuseMattermostDriver(base, handle.token)
+        return True
 
     def connect(self) -> bool:
         """Authenticate with Mattermost using stored config."""
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            # Vault-first surrogate wiring; validation below runs the
+            # /users/me read through the daemon boundary (audited).
+            if not self._wire_muse():
+                return False
+            try:
+                me = self._driver.users.get_user("me")
+                self._connection_info = f"Authenticated as {me.get('username', '')}"
+                self._last_post_time = int(time.time() * 1000)
+                return True
+            except Exception as e:
+                self._connection_info = f"Mattermost connection failed: {e}"
+                return False
         cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Mattermost config found."
@@ -153,7 +398,10 @@ class MattermostChannelBackend(ToolMethodBackend):
         if thread_ts:
             body["parent_id"] = thread_ts
         try:
-            requests.post(
+            # In Muse mode ``_token`` holds a surrogate and ``_http`` is
+            # the boundary session (the daemon swaps in the real token
+            # and classifies this ephemeral POST as a read).
+            self._http.post(
                 f"{self._base_url}/api/v4/users/me/typing",
                 json=body,
                 headers={"Authorization": f"Bearer {self._token}"},
@@ -402,12 +650,102 @@ class MattermostChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
+def _muse_authenticate(
+    backend: MattermostChannelBackend, url: str, token: str, port: int, scheme: str
+) -> str:
+    """Enroll a Mattermost token into the Muse vault and validate it.
+
+    The plaintext token goes straight into the vault as a bearer
+    credential bound to the configured server origin, and is never
+    written to ``config.json`` (only the non-secret ``url``/``port``/
+    ``scheme`` metadata is; it is written first, so a failed enrollment
+    leaves no token on disk).  Validation runs ``/users/me`` through
+    the daemon boundary, so it is audited; an invalid token leaves the
+    vault empty.
+
+    Args:
+        backend: The agent's Mattermost backend to (re)wire.
+        url: Server hostname (e.g. ``mattermost.example.com``).
+        token: Personal access token.
+        port: Server port.
+        scheme: ``"https"`` or ``"http"``.
+
+    Returns:
+        JSON string with the validation result.
+    """
+    import contextlib
+
+    from kiss.agents.third_party_agents.muse_auth._common import (
+        insecure_origin_hosts,
+        origin_hosts,
+        valid_http_url,
+    )
+    from kiss.agents.third_party_agents.muse_auth.client import (
+        clear_credentials,
+        store_credentials,
+    )
+
+    base = f"{scheme}://{url}:{port}"
+    if not valid_http_url(base):
+        return json.dumps(
+            {"ok": False, "error": f"{base!r} is not a valid http(s):// server URL."}
+        )
+    try:
+        save_json_config(
+            _config.path, {"url": url, "port": str(port), "scheme": scheme}
+        )
+        store_credentials(
+            "mattermost",
+            {"kind": "bearer", "token": token},
+            [],
+            hosts=origin_hosts(base),
+            insecure_hosts=insecure_origin_hosts(base),
+        )
+        if backend._wire_muse():
+            me = backend._driver.users.get_user("me")
+            return json.dumps(
+                {
+                    "ok": True,
+                    "message": "Mattermost credentials saved (Muse-auth).",
+                    "username": me.get("username", ""),
+                }
+            )
+        else:  # pragma: no cover - defense in depth, credential was just stored
+            error = json.dumps({"ok": False, "error": backend._connection_info})
+    except Exception as e:
+        error = json.dumps({"ok": False, "error": str(e)})
+    # Roll the vault back so a bad token is not left enrolled.
+    with contextlib.suppress(Exception):
+        clear_credentials("mattermost")
+    backend._driver = None
+    backend._token = ""
+    backend._http = requests
+    backend._muse = False
+    return error
+
+
 class MattermostAgent(BaseChannelAgent):
     """Channel agent with Mattermost REST API tools."""
 
     def __init__(self) -> None:
         super().__init__("Mattermost Agent")
         self._backend = MattermostChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+            # Muse-auth mode: wire a vault surrogate and the boundary
+            # driver (no network round trip); the real token never
+            # enters this process once migrated.  A daemon failure
+            # leaves the agent constructible (fail closed, tokenless)
+            # so its authenticate/clear tools stay available.
+            try:
+                self._backend._wire_muse()
+            except MuseAuthError as e:
+                self._backend._driver = None
+                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            return
         cfg = _config.load()
         if cfg:  # pragma: no branch
             try:
@@ -474,6 +812,12 @@ class MattermostAgent(BaseChannelAgent):
             for val, name in [(url, "url"), (token, "token")]:  # pragma: no branch
                 if not val.strip():  # pragma: no branch
                     return f"{name} cannot be empty."
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                return _muse_authenticate(
+                    agent._backend, url.strip(), token.strip(), port, scheme.strip()
+                )
             try:
                 from mattermostdriver import Driver
 
@@ -514,6 +858,15 @@ class MattermostAgent(BaseChannelAgent):
             """
             _config.clear()
             agent._backend._driver = None
+            agent._backend._token = ""
+            agent._backend._http = requests
+            agent._backend._muse = False
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("mattermost")
             return "Mattermost authentication cleared."
 
         return [check_mattermost_auth, authenticate_mattermost, clear_mattermost_auth]
@@ -522,6 +875,13 @@ class MattermostAgent(BaseChannelAgent):
 def _make_backend() -> MattermostChannelBackend:
     """Create a configured backend for channel poll mode."""
     backend = MattermostChannelBackend()
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    if muse_auth_enabled():
+        if backend.connect():
+            return backend
+        print("Not authenticated. Run: kiss-mattermost -t 'authenticate'")
+        sys.exit(1)
     cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-mattermost -t 'authenticate'")

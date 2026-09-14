@@ -510,10 +510,24 @@ def _run_prompt_job(
     work_dir = _cron_dir() / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
+        # Scheduled runs execute in the cron scratch directory, outside
+        # any project git lifecycle: no ``extension_agent_path`` is
+        # passed here, so this module's ``use_worktree()`` /
+        # ``auto_commit()`` getters do NOT apply and the values must be
+        # pinned on the wire.  ``classify_tasks=False`` is pinned too,
+        # because an ``is_development`` classification verdict
+        # overrides an explicit ``use_worktree=False``
+        # (``WorktreeSorcarAgent.run``) — a scheduled job whose prompt
+        # looked like development work used to get a worktree of
+        # whatever git repository happened to enclose the scratch
+        # directory, on every single run.
         result = daemon_client.run(
             preamble + str(job.get("prompt", "")),
             work_dir=str(work_dir),
             model=str(job.get("model_name", "")),
+            use_worktree=False,
+            auto_commit=False,
+            classify_tasks=False,
             max_budget=float(job["max_budget"]) if job.get("max_budget") else None,
             timeout=PROMPT_TIMEOUT_SECONDS,
             sock_path=sock_path,

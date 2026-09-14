@@ -108,7 +108,7 @@ _VERDICT_JSON_SCHEMA: dict[str, Any] = {
         "is_development": {
             "type": "boolean",
             "description": (
-                "True only if the task is a software development task "
+                "True only if the task is a software development or research task "
                 "that requires creating or editing files; git-only "
                 "tasks are false."
             ),

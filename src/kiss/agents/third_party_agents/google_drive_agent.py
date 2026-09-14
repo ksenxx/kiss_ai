@@ -41,6 +41,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
 )
 from kiss.agents.third_party_agents._google_workspace_utils import (
     fresh_access_token,
+    google_api_session,
     load_google_credentials,
     make_google_auth_tools,
 )
@@ -103,6 +104,7 @@ class GoogleDriveChannelBackend(ToolMethodBackend):
 
     def __init__(self) -> None:
         self._creds: Any = None
+        self._http: Any = google_api_session(_SERVICE)
         self._token: str = ""
         self._base_url: str = "https://www.googleapis.com/drive/v3"
         self._upload_base_url: str = "https://www.googleapis.com/upload/drive/v3"
@@ -150,7 +152,7 @@ class GoogleDriveChannelBackend(ToolMethodBackend):
             ``{"ok": false, "error": ...}`` on an HTTP error status.
         """
         url = self._base_url.rstrip("/") + path
-        resp = requests.request(
+        resp = self._http.request(
             method,
             url,
             headers=self._headers(),
@@ -187,7 +189,7 @@ class GoogleDriveChannelBackend(ToolMethodBackend):
             ``{"ok": false, ...}`` JSON string in *error* on failure.
         """
         file_path = f"/files/{quote(file_id, safe='')}"
-        meta_resp = requests.get(
+        meta_resp = self._http.get(
             self._base_url.rstrip("/") + file_path,
             headers=self._headers(),
             params={"fields": "id,name,mimeType"},
@@ -201,14 +203,14 @@ class GoogleDriveChannelBackend(ToolMethodBackend):
             export_mime = export_mime_type or (
                 "text/csv" if mime == _SPREADSHEET_MIME else "text/plain"
             )
-            content_resp = requests.get(
+            content_resp = self._http.get(
                 self._base_url.rstrip("/") + file_path + "/export",
                 headers=self._headers(),
                 params={"mimeType": export_mime},
                 timeout=_TIMEOUT,
             )
         else:
-            content_resp = requests.get(
+            content_resp = self._http.get(
                 self._base_url.rstrip("/") + file_path,
                 headers=self._headers(),
                 params={"alt": "media"},
@@ -409,7 +411,7 @@ class GoogleDriveChannelBackend(ToolMethodBackend):
             )
             headers = self._headers()
             headers["Content-Type"] = f"multipart/related; boundary={boundary}"
-            resp = requests.post(
+            resp = self._http.post(
                 self._upload_base_url.rstrip("/") + "/files",
                 headers=headers,
                 params={"uploadType": "multipart", "fields": _FILE_FIELDS},

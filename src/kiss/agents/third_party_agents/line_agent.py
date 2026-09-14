@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import sys
 import threading
@@ -43,7 +44,191 @@ logger = logging.getLogger(__name__)
 _DEFAULT_WEBHOOK_PORT = 18081
 
 _LINE_DIR = Path.home() / ".kiss" / "third_party_agents" / "line"
+_LINE_API_BASE = "https://api.line.me"
 _config = ChannelConfig(_LINE_DIR, ("channel_access_token",))
+
+
+def _scrub_config_token() -> None:
+    """Remove a vault-migrated ``channel_access_token`` from config.json.
+
+    Finishes the Muse migration automatically: the ``channel_secret``
+    (an inbound webhook-verification secret that never leaves this
+    machine) is kept and the file is deleted when nothing but the
+    access token was stored.
+    """
+    try:
+        cfg = json.loads(_config.path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(cfg, dict) or "channel_access_token" not in cfg:
+        return
+    kept = {k: str(v) for k, v in cfg.items() if k != "channel_access_token" and v}
+    if kept:
+        from kiss.agents.third_party_agents._channel_agent_utils import save_json_config
+
+        save_json_config(_config.path, kept)
+    else:
+        _config.clear()
+
+
+class _SdkLineApi:
+    """LINE Messaging API adapter over the official ``linebot`` SDK.
+
+    The backend talks to one of two duck-typed adapters — this one
+    (legacy mode, real token in-process) or :class:`_MuseLineApi`
+    (Muse mode, surrogate + daemon boundary) — through the same small
+    set of semantic methods, so the tool methods contain no SDK
+    imports or mode branches.
+    """
+
+    def __init__(self, channel_access_token: str) -> None:
+        from linebot.v3.messaging import ApiClient, Configuration, MessagingApi
+
+        self._api = MessagingApi(ApiClient(Configuration(access_token=channel_access_token)))
+
+    def push_text(self, to: str, text: str) -> None:
+        """Push one text message to a user, group, or room."""
+        from linebot.v3.messaging import PushMessageRequest, TextMessage
+
+        self._api.push_message(PushMessageRequest(to=to, messages=[TextMessage(text=text)]))
+
+    def push_image(self, to: str, image_url: str, preview_url: str) -> None:
+        """Push one image message."""
+        from linebot.v3.messaging import ImageMessage, PushMessageRequest
+
+        self._api.push_message(
+            PushMessageRequest(
+                to=to,
+                messages=[ImageMessage(originalContentUrl=image_url, previewImageUrl=preview_url)],
+            )
+        )
+
+    def reply_texts(self, reply_token: str, texts: list[str]) -> None:
+        """Reply to an inbound event with text messages."""
+        from linebot.v3.messaging import ReplyMessageRequest, TextMessage
+
+        self._api.reply_message(
+            ReplyMessageRequest(
+                replyToken=reply_token, messages=[TextMessage(text=t) for t in texts]
+            )
+        )
+
+    def get_profile(self, user_id: str) -> dict[str, Any]:
+        """Return a user's profile as a plain dict."""
+        profile = self._api.get_profile(user_id)
+        return {
+            "display_name": profile.display_name,
+            "user_id": profile.user_id,
+            "picture_url": profile.picture_url or "",
+            "status_message": profile.status_message or "",
+        }
+
+    def get_quota(self) -> dict[str, Any]:
+        """Return the monthly message quota as a plain dict."""
+        quota = self._api.get_message_quota()
+        return {"type": quota.type, "value": quota.value if hasattr(quota, "value") else None}
+
+    def leave_group(self, group_id: str) -> None:
+        """Leave a group."""
+        self._api.leave_group(group_id)
+
+
+class _MuseLineApi:
+    """LINE Messaging API adapter that executes at the Muse boundary.
+
+    Sends a surrogate bearer with every REST call; the daemon swaps in
+    the real channel access token, so this process never holds it.
+    """
+
+    def __init__(self, surrogate: str) -> None:
+        from kiss.agents.third_party_agents.muse_auth.client import MuseBoundarySession
+
+        self._api_base = os.environ.get("LINE_API_BASE", _LINE_API_BASE)
+        self._surrogate = surrogate
+        self._session = MuseBoundarySession("line")
+
+    def _call(self, method: str, path: str, json_body: Any = None) -> dict[str, Any]:
+        """Execute one REST call at the boundary, raising on HTTP errors.
+
+        Args:
+            method: HTTP method.
+            path: API path under ``https://api.line.me``.
+            json_body: Optional JSON body.
+
+        Returns:
+            The decoded JSON response (``{}`` for empty bodies).
+
+        Raises:
+            RuntimeError: On any HTTP error status (mirroring the SDK,
+                which raises ``ApiException`` on non-2xx responses).
+        """
+        resp = self._session.request(
+            method,
+            f"{self._api_base}{path}",
+            headers={"Authorization": f"Bearer {self._surrogate}"},
+            json=json_body,
+            timeout=30,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"LINE API {method} {path} failed: HTTP {resp.status_code} {resp.text[:300]}"
+            )
+        return dict(resp.json()) if resp.content else {}
+
+    def push_text(self, to: str, text: str) -> None:
+        """Push one text message to a user, group, or room."""
+        self._call(
+            "POST",
+            "/v2/bot/message/push",
+            {"to": to, "messages": [{"type": "text", "text": text}]},
+        )
+
+    def push_image(self, to: str, image_url: str, preview_url: str) -> None:
+        """Push one image message."""
+        self._call(
+            "POST",
+            "/v2/bot/message/push",
+            {
+                "to": to,
+                "messages": [
+                    {
+                        "type": "image",
+                        "originalContentUrl": image_url,
+                        "previewImageUrl": preview_url,
+                    }
+                ],
+            },
+        )
+
+    def reply_texts(self, reply_token: str, texts: list[str]) -> None:
+        """Reply to an inbound event with text messages."""
+        self._call(
+            "POST",
+            "/v2/bot/message/reply",
+            {
+                "replyToken": reply_token,
+                "messages": [{"type": "text", "text": t} for t in texts],
+            },
+        )
+
+    def get_profile(self, user_id: str) -> dict[str, Any]:
+        """Return a user's profile as a plain dict."""
+        data = self._call("GET", f"/v2/bot/profile/{user_id}")
+        return {
+            "display_name": data.get("displayName", ""),
+            "user_id": data.get("userId", ""),
+            "picture_url": data.get("pictureUrl", "") or "",
+            "status_message": data.get("statusMessage", "") or "",
+        }
+
+    def get_quota(self) -> dict[str, Any]:
+        """Return the monthly message quota as a plain dict."""
+        data = self._call("GET", "/v2/bot/message/quota")
+        return {"type": data.get("type", ""), "value": data.get("value")}
+
+    def leave_group(self, group_id: str) -> None:
+        """Leave a group."""
+        self._call("POST", f"/v2/bot/group/{group_id}/leave")
 
 
 class LineChannelBackend(ToolMethodBackend):
@@ -59,17 +244,50 @@ class LineChannelBackend(ToolMethodBackend):
         self._webhook_thread: threading.Thread | None = None
         self._connection_info: str = ""
 
+    def _wire_muse(self) -> bool:
+        """Acquire a LINE surrogate and wire the boundary adapter.
+
+        A ``channel_access_token`` still in the legacy config is the
+        newest user intent (initial migration, or a rotation done while
+        Muse was off): it is enrolled as a bearer credential replacing
+        any vault entry, and scrubbed from ``config.json`` (the inbound
+        ``channel_secret`` survives) only after the vault holds it.
+        No network round trip happens here.
+
+        Returns:
+            True when the backend holds a surrogate-backed adapter.
+        """
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            mint_surrogate,
+            store_credentials,
+        )
+
+        cfg = _config.load_metadata() or {}
+        token = cfg.get("channel_access_token", "")
+        if token:
+            store_credentials("line", {"kind": "bearer", "token": token}, [])
+        handle = mint_surrogate("line")
+        if handle is None:
+            self._connection_info = "No LINE credential in the Muse vault or config."
+            return False
+        _scrub_config_token()
+        self._api = _MuseLineApi(handle.token)
+        return True
+
     def connect(self) -> bool:
         """Authenticate with LINE and start webhook server."""
-        cfg = _config.load()
-        if not cfg:  # pragma: no branch
-            self._connection_info = "No LINE config found."
-            return False
-        try:
-            from linebot.v3.messaging import ApiClient, Configuration, MessagingApi
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
-            configuration = Configuration(access_token=cfg["channel_access_token"])
-            self._api = MessagingApi(ApiClient(configuration))
+        try:
+            if muse_auth_enabled():
+                if not self._wire_muse():
+                    return False
+            else:
+                cfg = _config.load()
+                if not cfg:  # pragma: no branch
+                    self._connection_info = "No LINE config found."
+                    return False
+                self._api = _SdkLineApi(cfg["channel_access_token"])
             self._connection_info = "Connected to LINE"
             if not self._start_webhook_server():  # pragma: no branch
                 return False
@@ -149,11 +367,7 @@ class LineChannelBackend(ToolMethodBackend):
         """
         if not self._api:
             raise RuntimeError("Not connected to LINE")
-        from linebot.v3.messaging import PushMessageRequest, TextMessage
-
-        self._api.push_message(
-            PushMessageRequest(to=channel_id, messages=[TextMessage(text=text)])
-        )
+        self._api.push_text(channel_id, text)
 
     def disconnect(self) -> None:
         """Stop the embedded webhook server and release backend resources."""
@@ -173,9 +387,7 @@ class LineChannelBackend(ToolMethodBackend):
         """
         assert self._api is not None
         try:
-            from linebot.v3.messaging import PushMessageRequest, TextMessage
-
-            self._api.push_message(PushMessageRequest(to=to, messages=[TextMessage(text=text)]))
+            self._api.push_text(to, text)
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -193,13 +405,9 @@ class LineChannelBackend(ToolMethodBackend):
         """
         assert self._api is not None
         try:
-            from linebot.v3.messaging import ReplyMessageRequest, TextMessage
-
             msgs_data = json.loads(messages_json)
-            messages = [
-                TextMessage(text=m.get("text", "")) for m in msgs_data if m.get("type") == "text"
-            ]
-            self._api.reply_message(ReplyMessageRequest(replyToken=reply_token, messages=messages))
+            texts = [m.get("text", "") for m in msgs_data if m.get("type") == "text"]
+            self._api.reply_texts(reply_token, texts)
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -215,16 +423,7 @@ class LineChannelBackend(ToolMethodBackend):
         """
         assert self._api is not None
         try:
-            profile = self._api.get_profile(user_id)
-            return json.dumps(
-                {
-                    "ok": True,
-                    "display_name": profile.display_name,
-                    "user_id": profile.user_id,
-                    "picture_url": profile.picture_url or "",
-                    "status_message": profile.status_message or "",
-                }
-            )
+            return json.dumps({"ok": True, **self._api.get_profile(user_id)})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -236,14 +435,7 @@ class LineChannelBackend(ToolMethodBackend):
         """
         assert self._api is not None
         try:
-            quota = self._api.get_message_quota()
-            return json.dumps(
-                {
-                    "ok": True,
-                    "type": quota.type,
-                    "value": quota.value if hasattr(quota, "value") else None,
-                }
-            )
+            return json.dumps({"ok": True, **self._api.get_quota()})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -276,19 +468,61 @@ class LineChannelBackend(ToolMethodBackend):
         """
         assert self._api is not None
         try:
-            from linebot.v3.messaging import ImageMessage, PushMessageRequest
-
-            self._api.push_message(
-                PushMessageRequest(
-                    to=to,
-                    messages=[
-                        ImageMessage(originalContentUrl=image_url, previewImageUrl=preview_url)
-                    ],
-                )
-            )
+            self._api.push_image(to, image_url, preview_url)
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
+
+
+def _muse_authenticate(
+    backend: LineChannelBackend, channel_access_token: str, channel_secret: str
+) -> str:
+    """Enroll a LINE channel access token into the Muse vault and validate it.
+
+    The plaintext token goes straight into the vault as a bearer
+    credential, atomically replacing any previous enrollment, and is
+    never written to ``config.json`` (only the inbound
+    ``channel_secret`` webhook-verification metadata is — written
+    first, so a failed enrollment leaves no access token on disk).
+    Validation runs the message-quota read through the daemon boundary,
+    so it is audited; an invalid token leaves the vault empty.
+
+    Args:
+        backend: The agent's LINE backend to (re)wire.
+        channel_access_token: LINE channel access token.
+        channel_secret: Optional channel secret (inbound verification).
+
+    Returns:
+        JSON string with the validation result.
+    """
+    import contextlib
+
+    from kiss.agents.third_party_agents._channel_agent_utils import save_json_config
+    from kiss.agents.third_party_agents.muse_auth.client import (
+        clear_credentials,
+        store_credentials,
+    )
+
+    try:
+        if channel_secret:
+            save_json_config(_config.path, {"channel_secret": channel_secret})
+        else:
+            _config.clear()
+        store_credentials("line", {"kind": "bearer", "token": channel_access_token}, [])
+        if backend._wire_muse():  # pragma: no branch - credential was just stored
+            result = json.loads(backend.get_quota())
+            if result.get("ok"):
+                return json.dumps({"ok": True, "message": "LINE credentials saved (Muse-auth)."})
+            error = json.dumps({"ok": False, "error": str(result)})
+        else:  # pragma: no cover - defense in depth
+            error = json.dumps({"ok": False, "error": backend._connection_info})
+    except Exception as e:
+        error = json.dumps({"ok": False, "error": str(e)})
+    # Roll the vault back so a bad token is not left enrolled.
+    with contextlib.suppress(Exception):
+        clear_credentials("line")
+    backend._api = None
+    return error
 
 
 class LineAgent(BaseChannelAgent):
@@ -297,13 +531,26 @@ class LineAgent(BaseChannelAgent):
     def __init__(self) -> None:
         super().__init__("LINE Agent")
         self._backend = LineChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+            # Muse-auth mode: wire a vault surrogate and the boundary
+            # adapter (no network round trip); the real token never
+            # enters this process once migrated.  A daemon failure
+            # leaves the agent constructible (fail closed, tokenless)
+            # so its authenticate/clear tools stay available.
+            try:
+                self._backend._wire_muse()
+            except MuseAuthError as e:
+                self._backend._api = None
+                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            return
         cfg = _config.load()
         if cfg:  # pragma: no branch
             try:
-                from linebot.v3.messaging import ApiClient, Configuration, MessagingApi
-
-                configuration = Configuration(access_token=cfg["channel_access_token"])
-                self._backend._api = MessagingApi(ApiClient(configuration))
+                self._backend._api = _SdkLineApi(cfg["channel_access_token"])
             except Exception:
                 pass
 
@@ -348,12 +595,14 @@ class LineAgent(BaseChannelAgent):
             """
             if not channel_access_token.strip():  # pragma: no branch
                 return "channel_access_token cannot be empty."
-            try:
-                from linebot.v3.messaging import ApiClient, Configuration, MessagingApi
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
-                configuration = Configuration(access_token=channel_access_token.strip())
-                api = MessagingApi(ApiClient(configuration))
-                agent._backend._api = api
+            if muse_auth_enabled():
+                return _muse_authenticate(
+                    agent._backend, channel_access_token.strip(), channel_secret.strip()
+                )
+            try:
+                agent._backend._api = _SdkLineApi(channel_access_token.strip())
                 _config.save(
                     {
                         "channel_access_token": channel_access_token.strip(),
@@ -372,6 +621,12 @@ class LineAgent(BaseChannelAgent):
             """
             _config.clear()
             agent._backend._api = None
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("line")
             return "LINE authentication cleared."
 
         return [check_line_auth, authenticate_line, clear_line_auth]
@@ -380,14 +635,18 @@ class LineAgent(BaseChannelAgent):
 def _make_backend() -> LineChannelBackend:
     """Create a configured backend for channel poll mode."""
     backend = LineChannelBackend()
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    if muse_auth_enabled():
+        if backend._wire_muse():
+            return backend
+        print("Not authenticated. Run: kiss-line -t 'authenticate'")
+        sys.exit(1)
     cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-line -t 'authenticate'")
         sys.exit(1)
-    from linebot.v3.messaging import ApiClient, Configuration, MessagingApi
-
-    configuration = Configuration(access_token=cfg["channel_access_token"])
-    backend._api = MessagingApi(ApiClient(configuration))
+    backend._api = _SdkLineApi(cfg["channel_access_token"])
     return backend
 
 
