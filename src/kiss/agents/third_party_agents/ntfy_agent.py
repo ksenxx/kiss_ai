@@ -14,7 +14,7 @@ Stores config in ``~/.kiss/third_party_agents/ntfy/config.json`` with a
 required ``topic`` and optional ``server`` (default ``https://ntfy.sh``),
 ``token`` (sent as ``Authorization: Bearer``) and ``echo_tag``.
 
-In Muse-auth mode (``KISS_MUSE_AUTH=1``) a configured token lives in
+In Muse-auth mode (the default) a configured token lives in
 the Muse vault, enrolled together with a self-hosted server's host
 (flagged as a consent-scoped insecure host when the server URL is
 plain ``http://``), and every API call runs at the daemon boundary;

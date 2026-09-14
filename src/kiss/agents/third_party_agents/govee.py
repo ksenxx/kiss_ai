@@ -7,7 +7,7 @@
 
 Reads the key from $GOVEE_API_KEY (already exported in ~/.zshrc).
 
-In Muse-auth mode (``KISS_MUSE_AUTH=1``) the key lives in the Muse
+In Muse-auth mode (the default) the key lives in the Muse
 vault as a header-kind credential ($GOVEE_API_KEY is enrolled once, on
 first use): this process only holds a surrogate, and the daemon swaps
 it into the real ``Govee-API-Key`` header at the network boundary.
@@ -230,6 +230,25 @@ def cmd_kelvin(name: str, k: int) -> None:
 
 def main(argv: list[str]) -> None:
     """CLI entry."""
+    # A direct CLI run does not inherit the kiss-web daemon's
+    # environment: import the canonical ``$KISS_HOME/api_keys.env``
+    # (the Muse-auth ``KISS_MUSE_AUTH`` opt-out, API keys) before any
+    # Muse-mode check or credential migration, exactly like
+    # ``channel_main()``.  ``vscode_config`` needs POSIX ``fcntl``, so
+    # the CLI keeps working where that module cannot import (Windows).
+    try:
+        from kiss.core.vscode_config import load_api_keys, load_api_keys_readonly
+    except ImportError:
+        pass
+    else:
+        # A read-only $KISS_HOME (the store's lock file cannot be
+        # created) must neither stop the CLI nor drop a canonical
+        # KISS_MUSE_AUTH=0 opt-out: fall back to the lock-free,
+        # write-free import.
+        try:
+            load_api_keys()
+        except OSError:
+            load_api_keys_readonly()
     if len(argv) < 2:
         print(__doc__)
         return

@@ -319,6 +319,28 @@ class ChannelConfig:
         """Delete the config file if it exists."""
         clear_json_config(self.path)
 
+    def scrub_secrets(self, secret_keys: tuple[str, ...]) -> None:
+        """Remove vault-migrated secret keys from ``config.json``.
+
+        Finishes a Muse-auth migration automatically: non-secret
+        metadata keys survive (readable via :meth:`load_metadata`) and
+        the file is deleted when nothing but the secrets was stored.
+
+        Args:
+            secret_keys: Keys holding real credentials (e.g. ``("token",)``).
+        """
+        try:
+            cfg = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(cfg, dict) or not any(k in cfg for k in secret_keys):
+            return
+        kept = {str(k): str(v) for k, v in cfg.items() if k not in secret_keys and v}
+        if kept:
+            save_json_config(self.path, kept)
+        else:
+            self.clear()
+
 
 _BREAKER_FAILURE_LIMIT = 5
 _BREAKER_PAUSE_SECONDS = 900.0
@@ -1780,6 +1802,28 @@ def channel_main(
         _build_run_kwargs,
         _print_run_stats,
     )
+    # Import the canonical key store before any backend or connector
+    # code runs: a direct CLI invocation does not inherit the kiss-web
+    # daemon's environment, so ``KISS_MUSE_AUTH`` (the Muse-auth
+    # opt-out) and channel tokens in ``$KISS_HOME/api_keys.env`` must
+    # reach ``os.environ`` before the first ``muse_auth_enabled()``
+    # check or credential migration — not when the API server happens
+    # to start later.  ``vscode_config`` needs POSIX file locking; on
+    # platforms without ``fcntl`` (Windows) there is no daemon-written
+    # canonical store to import, so the CLI must keep working without it.
+    try:
+        from kiss.core.vscode_config import load_api_keys, load_api_keys_readonly
+    except ImportError:
+        pass
+    else:
+        # A read-only $KISS_HOME (the store's lock file cannot be
+        # created) must neither stop the CLI nor drop a canonical
+        # KISS_MUSE_AUTH=0 opt-out: fall back to the lock-free,
+        # write-free import.
+        try:
+            load_api_keys()
+        except OSError:
+            load_api_keys_readonly()
 
     if len(sys.argv) <= 1:  # pragma: no branch
         parts = [f"Usage: {cli_name} [-m MODEL] [-e ENDPOINT] [-b BUDGET]"]

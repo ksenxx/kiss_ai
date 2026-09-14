@@ -910,10 +910,10 @@ def test_cli_import_slack_and_token_services(muse_env: Path,
 
 def test_legacy_mode_untouched(isolated_kiss_home: Path, api_server: _ApiServer,
                                monkeypatch: pytest.MonkeyPatch) -> None:
-    """With KISS_MUSE_AUTH unset the connectors use plaintext directly."""
+    """With KISS_MUSE_AUTH=0 the connectors use plaintext directly."""
     from kiss.agents.third_party_agents.slack_agent import SlackAgent, _make_backend
 
-    monkeypatch.delenv("KISS_MUSE_AUTH", raising=False)
+    monkeypatch.setenv("KISS_MUSE_AUTH", "0")
     api_base_url = f"http://127.0.0.1:{api_server.server_address[1]}/api/"
     empty = SlackChannelBackend()
     assert not empty.connect()

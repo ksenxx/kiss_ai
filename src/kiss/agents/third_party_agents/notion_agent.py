@@ -227,7 +227,7 @@ class NotionChannelBackend(ToolMethodBackend):
     def connect(self) -> bool:
         """Load the Notion config from disk.
 
-        In Muse-auth mode (``KISS_MUSE_AUTH=1``) the real integration
+        In Muse-auth mode (the default) the real integration
         token lives in the Muse vault (auto-enrolled from the legacy
         config on first connect); this process only holds a surrogate
         and every API call is executed at the daemon boundary.
@@ -258,6 +258,10 @@ class NotionChannelBackend(ToolMethodBackend):
                 return False
             self._token = surrogate
             self._http = MuseBoundarySession("notion")
+            # The credential lives in the vault now; scrub any plaintext
+            # copy left in the legacy config so the agent process never
+            # holds the real token again.
+            _config.scrub_secrets(("token",))
             self._connection_info = "Notion API configured (Muse-auth)."
             return True
         cfg = _config.load()

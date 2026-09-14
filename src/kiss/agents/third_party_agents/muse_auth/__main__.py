@@ -14,6 +14,8 @@ Usage (via ``python -m kiss.agents.third_party_agents.muse_auth``):
 * ``grant <service> <read|write> [--scope once|session|perpetual|ttl] [--ttl SECONDS]``
   — approve asked actions (Muse's human-in-the-loop grant).
 * ``revoke <service> [action]`` — remove grants.
+* ``export <service>`` — print a service's vault credential so a
+  legacy config can be restored after opting out (``KISS_MUSE_AUTH=0``).
 * ``clear <service>`` — remove a service's credential from the vault.
 * ``audit [--tail N]`` — show recent Sentinel decisions.
 * ``daemon`` — run the daemon in the foreground.
@@ -476,6 +478,37 @@ def _cmd_import_synology() -> int:
     return 0
 
 
+def _cmd_export(service: str) -> int:
+    """Print a service's vault credential as JSON on stdout.
+
+    The Muse-auth default migrates plaintext credentials into the vault
+    and scrubs the legacy copies, so a user opting out afterwards
+    (``KISS_MUSE_AUTH=0``) needs the real credential back to rebuild a
+    legacy config or ``token.json``.  The vault file already belongs to
+    (and is readable by) the invoking user, so printing it discloses
+    nothing the user cannot read; the daemon itself still never returns
+    credentials over the socket.
+
+    Args:
+        service: Connector service name.
+
+    Returns:
+        Process exit code (1 when the service has no vault credential).
+    """
+    from kiss.agents.third_party_agents.muse_auth._common import valid_service_name
+
+    if not valid_service_name(service):
+        print(f"invalid service name {service!r}", file=sys.stderr)
+        return 1
+    path = muse_auth_dir() / "vault" / f"{service}.json"
+    if not path.exists():
+        print(f"no vault credential for '{service}'", file=sys.stderr)
+        return 1
+    payload = json.loads(path.read_text())
+    print(json.dumps(payload.get("authorized_user_info"), indent=2))
+    return 0
+
+
 def _cmd_audit(tail: int) -> int:
     """Print the last *tail* Sentinel audit records.
 
@@ -517,6 +550,7 @@ def main(argv: list[str] | None = None) -> int:
     p_revoke = sub.add_parser("revoke")
     p_revoke.add_argument("service")
     p_revoke.add_argument("action", nargs="?", default="")
+    sub.add_parser("export").add_argument("service")
     sub.add_parser("clear").add_argument("service")
     p_audit = sub.add_parser("audit")
     p_audit.add_argument("--tail", type=int, default=20)
@@ -537,6 +571,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "revoke":
         print(f"revoked {revoke(args.service, args.action)} grant(s)")
         return 0
+    if args.cmd == "export":
+        return _cmd_export(args.service)
     if args.cmd == "clear":
         clear_credentials(args.service)
         print(f"cleared '{args.service}' from the vault")

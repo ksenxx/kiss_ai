@@ -120,22 +120,10 @@ def _load_service(sa_path: str = "") -> Any:
         # signs JWTs locally and intentionally stays legacy, above.)
         from kiss.agents.third_party_agents.muse_auth.client import (
             MuseHttp,
-            mint_surrogate,
-            store_credentials,
+            mint_surrogate_migrating,
         )
 
-        handle = mint_surrogate("googlechat")
-        if handle is None:
-            token_file = _token_path()
-            if token_file.exists():
-                try:
-                    store_credentials(
-                        "googlechat", json.loads(token_file.read_text()), _SCOPES
-                    )
-                    token_file.unlink()
-                    handle = mint_surrogate("googlechat")
-                except Exception:
-                    handle = None
+        handle = mint_surrogate_migrating("googlechat", _token_path(), _SCOPES)
         if handle is None:
             return None
         return build(

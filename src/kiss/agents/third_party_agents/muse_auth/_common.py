@@ -190,13 +190,52 @@ MAX_FRAME_BYTES = 64 * 1024 * 1024
 READ_METHODS = ("GET", "HEAD", "OPTIONS")
 
 
-def muse_auth_enabled() -> bool:
-    """Return True when Muse-style auth is switched on via ``KISS_MUSE_AUTH``.
+def platform_supports_muse_daemon() -> bool:
+    """Return whether this platform can run the Muse-auth daemon.
+
+    The daemon needs POSIX file locking (``fcntl``, absent on Windows)
+    and ``SO_PEERCRED`` peer authentication on Unix sockets (Linux;
+    macOS exposes ``LOCAL_PEERCRED`` instead).  On unsupported
+    platforms the daemon dies at import or cannot authenticate its
+    first client, so defaulting Muse-auth on there would break every
+    connector instead of protecting it.
 
     Returns:
-        True when the env var is a truthy string ("1", "true", "yes", "on").
+        True when both ``fcntl`` and ``socket.SO_PEERCRED`` exist.
     """
-    return os.environ.get("KISS_MUSE_AUTH", "").strip().lower() in ("1", "true", "yes", "on")
+    if not hasattr(socket, "SO_PEERCRED"):
+        return False
+    try:
+        import fcntl  # noqa: F401
+    except ImportError:  # pragma: no cover - non-POSIX interpreter
+        return False
+    return True
+
+
+def muse_auth_enabled() -> bool:
+    """Return True when Muse-style auth is switched on (the default).
+
+    On platforms that can run the daemon (see
+    :func:`platform_supports_muse_daemon`), Muse-auth is enabled unless
+    ``KISS_MUSE_AUTH`` is explicitly set to a falsy string ("0",
+    "false", "no", "off") — unset, empty, or unrecognized values keep
+    the secure default on, so a typo cannot silently fall back to
+    plaintext credentials in the agent process.  An explicit truthy
+    string ("1", "true", "yes", "on") forces Muse-auth on even on
+    unsupported platforms, preserving the historical opt-in behavior.
+
+    Returns:
+        False when ``KISS_MUSE_AUTH`` is "0", "false", "no", or "off"
+        (case-insensitive, surrounding whitespace ignored); True when
+        it is "1", "true", "yes", or "on"; otherwise the platform
+        default (True where the daemon can run, False elsewhere).
+    """
+    value = os.environ.get("KISS_MUSE_AUTH", "").strip().lower()
+    if value in ("0", "false", "no", "off"):
+        return False
+    if value in ("1", "true", "yes", "on"):
+        return True
+    return platform_supports_muse_daemon()
 
 
 def muse_auth_dir() -> Path:

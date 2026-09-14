@@ -246,7 +246,7 @@ class SlackChannelBackend(ToolMethodBackend):
         """Authenticate with Slack using the stored bot token.
 
         Uses the workspace set at construction time to load the
-        appropriate token.  In Muse-auth mode (``KISS_MUSE_AUTH=1``)
+        appropriate token.  In Muse-auth mode (the default)
         the real bot token lives in the Muse vault (auto-enrolled from
         the legacy token file on first connect); this process only
         holds a surrogate and every Web API call is executed at the

@@ -34,6 +34,7 @@ from kiss.agents.third_party_agents.muse_auth._common import (
     PROTOCOL_VERSION,
     muse_auth_dir,
     muse_auth_enabled,
+    platform_supports_muse_daemon,
     recv_frame,
     send_frame,
     socket_path,
@@ -49,7 +50,9 @@ __all__ = [
     "enrolled_services",
     "grant",
     "mint_surrogate",
+    "mint_surrogate_migrating",
     "muse_auth_enabled",
+    "platform_supports_muse_daemon",
     "revoke",
     "stop_daemon",
     "store_credentials",
@@ -332,6 +335,115 @@ def mint_surrogate(service: str) -> SurrogateCredentials | None:
     if not reply.get("ok"):
         return None
     return SurrogateCredentials(service, str(reply["surrogate"]))
+
+
+def _migratable_google_info(token_file: Any, scopes: list[str]) -> dict[str, Any] | None:
+    """Return the authorized-user info in *token_file* when it is loadable.
+
+    Validated with the same ``google-auth`` parser the legacy loader
+    and the daemon vault use, so the migration accepts exactly the
+    credentials that worked before the Muse-auth default (including
+    quirks like empty-but-present required fields) and keeps every
+    other file on disk for diagnosis instead of enrolling a credential
+    that can only fail at the boundary.
+
+    Args:
+        token_file: :class:`~pathlib.Path` of the legacy ``token.json``.
+        scopes: OAuth scopes the connector requests.
+
+    Returns:
+        The parsed info dict, or ``None`` when the file is unreadable,
+        malformed, or not loadable as an authorized-user credential.
+    """
+    try:
+        info = json.loads(token_file.read_text())
+        if not isinstance(info, dict):
+            return None
+        from google.oauth2.credentials import Credentials
+
+        creds = Credentials.from_authorized_user_info(info, scopes)
+        # Match the legacy loader's usability contract, not just its
+        # parser: a credential that is neither currently valid nor
+        # refreshable (expired with no refresh token) always yielded
+        # None before, so vaulting it would only manufacture a
+        # surrogate that can never resolve.
+        if not creds.valid and not (creds.expired and creds.refresh_token):
+            return None
+    except Exception:
+        return None
+    return info
+
+
+def mint_surrogate_migrating(
+    service: str, token_file: Any, scopes: list[str]
+) -> SurrogateCredentials | None:
+    """Mint a surrogate, migrating a legacy ``token.json`` if needed.
+
+    A user upgrading with a working Google OAuth token on disk but no
+    vault enrollment must keep working under the Muse-auth default:
+    when the vault has no credential for *service* and *token_file*
+    exists, its authorized-user info is enrolled into the vault, the
+    plaintext file is removed, and a surrogate is minted — the same
+    store-then-unlink migration Google Chat has always done.
+
+    Args:
+        service: Connector service name (e.g. ``"google_drive"``).
+        token_file: :class:`~pathlib.Path` of the legacy ``token.json``.
+        scopes: OAuth scopes the migrated credential carries.
+
+    Returns:
+        A :class:`SurrogateCredentials`, or ``None`` when the service
+        is not enrolled and no migratable ``token.json`` exists.
+    """
+    handle = mint_surrogate(service)
+    if handle is not None:
+        # Deliberately no scrub retry here: a token.json that exists
+        # alongside a vault enrollment may be a NEWER credential (the
+        # user re-ran a legacy consent flow), and deleting it without
+        # migrating would destroy it.  The rare leftover from an
+        # unlink that failed in a read-only directory is finished
+        # manually with the ``import`` CLI.
+        return handle
+    if token_file.exists() and _migratable_google_info(token_file, scopes) is not None:
+        # Serialize concurrent upgrades on a lock file next to
+        # token.json: without it, several first-connect callers each
+        # store the same credential (every store starts a new
+        # generation, invalidating the surrogates the others just
+        # minted) and race on the unlink.  Under the lock exactly one
+        # caller migrates; the rest re-mint against the finished
+        # enrollment.  The empty lock file is left behind on purpose —
+        # unlinking it would reopen the race it exists to close.
+        import fcntl
+
+        lock_path = token_file.with_name(token_file.name + ".muse-migrate.lock")
+        try:
+            with open(lock_path, "w") as lock_fh:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+                handle = mint_surrogate(service)
+                if handle is None and token_file.exists():
+                    info = _migratable_google_info(token_file, scopes)
+                    if info is not None:
+                        store_credentials(service, info, scopes)
+                        handle = mint_surrogate(service)
+                        # The vault holds the credential and the handle
+                        # is live: a failed unlink (e.g. a directory
+                        # turned read-only) must not turn this success
+                        # into "no credentials".
+                        with contextlib.suppress(OSError):
+                            token_file.unlink(missing_ok=True)
+        except Exception:
+            # A daemon hiccup or an unwritable directory means "no
+            # usable credentials" for this caller; the next connect
+            # retries the migration.
+            handle = None
+        if handle is not None:
+            return handle
+    # Close the pre-lock TOCTOU window: between the first mint and the
+    # checks above, a concurrent caller may have finished the migration
+    # (the store precedes the unlink, so a vanished token.json implies
+    # the enrollment completed).  One final vault check answers for
+    # every "could not migrate" path.
+    return mint_surrogate(service)
 
 
 def clear_credentials(service: str) -> None:

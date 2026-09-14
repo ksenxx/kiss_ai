@@ -1205,7 +1205,7 @@ def test_legacy_mode_unchanged(
     isolated_kiss_home: Path, api_server: _MessagingApiServer
 ) -> None:
     """With Muse off, every connector still sends its credential directly."""
-    assert os.environ.get("KISS_MUSE_AUTH", "") in ("", "0")
+    assert os.environ.get("KISS_MUSE_AUTH") == "0"  # pinned by tests/conftest.py
     # Mattermost: the typing indicator posts the real bearer directly.
     backend_mm = MattermostChannelBackend(base_url=api_server.base(), token=_REAL_MM_TOKEN)
     backend_mm.send_typing("C1")

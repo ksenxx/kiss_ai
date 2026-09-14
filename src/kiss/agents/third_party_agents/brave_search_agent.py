@@ -79,7 +79,7 @@ class BraveSearchChannelBackend(ToolMethodBackend):
     def connect(self) -> bool:
         """Load the Brave Search config from disk.
 
-        In Muse-auth mode (``KISS_MUSE_AUTH=1``) the real subscription
+        In Muse-auth mode (the default) the real subscription
         token lives in the Muse vault as a header-kind credential
         (auto-enrolled from the legacy config on first connect); this
         process only holds a surrogate, sent as a bearer to the daemon,
@@ -117,6 +117,9 @@ class BraveSearchChannelBackend(ToolMethodBackend):
             self._api_key = surrogate
             self._http = MuseBoundarySession("brave_search")
             self._muse = True
+            # The credential lives in the vault now; scrub any plaintext
+            # copy left in the legacy config.
+            _config.scrub_secrets(("api_key",))
             self._connection_info = "Brave Search API key configured (Muse-auth)."
             return True
         cfg = _config.load()

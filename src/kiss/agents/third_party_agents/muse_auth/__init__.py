@@ -25,8 +25,13 @@ Slack, Firecrawl, Brave Search):
 * **Per-service ACLs** — a surrogate minted for ``google_drive``
   cannot obtain the Gmail credential or reach Gmail API hosts.
 
-Enable by setting ``KISS_MUSE_AUTH=1``.  The Google agents then route
-all API traffic through the daemon (see
+Muse-auth is enabled by default on platforms that can run the daemon
+(see ``platform_supports_muse_daemon``); opt out by setting
+``KISS_MUSE_AUTH=0`` (or ``false`` / ``no`` / ``off``) to restore the
+legacy plaintext transport.  Credentials already migrated into the
+vault stay there — recover one for a legacy config with the ``export``
+CLI command.  The Google agents route all
+API traffic through the daemon (see
 ``_google_workspace_utils.google_api_session``).  Manage enrollment
 and grants with ``python -m kiss.agents.third_party_agents.muse_auth``.
 
@@ -52,7 +57,9 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     clear_credentials,
     grant,
     mint_surrogate,
+    mint_surrogate_migrating,
     muse_auth_enabled,
+    platform_supports_muse_daemon,
     store_credentials,
     vault_has_credentials,
 )
@@ -66,7 +73,9 @@ __all__ = [
     "clear_credentials",
     "grant",
     "mint_surrogate",
+    "mint_surrogate_migrating",
     "muse_auth_enabled",
+    "platform_supports_muse_daemon",
     "store_credentials",
     "vault_has_credentials",
 ]

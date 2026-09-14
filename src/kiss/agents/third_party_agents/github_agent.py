@@ -193,7 +193,7 @@ class GitHubChannelBackend(ToolMethodBackend):
     def connect(self) -> bool:
         """Load the GitHub config from disk.
 
-        In Muse-auth mode (``KISS_MUSE_AUTH=1``) the real personal
+        In Muse-auth mode (the default) the real personal
         access token lives in the Muse vault (auto-enrolled from the
         legacy config on first connect); this process only holds a
         surrogate and every API call is executed at the daemon boundary.
@@ -224,6 +224,9 @@ class GitHubChannelBackend(ToolMethodBackend):
                 return False
             self._token = surrogate
             self._http = MuseBoundarySession("github")
+            # The credential lives in the vault now; scrub any plaintext
+            # copy left in the legacy config (read_only survives).
+            _config.scrub_secrets(("token",))
             # The read_only flag lives in config.json; read it leniently
             # so it survives after the token key is migrated out.
             self._read_only = self._relaxed_config().get("read_only", "false") == "true"

@@ -68,6 +68,14 @@ if os.path.isfile(_subprocess_rc):
 
 os.environ["BROWSER"] = "true"
 
+# Muse-auth is on by default in production (see muse_auth._common.
+# muse_auth_enabled), but the legacy connector suites emulate raw
+# service HTTP endpoints and would otherwise route every request
+# through a per-test authd daemon.  Pin the legacy transport for the
+# whole session; the Muse suites opt back in per test with
+# monkeypatch.setenv("KISS_MUSE_AUTH", "1").
+os.environ["KISS_MUSE_AUTH"] = "0"
+
 _test_kiss_home = tempfile.mkdtemp(prefix="kiss_test_")
 os.environ["KISS_HOME"] = _test_kiss_home
 _th._db_conn = None

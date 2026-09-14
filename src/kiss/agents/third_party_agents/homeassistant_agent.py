@@ -9,7 +9,7 @@ long-lived access token (sent as ``Authorization: Bearer`` on every
 call).  Stores config in
 ``~/.kiss/third_party_agents/homeassistant/config.json``.
 
-In Muse-auth mode (``KISS_MUSE_AUTH=1``) the token lives in the Muse
+In Muse-auth mode (the default) the token lives in the Muse
 vault, enrolled together with the instance's host (Home Assistant is
 always self-hosted, so there is no built-in host allowlist).  When the
 configured ``base_url`` uses plain ``http://`` — common for LAN
@@ -189,7 +189,7 @@ class HomeAssistantChannelBackend(ToolMethodBackend):
     def connect(self) -> bool:
         """Load the Home Assistant config from disk.
 
-        In Muse-auth mode (``KISS_MUSE_AUTH=1``) the real token lives in
+        In Muse-auth mode (the default) the real token lives in
         the Muse vault (auto-enrolled from the legacy config on first
         connect, together with the instance's host — flagged as a
         consent-scoped insecure host when the base URL is plain

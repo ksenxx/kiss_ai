@@ -881,7 +881,7 @@ def test_discord_legacy_mode_unchanged(
     """With Muse-auth off, Discord keeps its plaintext-config behavior."""
     from kiss.agents.third_party_agents.discord_agent import DiscordAgent, _make_backend
 
-    monkeypatch.delenv("KISS_MUSE_AUTH", raising=False)
+    monkeypatch.setenv("KISS_MUSE_AUTH", "0")
     monkeypatch.setenv(
         "DISCORD_API_BASE", f"http://127.0.0.1:{api_server.server_address[1]}/api/v10"
     )
@@ -1348,7 +1348,7 @@ def test_govee_legacy_mode_unchanged(
     isolated_kiss_home: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With Muse-auth off, Govee sends the real key directly via urllib."""
-    monkeypatch.delenv("KISS_MUSE_AUTH", raising=False)
+    monkeypatch.setenv("KISS_MUSE_AUTH", "0")
     monkeypatch.setattr(
         govee, "API", f"http://127.0.0.1:{api_server.server_address[1]}/router/api/v1"
     )

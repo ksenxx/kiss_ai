@@ -95,7 +95,7 @@ def load_google_credentials(service: str, scopes: list[str]) -> Credentials | No
         service: Service directory name (e.g. ``"google_sheets"``).
         scopes: OAuth scopes the credentials must carry.
 
-    In Muse-auth mode (``KISS_MUSE_AUTH=1``) the real token stays in
+    In Muse-auth mode (the default) the real token stays in
     the daemon vault and a surrogate-bearing handle is returned
     instead; the agent process never reads ``token.json``.
 
@@ -106,9 +106,13 @@ def load_google_credentials(service: str, scopes: list[str]) -> Credentials | No
         unrefreshable.
     """
     if muse_auth_enabled():
-        from kiss.agents.third_party_agents.muse_auth.client import mint_surrogate
+        # A leftover legacy token.json (working install upgraded to the
+        # Muse-auth default) is migrated into the vault and removed.
+        from kiss.agents.third_party_agents.muse_auth.client import mint_surrogate_migrating
 
-        return cast("Credentials | None", mint_surrogate(service))
+        return cast(
+            "Credentials | None", mint_surrogate_migrating(service, token_path(service), scopes)
+        )
     path = token_path(service)
     if not path.exists():
         return None
@@ -394,7 +398,7 @@ def google_api_session(service: str) -> Any:
 
     Legacy mode returns the ``requests`` module (direct calls, real
     token in the Authorization header).  In Muse-auth mode
-    (``KISS_MUSE_AUTH=1``) it returns a
+    (the default) it returns a
     :class:`~kiss.agents.third_party_agents.muse_auth.client.MuseBoundarySession`
     that ships every request to the Muse-auth daemon, where Sentinel
     authorizes it and the surrogate bearer token is swapped for the

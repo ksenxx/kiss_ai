@@ -43,6 +43,8 @@ instead of mocked):
 from __future__ import annotations
 
 import json
+import os
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler
@@ -372,8 +374,9 @@ def test_github_bearer_service(muse_env: Path, api_server: _ApiServer) -> None:
     assert result["ok"] is True
     assert api_server.requests[-1]["auth"] == f"Bearer {_REAL_GITHUB_TOKEN}"
 
-    # With the legacy config gone, the vault alone still connects.
-    (config_dir / "config.json").unlink()
+    # connect() scrubbed the token-only legacy config automatically;
+    # the vault alone still connects.
+    assert not (config_dir / "config.json").exists()
     backend2 = GitHubChannelBackend()
     backend2._base_url = backend._base_url
     assert backend2.connect()
@@ -470,8 +473,8 @@ def test_cli_status_grant_import_audit(muse_env: Path, capsys: pytest.CaptureFix
 
 def test_legacy_mode_untouched(isolated_kiss_home: Path,
                                monkeypatch: pytest.MonkeyPatch) -> None:
-    """With KISS_MUSE_AUTH unset, the legacy paths are fully preserved."""
-    monkeypatch.delenv("KISS_MUSE_AUTH", raising=False)
+    """With KISS_MUSE_AUTH=0, the legacy paths are fully preserved."""
+    monkeypatch.setenv("KISS_MUSE_AUTH", "0")
     assert not muse_auth_enabled()
     import requests
 
@@ -480,6 +483,302 @@ def test_legacy_mode_untouched(isolated_kiss_home: Path,
     assert backend._http is requests
     assert action_class("get") == "read"
     assert action_class("Post") == "write"
+
+
+def test_muse_auth_enabled_by_default(isolated_kiss_home: Path,
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    """Muse-auth is on unless KISS_MUSE_AUTH is an explicit falsy string."""
+    from kiss.agents.third_party_agents.muse_auth.client import MuseBoundarySession
+
+    # Unset (the production default when nobody exports the var).
+    monkeypatch.delenv("KISS_MUSE_AUTH", raising=False)
+    assert muse_auth_enabled()
+    session = google_api_session("google_drive")
+    assert isinstance(session, MuseBoundarySession)
+    assert session.service == "google_drive"
+    backend = GoogleDriveChannelBackend()
+    assert isinstance(backend._http, MuseBoundarySession)
+
+    # Empty, truthy, and unrecognized values all keep the secure default.
+    for value in ("", "1", "true", " YES ", "on", "definitely"):
+        monkeypatch.setenv("KISS_MUSE_AUTH", value)
+        assert muse_auth_enabled(), value
+
+    # Only the explicit falsy strings restore legacy mode.
+    for value in ("0", "false", "no", " OFF ", "No"):
+        monkeypatch.setenv("KISS_MUSE_AUTH", value)
+        assert not muse_auth_enabled(), value
+
+    # This suite runs on Linux, where the daemon's prerequisites
+    # (fcntl + SO_PEERCRED) exist; the False branches of
+    # platform_supports_muse_daemon need Windows/macOS and are
+    # documented rather than faked.
+    from kiss.agents.third_party_agents.muse_auth._common import platform_supports_muse_daemon
+
+    assert platform_supports_muse_daemon()
+
+
+def test_default_on_migrates_google_token_json(
+    muse_env: Path, api_server: _ApiServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An upgrade with a working legacy token.json keeps working by default."""
+    from kiss.agents.third_party_agents.google_drive_agent import _SCOPES as DRIVE_SCOPES
+
+    # The true production default: no env var set at all.
+    monkeypatch.delenv("KISS_MUSE_AUTH")
+    assert muse_auth_enabled()
+
+    drive_dir = muse_env / "third_party_agents" / "google_drive"
+    drive_dir.mkdir(parents=True, exist_ok=True)
+    token_file = drive_dir / "token.json"
+    token_file.write_text(json.dumps(_google_info(_REAL_DRIVE_TOKEN)))
+
+    creds = load_google_credentials("google_drive", list(DRIVE_SCOPES))
+    assert isinstance(creds, SurrogateCredentials)
+    assert not token_file.exists()
+    assert vault_has_credentials("google_drive")
+
+    # The migrated credential is spent at the boundary like any other.
+    base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    backend = _drive_backend(base_url)
+    assert json.loads(backend.gdrive_search_files())["ok"] is True
+    assert api_server.requests[-1]["auth"] == f"Bearer {_REAL_DRIVE_TOKEN}"
+
+    # Gmail's separate loader migrates the same way.
+    gmail_dir = muse_env / "third_party_agents" / "gmail"
+    gmail_dir.mkdir(parents=True, exist_ok=True)
+    gmail_token = gmail_dir / "token.json"
+    gmail_token.write_text(json.dumps(_google_info(_REAL_GMAIL_TOKEN)))
+    gmail_creds = _load_credentials()
+    assert isinstance(gmail_creds, SurrogateCredentials)
+    assert not gmail_token.exists()
+    assert vault_has_credentials("gmail")
+
+    # A malformed leftover token.json means "no usable credentials"
+    # (and the file is kept for the user to inspect).
+    clear_google_credentials("gmail")
+    gmail_token.write_text("{not json")
+    assert _load_credentials() is None
+    assert gmail_token.exists()
+
+    # Structurally invalid authorized-user info (valid JSON, but a
+    # credential the legacy google-auth parser could never load) is
+    # refused the same way instead of being enrolled and unlinked.
+    bad_expiry = dict(_google_info("t"), expiry="not-a-google-expiry")
+    dead_cred = dict(_google_info("t"), expiry="2000-01-01T00:00:00Z", refresh_token="")
+    for bad in ("{}", json.dumps(["not", "a", "dict"]),
+                json.dumps({"refresh_token": "r", "client_id": "c"}),
+                json.dumps(bad_expiry),
+                # Parses, but is neither valid nor refreshable: the
+                # legacy loader always yielded None for it.
+                json.dumps(dead_cred)):
+        gmail_token.write_text(bad)
+        assert _load_credentials() is None
+        assert gmail_token.exists()
+    assert not vault_has_credentials("gmail")
+
+    # An unwritable directory with no lock sidecar yet: the migration
+    # cannot even start, so this caller gets None (and retries later).
+    docs_dir = muse_env / "third_party_agents" / "google_docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    docs_token = docs_dir / "token.json"
+    docs_token.write_text(json.dumps(_google_info("docs-token")))
+    docs_dir.chmod(0o500)
+    try:
+        assert load_google_credentials("google_docs", []) is None
+        assert docs_token.exists()
+        assert not vault_has_credentials("google_docs")
+    finally:
+        docs_dir.chmod(0o700)
+
+    # An expired-but-refreshable credential migrates (the daemon
+    # refreshes it at the boundary), matching the legacy contract.
+    cal_dir = muse_env / "third_party_agents" / "google_calendar"
+    cal_dir.mkdir(parents=True, exist_ok=True)
+    cal_token = cal_dir / "token.json"
+    cal_token.write_text(
+        json.dumps(dict(_google_info("cal-token"), expiry="2000-01-01T00:00:00Z"))
+    )
+    cal_creds = load_google_credentials("google_calendar", [])
+    assert isinstance(cal_creds, SurrogateCredentials)
+    assert not cal_token.exists()
+    assert vault_has_credentials("google_calendar")
+
+    # An unwritable directory WITH the (intentionally persistent) lock
+    # sidecar: the enrollment completes and the handle is returned; the
+    # plaintext stays behind (the leftover is finished with the
+    # ``import`` CLI — an automatic retry could delete a NEWER
+    # credential from a later legacy consent flow).
+    gmail_token.write_text(json.dumps(_google_info(_REAL_GMAIL_TOKEN)))
+    assert (gmail_dir / "token.json.muse-migrate.lock").exists()
+    gmail_dir.chmod(0o500)
+    try:
+        creds_ro = _load_credentials()
+        assert isinstance(creds_ro, SurrogateCredentials)
+        assert vault_has_credentials("gmail")
+        assert gmail_token.exists()
+    finally:
+        gmail_dir.chmod(0o700)
+
+
+def test_concurrent_token_migration_single_store(muse_env: Path) -> None:
+    """Concurrent first connects all obtain usable surrogates.
+
+    Without serialization, every caller stores the same token.json
+    (each store starts a new generation, invalidating the surrogates
+    the others just minted) and races on the unlink, so most callers
+    end up with no credential on a normal multi-connector startup.
+    """
+    import concurrent.futures
+
+    from kiss.agents.third_party_agents.muse_auth.client import mint_surrogate_migrating
+
+    gmail_dir = muse_env / "third_party_agents" / "gmail"
+    gmail_dir.mkdir(parents=True, exist_ok=True)
+    token_file = gmail_dir / "token.json"
+    token_file.write_text(json.dumps(_google_info(_REAL_GMAIL_TOKEN)))
+
+    barrier = threading.Barrier(8)
+
+    def migrate(_i: int) -> Any:
+        barrier.wait()
+        return mint_surrogate_migrating("gmail", token_file, ["scope-a"])
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        handles = list(pool.map(migrate, range(8)))
+    assert all(handle is not None for handle in handles)
+    assert not token_file.exists()
+    assert vault_has_credentials("gmail")
+
+
+def test_export_cli_recovers_vault_credential(
+    muse_env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`export` prints the vault credential so legacy configs can be rebuilt."""
+    assert muse_cli.main(["export", "../evil"]) == 1
+    assert muse_cli.main(["export", "google_drive"]) == 1
+    store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
+    capsys.readouterr()
+    assert muse_cli.main(["export", "google_drive"]) == 0
+    assert json.loads(capsys.readouterr().out)["token"] == _REAL_DRIVE_TOKEN
+
+
+def test_bearer_connect_scrubs_plaintext_config(muse_env: Path) -> None:
+    """notion/brave connects move the token to the vault and scrub the config."""
+    from kiss.agents.third_party_agents.brave_search_agent import BraveSearchChannelBackend
+    from kiss.agents.third_party_agents.brave_search_agent import _config as brave_config
+    from kiss.agents.third_party_agents.notion_agent import NotionChannelBackend
+    from kiss.agents.third_party_agents.notion_agent import _config as notion_config
+
+    notion_config.save({"token": "ntn_scrub_me", "workspace_hint": "acme"})
+    backend = NotionChannelBackend()
+    assert backend.connect()
+    assert backend._token.startswith("muse-sgt.notion.")
+    assert vault_has_credentials("notion")
+    # Non-secret metadata survives the scrub; the token does not.
+    assert notion_config.load_metadata() == {"workspace_hint": "acme"}
+
+    brave_config.save({"api_key": "brave_scrub_me"})
+    brave = BraveSearchChannelBackend()
+    assert brave.connect()
+    assert vault_has_credentials("brave_search")
+    # A key-only config is deleted outright.
+    assert not brave_config.path.exists()
+
+
+def test_channel_main_loads_api_keys_env_first(
+    isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KISS_MUSE_AUTH=0 in the canonical key store reaches channel CLIs.
+
+    A direct CLI invocation does not inherit the kiss-web daemon's
+    environment, so ``channel_main`` must import the canonical
+    ``$KISS_HOME/api_keys.env`` before any connector code can check
+    ``muse_auth_enabled()`` or migrate credentials.
+    """
+    from kiss.agents.third_party_agents._channel_agent_utils import channel_main
+    from kiss.agents.third_party_agents.notion_agent import NotionAgent
+
+    monkeypatch.delenv("KISS_MUSE_AUTH", raising=False)
+    isolated_kiss_home.mkdir(parents=True, exist_ok=True)
+    (isolated_kiss_home / "api_keys.env").write_text("export KISS_MUSE_AUTH=0\n")
+    monkeypatch.setattr(sys, "argv", ["kiss-notion"])
+    with pytest.raises(SystemExit):
+        channel_main(NotionAgent, "kiss-notion")
+    assert os.environ.get("KISS_MUSE_AUTH") == "0"
+    assert not muse_auth_enabled()
+
+
+def test_govee_cli_loads_api_keys_env_first(
+    isolated_kiss_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The standalone Govee CLI honors KISS_MUSE_AUTH=0 from api_keys.env."""
+    from kiss.agents.third_party_agents import govee
+
+    monkeypatch.delenv("KISS_MUSE_AUTH", raising=False)
+    isolated_kiss_home.mkdir(parents=True, exist_ok=True)
+    (isolated_kiss_home / "api_keys.env").write_text("export KISS_MUSE_AUTH=0\n")
+    govee.main(["govee.py"])  # usage path: no network, no daemon
+    capsys.readouterr()
+    assert os.environ.get("KISS_MUSE_AUTH") == "0"
+    assert not muse_auth_enabled()
+
+    # A read-only $KISS_HOME (load_api_keys cannot create its lock
+    # file) still honors the canonical opt-out via the lock-free
+    # fallback import, which also refreshes the in-memory config so
+    # model keys from the store are not silently blanked.
+    from kiss.core import config as core_config
+
+    monkeypatch.setenv("KISS_MUSE_AUTH", "")  # empty means enabled
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(core_config.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "")
+    assert muse_auth_enabled()
+    (isolated_kiss_home / "api_keys.env").write_text(
+        "export KISS_MUSE_AUTH=0\nexport ANTHROPIC_API_KEY=ro-model-key\n"
+    )
+    isolated_kiss_home.chmod(0o500)
+    try:
+        govee.main(["govee.py"])
+    finally:
+        isolated_kiss_home.chmod(0o700)
+    capsys.readouterr()
+    assert os.environ.get("KISS_MUSE_AUTH") == "0"
+    assert not muse_auth_enabled()
+    assert os.environ.get("ANTHROPIC_API_KEY") == "ro-model-key"
+    assert core_config.DEFAULT_CONFIG.ANTHROPIC_API_KEY == "ro-model-key"
+
+
+def test_cli_entrypoints_survive_missing_fcntl(isolated_kiss_home: Path) -> None:
+    """The govee CLI keeps working where fcntl is unavailable (Windows).
+
+    ``vscode_config`` imports POSIX-only ``fcntl`` at module level, so
+    the new canonical-env import in the CLI entry points must degrade
+    gracefully instead of dying with ModuleNotFoundError before
+    argument parsing.  Emulated by halting the ``fcntl`` import in a
+    fresh interpreter (the standard platform-equivalence probe).
+
+    ``channel_main()`` carries the same guard, but it cannot be probed
+    this way: its pre-existing ``_channel_cli`` import pulls in
+    ``kiss.core.models.model_info``, which imports ``fcntl`` at module
+    level at HEAD — a limitation that predates (and is untouched by)
+    the Muse-auth default flip.
+    """
+    import subprocess
+
+    code = (
+        "import sys\n"
+        "sys.modules['fcntl'] = None\n"
+        "from kiss.agents.third_party_agents import govee\n"
+        "govee.main(['govee.py'])\n"
+        "print('govee-usage-ok')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr
+    assert "govee-usage-ok" in result.stdout
 
 
 def test_boundary_hardening(muse_env: Path, api_server: _ApiServer) -> None:
@@ -702,7 +1001,7 @@ def test_remote_oauth_legacy_mode_writes_token_json(
         _SCOPES as CAL_SCOPES,
     )
 
-    monkeypatch.delenv("KISS_MUSE_AUTH", raising=False)
+    monkeypatch.setenv("KISS_MUSE_AUTH", "0")
     monkeypatch.setenv("OAUTHLIB_INSECURE_TRANSPORT", "1")
     provider = _OAuthProvider(("127.0.0.1", 0), scope=" ".join(CAL_SCOPES))
     thread = threading.Thread(target=provider.serve_forever, daemon=True)

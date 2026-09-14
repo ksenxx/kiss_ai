@@ -8,7 +8,7 @@ Provides authenticated access to Discord via a bot token. Uses the Discord
 REST API v10 directly via requests (no discord.py needed). Stores the token
 in ``~/.kiss/third_party_agents/discord/config.json``.
 
-In Muse-auth mode (``KISS_MUSE_AUTH=1``) the bot token lives in the
+In Muse-auth mode (the default) the bot token lives in the
 Muse vault as a header-kind credential occupying the ``Authorization``
 header itself (Discord's scheme is ``Bot <token>``, not ``Bearer``):
 this process holds only a surrogate bearer, and the daemon swaps it

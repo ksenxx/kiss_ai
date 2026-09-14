@@ -76,7 +76,7 @@ def _credentials_path() -> Path:
 def _load_credentials() -> Credentials | None:
     """Load stored OAuth2 credentials from disk.
 
-    In Muse-auth mode (``KISS_MUSE_AUTH=1``) the real token stays in
+    In Muse-auth mode (the default) the real token stays in
     the daemon vault and a surrogate-bearing handle is returned instead.
 
     Returns:
@@ -84,9 +84,11 @@ def _load_credentials() -> Credentials | None:
         mode), or None if not found or expired.
     """
     if muse_auth_enabled():
-        from kiss.agents.third_party_agents.muse_auth.client import mint_surrogate
+        # A leftover legacy token.json (working install upgraded to the
+        # Muse-auth default) is migrated into the vault and removed.
+        from kiss.agents.third_party_agents.muse_auth.client import mint_surrogate_migrating
 
-        return cast("Credentials | None", mint_surrogate("gmail"))
+        return cast("Credentials | None", mint_surrogate_migrating("gmail", _token_path(), _SCOPES))
     path = _token_path()
     if not path.exists():
         return None

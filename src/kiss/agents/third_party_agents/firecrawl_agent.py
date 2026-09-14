@@ -185,7 +185,7 @@ class FirecrawlChannelBackend(ToolMethodBackend):
     def connect(self) -> bool:
         """Load the Firecrawl config from disk.
 
-        In Muse-auth mode (``KISS_MUSE_AUTH=1``) the real API key lives
+        In Muse-auth mode (the default) the real API key lives
         in the Muse vault (auto-enrolled from the legacy config on
         first connect, together with a self-hosted ``base_url``'s host
         so Sentinel allows it); this process only holds a surrogate and
