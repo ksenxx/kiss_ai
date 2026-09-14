@@ -47,6 +47,7 @@ from kiss.agents.third_party_agents.muse_auth._common import (
     host_port_entry,
     is_loopback_host,
     muse_auth_dir,
+    policy_service,
     request_action,
     url_origin,
 )
@@ -162,7 +163,13 @@ class Sentinel:
         Returns:
             Tuple of allowed hostnames (lowercase).
         """
-        extra = self._load_policy().get("services", {}).get(service, {}).get("extra_hosts", [])
+        services = self._load_policy().get("services", {})
+        # A candidate-validation scratch name (``telegram-pending-<hex>``)
+        # inherits the LIVE root service's host extensions; per-workspace
+        # services keep their own isolated policy (policy_service is the
+        # identity for them).
+        svc_policy = services.get(service) or services.get(policy_service(service), {})
+        extra = svc_policy.get("extra_hosts", [])
         enrolled = self._hosts_provider(service)
         # Canonicalize policy/enrolled hosts (lowercase, drop a trailing
         # DNS dot, normalize any :port) so an FQDN- or leading-zero-port
@@ -352,8 +359,15 @@ class Sentinel:
             self._audit(service, action, method, effective_url or url, decision, grant_id="")
             return decision
         policy = self._load_policy()
+        services = policy.get("services", {})
+        # Exact service rule wins; otherwise a candidate-validation
+        # scratch name inherits its root service's rule (so validation
+        # under ``telegram-pending-<hex>`` obeys an explicit ``telegram``
+        # deny), then the global default.  Per-workspace services keep
+        # their own policy (policy_service is the identity for them).
         rule = (
-            policy.get("services", {}).get(service, {}).get(action)
+            services.get(service, {}).get(action)
+            or services.get(policy_service(service), {}).get(action)
             or policy.get("defaults", {}).get(action)
             or _DEFAULT_POLICY[action]
         )
@@ -363,17 +377,27 @@ class Sentinel:
         elif rule == "allow":
             decision = Decision("allow", f"policy allows '{action}' actions for '{service}'")
         else:
-            used = self._consume_grant(service, action)
+            # Consume grants under the policy identity: a candidate
+            # validating as ``telegram-pending-<hex>`` is approved by
+            # the user's ``telegram`` grant (the random scratch name
+            # keeps the credential isolated but must not need its own,
+            # un-grantable, grant).
+            used = self._consume_grant(policy_service(service), action)
             if used is not None:
                 grant_id = str(used["id"])
                 decision = Decision(
                     "allow", f"approved by {used['scope']} grant {grant_id}"
                 )
             else:
+                # Name the GRANTABLE policy identity in the remediation
+                # command: a random scratch name is un-grantable (a
+                # retry mints a new one), so the user must grant the
+                # root service that policy_service resolves to.
+                grantable = policy_service(service)
                 decision = Decision(
                     "ask",
-                    f"'{action}' on '{service}' requires user approval. Ask the user to run: "
-                    + grant_command(service, action),
+                    f"'{action}' on '{grantable}' requires user approval. "
+                    "Ask the user to run: " + grant_command(grantable, action),
                 )
         # Audit the effective (post-normalization) URL so the record
         # reflects the host/path actually contacted, not a parser-

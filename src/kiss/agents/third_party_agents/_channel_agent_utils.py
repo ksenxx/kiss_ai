@@ -202,6 +202,42 @@ def load_json_config(path: Path, required_keys: tuple[str, ...]) -> dict[str, st
     return result
 
 
+@contextlib.contextmanager
+def config_file_lock(path: Path) -> Iterator[None]:
+    """Serialize read-modify-write cycles on a config file.
+
+    Acquires an exclusive ``fcntl.flock`` on a ``<name>.lock`` sibling
+    of *path*, shared by every config writer across threads AND
+    processes: :func:`save_json_config` and :func:`clear_json_config`
+    take it around each write, and read-modify-write helpers (the
+    Muse-auth secret scrubbers) hold it across their whole
+    read-compare-replace cycle, making that cycle a true compare-and-
+    swap — a newer value another writer lands can only arrive before
+    the cycle's read (so the comparison sees it) or after its write
+    (so it survives), never in between.
+
+    ``flock`` is NOT reentrant across separate opens, even in one
+    thread: code already holding this lock must write with the raw
+    primitives (:func:`write_private_file`, ``Path.unlink``), never via
+    :func:`save_json_config`/:func:`clear_json_config`.
+
+    Args:
+        path: The config file whose writers must be serialized.
+
+    Yields:
+        None while the lock is held.
+    """
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.parent / (path.name + ".lock"), "a+b") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
 def write_private_file(path: Path, content: str) -> None:
     """Write *content* to *path* atomically with owner-only permissions.
 
@@ -230,21 +266,30 @@ def write_private_file(path: Path, content: str) -> None:
 def save_json_config(path: Path, data: dict[str, str]) -> None:
     """Save a JSON config file atomically with restricted permissions.
 
+    Takes :func:`config_file_lock`, so the write serializes against
+    concurrent read-modify-write cycles (the Muse-auth scrubbers);
+    never call this while already holding that lock.
+
     Args:
         path: Config file path.
         data: String dictionary to persist.
     """
-    write_private_file(path, json.dumps(data, indent=2))
+    with config_file_lock(path):
+        write_private_file(path, json.dumps(data, indent=2))
 
 
 def clear_json_config(path: Path) -> None:
     """Delete a JSON config file if it exists.
 
+    Takes :func:`config_file_lock` (see :func:`save_json_config`);
+    never call this while already holding that lock.
+
     Args:
         path: Config file path.
     """
-    if path.exists():
-        path.unlink()
+    with config_file_lock(path):
+        if path.exists():
+            path.unlink()
 
 
 class ChannelConfig:

@@ -75,11 +75,113 @@ SERVICE_HOSTS: dict[str, tuple[str, ...]] = {
     "nextcloud": (),
     "bluebubbles": (),
     "synology": (),
+    # Token-exchange connectors with one fixed endpoint host.
+    "msteams": ("graph.microsoft.com",),
+    "telegram": ("api.telegram.org",),
 }
 
-# Services that enroll one vault entry per workspace/account; a
-# ``<root>-<workspace>`` service name inherits the root's hosts.
-_WORKSPACE_SERVICE_ROOTS = ("slack",)
+# Where a service's ``oauth2_client_credentials`` vault entry may send
+# its client_secret to acquire an access token.  The daemon performs
+# the token exchange itself (agents never see the secret), so the
+# token endpoint must be pinned per service: a credential whose
+# ``token_url`` points anywhere else would POST the secret to an
+# attacker-chosen host.  Loopback endpoints are additionally accepted
+# at store time (same-machine development/test token servers have no
+# egress risk — the same exception Sentinel makes for plaintext HTTP).
+TOKEN_ENDPOINT_HOSTS: dict[str, tuple[str, ...]] = {
+    "msteams": ("login.microsoftonline.com",),
+}
+
+
+def valid_token_endpoint(service: str, url: Any) -> bool:
+    """Return whether *url* may serve as *service*'s OAuth token endpoint.
+
+    Args:
+        service: Connector service name the credential is stored under.
+        url: Candidate ``token_url`` (any type; non-strings fail).
+
+    Returns:
+        True for an ``https://`` URL on the service's pinned token
+        host, or any valid http(s) URL to a loopback host.
+    """
+    from urllib.parse import urlparse
+
+    if not (isinstance(url, str) and valid_http_url(url)):
+        return False
+    parsed = urlparse(url)
+    host = canonical_host(parsed.hostname or "")
+    if is_loopback_host(host):
+        return True
+    allowed = TOKEN_ENDPOINT_HOSTS.get(service)
+    if allowed is None:
+        # Scratch validation enrollments (msteams-pending) pin the same
+        # token endpoints as their root service.
+        allowed = TOKEN_ENDPOINT_HOSTS.get(service_root(service), ())
+    return parsed.scheme == "https" and host in allowed
+
+# Services that enroll one vault entry per workspace/account (slack)
+# or use a scratch ``<root>-pending`` enrollment to validate a
+# candidate credential without touching the live one (telegram,
+# msteams); a ``<root>-<suffix>`` service name inherits the root's
+# hosts, token endpoints, and action-classification rules.
+_WORKSPACE_SERVICE_ROOTS = ("slack", "telegram", "msteams")
+
+
+def service_root(service: str) -> str:
+    """Return the base service a (possibly suffixed) name derives from.
+
+    Args:
+        service: Connector service name (e.g. ``"telegram-pending"``).
+
+    Returns:
+        The root name when the prefix is a known workspace/scratch
+        root, else *service* unchanged.
+    """
+    root = service.split("-", 1)[0]
+    return root if root in _WORKSPACE_SERVICE_ROOTS else service
+
+
+# The exact grammar a candidate-validation scratch service is minted
+# with: ``<root>-pending-<16 lowercase hex>`` for a token-exchange
+# root.  Matched precisely so a legitimate per-workspace name that
+# merely contains ``-pending-`` (e.g. a Slack workspace literally
+# called "pending", ``slack-pending-<hash>``) is NOT mistaken for a
+# scratch service and does not inherit another service's policy.
+_SCRATCH_SERVICE_RE = re.compile(r"(?P<root>telegram|msteams)-pending-[0-9a-f]{16}")
+
+
+def scratch_root(service: str) -> str:
+    """Return the root a candidate-validation scratch name belongs to.
+
+    Args:
+        service: Connector service name.
+
+    Returns:
+        The root service (``"telegram"``/``"msteams"``) when *service*
+        matches the exact scratch grammar, else ``""``.
+    """
+    match = _SCRATCH_SERVICE_RE.fullmatch(service)
+    return match.group("root") if match else ""
+
+
+def policy_service(service: str) -> str:
+    """Return the service whose Sentinel policy governs *service*.
+
+    Candidate-validation scratch names (``<root>-pending-<hex>``) must
+    obey the LIVE root service's policy exactly — an explicit
+    ``telegram`` deny must also deny validating a telegram candidate,
+    and a ``telegram`` grant must approve it.  Every other name
+    (including per-workspace ``slack-<ws>`` services, which are
+    independent identities with their own isolated policy) governs
+    itself.
+
+    Args:
+        service: Connector service name.
+
+    Returns:
+        The service name to look policy and grants up under.
+    """
+    return scratch_root(service) or service
 
 
 def builtin_hosts(service: str) -> tuple[str, ...]:
@@ -97,10 +199,7 @@ def builtin_hosts(service: str) -> tuple[str, ...]:
     hosts = SERVICE_HOSTS.get(service)
     if hosts is not None:
         return hosts
-    root = service.split("-", 1)[0]
-    if root in _WORKSPACE_SERVICE_ROOTS:
-        return SERVICE_HOSTS.get(root, ())
-    return ()
+    return SERVICE_HOSTS.get(service_root(service), ())
 
 
 _HEADER_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
@@ -169,6 +268,35 @@ def valid_credential_value(value: Any) -> bool:
     return isinstance(value, str) and _CREDENTIAL_VALUE_RE.fullmatch(value) is not None
 
 
+# Path-placed credentials travel inside one URL path segment (Telegram's
+# ``/bot<token>/<method>``), so beyond the header-value rules they must
+# be path-safe without percent-encoding: RFC 3986 unreserved characters
+# plus ``:`` (a pchar, and part of every Telegram bot token).  ``/``
+# (segment escape), ``%`` (double-encoding ambiguity), ``?``/``#``
+# (component escapes) and spaces are all rejected, which also makes the
+# boundary's literal splice/scrub substitutions unambiguous.
+_PATH_CREDENTIAL_VALUE_RE = re.compile(r"[A-Za-z0-9:_.~-]{1,256}")
+
+# Stands in for a path-placed credential (or its surrogate) in every
+# URL Sentinel sees: decisions and the audit log stay capability-free.
+PATH_CREDENTIAL_PLACEHOLDER = "muse-path-credential"
+
+
+def valid_credential_path_value(value: Any) -> bool:
+    """Return whether *value* may be spliced into a URL path segment.
+
+    Used for ``{"kind": "path"}`` vault credentials (Telegram's
+    ``/bot<token>/...``).
+
+    Args:
+        value: Candidate token value (any type; non-strings fail).
+
+    Returns:
+        True when the value is path-safe without encoding.
+    """
+    return isinstance(value, str) and _PATH_CREDENTIAL_VALUE_RE.fullmatch(value) is not None
+
+
 SURROGATE_PREFIX = "muse-sgt."
 
 # Daemon wire-protocol version.  Bumped whenever the daemon gains
@@ -177,10 +305,16 @@ SURROGATE_PREFIX = "muse-sgt."
 # consent-scoped insecure enrollment hosts, which a v2 daemon would
 # silently drop from ``store_credentials`` and then deny every plain-
 # HTTP Home Assistant request; v4: query-kind credentials, which a v3
-# daemon would fail to resolve at the boundary).  The client restarts a
-# running daemon whose ``status`` reports an older protocol, so a
-# detached pre-upgrade daemon cannot serve new clients.
-PROTOCOL_VERSION = 4
+# daemon would fail to resolve at the boundary; v5: path-kind
+# credentials and daemon-side ``oauth2_client_credentials`` token
+# acquisition, which a v4 daemon would fail to resolve; v6: the atomic
+# store-if-absent critical section and the transport-write generation
+# gate — a v5 daemon could fail a concurrent auto-migration and could
+# emit a rotated-away credential resolved before connection setup).
+# The client restarts a running daemon whose ``status`` reports an
+# older protocol, so a detached pre-upgrade daemon cannot serve new
+# clients.
+PROTOCOL_VERSION = 6
 
 # One JSON object per line; requests carrying request/response bodies
 # are base64-encoded, so cap the frame to keep the daemon safe from
@@ -594,6 +728,28 @@ _FIRECRAWL_READ_PATHS = ("/v2/scrape", "/v2/map", "/v2/search")
 # /device/control (the actual actuation) stays a write.
 _GOVEE_READ_PATHS = ("/device/state",)
 
+# Telegram Bot API methods that only read bot/chat state, plus the
+# ephemeral typing indicator (sendChatAction) which must not burn
+# one-shot write grants.  Method names are case-insensitive on
+# Telegram's side, so the set is matched lowercased.  Every method not
+# listed here classifies as a write — the HTTP verb is meaningless
+# (``GET /bot<token>/sendMessage?...`` sends a message).
+_TELEGRAM_READ_METHODS = frozenset(
+    {
+        "getchat",
+        "getchatadministrators",
+        "getchatmember",
+        "getchatmembercount",
+        "getchatmemberscount",
+        "getfile",
+        "getme",
+        "getmycommands",
+        "getupdates",
+        "getwebhookinfo",
+        "sendchataction",
+    }
+)
+
 
 def request_action(service: str, method: str, path: str) -> str:
     """Classify a concrete request into Muse's read/write action classes.
@@ -647,6 +803,17 @@ def request_action(service: str, method: str, path: str) -> str:
         if method.upper() == "POST" and path.rstrip("/").endswith("/message/query"):
             return "read"
         return action_class(method)
+    if service_root(service) == "telegram":
+        # Telegram is RPC over the URL path: /bot<token>/<Method>
+        # answers to ANY HTTP verb (GET sendMessage sends a message),
+        # so the verb-based default would misclassify writes as reads.
+        # Classification comes from the API method name alone; the
+        # /file/bot<token>/<file_path> download namespace is a read.
+        segments = [s for s in path.split("/") if s]
+        if segments and segments[0] == "file":
+            return "read"
+        api_method = segments[-1].lower() if segments else ""
+        return "read" if api_method in _TELEGRAM_READ_METHODS else "write"
     # Nextcloud's POST /room/{token}/participants/active ("join a
     # conversation") creates or replaces an active participant session —
     # a server-side state change — so it deliberately stays a write and

@@ -271,7 +271,8 @@ def store_credentials(
     scopes: list[str],
     hosts: tuple[str, ...] = (),
     insecure_hosts: tuple[str, ...] = (),
-) -> None:
+    only_if_absent: bool = False,
+) -> bool:
     """Enroll a freshly obtained OAuth credential into the daemon vault.
 
     The real token crosses into the daemon once, right after the OAuth
@@ -287,6 +288,14 @@ def store_credentials(
         insecure_hosts: Hostnames the credential may reach over plain
             HTTP (consent-time exception when the user configured an
             ``http://`` base URL, e.g. a LAN Home Assistant instance).
+        only_if_absent: When True, the daemon stores ATOMICALLY only if
+            the service has no credential yet (auto-migration's
+            store-if-absent), so a concurrent authoritative writer
+            cannot be clobbered by a stale config candidate.
+
+    Returns:
+        True when the daemon wrote the credential; False only when
+        *only_if_absent* was set and a credential already existed.
     """
     info = creds if isinstance(creds, dict) else json.loads(creds.to_json())
     frame = {"op": "store_credentials", "service": service,
@@ -295,7 +304,9 @@ def store_credentials(
         frame["hosts"] = list(hosts)
     if insecure_hosts:
         frame["insecure_hosts"] = list(insecure_hosts)
-    _checked(frame)
+    if only_if_absent:
+        frame["only_if_absent"] = True
+    return bool(_checked(frame).get("created", True))
 
 
 def vault_has_credentials(service: str) -> bool:

@@ -71,6 +71,9 @@ _TOKEN_SERVICES: dict[str, dict[str, Any]] = {
     "line": {"key": "channel_access_token"},
     "mattermost": {"key": "token"},
     "bluebubbles": {"key": "password", "param": "password"},
+    # Telegram's token travels inside the URL path (/bot<token>/...),
+    # so it is stored as a path-kind credential.
+    "telegram": {"key": "bot_token", "kind": "path"},
 }
 
 
@@ -140,7 +143,7 @@ def _service_base_url(service: str, cfg: dict) -> str:
     return str(cfg.get("server_url") or "")
 
 
-def _scrub_imported_config(service: str) -> None:
+def _scrub_imported_config(service: str, expected: str | None = None) -> None:
     """Remove a just-imported token from its legacy ``config.json``.
 
     Completes the migration in the same command instead of leaving a
@@ -148,25 +151,43 @@ def _scrub_imported_config(service: str) -> None:
     ``server``, ``application_id``, ...) survive, and the file is
     deleted when nothing but the token was stored.
 
+    The read-compare-replace cycle runs under the shared
+    ``config_file_lock``, serialized against every other config writer
+    (a concurrent writer's value lands before the read or after the
+    replacement, never in between).
+
     Args:
         service: A :data:`_TOKEN_SERVICES` connector name.
+        expected: When given, the exact (unprefixed) token value that
+            was just migrated; the scrub backs off if the config now
+            holds a different value (a newer token a concurrent writer
+            landed after the migration must not be deleted — it never
+            made it into the vault).
     """
-    from kiss.agents.third_party_agents._channel_agent_utils import save_json_config
+    from kiss.agents.third_party_agents._channel_agent_utils import (
+        config_file_lock,
+        write_private_file,
+    )
 
     spec = _TOKEN_SERVICES[service]
     scrubbed = {spec["key"], *spec.get("also_scrub", ())}
     path = muse_auth_dir().parent / "third_party_agents" / service / "config.json"
-    try:
-        cfg = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return
-    if not isinstance(cfg, dict) or not scrubbed.intersection(cfg):
-        return
-    kept = {k: str(v) for k, v in cfg.items() if k not in scrubbed and v}
-    if kept:
-        save_json_config(path, kept)
-    else:
-        path.unlink()
+    with config_file_lock(path):
+        try:
+            cfg = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(cfg, dict) or not scrubbed.intersection(cfg):
+            return
+        if expected is not None and cfg.get(spec["key"]) != expected:
+            return
+        kept = {k: str(v) for k, v in cfg.items() if k not in scrubbed and v}
+        # Raw primitives: config_file_lock is not reentrant, so the
+        # locked save_json_config must not be used here.
+        if kept:
+            write_private_file(path, json.dumps(kept, indent=2))
+        else:
+            path.unlink()
 
 
 def _service_scopes(service: str) -> list[str]:
@@ -247,11 +268,14 @@ def _cmd_import(service: str) -> int:
     Google-OAuth services move their ``token.json`` (the plaintext file
     is deleted).  Token services (notion, github, firecrawl,
     brave_search, discord, homeassistant, ntfy, twitch, zalo, line,
-    mattermost, bluebubbles) move the token out of their
+    mattermost, bluebubbles, telegram) move the token out of their
     ``config.json``: the secret keys are scrubbed after a successful
     store while non-secret settings survive.  ``nextcloud`` folds its
     username/password into one Basic credential; ``synology`` extracts
-    the ``token=`` parameter embedded in its webhook URL.  ``slack``
+    the ``token=`` parameter embedded in its webhook URL; ``msteams``
+    folds its tenant/client IDs and client secret into one
+    ``oauth2_client_credentials`` entry the daemon exchanges for Graph
+    tokens at the boundary.  ``slack``
     migrates the default workspace's bot token and deletes its
     plaintext file; other Slack workspaces migrate automatically on
     their first Muse-mode connect.  ``govee`` enrolls
@@ -290,6 +314,8 @@ def _cmd_import(service: str) -> int:
         return _cmd_import_nextcloud()
     if service == "synology":
         return _cmd_import_synology()
+    if service == "msteams":
+        return _cmd_import_msteams()
     if service in _TOKEN_SERVICES:
         spec = _TOKEN_SERVICES[service]
         path = muse_auth_dir().parent / "third_party_agents" / service / "config.json"
@@ -300,6 +326,11 @@ def _cmd_import(service: str) -> int:
         token = cfg.get(spec["key"], "")
         if not token:
             print(f"no '{spec['key']}' key in {path}", file=sys.stderr)
+            return 1
+        if not isinstance(token, str):
+            # Type-strict pre-coercion: a JSON boolean/number is a
+            # malformed config, not a credential.
+            print(f"'{spec['key']}' in {path} must be a string", file=sys.stderr)
             return 1
         # Validate a configured self-hosted URL the same way the
         # authenticate tools do: a userinfo/malformed URL must not be
@@ -344,10 +375,13 @@ def _cmd_import(service: str) -> int:
                 file=sys.stderr,
             )
             return 1
+        raw_token = token
         token = spec.get("prefix", "") + token
         header = spec.get("header", "")
         param = spec.get("param", "")
-        if param:
+        if spec.get("kind") == "path":
+            info = {"kind": "path", "token": token}
+        elif param:
             info = {"kind": "query", "param": param, "token": token}
         elif header:
             info = {"kind": "header", "header": header, "token": token}
@@ -355,7 +389,7 @@ def _cmd_import(service: str) -> int:
             info = {"kind": "bearer", "token": token}
         hosts, insecure_hosts = _import_hosts(service, cfg)
         store_credentials(service, info, [], hosts=hosts, insecure_hosts=insecure_hosts)
-        _scrub_imported_config(service)
+        _scrub_imported_config(service, expected=raw_token)
         print(
             f"imported the {service} token into the Muse-auth vault and scrubbed "
             f"the plaintext copy from {path}."
@@ -424,6 +458,59 @@ def _cmd_import_nextcloud() -> int:
     print(
         f"imported the nextcloud credentials into the Muse-auth vault and scrubbed "
         f"the plaintext password from {path}."
+    )
+    return 0
+
+
+def _cmd_import_msteams() -> int:
+    """Migrate legacy MS Teams client credentials into the vault.
+
+    The tenant/client IDs and client secret become one
+    ``oauth2_client_credentials`` vault entry — the Muse daemon runs
+    the token exchange itself at the network boundary — and the
+    ``client_secret`` is scrubbed from ``config.json`` while the
+    non-secret ``tenant_id``/``client_id``/``bot_id`` survive.
+
+    Returns:
+        Process exit code.
+    """
+    from kiss.agents.third_party_agents import msteams_agent as ms
+
+    path = muse_auth_dir().parent / "third_party_agents" / "msteams" / "config.json"
+    if not path.exists():
+        print(f"no legacy config at {path}", file=sys.stderr)
+        return 1
+    cfg = json.loads(path.read_text())
+    # Type-strict pre-coercion: JSON booleans/numbers must not become
+    # apparently valid credential strings ("True") that then get
+    # enrolled while the malformed source config is scrubbed.
+    for key in ("tenant_id", "client_id", "client_secret", "bot_id"):
+        value = cfg.get(key)
+        if value is not None and not isinstance(value, str):
+            print(f"'{key}' in {path} must be a string", file=sys.stderr)
+            return 1
+    tenant_id = str(cfg.get("tenant_id") or "")
+    client_id = str(cfg.get("client_id") or "")
+    client_secret = str(cfg.get("client_secret") or "")
+    if not (tenant_id and client_id and client_secret):
+        print(f"{path} must hold tenant_id, client_id, and client_secret", file=sys.stderr)
+        return 1
+    if not ms._TENANT_ID_RE.fullmatch(tenant_id):
+        print(
+            f"'tenant_id' in {path} is not a valid Azure tenant "
+            "(GUID or verified domain, one URL path segment)",
+            file=sys.stderr,
+        )
+        return 1
+    store_credentials(
+        "msteams", ms._client_credential_info(tenant_id, client_id, client_secret), []
+    )
+    # Compare-and-scrub: only the secret that was just migrated may be
+    # removed, so a newer secret a concurrent writer lands survives.
+    ms._scrub_config_secret(expected=client_secret)
+    print(
+        f"imported the msteams client credentials into the Muse-auth vault and "
+        f"scrubbed the client_secret from {path}."
     )
     return 0
 

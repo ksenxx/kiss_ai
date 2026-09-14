@@ -1093,9 +1093,9 @@ def test_query_kind_vault_resolution(muse_env: Path) -> None:
 
 
 def test_daemon_protocol_is_current(muse_env: Path) -> None:
-    """A freshly ensured daemon reports the v4 (query-kind) protocol."""
+    """A freshly ensured daemon reports at least the v4 (query-kind) protocol."""
     ensure_daemon()
-    assert _daemon_protocol() == PROTOCOL_VERSION == 4
+    assert _daemon_protocol() == PROTOCOL_VERSION >= 4
 
 
 def test_underscore_header_kind_accepted(muse_env: Path) -> None:
