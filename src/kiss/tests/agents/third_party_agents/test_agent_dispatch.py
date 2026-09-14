@@ -228,6 +228,67 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     assert captured[0]["stop_on_timeout"] is True
 
 
+def test_channel_and_cron_dispatch_skip_git_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Channel and cron dispatches run outside the project git lifecycle.
+
+    A channel/cron sub-task executes in a scratch directory
+    (``~/.kiss/channel_work`` / ``~/.kiss/cron/work``), so worktree
+    setup would only copy whatever git repository happens to enclose
+    that directory — a dirty repo at ``$HOME`` once stalled a gmail
+    dispatch for minutes copying 65 GB before the sub-task's tab could
+    even appear.  The dispatch therefore pins ``use_worktree=False``
+    and ``auto_commit=False``, and pins ``classify_tasks=False``
+    because an ``is_development`` classification verdict overrides an
+    explicit ``use_worktree=False`` (``WorktreeSorcarAgent.run``).  A
+    path-mode agent script keeps the standard lifecycle: it operates
+    on the calling project unless its own getters say otherwise.  The
+    real dispatch path is exercised up to the daemon-client boundary;
+    only that boundary call is captured.
+    """
+    from kiss.agents.sorcar import daemon_client
+
+    captured: list[dict[str, Any]] = []
+
+    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        captured.append(kwargs)
+        return daemon_client.TaskResult(
+            text="ok", success=True, cost=0.0, tokens=0, steps=0,
+        )
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
+
+    caller = tmp_path / "caller_project"
+    caller.mkdir()
+    tool = make_run_agent_tool(str(caller))
+
+    # Channel mode: no worktree, no auto-commit, classification off.
+    tool("ntfy", "say hi")
+    assert captured[0]["use_worktree"] is False
+    assert captured[0]["auto_commit"] is False
+    assert captured[0]["classify_tasks"] is False
+
+    # Cron mode: same — the module getters already return False for
+    # use_worktree/auto_commit, and the wire fields agree with them
+    # while classification is pinned off.
+    captured.clear()
+    tool("cron", "run 'echo hi' every 5 minutes")
+    assert captured[0]["use_worktree"] is False
+    assert captured[0]["auto_commit"] is False
+    assert captured[0]["classify_tasks"] is False
+
+    # Path mode: the standard task lifecycle (worktree + auto-commit,
+    # classification following the daemon's configured default).
+    script = caller / "helper.py"
+    script.write_text("def model() -> str:\n    return 'm'\n")
+    captured.clear()
+    tool(str(script), "say hi")
+    assert captured[0]["use_worktree"] is True
+    assert captured[0]["auto_commit"] is True
+    assert captured[0]["classify_tasks"] is None
+
+
 def test_dispatch_forwards_parent_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
