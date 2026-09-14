@@ -30,10 +30,14 @@ channel agent instance is the *carrier* of channel identity (see `BaseChannelAge
   tool list: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
   `authenticate_slack`) plus, once authenticated, every public method of the module's
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
-- Config and tokens live under `~/.kiss/third_party_agents/<service>/` (`$KISS_HOME`
-  overrides `~/.kiss`). Because auth tools are always available, a not-yet-configured
-  agent can walk you through authentication *in chat* — you never have to hand-edit
-  `config.json` first.
+- Config lives under `~/.kiss/third_party_agents/<service>/` (`$KISS_HOME` overrides
+  `~/.kiss`). On Linux, outbound API secrets for the 24 Muse-covered services (see
+  below) migrate out of those files into the `$KISS_HOME/muse_auth/vault` credential
+  vault on first use; non-secret settings, OAuth bootstrap files (Google's
+  `credentials.json`), and inbound-verification secrets (LINE's `channel_secret`) stay
+  in the service directory. Because auth tools are always available,
+  a not-yet-configured agent can walk you through authentication *in chat* — you never
+  have to hand-edit `config.json` first.
 - Backends whose platform has an inbound message stream also implement
   `_make_backend()`, which enables **poll mode** (`--channel`) and **cron delivery**
   (see below). API-only services (GitHub, Notion, the Google Workspace agents, ...)
@@ -72,13 +76,17 @@ kiss-github   -t 'List the open issues in octocat/Hello-World'
 ```
 
 The task runs through the kiss-web daemon with that channel's tools attached, then
-prints run statistics. `-f FILE` reads the task from a file instead of `-t`.
+prints run statistics. `-f FILE` reads the task from a file instead of `-t`. Note that
+the CLI prints statistics only — the task's final summary is not echoed to your
+terminal — so word tasks to leave their output somewhere durable (a file, a message,
+the service itself) rather than "in the summary".
 
 ### 3. Channel (poll) mode — a Hermes-style gateway
 
 For the 26 poll-capable modules, `--channel` turns the CLI into a one-shot inbound
 message processor: it fetches pending messages from the named channel/chat, runs a
-daemon task per message, and replies in-channel.
+daemon task per pending top-level message (pending follow-ups in the same thread are
+batched into a single continuation task), and replies in-channel.
 
 ```bash
 kiss-telegram --channel 123456789                      # process pending messages once
@@ -91,7 +99,9 @@ kiss-discord  --channel general --approve 1f2e3d4c     # approve a pairing code 
 Poll mode persists Hermes-gateway state next to the adapter's config (or under
 `$KISS_HOME/third_party_agents/channel_state/`): per-thread daemon-chat continuity, an
 at-least-once delivery ledger with `(recovered reply)` redelivery, a circuit breaker
-that pauses the channel after repeated transport failures, and DM pairing. Run it from
+that pauses the channel after repeated tick crashes (only errors that escape a tick
+count; adapters that swallow poll errors into empty results reset it), and sender
+pairing. Run it from
 cron (or let the kiss-web daemon's scheduler tick it) to get an always-on channel bot;
 overlapping ticks exit immediately thanks to a non-blocking per-channel lock.
 
@@ -99,8 +109,10 @@ One caveat: adapters that receive messages through an **embedded callback server
 (A2A, DingTalk, LINE, QQ, Synology Chat, Webhook, Weixin, Zalo) start that HTTP server
 on `connect()` and stop it on `disconnect()`, so they only receive events **while a
 tick is running**; a one-shot tick drains the in-memory queue and exits. Polling-based
-adapters (Slack, Telegram, Discord, email, ...) fetch history from the platform, so
-scheduled ticks miss nothing.
+adapters (Slack, Telegram, email, ...) fetch history from the platform, so scheduled
+ticks catch up on anything sent in between. Discord is a partial exception: until a
+first message has been captured, each tick looks back only about one second, so
+messages that arrive between ticks in a quiet channel can be missed.
 
 ### 4. Python API
 
@@ -151,14 +163,15 @@ All agents share the same argument parser (`_channel_cli.py`):
 | `--workspace WS` | Credential workspace for multi-account channels (default `default`). |
 | `--channel CH` | Poll mode: process pending messages in this channel/chat. |
 | `--allow-users A,B` | Poll mode: restrict to these senders. |
-| `--pairing` | Poll mode: unknown DM senders get a one-time approval code. |
+| `--pairing` | Poll mode: unknown senders get a one-time approval code (sent back into the monitored channel/thread). |
 | `--approve CODE` / `--list-pending` | Approve / list pending pairing requests (need `--channel`). |
 | `-V, --version` | Print version. |
 
 Per-channel defaults: when `-m` / `-b` are omitted in poll mode, the
 `channel_model_name` / `channel_max_budget` keys of the adapter's `config.json` apply
 before the global defaults — on adapters with a module-level config store (all poll
-adapters except Slack, whose store holds only workspace tokens).
+adapters except Slack, whose store holds only workspace tokens, and Google Chat, whose
+credential store carries no module-level config).
 
 ## Credential isolation (Muse auth)
 
@@ -167,9 +180,12 @@ a Meta-Muse-style security boundary implemented in the `muse_auth/` package: leg
 tokens auto-migrate into a vault owned by a local auth daemon on first use (a one-time
 hand-off of the real credential through the agent process), after which ordinary
 boundary-routed requests carry only opaque surrogate tokens that the daemon swaps for
-the real ones at the network edge, and every boundary-routed request is host-allowlisted, classified
-read vs. write, and checked against an allow/deny/ask policy with an audit log. Reads
-are allowed by default; writes ask for a grant.
+the real ones at the network edge, and every boundary-routed request is checked against
+the service's host allowlist (one deliberate exception: bodyless GET/HEAD redirect hops
+are followed after stripping credentials, even off-allowlist), classified read vs.
+write, and checked against an allow/deny/ask policy. Reads are allowed by default;
+writes ask for a grant. The audit log records the Sentinel's allow/deny/ask decisions —
+not whether the network call afterwards succeeded.
 
 Covered services (`muse_auth/_common.py` `SERVICE_HOSTS`): the six Google services
 (`gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`,
@@ -182,19 +198,25 @@ Manage the boundary with:
 
 ```bash
 python -m kiss.agents.third_party_agents.muse_auth status   # daemon + enrollment state
-python -m kiss.agents.third_party_agents.muse_auth enroll SERVICE       # enroll a credential
+python -m kiss.agents.third_party_agents.muse_auth enroll SERVICE       # interactive OAuth enrollment
 python -m kiss.agents.third_party_agents.muse_auth grant SERVICE write   # grant write access
-python -m kiss.agents.third_party_agents.muse_auth audit                 # inspect the audit log
+python -m kiss.agents.third_party_agents.muse_auth audit                 # print recent audit records
 python -m kiss.agents.third_party_agents.muse_auth export SERVICE        # recover a vaulted credential
 ```
 
-Opt out with `KISS_MUSE_AUTH=0` in `~/.kiss/api_keys.env`.
+`enroll` supports only the six Google OAuth services; every other covered service
+enrolls itself when its legacy credential auto-migrates on first use. `grant SERVICE
+write` defaults to a single-use grant (`--scope once`); use `--scope ttl --ttl 3600`,
+`--scope session`, or `--scope perpetual` for a standing one. Opt out with
+`KISS_MUSE_AUTH=0` in `$KISS_HOME/api_keys.env` (default `~/.kiss/api_keys.env`).
 
 ## Agent catalog
 
 Config paths below are relative to `~/.kiss/third_party_agents/` (override the root
 with `$KISS_HOME`; exception: Slack's workspace token store is hard-coded under
-`~/.kiss`). "Poll" marks the modules with `_make_backend()` — usable with
+`~/.kiss`). Token locations name the legacy (non-Muse) files: on Linux with Muse
+enabled, the secret moves into the vault on first use and the legacy file is removed.
+"Poll" marks the modules with `_make_backend()` — usable with
 `--channel` and as cron delivery targets. Tool names are the exact callables the agent
 session sees; every agent also gets its auth tools (`check_<service>_auth`,
 `authenticate_<service>`, `clear_<service>_auth`, plus service-specific browser-setup
@@ -207,7 +229,7 @@ helpers noted below).
 | BlueBubbles (iMessage via a Mac server) | `kiss-bluebubbles` | yes | server URL + password, `bluebubbles/config.json` | `list_chats`, `get_chat`, `get_chat_messages`, `post_message`, `get_server_info`, `mark_chat_read` |
 | DingTalk group robots | `kiss-dingtalk` | yes | robot webhook (+ optional `secret`, `outgoing_token`), `dingtalk/config.json` | `post_message`, `post_markdown` |
 | Discord | `kiss-discord` | yes | bot token (also `start_discord_browser_auth`), `discord/config.json` | `list_guilds`, `list_third_party_agents` (channels), `get_channel`, `get_channel_messages`, `post_message`, `edit_message`, `delete_message`, `add_reaction`, `create_thread`, `list_guild_members`, `create_invite` |
-| Email (any IMAP/SMTP mailbox) | `kiss-email` | yes | host/user/app-password, `email/config.json` | `send_email`, `list_unread_emails`, `read_email`, `mark_email_read` |
+| Email (any IMAP/SMTP mailbox) | `kiss-email` | yes | IMAP host + SMTP host + address + app-password, `email/config.json` | `send_email`, `list_unread_emails`, `read_email`, `mark_email_read` |
 | Feishu / Lark | `kiss-feishu` | yes | `app_id` + `app_secret`, `feishu/config.json` | `send_text_message`, `reply_message`, `delete_message`, `list_messages`, `list_chats`, `get_chat`, `get_user_info` |
 | Gmail | `kiss-gmail` | no | OAuth2 (`start_gmail_browser_setup`, `finish_gmail_auth`), token in `gmail/` | `get_profile`, `list_messages`, `get_message`, `send_email`, `reply_to_message`, `create_draft`, `trash_message`, `untrash_message`, `delete_message`, `modify_labels`, `list_labels`, `create_label`, `get_attachment`, `get_thread` |
 | Google Chat | `kiss-gchat` | yes | service account or OAuth2 (`finish_googlechat_auth`), `googlechat/` | `list_spaces`, `get_space`, `list_members`, `list_messages`, `get_message`, `post_message`, `update_message`, `delete_message`, `create_space` |
@@ -215,25 +237,25 @@ helpers noted below).
 | iMessage (macOS AppleScript) | `kiss-imessage` | no | local Messages app, `imessage/config.json` | `send_imessage`, `send_attachment`, `list_conversations`, `get_messages` |
 | IRC | `kiss-irc` | yes | server/nick (+ NickServ), `irc/config.json` | `connect_irc`, `join_irc_channel`, `leave_channel`, `post_message`, `send_notice`, `get_topic`, `set_topic`, `kick_user`, `whois`, `identify_nickserv` |
 | LINE | `kiss-line` | yes | channel access token, `line/config.json` | `push_text_message`, `reply_message`, `get_profile`, `get_quota`, `leave_group`, `push_image_message` |
-| Matrix | `kiss-matrix` | yes | homeserver + user + token (matrix-nio), `matrix/config.json` | `list_rooms`, `join_room`, `leave_room`, `send_text_message`, `send_notice`, `get_room_members`, `invite_user`, `kick_user`, `create_room`, `get_profile` |
+| Matrix | `kiss-matrix` | yes | homeserver + access token, optional user/device IDs (matrix-nio), `matrix/config.json` | `list_rooms`, `join_room`, `leave_room`, `send_text_message`, `send_notice`, `get_room_members`, `invite_user`, `kick_user`, `create_room`, `get_profile` |
 | Mattermost | `kiss-mattermost` | yes | server URL + personal access token, `mattermost/config.json` | `list_teams`, `list_third_party_agents` (channels), `get_channel`, `list_channel_posts`, `create_post`, `delete_post`, `get_user`, `list_users`, `create_direct_message_channel`, `add_reaction` |
 | Microsoft Teams | `kiss-msteams` | yes | Azure AD client credentials, `msteams/config.json` | `list_teams`, `get_team`, `list_third_party_agents` (channels), `list_channel_messages`, `post_channel_message`, `reply_to_message`, `list_chats`, `post_chat_message`, `list_team_members` |
 | Nextcloud Talk | `kiss-nextcloud` | yes | server URL + username/password, `nextcloud/config.json` | `list_rooms`, `get_room`, `create_room`, `list_participants`, `list_messages`, `post_message`, `set_room_name`, `delete_message` |
-| Nostr | `kiss-nostr` | no | private key + relays (pynostr), `nostr/config.json` | `publish_note`, `publish_reply`, `send_dm`, `get_profile`, `set_profile`, `list_relays`, `add_relay`, `remove_relay` |
+| Nostr | `kiss-nostr` | no | private key, optional relays (default `wss://relay.damus.io`; pynostr), `nostr/config.json` | `publish_note`, `publish_reply`, `send_dm`, `get_profile`, `set_profile`, `list_relays`, `add_relay`, `remove_relay` |
 | ntfy pub-sub | `kiss-ntfy` | yes | `topic` (+ optional `server`, `token`), `ntfy/config.json` | `publish_notification`, `poll_topic` |
 | Phone control (Android companion app) | `kiss-phone` | yes | device IP + optional port/API key of the companion REST app, `phone/config.json` | `send_sms`, `make_call`, `end_call`, `list_sms_conversations`, `get_sms_messages`, `get_call_log`, `get_device_info`, `list_notifications`, `dismiss_notification`, `send_notification_reply` |
 | QQ bot platform | `kiss-qq` | yes | app id/secret (Ed25519 webhook), `qq/config.json` | `send_group_message`, `send_c2c_message` |
 | Signal (signal-cli) | `kiss-signal` | yes | registered signal-cli number, `signal/config.json` | `send_signal_message`, `receive_messages`, `send_attachment`, `list_contacts`, `list_groups` |
 | SimpleX Chat | `kiss-simplex` | yes | local `simplex-chat -p 5225` WebSocket, `simplex/config.json` | `send_simplex_message`, `list_simplex_contacts`, `get_simplex_address` |
 | Slack | `kiss-slack` | yes | bot token (also `start_slack_browser_auth`); `--list-workspaces` / `--delete-workspace WS` manage accounts; token in `slack/<workspace>/token.json` | `list_third_party_agents` (channels), `read_messages`, `read_thread`, `post_message`, `update_message`, `delete_message`, `list_users`, `get_user_info`, `create_channel`, `invite_to_channel`, `add_reaction`, `search_messages`, `set_channel_topic`, `upload_file`, `get_channel_info` |
-| SMS / voice (Twilio) | `kiss-sms` | yes | account SID + auth token, `sms/config.json` | `send_sms`, `send_mms`, `list_messages`, `get_message`, `list_phone_numbers`, `get_account_info`, `send_whatsapp_message`, `create_call`, `list_calls`, `get_call`, `cancel_message` |
+| SMS / voice (Twilio) | `kiss-sms` | yes | account SID + auth token + from number, `sms/config.json` | `send_sms`, `send_mms`, `list_messages`, `get_message`, `list_phone_numbers`, `get_account_info`, `send_whatsapp_message`, `create_call`, `list_calls`, `get_call`, `cancel_message` |
 | Synology Chat | `kiss-synology` | yes | incoming/outgoing webhooks, `synology/config.json` | `post_message`, `send_file_message` |
 | Telegram | `kiss-telegram` | yes | @BotFather bot token, `telegram/config.json` | `send_text`, `send_photo`, `send_document`, `edit_message_text`, `delete_message`, `pin_message`, `unpin_message`, `get_chat`, `get_chat_members_count`, `get_chat_member`, `ban_chat_member`, `unban_chat_member`, `get_updates`, `send_poll`, `forward_message` |
 | Tlon / Urbit | `kiss-tlon` | no | Eyre HTTP server + code, `tlon/config.json` | `list_groups`, `list_third_party_agents` (channels), `get_messages`, `post_message`, `get_profile`, `poke`, `scry` |
-| Twitch | `kiss-twitch` | no | OAuth2 tokens (Helix + twitchio chat), `twitch/config.json` | `get_stream_info`, `get_channel_info`, `get_user_info`, `get_chatters`, `send_chat_message`, `ban_user`, `search_third_party_agents` (channels), `get_clips`, `create_clip` |
-| Webhook routes (inbound HMAC webhooks) | `kiss-webhook` | yes | `port` + `routes` map, `webhook/config.json` | `add_webhook_route`, `remove_webhook_route`, `list_webhook_routes` |
+| Twitch | `kiss-twitch` | no | client ID + OAuth access token (all calls, chat included, via Helix), `twitch/config.json` | `get_stream_info`, `get_channel_info`, `get_user_info`, `get_chatters`, `send_chat_message`, `ban_user`, `search_third_party_agents` (channels), `get_clips`, `create_clip` |
+| Webhook routes (inbound HMAC webhooks) | `kiss-webhook` | yes | listener `port` (routes added via `add_webhook_route`), `webhook/config.json` | `add_webhook_route`, `remove_webhook_route`, `list_webhook_routes` |
 | WeCom group robots | `kiss-wecom` | no | robot webhook, `wecom/config.json` | `post_message`, `post_markdown` |
-| Weixin / WeChat Official Accounts | `kiss-weixin` | yes | app id/secret + callback token, `weixin/config.json` | `send_text_message`, `get_user_info` |
+| Weixin / WeChat Official Accounts | `kiss-weixin` | yes | app id/secret, optional callback token (enables callback verification), `weixin/config.json` | `send_text_message`, `get_user_info` |
 | WhatsApp (personal, QR-paired bridge) | `kiss-whatsapp` | yes | whatsapp-mcp Go bridge (auth tools also: `start_whatsapp_bridge`, `get_whatsapp_qr_code`, `wait_for_whatsapp_pairing`, `stop_whatsapp_bridge`), `whatsapp/` | `search_whatsapp_contacts`, `list_whatsapp_chats`, `get_whatsapp_chat`, `get_whatsapp_direct_chat_by_contact`, `get_whatsapp_contact_chats`, `get_whatsapp_last_interaction`, `list_whatsapp_messages`, `get_whatsapp_message_context`, `send_whatsapp_message`, `send_whatsapp_file`, `send_whatsapp_audio_message`, `download_whatsapp_media` |
 | Zalo Official Account | `kiss-zalo` | yes | OA access token, `zalo/config.json` | `send_text_message`, `send_image_message`, `get_follower_profile`, `get_followers`, `get_oa_info`, `get_recent_messages`, `get_conversation`, `upload_image` |
 
@@ -336,15 +358,18 @@ Muse's task-writing guidance transfers directly:
    run poll-mode gateways on existing channels instead of inventing new inboxes.
 8. **Verify in the real service, then review the trail.** Check the actual Slack
    channel / calendar / repository after the task, and use
-   `python -m kiss.agents.third_party_agents.muse_auth audit` to see exactly which API
-   calls were made.
+   `python -m kiss.agents.third_party_agents.muse_auth audit` to see which API calls
+   the Sentinel allowed, denied, or asked about (it records decisions, not network
+   outcomes).
 
 ## 26 examples and tips for combining agents
 
 Everything below is real, runnable usage of the agents in this directory. Shell
-examples use the CLIs; the same tasks also work as `run_agent("<channel>", "<task>")`
-from a Sorcar session or as `Agent().run(prompt_template=...)` from Python — except
-examples 25 and 26, whose infrastructure agents are hidden from `run_agent`.
+examples use the CLIs; the same tasks also work as `Agent().run(prompt_template=...)`
+from Python, and single-service tasks also as `run_agent("<channel>", "<task>")` from a
+Sorcar session. Two exceptions: examples 25 and 26 use infrastructure agents hidden
+from `run_agent`, and the cross-agent pipeline examples (6–15) must not be dispatched
+*to* a channel with `run_agent` (see that section's prerequisites).
 
 ### Getting started
 
@@ -358,12 +383,19 @@ kiss-slack -t 'Post "deploy of v2.3 finished, all green" to #eng'
 **2. Authenticate in chat, not in config files.** Auth tools are always present, so a
 fresh agent can set itself up:
 
-```bash
-kiss-github -t 'Check my GitHub auth; if missing, walk me through creating a token,
-store it, then list my open pull requests'
+```
+run_agent(agent="github", task="Check my GitHub auth; if missing, walk me through creating a token and store it")
 ```
 
-Each agent's `check_<service>_auth` returns setup instructions when unconfigured, and
+```bash
+kiss-github -t 'List my open pull requests and write them to ./prs.md'
+```
+
+Do the interactive auth step from a Sorcar session — a one-shot CLI task has no chat
+UI in which to answer questions. Backend tools are snapshotted when the session
+starts, so the run that stores a fresh token cannot call `gh_*` itself — do the real
+work in a second invocation. Each
+agent's `check_<service>_auth` returns setup instructions when unconfigured, and
 Slack/Discord/Gmail can even drive the provider's console in the browser
 (`start_slack_browser_auth`, `start_discord_browser_auth`, `start_gmail_browser_setup`).
 
@@ -371,8 +403,8 @@ Slack/Discord/Gmail can even drive the provider's console in the browser
 Postgres config:
 
 ```bash
-kiss-postgres -t 'List schemas and tables, describe the orders table, and show the ten
-most recent orders. Do not modify anything.'
+kiss-postgres -t 'List schemas and tables, describe the orders table, and write the
+ten most recent orders to ./orders-sample.md. Do not modify the database.'
 ```
 
 The default read-only mode makes the "do not modify" clause server-enforced, not a
@@ -393,10 +425,12 @@ run_agent(agent="ntfy", task="Notify me that the benchmark finished: 42.3s, 0 fa
 
 ### Cross-agent pipelines
 
-The most powerful pattern: give **one task** that names two or three services, and let
-the session use both tool sets (dispatch the combined task with `run_agent` to the
-primary channel, or run the primary CLI with a task that calls `run_agent` for the
-second service).
+The most powerful pattern: give **one task** that names two or three services — run
+the primary channel's CLI with a task that calls `run_agent` for the second service.
+Two prerequisites: the main kiss-web daemon must be reachable (`$KISS_HOME/sorcar.sock`
+or `KISS_SORCAR_SOCK`), because nested dispatch does not reuse the CLI's private helper
+daemon; and don't route a combined task *to* a channel with `run_agent` — a dispatched
+channel session is itself instructed never to call `run_agent`.
 
 **6. GitHub → Slack standup digest.**
 
@@ -423,12 +457,17 @@ kiss-firecrawl -t 'Scrape https://example.com/pricing and its /docs subpages
 structured summary and the source URLs.'
 ```
 
-**9. Brave Search → Email newsletter.**
+**9. Brave Search → Email newsletter.** `send_email` transmits immediately, and a
+task's final summary exists only after the task ends — a summary can never be a
+pre-send checkpoint. Split draft and send (Muse tip 5):
 
 ```bash
 kiss-brave -t 'Find the 5 most significant news stories about RISC-V from the past
-week (brave_news_search). Then run_agent("email", ...) to send a plain-text digest
-with links to team@acme.dev. Show me the draft in the summary before sending.'
+week (brave_news_search) and write a plain-text digest with links to ./digest.txt.
+Do not send anything.'
+# review digest.txt yourself, then:
+kiss-email -t 'Send the contents of ./digest.txt to team@acme.dev with the subject
+"RISC-V weekly"'
 ```
 
 **10. Gmail → Google Calendar.** Read one service, write another, keep the stop point
@@ -437,8 +476,11 @@ explicit (Muse tips 1 and 5):
 ```bash
 kiss-gmail -t 'Find emails from the last 3 days that propose meetings. For each,
 extract the proposed time and attendees, then run_agent("google_calendar", ...) to
-create an event for each. List every event you created in the summary so I can verify.'
+create an event for each and read the created events back with gcal_list_events.'
 ```
+
+Then check the new events in Google Calendar itself (Muse tip 8) — remember the
+one-shot CLI prints statistics, not the agent's summary.
 
 **11. Home Assistant + Govee evening scene.** Two device backends, one instruction:
 
@@ -450,15 +492,20 @@ Assistant, then run bash: ./src/kiss/agents/third_party_agents/govee.py brightne
 ```
 
 (`govee.py` is a plain CLI, so any agent session with bash can call it; the Muse write
-policy still gates `/device/control`.)
+policy still gates `/device/control`. The `./src/...` path resolves against the task's
+working directory — your launch directory for a direct CLI run, `~/.kiss/channel_work`
+for a channel dispatch — so run this from the repository root or use an absolute path.)
 
 **12. Twitch → Discord stream announcement.**
 
 ```bash
 kiss-twitch -t 'Get stream info for channel "mychannel". If live, run_agent("discord",
-...) to post "We are live: <title> — <url>" to the #announcements channel; if offline,
-do nothing and say [SILENT] in your summary.'
+...) to post "We are live: <title> — https://twitch.tv/mychannel" to the
+#announcements channel; if offline, do nothing and say [SILENT] in your summary.'
 ```
+
+(`get_stream_info` returns title and viewer data but no URL — build the link from the
+channel login as shown.)
 
 **13. Google Drive backup, link shared to Mattermost.**
 
@@ -524,10 +571,12 @@ HMAC-signed events and can push them straight through another channel's backend:
 
 ```bash
 kiss-webhook -t 'Add a webhook route named "gh-push" with the github signature scheme,
-secret from my input, prompt template "Repo {repository.full_name}: {head_commit.message}",
-and deliver_module "kiss.agents.third_party_agents.ntfy_agent". Then tell me the URL
-to configure on GitHub.'
+secret "rotate-me-7f3a", prompt template "Repo {repository.full_name}: {head_commit.message}",
+and deliver_module "kiss.agents.third_party_agents.ntfy_agent".'
 ```
+
+Pass the (required, nonempty) secret inline: a direct CLI task has no chat UI attached,
+so a task that stops to ask you a question blocks with nobody to answer it.
 
 Point GitHub's webhook at `http://<host>:<port>/hook/gh-push`. `deliver_module` must be
 the full module path; deliver-only routes push through that module's backend and return
@@ -544,8 +593,9 @@ bulk/list mail before the agent sees it:
 
 ### Multi-account, budgets, and guardrails
 
-**21. Two Slack workspaces, cleanly separated.** Tokens live under
-`slack/<workspace>/token.json`:
+**21. Two Slack workspaces, cleanly separated.** Each workspace keeps its own
+credential set under `slack/<workspace>/` (legacy file `token.json`; vaulted
+per-workspace under Muse):
 
 ```bash
 kiss-slack --list-workspaces                  # show configured workspaces
@@ -565,7 +615,7 @@ gateway ticks run on an inexpensive model, and override per task when it matters
 
 ```bash
 kiss-slack -m claude-fable-5 -b 2.0 -t 'Deep-dive: analyze the last 200 messages in
-#incidents and write a post-mortem outline'
+#incidents and post a post-mortem outline back to #incidents'
 ```
 
 **23. Guardrails are config, not prompts** (Muse tip 4). Prefer the enforced switch
@@ -574,13 +624,15 @@ bot, keep Postgres in its default read-only mode, and grant Muse-auth writes per
 service only when a workflow actually needs them:
 
 ```bash
-python -m kiss.agents.third_party_agents.muse_auth grant github write  # per-service write grant
-python -m kiss.agents.third_party_agents.muse_auth audit                # verify what actually ran
+python -m kiss.agents.third_party_agents.muse_auth grant github write  # single-use write grant (scope `once`)
+python -m kiss.agents.third_party_agents.muse_auth audit                # review recent allow/deny/ask decisions
 ```
 
-**24. Restrict who can talk to a gateway.** `--allow-users` resolves names via the
-backend and drops everyone else; combine with `--pairing` for a controlled onboarding
-flow instead of an open bot.
+**24. Restrict who can talk to a gateway.** `--allow-users` drops every other sender.
+Only Slack resolves display names to user IDs; on every other channel pass the raw
+sender identifier exactly as the platform emits it (numeric Telegram user ID, email
+address, ...). Combine with `--pairing` for a controlled onboarding flow instead of an
+open bot.
 
 ### Agent-to-agent and custom frontends
 
@@ -589,8 +641,9 @@ channel runner is ticking (embedded-server caveat above); from machine B:
 
 ```bash
 kiss-a2a -t 'Discover the agent at http://machine-a:8710 (a2a_discover), then a2a_call
-it with "What does your project do?", passing token="<machine A bearer token>", and
-poll a2a_get_task with the same token until the reply completes.'
+it with "What does your project do?", passing token="<machine A bearer token>", poll
+a2a_get_task with the same token until the reply completes, and save the reply to
+./a2a-reply.txt.'
 ```
 
 Peer input is treated as untrusted text (queued, never executed), JSON-RPC POSTs
