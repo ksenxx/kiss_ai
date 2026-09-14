@@ -49,8 +49,10 @@ from kiss.agents.third_party_agents.muse_auth._common import (
     recv_frame,
     send_frame,
     socket_path,
+    strip_url_query_param,
     url_origin,
     valid_credential_header,
+    valid_credential_param,
     valid_credential_value,
     valid_hostname,
     valid_service_name,
@@ -114,6 +116,25 @@ def _invalid_hosts_reason(hosts: Any) -> str:
     return ""
 
 
+def _with_query_param(url: str, name: str, value: str) -> str:
+    """Return *url* with ``name=value`` appended to its query string.
+
+    Args:
+        url: Absolute request URL (already stripped of *name*).
+        name: Credential query parameter name.
+        value: Real credential value (percent-encoded on the way in).
+
+    Returns:
+        The URL carrying the credential parameter.
+    """
+    from urllib.parse import urlencode, urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    encoded = urlencode([(name, value)])
+    query = f"{parts.query}&{encoded}" if parts.query else encoded
+    return urlunsplit(parts._replace(query=query))
+
+
 def _peer_uid(conn: socket.socket) -> int:
     """Return the connecting peer's UID via ``SO_PEERCRED``.
 
@@ -174,7 +195,13 @@ class MuseAuthDaemon:
                 return {"ok": False, "error": "invalid credential header name"}
             if (
                 isinstance(info, dict)
-                and info.get("kind") in ("header", "bearer")
+                and info.get("kind") == "query"
+                and not valid_credential_param(info.get("param"))
+            ):
+                return {"ok": False, "error": "invalid credential query parameter name"}
+            if (
+                isinstance(info, dict)
+                and info.get("kind") in ("header", "bearer", "query")
                 and not valid_credential_value(info.get("token"))
             ):
                 # A malformed value (control chars, stray whitespace)
@@ -289,34 +316,65 @@ class MuseAuthDaemon:
                 "error": "unknown or stale surrogate token; re-connect the agent backend",
             }
         try:
-            cred_header, cred_value = self.vault.resolve_header(service, generation)
+            placement, cred_name, cred_value = self.vault.resolve_credential(service, generation)
         except Exception as e:
             return {"ok": False, "error": f"credential resolution failed: {e}"}
-        if not valid_credential_header(cred_header):
+        if placement == "header" and not valid_credential_header(cred_name):
             # Defense in depth: enrollment already validates this.
-            return {"ok": False, "error": f"vault credential for '{service}' "
-                                          f"names an unsafe header"}
+            return {
+                "ok": False,
+                "error": f"vault credential for '{service}' names an unsafe header",
+            }
+        if placement == "query" and not valid_credential_param(cred_name):
+            return {
+                "ok": False,
+                "error": f"vault credential for '{service}' names an unsafe query parameter",
+            }
         # Preserve the caller's own headers (Notion-Version, Accept,
         # multipart Content-Type, ...); only drop hop-by-hop headers,
         # every Authorization variant, and every copy of the credential
         # header, then set exactly one real credential so a duplicate
         # header cannot smuggle a value past the swap.
+        dropped = {"authorization"}
+        if placement == "header":
+            dropped.add(cred_name.lower())
         out_headers = {
             k: v
             for k, v in headers.items()
-            if k.lower() not in _HOP_HEADERS
-            and k.lower() not in ("authorization", cred_header.lower())
+            if k.lower() not in _HOP_HEADERS and k.lower() not in dropped
         }
-        out_headers[cred_header] = cred_value
+        if placement == "header":
+            out_headers[cred_name] = cred_value
+        else:
+            # Query-kind: the credential travels in the URL, injected
+            # per hop by _execute.  A caller-supplied copy of the
+            # parameter must not survive next to the real one.
+            url = strip_url_query_param(url, cred_name)
         try:
-            resp = self._execute(service, method, url, out_headers, body,
-                                 float(request.get("timeout", 120.0)),
-                                 cred_header=cred_header, generation=generation)
+            resp = self._execute(
+                service,
+                method,
+                url,
+                out_headers,
+                body,
+                float(request.get("timeout", 120.0)),
+                placement=placement,
+                cred_name=cred_name,
+                cred_value=cred_value,
+                generation=generation,
+            )
         except Exception as e:
-            # Exception text from the HTTP stack can reflect header
-            # values verbatim; never let the real credential cross back
-            # to the agent inside an error message.
-            message = str(e).replace(cred_value, "<redacted-credential>")
+            if placement == "query":
+                # The sent URL carries the percent-encoded credential and
+                # the HTTP stack embeds that URL verbatim in exception
+                # text; rather than enumerating encoding variants, return
+                # only the exception class and the credential-free URL.
+                message = f"{type(e).__name__} contacting {url}"
+            else:
+                # Exception text from the HTTP stack can reflect header
+                # values verbatim; never let the real credential cross
+                # back to the agent inside an error message.
+                message = str(e).replace(cred_value, "<redacted-credential>")
             return {"ok": False, "error": f"network boundary request failed: {message}"}
         if isinstance(resp, str):
             return {"ok": False, "denied": True, "error": resp}
@@ -341,7 +399,9 @@ class MuseAuthDaemon:
         headers: dict[str, str],
         body: bytes | None,
         timeout: float,
-        cred_header: str = "Authorization",
+        placement: str = "header",
+        cred_name: str = "Authorization",
+        cred_value: str = "",
         generation: str | None = None,
     ) -> requests.Response | str:
         """Execute a request, following redirects with per-hop authorization.
@@ -356,13 +416,20 @@ class MuseAuthDaemon:
         Args:
             service: Connector service name.
             method: HTTP method.
-            url: Absolute request URL (already authorized for hop 0).
-            headers: Outgoing headers including the real credential.
+            url: Absolute request URL (already authorized for hop 0;
+                for query placement, already stripped of *cred_name*).
+            headers: Outgoing headers (for header placement, including
+                the real credential).
             body: Request body bytes, or None.
             timeout: Per-request timeout in seconds.
-            cred_header: Header carrying the real credential
-                (``Authorization`` or a header-kind credential's name
-                such as ``X-Subscription-Token``).
+            placement: ``"header"`` (credential in *cred_name* header)
+                or ``"query"`` (credential spliced into the URL query
+                as ``cred_name=cred_value`` just before each send).
+            cred_name: Header or query parameter carrying the real
+                credential.
+            cred_value: The real credential value (used for query
+                placement; header placement already carries it in
+                *headers*).
             generation: Vault credential generation the request is
                 pinned to; redirect hops abort when it changes.
 
@@ -370,6 +437,7 @@ class MuseAuthDaemon:
             The final :class:`requests.Response`, or a Sentinel denial
             reason string when a redirect hop is refused.
         """
+
         # The boundary must be immune to ambient environment configs:
         # an HTTP(S)_PROXY would re-route credentialed requests through
         # an unauthorized intermediary and a ~/.netrc would overwrite
@@ -377,9 +445,30 @@ class MuseAuthDaemon:
         session = requests.Session()
         session.trust_env = False
         with session:
+            # For query placement the credential is spliced into the
+            # sent URL just before each send; ``url`` itself stays
+            # credential-free (it feeds Sentinel and origin checks).
+            sent = (
+                _with_query_param(url, cred_name, cred_value)
+                if placement == "query" and cred_value
+                else url
+            )
             resp = session.request(
-                method, url, headers=headers, data=body,
-                timeout=timeout, allow_redirects=False,
+                method,
+                sent,
+                headers=headers,
+                data=body,
+                timeout=timeout,
+                allow_redirects=False,
+            )
+            # The credential stays pinned to the origin of the initially
+            # authorized request for the WHOLE redirect chain: comparing
+            # against the immediately previous hop would let an
+            # allowlisted foreign origin regain the credential with one
+            # extra same-origin redirect (A -> B -> B).
+            first_parsed = urlparse(url)
+            pinned_origin = url_origin(
+                first_parsed.scheme, first_parsed.hostname, first_parsed.port
             )
             # Follow up to 5 redirects, re-authorizing each hop.
             for _hop in range(5):
@@ -387,15 +476,20 @@ class MuseAuthDaemon:
                 if not (resp.is_redirect and location):
                     return resp
                 next_url = requests.compat.urljoin(resp.url, location)  # type: ignore[attr-defined]
+                if placement == "query":
+                    # Never treat a server-echoed (or attacker-chosen)
+                    # copy of the credential parameter as part of the
+                    # redirect target; authorized hops re-inject it.
+                    next_url = strip_url_query_param(next_url, cred_name)
                 next_parsed = urlparse(next_url)
-                prev_parsed = urlparse(url)
                 next_host = canonical_host(next_parsed.hostname or "")
-                # Same ORIGIN (host and effective port): the same
-                # hostname on another port is a different server and
-                # must re-qualify through the allowlist.
+                # Same ORIGIN (scheme, host, and effective port) as the
+                # initially authorized request: the same hostname on
+                # another port is a different server and must re-qualify
+                # through the allowlist.
                 same_host = url_origin(
                     next_parsed.scheme, next_parsed.hostname, next_parsed.port
-                ) == url_origin(prev_parsed.scheme, prev_parsed.hostname, prev_parsed.port)
+                ) == pinned_origin
                 if resp.status_code in (301, 302, 303) and method not in ("GET", "HEAD"):
                     method, body = "GET", None
                 headers = dict(headers)
@@ -411,10 +505,12 @@ class MuseAuthDaemon:
                             f"cross-host redirect to '{next_host}' would carry the request "
                             f"body off the '{service}' allowlist; refusing to follow it"
                         )
-                    headers.pop(cred_header, None)
+                    headers.pop(cred_name, None)
+                    cred_value = ""
                 else:
-                    decision = self.sentinel.decide(service, method, next_url,
-                                                    effective_url=next_url)
+                    decision = self.sentinel.decide(
+                        service, method, next_url, effective_url=next_url
+                    )
                     if decision.verdict != "allow":
                         return decision.reason
                     # Re-resolve the credential for every authorized
@@ -423,22 +519,40 @@ class MuseAuthDaemon:
                     # instead of shipping either generation's token
                     # under the other generation's host scope.
                     try:
-                        hop_header, hop_value = self.vault.resolve_header(service, generation)
+                        hop = self.vault.resolve_credential(service, generation)
                     except Exception:
                         return (
                             f"the '{service}' credential changed mid-request; "
                             "re-connect the agent backend and retry"
                         )
-                    if hop_header != cred_header:
+                    if hop[:2] != (placement, cred_name):
                         return (
-                            f"the '{service}' credential changed its header mid-request; "
+                            f"the '{service}' credential changed its placement mid-request; "
                             "re-connect the agent backend and retry"
                         )
-                    headers[cred_header] = hop_value
+                    if placement == "query" and not same_host:
+                        # A query credential binds to the exact origin it
+                        # was consented for: a separately allowlisted
+                        # sibling origin may be followed, but never with
+                        # the credential spliced into its URL.
+                        cred_value = ""
+                    else:
+                        cred_value = hop[2]
+                        if placement == "header":
+                            headers[cred_name] = cred_value
                 url = next_url
+                sent = (
+                    _with_query_param(url, cred_name, cred_value)
+                    if placement == "query" and cred_value
+                    else url
+                )
                 resp = session.request(
-                    method, url, headers=headers, data=body,
-                    timeout=timeout, allow_redirects=False,
+                    method,
+                    sent,
+                    headers=headers,
+                    data=body,
+                    timeout=timeout,
+                    allow_redirects=False,
                 )
             return resp
 
@@ -528,9 +642,7 @@ class MuseAuthDaemon:
             with contextlib.suppress(OSError):
                 path.unlink()
 
-    def _serve_with_slot(
-        self, conn: socket.socket, slots: threading.BoundedSemaphore
-    ) -> None:
+    def _serve_with_slot(self, conn: socket.socket, slots: threading.BoundedSemaphore) -> None:
         """Serve one connection then release its worker slot.
 
         Args:

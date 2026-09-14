@@ -445,6 +445,7 @@ class MuseBoundarySession:
         params: Any = None,
         json: Any = None,
         data: Any = None,
+        files: Any = None,
         timeout: float = _DEFAULT_TIMEOUT,
         **_ignored: Any,
     ) -> requests.Response:
@@ -457,6 +458,9 @@ class MuseBoundarySession:
             params: Optional query parameters.
             json: Optional JSON body.
             data: Optional raw/form body.
+            files: Optional ``requests``-style multipart file mapping;
+                encoded here so the daemon ships the finished multipart
+                body (with its boundary Content-Type) verbatim.
             timeout: Request timeout in seconds.
 
         Returns:
@@ -467,7 +471,7 @@ class MuseBoundarySession:
         """
         prep = requests.Request(
             method=method.upper(), url=url, headers=headers or {}, params=params,
-            json=json, data=data,
+            json=json, data=data, files=files,
         ).prepare()
         body = prep.body or b""
         if isinstance(body, str):

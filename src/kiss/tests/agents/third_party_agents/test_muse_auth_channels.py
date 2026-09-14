@@ -21,7 +21,7 @@ instead of mocked):
   ``files.slack.com`` URL with no credential; emulating Slack's
   two-step upload handshake end-to-end is out of scope here because it
   never touches the vault or the boundary.
-* ``vault.resolve_header``'s ``KeyError`` raise and
+* ``vault.resolve_credential``'s ``KeyError`` raise and
   ``vault.enrolled_hosts``'s missing-file branch are guarded by the
   daemon (surrogate binding is validated first, so the vault file
   exists), so they cannot fire end-to-end.

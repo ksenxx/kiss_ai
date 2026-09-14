@@ -227,12 +227,16 @@ class CredentialVault:
         with self._lock:
             return self._surrogates.get(surrogate)
 
-    def resolve_header(self, service: str, generation: str | None = None) -> tuple[str, str]:
-        """Return the real credential as an outbound header (name, value) pair.
+    def resolve_credential(
+        self, service: str, generation: str | None = None
+    ) -> tuple[str, str, str]:
+        """Return the real credential and where the boundary must place it.
 
         ``{"kind": "header"}`` credentials (e.g. Brave Search's
         ``X-Subscription-Token``) are sent verbatim in their declared
-        header; every other kind resolves through
+        header; ``{"kind": "query"}`` credentials (BlueBubbles'
+        ``password``, Synology's webhook ``token``) are spliced into the
+        request URL's query string; every other kind resolves through
         :meth:`resolve_token` into ``Authorization: Bearer <token>``.
 
         Args:
@@ -248,7 +252,9 @@ class CredentialVault:
                 replaced after the caller's request started.
 
         Returns:
-            ``(header_name, header_value)`` for the boundary swap.
+            ``(placement, name, value)`` where *placement* is
+            ``"header"`` or ``"query"``, *name* is the header or query
+            parameter name, and *value* is the real credential.
         """
         with self._lock:
             path = self._entry_path(service)
@@ -256,13 +262,17 @@ class CredentialVault:
                 raise KeyError(f"no vault credential for service '{service}'")
             info = json.loads(path.read_text())["authorized_user_info"]
         if info.get("kind") == "header":
-            # Header-kind credentials never call resolve_token, so the
-            # generation is checked here; other kinds are checked inside
-            # resolve_token (avoiding a redundant double-check).
+            # Header/query-kind credentials never call resolve_token,
+            # so the generation is checked here; other kinds are checked
+            # inside resolve_token (avoiding a redundant double-check).
             with self._lock:
                 self._check_generation(service, generation)
-            return str(info["header"]), str(info["token"])
-        return "Authorization", f"Bearer {self.resolve_token(service, generation)}"
+            return "header", str(info["header"]), str(info["token"])
+        if info.get("kind") == "query":
+            with self._lock:
+                self._check_generation(service, generation)
+            return "query", str(info["param"]), str(info["token"])
+        return "header", "Authorization", f"Bearer {self.resolve_token(service, generation)}"
 
     def _check_generation(self, service: str, generation: str | None) -> None:
         """Raise if the stored generation no longer matches *generation*.

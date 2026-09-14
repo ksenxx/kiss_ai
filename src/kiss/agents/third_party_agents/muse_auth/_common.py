@@ -65,6 +65,16 @@ SERVICE_HOSTS: dict[str, tuple[str, ...]] = {
     "homeassistant": (),
     "ntfy": (),
     "firecrawl": (),
+    # Cloud messaging APIs with one fixed endpoint host.
+    "twitch": ("api.twitch.tv",),
+    "zalo": ("openapi.zalo.me",),
+    "line": ("api.line.me",),
+    # Self-hosted messaging servers: like Home Assistant, the credential
+    # is bound to the one origin enrolled with it.
+    "mattermost": (),
+    "nextcloud": (),
+    "bluebubbles": (),
+    "synology": (),
 }
 
 # Services that enroll one vault entry per workspace/account; a
@@ -93,7 +103,7 @@ def builtin_hosts(service: str) -> tuple[str, ...]:
     return ()
 
 
-_HEADER_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,63}")
+_HEADER_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
 
 # Headers a vault credential may never occupy: hop-by-hop and
 # framing headers would corrupt the boundary request itself.
@@ -122,6 +132,24 @@ def valid_credential_header(name: Any) -> bool:
     )
 
 
+def valid_credential_param(name: Any) -> bool:
+    """Return whether *name* may carry a real credential as a query parameter.
+
+    Used for ``{"kind": "query"}`` vault credentials (BlueBubbles'
+    ``password``, Synology Chat's webhook ``token``): the boundary
+    splices ``name=<real value>`` into the request URL's query string,
+    so the name must be a plain token that cannot break out of its
+    key/value slot.
+
+    Args:
+        name: Candidate query parameter name (any type; non-strings fail).
+
+    Returns:
+        True when the parameter may carry the credential.
+    """
+    return isinstance(name, str) and _HEADER_NAME_RE.fullmatch(name) is not None
+
+
 # Visible-ASCII runs separated by single spaces: covers bearer tokens
 # and scheme-prefixed values like ``Bot <token>``, while rejecting
 # control characters (header injection) and leading/trailing/duplicate
@@ -148,10 +176,11 @@ SURROGATE_PREFIX = "muse-sgt."
 # credentials, enrollment hosts, service-aware action classes; v3:
 # consent-scoped insecure enrollment hosts, which a v2 daemon would
 # silently drop from ``store_credentials`` and then deny every plain-
-# HTTP Home Assistant request).  The client restarts a running daemon
-# whose ``status`` reports an older protocol, so a detached pre-upgrade
-# daemon cannot serve new clients.
-PROTOCOL_VERSION = 3
+# HTTP Home Assistant request; v4: query-kind credentials, which a v3
+# daemon would fail to resolve at the boundary).  The client restarts a
+# running daemon whose ``status`` reports an older protocol, so a
+# detached pre-upgrade daemon cannot serve new clients.
+PROTOCOL_VERSION = 4
 
 # One JSON object per line; requests carrying request/response bodies
 # are base64-encoded, so cap the frame to keep the daemon safe from
@@ -396,6 +425,72 @@ def url_origin_entry(url: str) -> str:
     return host_port_entry(host, port) if host else ""
 
 
+def origin_hosts(base_url: str) -> tuple[str, ...]:
+    """Return the Muse enrollment origins for a self-hosted base URL.
+
+    Origin-bound services (Mattermost, Nextcloud Talk, BlueBubbles,
+    Synology Chat, ...) have no built-in allowlist: the configured
+    origin — host AND port, because the same hostname on another port
+    is a different server — is enrolled with the credential.
+
+    Args:
+        base_url: The configured server base URL.
+
+    Returns:
+        ``("host:port",)``, or ``()`` when the URL has no host.
+    """
+    entry = url_origin_entry(base_url)
+    return (entry,) if entry else ()
+
+
+def insecure_origin_hosts(base_url: str) -> tuple[str, ...]:
+    """Return the origins to enroll as consent-scoped plain-HTTP origins.
+
+    Only an explicit ``http://`` base URL to a non-loopback host needs
+    the exception (loopback plaintext is always allowed, and HTTPS
+    needs none).
+
+    Args:
+        base_url: The configured server base URL.
+
+    Returns:
+        ``("host:port",)`` for a plain-HTTP non-loopback base URL,
+        else ``()``.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    host = canonical_host(parsed.hostname or "")
+    if parsed.scheme == "http" and host and not is_loopback_host(host):
+        return (url_origin_entry(base_url),)
+    return ()
+
+
+def strip_url_query_param(url: str, name: str) -> str:
+    """Return *url* with every query parameter named *name* removed.
+
+    Shared by the daemon boundary (which refuses to send a
+    caller-supplied or server-echoed copy of a query-kind credential
+    parameter next to the real one) and by connectors that scrub an
+    embedded credential out of a configured URL (Synology Chat's
+    webhook ``token``).
+
+    Args:
+        url: Absolute URL.
+        name: Credential query parameter name.
+
+    Returns:
+        The URL without any ``name=...`` query pairs.
+    """
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+    pairs = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != name]
+    return urlunsplit(parts._replace(query=urlencode(pairs)))
+
+
 def is_loopback_host(host: str) -> bool:
     """Return whether *host* is a loopback destination.
 
@@ -500,6 +595,23 @@ def request_action(service: str, method: str, path: str) -> str:
         if method.upper() == "POST" and path.rstrip("/").endswith("/typing"):
             return "read"
         return action_class(method)
+    if service == "mattermost":
+        # Same reasoning as Discord: the typing indicator is ephemeral
+        # presence, not a workspace mutation.
+        if method.upper() == "POST" and path.rstrip("/").endswith("/users/me/typing"):
+            return "read"
+        return action_class(method)
+    if service == "bluebubbles":
+        # BlueBubbles' message search is a POST whose body carries the
+        # query filters; it only retrieves messages.  Sending
+        # (/message/text) and mark-read stay writes.
+        if method.upper() == "POST" and path.rstrip("/").endswith("/message/query"):
+            return "read"
+        return action_class(method)
+    # Nextcloud's POST /room/{token}/participants/active ("join a
+    # conversation") creates or replaces an active participant session —
+    # a server-side state change — so it deliberately stays a write and
+    # needs a write grant even though the poll loop uses it.
     return action_class(method)
 
 

@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import sys
+from typing import Any
 
 from kiss.agents.third_party_agents.muse_auth._common import muse_auth_dir, valid_http_url
 from kiss.agents.third_party_agents.muse_auth.client import (
@@ -49,10 +50,13 @@ _SERVICE_MODULES = {
 }
 
 # Plain token connectors: the legacy config.json key holding the token,
-# plus the credential header when it is not ``Authorization: Bearer``
-# and an optional value prefix for non-Bearer Authorization schemes
-# (Discord sends ``Authorization: Bot <token>``).
-_TOKEN_SERVICES: dict[str, dict[str, str]] = {
+# plus the credential header when it is not ``Authorization: Bearer``,
+# an optional value prefix for non-Bearer Authorization schemes
+# (Discord sends ``Authorization: Bot <token>``), an optional query
+# ``param`` for query-kind credentials (BlueBubbles authenticates with
+# ``password=`` in the URL), and optional extra secret keys to scrub
+# after the migration (Twitch's unused ``client_secret``).
+_TOKEN_SERVICES: dict[str, dict[str, Any]] = {
     "notion": {"key": "token"},
     "github": {"key": "token"},
     "firecrawl": {"key": "api_key"},
@@ -60,6 +64,11 @@ _TOKEN_SERVICES: dict[str, dict[str, str]] = {
     "discord": {"key": "bot_token", "header": "Authorization", "prefix": "Bot "},
     "homeassistant": {"key": "token"},
     "ntfy": {"key": "token"},
+    "twitch": {"key": "access_token", "also_scrub": ("client_secret",)},
+    "zalo": {"key": "access_token", "header": "access_token"},
+    "line": {"key": "channel_access_token"},
+    "mattermost": {"key": "token"},
+    "bluebubbles": {"key": "password", "param": "password"},
 }
 
 
@@ -100,7 +109,33 @@ def _import_hosts(service: str, cfg: dict) -> tuple[tuple[str, ...], tuple[str, 
         # same default the connector's loader substitutes.
         server = str(cfg.get("server") or ntfy_agent._DEFAULT_SERVER)
         return ntfy_agent._extra_hosts(server), ntfy_agent._insecure_extra_hosts(server)
+    if service in ("mattermost", "bluebubbles"):
+        from kiss.agents.third_party_agents.muse_auth._common import (
+            insecure_origin_hosts,
+            origin_hosts,
+        )
+
+        base_url = _service_base_url(service, cfg)
+        return origin_hosts(base_url), insecure_origin_hosts(base_url)
     return (), ()
+
+
+def _service_base_url(service: str, cfg: dict) -> str:
+    """Return the origin-binding base URL of a legacy config.
+
+    Args:
+        service: ``"mattermost"`` (URL composed from ``url``/``port``/
+            ``scheme``) or ``"bluebubbles"`` (``server_url``).
+        cfg: The parsed legacy ``config.json`` contents.
+
+    Returns:
+        The base URL string (may be empty or invalid; callers validate).
+    """
+    if service == "mattermost":
+        from kiss.agents.third_party_agents.mattermost_agent import _base_url_from_config
+
+        return _base_url_from_config(cfg)
+    return str(cfg.get("server_url") or "")
 
 
 def _scrub_imported_config(service: str) -> None:
@@ -116,15 +151,16 @@ def _scrub_imported_config(service: str) -> None:
     """
     from kiss.agents.third_party_agents._channel_agent_utils import save_json_config
 
-    key = _TOKEN_SERVICES[service]["key"]
+    spec = _TOKEN_SERVICES[service]
+    scrubbed = {spec["key"], *spec.get("also_scrub", ())}
     path = muse_auth_dir().parent / "third_party_agents" / service / "config.json"
     try:
         cfg = json.loads(path.read_text())
     except (OSError, ValueError):
         return
-    if not isinstance(cfg, dict) or key not in cfg:
+    if not isinstance(cfg, dict) or not scrubbed.intersection(cfg):
         return
-    kept = {k: str(v) for k, v in cfg.items() if k != key and v}
+    kept = {k: str(v) for k, v in cfg.items() if k not in scrubbed and v}
     if kept:
         save_json_config(path, kept)
     else:
@@ -208,13 +244,17 @@ def _cmd_import(service: str) -> int:
 
     Google-OAuth services move their ``token.json`` (the plaintext file
     is deleted).  Token services (notion, github, firecrawl,
-    brave_search, discord, homeassistant, ntfy) move the token out of
-    their ``config.json``: the key is scrubbed after a successful store
-    while non-secret settings survive.  ``slack`` migrates the default
-    workspace's bot token and deletes its plaintext file; other Slack
-    workspaces migrate automatically on their first Muse-mode connect.
-    ``govee`` enrolls ``$GOVEE_API_KEY`` from the environment (there is
-    no config file); unset the shell export afterwards.
+    brave_search, discord, homeassistant, ntfy, twitch, zalo, line,
+    mattermost, bluebubbles) move the token out of their
+    ``config.json``: the secret keys are scrubbed after a successful
+    store while non-secret settings survive.  ``nextcloud`` folds its
+    username/password into one Basic credential; ``synology`` extracts
+    the ``token=`` parameter embedded in its webhook URL.  ``slack``
+    migrates the default workspace's bot token and deletes its
+    plaintext file; other Slack workspaces migrate automatically on
+    their first Muse-mode connect.  ``govee`` enrolls
+    ``$GOVEE_API_KEY`` from the environment (there is no config file);
+    unset the shell export afterwards.
 
     Args:
         service: Connector service name.
@@ -244,6 +284,10 @@ def _cmd_import(service: str) -> int:
         )
         print("enrolled $GOVEE_API_KEY into the Muse-auth vault; you may unset it now.")
         return 0
+    if service == "nextcloud":
+        return _cmd_import_nextcloud()
+    if service == "synology":
+        return _cmd_import_synology()
     if service in _TOKEN_SERVICES:
         spec = _TOKEN_SERVICES[service]
         path = muse_auth_dir().parent / "third_party_agents" / service / "config.json"
@@ -259,18 +303,22 @@ def _cmd_import(service: str) -> int:
         # authenticate tools do: a userinfo/malformed URL must not be
         # migrated (its password would persist and the credential could
         # not be spent).
-        url_key = {"firecrawl": "base_url", "homeassistant": "base_url", "ntfy": "server"}.get(
-            service
-        )
+        url_key = {
+            "firecrawl": "base_url",
+            "homeassistant": "base_url",
+            "ntfy": "server",
+            "bluebubbles": "server_url",
+        }.get(service)
         if url_key is not None:
             raw_url = cfg.get(url_key)
             if raw_url is None or raw_url == "":
                 # Null/absent/empty selects the documented default for
                 # the optional firecrawl/ntfy URLs (their loaders and
-                # _import_hosts substitute it).  Home Assistant is
-                # always self-hosted: without a base URL the credential
-                # would be stored hostless and unusable, so reject.
-                if service == "homeassistant":
+                # _import_hosts substitute it).  Home Assistant and
+                # BlueBubbles are always self-hosted: without a base URL
+                # the credential would be stored hostless and unusable,
+                # so reject.
+                if service in ("homeassistant", "bluebubbles"):
                     print(
                         f"'{url_key}' in {path} is required and must be a "
                         "valid http(s):// URL",
@@ -286,9 +334,20 @@ def _cmd_import(service: str) -> int:
                     file=sys.stderr,
                 )
                 return 1
+        if service == "mattermost" and not valid_http_url(_service_base_url(service, cfg)):
+            # Mattermost's origin is composed from url/scheme/port.
+            print(
+                f"the mattermost config in {path} does not compose a valid "
+                "http(s):// server URL (url, scheme, port)",
+                file=sys.stderr,
+            )
+            return 1
         token = spec.get("prefix", "") + token
         header = spec.get("header", "")
-        if header:
+        param = spec.get("param", "")
+        if param:
+            info = {"kind": "query", "param": param, "token": token}
+        elif header:
             info = {"kind": "header", "header": header, "token": token}
         else:
             info = {"kind": "bearer", "token": token}
@@ -310,6 +369,110 @@ def _cmd_import(service: str) -> int:
     store_credentials(service, info, _service_scopes(service))
     path.unlink()
     print(f"migrated {path} into the Muse-auth vault and removed the plaintext token.")
+    return 0
+
+
+def _cmd_import_nextcloud() -> int:
+    """Migrate a legacy Nextcloud username/password into the vault.
+
+    The pair becomes one header-kind ``Authorization: Basic`` credential
+    bound to the configured server origin; the ``password`` is scrubbed
+    from ``config.json`` while the non-secret ``url``/``username``
+    survive.
+
+    Returns:
+        Process exit code.
+    """
+    from kiss.agents.third_party_agents import nextcloud_talk_agent as nc
+    from kiss.agents.third_party_agents.muse_auth._common import (
+        insecure_origin_hosts,
+        origin_hosts,
+    )
+
+    path = muse_auth_dir().parent / "third_party_agents" / "nextcloud" / "config.json"
+    if not path.exists():
+        print(f"no legacy config at {path}", file=sys.stderr)
+        return 1
+    cfg = json.loads(path.read_text())
+    url = str(cfg.get("url") or "").rstrip("/")
+    username = str(cfg.get("username") or "")
+    password = str(cfg.get("password") or "")
+    if not (url and username and password):
+        print(f"{path} must hold url, username, and password", file=sys.stderr)
+        return 1
+    if not valid_http_url(url):
+        print(
+            f"'url' in {path} is not a valid http(s):// URL "
+            "(no userinfo, valid host and port)",
+            file=sys.stderr,
+        )
+        return 1
+    store_credentials(
+        "nextcloud",
+        {
+            "kind": "header",
+            "header": "Authorization",
+            "token": nc._basic_credential(username, password),
+        },
+        [],
+        hosts=origin_hosts(url),
+        insecure_hosts=insecure_origin_hosts(url),
+    )
+    nc._scrub_config_password()
+    print(
+        f"imported the nextcloud credentials into the Muse-auth vault and scrubbed "
+        f"the plaintext password from {path}."
+    )
+    return 0
+
+
+def _cmd_import_synology() -> int:
+    """Migrate the token embedded in a Synology webhook URL into the vault.
+
+    The ``token=`` query parameter becomes a query-kind credential bound
+    to the webhook's origin; ``config.json`` keeps the URL without it.
+
+    Returns:
+        Process exit code.
+    """
+    from kiss.agents.third_party_agents import synology_chat_agent as syno
+    from kiss.agents.third_party_agents.muse_auth._common import (
+        insecure_origin_hosts,
+        origin_hosts,
+    )
+
+    path = muse_auth_dir().parent / "third_party_agents" / "synology" / "config.json"
+    if not path.exists():
+        print(f"no legacy config at {path}", file=sys.stderr)
+        return 1
+    cfg = json.loads(path.read_text())
+    webhook_url = str(cfg.get("webhook_url") or "")
+    if not webhook_url:
+        print(f"no 'webhook_url' key in {path}", file=sys.stderr)
+        return 1
+    if not valid_http_url(webhook_url):
+        print(
+            f"'webhook_url' in {path} is not a valid http(s):// URL "
+            "(no userinfo, valid host and port)",
+            file=sys.stderr,
+        )
+        return 1
+    embedded = syno._embedded_token(webhook_url)
+    if not embedded:
+        print(f"the webhook_url in {path} carries no token= query parameter", file=sys.stderr)
+        return 1
+    store_credentials(
+        "synology",
+        {"kind": "query", "param": "token", "token": embedded},
+        [],
+        hosts=origin_hosts(webhook_url),
+        insecure_hosts=insecure_origin_hosts(webhook_url),
+    )
+    syno._scrub_config_webhook_token()
+    print(
+        f"imported the synology webhook token into the Muse-auth vault and scrubbed "
+        f"it from the webhook_url in {path}."
+    )
     return 0
 
 

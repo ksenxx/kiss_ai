@@ -990,7 +990,7 @@ def test_vault_direct_reads(muse_env: Path) -> None:
     )
     vault = CredentialVault()
     # No generation pin: the header credential resolves without a check.
-    assert vault.resolve_header("govee") == ("Govee-API-Key", "gk")
+    assert vault.resolve_credential("govee") == ("header", "Govee-API-Key", "gk")
     # A fresh generation nonce was written and is stable across reads.
     assert vault.generation("govee") == vault.generation("govee") != ""
     # Absent entries fail closed: no hosts, empty generation, no error.
