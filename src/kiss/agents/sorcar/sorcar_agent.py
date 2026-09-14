@@ -51,6 +51,14 @@ from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
 
+# Smallest per-child budget a ``run_parallel`` fan-out may hand out.
+# Every child resumes the parent's chat context, so even its FIRST LLM
+# step can cost a few cents; below this floor a child is killed by the
+# budget check after step 1 having produced nothing (observed in
+# recursive fan-outs that split a parent's remainder down to ~$0.03).
+# See :meth:`SorcarAgent._subagent_budget_share`.
+MIN_SUBAGENT_BUDGET = 0.50
+
 
 def summary(description: str) -> str:
     """Every 10 steps: summarize your steps since the last `summary` call.
@@ -1080,6 +1088,18 @@ class SorcarAgent(RelentlessAgent):
         agent enough budget to process the results and finish; importantly,
         even a one-item fan-out cannot consume the parent's entire remainder.
 
+        A share below :data:`MIN_SUBAGENT_BUDGET` is refused instead of
+        spawned: each sub-agent resumes the parent's whole chat context,
+        so its very first LLM step can cost a few cents, and a child
+        whose budget cannot cover even that step is killed on step 1
+        having done nothing.  Recursive fan-outs used to divide the
+        remainder into such doomed slivers (each nesting level splits by
+        ``num_tasks + 1``), burning budget on children that all returned
+        "Task failed".  Refusing with a plain :class:`KISSError` — not
+        :class:`BudgetExceededError`, which aborts the whole agent —
+        surfaces an actionable tool error so the parent model does the
+        work inline instead.
+
         Args:
             num_tasks: Number of parallel sub-agent tasks about to spawn.
 
@@ -1090,7 +1110,9 @@ class SorcarAgent(RelentlessAgent):
             sub-agents then fall back to their default budget.
 
         Raises:
-            KISSError: If the task has no remaining budget.
+            BudgetExceededError: If the task has no remaining budget.
+            KISSError: If the per-child share would be below
+                :data:`MIN_SUBAGENT_BUDGET`.
         """
         raw_max_budget = getattr(self, "max_budget", None)
         if raw_max_budget is None:
@@ -1105,7 +1127,23 @@ class SorcarAgent(RelentlessAgent):
                 f"sub-agents (${max_budget - remaining:.4f} / "
                 f"${max_budget:.2f})."
             )
-        return remaining if num_tasks <= 0 else remaining / (num_tasks + 1)
+        if num_tasks <= 0:
+            return remaining
+        share = remaining / (num_tasks + 1)
+        # 1e-9 tolerance: budget arithmetic is float subtraction, so a
+        # mathematically exact floor share (e.g. (1.13-0.13)/2 per child)
+        # can land a few ULPs below 0.50 and must not be refused with a
+        # self-contradictory "$0.50 is below the $0.50 minimum" message.
+        if share < MIN_SUBAGENT_BUDGET - 1e-9:
+            raise KISSError(
+                f"Refusing to spawn {num_tasks} parallel sub-agent(s): the "
+                f"remaining budget ${remaining:.2f} gives each sub-agent "
+                f"only ${share:.2f}, below the ${MIN_SUBAGENT_BUDGET:.2f} "
+                "minimum a sub-agent needs to do useful work. Do the work "
+                "inline yourself (without run_parallel), or fan out fewer "
+                "tasks."
+            )
+        return share
 
     def _subagent_parent_tab_id(self) -> str:
         """Return the frontend tab id sub-agents should call their parent.
