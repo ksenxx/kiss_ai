@@ -28,6 +28,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
+    save_json_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,12 +44,55 @@ _config = ChannelConfig(
 )
 
 
+def _basic_credential(username: str, password: str) -> str:
+    """Return the ``Authorization: Basic`` value for a username/password.
+
+    Nextcloud authenticates with HTTP Basic auth, which is one header —
+    so the Muse vault stores it as a header-kind credential and the
+    daemon emits exactly this value at the boundary.
+
+    Args:
+        username: Nextcloud login name.
+        password: Nextcloud password or app password.
+
+    Returns:
+        ``Basic <base64(username:password)>``.
+    """
+    import base64
+
+    return "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
+
+
+def _scrub_config_password() -> None:
+    """Remove a vault-migrated ``password`` from config.json.
+
+    Finishes the Muse migration automatically: the non-secret ``url``/
+    ``username`` metadata is kept (``username`` is needed to recognize
+    the bot's own messages) and the file is deleted when nothing but
+    the password was stored.
+    """
+    try:
+        cfg = json.loads(_config.path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(cfg, dict) or "password" not in cfg:
+        return
+    kept = {k: str(v) for k, v in cfg.items() if k != "password" and v}
+    if kept:
+        save_json_config(_config.path, kept)
+    else:
+        _config.clear()
+
+
 class NextcloudTalkChannelBackend(ToolMethodBackend):
     """Channel backend for Nextcloud Talk REST API."""
 
     def __init__(self) -> None:
         self._url: str = ""
         self._auth: tuple[str, str] = ("", "")
+        self._http: Any = requests
+        self._muse: bool = False
+        self._surrogate: str = ""
         self._last_message_id: int = 0
         self._connection_info: str = ""
 
@@ -58,40 +102,151 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
     def _headers(self) -> dict[str, str]:
         return {"OCS-APIRequest": "true", "Accept": "application/json"}
 
+    def _auth_kwargs(self) -> dict[str, Any]:
+        """Return the per-request credential kwargs for the current mode.
+
+        Legacy mode sends HTTP Basic auth directly; Muse mode sends a
+        surrogate bearer that the daemon swaps for the real
+        ``Authorization: Basic`` header at the network boundary.
+
+        Returns:
+            Keyword arguments carrying headers (and legacy ``auth``).
+        """
+        if self._muse:
+            return {
+                "headers": {**self._headers(), "Authorization": f"Bearer {self._surrogate}"}
+            }
+        return {"auth": self._auth, "headers": self._headers()}
+
+    def _validate_credentials(self) -> tuple[bool, str]:
+        """Check the credentials with a ``/room`` read, strictly.
+
+        OCS error responses also arrive inside an ``ocs`` envelope (an
+        HTTP 401 carries ``meta.status == "failure"``), so envelope
+        presence proves nothing: both the HTTP status and the OCS meta
+        statuscode must signal success.
+
+        Returns:
+            ``(True, "")`` when the credentials are valid, else
+            ``(False, detail)`` with a credential-free failure detail.
+        """
+        resp = self._http.get(f"{self._base()}/room", timeout=30, **self._auth_kwargs())
+        try:
+            meta = resp.json().get("ocs", {}).get("meta", {})
+        except ValueError:
+            meta = {}
+        statuscode = meta.get("statuscode")
+        if resp.status_code == 200 and statuscode in (200, 201):
+            return True, ""
+        return False, f"HTTP {resp.status_code}, OCS statuscode {statuscode!r}"
+
     def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
-        resp = requests.get(
+        resp = self._http.get(
             f"{self._base()}{path}",
-            auth=self._auth,
-            headers=self._headers(),
             params=params,
             timeout=30,
+            **self._auth_kwargs(),
         )
         return resp.json()  # type: ignore[no-any-return]
 
     def _post(self, path: str, data: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
-        resp = requests.post(
+        resp = self._http.post(
             f"{self._base()}{path}",
-            auth=self._auth,
-            headers=self._headers(),
             json=data,
             timeout=30,
+            **self._auth_kwargs(),
         )
         return resp.json()  # type: ignore[no-any-return]
 
-    def connect(self) -> bool:
-        """Authenticate with Nextcloud Talk."""
-        cfg = _config.load()
-        if not cfg:  # pragma: no branch
+    def _wire_muse(self) -> bool:
+        """Acquire a Nextcloud surrogate and wire the boundary session.
+
+        A ``password`` still in the legacy config is the newest user
+        intent (initial migration, or a rotation done while Muse was
+        off): together with ``username`` it is enrolled as a header-kind
+        Basic credential bound to the configured server origin (flagged
+        as a consent-scoped insecure host when the URL is plain
+        ``http``), and scrubbed from ``config.json`` only after the
+        vault holds it.  No network round trip happens here.
+
+        Returns:
+            True when the backend holds a surrogate and boundary session.
+        """
+        from kiss.agents.third_party_agents.muse_auth._common import (
+            insecure_origin_hosts,
+            origin_hosts,
+            valid_http_url,
+        )
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            MuseBoundarySession,
+            mint_surrogate,
+            store_credentials,
+        )
+
+        cfg = _config.load_metadata() or {}
+        url = str(cfg.get("url") or "").rstrip("/")
+        if not url:
             self._connection_info = "No Nextcloud config found."
             return False
-        self._url = cfg["url"].rstrip("/")
-        self._auth = (cfg["username"], cfg["password"])
+        # Validate before any credential state changes: a malformed
+        # legacy URL must not auto-migrate the password into a host
+        # scope Sentinel can never match, nor scrub the plaintext copy.
+        if not valid_http_url(url):
+            self._connection_info = (
+                f"Nextcloud URL {url!r} is not a valid http(s):// URL; "
+                "fix config.json and reconnect."
+            )
+            return False
+        username = str(cfg.get("username") or "")
+        password = str(cfg.get("password") or "")
+        if password and username:
+            store_credentials(
+                "nextcloud",
+                {
+                    "kind": "header",
+                    "header": "Authorization",
+                    "token": _basic_credential(username, password),
+                },
+                [],
+                hosts=origin_hosts(url),
+                insecure_hosts=insecure_origin_hosts(url),
+            )
+        handle = mint_surrogate("nextcloud")
+        if handle is None:
+            self._connection_info = "No Nextcloud credential in the Muse vault or config."
+            return False
+        _scrub_config_password()
+        self._url = url
+        # Keep the username (for is_from_bot); the password never
+        # lives in this process once migrated.
+        self._auth = (username, "")
+        self._surrogate = handle.token
+        self._http = MuseBoundarySession("nextcloud")
+        self._muse = True
+        return True
+
+    def connect(self) -> bool:
+        """Authenticate with Nextcloud Talk."""
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            # Vault-first surrogate wiring; validation below runs the
+            # /room read through the daemon boundary (audited).
+            if not self._wire_muse():
+                return False
+        else:
+            cfg = _config.load()
+            if not cfg:  # pragma: no branch
+                self._connection_info = "No Nextcloud config found."
+                return False
+            self._url = cfg["url"].rstrip("/")
+            self._auth = (cfg["username"], cfg["password"])
         try:
-            result = self._get("/room")
-            if "ocs" in result:  # pragma: no branch
-                self._connection_info = f"Connected to {self._url} as {cfg['username']}"
+            ok, detail = self._validate_credentials()
+            if ok:
+                self._connection_info = f"Connected to {self._url} as {self._auth[0]}"
                 return True
-            self._connection_info = f"Nextcloud auth failed: {result}"
+            self._connection_info = f"Nextcloud auth failed: {detail}"
             return False
         except Exception as e:
             self._connection_info = f"Nextcloud connection failed: {e}"
@@ -312,12 +467,11 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
             JSON string with ok status.
         """
         try:
-            resp = requests.put(
+            resp = self._http.put(
                 f"{self._base()}/room/{token}/name",
-                auth=self._auth,
-                headers=self._headers(),
                 json={"roomName": name},
                 timeout=30,
+                **self._auth_kwargs(),
             )
             return json.dumps({"ok": resp.status_code == 200})
         except Exception as e:
@@ -334,15 +488,90 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
             JSON string with ok status.
         """
         try:
-            resp = requests.delete(
+            resp = self._http.delete(
                 f"{self._base()}/chat/{token}/{message_id}",
-                auth=self._auth,
-                headers=self._headers(),
                 timeout=30,
+                **self._auth_kwargs(),
             )
             return json.dumps({"ok": resp.status_code == 200})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
+
+
+def _muse_authenticate(
+    backend: NextcloudTalkChannelBackend, url: str, username: str, password: str
+) -> str:
+    """Enroll Nextcloud credentials into the Muse vault and validate them.
+
+    The password goes straight into the vault as a header-kind Basic
+    credential bound to the configured server origin, and is never
+    written to ``config.json`` (only the non-secret ``url``/``username``
+    metadata is — written first, so a failed enrollment leaves no
+    password on disk).  Validation runs the ``/room`` read through the
+    daemon boundary, so it is audited; invalid credentials leave the
+    vault empty.
+
+    Args:
+        backend: The agent's Nextcloud backend to (re)wire.
+        url: Nextcloud server base URL.
+        username: Nextcloud login name.
+        password: Nextcloud password or app password.
+
+    Returns:
+        JSON string with the validation result.
+    """
+    import contextlib
+
+    from kiss.agents.third_party_agents.muse_auth._common import (
+        insecure_origin_hosts,
+        origin_hosts,
+        valid_http_url,
+    )
+    from kiss.agents.third_party_agents.muse_auth.client import (
+        clear_credentials,
+        store_credentials,
+    )
+
+    if not valid_http_url(url):
+        return json.dumps(
+            {"ok": False, "error": f"{url!r} is not a valid http(s):// server URL."}
+        )
+    try:
+        save_json_config(_config.path, {"url": url, "username": username})
+        store_credentials(
+            "nextcloud",
+            {
+                "kind": "header",
+                "header": "Authorization",
+                "token": _basic_credential(username, password),
+            },
+            [],
+            hosts=origin_hosts(url),
+            insecure_hosts=insecure_origin_hosts(url),
+        )
+        if backend._wire_muse():  # pragma: no branch - credential was just stored
+            # The same strict check connect() uses: HTTP status AND OCS
+            # meta statuscode (list_rooms() would swallow a 401 into an
+            # empty room list, and error envelopes also carry "ocs").
+            ok, detail = backend._validate_credentials()
+            if ok:
+                return json.dumps(
+                    {"ok": True, "message": "Nextcloud credentials saved (Muse-auth)."}
+                )
+            error = json.dumps({"ok": False, "error": f"Authentication failed: {detail}"})
+        else:  # pragma: no cover - defense in depth
+            error = json.dumps({"ok": False, "error": backend._connection_info})
+    except Exception as e:
+        error = json.dumps({"ok": False, "error": str(e)})
+    # Roll the vault back so bad credentials are not left enrolled.
+    with contextlib.suppress(Exception):
+        clear_credentials("nextcloud")
+    backend._url = ""
+    backend._auth = ("", "")
+    backend._surrogate = ""
+    backend._http = requests
+    backend._muse = False
+    return error
 
 
 class NextcloudTalkAgent(BaseChannelAgent):
@@ -351,6 +580,22 @@ class NextcloudTalkAgent(BaseChannelAgent):
     def __init__(self) -> None:
         super().__init__("Nextcloud Talk Agent")
         self._backend = NextcloudTalkChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+            # Muse-auth mode: wire a vault surrogate and the boundary
+            # session (no network round trip); the real password never
+            # enters this process once migrated.  A daemon failure
+            # leaves the agent constructible (fail closed) so its
+            # authenticate/clear tools stay available.
+            try:
+                self._backend._wire_muse()
+            except MuseAuthError as e:
+                self._backend._url = ""
+                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            return
         cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._url = cfg["url"].rstrip("/")
@@ -401,6 +646,15 @@ class NextcloudTalkAgent(BaseChannelAgent):
             for val, name in [(url, "url"), (username, "username"), (password, "password")]:
                 if not val.strip():  # pragma: no branch
                     return f"{name} cannot be empty."
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                return _muse_authenticate(
+                    agent._backend,
+                    url.strip().rstrip("/"),
+                    username.strip(),
+                    password.strip(),
+                )
             agent._backend._url = url.strip().rstrip("/")
             agent._backend._auth = (username.strip(), password.strip())
             try:
@@ -428,6 +682,15 @@ class NextcloudTalkAgent(BaseChannelAgent):
             _config.clear()
             agent._backend._url = ""
             agent._backend._auth = ("", "")
+            agent._backend._surrogate = ""
+            agent._backend._http = requests
+            agent._backend._muse = False
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("nextcloud")
             return "Nextcloud authentication cleared."
 
         return [check_nextcloud_auth, authenticate_nextcloud, clear_nextcloud_auth]
@@ -436,6 +699,13 @@ class NextcloudTalkAgent(BaseChannelAgent):
 def _make_backend() -> NextcloudTalkChannelBackend:
     """Create a configured backend for channel poll mode."""
     backend = NextcloudTalkChannelBackend()
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    if muse_auth_enabled():
+        if backend._wire_muse():
+            return backend
+        print("Not authenticated. Run: kiss-nextcloud -t 'authenticate'")
+        sys.exit(1)
     cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-nextcloud -t 'authenticate'")

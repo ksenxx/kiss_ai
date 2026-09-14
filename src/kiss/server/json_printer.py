@@ -717,6 +717,31 @@ class JsonPrinter(Printer):
                 return []
             return list(viewers)
 
+    def tasks_for_tab(self, tab_id: str) -> list[str]:
+        """Return the task keys *tab_id* is currently subscribed to.
+
+        The inverse of :meth:`_fanout_targets`.  A tab is normally
+        subscribed to the one task it launched or is viewing, but a
+        finished task's subscriber set lingers for a while (see
+        :meth:`cleanup_task`), so right after a new run starts the list
+        can name both the old and the new task; callers pick the live
+        one via the agent-state registry.
+
+        Args:
+            tab_id: The frontend tab id.
+
+        Returns:
+            The subscribed task keys (``task_history`` ids as strings),
+            empty when *tab_id* is subscribed to nothing.
+        """
+        with self._lock:
+            self._sweep_expired_subscribers()
+            return [
+                key
+                for key, viewers in self._subscribers.items()
+                if tab_id in viewers
+            ]
+
     def _transient_targets(
         self, task_id: Any, tab_id: str = "",
     ) -> tuple[str, list[str]]:

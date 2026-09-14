@@ -269,7 +269,7 @@ def test_run_google_oauth_flow_without_credentials_json(kiss_home) -> None:
 
 
 def test_make_google_auth_tools_names_and_docstrings(kiss_home) -> None:
-    """make_google_auth_tools builds the 4 named tools with real docstrings."""
+    """make_google_auth_tools builds the 5 named tools with real docstrings."""
     agent = GoogleCalendarAgent()
 
     def on_credentials(creds) -> None:
@@ -284,6 +284,7 @@ def test_make_google_auth_tools_names_and_docstrings(kiss_home) -> None:
         "authenticate_google_calendar",
         "clear_google_calendar_auth",
         "start_google_calendar_browser_setup",
+        "finish_google_calendar_auth",
     ]
     for tool in tools:
         assert tool.__doc__ is not None

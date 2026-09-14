@@ -47,12 +47,37 @@ _config = ChannelConfig(
 )
 
 
+def _scrub_config_password() -> None:
+    """Remove a vault-migrated ``password`` from config.json.
+
+    Finishes the Muse migration automatically: the non-secret
+    ``server_url`` metadata is kept and the file is deleted when
+    nothing but the password was stored.
+    """
+    try:
+        cfg = json.loads(_config.path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(cfg, dict) or "password" not in cfg:
+        return
+    kept = {k: str(v) for k, v in cfg.items() if k != "password" and v}
+    if kept:
+        from kiss.agents.third_party_agents._channel_agent_utils import save_json_config
+
+        save_json_config(_config.path, kept)
+    else:
+        _config.clear()
+
+
 class BlueBubblesChannelBackend(ToolMethodBackend):
     """Channel backend for BlueBubbles REST API."""
 
     def __init__(self) -> None:
         self._server_url: str = ""
         self._password: str = ""
+        self._http: Any = requests
+        self._muse: bool = False
+        self._surrogate: str = ""
         self._last_ts: float = 0.0
         self._connection_info: str = ""
 
@@ -60,21 +85,110 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
         return f"{self._server_url}{path}"
 
     def _params(self) -> dict[str, str]:
+        # In Muse mode the password never enters this process: the
+        # daemon splices the real ``password=`` query parameter (a
+        # query-kind vault credential) into the URL at the boundary.
+        if self._muse:
+            return {}
         return {"password": self._password}
+
+    def _headers(self) -> dict[str, str]:
+        """Return per-request headers: the surrogate bearer in Muse mode.
+
+        Returns:
+            ``{"Authorization": "Bearer <surrogate>"}`` in Muse mode
+            (the daemon validates and strips it), else ``{}``.
+        """
+        if self._muse:
+            return {"Authorization": f"Bearer {self._surrogate}"}
+        return {}
+
+    def _wire_muse(self) -> bool:
+        """Acquire a BlueBubbles surrogate and wire the boundary session.
+
+        A ``password`` still in the legacy config is the newest user
+        intent (initial migration, or a rotation done while Muse was
+        off): it is enrolled as a query-kind credential (BlueBubbles
+        authenticates with a ``password=`` query parameter) bound to the
+        configured server origin (flagged as a consent-scoped insecure
+        host when the URL is plain ``http`` to a non-loopback host), and
+        scrubbed from ``config.json`` only after the vault holds it.
+        No network round trip happens here.
+
+        Returns:
+            True when the backend holds a surrogate and boundary session.
+        """
+        from kiss.agents.third_party_agents.muse_auth._common import (
+            insecure_origin_hosts,
+            origin_hosts,
+            valid_http_url,
+        )
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            MuseBoundarySession,
+            mint_surrogate,
+            store_credentials,
+        )
+
+        cfg = _config.load_metadata() or {}
+        server_url = str(cfg.get("server_url") or "").rstrip("/")
+        if not server_url:
+            self._connection_info = "No BlueBubbles config found."
+            return False
+        # Validate before any credential state changes: a malformed
+        # legacy URL must not auto-migrate the password into a host
+        # scope Sentinel can never match, nor scrub the plaintext copy.
+        if not valid_http_url(server_url):
+            self._connection_info = (
+                f"BlueBubbles server URL {server_url!r} is not a valid http(s):// URL; "
+                "fix config.json and reconnect."
+            )
+            return False
+        password = str(cfg.get("password") or "")
+        if password:
+            store_credentials(
+                "bluebubbles",
+                {"kind": "query", "param": "password", "token": password},
+                [],
+                hosts=origin_hosts(server_url),
+                insecure_hosts=insecure_origin_hosts(server_url),
+            )
+        handle = mint_surrogate("bluebubbles")
+        if handle is None:
+            self._connection_info = "No BlueBubbles credential in the Muse vault or config."
+            return False
+        _scrub_config_password()
+        self._server_url = server_url
+        self._surrogate = handle.token
+        self._http = MuseBoundarySession("bluebubbles")
+        self._muse = True
+        return True
 
     def connect(self) -> bool:
         """Connect to BlueBubbles server."""
         if sys.platform != "darwin":  # pragma: no branch
             self._connection_info = "BlueBubbles requires macOS."
             return False
-        cfg = _config.load()
-        if not cfg:  # pragma: no branch
-            self._connection_info = "No BlueBubbles config found."
-            return False
-        self._server_url = cfg["server_url"].rstrip("/")
-        self._password = cfg["password"]
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            # Vault-first surrogate wiring; validation below runs the
+            # /server/info read through the daemon boundary (audited).
+            if not self._wire_muse():
+                return False
+        else:
+            cfg = _config.load()
+            if not cfg:  # pragma: no branch
+                self._connection_info = "No BlueBubbles config found."
+                return False
+            self._server_url = cfg["server_url"].rstrip("/")
+            self._password = cfg["password"]
         try:
-            resp = requests.get(self._url("/api/v1/server/info"), params=self._params(), timeout=10)
+            resp = self._http.get(
+                self._url("/api/v1/server/info"),
+                params=self._params(),
+                headers=self._headers(),
+                timeout=10,
+            )
             data = resp.json()
             if data.get("status") == 200:  # pragma: no branch
                 self._connection_info = f"Connected to BlueBubbles at {self._server_url}"
@@ -103,9 +217,10 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
                 body["chatGuid"] = channel_id
             if cursor:
                 body["after"] = cursor
-            resp = requests.post(
+            resp = self._http.post(
                 self._url("/api/v1/message/query"),
                 params=self._params(),
+                headers=self._headers(),
                 json=body,
                 timeout=10,
             )
@@ -151,9 +266,10 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
         Raises:
             RuntimeError: If the server reports a non-200 status.
         """
-        resp = requests.post(
+        resp = self._http.post(
             self._url("/api/v1/message/text"),
             params=self._params(),
+                headers=self._headers(),
             json={"chatGuid": channel_id, "message": text, "method": "private-api"},
             timeout=30,
         )
@@ -174,9 +290,10 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
         if sys.platform != "darwin":  # pragma: no branch
             return _PLATFORM_ERROR
         try:
-            resp = requests.get(
+            resp = self._http.get(
                 self._url("/api/v1/chat"),
                 params={**self._params(), "limit": str(limit), "offset": str(offset)},
+                headers=self._headers(),
                 timeout=10,
             )
             data = resp.json()
@@ -204,8 +321,9 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
         if sys.platform != "darwin":  # pragma: no branch
             return _PLATFORM_ERROR
         try:
-            resp = requests.get(
-                self._url(f"/api/v1/chat/{chat_guid}"), params=self._params(), timeout=10
+            resp = self._http.get(
+                self._url(f"/api/v1/chat/{chat_guid}"), params=self._params(),
+                headers=self._headers(), timeout=10
             )
             return json.dumps({"ok": True, "chat": resp.json().get("data", {})}, indent=2)[:8000]
         except Exception as e:
@@ -233,8 +351,11 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
                 params["before"] = before
             if after:  # pragma: no branch
                 params["after"] = after
-            resp = requests.get(
-                self._url(f"/api/v1/chat/{chat_guid}/message"), params=params, timeout=10
+            resp = self._http.get(
+                self._url(f"/api/v1/chat/{chat_guid}/message"),
+                params=params,
+                headers=self._headers(),
+                timeout=10
             )
             messages = [
                 {
@@ -263,9 +384,10 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
         if sys.platform != "darwin":  # pragma: no branch
             return _PLATFORM_ERROR
         try:
-            resp = requests.post(
+            resp = self._http.post(
                 self._url("/api/v1/message/text"),
                 params=self._params(),
+                headers=self._headers(),
                 json={"chatGuid": chat_guid, "message": text, "method": "private-api"},
                 timeout=30,
             )
@@ -285,8 +407,21 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
         if sys.platform != "darwin":  # pragma: no branch
             return _PLATFORM_ERROR
         try:
-            resp = requests.get(self._url("/api/v1/server/info"), params=self._params(), timeout=10)
-            return json.dumps({"ok": True, "info": resp.json().get("data", {})}, indent=2)[:8000]
+            resp = self._http.get(
+                self._url("/api/v1/server/info"),
+                params=self._params(),
+                headers=self._headers(),
+                timeout=10,
+            )
+            data = resp.json()
+            # BlueBubbles wraps every response in a numeric ``status``
+            # envelope; a decodable body alone (e.g. an HTTP 401 with
+            # {"status": 401, "message": "bad password"}) is a failure.
+            if resp.status_code == 200 and data.get("status") == 200:
+                return json.dumps({"ok": True, "info": data.get("data", {})}, indent=2)[:8000]
+            return json.dumps(
+                {"ok": False, "error": f"HTTP {resp.status_code}: {str(data)[:500]}"}
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -302,12 +437,80 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
         if sys.platform != "darwin":  # pragma: no branch
             return _PLATFORM_ERROR
         try:
-            resp = requests.post(
-                self._url(f"/api/v1/chat/{chat_guid}/read"), params=self._params(), timeout=10
+            resp = self._http.post(
+                self._url(f"/api/v1/chat/{chat_guid}/read"), params=self._params(),
+                headers=self._headers(), timeout=10
             )
             return json.dumps({"ok": resp.json().get("status") == 200})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
+
+
+def _muse_authenticate(backend: BlueBubblesChannelBackend, server_url: str, password: str) -> str:
+    """Enroll a BlueBubbles password into the Muse vault and validate it.
+
+    The plaintext password goes straight into the vault as a query-kind
+    credential (the daemon splices ``password=`` into the URL at the
+    boundary) bound to the configured server origin, and is never
+    written to ``config.json`` (only the non-secret ``server_url``
+    metadata is — written first, so a failed enrollment leaves no
+    password on disk).  Validation runs the ``/server/info`` read
+    through the daemon boundary, so it is audited; an invalid password
+    leaves the vault empty.
+
+    Args:
+        backend: The agent's BlueBubbles backend to (re)wire.
+        server_url: BlueBubbles server base URL.
+        password: BlueBubbles server password.
+
+    Returns:
+        JSON string with the validation result.
+    """
+    import contextlib
+
+    from kiss.agents.third_party_agents._channel_agent_utils import save_json_config
+    from kiss.agents.third_party_agents.muse_auth._common import (
+        insecure_origin_hosts,
+        origin_hosts,
+        valid_http_url,
+    )
+    from kiss.agents.third_party_agents.muse_auth.client import (
+        clear_credentials,
+        store_credentials,
+    )
+
+    if not valid_http_url(server_url):
+        return json.dumps(
+            {"ok": False, "error": f"{server_url!r} is not a valid http(s):// server URL."}
+        )
+    try:
+        save_json_config(_config.path, {"server_url": server_url})
+        store_credentials(
+            "bluebubbles",
+            {"kind": "query", "param": "password", "token": password},
+            [],
+            hosts=origin_hosts(server_url),
+            insecure_hosts=insecure_origin_hosts(server_url),
+        )
+        if backend._wire_muse():  # pragma: no branch - credential was just stored
+            result = json.loads(backend.get_server_info())
+            if result.get("ok"):
+                return json.dumps({"ok": True, "message": "BlueBubbles configured (Muse-auth)."})
+            error = json.dumps(
+                {"ok": False, "error": "Could not connect to BlueBubbles server."}
+            )
+        else:  # pragma: no cover - defense in depth
+            error = json.dumps({"ok": False, "error": backend._connection_info})
+    except Exception as e:
+        error = json.dumps({"ok": False, "error": str(e)})
+    # Roll the vault back so a bad password is not left enrolled.
+    with contextlib.suppress(Exception):
+        clear_credentials("bluebubbles")
+    backend._server_url = ""
+    backend._surrogate = ""
+    backend._http = requests
+    backend._muse = False
+    return error
 
 
 class BlueBubblesAgent(BaseChannelAgent):
@@ -316,6 +519,22 @@ class BlueBubblesAgent(BaseChannelAgent):
     def __init__(self) -> None:
         super().__init__("BlueBubbles Agent")
         self._backend = BlueBubblesChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+            # Muse-auth mode: wire a vault surrogate and the boundary
+            # session (no network round trip); the real password never
+            # enters this process once migrated.  A daemon failure
+            # leaves the agent constructible (fail closed) so its
+            # authenticate/clear tools stay available.
+            try:
+                self._backend._wire_muse()
+            except MuseAuthError as e:
+                self._backend._server_url = ""
+                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            return
         cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._server_url = cfg["server_url"].rstrip("/")
@@ -371,6 +590,12 @@ class BlueBubblesAgent(BaseChannelAgent):
             for val, name in [(server_url, "server_url"), (password, "password")]:
                 if not val.strip():  # pragma: no branch
                     return f"{name} cannot be empty."
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                return _muse_authenticate(
+                    agent._backend, server_url.strip().rstrip("/"), password.strip()
+                )
             agent._backend._server_url = server_url.strip().rstrip("/")
             agent._backend._password = password.strip()
             result = json.loads(agent._backend.get_server_info())
@@ -388,6 +613,15 @@ class BlueBubblesAgent(BaseChannelAgent):
             _config.clear()
             agent._backend._server_url = ""
             agent._backend._password = ""
+            agent._backend._surrogate = ""
+            agent._backend._http = requests
+            agent._backend._muse = False
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("bluebubbles")
             return "BlueBubbles configuration cleared."
 
         return [check_bluebubbles_auth, authenticate_bluebubbles, clear_bluebubbles_auth]
@@ -396,6 +630,13 @@ class BlueBubblesAgent(BaseChannelAgent):
 def _make_backend() -> BlueBubblesChannelBackend:
     """Create a configured backend for channel poll mode."""
     backend = BlueBubblesChannelBackend()
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    if muse_auth_enabled():
+        if backend._wire_muse():
+            return backend
+        print("Not configured. Run: kiss-bluebubbles -t 'authenticate'")
+        sys.exit(1)
     cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not configured. Run: kiss-bluebubbles -t 'authenticate'")

@@ -16,6 +16,8 @@ Usage::
 from __future__ import annotations
 
 import json
+import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -28,11 +30,115 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
+    config_file_lock,
+    write_private_file,
 )
 
 _MSTEAMS_DIR = Path.home() / ".kiss" / "third_party_agents" / "msteams"
 _config = ChannelConfig(_MSTEAMS_DIR, ("tenant_id", "client_id", "client_secret"))
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+_DEFAULT_LOGIN_BASE = "https://login.microsoftonline.com"
+_GRAPH_SCOPE = "https://graph.microsoft.com/.default"
+
+# Azure tenant IDs are GUIDs or verified domains (contoso.onmicrosoft.com):
+# one URL path segment.  Rejecting anything else keeps the composed token
+# URL's host and path shape fixed (no `/`, `?`, `#`, or whitespace).
+_TENANT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}")
+
+
+def _login_base() -> str:
+    """Return the Azure AD login base URL, resolved per call.
+
+    ``MSTEAMS_LOGIN_BASE`` lets tests point the daemon-side token
+    exchange at a loopback token endpoint (the Muse daemon only
+    accepts the real pinned host or loopback).
+
+    Returns:
+        The login base URL without a trailing slash.
+    """
+    return os.environ.get("MSTEAMS_LOGIN_BASE", "") or _DEFAULT_LOGIN_BASE
+
+
+def _client_credential_info(tenant_id: str, client_id: str, client_secret: str) -> dict[str, str]:
+    """Build the vault payload for the Azure AD client-credentials flow.
+
+    The Muse daemon performs the token exchange itself at the network
+    boundary (POST ``token_url``), so this payload carries everything
+    the exchange needs and the agent process never sees the acquired
+    Graph token.
+
+    Args:
+        tenant_id: Azure tenant ID (validated against _TENANT_ID_RE).
+        client_id: Azure app client ID.
+        client_secret: Azure app client secret.
+
+    Returns:
+        An ``oauth2_client_credentials`` vault credential dict.
+    """
+    return {
+        "kind": "oauth2_client_credentials",
+        "token_url": f"{_login_base()}/{tenant_id}/oauth2/v2.0/token",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "token_scope": _GRAPH_SCOPE,
+    }
+
+
+def _raw_config() -> dict[str, Any]:
+    """Return the legacy config parsed WITHOUT type coercion.
+
+    ``ChannelConfig.load_metadata`` stringifies every value, which would
+    turn a JSON boolean ``true`` into the credential string ``"True"``;
+    migration must see the real JSON types so a malformed config is
+    rejected, not coerced.
+
+    Returns:
+        The parsed config dict, or ``{}`` when missing or not an object.
+    """
+    try:
+        data = json.loads(_config.path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _scrub_config_secret(expected: str | None = None) -> None:
+    """Remove a vault-migrated ``client_secret`` from config.json.
+
+    Finishes the Muse migration automatically: the non-secret
+    ``tenant_id``/``client_id``/``bot_id`` metadata survives (the
+    backend still needs it to rebuild the vault payload on rotation),
+    and the file is deleted when nothing else was stored.
+
+    The whole read-compare-replace cycle runs under
+    :func:`config_file_lock`, which every config writer shares, so it
+    is a true compare-and-swap: a newer secret a concurrent writer
+    lands either arrives before the read (the comparison sees it and
+    the scrub backs off) or after the replacement (it survives), never
+    in between.
+
+    Args:
+        expected: When given, the exact secret that was migrated; the
+            key is scrubbed only if the config still holds that value,
+            so a newer secret a concurrent writer placed there since
+            the migration is left untouched.
+    """
+    with config_file_lock(_config.path):
+        try:
+            cfg = json.loads(_config.path.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(cfg, dict) or "client_secret" not in cfg:
+            return
+        if expected is not None and cfg.get("client_secret") != expected:
+            return
+        kept = {k: str(v) for k, v in cfg.items() if k != "client_secret" and v}
+        # Raw primitives: config_file_lock is not reentrant, so the
+        # locked save_json_config/clear_json_config must not be used.
+        if kept:
+            write_private_file(_config.path, json.dumps(kept, indent=2))
+        elif _config.path.exists():  # pragma: no branch - read above proved it exists
+            _config.path.unlink()
 
 
 def _get_access_token(tenant_id: str, client_id: str, client_secret: str) -> str:
@@ -64,9 +170,16 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         self._token_expiry: float = 0.0
         self._connection_info: str = ""
         self._graph_base: str = graph_base
+        self._http: Any = requests
+        self._muse: bool = False
 
     def _token(self) -> str:
         """Get a valid access token, refreshing if needed."""
+        if self._muse:
+            # ``_access_token`` holds a surrogate that never expires
+            # agent-side; the daemon runs (and caches) the real
+            # client-credentials exchange at the network boundary.
+            return self._access_token
         if time.time() >= self._token_expiry - 60:  # pragma: no branch
             self._access_token = _get_access_token(
                 self._tenant_id, self._client_id, self._client_secret
@@ -74,23 +187,139 @@ class MSTeamsChannelBackend(ToolMethodBackend):
             self._token_expiry = time.time() + 3600
         return self._access_token
 
+    def _wire_muse(self) -> bool:
+        """Acquire an MS Teams surrogate and wire the boundary session.
+
+        On the FIRST migration (the vault holds no ``msteams``
+        credential yet) the legacy config's tenant/client IDs and
+        ``client_secret`` seed an ``oauth2_client_credentials`` vault
+        entry, and the ``client_secret`` is scrubbed from
+        ``config.json`` afterwards (the non-secret
+        ``tenant_id``/``client_id``/``bot_id`` survive).  Once the vault
+        holds a credential it is authoritative: the config candidate is
+        neither validated nor applied — a stale config value (malformed
+        or not) must never block or clobber a working vault credential —
+        and rotations go through ``authenticate_msteams``, which
+        validates the candidate before replacing anything.  No network
+        round trip happens here; the daemon exchanges the secret for a
+        Graph token lazily.
+
+        Returns:
+            True when the backend holds a surrogate and boundary session.
+        """
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            MuseBoundarySession,
+            mint_surrogate,
+            store_credentials,
+        )
+
+        cfg = _raw_config()
+        migrated = False
+        client_secret = cfg.get("client_secret")
+        # VAULT FIRST: only when no credential is enrolled yet does the
+        # legacy config candidate matter, so its local validation runs
+        # only then — a stale malformed config must not disable an
+        # authoritative vault credential.
+        handle = mint_surrogate("msteams")
+        if handle is None:
+            local_error = ""
+            tenant_id = cfg.get("tenant_id")
+            client_id = cfg.get("client_id")
+            if client_secret and tenant_id and client_id:
+                # Validate types and shape BEFORE any credential state
+                # change: a non-string (JSON true -> "True") or
+                # malformed tenant must not partially migrate the vault.
+                if not all(isinstance(v, str) for v in (tenant_id, client_id, client_secret)):
+                    local_error = "MS Teams config has non-string credentials."
+                elif not _TENANT_ID_RE.fullmatch(tenant_id):
+                    local_error = f"MS Teams config has an invalid tenant_id {tenant_id!r}"
+                else:
+                    # Store-if-absent is ATOMIC in the daemon (presence
+                    # check, candidate validation, and write form one
+                    # vault critical section), so a concurrent
+                    # authoritative writer can never be clobbered — or
+                    # failed — by this stale config candidate.
+                    migrated = store_credentials(
+                        "msteams",
+                        _client_credential_info(tenant_id, client_id, client_secret),
+                        [],
+                        only_if_absent=True,
+                    )
+            # Mint again even when the local candidate was rejected: a
+            # concurrent writer may have enrolled the authoritative
+            # credential since the first mint, and it wins.
+            handle = mint_surrogate("msteams")
+            if handle is None:
+                self._connection_info = (
+                    local_error or "No MS Teams credential in the Muse vault or config."
+                )
+                return False
+        if migrated and isinstance(client_secret, str):
+            # Compare-and-scrub: only remove the secret we migrated, so
+            # a newer secret a concurrent writer placed in config
+            # between the store and here is not deleted.
+            _scrub_config_secret(expected=client_secret)
+        self._tenant_id = str(cfg.get("tenant_id") or "")
+        self._client_id = str(cfg.get("client_id") or "")
+        self._bot_id = str(cfg.get("bot_id") or "")
+        self._access_token = handle.token
+        self._http = MuseBoundarySession("msteams")
+        self._muse = True
+        return True
+
+    def _muse_probe(self) -> tuple[bool, str]:
+        """Prove the daemon can exchange this credential for a Graph token.
+
+        See :func:`_graph_probe`.
+
+        Returns:
+            ``(ok, message)``.
+        """
+        return _graph_probe("msteams", self._access_token, self._graph_base)
+
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token()}", "Content-Type": "application/json"}
 
     def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
-        resp = requests.get(
+        resp = self._http.get(
             f"{self._graph_base}{path}", headers=self._headers(), params=params, timeout=30
         )
-        return resp.json()  # type: ignore[no-any-return]
+        result: dict[str, Any] = resp.json()
+        # Muse mode marks HTTP errors so tools can surface Sentinel
+        # denials and Graph failures; legacy behavior is unchanged.
+        if self._muse and resp.status_code >= 400:
+            result["ok"] = False
+        return result
 
     def _post(self, path: str, body: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
-        resp = requests.post(
+        resp = self._http.post(
             f"{self._graph_base}{path}", headers=self._headers(), json=body, timeout=30
         )
-        return resp.json() if resp.content else {"ok": True}  # type: ignore[no-any-return]
+        result: dict[str, Any] = resp.json() if resp.content else {"ok": True}
+        if self._muse and resp.status_code >= 400:
+            result["ok"] = False
+        return result
 
     def connect(self) -> bool:
         """Authenticate with Microsoft Graph API."""
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+        from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+        if muse_auth_enabled():
+            # Vault-first surrogate wiring; the probe below runs one
+            # Graph read through the daemon boundary (audited), which
+            # forces the daemon-side client-credentials exchange.  A
+            # malformed legacy-config secret makes the daemon refuse
+            # enrollment (MuseAuthError); fail closed with a bool.
+            try:
+                if not self._wire_muse():
+                    return False
+            except MuseAuthError as e:
+                self._connection_info = f"MS Teams auth failed: {e}"
+                return False
+            ok, message = self._muse_probe()
+            self._connection_info = message if ok else f"MS Teams auth failed: {message}"
+            return ok
         cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No MS Teams config found."
@@ -272,6 +501,8 @@ class MSTeamsChannelBackend(ToolMethodBackend):
                 f"/teams/{team_id}/channels/{channel_id}/messages",
                 {"body": {"content": content, "contentType": content_type}},
             )
+            if result.get("ok") is False:
+                return json.dumps({"ok": False, "error": str(result.get("error", result))[:500]})
             return json.dumps({"ok": True, "id": result.get("id", "")})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -293,6 +524,8 @@ class MSTeamsChannelBackend(ToolMethodBackend):
                 f"/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies",
                 {"body": {"content": content, "contentType": "html"}},
             )
+            if result.get("ok") is False:
+                return json.dumps({"ok": False, "error": str(result.get("error", result))[:500]})
             return json.dumps({"ok": True, "id": result.get("id", "")})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -332,6 +565,8 @@ class MSTeamsChannelBackend(ToolMethodBackend):
                 f"/me/chats/{chat_id}/messages",
                 {"body": {"content": content, "contentType": content_type}},
             )
+            if result.get("ok") is False:
+                return json.dumps({"ok": False, "error": str(result.get("error", result))[:500]})
             return json.dumps({"ok": True, "id": result.get("id", "")})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -362,12 +597,219 @@ class MSTeamsChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
+def _graph_probe(service: str, surrogate: str, graph_base: str) -> tuple[bool, str]:
+    """Run one Graph read through the boundary to validate a credential.
+
+    Client-credentials validation cannot happen agent-side (the secret
+    lives only in the vault), so one small Graph read flows through the
+    audited boundary, forcing the daemon-side token exchange.  A real
+    Graph response — even a 403 for a missing app permission — proves
+    the exchange succeeded (mirroring the legacy "token acquired"
+    success criterion), but a 401 means Graph rejected the acquired
+    token itself; a failed exchange or a Sentinel denial reports its
+    reason.
+
+    Args:
+        service: Vault service the surrogate is bound to (``"msteams"``
+            or the scratch ``"msteams-pending"``).
+        surrogate: The surrogate bearer to present.
+        graph_base: Graph API base URL.
+
+    Returns:
+        ``(ok, message)``.
+    """
+    from kiss.agents.third_party_agents.muse_auth.client import (
+        MuseAuthError,
+        MuseBoundarySession,
+    )
+
+    try:
+        resp = MuseBoundarySession(service).get(
+            f"{graph_base}/teams",
+            headers={"Authorization": f"Bearer {surrogate}"},
+            params={"$top": 1},
+            timeout=30,
+        )
+    except MuseAuthError as e:
+        return False, str(e)
+    try:
+        data = resp.json() if resp.content else {}
+    except ValueError:
+        data = {}
+    error = data.get("error") if isinstance(data, dict) else None
+    if isinstance(error, dict) and error.get("status") == "MUSE_AUTH_DENIED":
+        return False, str(error.get("message", "denied by Muse-auth policy"))
+    if resp.status_code == 401:
+        # Graph documents 401 as missing/invalid authentication.
+        return False, "Microsoft Graph rejected the acquired token (HTTP 401)"
+    return True, "Authenticated with Microsoft Teams (Muse-auth)"
+
+
+def _probe_candidate_credentials(backend: MSTeamsChannelBackend, info: dict[str, str]) -> str:
+    """Validate candidate client credentials without touching the live entry.
+
+    The candidate is enrolled under the scratch service
+    ``msteams-pending`` (which inherits the Graph host allowlist and
+    the pinned token-endpoint list), one probe read forces the
+    daemon-side exchange, and the scratch entry is removed again — so
+    a rejected rotation can never destroy an existing working
+    ``msteams`` vault credential.
+
+    Args:
+        backend: The agent's MS Teams backend (supplies the Graph base).
+        info: The candidate ``oauth2_client_credentials`` payload.
+
+    Returns:
+        ``""`` on success, else the failure detail.
+    """
+    import contextlib
+    import secrets
+
+    from kiss.agents.third_party_agents.muse_auth.client import (
+        clear_credentials,
+        mint_surrogate,
+        store_credentials,
+    )
+
+    # A per-attempt unique scratch service (``msteams-pending-<hex>``)
+    # so two concurrent validations can never probe or clear each
+    # other's candidate; it resolves to ``msteams`` for host, token
+    # endpoint, and policy inheritance via service_root.
+    scratch = f"msteams-pending-{secrets.token_hex(8)}"
+    store_credentials(scratch, info, [])
+    try:
+        handle = mint_surrogate(scratch)
+        if handle is None:  # pragma: no cover - defense in depth
+            return "could not mint a scratch validation surrogate"
+        ok, message = _graph_probe(scratch, handle.token, backend._graph_base)
+        return "" if ok else message
+    finally:
+        with contextlib.suppress(Exception):
+            clear_credentials(scratch)
+
+
+def _muse_authenticate(
+    backend: MSTeamsChannelBackend,
+    tenant_id: str,
+    client_id: str,
+    client_secret: str,
+    bot_id: str,
+) -> str:
+    """Enroll Azure AD client credentials into the Muse vault and validate.
+
+    The candidate is validated FIRST, against a scratch ``-pending``
+    enrollment, so a rejected secret mutates nothing — neither the
+    config nor an existing working vault credential.  Only proven
+    credentials replace the live enrollment: the non-secret
+    ``tenant_id``/``client_id``/``bot_id`` metadata is written to
+    ``config.json``, and the ``client_secret`` goes straight into the
+    vault, never to disk outside it.  If the swap itself fails midway,
+    the pre-call config bytes are restored — the vault is never
+    cleared, because whichever credential it holds at that point (the
+    untouched old one or the just-validated new one) is worth keeping.
+
+    Args:
+        backend: The agent's MS Teams backend to (re)wire.
+        tenant_id: Azure tenant ID.
+        client_id: Azure app client ID.
+        client_secret: Azure app client secret.
+        bot_id: Optional bot user ID kept as config metadata.
+
+    Returns:
+        JSON string with the validation result.
+    """
+    import contextlib
+
+    from kiss.agents.third_party_agents.muse_auth._common import valid_credential_value
+    from kiss.agents.third_party_agents.muse_auth.client import store_credentials
+
+    if not _TENANT_ID_RE.fullmatch(tenant_id):
+        # Pre-validate before any credential state change: the tenant
+        # becomes one path segment of the daemon's token URL.
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "tenant_id must be a GUID or verified domain "
+                "(letters, digits, '.', '_', '-').",
+            }
+        )
+    if not (valid_credential_value(client_id) and valid_credential_value(client_secret)):
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "client_id/client_secret contain control characters "
+                "or stray whitespace.",
+            }
+        )
+    info = _client_credential_info(tenant_id, client_id, client_secret)
+    try:
+        failure = _probe_candidate_credentials(backend, info)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)})
+    if failure:
+        return json.dumps({"ok": False, "error": failure})
+    try:
+        prev_raw: str | None = _config.path.read_text()
+    except OSError:
+        prev_raw = None
+    try:
+        meta = {"tenant_id": tenant_id, "client_id": client_id}
+        if bot_id:
+            meta["bot_id"] = bot_id
+        _config.save(meta)
+        store_credentials("msteams", info, [])
+        if backend._wire_muse():  # pragma: no branch - credential was just stored
+            backend._connection_info = "Authenticated with Microsoft Teams (Muse-auth)"
+            return json.dumps(
+                {"ok": True, "message": "MS Teams credentials saved (Muse-auth)."}
+            )
+        error = json.dumps(  # pragma: no cover - defense in depth
+            {"ok": False, "error": backend._connection_info}
+        )
+    except Exception as e:
+        error = json.dumps({"ok": False, "error": str(e)})
+    # Restore the pre-call config bytes; a failed swap must not leave
+    # half-migrated state (the restored bytes are exactly what was
+    # already on disk, so no new secret lands in the file).
+    with contextlib.suppress(Exception):
+        if prev_raw is None:
+            _config.clear()
+        else:
+            # Atomic 0600 restore, serialized against every other
+            # config writer via the shared config lock.
+            with config_file_lock(_config.path):
+                write_private_file(_config.path, prev_raw)
+    backend._access_token = ""
+    backend._muse = False
+    backend._http = requests
+    backend._tenant_id = ""
+    backend._client_id = ""
+    backend._client_secret = ""
+    return error
+
+
 class MSTeamsAgent(BaseChannelAgent):
     """Channel agent with Microsoft Teams Graph API tools."""
 
     def __init__(self) -> None:
         super().__init__("MS Teams Agent")
         self._backend = MSTeamsChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+            # Muse-auth mode: wire a vault surrogate and the boundary
+            # session (no network round trip); the client_secret never
+            # enters this process once migrated.  A daemon failure
+            # leaves the agent constructible (fail closed, tokenless)
+            # so its authenticate/clear tools stay available.
+            try:
+                self._backend._wire_muse()
+            except MuseAuthError as e:
+                self._backend._access_token = ""
+                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            return
         cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._tenant_id = cfg["tenant_id"]
@@ -377,6 +819,8 @@ class MSTeamsAgent(BaseChannelAgent):
 
     def _is_authenticated(self) -> bool:
         """Return True if the backend is authenticated."""
+        if self._backend._muse:
+            return bool(self._backend._access_token)
         return bool(self._backend._client_id)
 
     def _get_auth_tools(self) -> list:
@@ -389,6 +833,15 @@ class MSTeamsAgent(BaseChannelAgent):
             Returns:
                 Authentication status or instructions.
             """
+            if agent._backend._muse:
+                # The secret lives in the vault; the probe forces the
+                # daemon-side token exchange through the boundary.
+                ok, message = agent._backend._muse_probe()
+                if ok:
+                    return json.dumps(
+                        {"ok": True, "message": "MS Teams authenticated (Muse-auth)."}
+                    )
+                return json.dumps({"ok": False, "error": message})
             if not agent._backend._client_id:  # pragma: no branch
                 return (
                     "Not authenticated with MS Teams. Use authenticate_msteams() to configure.\n"
@@ -430,6 +883,16 @@ class MSTeamsAgent(BaseChannelAgent):
             for val, name in cred_pairs:  # pragma: no branch
                 if not val.strip():  # pragma: no branch
                     return f"{name} cannot be empty."
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                return _muse_authenticate(
+                    agent._backend,
+                    tenant_id.strip(),
+                    client_id.strip(),
+                    client_secret.strip(),
+                    bot_id.strip(),
+                )
             agent._backend._tenant_id = tenant_id.strip()
             agent._backend._client_id = client_id.strip()
             agent._backend._client_secret = client_secret.strip()
@@ -460,6 +923,16 @@ class MSTeamsAgent(BaseChannelAgent):
             agent._backend._client_id = ""
             agent._backend._client_secret = ""
             agent._backend._tenant_id = ""
+            agent._backend._access_token = ""
+            agent._backend._token_expiry = 0.0
+            agent._backend._muse = False
+            agent._backend._http = requests
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("msteams")
             return "MS Teams authentication cleared."
 
         return [check_msteams_auth, authenticate_msteams, clear_msteams_auth]
@@ -468,6 +941,18 @@ class MSTeamsAgent(BaseChannelAgent):
 def _make_backend() -> MSTeamsChannelBackend:
     """Create a configured backend for channel poll mode."""
     backend = MSTeamsChannelBackend()
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+    from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+    if muse_auth_enabled():
+        try:
+            wired = backend._wire_muse()
+        except MuseAuthError:
+            wired = False
+        if wired:
+            return backend
+        print("Not authenticated. Run: kiss-msteams -t 'authenticate'")
+        sys.exit(1)
     cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-msteams -t 'authenticate'")

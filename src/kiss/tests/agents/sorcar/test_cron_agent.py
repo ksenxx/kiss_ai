@@ -7,12 +7,14 @@
 Everything runs against the real JSON job store under an isolated
 ``KISS_HOME`` — no mocks or test doubles (``monkeypatch`` is used
 only to isolate environment variables, ``sys.argv``, and the
-module-level daemon-socket default between tests).  The only
-branches not exercised here are ``_run_prompt_job``'s successful /
-silent / timed-out LLM paths: they submit a task to the kiss-web
-daemon and require a live LLM endpoint, which is unavailable (and
-non-deterministic) in unit tests; the failure path is covered via
-``_execute_job``'s exception handling.
+module-level daemon-socket default between tests, and to capture the
+daemon submission a prompt job would perform).  The only branches
+not exercised here are ``_run_prompt_job``'s silent / timed-out LLM
+paths: they submit a task to the kiss-web daemon and require a live
+LLM endpoint, which is unavailable (and non-deterministic) in unit
+tests; the failure path is covered via ``_execute_job``'s exception
+handling, and the successful path's daemon-bound arguments via
+``test_prompt_job_skips_git_lifecycle``.
 """
 
 from __future__ import annotations
@@ -363,6 +365,44 @@ def test_tick_skips_when_lock_held() -> None:
     with cron_agent._jobs_lock(blocking=True):
         assert tick(2.0) == 0
     assert tick(2.0) == 1
+
+
+def test_prompt_job_skips_git_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scheduled prompt job runs outside any project git lifecycle.
+
+    ``_run_prompt_job`` submits without an ``extension_agent_path``,
+    so the module's ``use_worktree()``/``auto_commit()`` getters never
+    apply on the daemon — the values must be pinned on the wire, and
+    ``classify_tasks`` must be pinned off too, because an
+    ``is_development`` classification verdict overrides an explicit
+    ``use_worktree=False`` (``WorktreeSorcarAgent.run``).  Before the
+    pin, a scheduled job whose prompt looked like development work
+    created a git worktree of whatever repository enclosed
+    ``~/.kiss/cron/work`` on every run.  The real path is exercised up
+    to the daemon-client boundary; only that boundary call is
+    captured, to read the arguments the job runner computed.
+    """
+    from kiss.agents.sorcar import daemon_client
+
+    captured: list[dict[str, object]] = []
+
+    def capture_run(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
+        captured.append(kwargs)
+        return daemon_client.TaskResult(
+            text="hello", success=True, cost=0.0, tokens=0, steps=0,
+        )
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
+    status, text = cron_agent._run_prompt_job(
+        {"id": "abcd1234", "prompt": "say hi", "max_budget": 0},
+    )
+    assert (status, text) == ("ok", "hello")
+    assert captured[0]["use_worktree"] is False
+    assert captured[0]["auto_commit"] is False
+    assert captured[0]["classify_tasks"] is False
+    assert captured[0]["work_dir"] == str(tmp_path / "cron" / "work")
 
 
 def test_prompt_job_failure_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
