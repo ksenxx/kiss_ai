@@ -927,14 +927,32 @@ class GmailAgent(BaseChannelAgent):
 
     channel_system_prompt = (
         "\n\n## Gmail Authentication\n"
-        "If credentials.json is missing, call start_gmail_browser_setup() to open "
-        "Google Cloud Console, then use browser tools to create OAuth credentials "
-        "autonomously. If credentials.json exists, call authenticate_gmail() directly. "
-        "Use ask_user_question() if you need user help with Google account login screens. "
-        "Do NOT instruct the user to do these steps manually. "
-        "You MUST use the user's default browser and computer use to authenticate "
-        "using claude-fable-5 as the model.  Do all the steps on user's behalf and "
-        "ask user's help ONLY if you are stuck on login or captcha."
+        "Always call check_gmail_auth() first; if it returns ok, report the "
+        "authenticated email and stop — never start an OAuth flow over valid "
+        "credentials. If credentials.json is missing, call "
+        "start_gmail_browser_setup() to create an OAuth Desktop-app client in "
+        "Google Cloud Console; if credentials.json exists, call "
+        "authenticate_gmail() directly.\n"
+        "When authenticate_gmail() returns status 'consent_required' with an "
+        "auth_url, do NOT open the auth_url or any accounts.google.com page in "
+        "your own browser, and never ask for or type the user's Google "
+        "password or 2FA code: Google sign-in pages are often blocked in the "
+        "built-in browser (net::ERR_FAILED), and the sign-in belongs to the "
+        "user. Hand off consent instead:\n"
+        "1. Call ask_user_question() with the full auth_url, asking the user "
+        "to open it in their OWN browser, approve access, and paste back the "
+        "complete redirect URL from the address bar (it looks like "
+        "http://localhost:PORT/?state=...&code=... and shows a connection "
+        "error page — that is expected).\n"
+        "2. The loopback consent server runs on THIS machine: deliver the "
+        "pasted URL to it with Bash: curl -s '<pasted redirect URL>' (quote "
+        "the URL; it contains & characters).\n"
+        "3. Call finish_gmail_auth(); if it returns 'pending', wait 2 seconds "
+        "and call it once more.\n"
+        "If any browser navigation to a Google page fails, do not retry it or "
+        "relaunch the browser — switch to this hand-off immediately. Finish "
+        "by verifying with check_gmail_auth() and reporting the authenticated "
+        "email address."
     )
 
     def __init__(self) -> None:
@@ -1001,8 +1019,8 @@ class GmailAgent(BaseChannelAgent):
             """
             if is_headless_environment():
                 # Remote machine: the user cannot see a local browser, so
-                # hand back the consent URL to drive in the built-in
-                # browser with pages shown inline in the chat webview.
+                # hand back the consent URL for the user to open in their
+                # own browser and paste back the loopback redirect URL.
                 from kiss.agents.third_party_agents._google_workspace_utils import (
                     RemoteOAuthSession,
                     remote_oauth_instructions,
@@ -1091,8 +1109,9 @@ class GmailAgent(BaseChannelAgent):
         def finish_gmail_auth() -> str:
             """Complete a remote Gmail OAuth consent started by authenticate_gmail().
 
-            Call after the consent pages (driven in the built-in browser and
-            shown inline in the chat webview) reach 'Authentication complete'.
+            Call after the user has approved consent in their own browser
+            and the pasted redirect URL has been delivered to the local
+            consent server (``curl -s '<pasted redirect URL>'``).
 
             Returns:
                 Authentication result, a pending status when consent is not
