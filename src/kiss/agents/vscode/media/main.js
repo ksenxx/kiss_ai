@@ -2902,18 +2902,21 @@
 
   // metainfo-coverage:start
   // The info subpanel of the docked task-info panel (#meta-info,
-  // remote desktop mode only) mirrors ./tmp/PROGRESS.md under the
-  // active tab's workdir (the daemon prefers the tab's worktree copy
-  // while a worktree-mode task runs).  The daemon owns the file, so
-  // the client polls getInfoFile every second — the panel refreshes as
+  // remote desktop mode only) mirrors the ./tmp/PROGRESS.md of the task
+  // running in the visible tab (the daemon resolves the task's own
+  // work dir — its worktree for a worktree-mode run — and hides a file
+  // a previous task left behind).  The daemon owns the file, so the
+  // client polls getInfoFile every second — the panel refreshes as
   // soon as the file changes; the reply's sig (path+mtime+size
   // fingerprint) makes an unchanged file cost one stat per poll, and
   // a missing file renders as an empty subpanel.
   const metaInfoEl = document.getElementById('meta-info');
   const metaInfoContent = document.getElementById('meta-info-content');
   let metaInfoSig = '';
+  // The poll target: the visible tab and the workdir its panel shows.
   let metaInfoWorkDir = '';
-  // Generation token, bumped on every workdir switch and echoed by the
+  let metaInfoTabId = '';
+  // Generation token, bumped on every target switch and echoed by the
   // daemon: replies are matched against it rather than the workDir
   // echo, because the server's dispatch may rewrite a degenerate
   // workDir (root paths are blanked and re-pinned) and a rewritten
@@ -2934,7 +2937,24 @@
     if (metaInfoEl) metaInfoEl.classList.toggle('visible', html !== '');
   }
 
-  /** Ask the daemon for tmp/PROGRESS.md under the subpanel's workdir. */
+  /**
+   * The chat tab whose task the info subpanel mirrors: the visible
+   * tab, except that a content tab (a file or report view) has no
+   * task of its own and leaves the task-info panel describing the
+   * chat tab it was lent to — so the subpanel stays on that chat tab
+   * too, rather than polling under an id the daemon cannot resolve
+   * to any task.
+   *
+   * @returns {string} A chat tab id, or '' before any chat tab was
+   *   targeted.
+   */
+  function metaInfoChatTabId() {
+    const active = getTab(activeTabId);
+    if (active && active.isContentTab) return metaInfoTabId;
+    return activeTabId;
+  }
+
+  /** Ask the daemon for the visible tab's task's tmp/PROGRESS.md. */
   function requestInfoFile() {
     if (!metaInfoContent) return;
     // Only a RUNNING task has a live tmp/PROGRESS.md worth mirroring; an
@@ -2942,10 +2962,19 @@
     if (!isRunning) return;
     if (!document.body.classList.contains('remote-desktop')) return;
     if (document.visibilityState === 'hidden') return;
+    // A tab switch that reached neither updateMetaTaskDetails nor a
+    // running-state flip (two running tabs in one workdir) is caught
+    // here: retarget — which clears and repolls — instead of polling
+    // the new tab under the old tab's signature and generation.
+    if (metaInfoChatTabId() !== metaInfoTabId) {
+      setMetaInfoTarget(metaInfoWorkDir);
+      return;
+    }
+    if (!metaInfoTabId) return;
     try {
       api.getInfoFile({
         workDir: metaInfoWorkDir,
-        tabId: activeTabId,
+        tabId: metaInfoTabId,
         knownSig: metaInfoSig,
         token: String(metaInfoGen),
       });
@@ -2955,18 +2984,21 @@
   }
 
   /**
-   * Adopt *wd* as the workdir the info subpanel mirrors — the SAME
-   * workdir the panel's Workdir row shows (updateMetaTaskDetails
-   * drives both), so the subpanel can never read one directory while
-   * the row names another.  A change invalidates the held signature
-   * and clears the shown contents right away — the old workdir's
-   * PROGRESS.md must not survive a tab or config switch, and a late reply
-   * for the former workdir no longer matches — then polls immediately
-   * instead of waiting out the interval.
+   * Adopt the visible tab and *wd* as the target the info subpanel
+   * mirrors — *wd* being the SAME workdir the panel's Workdir row
+   * shows (updateMetaTaskDetails drives both), so the subpanel can
+   * never read one directory while the row names another.  A change
+   * of either invalidates the held signature and clears the shown
+   * contents right away — another tab's or workdir's PROGRESS.md must
+   * not survive a tab or config switch, and a late reply for the
+   * former target no longer matches — then polls immediately instead
+   * of waiting out the interval.
    */
-  function setMetaInfoWorkDir(wd) {
-    if (wd === metaInfoWorkDir) return;
+  function setMetaInfoTarget(wd) {
+    const tabId = metaInfoChatTabId();
+    if (wd === metaInfoWorkDir && tabId === metaInfoTabId) return;
     metaInfoWorkDir = wd;
+    metaInfoTabId = tabId;
     metaInfoSig = '';
     metaInfoGen++;
     setMetaInfoHTML('');
@@ -3174,7 +3206,7 @@
    * same task as the static task panel.  A task without settings
    * falls back to the tab's pinned workdir and the configured default
    * budget.  The workdir shown here is also adopted as the info
-   * subpanel's poll target (setMetaInfoWorkDir), keeping the row and
+   * subpanel's poll target (setMetaInfoTarget), keeping the row and
    * the mirrored tmp/PROGRESS.md in the same directory.
    *
    * @param {object|null} s A task_settings event's settings payload.
@@ -3198,7 +3230,7 @@
       metaMaxBudgetEl.textContent =
         budget === null ? '\u2014' : '$' + budget.toFixed(2);
     }
-    setMetaInfoWorkDir(wd);
+    setMetaInfoTarget(wd);
   }
   updateMetaTaskDetails(null);
 

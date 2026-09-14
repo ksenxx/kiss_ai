@@ -22,6 +22,7 @@ import os
 import ssl
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -301,6 +302,286 @@ class TestGetInfoFileOverWss(IsolatedAsyncioTestCase):
         self.assertIs(reply["exists"], True)
         self.assertEqual(reply["content"], "only in main\n")
         self.assertTrue(reply["sig"].startswith(str(main_copy) + ":"))
+
+    def _register_task(
+        self,
+        task_id: str,
+        tab_id: str,
+        work_dir: str,
+        start_ms: int,
+        *,
+        active: bool = True,
+    ) -> Any:
+        """Register a real agent state as the task-runner does for a run.
+
+        Mirrors ``_TaskRunnerMixin._run_task_inner``: a
+        :class:`WorktreeSorcarAgent` stamped with the run's
+        ``_task_start_ms`` and (as ``RelentlessAgent._reset`` does once
+        the run begins) its effective ``work_dir``, installed in the
+        agent-state registry under the launching tab.  The state is
+        unregistered on test teardown.
+        """
+        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+        from kiss.server import agent_state
+
+        agent = WorktreeSorcarAgent(f"info-file-test {task_id}")
+        if work_dir:
+            agent.work_dir = work_dir
+        agent._task_start_ms = start_ms
+        state = agent_state.AgentState(
+            task_id,
+            agent=agent,
+            tab_id=tab_id,
+            server_owned=True,
+            is_task_active=active,
+        )
+        agent_state.register(state)
+        self.addCleanup(agent_state.unregister, task_id, state)
+        return state
+
+    @staticmethod
+    def _write_aged(path: Path, text: str, age_seconds: float) -> None:
+        """Write *text* to *path* and back-date its mtime by *age_seconds*."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        old = time.time() - age_seconds
+        os.utime(path, (old, old))
+
+    async def test_previous_tasks_file_is_hidden_until_task_rewrites_it(
+        self,
+    ) -> None:
+        """A tmp/PROGRESS.md older than the running task is not shown.
+
+        The reported bug: the subpanel mirrored the PROGRESS.md a
+        PREVIOUS task left in the directory until the running task
+        overwrote it.  A file whose mtime predates the running task's
+        start is treated as missing; once the task rewrites it, the
+        new contents are served.
+        """
+        work_dir = self.server.work_dir
+        info = Path(work_dir) / "tmp" / "PROGRESS.md"
+        self._write_aged(info, "# previous task\n", age_seconds=3600)
+        self._register_task(
+            "task-cur", "t-run", work_dir, int(time.time() * 1000),
+        )
+        # As in production, the launching tab is also subscribed to its
+        # own task's stream (register_task_ui), and the subscriber set
+        # of its previous, already torn-down task may still linger.
+        self.server._printer.subscribe_tab("task-cur", "t-run")
+        self.server._printer.subscribe_tab("task-gone", "t-run")
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+            stale = await self._get_info_file(
+                ws, {"workDir": work_dir, "tabId": "t-run"}
+            )
+            info.write_text("# current task\n\nstep 1\n")
+            fresh = await self._get_info_file(
+                ws, {"workDir": work_dir, "tabId": "t-run"}
+            )
+            # A stale knownSig from the fresh read still short-circuits.
+            again = await self._get_info_file(
+                ws,
+                {"workDir": work_dir, "tabId": "t-run", "knownSig": fresh["sig"]},
+            )
+        self.assertIs(stale["exists"], False)
+        self.assertEqual(stale["content"], "")
+        self.assertEqual(stale["sig"], "")
+        self.assertIs(fresh["exists"], True)
+        self.assertEqual(fresh["content"], "# current task\n\nstep 1\n")
+        self.assertIs(again["unchanged"], True)
+
+    async def test_file_written_just_before_start_tolerates_clock_skew(
+        self,
+    ) -> None:
+        """An mtime within the 1s tolerance before the start is accepted."""
+        work_dir = self.server.work_dir
+        info = Path(work_dir) / "tmp" / "PROGRESS.md"
+        self._write_aged(info, "coarse clock\n", age_seconds=0.5)
+        self._register_task(
+            "task-skew", "t-skew", work_dir, int(time.time() * 1000),
+        )
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+            reply = await self._get_info_file(
+                ws, {"workDir": work_dir, "tabId": "t-skew"}
+            )
+        self.assertIs(reply["exists"], True)
+        self.assertEqual(reply["content"], "coarse clock\n")
+
+    async def test_running_tasks_work_dir_is_the_only_source(self) -> None:
+        """The running task's effective work dir wins over every fallback.
+
+        A worktree-mode run's ``work_dir`` is its worktree; the tab's
+        workDir (the main checkout) and even a stale recorded worktree
+        hold OTHER tasks' files and must never be served — not even
+        when the running task has not written its own copy yet.
+        """
+        work_dir = self.server.work_dir
+        main_copy = Path(work_dir) / "tmp" / "PROGRESS.md"
+        main_copy.parent.mkdir(parents=True)
+        main_copy.write_text("main checkout, other task\n")
+        old_wt = tempfile.mkdtemp(prefix="kiss_wt_old_")
+        (Path(old_wt) / "tmp").mkdir()
+        (Path(old_wt) / "tmp" / "PROGRESS.md").write_text("old worktree\n")
+        self.server._printer._track_worktree_event(
+            {"type": "worktree_created", "worktreeWorkDir": old_wt},
+            "t-wt3",
+            None,
+        )
+        task_wt = tempfile.mkdtemp(prefix="kiss_wt_cur_")
+        self._register_task(
+            "task-wt3", "t-wt3", task_wt, int(time.time() * 1000),
+        )
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+            nothing_yet = await self._get_info_file(
+                ws, {"workDir": work_dir, "tabId": "t-wt3"}
+            )
+            own = Path(task_wt) / "tmp" / "PROGRESS.md"
+            own.parent.mkdir()
+            own.write_text("running task's progress\n")
+            served = await self._get_info_file(
+                ws, {"workDir": work_dir, "tabId": "t-wt3"}
+            )
+        self.assertIs(nothing_yet["exists"], False)
+        self.assertEqual(nothing_yet["content"], "")
+        self.assertIs(served["exists"], True)
+        self.assertEqual(served["content"], "running task's progress\n")
+        self.assertTrue(served["sig"].startswith(str(own) + ":"))
+
+    async def test_viewer_tab_resolves_task_through_subscription(
+        self,
+    ) -> None:
+        """A tab viewing a task launched elsewhere reads THAT task's file.
+
+        The same chat opened from another client is subscribed to the
+        running task's stream (``JsonPrinter.subscribe_tab``) without
+        owning an agent state; the poll must still find the task via
+        the subscription.  A viewer tab whose OWN previous task is idle
+        (its state lingers for the pending worktree) must prefer the
+        active task it is watching.
+        """
+        work_dir = self.server.work_dir
+        task_dir = tempfile.mkdtemp(prefix="kiss_task_dir_")
+        (Path(task_dir) / "tmp").mkdir()
+        (Path(task_dir) / "tmp" / "PROGRESS.md").write_text("watched task\n")
+        self._register_task(
+            "task-live", "t-launcher", task_dir, int(time.time() * 1000),
+        )
+        # The viewer's own finished task (idle, lingering state) wrote
+        # a fresh-looking file of its own that must NOT be shown.
+        idle_dir = tempfile.mkdtemp(prefix="kiss_idle_dir_")
+        (Path(idle_dir) / "tmp").mkdir()
+        (Path(idle_dir) / "tmp" / "PROGRESS.md").write_text("idle own task\n")
+        self._register_task(
+            "task-idle", "t-viewer", idle_dir, int(time.time() * 1000) - 5000,
+            active=False,
+        )
+        self.server._printer.subscribe_tab("task-live", "t-viewer")
+        self.server._printer.subscribe_tab("task-live", "t-pure-viewer")
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+            viewer = await self._get_info_file(
+                ws, {"workDir": work_dir, "tabId": "t-viewer"}
+            )
+            pure = await self._get_info_file(
+                ws, {"workDir": work_dir, "tabId": "t-pure-viewer"}
+            )
+        self.assertEqual(viewer["content"], "watched task\n")
+        self.assertEqual(pure["content"], "watched task\n")
+
+    async def test_idle_state_without_active_task_still_serves_its_dir(
+        self,
+    ) -> None:
+        """With no active task, the tab's lingering state names the dir.
+
+        Right after a task ends (before the client's status flip stops
+        the poll) the state is inactive but still the tab's only
+        task: its work dir is served rather than the workDir fallback.
+        """
+        work_dir = self.server.work_dir
+        main_copy = Path(work_dir) / "tmp" / "PROGRESS.md"
+        main_copy.parent.mkdir(parents=True)
+        main_copy.write_text("main\n")
+        done_dir = tempfile.mkdtemp(prefix="kiss_done_dir_")
+        (Path(done_dir) / "tmp").mkdir()
+        (Path(done_dir) / "tmp" / "PROGRESS.md").write_text("just finished\n")
+        self._register_task(
+            "task-done", "t-done", done_dir, int(time.time() * 1000) - 60000,
+            active=False,
+        )
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+            reply = await self._get_info_file(
+                ws, {"workDir": work_dir, "tabId": "t-done"}
+            )
+        self.assertEqual(reply["content"], "just finished\n")
+
+    async def test_agent_without_start_stamp_is_not_gated(self) -> None:
+        """A task agent with no start timestamp serves its dir ungated.
+
+        Sub-agents (``ChatSorcarAgent`` children of ``run_parallel``)
+        carry no ``_task_start_ms``; their work dir is the parent's,
+        whose PROGRESS.md predates the child — it must still show.
+        """
+        work_dir = self.server.work_dir
+        info = Path(work_dir) / "tmp" / "PROGRESS.md"
+        self._write_aged(info, "parent progress\n", age_seconds=3600)
+        self._register_task("task-sub", "t-sub", work_dir, 0)
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+            reply = await self._get_info_file(
+                ws, {"workDir": work_dir, "tabId": "t-sub"}
+            )
+        self.assertEqual(reply["content"], "parent progress\n")
+
+    async def test_agent_without_work_dir_falls_back_to_tab_dirs(self) -> None:
+        """Before ``_reset`` the agent has no work dir: tab dirs, gated.
+
+        During task classification / worktree setup the fresh agent has
+        no ``work_dir`` yet (``_reset`` assigns it), so the recorded
+        worktree / workDir candidates apply — still gated by the start
+        stamp, so the previous task's file in the main checkout stays
+        hidden.
+        """
+        work_dir = self.server.work_dir
+        info = Path(work_dir) / "tmp" / "PROGRESS.md"
+        self._write_aged(info, "previous task\n", age_seconds=3600)
+        self._register_task(
+            "task-early", "t-early", "", int(time.time() * 1000),
+        )
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+            hidden = await self._get_info_file(
+                ws, {"workDir": work_dir, "tabId": "t-early"}
+            )
+            info.write_text("written by the running task\n")
+            shown = await self._get_info_file(
+                ws, {"workDir": work_dir, "tabId": "t-early"}
+            )
+        self.assertIs(hidden["exists"], False)
+        self.assertEqual(shown["content"], "written by the running task\n")
 
     async def test_directory_named_progress_md_replies_empty(self) -> None:
         """tmp/PROGRESS.md that is a directory is treated as missing."""

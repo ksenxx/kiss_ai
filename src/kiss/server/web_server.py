@@ -5739,6 +5739,41 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("checkPaths: failed to write reply", exc_info=True)
 
+    def _tab_task_agent(self, tab_id: str) -> Any:
+        """Return the agent of the task *tab_id* is running or viewing.
+
+        The tab that launched a task owns its agent state
+        (:func:`agent_state.find_by_tab`); a tab that merely views the
+        task — the same chat open in another client — is only
+        subscribed to its event stream (:meth:`JsonPrinter.tasks_for_tab`),
+        so both lookups are combined.  A tab can be attached to more
+        than one state at once (its own finished task's state lingers
+        while its worktree is pending; a finished task's subscriber set
+        lingers a few minutes), so a state whose task is active wins;
+        otherwise the tab's own state, then the first subscribed one.
+
+        Args:
+            tab_id: The requesting client's tab id.
+
+        Returns:
+            The task's live agent, or ``None`` when the tab is attached
+            to no task.
+        """
+        from kiss.server import agent_state
+
+        states: list[agent_state.AgentState] = []
+        own = agent_state.find_by_tab(tab_id)
+        if own is not None:
+            states.append(own)
+        for key in self._printer.tasks_for_tab(tab_id):
+            state = agent_state.get(key)
+            if state is not None and state not in states:
+                states.append(state)
+        for state in states:
+            if state.is_task_active:
+                return state.agent
+        return states[0].agent if states else None
+
     async def _handle_get_info_file(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None:
@@ -5746,17 +5781,35 @@ class RemoteAccessServer:
 
         Handles the ``getInfoFile`` command polled by ``media/main.js``
         for the info subpanel of the docked task-info panel (remote
-        desktop mode): the subpanel mirrors ``tmp/PROGRESS.md`` under
-        the command's ``workDir`` (falling back to the daemon work dir
-        exactly like the other file handlers), and shows nothing when
-        the file does not exist.  A task running in worktree mode
-        maintains its ``tmp/PROGRESS.md`` inside the worktree, so when
-        the tab has a recorded worktree dir
-        (:meth:`WebPrinter.worktree_dir_for_tab`, recorded at
-        ``worktree_created`` — i.e. while the task is still running)
-        the worktree's copy is tried FIRST and the workDir's copy is
-        the fallback.  The reply is sent directly to the requesting
-        *endpoint* — never broadcast — with the shape::
+        desktop mode): the subpanel mirrors the ``tmp/PROGRESS.md`` of
+        the task RUNNING in the tab, and shows nothing when that task
+        has not written one — in particular never the file a previous
+        task left behind.  Two facts about the tab's task drive that
+        (:meth:`_tab_task_agent`):
+
+        * its effective work dir (``agent.work_dir``, assigned by
+          ``RelentlessAgent._reset`` once the run begins — the
+          worktree work dir for a worktree-mode run) is the ONLY
+          directory read while it is known; the tab's ``workDir`` (the
+          main checkout) holds the previous task's copy — rescued from
+          its merged worktree or written by an earlier non-worktree
+          run — and must not be served as a fallback;
+        * a file whose mtime predates the run's start
+          (``agent._task_start_ms``, stamped by the task runner before
+          the run does anything) is treated as missing, so the main
+          checkout's stale copy stays hidden during a non-worktree run
+          and during the setup window before ``_reset`` (when the
+          agent's ``work_dir`` is unset or still the previous run's).
+          One second of tolerance absorbs coarse filesystem
+          timestamps.  Agents without the stamp (``run_parallel``
+          sub-agents, which run in the parent's dir) are not gated.
+
+        A tab attached to no task (nothing to gate against) keeps the
+        older resolution: the tab's recorded worktree dir
+        (:meth:`WebPrinter.worktree_dir_for_tab`) first, then
+        ``workDir`` (falling back to the daemon work dir exactly like
+        the other file handlers).  The reply is sent directly to the
+        requesting *endpoint* — never broadcast — with the shape::
 
             {"type": "infoFile", "exists": <bool>, "sig": <str>,
              "content": <utf-8 text>,           # changed or missing
@@ -5772,14 +5825,13 @@ class RemoteAccessServer:
 
         ``sig`` fingerprints the file (``"<path>:<mtime_ns>:<size>"``,
         ``""`` when missing — the path prefix makes a switch between
-        the worktree's and the workDir's copy always look changed); a
-        poll whose ``knownSig`` matches it is answered with
-        ``unchanged: true`` and no ``content``, so an idle file costs
-        a stat per poll instead of a re-read and re-send.  A missing,
-        unreadable, non-regular or oversized
-        (:data:`_OPEN_FILE_MAX_BYTES`) file replies ``exists: false``
-        with empty content — the client renders that as an empty
-        subpanel rather than an error.
+        directories always look changed); a poll whose ``knownSig``
+        matches it is answered with ``unchanged: true`` and no
+        ``content``, so an idle file costs a stat per poll instead of
+        a re-read and re-send.  A missing, unreadable, non-regular,
+        oversized (:data:`_OPEN_FILE_MAX_BYTES`) or pre-task file
+        replies ``exists: false`` with empty content — the client
+        renders that as an empty subpanel rather than an error.
 
         The file is opened ONCE (``O_NONBLOCK``, so a FIFO planted at
         the path cannot hang the worker thread) and the sig, the type /
@@ -5800,11 +5852,20 @@ class RemoteAccessServer:
         tab_id = self._cmd_str(cmd, "tabId")
         known_sig = self._cmd_str(cmd, "knownSig")
         token = self._cmd_str(cmd, "token")
-        # A worktree task keeps its tmp/PROGRESS.md inside the worktree
-        # (recorded per tab at worktree_created, so it is known while
-        # the task is still running): that copy is the poll's primary
-        # candidate, the workDir's copy the fallback.
-        wt_dir = self._printer.worktree_dir_for_tab(tab_id) if tab_id else ""
+        agent = self._tab_task_agent(tab_id) if tab_id else None
+        task_dir = str(getattr(agent, "work_dir", "") or "")
+        start_ms = int(getattr(agent, "_task_start_ms", 0) or 0)
+        # Files last modified before the task started belong to a
+        # previous task; 0 disables the gate.
+        min_mtime_ns = (start_ms - 1000) * 1_000_000 if start_ms > 0 else 0
+        candidates: list[Path] = []
+        if task_dir:
+            candidates.append(Path(task_dir) / "tmp" / "PROGRESS.md")
+        else:
+            wt_dir = self._printer.worktree_dir_for_tab(tab_id) if tab_id else ""
+            if wt_dir and wt_dir != work_dir:
+                candidates.append(Path(wt_dir) / "tmp" / "PROGRESS.md")
+            candidates.append(Path(work_dir) / "tmp" / "PROGRESS.md")
 
         def _read_info() -> dict[str, Any]:
             reply: dict[str, Any] = {
@@ -5816,10 +5877,6 @@ class RemoteAccessServer:
                 "sig": "",
                 "content": "",
             }
-            candidates: list[Path] = []
-            if wt_dir and wt_dir != work_dir:
-                candidates.append(Path(wt_dir) / "tmp" / "PROGRESS.md")
-            candidates.append(Path(work_dir) / "tmp" / "PROGRESS.md")
             for path in candidates:
                 try:
                     fd = os.open(
@@ -5833,6 +5890,7 @@ class RemoteAccessServer:
                     if (
                         not stat_module.S_ISREG(st.st_mode)
                         or st.st_size > _OPEN_FILE_MAX_BYTES
+                        or st.st_mtime_ns < min_mtime_ns
                     ):
                         continue
                     sig = f"{path}:{st.st_mtime_ns}:{st.st_size}"

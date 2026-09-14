@@ -549,6 +549,171 @@ async function main() {
     },
   );
 
+  await test(
+    'switching between two running tabs clears the subpanel, repolls ' +
+      'for the newly visible tab and drops the other tab\'s late reply',
+    async () => {
+      const wv = makeWebview();
+      const win = wv.win;
+      send(win, {
+        type: 'configData',
+        config: {work_dir: '/cfg/dir', max_budget: 42},
+        apiKeys: {},
+      });
+      const TAB1 = tabIdOf(wv);
+      send(win, {type: 'status', running: true, tabId: TAB1});
+      let polls = wv.posted.filter(m => m.type === 'getInfoFile');
+      const tok1 = polls[polls.length - 1].token;
+      assert.strictEqual(polls[polls.length - 1].tabId, TAB1);
+      const content = win.document.getElementById('meta-info-content');
+      send(win, {
+        type: 'infoFile',
+        workDir: '/cfg/dir',
+        tabId: TAB1,
+        token: tok1,
+        exists: true,
+        sig: '/wt1/tmp/PROGRESS.md:1:9',
+        content: 'tab one notes',
+      });
+      assert.ok(content.textContent.includes('tab one notes'));
+
+      // Open a second tab (it becomes visible) and run a task in it.
+      win.document
+        .querySelector('#new-chat-btn')
+        .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+      const newChat = wv.posted.filter(m => m.type === 'newChat').pop();
+      assert.ok(newChat && newChat.tabId, 'new tab must be announced');
+      const TAB2 = newChat.tabId;
+      assert.notStrictEqual(TAB2, TAB1);
+      assert.strictEqual(content.innerHTML, '', 'idle new tab shows nothing');
+      send(win, {type: 'status', running: true, tabId: TAB2});
+      polls = wv.posted.filter(m => m.type === 'getInfoFile');
+      const poll2 = polls[polls.length - 1];
+      assert.strictEqual(poll2.tabId, TAB2, 'poll names the visible tab');
+      assert.notStrictEqual(poll2.token, tok1);
+      assert.strictEqual(poll2.knownSig, '');
+      send(win, {
+        type: 'infoFile',
+        workDir: '/cfg/dir',
+        tabId: TAB2,
+        token: poll2.token,
+        exists: true,
+        sig: '/wt2/tmp/PROGRESS.md:2:9',
+        content: 'tab two notes',
+      });
+      assert.ok(content.textContent.includes('tab two notes'));
+
+      // Back to the first tab while BOTH tabs are running: the same
+      // workdir and the same running state, yet the subpanel must not
+      // keep showing tab two's file for even one poll interval.
+      const before = wv.posted.filter(m => m.type === 'getInfoFile').length;
+      win.document
+        .querySelector(`.chat-tab[data-tab-id=${JSON.stringify(TAB1)}]`)
+        .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+      assert.strictEqual(content.innerHTML, '', 'tab switch clears the panel');
+      assert.ok(!infoVisible(win), 'tab switch hides the subpanel');
+      polls = wv.posted.filter(m => m.type === 'getInfoFile');
+      assert.strictEqual(polls.length, before + 1, 'immediate poll fired');
+      const poll3 = polls[polls.length - 1];
+      assert.strictEqual(poll3.tabId, TAB1);
+      assert.strictEqual(poll3.knownSig, '', 'signature reset on switch');
+      assert.notStrictEqual(poll3.token, poll2.token, 'new generation');
+      // A late reply for tab two must not paint tab one's subpanel.
+      send(win, {
+        type: 'infoFile',
+        workDir: '/cfg/dir',
+        tabId: TAB2,
+        token: poll2.token,
+        exists: true,
+        sig: '/wt2/tmp/PROGRESS.md:3:12',
+        content: 'tab two, later',
+      });
+      assert.strictEqual(content.innerHTML, '', 'late other-tab reply ignored');
+      send(win, {
+        type: 'infoFile',
+        workDir: '/cfg/dir',
+        tabId: TAB1,
+        token: poll3.token,
+        exists: true,
+        sig: '/wt1/tmp/PROGRESS.md:4:9',
+        content: 'tab one again',
+      });
+      assert.ok(content.textContent.includes('tab one again'));
+    },
+  );
+
+  await test(
+    'a content tab (file view) keeps the subpanel on the chat tab it ' +
+      'was lent to instead of polling under the content tab\'s id',
+    async () => {
+      const wv = makeWebview();
+      const win = wv.win;
+      send(win, {
+        type: 'configData',
+        config: {work_dir: '/cfg/dir', max_budget: 42},
+        apiKeys: {},
+      });
+      const TAB1 = tabIdOf(wv);
+      send(win, {type: 'status', running: true, tabId: TAB1});
+      let polls = wv.posted.filter(m => m.type === 'getInfoFile');
+      const tok1 = polls[polls.length - 1].token;
+      const content = win.document.getElementById('meta-info-content');
+      send(win, {
+        type: 'infoFile',
+        workDir: '/cfg/dir',
+        tabId: TAB1,
+        token: tok1,
+        exists: true,
+        sig: '/wt1/tmp/PROGRESS.md:1:9',
+        content: 'chat tab notes',
+      });
+      assert.ok(content.textContent.includes('chat tab notes'));
+
+      // Open a file view: it becomes the visible tab, but has no task.
+      send(win, {
+        type: 'fileContent',
+        name: 'report.html',
+        path: '/cfg/dir/reports/report.html',
+        content: '<h1>report</h1>',
+      });
+      const contentTab = win.document.querySelector(
+        `.chat-tab.active[data-tab-id]`,
+      );
+      assert.ok(contentTab, 'the content tab is the visible tab');
+      assert.notStrictEqual(contentTab.getAttribute('data-tab-id'), TAB1);
+      assert.ok(
+        content.textContent.includes('chat tab notes'),
+        'opening a file view keeps the mirrored file on screen',
+      );
+      const before = wv.posted.filter(m => m.type === 'getInfoFile').length;
+      await sleep(1300);
+      polls = wv.posted.filter(m => m.type === 'getInfoFile');
+      assert.ok(polls.length > before, 'the poll keeps running');
+      const poll = polls[polls.length - 1];
+      assert.strictEqual(poll.tabId, TAB1, 'polls name the chat tab');
+      assert.strictEqual(poll.token, tok1, 'no new generation');
+      assert.strictEqual(poll.knownSig, '/wt1/tmp/PROGRESS.md:1:9');
+      send(win, {
+        type: 'infoFile',
+        workDir: '/cfg/dir',
+        tabId: TAB1,
+        token: tok1,
+        exists: true,
+        sig: '/wt1/tmp/PROGRESS.md:2:12',
+        content: 'chat tab, updated',
+      });
+      assert.ok(content.textContent.includes('chat tab, updated'));
+
+      // Back to the chat tab: same target, nothing is cleared.
+      win.document
+        .querySelector(`.chat-tab[data-tab-id=${JSON.stringify(TAB1)}]`)
+        .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+      assert.ok(content.textContent.includes('chat tab, updated'));
+      polls = wv.posted.filter(m => m.type === 'getInfoFile');
+      assert.strictEqual(polls[polls.length - 1].token, tok1);
+    },
+  );
+
   console.log(`\n${passed} passed, ${failures.length} failed`);
   if (failures.length > 0) process.exit(1);
   process.exit(0);
