@@ -1115,9 +1115,7 @@ class TelegramAgent(BaseChannelAgent):
             return
         cfg = _config.load()
         if cfg:  # pragma: no branch
-            self._backend._bot = _TelegramBot(
-                self._backend, cfg["bot_token"], requests.Session()
-            )
+            self._backend._bot = _TelegramBot(self._backend, cfg["bot_token"], requests.Session())
 
     def _is_authenticated(self) -> bool:
         """Return True if the backend is authenticated."""

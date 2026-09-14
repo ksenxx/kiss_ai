@@ -14,7 +14,10 @@ HTTP emulator of the Bot API, with ``KISS_HOME`` pointed at a temp dir.
 Not covered here: the Muse branch of ``_TelegramBot`` (``session is
 None``), which needs the Muse daemon; that daemon requires
 ``socket.SO_PEERCRED`` (Linux) and cannot run on macOS, so the branch
-is unreachable in this environment without a test double.
+is unreachable in this environment without a test double.  On Linux it
+is covered end to end by the ``muse_env`` tests in
+``test_muse_auth_tokenx.py`` (a real daemon plus the same kind of Bot
+API emulator).
 """
 
 from __future__ import annotations

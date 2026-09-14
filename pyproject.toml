@@ -294,10 +294,6 @@ module = "kiss.viz_trajectory.*"
 disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
-module = "telegram.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
 module = "nio.*"
 ignore_missing_imports = true
 
