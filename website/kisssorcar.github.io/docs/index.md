@@ -9,7 +9,7 @@
 - [Client Interfaces](cli.md) — The `kiss-web` daemon, VS Code extension, web/mobile app, and Python client API
 - [Python API Reference](api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, GitWorktreeOps
 - [Supported Models](models.md) — 660-model catalog across 9 provider categories
-- [Messaging & Third-Party Agents](messaging-agents.md) — 32 messaging-channel agents and 9 service agents, plus infrastructure agents and the Govee smart-home CLI
+- [Messaging & Third-Party Agents](messaging-agents.md) — 32 messaging-channel agents and 9 service agents, plus infrastructure agents, the Govee smart-home CLI, and Muse-auth credential isolation
 - [Sample Tasks](sample-tasks.md) — Ready-to-use example prompts
 - [Prompt Tricks](prompt-tricks.md) — Reusable prompt snippets that boost result quality
 - [Tips](tips.md) — Practical tips for getting the highest-quality work

@@ -11,7 +11,7 @@ This is the plain-Markdown twin of <https://kisssorcar.github.io/>. Machine-read
 - **License:** Apache-2.0 · **Source:** <https://github.com/ksenxx/kiss_ai> · **PyPI:** `kiss-agent-framework`
 - **660 models** across 9 provider categories (OpenAI, Anthropic, Gemini, Together AI, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, Codex CLI)
 - **43 third-party agents**: 32 messaging channels (Slack, Gmail, Email, WhatsApp, SMS, iMessage, Telegram, Discord, Signal, Phone Control, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace
-- Unique features: AI discovery via prompt, GEPA prompt optimization via prompt, multi-vendor multi-model tasks, dynamic `set_model` switching, steering-on-the-fly, git-worktree task isolation, wake-word voice chat
+- Unique features: AI discovery via prompt, GEPA prompt optimization via prompt, multi-vendor multi-model tasks, dynamic `set_model` switching, steering-on-the-fly, git-worktree task isolation, wake-word voice chat, persistent agent memory, Muse-auth credential isolation for connector secrets
 
 ## Install
 
