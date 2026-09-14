@@ -28,8 +28,6 @@ import threading
 from typing import Any
 from urllib.parse import quote
 
-import requests
-
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
@@ -37,6 +35,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
 )
 from kiss.agents.third_party_agents._google_workspace_utils import (
     fresh_access_token,
+    google_api_session,
     load_google_credentials,
     make_google_auth_tools,
 )
@@ -156,6 +155,7 @@ class GoogleDocsChannelBackend(ToolMethodBackend):
 
     def __init__(self) -> None:
         self._creds: Any = None
+        self._http: Any = google_api_session(_SERVICE)
         self._token: str = ""
         self._base_url: str = "https://docs.googleapis.com/v1"
         self._drive_base_url: str = "https://www.googleapis.com/drive/v3"
@@ -206,7 +206,7 @@ class GoogleDocsChannelBackend(ToolMethodBackend):
             ``{"ok": False, "error": ...}`` on an HTTP error status.
         """
         with self._request_lock:
-            resp = requests.request(
+            resp = self._http.request(
                 method, url, headers=self._headers(), params=params, json=payload,
                 timeout=_TIMEOUT,
             )

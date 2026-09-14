@@ -85,6 +85,15 @@ DEFAULTS: dict[str, Any] = {
     # (lite system prompt) and is_development (worktree on/off for
     # that run only — this persisted is_worktree value is not touched).
     "classify_tasks": True,
+    # Persistent agent memory (kiss.core.memoryfield), on by default:
+    # SorcarAgent runs get the memory_* tools and the MEMORY_PROTOCOL
+    # system-prompt block.  Pages live in ``memory_dir`` when set, else
+    # ``$KISS_HOME/memories`` (~/.kiss/memories).  The KISS_USE_MEMORY
+    # environment variable overrides the stored toggle for one process.
+    # Without an OPENAI_API_KEY the index falls back to the offline
+    # hashed embedder (kiss.core.memoryfield.index.default_embedder).
+    "use_memory": True,
+    "memory_dir": "",
     "work_dir": "",
     "last_model": "",
 }
@@ -898,6 +907,34 @@ def build_model_config(cfg: dict[str, Any]) -> dict[str, Any] | None:
     if headers:
         result["extra_headers"] = headers
     return result
+
+
+def load_api_keys_readonly() -> None:
+    """Import the canonical key store into ``os.environ`` without writing.
+
+    Fallback for the direct CLI entry points when :func:`load_api_keys`
+    cannot run (a read-only ``$KISS_HOME`` where its migration lock
+    file cannot be created): the store is parsed with the same
+    :func:`_parse_env_assignment` rules and the in-memory
+    ``DEFAULT_CONFIG`` is refreshed, but the filesystem-writing steps
+    (the legacy-RC migration and the systemd-mirror retirement) are
+    skipped.  A store that cannot even be read is silently treated as
+    empty, matching :func:`load_api_keys`.
+    """
+    with _config_lock:
+        try:
+            text = api_keys_env_path().read_text(encoding="utf-8")
+        except OSError:
+            return
+        for line in text.splitlines():
+            parsed = _parse_env_assignment(line)
+            if parsed is None:
+                continue
+            try:
+                os.environ[parsed[0]] = parsed[1]
+            except ValueError:
+                continue
+        _refresh_config()
 
 
 def load_api_keys() -> None:

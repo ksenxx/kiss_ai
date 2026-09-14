@@ -35,6 +35,7 @@ from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.core.kiss_error import BudgetExceededError, KISSError
+from kiss.core.memoryfield.tools import MEMORY_PROTOCOL, MemoryTools
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -42,12 +43,21 @@ from kiss.core.models.model_info import (
     _match_openai_compatible_provider,
     _strip_provider_prefix,
     get_default_model,
+    model_runs_task_to_completion,
 )
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
 from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
+
+# Smallest per-child budget a ``run_parallel`` fan-out may hand out.
+# Every child resumes the parent's chat context, so even its FIRST LLM
+# step can cost a few cents; below this floor a child is killed by the
+# budget check after step 1 having produced nothing (observed in
+# recursive fan-outs that split a parent's remainder down to ~$0.03).
+# See :meth:`SorcarAgent._subagent_budget_share`.
+MIN_SUBAGENT_BUDGET = 0.50
 
 
 def summary(description: str) -> str:
@@ -64,6 +74,94 @@ def summary(description: str) -> str:
     """
     del description
     return "Summary recorded."
+
+
+def _memory_root_for_run(
+    append_basic_tools: bool,
+    docker_image: str | None,
+    model_name: str,
+    caller_system_instruction: bool = False,
+    use_memory_override: bool | None = None,
+) -> Path | None:
+    """The memory directory this run should use, or None for no memory.
+
+    Memory rides with the built-in toolset, so four gates precede the
+    user's ``use_memory`` setting (see :func:`_memory_settings`):
+
+    * ``append_basic_tools=False`` strips the run down to ``finish`` plus
+      the caller's tools — promising ``memory_*`` tools in the prompt
+      would be a lie.
+    * Docker runs replace Bash/Read/Edit/Write with container-backed
+      tools; the memory tools execute in the host process on host paths,
+      so registering them would hand a containerized task read/write
+      access to host memory outside the ``docker_image`` boundary.
+    * Run-to-completion CLI models (``cc/*``, ``codex/*``) never see
+      KISS-registered tools, so they get neither the tools nor a protocol
+      demanding them.
+    * A caller-supplied ``model_config["system_instruction"]`` replaces
+      the whole composed prompt (``KISSAgent.run`` only ``setdefault``-s
+      it), so ``MEMORY_PROTOCOL`` would never reach the model; the tools
+      must not be registered without the protocol that governs them.
+
+    The gates are hard invariants — an explicit *use_memory_override*
+    never bypasses them.  Past the gates, a boolean override is the
+    caller's per-run choice and wins over both the ``KISS_USE_MEMORY``
+    environment variable and the stored ``use_memory`` setting; ``None``
+    (the default) keeps the :func:`_memory_settings` resolution.
+
+    Args:
+        append_basic_tools: Whether the run builds the built-in toolset.
+        docker_image: The run's Docker image, if any.
+        model_name: The resolved model name the run will use.
+        caller_system_instruction: Whether the caller's ``model_config``
+            carries its own ``system_instruction``.
+        use_memory_override: Per-run memory toggle — ``True`` enables
+            (subject to the gates above), ``False`` disables, ``None``
+            falls back to the environment/config default.
+
+    Returns:
+        The memory root when every gate and the effective toggle allow
+        it, else None.
+    """
+    if not append_basic_tools or docker_image or caller_system_instruction:
+        return None
+    if model_runs_task_to_completion(model_name):
+        return None
+    enabled, root = _memory_settings()
+    if use_memory_override is not None:
+        enabled = use_memory_override
+    return root if enabled else None
+
+
+def _memory_settings() -> tuple[bool, Path]:
+    """Return whether persistent agent memory is enabled and where it lives.
+
+    The toggle is the ``use_memory`` key of ``~/.kiss/config.json`` (see
+    :data:`kiss.core.vscode_config.DEFAULTS`, default on).  The
+    ``KISS_USE_MEMORY`` environment variable, when non-empty, wins over
+    the stored value — ``0``/``false``/``no``/``off`` (any case) disable,
+    anything else enables — so one process or test can flip memory
+    without editing the config file.  Pages live in the config's
+    ``memory_dir`` when set, else ``$KISS_HOME/memories``
+    (``~/.kiss/memories``).
+
+    Returns:
+        ``(enabled, root)`` where *root* is the memory page directory
+        (created lazily on first write by
+        :class:`kiss.core.memoryfield.pages.MemoryDir`).
+    """
+    from kiss.core.config import kiss_home
+    from kiss.core.vscode_config import load_config
+
+    cfg = load_config()
+    env = os.environ.get("KISS_USE_MEMORY", "").strip().lower()
+    if env:
+        enabled = env not in ("0", "false", "no", "off")
+    else:
+        enabled = bool(cfg.get("use_memory", True))
+    raw_dir = str(cfg.get("memory_dir", "")).strip()
+    root = Path(raw_dir).expanduser() if raw_dir else kiss_home() / "memories"
+    return enabled, root
 
 
 def _generate_commit_message(
@@ -885,6 +983,15 @@ class SorcarAgent(RelentlessAgent):
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
         self.docker_manager: Any = None
+        # Persistent agent memory (kiss.core.memoryfield), built per
+        # run by :meth:`run` when the ``use_memory`` config flag (or the
+        # KISS_USE_MEMORY environment variable) enables it; None keeps
+        # the run memory-free.  :meth:`_get_tools` registers its tools.
+        self._memory_tools: MemoryTools | None = None
+        # Per-run memory toggle (:meth:`run`'s *use_memory*), kept on
+        # self so the ``run_parallel`` fan-out — which executes DURING
+        # the run — forwards the same override to every sub-agent.
+        self._use_memory_override: bool | None = None
         self._use_web_tools: bool = True
         self._is_parallel: bool = True
         self._append_basic_tools: bool = True
@@ -981,6 +1088,18 @@ class SorcarAgent(RelentlessAgent):
         agent enough budget to process the results and finish; importantly,
         even a one-item fan-out cannot consume the parent's entire remainder.
 
+        A share below :data:`MIN_SUBAGENT_BUDGET` is refused instead of
+        spawned: each sub-agent resumes the parent's whole chat context,
+        so its very first LLM step can cost a few cents, and a child
+        whose budget cannot cover even that step is killed on step 1
+        having done nothing.  Recursive fan-outs used to divide the
+        remainder into such doomed slivers (each nesting level splits by
+        ``num_tasks + 1``), burning budget on children that all returned
+        "Task failed".  Refusing with a plain :class:`KISSError` — not
+        :class:`BudgetExceededError`, which aborts the whole agent —
+        surfaces an actionable tool error so the parent model does the
+        work inline instead.
+
         Args:
             num_tasks: Number of parallel sub-agent tasks about to spawn.
 
@@ -991,7 +1110,9 @@ class SorcarAgent(RelentlessAgent):
             sub-agents then fall back to their default budget.
 
         Raises:
-            KISSError: If the task has no remaining budget.
+            BudgetExceededError: If the task has no remaining budget.
+            KISSError: If the per-child share would be below
+                :data:`MIN_SUBAGENT_BUDGET`.
         """
         raw_max_budget = getattr(self, "max_budget", None)
         if raw_max_budget is None:
@@ -1006,7 +1127,23 @@ class SorcarAgent(RelentlessAgent):
                 f"sub-agents (${max_budget - remaining:.4f} / "
                 f"${max_budget:.2f})."
             )
-        return remaining if num_tasks <= 0 else remaining / (num_tasks + 1)
+        if num_tasks <= 0:
+            return remaining
+        share = remaining / (num_tasks + 1)
+        # 1e-9 tolerance: budget arithmetic is float subtraction, so a
+        # mathematically exact floor share (e.g. (1.13-0.13)/2 per child)
+        # can land a few ULPs below 0.50 and must not be refused with a
+        # self-contradictory "$0.50 is below the $0.50 minimum" message.
+        if share < MIN_SUBAGENT_BUDGET - 1e-9:
+            raise KISSError(
+                f"Refusing to spawn {num_tasks} parallel sub-agent(s): the "
+                f"remaining budget ${remaining:.2f} gives each sub-agent "
+                f"only ${share:.2f}, below the ${MIN_SUBAGENT_BUDGET:.2f} "
+                "minimum a sub-agent needs to do useful work. Do the work "
+                "inline yourself (without run_parallel), or fan out fewer "
+                "tasks."
+            )
+        return share
 
     def _subagent_parent_tab_id(self) -> str:
         """Return the frontend tab id sub-agents should call their parent.
@@ -1098,6 +1235,7 @@ class SorcarAgent(RelentlessAgent):
                     getattr(self, "_system_prompt_suffix", "") or ""
                 ),
                 web_tools=self._use_web_tools,
+                use_memory=self._use_memory_override,
             )
         finally:
             # stop() joins the monitor BEFORE the offsets bump below so a
@@ -1488,6 +1626,8 @@ class SorcarAgent(RelentlessAgent):
             self._show_model_in_picker(model_name)
             return f"Model changed from {previous_name} to {model_name}."
 
+        if self._memory_tools is not None:
+            tools.extend(self._memory_tools.tools())
         skill_tool = make_skill_tool(self.work_dir or ".")
         if skill_tool is not None:
             tools.append(skill_tool)
@@ -1817,6 +1957,7 @@ class SorcarAgent(RelentlessAgent):
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None,
         tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
+        use_memory: bool | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -1880,12 +2021,26 @@ class SorcarAgent(RelentlessAgent):
                 result.  Applies to this agent only, not to
                 ``run_parallel`` sub-agents.  Defaults to None (no
                 hook).
+            use_memory: Per-run persistent-memory toggle
+                (:mod:`kiss.core.memoryfield`).  ``True`` gives the
+                run the ``memory_*`` tools and the ``MEMORY_PROTOCOL``
+                prompt block, ``False`` withholds them, and ``None``
+                (the default) falls back to the ``KISS_USE_MEMORY``
+                environment variable / the stored ``use_memory``
+                setting (see :func:`_memory_settings`).  A boolean
+                never bypasses the hard gates of
+                :func:`_memory_root_for_run` (stripped basic tools,
+                Docker runs, run-to-completion CLI models, a caller
+                ``model_config["system_instruction"]``).  Forwarded to
+                every ``run_parallel`` sub-agent, so one override
+                governs the whole task tree.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
+        self._use_memory_override = use_memory
         self._is_parallel = is_parallel
         self._append_basic_tools = append_basic_tools
         # Stored on self (not just a local) so the ``run_parallel``
@@ -1900,6 +2055,7 @@ class SorcarAgent(RelentlessAgent):
         # tree, exactly like a *base_system_prompt* replacement.
         self._system_prompt_suffix = system_prompt if system_prompt else ""
         self.web_use_tool = None
+        self._memory_tools = None
         tl = getattr(printer, "_thread_local", None) if printer else None
         self._stop_event = getattr(tl, "stop_event", None) if tl else None
         try:
@@ -1924,6 +2080,18 @@ class SorcarAgent(RelentlessAgent):
                 (self._base_system_prompt or default_base_prompt)
                 + (system_prompt if system_prompt else "")
             )
+            memory_root = _memory_root_for_run(
+                self._append_basic_tools,
+                docker_image,
+                self._resolve_model_name(model_name),
+                caller_system_instruction=bool(
+                    (model_config or {}).get("system_instruction")
+                ),
+                use_memory_override=use_memory,
+            )
+            if memory_root is not None:
+                self._memory_tools = MemoryTools(memory_root)
+                system_instructions += "\n\n" + MEMORY_PROTOCOL
             prompt = prompt_template
             if attachments:
                 parts = _attachment_parts(attachments)
@@ -1964,6 +2132,7 @@ class SorcarAgent(RelentlessAgent):
             if self.web_use_tool:
                 self.web_use_tool.close()
             self.web_use_tool = None
+            self._memory_tools = None
             self._ask_user_question_callback = None
             self.pre_step_hook = None
             self.tool_call_guard = None
@@ -2102,6 +2271,7 @@ def run_tasks_parallel(
     base_system_prompt: str = "",
     system_prompt_suffix: str = "",
     web_tools: bool = True,
+    use_memory: bool | None = None,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -2194,6 +2364,12 @@ def run_tasks_parallel(
             forwarded to each sub-agent's ``run``.  A parent running
             without web tools (``run(web_tools=False)``) passes False
             so its children cannot re-acquire the browser it was denied.
+        use_memory: Per-run persistent-memory toggle forwarded to each
+            sub-agent's ``run`` (see :meth:`SorcarAgent.run`'s
+            *use_memory*), so a parent run's explicit override governs
+            its whole task tree.  ``None`` (the default) lets each
+            sub-agent fall back to the environment/config default,
+            exactly like the parent did.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -2278,6 +2454,7 @@ def run_tasks_parallel(
                 base_system_prompt=base_system_prompt,
                 system_prompt=system_prompt_suffix or None,
                 web_tools=web_tools,
+                use_memory=use_memory,
             )
             return result
         except KeyboardInterrupt:

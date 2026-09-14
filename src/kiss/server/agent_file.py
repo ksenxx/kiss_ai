@@ -73,6 +73,7 @@ PARAM_FIELDS: tuple[tuple[str, str], ...] = (
     ("scope_work_dir", "tabScopeWorkDir"),
     ("use_web_tools", "webTools"),
     ("classify_tasks", "classifyTasks"),
+    ("use_memory", "useMemory"),
     ("is_parallel", "useParallel"),
 )
 """The overridable ``run`` parameters, as ``(getter_name, wire_field)`` pairs.
@@ -91,9 +92,13 @@ daemon-side getter could never take effect.
 ``scope_work_dir()`` (wire field ``tabScopeWorkDir``) overrides the
 tab-bar visibility scope of the run's tab; an empty override scopes
 the tab to the run's work directory, like an empty client-sent
-``scope_work_dir``.  ``use_web_tools()`` (wire field ``webTools``) and
-``classify_tasks()`` (wire field ``classifyTasks``) return a bool for
-a per-run override or ``None`` to fall back to the persisted setting;
+``scope_work_dir``.  ``use_web_tools()`` (wire field ``webTools``),
+``classify_tasks()`` (wire field ``classifyTasks``), and
+``use_memory()`` (wire field ``useMemory``) return a bool for a
+per-run override or ``None`` to fall back to the daemon's default —
+the persisted setting, except that ``use_memory``'s fallback also
+honours a non-empty ``KISS_USE_MEMORY`` environment variable over the
+stored value (``sorcar_agent._memory_settings``);
 ``is_parallel()`` (wire field ``useParallel``) returns a bool.
 ``parent_task_id`` / ``parent_tab_id`` (wire fields ``parentTaskId``
 / ``parentTabId``) are absent by design: they are the
@@ -179,10 +184,13 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
     ):
         ok = isinstance(value, bool)
         expected = "a bool"
-    elif param in ("use_web_tools", "classify_tasks"):
-        # ``None`` means "no per-run override": the task runner then
-        # falls back to the persisted setting, exactly like an absent
-        # ``webTools`` / ``classifyTasks`` wire field.
+    elif param in ("use_web_tools", "classify_tasks", "use_memory"):
+        # ``None`` means "no per-run override": the run then falls back
+        # to the daemon's default, exactly like an absent ``webTools``
+        # / ``classifyTasks`` / ``useMemory`` wire field — the
+        # persisted setting for the first two; for ``use_memory`` a
+        # non-empty ``KISS_USE_MEMORY`` environment variable wins over
+        # the stored value (``sorcar_agent._memory_settings``).
         ok = value is None or isinstance(value, bool)
         expected = "a bool or None"
     elif param == "max_budget":

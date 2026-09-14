@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import sys
 import threading
@@ -49,31 +50,117 @@ _API_BASE = "https://openapi.zalo.me/v2.0/oa"
 _config = ChannelConfig(_ZALO_DIR, ("access_token",))
 
 
+def _scrub_config_token() -> None:
+    """Remove a vault-migrated ``access_token`` from config.json.
+
+    Finishes the Muse migration automatically: the non-secret ``oa_id``
+    metadata is kept and the file is deleted when nothing but the token
+    was stored.
+    """
+    try:
+        cfg = json.loads(_config.path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(cfg, dict) or "access_token" not in cfg:
+        return
+    kept = {k: str(v) for k, v in cfg.items() if k != "access_token" and v}
+    if kept:
+        from kiss.agents.third_party_agents._channel_agent_utils import save_json_config
+
+        save_json_config(_config.path, kept)
+    else:
+        _config.clear()
+
+
 class ZaloChannelBackend(ToolMethodBackend):
     """Channel backend for Zalo OA API.
 
     Uses webhook queue pattern for receiving inbound messages.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, api_base: str = "") -> None:
+        self._api_base_override = api_base
         self._access_token: str = ""
         self._oa_id: str = ""
+        self._http: Any = requests
+        self._muse: bool = False
         self._message_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self._webhook_server: ThreadedHTTPServer | None = None
         self._webhook_thread: threading.Thread | None = None
         self._connection_info: str = ""
 
+
+    def _api_base(self) -> str:
+        """Return the OA API base URL, resolved at call time.
+
+        Precedence: the constructor override, then ``$ZALO_API_BASE``,
+        then the module-level ``_API_BASE`` — read per call so tests
+        that repoint the module global after constructing a backend
+        still take effect.
+
+        Returns:
+            The API base URL string.
+        """
+        return self._api_base_override or os.environ.get("ZALO_API_BASE") or _API_BASE
+
     def _headers(self) -> dict[str, str]:
+        if self._muse:
+            # ``_access_token`` holds a surrogate: the daemon swaps this
+            # bearer for the real ``access_token`` header (a header-kind
+            # vault credential) at the network boundary.
+            return {"Authorization": f"Bearer {self._access_token}"}
         return {"access_token": self._access_token}
+
+    def _wire_muse(self) -> bool:
+        """Acquire a Zalo surrogate and wire the boundary session.
+
+        An ``access_token`` still in the legacy config is the newest
+        user intent (initial migration, or a rotation done while Muse
+        was off): it is enrolled as a header-kind credential (Zalo sends
+        the token in an ``access_token`` request header) replacing any
+        vault entry, and scrubbed from ``config.json`` only after the
+        vault holds it.  No network round trip happens here.
+
+        Returns:
+            True when the backend holds a surrogate and boundary session.
+        """
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            MuseBoundarySession,
+            mint_surrogate,
+            store_credentials,
+        )
+
+        cfg = _config.load_metadata() or {}
+        token = cfg.get("access_token", "")
+        if token:
+            store_credentials(
+                "zalo", {"kind": "header", "header": "access_token", "token": token}, []
+            )
+        handle = mint_surrogate("zalo")
+        if handle is None:
+            self._connection_info = "No Zalo credential in the Muse vault or config."
+            return False
+        _scrub_config_token()
+        self._oa_id = cfg.get("oa_id", "")
+        self._access_token = handle.token
+        self._http = MuseBoundarySession("zalo")
+        self._muse = True
+        return True
 
     def connect(self) -> bool:
         """Load Zalo config and start webhook server."""
-        cfg = _config.load()
-        if not cfg:  # pragma: no branch
-            self._connection_info = "No Zalo config found."
-            return False
-        self._access_token = cfg["access_token"]
-        self._oa_id = cfg.get("oa_id", "")
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            if not self._wire_muse():
+                return False
+        else:
+            cfg = _config.load()
+            if not cfg:  # pragma: no branch
+                self._connection_info = "No Zalo config found."
+                return False
+            self._access_token = cfg["access_token"]
+            self._oa_id = cfg.get("oa_id", "")
         self._connection_info = "Zalo OA configured"
         if not self._start_webhook_server():  # pragma: no branch
             return False
@@ -159,8 +246,8 @@ class ZaloChannelBackend(ToolMethodBackend):
             JSON string with ok status.
         """
         try:
-            resp = requests.post(
-                f"{_API_BASE}/message/text",
+            resp = self._http.post(
+                f"{self._api_base()}/message/text",
                 headers=self._headers(),
                 json={"recipient": {"user_id": to_user_id}, "message": {"text": text}},
                 timeout=30,
@@ -195,8 +282,8 @@ class ZaloChannelBackend(ToolMethodBackend):
             msg: dict[str, Any] = {"attachment": attachment}
             if caption:  # pragma: no branch
                 msg["text"] = caption
-            resp = requests.post(
-                f"{_API_BASE}/message",
+            resp = self._http.post(
+                f"{self._api_base()}/message",
                 headers=self._headers(),
                 json={"recipient": {"user_id": to_user_id}, "message": msg},
                 timeout=30,
@@ -221,8 +308,8 @@ class ZaloChannelBackend(ToolMethodBackend):
             JSON string with user profile.
         """
         try:
-            resp = requests.get(
-                f"{_API_BASE}/getprofile",
+            resp = self._http.get(
+                f"{self._api_base()}/getprofile",
                 headers=self._headers(),
                 params={"user_id": user_id},
                 timeout=30,
@@ -245,8 +332,8 @@ class ZaloChannelBackend(ToolMethodBackend):
             JSON string with follower list.
         """
         try:
-            resp = requests.get(
-                f"{_API_BASE}/getfollowers",
+            resp = self._http.get(
+                f"{self._api_base()}/getfollowers",
                 headers=self._headers(),
                 params={"offset": offset, "count": min(count, 50)},
                 timeout=30,
@@ -265,8 +352,8 @@ class ZaloChannelBackend(ToolMethodBackend):
             JSON string with OA info (name, id, description, etc).
         """
         try:
-            resp = requests.get(
-                f"{_API_BASE}/getoa",
+            resp = self._http.get(
+                f"{self._api_base()}/getoa",
                 headers=self._headers(),
                 timeout=30,
             )
@@ -288,8 +375,8 @@ class ZaloChannelBackend(ToolMethodBackend):
             JSON string with message list.
         """
         try:
-            resp = requests.get(
-                f"{_API_BASE}/listrecentchat",
+            resp = self._http.get(
+                f"{self._api_base()}/listrecentchat",
                 headers=self._headers(),
                 params={"offset": offset, "count": count},
                 timeout=30,
@@ -315,8 +402,8 @@ class ZaloChannelBackend(ToolMethodBackend):
             JSON string with conversation messages.
         """
         try:
-            resp = requests.get(
-                f"{_API_BASE}/conversation",
+            resp = self._http.get(
+                f"{self._api_base()}/conversation",
                 headers=self._headers(),
                 params={"user_id": user_id, "offset": str(offset), "count": str(count)},
                 timeout=30,
@@ -339,8 +426,8 @@ class ZaloChannelBackend(ToolMethodBackend):
         """
         try:
             with open(file_path, "rb") as f:
-                resp = requests.post(
-                    f"{_API_BASE}/upload/image",
+                resp = self._http.post(
+                    f"{self._api_base()}/upload/image",
                     headers=self._headers(),
                     files={"file": (Path(file_path).name, f)},
                     timeout=60,
@@ -354,12 +441,81 @@ class ZaloChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
+def _muse_authenticate(backend: ZaloChannelBackend, access_token: str, oa_id: str) -> str:
+    """Enroll a Zalo OA token into the Muse vault and validate it.
+
+    The plaintext token goes straight into the vault as a header-kind
+    credential (Zalo's ``access_token`` request header), atomically
+    replacing any previous enrollment, and is never written to
+    ``config.json`` (only the non-secret ``oa_id`` metadata is — written
+    first, so a failed enrollment leaves no token on disk).  Validation
+    runs ``/getoa`` through the daemon boundary, so it is audited; an
+    invalid token leaves the vault empty.
+
+    Args:
+        backend: The agent's Zalo backend to (re)wire.
+        access_token: Zalo OA access token.
+        oa_id: Optional Official Account ID metadata.
+
+    Returns:
+        JSON string with the validation result.
+    """
+    import contextlib
+
+    from kiss.agents.third_party_agents._channel_agent_utils import save_json_config
+    from kiss.agents.third_party_agents.muse_auth.client import (
+        clear_credentials,
+        store_credentials,
+    )
+
+    try:
+        if oa_id:
+            save_json_config(_config.path, {"oa_id": oa_id})
+        else:
+            _config.clear()
+        store_credentials(
+            "zalo", {"kind": "header", "header": "access_token", "token": access_token}, []
+        )
+        if backend._wire_muse():  # pragma: no branch - credential was just stored
+            result = json.loads(backend.get_oa_info())
+            if result.get("ok"):
+                return json.dumps({"ok": True, "message": "Zalo credentials saved (Muse-auth)."})
+            error = json.dumps({"ok": False, "error": "Could not verify credentials."})
+        else:  # pragma: no cover - defense in depth
+            error = json.dumps({"ok": False, "error": backend._connection_info})
+    except Exception as e:
+        error = json.dumps({"ok": False, "error": str(e)})
+    # Roll the vault back so a bad token is not left enrolled.
+    with contextlib.suppress(Exception):
+        clear_credentials("zalo")
+    backend._access_token = ""
+    backend._http = requests
+    backend._muse = False
+    return error
+
+
 class ZaloAgent(BaseChannelAgent):
     """Channel agent with Zalo OA API tools."""
 
     def __init__(self) -> None:
         super().__init__("Zalo Agent")
         self._backend = ZaloChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+            # Muse-auth mode: wire a vault surrogate and the boundary
+            # session (no network round trip); the real token never
+            # enters this process once migrated.  A daemon failure
+            # leaves the agent constructible (fail closed, tokenless)
+            # so its authenticate/clear tools stay available.
+            try:
+                self._backend._wire_muse()
+            except MuseAuthError as e:
+                self._backend._access_token = ""
+                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            return
         cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._access_token = cfg["access_token"]
@@ -408,6 +564,10 @@ class ZaloAgent(BaseChannelAgent):
             """
             if not access_token.strip():  # pragma: no branch
                 return "access_token cannot be empty."
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                return _muse_authenticate(agent._backend, access_token.strip(), oa_id.strip())
             agent._backend._access_token = access_token.strip()
             agent._backend._oa_id = oa_id.strip()
             try:
@@ -428,6 +588,14 @@ class ZaloAgent(BaseChannelAgent):
             _config.clear()
             agent._backend._access_token = ""
             agent._backend._oa_id = ""
+            agent._backend._http = requests
+            agent._backend._muse = False
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("zalo")
             return "Zalo authentication cleared."
 
         return [check_zalo_auth, authenticate_zalo, clear_zalo_auth]
@@ -436,6 +604,13 @@ class ZaloAgent(BaseChannelAgent):
 def _make_backend() -> ZaloChannelBackend:
     """Create a configured backend for channel poll mode."""
     backend = ZaloChannelBackend()
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    if muse_auth_enabled():
+        if backend._wire_muse():
+            return backend
+        print("Not authenticated. Run: kiss-zalo -t 'authenticate'")
+        sys.exit(1)
     cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-zalo -t 'authenticate'")

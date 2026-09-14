@@ -202,6 +202,42 @@ def load_json_config(path: Path, required_keys: tuple[str, ...]) -> dict[str, st
     return result
 
 
+@contextlib.contextmanager
+def config_file_lock(path: Path) -> Iterator[None]:
+    """Serialize read-modify-write cycles on a config file.
+
+    Acquires an exclusive ``fcntl.flock`` on a ``<name>.lock`` sibling
+    of *path*, shared by every config writer across threads AND
+    processes: :func:`save_json_config` and :func:`clear_json_config`
+    take it around each write, and read-modify-write helpers (the
+    Muse-auth secret scrubbers) hold it across their whole
+    read-compare-replace cycle, making that cycle a true compare-and-
+    swap — a newer value another writer lands can only arrive before
+    the cycle's read (so the comparison sees it) or after its write
+    (so it survives), never in between.
+
+    ``flock`` is NOT reentrant across separate opens, even in one
+    thread: code already holding this lock must write with the raw
+    primitives (:func:`write_private_file`, ``Path.unlink``), never via
+    :func:`save_json_config`/:func:`clear_json_config`.
+
+    Args:
+        path: The config file whose writers must be serialized.
+
+    Yields:
+        None while the lock is held.
+    """
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.parent / (path.name + ".lock"), "a+b") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
 def write_private_file(path: Path, content: str) -> None:
     """Write *content* to *path* atomically with owner-only permissions.
 
@@ -230,21 +266,30 @@ def write_private_file(path: Path, content: str) -> None:
 def save_json_config(path: Path, data: dict[str, str]) -> None:
     """Save a JSON config file atomically with restricted permissions.
 
+    Takes :func:`config_file_lock`, so the write serializes against
+    concurrent read-modify-write cycles (the Muse-auth scrubbers);
+    never call this while already holding that lock.
+
     Args:
         path: Config file path.
         data: String dictionary to persist.
     """
-    write_private_file(path, json.dumps(data, indent=2))
+    with config_file_lock(path):
+        write_private_file(path, json.dumps(data, indent=2))
 
 
 def clear_json_config(path: Path) -> None:
     """Delete a JSON config file if it exists.
 
+    Takes :func:`config_file_lock` (see :func:`save_json_config`);
+    never call this while already holding that lock.
+
     Args:
         path: Config file path.
     """
-    if path.exists():
-        path.unlink()
+    with config_file_lock(path):
+        if path.exists():
+            path.unlink()
 
 
 class ChannelConfig:
@@ -287,6 +332,26 @@ class ChannelConfig:
         """
         return load_json_config(self.path, self.required_keys)
 
+    def load_metadata(self) -> dict[str, str] | None:
+        """Load the config without enforcing the required keys.
+
+        Muse-auth migration scrubs the secret key out of ``config.json``
+        while non-secret settings (``base_url``, ``channel_model_name``,
+        ...) survive; :meth:`load` would report such a file as invalid,
+        but metadata readers still need those settings.
+
+        Returns:
+            The stored string dictionary, or ``None`` when the file is
+            missing or not a JSON object.
+        """
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        return {str(k): str(v) for k, v in data.items()}
+
     def save(self, data: dict[str, str]) -> None:
         """Save *data* to the config file with restricted permissions.
 
@@ -298,6 +363,28 @@ class ChannelConfig:
     def clear(self) -> None:
         """Delete the config file if it exists."""
         clear_json_config(self.path)
+
+    def scrub_secrets(self, secret_keys: tuple[str, ...]) -> None:
+        """Remove vault-migrated secret keys from ``config.json``.
+
+        Finishes a Muse-auth migration automatically: non-secret
+        metadata keys survive (readable via :meth:`load_metadata`) and
+        the file is deleted when nothing but the secrets was stored.
+
+        Args:
+            secret_keys: Keys holding real credentials (e.g. ``("token",)``).
+        """
+        try:
+            cfg = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(cfg, dict) or not any(k in cfg for k in secret_keys):
+            return
+        kept = {str(k): str(v) for k, v in cfg.items() if k not in secret_keys and v}
+        if kept:
+            save_json_config(self.path, kept)
+        else:
+            self.clear()
 
 
 _BREAKER_FAILURE_LIMIT = 5
@@ -599,6 +686,25 @@ def derive_state_path(
         return cfg.path.parent / file_name
     slug = sanitize_state_component(agent_label or agent_cls.__name__)
     return kiss_home() / "third_party_agents" / "channel_state" / slug / file_name
+
+
+def channel_override_config(agent_cls: type) -> dict[str, str] | None:
+    """Return the persisted config metadata of an agent class's module.
+
+    Reads the module-level :class:`ChannelConfig` without enforcing its
+    required keys: a Muse-scrubbed ``config.json`` keeps its channel
+    model/budget overrides even after the secret key is gone.
+
+    Args:
+        agent_cls: The channel agent class whose module holds ``_config``.
+
+    Returns:
+        The stored string dictionary, or ``None`` when the module has no
+        :class:`ChannelConfig` or the file is missing/invalid.
+    """
+    module = sys.modules.get(agent_cls.__module__)
+    module_config = getattr(module, "_config", None) if module is not None else None
+    return module_config.load_metadata() if isinstance(module_config, ChannelConfig) else None
 
 
 def resolve_channel_overrides(
@@ -1741,6 +1847,28 @@ def channel_main(
         _build_run_kwargs,
         _print_run_stats,
     )
+    # Import the canonical key store before any backend or connector
+    # code runs: a direct CLI invocation does not inherit the kiss-web
+    # daemon's environment, so ``KISS_MUSE_AUTH`` (the Muse-auth
+    # opt-out) and channel tokens in ``$KISS_HOME/api_keys.env`` must
+    # reach ``os.environ`` before the first ``muse_auth_enabled()``
+    # check or credential migration — not when the API server happens
+    # to start later.  ``vscode_config`` needs POSIX file locking; on
+    # platforms without ``fcntl`` (Windows) there is no daemon-written
+    # canonical store to import, so the CLI must keep working without it.
+    try:
+        from kiss.core.vscode_config import load_api_keys, load_api_keys_readonly
+    except ImportError:
+        pass
+    else:
+        # A read-only $KISS_HOME (the store's lock file cannot be
+        # created) must neither stop the CLI nor drop a canonical
+        # KISS_MUSE_AUTH=0 opt-out: fall back to the lock-free,
+        # write-free import.
+        try:
+            load_api_keys()
+        except OSError:
+            load_api_keys_readonly()
 
     if len(sys.argv) <= 1:  # pragma: no branch
         parts = [f"Usage: {cli_name} [-m MODEL] [-e ENDPOINT] [-b BUDGET]"]
@@ -1825,9 +1953,7 @@ def channel_main(
         from kiss.core import config as core_config
         from kiss.core.models.model_info import get_default_model
 
-        module = sys.modules.get(agent_cls.__module__)
-        module_config = getattr(module, "_config", None) if module is not None else None
-        cfg = module_config.load() if isinstance(module_config, ChannelConfig) else None
+        cfg = channel_override_config(agent_cls)
         model_name, max_budget = resolve_channel_overrides(
             cfg,
             args.model_name,

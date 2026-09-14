@@ -38,7 +38,10 @@ script serves as its own tools file — the daemon-built agent gets the
 channel's authenticated API tools (credentials persisted under
 ``~/.kiss``) on top of the standard tools (bash, files, browser) — and
 the sub-task runs in the channel agents' shared work directory
-(``~/.kiss/channel_work``).  For a path-named agent script, whatever
+(``~/.kiss/channel_work``), outside the project git lifecycle: like a
+cron dispatch, a channel dispatch passes ``use_worktree=False``,
+``auto_commit=False``, and ``classify_tasks=False``, so no git
+worktree is ever created for it (see ``_dispatch``).  For a path-named agent script, whatever
 getters the file defines (``tools``, ``model``,
 ``system_prompt``, ...) configure the session the same way; a
 relative path is resolved against the CALLING task's work directory
@@ -267,6 +270,7 @@ def _dispatch(
     timeout: float,
     parent_agent: Any = None,
     scope_work_dir: str = "",
+    git_lifecycle: bool = True,
 ) -> str:
     """Submit an agent-script task to the kiss-web daemon and wait.
 
@@ -301,6 +305,21 @@ def _dispatch(
             *work_dir* (a channel/cron scratch directory).  Empty
             (standalone tools-file use) leaves the scope falling back
             to *work_dir*.
+        git_lifecycle: Whether the sub-task runs through the standard
+            project git lifecycle (worktree isolation + auto-commit +
+            pre-run task classification).  ``False`` — the channel
+            mode — dispatches with ``use_worktree=False``,
+            ``auto_commit=False``, and ``classify_tasks=False``: a
+            channel session acts on an external service from a scratch
+            directory (``~/.kiss/channel_work``), so worktree setup
+            would only copy whatever git repository happens to enclose
+            that directory (a dirty repo at ``$HOME`` once stalled a
+            gmail dispatch for minutes copying 65 GB before the task
+            could even start), and classification must be pinned off
+            because an ``is_development`` verdict overrides an
+            explicit ``use_worktree=False``
+            (``WorktreeSorcarAgent.run``).  An agent script's own
+            getters still win over all three values on the daemon.
 
     Returns:
         The sub-task's YAML result ("success" and "summary" keys), or
@@ -340,6 +359,9 @@ def _dispatch(
             parent_task_id=parent_task_id,
             parent_tab_id=parent_tab_id,
             model=model_name,
+            use_worktree=git_lifecycle,
+            auto_commit=git_lifecycle,
+            classify_tasks=None if git_lifecycle else False,
             max_budget=budget,
             timeout=timeout,
             stop_on_timeout=True,
@@ -467,7 +489,10 @@ def _run_agent(
         # same way — its tools() supplies the cron_job tool and
         # its work_dir()/use_worktree()/auto_commit()
         # getters keep the session in ~/.kiss/cron/work, out of the
-        # calling project's git lifecycle.
+        # calling project's git lifecycle.  ``git_lifecycle=False``
+        # additionally pins classification off, because an
+        # ``is_development`` verdict would override even the getters'
+        # ``use_worktree() -> False`` (see ``_dispatch``).
         from kiss.agents.sorcar import cron_agent
 
         return _dispatch(
@@ -475,6 +500,7 @@ def _run_agent(
             str(cron_agent.__file__), cron_agent.work_dir(),
             model_name, budget, wait, parent_agent,
             scope_work_dir=parent_work_dir,
+            git_lifecycle=False,
         )
     channels = available_channels()
     matches = [name for name in channels if _squash(name) == squashed]
@@ -537,7 +563,8 @@ def _run_agent(
     try:
         return _dispatch(channel, prompt, str(module.__file__),
                          work_dir, model_name, budget, wait, parent_agent,
-                         scope_work_dir=parent_work_dir)
+                         scope_work_dir=parent_work_dir,
+                         git_lifecycle=False)
     finally:
         exit_workspace(workspace)
 

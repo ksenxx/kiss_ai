@@ -2707,6 +2707,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           Full reference (the <code>kiss-web</code> daemon, chat-client features, every <code>run()</code> option, skills, and MCP discovery): <a href="https://github.com/ksenxx/kiss_ai/blob/main/README.md#using-kiss-sorcar" target="_blank" rel="noopener"><strong>Full client reference →</strong></a>
         </p>
       </div>
+      <div class="inner-card" style="--i:1">
+        <h3>Persistent agent memory</h3>
+        <p>On by default: standard Sorcar runs get seven <code>memory_*</code> tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks (not for Docker runs, <code>cc/*</code>/<code>codex/*</code> models, runs that drop the built-in toolset, or runs whose <code>model_config</code> supplies its own <code>system_instruction</code>). Pages are Markdown files under <code>~/.kiss/memories</code> with a SQLite vector index (OpenAI embeddings when an <code>OPENAI_API_KEY</code> is available, otherwise a fully offline hashed embedder). Toggle it — or point it at a custom directory — in the Settings panel, set <code>KISS_USE_MEMORY=0</code>, or override per run with <code>sorcar.run(..., use_memory=...)</code>.</p>
+      </div>
     </div>
   </section>
   </div>
@@ -2770,9 +2774,13 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <span class="chip">PostgreSQL (<code>kiss-postgres</code>)</span>
         </div>
       </div>
-      <div class="inner-card" style="--i:2">
+      <div class="inner-card" style="--i:2;margin-bottom:1.1rem;">
         <h3>Plus: smart-home control</h3>
         <p>A <strong>Govee smart-home CLI</strong> for controlling IoT lights — on/off, brightness, color, and color temperature — directly via the Govee Developer API.</p>
+      </div>
+      <div class="inner-card" style="--i:3">
+        <h3>Credential isolation (Muse auth)</h3>
+        <p>On Linux, credentials for the 22 Muse-supported connectors (the six Google services — Google Chat's service-account mode excepted — plus Slack, GitHub, Notion, Discord, Home Assistant, Firecrawl, Brave Search, ntfy, Govee, LINE, Mattermost, Nextcloud Talk, Synology Chat, Twitch, Zalo, and BlueBubbles) are isolated by default behind a Meta-Muse-style security boundary: legacy tokens auto-migrate into a vault owned by a local auth daemon on first use (a one-time hand-off of the real credential; plaintext copies are then scrubbed on a best-effort basis), after which the agent process holds only opaque surrogate tokens that the daemon swaps for the real ones at the network edge, and every boundary-routed API request is host-allowlisted, classified read vs. write, and checked against an allow/deny/ask policy with an audit log. Reads are allowed by default; writes ask for a grant. Manage it with <code>python -m kiss.agents.third_party_agents.muse_auth</code>; opt out with <code>KISS_MUSE_AUTH=0</code>.</p>
       </div>
     </div>
   </section>

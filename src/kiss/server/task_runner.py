@@ -1530,6 +1530,15 @@ class _TaskRunnerMixin:
             _agent_budget = coerce_budget_override(cmd.get("maxBudget"))
             _raw_web = cmd.get("webTools")
             _agent_web = _raw_web if isinstance(_raw_web, bool) else None
+            # Per-run persistent-memory toggle: the ``useMemory`` wire
+            # field (``use_memory`` on ``kiss.server.sorcar.run``).
+            # Absent or malformed means "no override" (``None``) — the
+            # agent then resolves the KISS_USE_MEMORY environment
+            # variable / persisted ``use_memory`` setting itself
+            # (``sorcar_agent._memory_settings``), so unlike
+            # ``webTools`` no config fallback is read here.
+            _raw_memory = cmd.get("useMemory")
+            _agent_memory = _raw_memory if isinstance(_raw_memory, bool) else None
             # Absent or malformed means the default (True): only a
             # client that explicitly sent ``false`` strips the agent
             # down to ``finish`` plus its own tools.
@@ -1625,6 +1634,7 @@ class _TaskRunnerMixin:
                         auto_commit=state.auto_commit_mode,
                         max_budget=(_agent_budget if _agent_budget is not None else _cfg_budget),
                         web_tools=(_agent_web if _agent_web is not None else _cfg_web),
+                        use_memory=_agent_memory,
                         model_config=(
                             _agent_model_config
                             if _agent_model_config is not None

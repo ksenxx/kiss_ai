@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import requests
@@ -28,12 +29,305 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
+    config_file_lock,
+    write_private_file,
 )
 
 _TELEGRAM_DIR = Path.home() / ".kiss" / "third_party_agents" / "telegram"
 _config = ChannelConfig(_TELEGRAM_DIR, ("bot_token",))
 
 _DEFAULT_API_BASE = "https://api.telegram.org"
+
+
+def _raw_config() -> dict[str, Any]:
+    """Return the legacy config parsed WITHOUT type coercion.
+
+    ``ChannelConfig.load_metadata`` stringifies every value, which would
+    turn a JSON boolean ``true`` into the credential string ``"True"``;
+    migration must see the real JSON types so a malformed config is
+    rejected, not coerced.
+
+    Returns:
+        The parsed config dict, or ``{}`` when missing or not an object.
+    """
+    try:
+        data = json.loads(_config.path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _scrub_config_token(expected: str | None = None) -> None:
+    """Remove a vault-migrated ``bot_token`` from config.json.
+
+    Finishes the Muse migration automatically: any non-secret settings
+    survive and the file is deleted when nothing but the token was
+    stored (the usual case — Telegram's config holds only the token).
+
+    The whole read-compare-replace cycle runs under
+    :func:`config_file_lock`, which every config writer shares, so it
+    is a true compare-and-swap: a newer token a concurrent writer
+    lands either arrives before the read (the comparison sees it and
+    the scrub backs off) or after the replacement (it survives), never
+    in between.
+
+    Args:
+        expected: When given, the exact token that was migrated; the
+            key is scrubbed only if the config still holds that value.
+            A concurrent writer that replaced it with a NEWER token
+            since the migration is left untouched (its value must not
+            be deleted — it never made it into the vault).
+    """
+    with config_file_lock(_config.path):
+        try:
+            cfg = json.loads(_config.path.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(cfg, dict) or "bot_token" not in cfg:
+            return
+        if expected is not None and cfg.get("bot_token") != expected:
+            return
+        kept = {k: str(v) for k, v in cfg.items() if k != "bot_token" and v}
+        # Raw primitives: config_file_lock is not reentrant, so the
+        # locked save_json_config/clear_json_config must not be used.
+        if kept:
+            write_private_file(_config.path, json.dumps(kept, indent=2))
+        elif _config.path.exists():  # pragma: no branch - read above proved it exists
+            _config.path.unlink()
+
+
+def _ns_message(msg: dict[str, Any] | None) -> Any:
+    """Convert a Bot API message dict into an SDK-shaped namespace.
+
+    Args:
+        msg: The ``message``/``channel_post`` dict, or None.
+
+    Returns:
+        A namespace with ``message_id``/``text``/``chat``/``from_user``
+        attributes, or None when *msg* is empty.
+    """
+    if not msg:
+        return None
+    sender = msg.get("from")
+    return SimpleNamespace(
+        message_id=msg.get("message_id"),
+        text=msg.get("text"),
+        chat=SimpleNamespace(id=(msg.get("chat") or {}).get("id")),
+        from_user=SimpleNamespace(id=sender.get("id")) if sender else None,
+    )
+
+
+class _MuseTelegramBot:
+    """Telegram Bot API adapter that executes at the Muse boundary.
+
+    Duck-types the slice of ``python-telegram-bot``'s sync ``Bot``
+    surface the backend uses, speaking raw Bot API JSON: each request
+    URL embeds the SURROGATE in the token path segment
+    (``/bot<surrogate>/<Method>``) and the daemon splices in the real
+    bot token — a path-kind vault credential — just before the send,
+    so this process never holds it.
+
+    Attributes:
+        token: The surrogate token; ``_bot_token`` reads it for the
+            backend's direct Bot API calls (poll/typing), which flow
+            through the same boundary.
+    """
+
+    def __init__(self, backend: TelegramChannelBackend, surrogate: str) -> None:
+        from kiss.agents.third_party_agents.muse_auth.client import MuseBoundarySession
+
+        self._backend = backend
+        self.token = surrogate
+        self._session = MuseBoundarySession("telegram")
+
+    def _call(
+        self,
+        api_method: str,
+        payload: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+    ) -> Any:
+        """Execute one Bot API method at the boundary.
+
+        The API base is read from the backend per call, so tests can
+        re-point an already-wired backend at an emulator.
+
+        Args:
+            api_method: Bot API method name (e.g. ``"getMe"``).
+            payload: JSON payload (or multipart form fields with
+                *files*).
+            files: Optional ``requests``-style file mapping for uploads.
+
+        Returns:
+            The response envelope's ``result`` value.
+
+        Raises:
+            RuntimeError: On an error envelope or HTTP error (mirroring
+                the SDK, which raises ``TelegramError``); Sentinel
+                denials surface here with their grant instructions.
+        """
+        url = f"{self._backend._api_base}/bot{self.token}/{api_method}"
+        headers = {"Authorization": f"Bearer {self.token}"}
+        if files:
+            resp = self._session.request(
+                "POST", url, headers=headers, data=payload, files=files, timeout=120
+            )
+        else:
+            resp = self._session.request(
+                "POST", url, headers=headers, json=payload or {}, timeout=30
+            )
+        try:
+            data = resp.json() if resp.content else {}
+        except ValueError:
+            data = {}
+        if not (isinstance(data, dict) and data.get("ok")):
+            detail = ""
+            if isinstance(data, dict):
+                error = data.get("error")
+                detail = str(
+                    data.get("description")
+                    or (error.get("message", "") if isinstance(error, dict) else "")
+                )
+            raise RuntimeError(
+                f"Telegram API {api_method} failed: HTTP {resp.status_code} {detail[:300]}"
+            )
+        return data.get("result")
+
+    def get_me(self) -> Any:
+        """Return the bot's own user namespace."""
+        user = self._call("getMe") or {}
+        return SimpleNamespace(
+            id=user.get("id"),
+            username=user.get("username"),
+            first_name=user.get("first_name"),
+        )
+
+    def send_message(
+        self, chat_id: Any, text: str, reply_to_message_id: int | None = None
+    ) -> Any:
+        """Send a text message; returns a namespace with ``message_id``."""
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if reply_to_message_id is not None:
+            payload["reply_to_message_id"] = reply_to_message_id
+        result = self._call("sendMessage", payload) or {}
+        return SimpleNamespace(message_id=result.get("message_id"))
+
+    def send_photo(self, chat_id: Any, photo: Any, caption: str | None = None) -> Any:
+        """Send a photo by URL or open file object."""
+        payload: dict[str, Any] = {"chat_id": chat_id}
+        if caption:
+            payload["caption"] = caption
+        if isinstance(photo, str):
+            payload["photo"] = photo
+            result = self._call("sendPhoto", payload)
+        else:
+            result = self._call("sendPhoto", payload, files={"photo": photo})
+        return SimpleNamespace(message_id=(result or {}).get("message_id"))
+
+    def send_document(self, chat_id: Any, document: Any, caption: str = "") -> Any:
+        """Send a document from an open file object."""
+        payload: dict[str, Any] = {"chat_id": chat_id}
+        if caption:
+            payload["caption"] = caption
+        result = self._call("sendDocument", payload, files={"document": document})
+        return SimpleNamespace(message_id=(result or {}).get("message_id"))
+
+    def edit_message_text(self, chat_id: Any, message_id: int, text: str) -> None:
+        """Edit a message's text."""
+        self._call(
+            "editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text}
+        )
+
+    def delete_message(self, chat_id: Any, message_id: int) -> None:
+        """Delete a message."""
+        self._call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+
+    def pin_chat_message(self, chat_id: Any, message_id: int) -> None:
+        """Pin a message."""
+        self._call("pinChatMessage", {"chat_id": chat_id, "message_id": message_id})
+
+    def unpin_chat_message(self, chat_id: Any, message_id: int) -> None:
+        """Unpin one message."""
+        self._call("unpinChatMessage", {"chat_id": chat_id, "message_id": message_id})
+
+    def unpin_all_chat_messages(self, chat_id: Any) -> None:
+        """Unpin every message in a chat."""
+        self._call("unpinAllChatMessages", {"chat_id": chat_id})
+
+    def get_chat(self, chat_id: Any) -> Any:
+        """Return a chat namespace (id, title, type, username, description)."""
+        chat = self._call("getChat", {"chat_id": chat_id}) or {}
+        return SimpleNamespace(
+            id=chat.get("id"),
+            title=chat.get("title"),
+            type=chat.get("type"),
+            username=chat.get("username"),
+            description=chat.get("description"),
+        )
+
+    def get_chat_member_count(self, chat_id: Any) -> int:
+        """Return the number of members in a chat."""
+        return int(self._call("getChatMemberCount", {"chat_id": chat_id}) or 0)
+
+    def get_chat_member(self, chat_id: Any, user_id: int) -> Any:
+        """Return a chat-member namespace (user, status)."""
+        member = self._call("getChatMember", {"chat_id": chat_id, "user_id": user_id}) or {}
+        user = member.get("user") or {}
+        return SimpleNamespace(
+            user=SimpleNamespace(
+                id=user.get("id"),
+                username=user.get("username"),
+                first_name=user.get("first_name"),
+            ),
+            status=member.get("status"),
+        )
+
+    def ban_chat_member(self, chat_id: Any, user_id: int) -> None:
+        """Ban a user from a chat."""
+        self._call("banChatMember", {"chat_id": chat_id, "user_id": user_id})
+
+    def unban_chat_member(self, chat_id: Any, user_id: int) -> None:
+        """Unban a user from a chat."""
+        self._call("unbanChatMember", {"chat_id": chat_id, "user_id": user_id})
+
+    def get_updates(
+        self, offset: int | None = None, limit: int = 10, timeout: int = 0
+    ) -> list[Any]:
+        """Return recent updates as SDK-shaped namespaces."""
+        payload: dict[str, Any] = {"limit": limit, "timeout": timeout}
+        if offset is not None:
+            payload["offset"] = offset
+        updates = self._call("getUpdates", payload) or []
+        return [
+            SimpleNamespace(
+                update_id=u.get("update_id"),
+                message=_ns_message(u.get("message")),
+                channel_post=_ns_message(u.get("channel_post")),
+            )
+            for u in updates
+        ]
+
+    def send_poll(
+        self, chat_id: Any, question: str, options: list[str], is_anonymous: bool = True
+    ) -> Any:
+        """Send a poll; returns a namespace with ``message_id``."""
+        result = self._call(
+            "sendPoll",
+            {
+                "chat_id": chat_id,
+                "question": question,
+                "options": options,
+                "is_anonymous": is_anonymous,
+            },
+        ) or {}
+        return SimpleNamespace(message_id=result.get("message_id"))
+
+    def forward_message(self, chat_id: Any, from_chat_id: Any, message_id: int) -> Any:
+        """Forward a message; returns a namespace with ``message_id``."""
+        result = self._call(
+            "forwardMessage",
+            {"chat_id": chat_id, "from_chat_id": from_chat_id, "message_id": message_id},
+        ) or {}
+        return SimpleNamespace(message_id=result.get("message_id"))
 
 
 class TelegramChannelBackend(ToolMethodBackend):
@@ -50,6 +344,72 @@ class TelegramChannelBackend(ToolMethodBackend):
         self._last_update_id: int = -1
         self._connection_info: str = ""
         self._api_base: str = _DEFAULT_API_BASE
+        self._http: Any = requests
+        self._muse: bool = False
+
+    def _request_headers(self) -> dict[str, str]:
+        """Return headers for direct Bot API calls (poll/typing).
+
+        In Muse mode the surrogate bearer identifies the request at the
+        daemon, which swaps the URL's ``/bot<surrogate>/`` path segment
+        for the real token at the boundary; legacy mode needs no
+        headers because the real token is already in the URL.
+
+        Returns:
+            Header dict for :attr:`_http` requests.
+        """
+        if self._muse:
+            return {"Authorization": f"Bearer {self._bot_token()}"}
+        return {}
+
+    def _wire_muse(self) -> bool:
+        """Acquire a Telegram surrogate and wire the boundary transport.
+
+        On the FIRST migration (the vault holds no ``telegram``
+        credential yet) a ``bot_token`` in the legacy config seeds the
+        vault as a path-kind credential and is scrubbed from
+        ``config.json`` afterwards.  Once the vault holds a credential
+        it is authoritative: a bare config token is NOT auto-applied,
+        because an unvalidated config value (a typo, a bad rotation
+        done while Muse was off) must never clobber a working vault
+        credential — rotations go through ``authenticate_telegram``,
+        which validates the candidate before replacing anything.  No
+        network round trip happens here.
+
+        Returns:
+            True when the backend holds a surrogate-backed adapter.
+        """
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            MuseBoundarySession,
+            mint_surrogate,
+            store_credentials,
+        )
+
+        migrated = False
+        token = _raw_config().get("bot_token")
+        if isinstance(token, str) and token:
+            # Store-if-absent is ATOMIC in the daemon: a config token
+            # seeds the vault only when it holds no credential yet, and
+            # a concurrent authoritative writer can never be clobbered
+            # by this stale config candidate.  A non-string/malformed
+            # token is refused by store_credentials (path-splice
+            # validation) before anything is enrolled or scrubbed.
+            migrated = store_credentials(
+                "telegram", {"kind": "path", "token": token}, [], only_if_absent=True
+            )
+        handle = mint_surrogate("telegram")
+        if handle is None:
+            self._connection_info = "No Telegram credential in the Muse vault or config."
+            return False
+        if migrated and isinstance(token, str):
+            # Compare-and-scrub: only remove the token we actually
+            # migrated, so a newer token a concurrent writer placed in
+            # config between the store and here is not deleted.
+            _scrub_config_token(expected=token)
+        self._bot = _MuseTelegramBot(self, handle.token)
+        self._http = MuseBoundarySession("telegram")
+        self._muse = True
+        return True
 
     def _bot_token(self) -> str:
         """Return the bot token from the live Bot or the stored config.
@@ -66,6 +426,29 @@ class TelegramChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Authenticate with Telegram using the stored bot token."""
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+        from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+        if muse_auth_enabled():
+            # Vault-first surrogate wiring; the getMe validation below
+            # runs through the daemon boundary (audited).  A malformed
+            # legacy-config token makes the daemon refuse enrollment
+            # (MuseAuthError); fail closed with a bool like the legacy
+            # path rather than letting it escape this documented -> bool
+            # method.
+            try:
+                if not self._wire_muse():
+                    return False
+            except MuseAuthError as e:
+                self._connection_info = f"Telegram auth failed: {e}"
+                return False
+            try:
+                me = self._bot.get_me()
+                self._connection_info = f"Authenticated as @{me.username}"
+                return True
+            except Exception as e:
+                self._connection_info = f"Telegram auth failed: {e}"
+                return False
         cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Telegram token found."
@@ -126,8 +509,9 @@ class TelegramChannelBackend(ToolMethodBackend):
             payload: dict[str, Any] = {"timeout": 0, "limit": min(limit, 100)}
             if candidates:
                 payload["offset"] = max(candidates)
-            response = requests.post(
+            response = self._http.post(
                 f"{self._api_base}/bot{self._bot_token()}/getUpdates",
+                headers=self._request_headers(),
                 json=payload,
                 timeout=30,
             )
@@ -193,8 +577,9 @@ class TelegramChannelBackend(ToolMethodBackend):
             if not token:
                 return
             cid: Any = int(channel_id) if channel_id.lstrip("-").isdigit() else channel_id
-            requests.post(
+            self._http.post(
                 f"{self._api_base}/bot{token}/sendChatAction",
+                headers=self._request_headers(),
                 json={"chat_id": cid, "action": "typing"},
                 timeout=30,
             )
@@ -543,6 +928,151 @@ class TelegramChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
+def _probe_candidate_token(backend: TelegramChannelBackend, bot_token: str) -> tuple[str, Any]:
+    """Validate a candidate bot token without touching the live enrollment.
+
+    The candidate is enrolled under the scratch service
+    ``telegram-pending`` (which inherits Telegram's host pinning and
+    action classification), a ``getMe`` probe runs through the audited
+    daemon boundary, and the scratch entry is removed again — so a
+    rejected rotation can never destroy an existing working
+    ``telegram`` vault credential.
+
+    Args:
+        backend: The agent's Telegram backend (supplies the API base).
+        bot_token: Candidate bot token (already path-splice-validated).
+
+    Returns:
+        ``("", user_dict)`` on success (the ``getMe`` result), or
+        ``(error_message, {})`` when the API rejects the token.
+    """
+    import contextlib
+    import secrets
+
+    from kiss.agents.third_party_agents.muse_auth.client import (
+        MuseBoundarySession,
+        clear_credentials,
+        mint_surrogate,
+        store_credentials,
+    )
+
+    # A per-attempt unique scratch service (``telegram-pending-<hex>``)
+    # so two concurrent validations can never probe or clear each
+    # other's candidate; it still resolves to ``telegram`` for host and
+    # policy inheritance via service_root.
+    scratch = f"telegram-pending-{secrets.token_hex(8)}"
+    store_credentials(scratch, {"kind": "path", "token": bot_token}, [])
+    try:
+        handle = mint_surrogate(scratch)
+        if handle is None:  # pragma: no cover - defense in depth
+            return "could not mint a scratch validation surrogate", {}
+        resp = MuseBoundarySession(scratch).request(
+            "POST",
+            f"{backend._api_base}/bot{handle.token}/getMe",
+            headers={"Authorization": f"Bearer {handle.token}"},
+            json={},
+            timeout=30,
+        )
+        try:
+            data = resp.json() if resp.content else {}
+        except ValueError:
+            data = {}
+        if isinstance(data, dict) and data.get("ok"):
+            return "", dict(data.get("result") or {})
+        detail = ""
+        if isinstance(data, dict):
+            error = data.get("error")
+            detail = str(
+                data.get("description")
+                or (error.get("message", "") if isinstance(error, dict) else "")
+            )
+        return f"Telegram API getMe failed: HTTP {resp.status_code} {detail[:300]}", {}
+    finally:
+        with contextlib.suppress(Exception):
+            clear_credentials(scratch)
+
+
+def _muse_authenticate(backend: TelegramChannelBackend, bot_token: str) -> str:
+    """Enroll a Telegram bot token into the Muse vault and validate it.
+
+    The candidate is validated FIRST, against a scratch ``-pending``
+    enrollment, so a rejected token mutates nothing — neither the
+    config nor an existing working vault credential.  Only a proven
+    token replaces the live enrollment; the plaintext is never written
+    to ``config.json`` (any legacy copy there is removed).  If the
+    swap itself fails midway, the pre-call config bytes are restored —
+    the vault is never cleared, because whichever credential it holds
+    at that point (the untouched old one or the just-validated new
+    one) is worth keeping.
+
+    Args:
+        backend: The agent's Telegram backend to (re)wire.
+        bot_token: Bot token from @BotFather.
+
+    Returns:
+        JSON string with the validation result.
+    """
+    import contextlib
+
+    from kiss.agents.third_party_agents.muse_auth._common import valid_credential_path_value
+    from kiss.agents.third_party_agents.muse_auth.client import store_credentials
+
+    if not valid_credential_path_value(bot_token):
+        # Pre-validate with the vault's own path-splice rule so a
+        # doomed enrollment never mutates any stored state.
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "bot_token contains characters that are not URL-path-safe; "
+                "copy it exactly from @BotFather.",
+            }
+        )
+    try:
+        failure, user = _probe_candidate_token(backend, bot_token)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)})
+    if failure:
+        return json.dumps({"ok": False, "error": failure})
+    try:
+        prev_raw: str | None = _config.path.read_text()
+    except OSError:
+        prev_raw = None
+    try:
+        # The Telegram config exists only to hold the token, which now
+        # lives in the vault; remove any plaintext copy first.
+        _config.clear()
+        store_credentials("telegram", {"kind": "path", "token": bot_token}, [])
+        if backend._wire_muse():  # pragma: no branch - credential was just stored
+            return json.dumps(
+                {
+                    "ok": True,
+                    "message": "Telegram token saved and validated (Muse-auth).",
+                    "username": user.get("username"),
+                    "id": user.get("id"),
+                }
+            )
+        error = json.dumps(  # pragma: no cover - defense in depth
+            {"ok": False, "error": backend._connection_info}
+        )
+    except Exception as e:
+        error = json.dumps({"ok": False, "error": str(e)})
+    # Restore the pre-call config bytes; a failed swap must not leave
+    # half-migrated state (the restored bytes are exactly what was on
+    # disk before, so no new secret lands in the file).
+    with contextlib.suppress(Exception):
+        if prev_raw is None:
+            _config.clear()
+        else:
+            # Atomic 0600 restore, serialized against every other
+            # config writer via the shared config lock.
+            with config_file_lock(_config.path):
+                write_private_file(_config.path, prev_raw)
+    backend._bot = None
+    backend._muse = False
+    backend._http = requests
+    return error
+
+
 class TelegramAgent(BaseChannelAgent):
     """Channel agent with Telegram Bot API tools.
 
@@ -555,6 +1085,22 @@ class TelegramAgent(BaseChannelAgent):
     def __init__(self) -> None:
         super().__init__("Telegram Agent")
         self._backend = TelegramChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+            # Muse-auth mode: wire a vault surrogate and the boundary
+            # adapter (no network round trip); the real token never
+            # enters this process once migrated.  A daemon failure
+            # leaves the agent constructible (fail closed, tokenless)
+            # so its authenticate/clear tools stay available.
+            try:
+                self._backend._wire_muse()
+            except MuseAuthError as e:
+                self._backend._bot = None
+                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            return
         cfg = _config.load()
         if cfg:  # pragma: no branch
             try:
@@ -609,6 +1155,10 @@ class TelegramAgent(BaseChannelAgent):
             bot_token = bot_token.strip()
             if not bot_token:  # pragma: no branch
                 return "bot_token cannot be empty."
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                return _muse_authenticate(agent._backend, bot_token)
             try:
                 from telegram import Bot
 
@@ -635,6 +1185,14 @@ class TelegramAgent(BaseChannelAgent):
             """
             _config.clear()
             agent._backend._bot = None
+            agent._backend._muse = False
+            agent._backend._http = requests
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            if muse_auth_enabled():
+                from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
+
+                clear_credentials("telegram")
             return "Telegram authentication cleared."
 
         return [check_telegram_auth, authenticate_telegram, clear_telegram_auth]
@@ -643,6 +1201,18 @@ class TelegramAgent(BaseChannelAgent):
 def _make_backend() -> TelegramChannelBackend:
     """Create a configured backend for channel poll mode."""
     backend = TelegramChannelBackend()
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+    from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+    if muse_auth_enabled():
+        try:
+            wired = backend._wire_muse()
+        except MuseAuthError:
+            wired = False
+        if wired:
+            return backend
+        print("Not authenticated. Run: kiss-telegram -t 'authenticate'")
+        sys.exit(1)
     cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-telegram -t 'authenticate'")

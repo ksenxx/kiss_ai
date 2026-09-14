@@ -180,6 +180,12 @@ class FakePanelManager {
   registerSerializer() {
     return makeDisposable();
   }
+  watchEditorTabs() {
+    return makeDisposable();
+  }
+  ensureChatOpen() {
+    return undefined;
+  }
   activeController() {
     return undefined;
   }

@@ -568,15 +568,18 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     }
                 )
             )
+            # The ready handshake fans out getModels / getInputHistory /
+            # getConfig and sends focusInput, but the replies arrive in no
+            # guaranteed order and the server may interleave unsolicited
+            # broadcasts (e.g. tasks_updated when other tasks on the machine
+            # touch the task DB), so read until every expected type has
+            # arrived rather than a fixed number of messages.
+            expected = {"models", "inputHistory", "configData", "focusInput"}
             received_types: set[str] = set()
-            for _ in range(5):
-                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+            while not expected <= received_types:
+                raw = await asyncio.wait_for(ws.recv(), timeout=10)
                 ev = json.loads(raw)
                 received_types.add(ev["type"])
-            self.assertIn("models", received_types)
-            self.assertIn("inputHistory", received_types)
-            self.assertIn("configData", received_types)
-            self.assertIn("focusInput", received_types)
             self.assertNotIn("welcome_suggestions", received_types)
 
     async def test_ws_ready_does_not_produce_unknown_error(self) -> None:
