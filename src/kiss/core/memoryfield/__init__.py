@@ -5,13 +5,13 @@
 """File-based agent memory with a SQLite vector index (the memoryfield pattern).
 
 A memory is a flat directory of short Markdown pages with YAML frontmatter
-(:mod:`kiss.agents.memoryfield.pages`) plus one regenerable SQLite index of
-embeddings (:mod:`kiss.agents.memoryfield.index`). :class:`MemoryTools` turns
-that into seven agent tools; :mod:`kiss.agents.memoryfield.evaluate` measures
+(:mod:`kiss.core.memoryfield.pages`) plus one regenerable SQLite index of
+embeddings (:mod:`kiss.core.memoryfield.index`). :class:`MemoryTools` turns
+that into seven agent tools; :mod:`kiss.core.memoryfield.evaluate` measures
 recall against real past Sorcar tasks.
 """
 
-from kiss.agents.memoryfield.index import (
+from kiss.core.memoryfield.index import (
     DEFAULT_EMBEDDING_MODEL,
     ModelEmbedder,
     SearchHit,
@@ -20,8 +20,8 @@ from kiss.agents.memoryfield.index import (
     default_embedder,
     hashed_embedding,
 )
-from kiss.agents.memoryfield.pages import MemoryDir, Page
-from kiss.agents.memoryfield.tools import MEMORY_PROTOCOL, MemoryTools
+from kiss.core.memoryfield.pages import MemoryDir, Page
+from kiss.core.memoryfield.tools import MEMORY_PROTOCOL, MemoryTools
 
 __all__ = [
     "DEFAULT_EMBEDDING_MODEL",

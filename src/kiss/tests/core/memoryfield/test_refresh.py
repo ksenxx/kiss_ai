@@ -6,9 +6,9 @@
 
 from pathlib import Path
 
-from kiss.agents.memoryfield.index import VectorIndex, hashed_embedding
-from kiss.agents.memoryfield.pages import MemoryDir
-from kiss.agents.memoryfield.tools import MemoryTools
+from kiss.core.memoryfield.index import VectorIndex, hashed_embedding
+from kiss.core.memoryfield.pages import MemoryDir
+from kiss.core.memoryfield.tools import MemoryTools
 
 
 def make_tools(root: Path) -> MemoryTools:

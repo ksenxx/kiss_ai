@@ -29,7 +29,7 @@ page per topic.
 
 Run::
 
-    uv run python -m kiss.agents.memoryfield.evaluate --limit 300 --llm-probes 40
+    uv run python -m kiss.core.memoryfield.evaluate --limit 300 --llm-probes 40
 """
 
 import argparse
@@ -47,14 +47,14 @@ from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 
-from kiss.agents.memoryfield.index import (
+from kiss.core.memoryfield.index import (
     DEFAULT_EMBEDDING_MODEL,
     HASHED_EMBEDDING_MODEL_CODE,
     ModelEmbedder,
     VectorIndex,
     hashed_embedding,
 )
-from kiss.agents.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, slugify
+from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, slugify
 
 logger = logging.getLogger(__name__)
 

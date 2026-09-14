@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.memoryfield.evaluate import (
+from kiss.core.memoryfield.evaluate import (
     HAND_PROBES,
     HASHED_EMBEDDING_MODEL_CODE,
     KeywordIndex,
@@ -37,8 +37,8 @@ from kiss.agents.memoryfield.evaluate import (
     task_families,
     task_page_body,
 )
-from kiss.agents.memoryfield.index import VectorIndex, hashed_embedding
-from kiss.agents.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir
+from kiss.core.memoryfield.index import VectorIndex, hashed_embedding
+from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir
 
 live_api = pytest.mark.live_api
 requires_anthropic = pytest.mark.skipif(

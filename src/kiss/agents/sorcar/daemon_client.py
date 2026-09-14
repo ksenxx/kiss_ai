@@ -563,7 +563,7 @@ def run(
             configured default (the settings panel's "Classify tasks
             before running" checkbox, persisted as ``classify_tasks``).
         use_memory: Per-task persistent-memory override
-            (``kiss.agents.memoryfield``), mapped to the agent's
+            (``kiss.core.memoryfield``), mapped to the agent's
             ``use_memory`` toggle
             (:meth:`kiss.agents.sorcar.sorcar_agent.SorcarAgent.run`).
             ``True`` gives the run (and its ``run_parallel``

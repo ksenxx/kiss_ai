@@ -20,7 +20,6 @@ from typing import Any, cast
 
 import pytest
 
-from kiss.agents.memoryfield.tools import MEMORY_PROTOCOL
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
@@ -28,6 +27,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     _memory_settings,
     run_tasks_parallel,
 )
+from kiss.core.memoryfield.tools import MEMORY_PROTOCOL
 
 live_api = pytest.mark.live_api
 requires_keys = pytest.mark.skipif(

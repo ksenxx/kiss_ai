@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from operator import attrgetter
 from typing import Any
 
-from kiss.agents.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, split_frontmatter
+from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, split_frontmatter
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,17 @@ DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 HASHED_EMBEDDING_MODEL_CODE = "hashed-bow-v1"
 HASHED_EMBEDDING_DIMS = 1024
+
+# Version of the page-to-embedding-input mapping (see
+# :func:`embedding_text`), stored per row in the ``input_format`` column.
+# :meth:`VectorIndex.sync` re-embeds any row carrying a different value —
+# including rows that a still-running older process writes AFTER an
+# upgraded process has synced (rows written before this column existed
+# read as the column's default, ``'1'``).  The ``sha256`` column keeps the
+# plain content hash, so a pre-format process sees rows written by current
+# code as unchanged and the two versions never rebuild the index back and
+# forth.  Bump this whenever the mapping changes.
+EMBEDDING_INPUT_FORMAT = "2"
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
@@ -77,6 +88,22 @@ def hashed_embedding(text: str, dims: int = HASHED_EMBEDDING_DIMS) -> list[float
         sign = 1.0 if value & 1 else -1.0
         vector[(value >> 1) % dims] += sign * (1.0 + math.log(count))
     return normalize(vector)
+
+
+def embedding_text(raw: str) -> str:
+    """The searchable text of a page: title, summary and Markdown body.
+
+    Volatile frontmatter — the ``uuid`` and the ``created``/``updated``
+    timestamps — is excluded: embedding it made two writes of identical
+    content produce different vectors, and its random tokens leaked into
+    similarity scores as noise.
+
+    Args:
+        raw: Complete page text including frontmatter.
+    """
+    frontmatter, body = split_frontmatter(raw)
+    parts = [str(frontmatter[key]) for key in ("title", "summary") if frontmatter.get(key)]
+    return "\n".join([*parts, body])
 
 
 def normalize(vector: list[float]) -> list[float]:
@@ -241,8 +268,23 @@ class VectorIndex:
                 " frontmatter TEXT NOT NULL,"
                 " last_modified REAL NOT NULL,"
                 " sha256 BLOB NOT NULL,"
-                " embedding BLOB NOT NULL)"
+                " embedding BLOB NOT NULL,"
+                " input_format TEXT NOT NULL DEFAULT '1')"
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
+            if "input_format" not in columns:
+                # Index created before the input_format column existed; the
+                # default '1' marks its rows for re-embedding (they were
+                # embedded from the whole raw file, frontmatter included).
+                try:
+                    conn.execute(
+                        "ALTER TABLE pages ADD COLUMN input_format TEXT NOT NULL DEFAULT '1'"
+                    )
+                except sqlite3.OperationalError:
+                    # Another process added the column between the PRAGMA
+                    # read and the ALTER; the schema is as desired either
+                    # way.  (Unreachable in a single-process test run.)
+                    pass
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
@@ -265,25 +307,32 @@ class VectorIndex:
         return conn
 
     def embedding_input(self, raw: str) -> str:
-        """The text that gets embedded for a page: the whole file, capped at 8192 bytes.
+        """The text that gets embedded for a page, capped at 8192 bytes.
+
+        :func:`embedding_text` (title, summary and Markdown body — no
+        volatile frontmatter), truncated to :data:`MAX_PAGE_BYTES` of UTF-8.
 
         Args:
             raw: Complete page text including frontmatter.
         """
-        data = raw.encode("utf-8")
+        text = embedding_text(raw)
+        data = text.encode("utf-8")
         if len(data) <= MAX_PAGE_BYTES:
-            return raw
+            return text
         return data[:MAX_PAGE_BYTES].decode("utf-8", errors="ignore")
 
     def sync(self) -> SyncReport:
         """Bring the index in line with the pages on disk.
 
-        Pages whose sha256 is unchanged are skipped; new or modified pages
-        are re-embedded; rows for pages that no longer exist are removed.
-        Embeddings are computed with no database transaction open, and the
-        rows are then written in one short transaction. A page that changes
-        while it is being embedded is left for the next sync rather than
-        stored with a stale vector.
+        A page is skipped only when its stored sha256 matches AND its row
+        was embedded under the current :data:`EMBEDDING_INPUT_FORMAT`; new
+        or modified pages and rows embedded under an older input mapping —
+        even ones written by a still-running old process after this code
+        has synced — are re-embedded.  Rows for pages that no longer exist
+        are removed.  Embeddings are computed with no database transaction
+        open, and the rows are then written in one short transaction. A
+        page that changes while it is being embedded is left for the next
+        sync rather than stored with a stale vector.
 
         Returns:
             A :class:`SyncReport` with per-category counts.
@@ -291,10 +340,11 @@ class VectorIndex:
         added = updated = removed = unchanged = 0
         with closing(self._connect()) as conn:
             stored = {
-                row[0]: bytes(row[1]) for row in conn.execute("SELECT filename, sha256 FROM pages")
+                row[0]: (bytes(row[1]), row[2])
+                for row in conn.execute("SELECT filename, sha256, input_format FROM pages")
             }
 
-        rows: list[tuple[str, str, float, bytes, bytes]] = []
+        rows: list[tuple[str, str, float, bytes, bytes, str]] = []
         on_disk: set[str] = set()
         for name in self.memory.page_names():
             filename = f"{name}.md"
@@ -302,7 +352,7 @@ class VectorIndex:
             path = self.memory.page_path(name)
             data = path.read_bytes()
             digest = hashlib.sha256(data).digest()
-            if stored.get(filename) == digest:
+            if stored.get(filename) == (digest, EMBEDDING_INPUT_FORMAT):
                 unchanged += 1
                 continue
             raw = data.decode("utf-8", errors="replace")
@@ -320,6 +370,7 @@ class VectorIndex:
                     path.stat().st_mtime,
                     digest,
                     serialize_float32(vector),
+                    EMBEDDING_INPUT_FORMAT,
                 )
             )
             if filename in stored:
@@ -331,7 +382,8 @@ class VectorIndex:
         with closing(self._connect()) as conn, conn:
             conn.executemany(
                 "INSERT OR REPLACE INTO pages"
-                " (filename, frontmatter, last_modified, sha256, embedding) VALUES (?, ?, ?, ?, ?)",
+                " (filename, frontmatter, last_modified, sha256, embedding, input_format)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
                 rows,
             )
             conn.executemany("DELETE FROM pages WHERE filename = ?", [(f,) for f in stale])
@@ -402,8 +454,7 @@ class VectorIndex:
                 "SELECT filename, embedding FROM pages ORDER BY filename"
             ).fetchall()
         vectors = [
-            (str(filename)[:-3], deserialize_float32(bytes(blob)))
-            for filename, blob in rows
+            (str(filename)[:-3], deserialize_float32(bytes(blob))) for filename, blob in rows
         ]
         pairs: list[tuple[str, str, float]] = []
         for i, (name_a, vector_a) in enumerate(vectors):

@@ -22,7 +22,6 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.memoryfield.tools import MEMORY_PROTOCOL, MemoryTools
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
@@ -36,6 +35,7 @@ from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.core.kiss_error import BudgetExceededError, KISSError
+from kiss.core.memoryfield.tools import MEMORY_PROTOCOL, MemoryTools
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -148,7 +148,7 @@ def _memory_settings() -> tuple[bool, Path]:
     Returns:
         ``(enabled, root)`` where *root* is the memory page directory
         (created lazily on first write by
-        :class:`kiss.agents.memoryfield.pages.MemoryDir`).
+        :class:`kiss.core.memoryfield.pages.MemoryDir`).
     """
     from kiss.core.config import kiss_home
     from kiss.core.vscode_config import load_config
@@ -983,7 +983,7 @@ class SorcarAgent(RelentlessAgent):
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
         self.docker_manager: Any = None
-        # Persistent agent memory (kiss.agents.memoryfield), built per
+        # Persistent agent memory (kiss.core.memoryfield), built per
         # run by :meth:`run` when the ``use_memory`` config flag (or the
         # KISS_USE_MEMORY environment variable) enables it; None keeps
         # the run memory-free.  :meth:`_get_tools` registers its tools.
@@ -2022,7 +2022,7 @@ class SorcarAgent(RelentlessAgent):
                 ``run_parallel`` sub-agents.  Defaults to None (no
                 hook).
             use_memory: Per-run persistent-memory toggle
-                (:mod:`kiss.agents.memoryfield`).  ``True`` gives the
+                (:mod:`kiss.core.memoryfield`).  ``True`` gives the
                 run the ``memory_*`` tools and the ``MEMORY_PROTOCOL``
                 prompt block, ``False`` withholds them, and ``None``
                 (the default) falls back to the ``KISS_USE_MEMORY``

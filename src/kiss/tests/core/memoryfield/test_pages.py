@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from kiss.agents.memoryfield.pages import (
+from kiss.core.memoryfield.pages import (
     MemoryDir,
     is_debris,
     is_valid_page_name,

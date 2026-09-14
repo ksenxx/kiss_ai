@@ -9,7 +9,7 @@ This module implements the *data* half of the memoryfield pattern
 directory of short Markdown "pages". Each page may start with a YAML
 frontmatter block carrying ``title``, ``uuid``, ``summary``, ``created`` and
 ``updated``. The pages are the canonical data; the vector index built by
-:mod:`kiss.agents.memoryfield.index` is a regenerable cache.
+:mod:`kiss.core.memoryfield.index` is a regenerable cache.
 
 Only the standard library plus PyYAML (already a project dependency) is used.
 """

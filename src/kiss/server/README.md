@@ -208,7 +208,7 @@ The parameters without getters:
   panel's "Classify tasks before running" checkbox, persisted as
   `classify_tasks`).
 - **`use_memory()`** — per-run persistent agent memory
-  (`kiss.agents.memoryfield`): the seven `memory_*` tools plus the
+  (`kiss.core.memoryfield`): the seven `memory_*` tools plus the
   memory protocol prompt block.  `True` enables, `False` disables,
   `None` falls back to the daemon's configured default (the settings
   panel's "Use persistent memory" checkbox, persisted as

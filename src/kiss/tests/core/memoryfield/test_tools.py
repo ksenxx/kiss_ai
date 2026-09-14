@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.memoryfield.index import hashed_embedding
-from kiss.agents.memoryfield.tools import MEMORY_PROTOCOL, PULL_CHAR_LIMIT, MemoryTools
 from kiss.core.kiss_agent import KISSAgent
+from kiss.core.memoryfield.index import hashed_embedding
+from kiss.core.memoryfield.tools import MEMORY_PROTOCOL, PULL_CHAR_LIMIT, MemoryTools
 
 live_api = pytest.mark.live_api
 requires_keys = pytest.mark.skipif(
@@ -100,8 +100,13 @@ def test_tools_full_lifecycle(tmp_path: Path) -> None:
 def test_write_warns_when_page_exceeds_embedding_limit(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     result = tools.memory_write("big", "word " * 3000)
-    assert "Warning: page is" in result and "Split it into several pages." in result
+    assert "Warning: the page's searchable text" in result
+    assert "Split it into several pages." in result
     assert tools.memory_search("word")[0:5] != "No ma"
+    # The warning keys on the embedded text (title + summary + body), not the
+    # raw file size: frontmatter overhead alone must not trigger it.
+    result = tools.memory_write("fits", "word " * 1600, summary="s" * 100)
+    assert "Warning" not in result
 
 
 def test_pull_caps_total_output(tmp_path: Path) -> None:

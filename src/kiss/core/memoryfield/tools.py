@@ -13,8 +13,8 @@ a human in an editor, git pull) are searchable without a separate reindex.
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from kiss.agents.memoryfield.index import Embedder, SearchHit, VectorIndex
-from kiss.agents.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir
+from kiss.core.memoryfield.index import Embedder, SearchHit, VectorIndex, embedding_text
+from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir
 
 MEMORY_PROTOCOL = """\
 ## Memory
@@ -56,10 +56,10 @@ class MemoryTools:
     Args:
         root: The memory directory (created on first write).
         embed: Embedding function; defaults to
-            :func:`kiss.agents.memoryfield.index.default_embedder` — the
+            :func:`kiss.core.memoryfield.index.default_embedder` — the
             framework's ``text-embedding-3-small`` model when an
             ``OPENAI_API_KEY`` is available, else the fully offline
-            :func:`kiss.agents.memoryfield.index.hashed_embedding`.
+            :func:`kiss.core.memoryfield.index.hashed_embedding`.
         model_code: Overrides the embedding-model identifier used to name the
             index file.
     """
@@ -155,11 +155,13 @@ class MemoryTools:
         except ValueError as e:
             return f"Error: {e}"
         size = len(page.raw.encode("utf-8"))
+        embedded = len(embedding_text(page.raw).encode("utf-8"))
         note = ""
-        if size > MAX_PAGE_BYTES:
+        if embedded > MAX_PAGE_BYTES:
             note = (
-                f" Warning: page is {size} bytes; only the first {MAX_PAGE_BYTES} bytes are "
-                "embedded. Split it into several pages."
+                f" Warning: the page's searchable text (title, summary and body) is "
+                f"{embedded} bytes; only the first {MAX_PAGE_BYTES} bytes are embedded. "
+                "Split it into several pages."
             )
         return f"Wrote {page.name}.md ({size} bytes).{note}"
 
@@ -224,9 +226,7 @@ class MemoryTools:
         for name in self.memory.page_names():
             raw_updated = str(self.memory.read(name).frontmatter.get("updated", ""))
             try:
-                updated = datetime.strptime(raw_updated, "%Y-%m-%dT%H:%M:%SZ").replace(
-                    tzinfo=UTC
-                )
+                updated = datetime.strptime(raw_updated, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
             except ValueError:
                 continue
             if updated < cutoff:

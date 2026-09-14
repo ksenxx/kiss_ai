@@ -1,5 +1,6 @@
 """End-to-end tests for the SQLite vector index (offline embedder + live model)."""
 
+import hashlib
 import logging
 import math
 import os
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.memoryfield.index import (
+from kiss.core.memoryfield.index import (
     DEFAULT_EMBEDDING_MODEL,
     HASHED_EMBEDDING_MODEL_CODE,
     ModelEmbedder,
@@ -21,7 +22,7 @@ from kiss.agents.memoryfield.index import (
     normalize,
     serialize_float32,
 )
-from kiss.agents.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir
+from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir
 
 live_api = pytest.mark.live_api
 requires_openai = pytest.mark.skipif(
@@ -100,14 +101,16 @@ def test_index_sync_is_incremental_and_search_ranks(tmp_path: Path) -> None:
     hits = index.search("carbon fibre woks conduct heat", k=5)
     assert hits[0].name == "woks" and hits[0].title == "Carbon Fibre Woks" and hits[0].summary == ""
     assert hits[0].score > 0
-    # The unrelated page is (near-)orthogonal: the random uuid/timestamps in its
-    # frontmatter can collide with query buckets, so only its rank is fixed.
+    # Only title, summary and body are embedded (volatile frontmatter such as
+    # the uuid and timestamps is excluded), so scores are deterministic: the
+    # true match scores ~0.8 while the unrelated page's residual
+    # hash-collision score is ~0.07, so min_score=0.1 separates them.
     assert [
         h.name for h in index.search("carbon fibre woks conduct heat", k=5, min_score=-1.0)
     ] == ["woks", "dvv"]
-    assert [
-        h.name for h in index.search("carbon fibre woks conduct heat", k=5, min_score=0.05)
-    ] == ["woks"]
+    assert [h.name for h in index.search("carbon fibre woks conduct heat", k=5, min_score=0.1)] == [
+        "woks"
+    ]
     assert index.search("woks", k=0) == []
     assert index.search("woks", k=1)[0].name == "woks"
 
@@ -126,6 +129,99 @@ def test_index_sync_is_incremental_and_search_ranks(tmp_path: Path) -> None:
     index.clear()  # idempotent
     assert index.count() == 0
     assert index.sync().added == 2
+
+
+def test_embedding_ignores_volatile_frontmatter(tmp_path: Path) -> None:
+    """Rewriting identical content must reproduce the exact same vector.
+
+    ``MemoryDir.write`` generates a fresh ``uuid`` and timestamps for every
+    new page, so this only holds because ``embedding_input`` embeds nothing
+    but the title, the summary and the body.
+    """
+    memory = MemoryDir(tmp_path)
+    index = VectorIndex(memory, embed=hashed_embedding)
+    memory.write("woks", "Carbon fibre woks conduct heat.", title="Woks", summary="wok care")
+    index.sync()
+    with closing(sqlite3.connect(index.path)) as conn:
+        first = conn.execute("SELECT embedding FROM pages WHERE filename='woks.md'").fetchone()[0]
+
+    memory.delete("woks")
+    assert index.sync().removed == 1
+    memory.write("woks", "Carbon fibre woks conduct heat.", title="Woks", summary="wok care")
+    assert index.sync().added == 1
+    with closing(sqlite3.connect(index.path)) as conn:
+        second = conn.execute("SELECT embedding FROM pages WHERE filename='woks.md'").fetchone()[0]
+    assert bytes(first) == bytes(second)
+
+    raw = memory.read("woks").raw
+    assert index.embedding_input(raw) == "Woks\nwok care\nCarbon fibre woks conduct heat.\n"
+
+
+def test_old_input_format_rows_are_reembedded(tmp_path: Path) -> None:
+    """Rows embedded under an older input format are re-embedded exactly once.
+
+    Each row records the input-format version it was embedded under, so a
+    row marked with the pre-frontmatter-exclusion format ``'1'`` (what a
+    still-running old process writes, even AFTER a current-format sync) is
+    picked up and healed by the next sync.  The ``sha256`` column stays the
+    plain content hash, which is what keeps that old process from seeing
+    current rows as changed and rebuilding the index right back (the
+    mixed-version ping-pong found in review).
+    """
+    memory = MemoryDir(tmp_path)
+    memory.write("woks", "Carbon fibre woks conduct heat.")
+    memory.write("dvv", "Getting a Finnish personal identity code requires visiting DVV.")
+    index = VectorIndex(memory, embed=hashed_embedding)
+    assert index.sync().added == 2
+    raw_bytes = memory.page_path("dvv").read_bytes()
+    with closing(sqlite3.connect(index.path)) as conn:
+        good, sha = conn.execute(
+            "SELECT embedding, sha256 FROM pages WHERE filename='dvv.md'"
+        ).fetchone()
+    # Old-reader compatibility: current code stores the PLAIN content hash,
+    # so pre-format code (which compares plain sha256) sees rows unchanged.
+    assert bytes(sha) == hashlib.sha256(raw_bytes).digest()
+
+    # Overwrite one row the way pre-format code did: same plain sha256, a
+    # vector of the whole raw file (frontmatter included), and — via the
+    # column default — input_format '1'.
+    legacy_vector = normalize(hashed_embedding(raw_bytes.decode("utf-8")))
+    with closing(sqlite3.connect(index.path)) as conn, conn:
+        conn.execute(
+            "UPDATE pages SET embedding = ?, input_format = '1' WHERE filename = 'dvv.md'",
+            (serialize_float32(legacy_vector),),
+        )
+
+    report = index.sync()
+    assert (report.added, report.updated, report.removed, report.unchanged) == (0, 1, 0, 1)
+    with closing(sqlite3.connect(index.path)) as conn:
+        healed, fmt = conn.execute(
+            "SELECT embedding, input_format FROM pages WHERE filename='dvv.md'"
+        ).fetchone()
+    assert bytes(healed) == bytes(good) and fmt == "2"
+    assert index.sync().unchanged == 2  # healing converges: no rebuild loop
+    assert index.search("Finnish DVV", k=1)[0].name == "dvv"
+
+
+def test_pre_column_index_schema_is_migrated_and_reembedded(tmp_path: Path) -> None:
+    """An index file created before the input_format column existed is upgraded.
+
+    Connecting adds the column with default ``'1'``, which marks every
+    existing row as embedded under the old whole-raw-file mapping, so the
+    next sync re-embeds all pages.
+    """
+    memory = MemoryDir(tmp_path)
+    memory.write("woks", "Carbon fibre woks conduct heat.")
+    memory.write("dvv", "Getting a Finnish personal identity code requires visiting DVV.")
+    index = VectorIndex(memory, embed=hashed_embedding)
+    assert index.sync().added == 2
+    with closing(sqlite3.connect(index.path)) as conn, conn:
+        conn.execute("ALTER TABLE pages DROP COLUMN input_format")  # simulate the old schema
+
+    report = index.sync()
+    assert (report.added, report.updated, report.removed, report.unchanged) == (0, 2, 0, 0)
+    assert index.sync().unchanged == 2
+    assert index.search("Finnish DVV", k=1)[0].name == "dvv"
 
 
 def test_index_embedding_input_truncates_to_page_limit(tmp_path: Path) -> None:
