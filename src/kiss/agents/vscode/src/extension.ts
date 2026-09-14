@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import {SorcarSidebarView} from './SorcarSidebarView';
-import {CHAT_PANEL_VIEW_TYPE, SorcarPanelManager} from './SorcarPanelManager';
+import {SorcarPanelManager} from './SorcarPanelManager';
 import {getGitApi} from './gitApi';
 import {isReloadReady} from './reloadGuard';
 import {syncEditorActionsLocation} from './editorActionsLocation';
@@ -169,37 +169,17 @@ export function activate(context: vscode.ExtensionContext): void {
     void syncEditorActionsLocation(context, true);
   }
 
-  // How many editor tabs host a chat — live panels AND the serialized
-  // placeholders a window reload restores (indistinguishable in the
-  // tabGroups API). -1 when the API is absent (test stubs).
-  const chatEditorTabCount = (): number => {
-    const groups = vscode.window.tabGroups?.all;
-    if (!groups) return -1;
-    let count = 0;
-    for (const group of groups) {
-      for (const tab of group.tabs) {
-        const viewType = (tab.input as {viewType?: unknown} | null)?.viewType;
-        if (
-          typeof viewType === 'string' &&
-          viewType.includes(CHAT_PANEL_VIEW_TYPE)
-        ) {
-          count += 1;
-        }
-      }
-    }
-    return count;
-  };
-
-  // True when ANY editor tab hosts a chat panel. The workbench's
-  // restored chat tabs count too: after a window reload they exist as
-  // serialized placeholders long before the panel manager adopts them,
-  // and opening a "first" chat next to them would be a duplicate.
-  const hasChatEditorTab = (): boolean => {
-    const count = chatEditorTabCount();
-    // Guarded like the other optional host APIs (absent in test stubs).
-    if (count < 0) return panelManager!.panelCount > 0;
-    return count > 0;
-  };
+  // The editor-tabs-mode invariant — at least one chat editor tab is
+  // always open, as the sidebar strip always keeps one chat tab. The
+  // panel manager re-establishes it after every panel close; this
+  // covers the two closes it cannot observe from a panel: a restored
+  // placeholder closed before revival (tabGroups backstop) and a window
+  // that starts with the mode on and no chat tab at all (restored
+  // placeholders count, so a reload never gets a duplicate). The
+  // activation open stays in the background — the user did not ask
+  // for a chat right now.
+  context.subscriptions.push(panelManager.watchEditorTabs());
+  panelManager.ensureChatOpen({preserveFocus: true});
 
   // A chat tab another client created — or first ran a task in — since
   // the last registry snapshot (e.g. a task run in the remote web app)
@@ -219,11 +199,8 @@ export function activate(context: vscode.ExtensionContext): void {
     sidebarView.onRegistryTabsState(delta => {
       if (!editorTabsMode()) return;
       let toAdopt = delta.added;
-      if (
-        delta.firstSnapshot &&
-        (panelManager!.panelCount > 0 || hasChatEditorTab())
-      ) {
-        const tabCount = chatEditorTabCount();
+      if (delta.firstSnapshot && panelManager!.hasChatEditorTab()) {
+        const tabCount = panelManager!.chatEditorTabCount();
         if (tabCount >= 0 && tabCount === panelManager!.panelCount) {
           // Every chat editor tab is a LIVE panel the manager already
           // knows — no serialized placeholder is pending revival, so
@@ -248,11 +225,13 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   // A KS button brought the history panel on screen; an editor window
-  // with no chat tab at all also gets a fresh conversation.
+  // with no chat tab at all also gets a fresh conversation (the
+  // invariant normally holds already — this is the user asking for
+  // the chat, so a fresh one takes the focus).
   const openChatIfNoneOpen = (): void => {
-    if (!editorTabsMode()) return;
-    if (panelManager!.panelCount > 0 || hasChatEditorTab()) return;
-    void panelManager!.openNewChat().focusChatInput();
+    // Optional: a history-view visibility flip may land after
+    // deactivation cleared the module slot.
+    panelManager?.ensureChatOpen();
   };
 
   // The primary-sidebar history panel (editor-tabs mode): the same

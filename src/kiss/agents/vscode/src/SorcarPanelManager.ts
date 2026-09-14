@@ -66,6 +66,22 @@ interface ChatPanel {
    * dispose handler does not retire the chat from the daemon registry.
    */
   suppressCloseTab: boolean;
+  /**
+   * Raised when the USER closed the root chat from inside the webview
+   * (closeSelf with retire): the replacement chat that keeps the
+   * one-tab invariant then takes the keyboard focus, exactly like the
+   * sidebar strip's createNewTab focuses the fresh composer.
+   */
+  userClosed: boolean;
+}
+
+/** True when *tab* is an editor tab hosting a chat webview (live or a
+ * serialized placeholder the workbench has not revived yet). */
+function isChatEditorTab(tab: vscode.Tab): boolean {
+  const viewType = (tab.input as {viewType?: unknown} | null)?.viewType;
+  return (
+    typeof viewType === 'string' && viewType.includes(CHAT_PANEL_VIEW_TYPE)
+  );
 }
 
 function randomTabId(): string {
@@ -118,6 +134,10 @@ export class SorcarPanelManager {
   // after this are not user closes and must not retire chats from the
   // daemon's registry.
   private _shuttingDown: boolean = false;
+  // Raised while closeAll (mode switch off) disposes the panels: those
+  // disposals must not spawn a replacement chat tab — the chats move to
+  // the sidebar view.
+  private _closingAll: boolean = false;
 
   /**
    * @param _extensionUri The extension's root uri (chat HTML assets).
@@ -209,6 +229,88 @@ export class SorcarPanelManager {
     return this._panels.size;
   }
 
+  /**
+   * How many editor tabs host a chat — live panels AND the serialized
+   * placeholders a window reload restores (indistinguishable in the
+   * tabGroups API; a placeholder revives into a panel only when its
+   * tab is first shown). -1 when the API is absent (test stubs).
+   */
+  public chatEditorTabCount(): number {
+    const groups = vscode.window.tabGroups?.all;
+    if (!groups) return -1;
+    let count = 0;
+    for (const group of groups) {
+      for (const tab of group.tabs) {
+        if (isChatEditorTab(tab)) count += 1;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * True when ANY editor tab hosts a chat: a live panel or a restored
+   * placeholder awaiting revival. Opening a "first" chat next to a
+   * placeholder would be a duplicate, so every "is a chat open?"
+   * decision goes through this rather than panelCount alone.
+   */
+  public hasChatEditorTab(): boolean {
+    if (this._panels.size > 0) return true;
+    const count = this.chatEditorTabCount();
+    // Guarded like the other optional host APIs (absent in test stubs).
+    if (count < 0) return false;
+    return count > 0;
+  }
+
+  /**
+   * The editor-tabs-mode invariant: at least one chat editor tab is
+   * always open, exactly as the sidebar strip always keeps one chat
+   * tab (main.js closeTab -> createNewTab, reconcileTabs' placeholder).
+   * Opens a fresh conversation when no chat editor tab — live panel or
+   * restored placeholder — exists. A no-op while the mode is off, while
+   * closeAll is moving the chats to the sidebar, and during terminal
+   * teardown.
+   *
+   * @param opts preserveFocus: open the replacement in the background
+   *     (an automatic open the user did not ask for — activation, a
+   *     chat closed by another client); otherwise the fresh chat takes
+   *     the keyboard focus like the sidebar's createNewTab does.
+   * @returns The new chat's controller, or undefined when nothing
+   *     needed opening.
+   */
+  public ensureChatOpen(opts?: {
+    preserveFocus?: boolean;
+  }): SorcarSidebarView | undefined {
+    if (this._shuttingDown || this._closingAll) return undefined;
+    if (!SorcarPanelManager.modeEnabled()) return undefined;
+    if (this.hasChatEditorTab()) return undefined;
+    if (opts?.preserveFocus) {
+      return this._createPanel({tabId: randomTabId()}, {preserveFocus: true})
+        .controller;
+    }
+    const controller = this.openNewChat();
+    void controller.focusChatInput();
+    return controller;
+  }
+
+  /**
+   * Backstop for the one-tab invariant that the panel dispose handler
+   * cannot see: a chat editor tab closed WITHOUT ever becoming a live
+   * panel (a serialized placeholder the user closes before the
+   * workbench revives it fires no WebviewPanel.onDidDispose). Every
+   * chat tab close re-checks the invariant from the tabGroups model.
+   */
+  public watchEditorTabs(): vscode.Disposable {
+    const tabGroups = vscode.window.tabGroups;
+    // Guarded like the other optional host APIs (absent in test stubs).
+    if (!tabGroups || typeof tabGroups.onDidChangeTabs !== 'function') {
+      return {dispose: () => {}};
+    }
+    return tabGroups.onDidChangeTabs(e => {
+      if (!e.closed.some(isChatEditorTab)) return;
+      this.ensureChatOpen({preserveFocus: true});
+    });
+  }
+
   /** The controller of the most recently active chat panel, if any. */
   public activeController(): SorcarSidebarView | undefined {
     return this._activePanel()?.controller;
@@ -260,7 +362,7 @@ export class SorcarPanelManager {
         inRegistry: true,
       });
     }
-    if (this._panels.size === 0) this.openNewChat();
+    this.ensureChatOpen();
   }
 
   /**
@@ -359,9 +461,14 @@ export class SorcarPanelManager {
     // from `tabs_state`, and a stale memory could otherwise open a
     // long-vanished tab when the mode comes back.
     this._pendingAdoptions.clear();
-    for (const cp of [...this._panels.values()]) {
-      cp.suppressCloseTab = true;
-      cp.panel.dispose();
+    this._closingAll = true;
+    try {
+      for (const cp of [...this._panels.values()]) {
+        cp.suppressCloseTab = true;
+        cp.panel.dispose();
+      }
+    } finally {
+      this._closingAll = false;
     }
   }
 
@@ -442,6 +549,7 @@ export class SorcarPanelManager {
       panel,
       controller: undefined as unknown as SorcarSidebarView,
       suppressCloseTab: false,
+      userClosed: false,
     };
     // A revived panel may still carry the previous session's status
     // circle in its persisted title (the serializer strips it from
@@ -495,6 +603,16 @@ export class SorcarPanelManager {
       }
       cp.controller.dispose();
       this._refreshPoster();
+      // The last chat editor tab closing — by the user (tab X, or the
+      // root chat closed inside the webview), or because another
+      // client closed / displaced the chat — leaves the window without
+      // a chat, which the sidebar strip never allows: open a fresh one.
+      // The tabGroups model already reflects this close (the workbench
+      // updates it before disposing the editor input), so a restored
+      // placeholder still standing keeps this from duplicating it.
+      // Mode-off closes (closeAll) and teardown are skipped inside.
+      const userClose = !cp.suppressCloseTab || cp.userClosed;
+      this.ensureChatOpen({preserveFocus: !userClose});
     });
     this._refreshPoster();
     return cp;
@@ -610,6 +728,9 @@ export class SorcarPanelManager {
         // USER closed the root chat inside the panel (retire), the
         // registry entry is retired through the long-lived client here.
         cp.suppressCloseTab = true;
+        // retire = the USER closed the root chat inside the webview;
+        // otherwise the registry dropped the tab (closed elsewhere).
+        cp.userClosed = !!event.retire;
         if (event.retire) this._retire(cp);
         cp.panel.dispose();
         break;

@@ -28,8 +28,6 @@ import logging
 from typing import Any
 from urllib.parse import quote
 
-import requests
-
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
@@ -37,6 +35,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
 )
 from kiss.agents.third_party_agents._google_workspace_utils import (
     fresh_access_token,
+    google_api_session,
     load_google_credentials,
     make_google_auth_tools,
 )
@@ -121,6 +120,7 @@ class GoogleCalendarChannelBackend(ToolMethodBackend):
 
     def __init__(self) -> None:
         self._creds: Any = None
+        self._http: Any = google_api_session(_SERVICE)
         self._token: str = ""
         self._base_url: str = "https://www.googleapis.com/calendar/v3"
         self._connection_info: str = ""
@@ -168,7 +168,7 @@ class GoogleCalendarChannelBackend(ToolMethodBackend):
             ``{"ok": false, "error": ...}`` on an HTTP error status.
         """
         url = self._base_url.rstrip("/") + path
-        resp = requests.request(
+        resp = self._http.request(
             method,
             url,
             headers=self._headers(),

@@ -149,3 +149,32 @@ def test_classify_tasks_getter_rejects_non_bool(tmp_path: Path) -> None:
     cmd = {"agentPath": str(script), "classifyTasks": None}
     with pytest.raises(AgentFileError, match="classify_tasks"):
         apply_agent_overrides(cmd)
+
+
+def test_use_memory_getter_overrides_wire_field(tmp_path: Path) -> None:
+    # ``use_memory()`` is an agent-script getter like ``use_web_tools``:
+    # a bool return overrides the run command's ``useMemory`` field.
+    script = tmp_path / "memory_agent.py"
+    script.write_text("def use_memory():\n    return False\n")
+    cmd = {"agentPath": str(script), "useMemory": True}
+    assert apply_agent_overrides(cmd) == {"useMemory"}
+    assert cmd["useMemory"] is False
+
+
+def test_use_memory_getter_accepts_none(tmp_path: Path) -> None:
+    # ``None`` means "no per-run override": the agent then resolves the
+    # persisted ``use_memory`` setting itself.
+    script = tmp_path / "none_memory_agent.py"
+    script.write_text("def use_memory():\n    return None\n")
+    cmd = {"agentPath": str(script), "useMemory": True}
+    assert apply_agent_overrides(cmd) == {"useMemory"}
+    assert cmd["useMemory"] is None
+
+
+def test_use_memory_getter_rejects_non_bool(tmp_path: Path) -> None:
+    script = tmp_path / "bad_memory_agent.py"
+    script.write_text("def use_memory():\n    return 1\n")
+    cmd = {"agentPath": str(script), "useMemory": None}
+    with pytest.raises(AgentFileError, match="use_memory"):
+        apply_agent_overrides(cmd)
+    assert cmd["useMemory"] is None, "a broken getter must not override"

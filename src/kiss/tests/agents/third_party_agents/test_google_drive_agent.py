@@ -91,6 +91,7 @@ _AUTH_TOOL_NAMES = [
     "authenticate_google_drive",
     "clear_google_drive_auth",
     "start_google_drive_browser_setup",
+    "finish_google_drive_auth",
 ]
 
 _TOOL_NAMES = {
