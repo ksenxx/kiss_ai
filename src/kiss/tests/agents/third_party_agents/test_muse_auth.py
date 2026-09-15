@@ -924,16 +924,15 @@ def _drive_consent(auth_url: str) -> None:
     assert "Authentication complete" in callback.text
 
 
-def test_remote_oauth_inline_consent_flow(
+def test_remote_oauth_paste_back_consent_flow(
     muse_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Headless authenticate hands out an auth URL; finish vaults the token.
 
-    Emulates the full remote flow the chat webview surfaces inline:
-    the OAuth provider is a real local server, the consent 'browser'
-    is a real HTTP client on the same machine (like the agent's
-    built-in browser), and the loopback redirect completes against the
-    session's real WSGI server.
+    Emulates the full user paste-back hand-off: the OAuth provider is a
+    real local server, the user's 'own browser' is a real HTTP client on
+    the same machine, and the pasted loopback redirect URL is replayed
+    against the session's real WSGI consent server.
     """
     from kiss.agents.third_party_agents.google_calendar_agent import (
         _SCOPES as CAL_SCOPES,
@@ -975,8 +974,12 @@ def test_remote_oauth_inline_consent_flow(
         started = json.loads(tools["authenticate_google_calendar"]())
         assert started["ok"] is True
         assert started["status"] == "consent_required"
-        assert "screenshot" in started["instructions"]
-        assert "inline" in started["instructions"]
+        instructions = started["instructions"]
+        assert "OWN browser" in instructions
+        assert "paste back" in instructions
+        assert "curl -s '<pasted redirect URL>'" in instructions
+        assert "finish_google_calendar_auth()" in instructions
+        assert "do NOT open accounts.google.com" in instructions
 
         _drive_consent(started["auth_url"])
         finished = json.loads(tools["finish_google_calendar_auth"]())

@@ -6,7 +6,7 @@
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
-- **Version:** 2026.9.13
+- **Version:** 2026.9.14
 - **License:** Apache-2.0
 - **Python:** 3.13+
 - **Website:** <https://kisssorcar.github.io/>
@@ -23,7 +23,7 @@
 | Multiple models from multiple vendors in the same task | Yes — mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | No — Anthropic Claude models only | No — one model per task |
 | Primary focus | Quality — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | Core agents lines of code | ~3000 | Unknown | Unknown |
-| Models in bundled catalog | 660 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| Models in bundled catalog | 661 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | Bring your own API key / endpoint | Yes — keys stay on your machine | Anthropic key | Routed through Cursor backend |
 | Open source | Yes — Apache-2.0 | Proprietary | Proprietary |
 | Price | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -41,9 +41,9 @@
 - **Git-worktree task isolation.** Each interactive task runs on an isolated git worktree branch that is auto-committed and squash-merged back when it finishes.
 - **Voice interaction.** With the `sorcar` wake word, KISS Sorcar behaves like a super-intelligent Alexa; it distinguishes among different speakers.
 - **43 third-party agents.** 32 messaging channels — Slack, Gmail, Email (IMAP/SMTP), WhatsApp, SMS, iMessage, Telegram, Discord, Signal, phone control, Home Assistant, and more — plus service agents for GitHub, Notion, PostgreSQL, Brave Search, Firecrawl, and Google Workspace (Calendar, Drive, Docs, Sheets).
-- **Pre-run task classification.** A single fast non-agentic model call detects whether a task is a development task that requires creating or editing files — non-development tasks (questions, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. Toggleable in the Settings panel.
+- **Pre-run task classification.** Normally one fast non-agentic model call (structured output, with one plain-text retry if that fails) detects whether a task is a development task that requires creating or editing files — non-development tasks (questions, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. Toggleable in the Settings panel.
 - **Persistent agent memory.** On by default: standard Sorcar runs get seven `memory_*` tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks. Pages are Markdown files under `~/.kiss/memories` with a SQLite vector index; toggle it in the Settings panel or set `KISS_USE_MEMORY=0`.
-- **Credential isolation (Muse auth).** On Linux, credentials for the 22 Muse-supported connectors are isolated by default behind a Meta-Muse-style security boundary: legacy tokens auto-migrate into a local auth daemon's vault on first use (a one-time hand-off of the real credential; plaintext copies are then scrubbed on a best-effort basis), after which the agent process holds only opaque surrogate tokens that the daemon swaps for the real ones at the network edge, and every boundary-routed API request is host-allowlisted, classified read vs. write, and checked against an allow/deny/ask policy with an audit log. Opt out with `KISS_MUSE_AUTH=0`.
+- **Credential isolation (Muse auth).** On Linux, credentials for the 24 Muse-supported connectors are isolated by default behind a Meta-Muse-style security boundary: legacy tokens auto-migrate into a local auth daemon's vault on first use (a one-time hand-off of the real credential; plaintext copies are then scrubbed on a best-effort basis), after which the agent process holds only opaque surrogate tokens that the daemon swaps for the real ones at the network edge, and every boundary-routed API request is host-allowlisted (credential-free, bodyless `GET`/`HEAD` redirect hops are the one permitted off-list exception), classified read vs. write, and checked against an allow/deny/ask policy with an audit log. Where the provider supports a poll-based grant (GitHub, Twitch, Microsoft Teams, Nextcloud Talk, Matrix, Signal), connecting works like the Muse app's Connect button — the user signs in and approves in their own browser, nothing is pasted back; providers without such a grant (the six Google services on a headless host, Slack, Discord) get a safe paste-back hand-off instead of browser automation, and the agent never asks for a password or 2FA code. Opt out with `KISS_MUSE_AUTH=0`.
 
 ## What Is in the Name
 

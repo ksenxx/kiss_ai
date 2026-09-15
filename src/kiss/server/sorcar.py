@@ -954,10 +954,11 @@ class ServerApi:
     async def open_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Serve a file's content to a remote-web client.
 
-        A remote-web (WSS) client clicked a file link in a chat
-        webview.  The browser has no editor to open the file in, so
-        the daemon reads the file and replies with its content for an
-        in-page content tab.  UDS clients (VS Code windows) never take
+        A remote-web (WSS) client clicked a file or directory link in a
+        chat webview.  The browser has no editor to open the path in,
+        so the daemon reads the file (or builds a plain-text directory
+        listing) and replies with its content for an in-page content
+        tab.  UDS clients (VS Code windows) never take
         this path: their webview's ``openFile`` is consumed by the
         extension host, which opens the file in a real editor tab — so
         a UDS-delivered ``openFile`` is dropped as a defensive no-op.
@@ -976,7 +977,8 @@ class ServerApi:
         The chat webview linkifies file-path-looking strings in event
         panel contents lazily: a path only becomes a clickable link
         after this check confirms that clicking it (``openFile``)
-        would actually serve a file.  UDS clients (VS Code windows)
+        would actually serve something — a file's content or a
+        directory's listing.  UDS clients (VS Code windows)
         never take this path: their webview's ``checkPaths`` is
         consumed by the extension host, which checks the local
         filesystem itself — so a UDS-delivered ``checkPaths`` is

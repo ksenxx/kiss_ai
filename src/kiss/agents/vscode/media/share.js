@@ -310,10 +310,10 @@
 
   /**
    * Open the tabs of *taskId*'s orphan children — sub-agents no
-   * fan-out panel claims (`run_agent` sub-tasks, exported with
-   * `data-sub-orphan`). They have no panel to expand, so their tabs
-   * ride along with their parent's transcript, exactly like the live
-   * webview opens a tab for such spawns.
+   * fan-out panel claims (exported with `data-sub-orphan`; e.g. a
+   * `run_agent` sub-task whose panel never learned its task id). The
+   * static page has no panel entry to expand for them, so their tabs
+   * ride along with their parent's transcript.
    *
    * @param {string} taskId The parent whose transcript just opened.
    */
@@ -503,9 +503,9 @@
   // The exported page may hold fan-out panels the user left expanded:
   // their sub-agent tabs open on load, exactly like the live layout
   // the export captured (a collapsed panel's stay shut). A chat
-  // task's orphan children (run_agent sub-tasks, which no fan-out
-  // panel claims) open alongside, like the live webview's tabs for
-  // such spawns.
+  // task's orphan children (sub-agents no fan-out panel claims in
+  // the export) open alongside, there being no panel entry to expand
+  // for them here.
   (function initShareSubagentTabs() {
     const roots = document.querySelectorAll(
       '.share-task:not(.share-subagent) .tc-run-parallel[data-rp-subagents]',

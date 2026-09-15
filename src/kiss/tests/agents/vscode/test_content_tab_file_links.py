@@ -309,6 +309,124 @@ class TestContentTabFileLinks:
         finally:
             context.close()
 
+    # Waits until the content tab shows the code AROUND *marker* (a
+    # `xNNN = NNN` line of longcode.py). Monaco virtualizes its DOM, so
+    # innerText holds only the lines near the scroll position — seeing
+    # the marker (and, when asked, NOT seeing `x1 =`, the first line)
+    # proves the view actually jumped. The pre/code fallback renders
+    # everything at once, so there the scroll offset is asserted instead.
+    _JUMPED_TO_LINE_JS = """([marker, awayFromTop]) => {
+         const area = document.getElementById('content-tab-area');
+         if (!area) return false;
+         const pre = area.querySelector('.content-code-fallback');
+         if (pre) return !awayFromTop || pre.scrollTop > 0;
+         const text = area.innerText.replace(/\\u00a0/g, ' ');
+         if (!text.includes(marker)) return false;
+         return !awayFromTop || !text.includes('x1 =');
+       }"""
+
+    def _write_long_file(self, harness) -> str:
+        """Create a 300-line python file in the harness work dir."""
+        path = harness.work_dir / "longcode.py"
+        path.write_text(
+            "".join(f"x{n} = {n}\n" for n in range(1, 301)),
+        )
+        return str(path)
+
+    def test_line_suffix_link_jumps_to_line(self, browser, harness) -> None:
+        """A ``path:250`` link on a 300-line file opens the content tab
+        scrolled to line 250, matching the VS Code editor line jump."""
+        context, page, sent = _open_page(browser, harness)
+        try:
+            path = self._write_long_file(harness)
+            _inject_file_link(page, path + ":250", "lnk-jump")
+            page.click("#lnk-jump")
+            page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
+            page.wait_for_function(
+                self._JUMPED_TO_LINE_JS, arg=["x250 =", True], timeout=30000,
+            )
+            open_file = [f for f in sent if f.get("type") == "openFile"]
+            assert open_file and open_file[-1]["line"] == 250
+            assert open_file[-1]["path"] == path
+        finally:
+            context.close()
+
+    def test_out_of_range_line_clamps_to_last_line(
+        self, browser, harness,
+    ) -> None:
+        """A ``:9999`` suffix on a 300-line file clamps to the end of
+        the document instead of erroring, like VS Code does."""
+        context, page, sent = _open_page(browser, harness)
+        try:
+            path = self._write_long_file(harness)
+            _inject_file_link(page, path + ":9999", "lnk-clamp")
+            page.click("#lnk-clamp")
+            page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
+            page.wait_for_function(
+                self._JUMPED_TO_LINE_JS, arg=["x300 = 300", True],
+                timeout=30000,
+            )
+        finally:
+            context.close()
+
+    def test_fallback_pre_scrolls_to_line_when_cdn_unreachable(
+        self, browser, harness,
+    ) -> None:
+        """With the Monaco CDN unreachable the pre/code fallback still
+        honors the ``:NN`` suffix by scrolling to the line."""
+        context = browser.new_context(ignore_https_errors=True)
+        # Abort every CDN request so ensureMonaco() fails fast and the
+        # pre/code fallback renders instead.
+        context.route(
+            "https://cdn.jsdelivr.net/**",
+            lambda route: route.abort(),
+        )
+        page = context.new_page()
+        try:
+            page.goto(harness.base_url + "/")
+            page.wait_for_selector(
+                "#task-input", state="visible", timeout=30000,
+            )
+            page.wait_for_selector(".chat-tab", timeout=30000)
+            path = self._write_long_file(harness)
+            _inject_file_link(page, path + ":250", "lnk-fb")
+            page.click("#lnk-fb")
+            page.wait_for_selector(
+                "#content-tab-area .content-code-fallback", timeout=30000,
+            )
+            page.wait_for_function(
+                """() => {
+                     const pre = document.querySelector(
+                       '#content-tab-area .content-code-fallback');
+                     return pre && pre.scrollTop > 0;
+                   }""",
+                timeout=30000,
+            )
+        finally:
+            context.close()
+
+    def test_hidden_open_jumps_when_tab_shown(self, browser, harness) -> None:
+        """Switching to the chat tab while the code is still loading
+        must not lose the jump: the pending line is revealed when the
+        content tab becomes visible again."""
+        context, page, sent = _open_page(browser, harness)
+        try:
+            path = self._write_long_file(harness)
+            _inject_file_link(page, path + ":250", "lnk-bg")
+            page.click("#lnk-bg")
+            page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
+            # Hide the content tab immediately — the editor then loads
+            # (or already loaded) behind a display:none surface.
+            page.click(".chat-tab:not(.content-tab) .chat-tab-label")
+            page.wait_for_selector("#task-input", state="visible")
+            page.wait_for_timeout(2000)
+            page.click(".chat-tab.content-tab .chat-tab-label")
+            page.wait_for_function(
+                self._JUMPED_TO_LINE_JS, arg=["x250 =", True], timeout=30000,
+            )
+        finally:
+            context.close()
+
     def test_clicking_same_link_twice_reuses_tab(
         self, browser, harness,
     ) -> None:

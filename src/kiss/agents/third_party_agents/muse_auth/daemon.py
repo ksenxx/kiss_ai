@@ -30,6 +30,7 @@ import base64
 import contextlib
 import fcntl
 import functools
+import math
 import os
 import re
 import socket
@@ -261,6 +262,37 @@ def _invalid_client_credentials_reason(service: str, info: dict[str, Any]) -> st
     scope = info.get("token_scope")
     if scope is not None and not valid_credential_value(scope):
         return "invalid token_scope value"
+    return ""
+
+
+def _invalid_refresh_token_reason(service: str, info: dict[str, Any]) -> str:
+    """Validate an ``oauth2_refresh_token`` enrollment payload.
+
+    These entries come from a device-authorization sign-in with a
+    public OAuth client: the daemon later POSTs the refresh token to
+    ``token_url``, so the endpoint must be the service's pinned host
+    (or loopback), and every value must be a clean credential string.
+
+    Args:
+        service: Connector service name the credential is stored under.
+        info: The ``authorized_user_info`` dict from the store frame.
+
+    Returns:
+        A human-readable rejection reason, or ``""`` when acceptable.
+    """
+    if not valid_token_endpoint(service, info.get("token_url")):
+        return f"invalid or unpinned OAuth token endpoint URL for '{service}'"
+    for key in ("client_id", "access_token", "refresh_token"):
+        if not valid_credential_value(info.get(key)):
+            return f"invalid {key} value"
+    scope = info.get("token_scope")
+    if scope is not None and not valid_credential_value(scope):
+        return "invalid token_scope value"
+    expires_at = info.get("expires_at")
+    if not isinstance(expires_at, (int, float)) or isinstance(expires_at, bool):
+        return "invalid expires_at value"
+    if not math.isfinite(float(expires_at)):
+        return "invalid expires_at value"
     return ""
 
 
@@ -549,6 +581,10 @@ class MuseAuthDaemon:
                 return {"ok": False, "error": "invalid path credential token value"}
             if isinstance(info, dict) and info.get("kind") == "oauth2_client_credentials":
                 reason = _invalid_client_credentials_reason(request["service"], info)
+                if reason:
+                    return {"ok": False, "error": reason}
+            if isinstance(info, dict) and info.get("kind") == "oauth2_refresh_token":
+                reason = _invalid_refresh_token_reason(request["service"], info)
                 if reason:
                     return {"ok": False, "error": reason}
             hosts = request.get("hosts", [])

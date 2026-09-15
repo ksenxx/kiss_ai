@@ -265,6 +265,33 @@ async function runTests() {
   );
   console.log('  ok - path-only submit opens the worktree copy, no run');
 
+  // 1b. A workspace DIRECTORY must not shadow a pending-worktree FILE
+  // at the same relative path: the submit shortcut resolves fileOnly,
+  // so the directory candidate is skipped and the worktree copy opens.
+  fs.mkdirSync(path.join(ws, 'shadow.html'), {recursive: true});
+  fs.writeFileSync(path.join(wt, 'shadow.html'), '<h1>wt copy</h1>\n');
+  wv.fireMessage({
+    type: 'submit',
+    prompt: 'shadow.html',
+    workDir: ws,
+    tabId: 'tab1',
+  });
+  await waitFor(
+    () => opened.length === 2,
+    'submit must open the worktree copy behind the directory',
+  );
+  assert.strictEqual(
+    opened[1],
+    path.join(wt, 'shadow.html'),
+    'a workspace directory must not shadow the pending-worktree file',
+  );
+  assert.strictEqual(
+    runCommands().length,
+    0,
+    'the shadowed path-only submit must not start an agent task',
+  );
+  console.log('  ok - workspace dir does not shadow the worktree file');
+
   // 2. A non-path prompt still starts a task.
   wv.fireMessage({
     type: 'submit',
@@ -276,8 +303,27 @@ async function runTests() {
     () => runCommands().length === 1,
     'a non-path prompt must start an agent task',
   );
-  assert.strictEqual(opened.length, 1, 'no extra file must be opened');
+  assert.strictEqual(opened.length, 2, 'no extra file must be opened');
   console.log('  ok - a non-path prompt still starts a task');
+
+  // 3. A prompt naming a DIRECTORY starts a task: directories resolve
+  // for clickable links (checkPaths/openFile), but the path-only submit
+  // shortcut is for regular files only — "reports" must not be swallowed
+  // by an Explorer reveal.
+  // tab2: tab1 is marked running by the previous submit, so a repeat
+  // submit there would append a follow-up message instead of starting.
+  wv.fireMessage({
+    type: 'submit',
+    prompt: 'reports',
+    workDir: wt,
+    tabId: 'tab2',
+  });
+  await waitFor(
+    () => runCommands().length === 2,
+    'a directory-path prompt must start an agent task',
+  );
+  assert.strictEqual(opened.length, 2, 'no extra file must be opened');
+  console.log('  ok - a directory-path prompt still starts a task');
 
   view.dispose();
 }

@@ -77,7 +77,8 @@ function replyOnRealFs(win, msg) {
   for (const p of msg.paths) {
     let ok = false;
     try {
-      ok = fs.statSync(p).isFile();
+      const st = fs.statSync(p);
+      ok = st.isFile() || st.isDirectory();
     } catch {
       ok = false;
     }

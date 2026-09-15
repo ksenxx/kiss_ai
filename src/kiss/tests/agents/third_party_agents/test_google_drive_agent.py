@@ -310,7 +310,7 @@ def test_clear_auth_removes_token_and_relocks_tools() -> None:
 
 
 def test_tools_module_function() -> None:
-    """Module-level tools() returns the auth tool quartet when locked."""
+    """Module-level tools() returns the auth tool set when locked."""
     tools = gdrive_mod.tools()
     assert [t.__name__ for t in tools] == _AUTH_TOOL_NAMES
     assert all(callable(t) for t in tools)

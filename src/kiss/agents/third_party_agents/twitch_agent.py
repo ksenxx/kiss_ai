@@ -4,8 +4,14 @@
 # add your name here
 """Twitch Agent — channel agent with Twitch Helix API + Chat tools.
 
-Provides authenticated access to Twitch via OAuth2 tokens. Uses requests
-for Helix API and twitchio for chat. Stores config in
+Provides authenticated access to Twitch via OAuth2 user tokens.  Connects
+like the Muse app: ``authenticate_twitch(client_id=...)`` starts Twitch's
+device code grant for a public client and hands back a
+``twitch.tv/activate`` link with the code pre-filled; the user signs in
+and authorizes in their own browser and ``finish_twitch_auth()`` stores
+the token pair (the Muse daemon refreshes it, no client secret needed).
+An access token can still be supplied directly.  Uses requests for Helix
+API and twitchio for chat.  Stores config in
 ``~/.kiss/third_party_agents/twitch/config.json``.
 
 Usage::
@@ -17,6 +23,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +36,45 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
     save_json_config,
 )
+from kiss.agents.third_party_agents._device_auth import (
+    ConsentSession,
+    DeviceFlowProvider,
+    DeviceFlowSession,
+    TokenGrant,
+    connect_prompt,
+    consent_required,
+)
 
 _TWITCH_DIR = Path.home() / ".kiss" / "third_party_agents" / "twitch"
 _HELIX_BASE = "https://api.twitch.tv/helix"
+_DEFAULT_OAUTH_BASE = "https://id.twitch.tv"
+# Scopes the chat, moderation and clip tools need; public data needs none.
+_DEFAULT_SCOPES = (
+    "user:read:chat user:write:chat user:bot channel:bot "
+    "moderator:read:chatters moderator:manage:banned_users clips:edit"
+)
+
+
+def _device_provider() -> DeviceFlowProvider:
+    """Return Twitch's device-code-grant endpoints, resolved per call.
+
+    ``TWITCH_OAUTH_BASE`` lets tests point the flow (and the daemon-side
+    token refresh, which only accepts the pinned host or loopback) at a
+    loopback authorization server.  Twitch spells the scope field
+    ``scopes`` and requires it in the token poll as well.
+
+    Returns:
+        The provider with ``/oauth2/device`` and ``/oauth2/token``.
+    """
+    base = os.environ.get("TWITCH_OAUTH_BASE", "") or _DEFAULT_OAUTH_BASE
+    return DeviceFlowProvider(
+        device_url=f"{base}/oauth2/device",
+        token_url=f"{base}/oauth2/token",
+        scope_param="scopes",
+        token_scope_param="scopes",
+    )
+
+
 _config = ChannelConfig(
     _TWITCH_DIR,
     (
@@ -56,11 +99,7 @@ def _scrub_config_secrets() -> None:
         return
     if not isinstance(cfg, dict) or not ("access_token" in cfg or "client_secret" in cfg):
         return
-    kept = {
-        k: str(v)
-        for k, v in cfg.items()
-        if k not in ("access_token", "client_secret") and v
-    }
+    kept = {k: str(v) for k, v in cfg.items() if k not in ("access_token", "client_secret") and v}
     if kept:
         save_json_config(_config.path, kept)
     else:
@@ -389,66 +428,154 @@ class TwitchChannelBackend(ToolMethodBackend):
 
 
 def _muse_authenticate(
-    backend: TwitchChannelBackend, client_id: str, access_token: str, channel_name: str
+    backend: TwitchChannelBackend,
+    client_id: str,
+    credential: dict[str, Any],
+    channel_name: str,
+    login: str,
 ) -> str:
-    """Enroll a Twitch access token into the Muse vault and validate it.
+    """Enroll an already-validated Twitch credential into the Muse vault.
 
-    The plaintext token goes straight into the vault as a bearer
-    credential, atomically replacing any previous enrollment, and is
-    never written to ``config.json`` (only the non-secret
-    ``client_id``/``channel_name`` metadata is — written first, so a
-    failed enrollment leaves no token on disk).  The ``client_secret``
-    is never persisted in Muse mode: the connector does not use it, and
-    an unused plaintext secret must not linger.  Validation runs
-    ``/users`` through the daemon boundary, so it is audited; an invalid
-    token leaves the vault empty.
+    The credential — a plain ``bearer`` access token the user supplied,
+    or the ``oauth2_refresh_token`` pair a device-code sign-in produced
+    — was checked against ``/users`` by the caller (:func:`_probe_token`)
+    BEFORE this call, so nothing here can leave an invalid token
+    enrolled and a rejected candidate never touches the previous
+    enrollment.  The store atomically replaces any previous vault entry
+    (the vault never holds a half-written one); only the non-secret
+    ``client_id``/``channel_name`` metadata is written to
+    ``config.json``.  The ``client_secret`` is never persisted in Muse
+    mode: the connector does not use it, and an unused plaintext secret
+    must not linger.  A daemon failure is reported without clearing the
+    vault: whichever credential it holds at that point (the untouched
+    old one or the just-validated new one) is worth keeping.
 
     Args:
         backend: The agent's Twitch backend to (re)wire.
         client_id: Twitch app client ID (not a secret).
-        access_token: OAuth2 access token.
+        credential: The vault ``authorized_user_info`` payload.
         channel_name: Optional default channel metadata.
+        login: The account login the probe reported.
 
     Returns:
-        JSON string with the validation result.
+        JSON string with the result.
     """
-    import contextlib
-
-    from kiss.agents.third_party_agents.muse_auth.client import (
-        clear_credentials,
-        store_credentials,
-    )
+    from kiss.agents.third_party_agents.muse_auth.client import store_credentials
 
     try:
         meta = {k: v for k, v in (("client_id", client_id), ("channel_name", channel_name)) if v}
         save_json_config(_config.path, meta)
-        store_credentials("twitch", {"kind": "bearer", "token": access_token}, [])
-        if backend._wire_muse():  # pragma: no branch - credential was just stored
-            result = backend._get("/users")
-            if "data" in result:
-                return json.dumps(
-                    {
-                        "ok": True,
-                        "message": "Twitch credentials saved (Muse-auth).",
-                        "login": result["data"][0].get("login", "") if result["data"] else "",
-                    }
-                )
-            error = json.dumps({"ok": False, "error": str(result)})
-        else:  # pragma: no cover - defense in depth
-            error = json.dumps({"ok": False, "error": backend._connection_info})
+        store_credentials("twitch", credential, [])
+        if not backend._wire_muse():  # pragma: no cover - credential was just stored
+            return json.dumps({"ok": False, "error": backend._connection_info})
     except Exception as e:
-        error = json.dumps({"ok": False, "error": str(e)})
-    # Roll the vault back so a bad token is not left enrolled.
-    with contextlib.suppress(Exception):
-        clear_credentials("twitch")
-    backend._access_token = ""
-    backend._http = requests
-    backend._muse = False
-    return error
+        return json.dumps({"ok": False, "error": str(e)})
+    return json.dumps(
+        {"ok": True, "message": "Twitch credentials saved (Muse-auth).", "login": login}
+    )
+
+
+def _probe_token(helix_base: str, client_id: str, access_token: str) -> tuple[str | None, str]:
+    """Validate a freshly issued token with a direct ``GET /users``.
+
+    Runs BEFORE the token replaces any stored credential, so a token
+    Twitch rejects leaves the previous configuration untouched.  The
+    request bypasses ambient proxy/netrc settings and never follows a
+    redirect (the header carries the token).
+
+    Args:
+        helix_base: The Helix API base URL.
+        client_id: The app's public client ID.
+        access_token: The access token to validate.
+
+    Returns:
+        ``(login, "")`` on success (``login`` may be ``""`` for an app
+        token), or ``(None, error)`` where *error* never contains the
+        token.
+    """
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        with session:
+            resp = session.get(
+                f"{helix_base}/users",
+                headers={"Client-ID": client_id, "Authorization": f"Bearer {access_token}"},
+                timeout=30,
+                allow_redirects=False,
+            )
+    except Exception as e:
+        return None, f"{type(e).__name__} while validating the token"
+    if resp.status_code != 200:
+        return None, f"HTTP {resp.status_code}"
+    try:
+        data = resp.json()
+    except ValueError:
+        return None, "non-JSON answer from /users"
+    users = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(users, list):
+        return None, "unexpected /users answer"
+    return (str(users[0].get("login", "")) if users else ""), ""
+
+
+def _legacy_authenticate(
+    backend: TwitchChannelBackend,
+    client_id: str,
+    access_token: str,
+    channel_name: str,
+    client_secret: str = "",
+) -> str:
+    """Validate a Twitch access token directly and write ``config.json``.
+
+    Used when Muse-auth is switched off.  Device-code tokens are stored
+    as plain access tokens here (no refresh); they last about four
+    hours, after which ``authenticate_twitch`` must be run again.
+
+    Args:
+        backend: The agent's Twitch backend to configure.
+        client_id: Twitch app client ID.
+        access_token: OAuth2 access token.
+        channel_name: Optional default channel metadata.
+        client_secret: Optional app secret kept for the legacy config.
+
+    Returns:
+        JSON string with the validation result.
+    """
+    backend._client_id = client_id
+    backend._access_token = access_token
+    try:
+        result = backend._get("/users")
+        if "data" in result:  # pragma: no branch
+            _config.save(
+                {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "access_token": access_token,
+                    "channel_name": channel_name,
+                }
+            )
+            return json.dumps(
+                {
+                    "ok": True,
+                    "message": "Twitch credentials saved.",
+                    "login": result["data"][0].get("login", "") if result["data"] else "",
+                }
+            )
+        return json.dumps({"ok": False, "error": str(result)})
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)})
 
 
 class TwitchAgent(BaseChannelAgent):
     """Channel agent with Twitch Helix API tools."""
+
+    channel_system_prompt = connect_prompt(
+        "twitch",
+        "Twitch",
+        "authenticate_twitch(client_id=...) without an access_token",
+        "The client_id is the public Client ID of an app registered at "
+        "https://dev.twitch.tv/console/apps (client type Public; no secret); the "
+        "returned twitch.tv/activate link already carries the code.",
+    ).lstrip()
 
     def __init__(self) -> None:
         super().__init__("Twitch Agent")
@@ -498,10 +625,16 @@ class TwitchAgent(BaseChannelAgent):
             """
             if not agent._is_authenticated():  # pragma: no branch
                 return (
-                    "Not authenticated with Twitch. Use authenticate_twitch() to configure.\n"
-                    "You need client_id, client_secret, and access_token from "
-                    "https://dev.twitch.tv/console/apps — register an app, then "
-                    "generate an OAuth token at https://id.twitch.tv/oauth2/authorize."
+                    "Not authenticated with Twitch. Call "
+                    "authenticate_twitch(client_id=...) to sign in the way the Muse "
+                    "app connects: it returns a twitch.tv/activate link (code "
+                    "pre-filled) for the user to open in their OWN browser, sign in "
+                    "and authorize; then call finish_twitch_auth(). The client_id "
+                    "is the public Client ID of an app registered at "
+                    "https://dev.twitch.tv/console/apps (client type Public; no "
+                    "secret is needed). Never ask for the user's Twitch password or "
+                    "2FA code. Alternatively the user may hand you an access token "
+                    "for authenticate_twitch(client_id=..., access_token=...)."
                 )
             try:
                 result = agent._backend._get("/users")
@@ -519,53 +652,126 @@ class TwitchAgent(BaseChannelAgent):
 
         def authenticate_twitch(
             client_id: str,
-            client_secret: str,
-            access_token: str,
+            client_secret: str = "",
+            access_token: str = "",
             channel_name: str = "",
+            scopes: str = "",
         ) -> str:
-            """Store and validate Twitch API credentials.
+            """Connect Twitch by browser sign-in (device code) or with a token.
+
+            Without ``access_token`` this starts Twitch's device code grant
+            for the public app ``client_id`` and returns a
+            ``consent_required`` answer: give the user the activation URL
+            (ask_user_question) to open in their OWN browser, where they
+            sign in and authorize; then call finish_twitch_auth().  With
+            ``access_token`` the token is validated and stored directly.
 
             Args:
-                client_id: Twitch app client ID from dev console.
-                client_secret: Twitch app client secret.
-                access_token: OAuth2 access token (user or app token).
+                client_id: Twitch app client ID from the dev console (public).
+                client_secret: Optional app secret (legacy config only; the
+                    device flow and Muse-auth never use it).
+                access_token: Optional OAuth2 user/app access token to store
+                    directly instead of signing in.
                 channel_name: Default channel to monitor. Optional.
+                scopes: Space-separated scopes for the device flow (default
+                    covers chat, moderation and clips).
 
             Returns:
-                Validation result or error message.
+                A consent_required JSON answer, a validation result, or an
+                error message.
             """
-            for val, name in [(client_id, "client_id"), (access_token, "access_token")]:
-                if not val.strip():  # pragma: no branch
-                    return f"{name} cannot be empty."
+            if not client_id.strip():  # pragma: no branch
+                return "client_id cannot be empty."
             from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
-            if muse_auth_enabled():
-                return _muse_authenticate(
-                    agent._backend, client_id.strip(), access_token.strip(), channel_name.strip()
+            if access_token.strip():
+                # A hand-supplied token supersedes any browser sign-in
+                # still pending; drop it so a late approval cannot
+                # overwrite this credential.
+                ConsentSession.cancel_active("twitch")
+                if muse_auth_enabled():
+                    login, error = _probe_token(
+                        agent._backend._helix_base, client_id.strip(), access_token.strip()
+                    )
+                    if error:
+                        return json.dumps(
+                            {"ok": False, "error": f"Twitch rejected the token: {error}"}
+                        )
+                    return _muse_authenticate(
+                        agent._backend,
+                        client_id.strip(),
+                        {"kind": "bearer", "token": access_token.strip()},
+                        channel_name.strip(),
+                        login or "",
+                    )
+                return _legacy_authenticate(
+                    agent._backend,
+                    client_id.strip(),
+                    access_token.strip(),
+                    channel_name.strip(),
+                    client_secret.strip(),
                 )
-            agent._backend._client_id = client_id.strip()
-            agent._backend._access_token = access_token.strip()
             try:
-                result = agent._backend._get("/users")
-                if "data" in result:  # pragma: no branch
-                    _config.save(
-                        {
-                            "client_id": client_id.strip(),
-                            "client_secret": client_secret.strip(),
-                            "access_token": access_token.strip(),
-                            "channel_name": channel_name.strip(),
-                        }
-                    )
-                    return json.dumps(
-                        {
-                            "ok": True,
-                            "message": "Twitch credentials saved.",
-                            "login": result["data"][0].get("login", "") if result["data"] else "",
-                        }
-                    )
-                return json.dumps({"ok": False, "error": str(result)})
+                session = DeviceFlowSession(
+                    "twitch",
+                    _device_provider(),
+                    client_id.strip(),
+                    scopes.strip() or _DEFAULT_SCOPES,
+                )
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
+            # The metadata the finish step needs rides on the session; the
+            # stored configuration is untouched until the sign-in lands.
+            session.options["channel_name"] = channel_name.strip()
+            session.register()
+            return json.dumps(consent_required("twitch", "Twitch", session))
+
+        def finish_twitch_auth() -> str:
+            """Complete a browser sign-in started by authenticate_twitch().
+
+            Call after the user reports that they authorized the app; the
+            token pair Twitch issued is validated with a `/users` read and
+            stored (Muse vault when enabled, where the daemon refreshes it
+            with the public client ID; no secret involved).
+
+            Returns:
+                The validation result, a pending status while the user has
+                not authorized yet, or an error message.
+            """
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            session, status = ConsentSession.finish("twitch")
+            if status == "pending":
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "status": "pending",
+                        "error": "The user has not authorized yet; ask them to finish "
+                        "the sign-in, then call this tool again.",
+                    }
+                )
+            if not isinstance(session, DeviceFlowSession) or session.result is None:
+                return json.dumps({"ok": False, "error": f"Twitch sign-in failed: {status}"})
+            grant = TokenGrant.from_session(session)
+            channel_name = str(session.options.get("channel_name", ""))
+            # Validate first: a rejected token must not disturb the
+            # credential that is currently in use.
+            login, error = _probe_token(
+                agent._backend._helix_base, session.client_id, grant.access_token
+            )
+            if error:
+                return json.dumps({"ok": False, "error": f"Twitch rejected the new token: {error}"})
+            if muse_auth_enabled():
+                return _muse_authenticate(
+                    agent._backend,
+                    session.client_id,
+                    grant.vault_credential(session.provider.token_url, session.client_id),
+                    channel_name,
+                    login or "",
+                )
+            return _legacy_authenticate(
+                agent._backend, session.client_id, grant.access_token, channel_name
+            )
 
         def clear_twitch_auth() -> str:
             """Clear the stored Twitch credentials.
@@ -573,6 +779,7 @@ class TwitchAgent(BaseChannelAgent):
             Returns:
                 Status message.
             """
+            ConsentSession.cancel_active("twitch")
             _config.clear()
             agent._backend._client_id = ""
             agent._backend._access_token = ""
@@ -586,7 +793,7 @@ class TwitchAgent(BaseChannelAgent):
                 clear_credentials("twitch")
             return "Twitch authentication cleared."
 
-        return [check_twitch_auth, authenticate_twitch, clear_twitch_auth]
+        return [check_twitch_auth, authenticate_twitch, finish_twitch_auth, clear_twitch_auth]
 
 
 def main() -> None:
