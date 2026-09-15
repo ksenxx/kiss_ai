@@ -181,8 +181,14 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                 "An update of KISS Sorcar is getting installed",
                 str(notice.get("text", "")),
             )
+            # Poll for the marker *content*, not mere existence: the
+            # shell redirect creates the file empty before echo writes
+            # to it, so an existence check can win the race and read ''.
             for _ in range(100):
-                if marker.is_file():
+                if (
+                    marker.is_file()
+                    and marker.read_text().strip() == "nonint=1"
+                ):
                     break
                 await asyncio.sleep(0.05)
             self.assertTrue(marker.is_file(), "curl bootstrap did not run")
@@ -222,8 +228,14 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                 "An update of KISS Sorcar is getting installed",
                 str(notice.get("text", "")),
             )
+            # Poll for the marker *content*, not mere existence: the
+            # shell redirect creates the file empty before echo writes
+            # to it, so an existence check can win the race and read ''.
             for _ in range(100):
-                if marker.is_file():
+                if (
+                    marker.is_file()
+                    and marker.read_text().strip() == "updated"
+                ):
                     break
                 await asyncio.sleep(0.05)
             self.assertTrue(marker.is_file(), "install.sh did not run")
