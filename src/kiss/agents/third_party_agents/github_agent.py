@@ -130,6 +130,25 @@ def _device_client_id(explicit: str) -> str:
     )
 
 
+def _split_granted_scopes(scope: str) -> list[str]:
+    """Split GitHub's granted-scope answer into individual scopes.
+
+    Real GitHub reports the granted scopes COMMA-separated in the token
+    answer (``"read:org,read:user,repo"``, verified live 2026-09-15)
+    although the request format is space-separated.  Commas are treated
+    as separators only here in the GitHub adapter: a comma is legal
+    inside a generic OAuth scope token, so the shared device-flow code
+    must not split on it.
+
+    Args:
+        scope: The ``scope`` string from GitHub's token answer.
+
+    Returns:
+        The individual granted scopes, in the order GitHub sent them.
+    """
+    return [s for s in scope.replace(",", " ").split() if s]
+
+
 def _probe_token(api_base: str, token: str) -> tuple[dict[str, Any] | None, str]:
     """Validate a freshly issued token with a direct ``GET /user``.
 
@@ -1274,21 +1293,28 @@ class GitHubAgent(BaseChannelAgent):
                     # Keep the remembered OAuth client ID (public) so the
                     # next browser sign-in does not ask for it again.
                     meta = dict(_relaxed_config())
-                    meta["token"] = token.strip()
                     meta["read_only"] = "true" if read_only else "false"
-                    _config.save(meta)
                     if muse_auth_enabled():
-                        # Re-enroll straight into the Muse vault: clear any
-                        # existing entry first so a rotated token replaces
-                        # the old one (connect() is vault-first and would
-                        # otherwise keep minting the stale credential).
+                        # Enroll straight into the Muse vault: store()
+                        # replaces any previous entry atomically and
+                        # invalidates its old surrogates, so there is no
+                        # clear-then-store window in which a failure
+                        # could lose the working credential, and no
+                        # plaintext copy ever lands in the config file.
                         from kiss.agents.third_party_agents.muse_auth.client import (
-                            clear_credentials,
+                            store_credentials,
                         )
 
-                        clear_credentials("github")
-                        agent._backend.connect()
+                        store_credentials(
+                            "github", {"kind": "bearer", "token": token.strip()}, []
+                        )
+                        meta.pop("token", None)
+                        _config.save(meta)
+                        if not agent._backend.connect():
+                            raise RuntimeError(agent._backend._connection_info)
                     else:
+                        meta["token"] = token.strip()
+                        _config.save(meta)
                         agent._backend._token = token.strip()
                         agent._backend._read_only = read_only
                 except Exception as e:
@@ -1377,7 +1403,7 @@ class GitHubAgent(BaseChannelAgent):
                     store_credentials(
                         "github",
                         grant.vault_credential(session.provider.token_url, session.client_id),
-                        grant.scope.split(),
+                        _split_granted_scopes(grant.scope),
                     )
                     if not agent._backend.connect():
                         raise RuntimeError(agent._backend._connection_info)
@@ -1399,7 +1425,7 @@ class GitHubAgent(BaseChannelAgent):
                     "message": "GitHub connected.",
                     "login": data.get("login", ""),
                     "read_only": read_only,
-                    "scope": grant.scope,
+                    "scope": " ".join(_split_granted_scopes(grant.scope)),
                 }
             )
 

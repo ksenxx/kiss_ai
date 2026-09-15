@@ -338,6 +338,11 @@ class _AuthHandler(BaseHTTPRequestHandler):
         )
         if state.dialect == "twitch":
             body["scope"] = state.scope.split()
+        elif state.dialect == "github":
+            # Real GitHub answers with the granted scopes COMMA-separated
+            # ("read:org,read:user,repo") although the request format is
+            # space-separated — verified against live GitHub 2026-09-15.
+            body["scope"] = ",".join(state.scope.split())
         else:
             body["scope"] = state.scope
         del self.server.devices[form["device_code"]]
@@ -685,6 +690,9 @@ def test_github_device_flow_enrolls_bearer_and_connects(
         "token": "access-1",
     }
     assert agent._backend._token.startswith("muse-sgt.github.")
+    # Real GitHub reports granted scopes comma-separated; the adapter
+    # splits them into individual vault scope entries.
+    assert _vault_entry("github")["scopes"] == ["repo", "read:org", "read:user"]
     assert "token" not in json.loads(gh_config.path.read_text())
     assert json.loads(tools["check_github_auth"]()) == {"ok": True, "read_only": True}
     # The client ID is remembered for the next sign-in.
@@ -1592,6 +1600,20 @@ def test_github_sign_in_never_disturbs_the_working_credential(
     assert "no sign-in in progress" in json.loads(tools["finish_github_auth"]())["error"]
     assert _vault_entry("github")["authorized_user_info"] == {"kind": "bearer", "token": "ghp_new"}
     assert json.loads(tools["check_github_auth"]()) == {"ok": True, "read_only": False}
+    # The direct path never writes the plaintext token into the config:
+    # it goes straight into the vault (atomic replace).
+    assert "token" not in json.loads(gh_config.path.read_text())
+
+    # A direct token the daemon refuses (embedded control character) must
+    # not disturb the enrolled credential or the config: store() replaces
+    # atomically, so there is no clear-then-store window.  (Regression:
+    # the old path cleared the vault before migrating the candidate, so a
+    # refused candidate lost the working credential.)
+    bad = json.loads(tools["authenticate_github"]("bad\ttoken"))
+    assert bad["ok"] is False and "failed to save GitHub config" in bad["error"]
+    assert _vault_entry("github")["authorized_user_info"] == {"kind": "bearer", "token": "ghp_new"}
+    assert json.loads(tools["check_github_auth"]()) == {"ok": True, "read_only": False}
+    assert "token" not in json.loads(gh_config.path.read_text())
 
     # A successful sign-in applies the options chosen when it was started.
     assert json.loads(tools["authenticate_github"](read_only=True))["status"] == (
