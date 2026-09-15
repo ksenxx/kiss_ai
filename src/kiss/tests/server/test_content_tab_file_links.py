@@ -198,6 +198,39 @@ class TestOpenFileBackend:
         assert "binary" in reply["error"].lower()
         assert "content" not in reply
 
+    def test_line_number_echoed_in_reply(self, harness) -> None:
+        """A ``path:NN`` link's line arrives as ``line``; the reply
+        echoes it so the client can jump the content tab there."""
+        path = str(harness.work_dir / "sample.py")
+        reply = self._request(
+            harness,
+            {"type": "openFile", "path": path, "line": 2, "tabId": "t-9"},
+        )
+        assert reply["line"] == 2
+        assert reply["content"] == _PY_SOURCE
+        assert "error" not in reply
+
+    def test_invalid_line_values_not_echoed(self, harness) -> None:
+        """Non-positive, non-int, and bool ``line`` values are dropped:
+        the reply carries no ``line`` field at all."""
+        path = str(harness.work_dir / "sample.py")
+        for bad in (0, -3, True, False, "7", 2.5, None):
+            reply = self._request(
+                harness, {"type": "openFile", "path": path, "line": bad},
+            )
+            assert "line" not in reply, f"line={bad!r} leaked into reply"
+            assert reply["content"] == _PY_SOURCE
+
+    def test_line_echoed_even_on_error_reply(self, harness) -> None:
+        """The echo does not depend on the read succeeding — a missing
+        file's error reply still carries the validated line."""
+        reply = self._request(
+            harness,
+            {"type": "openFile", "path": "/no/such/file.py", "line": 5},
+        )
+        assert reply["line"] == 5
+        assert "File not found" in reply["error"]
+
     def test_oversized_file_returns_error(self, harness) -> None:
         big = harness.work_dir / "big.txt"
         big.write_text("x" * 2_500_000)

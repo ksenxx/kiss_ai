@@ -75,9 +75,11 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "check": "check_signal_auth",
         "auth": "authenticate_signal",
         "clear": "clear_signal_auth",
-        "required_params": ["phone_number"],
+        # phone_number is optional: without it ``signal-cli link`` runs and
+        # the user scans the QR code from their phone.
+        "required_params": [],
         "prompt_urls": ["https://github.com/AsamK/signal-cli"],
-        "prompt_keywords": ["signal-cli"],
+        "prompt_keywords": ["signal-cli", "finish_signal_auth"],
     },
     {
         "module": "kiss.agents.third_party_agents.msteams_agent",
@@ -85,9 +87,11 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "check": "check_msteams_auth",
         "auth": "authenticate_msteams",
         "clear": "clear_msteams_auth",
-        "required_params": ["tenant_id", "client_id", "client_secret"],
-        "prompt_urls": ["https://portal.azure.com"],
-        "prompt_keywords": ["App registrations"],
+        # client_secret is optional: without it the device code sign-in
+        # (browser consent) is used instead of the app-only flow.
+        "required_params": ["tenant_id", "client_id"],
+        "prompt_urls": ["https://portal.azure.com", "https://microsoft.com/devicelogin"],
+        "prompt_keywords": ["App registrations", "finish_msteams_auth"],
     },
     {
         "module": "kiss.agents.third_party_agents.matrix_agent",
@@ -95,9 +99,11 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "check": "check_matrix_auth",
         "auth": "authenticate_matrix",
         "clear": "clear_matrix_auth",
-        "required_params": ["homeserver_url", "access_token"],
+        # access_token is optional: without it the OAuth 2.0 device
+        # authorisation sign-in (browser consent) is used.
+        "required_params": ["homeserver_url"],
         "prompt_urls": [],
-        "prompt_keywords": ["Element", "Access Token"],
+        "prompt_keywords": ["Element", "Access Token", "finish_matrix_auth"],
     },
     {
         "module": "kiss.agents.third_party_agents.feishu_agent",
@@ -170,9 +176,11 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "check": "check_nextcloud_auth",
         "auth": "authenticate_nextcloud",
         "clear": "clear_nextcloud_auth",
-        "required_params": ["url", "username", "password"],
+        # username/password are optional: with only the URL, Login Flow
+        # v2 lets the user sign in and grant access in their browser.
+        "required_params": ["url"],
         "prompt_urls": [],
-        "prompt_keywords": ["Nextcloud", "Devices & sessions"],
+        "prompt_keywords": ["Nextcloud", "Devices & sessions", "finish_nextcloud_auth"],
     },
     {
         "module": "kiss.agents.third_party_agents.nostr_agent",
@@ -210,12 +218,11 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "check": "check_twitch_auth",
         "auth": "authenticate_twitch",
         "clear": "clear_twitch_auth",
-        "required_params": ["client_id", "access_token"],
-        "prompt_urls": [
-            "https://dev.twitch.tv/console/apps",
-            "https://id.twitch.tv/oauth2/authorize",
-        ],
-        "prompt_keywords": ["Twitch"],
+        # access_token is optional: without it the device code grant
+        # (browser consent) is used.
+        "required_params": ["client_id"],
+        "prompt_urls": ["https://dev.twitch.tv/console/apps"],
+        "prompt_keywords": ["Twitch", "twitch.tv/activate", "finish_twitch_auth"],
     },
     {
         # QR-paired personal WhatsApp (whatsapp-mcp bridge): authenticate

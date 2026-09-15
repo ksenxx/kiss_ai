@@ -116,10 +116,34 @@ conversation:
 > Check my GitHub auth; if it's missing, walk me through creating a token and store it.
 
 Each channel's `check_<service>_auth` returns setup instructions when unconfigured,
-and Slack, Discord, and Gmail can even drive the provider's console in the browser
-for you (`start_slack_browser_auth`, `start_discord_browser_auth`,
-`start_gmail_browser_setup`). Do interactive auth from a chat surface — the agent may
-need to ask you questions, and the chat panel is where you answer them.
+and several channels go further with a guided sign-in. Three styles exist, and in
+every one the sign-in itself stays in your hands — the agent never types or asks for
+your password or 2FA code:
+
+- **Connect-style browser sign-in** (GitHub, Twitch, Microsoft Teams, Nextcloud Talk,
+  Matrix, Signal). `authenticate_<service>` without a token returns a sign-in link —
+  for Signal, a QR code to scan like Signal Desktop — that you open and approve in
+  your *own* browser or on your phone, while the agent polls in the background;
+  `finish_<service>_auth` collects the credential (answering `pending` until your
+  approval lands). WhatsApp has its own variant of this: `start_whatsapp_bridge` +
+  `get_whatsapp_qr_code` show a pairing QR that you scan from the phone, and
+  `wait_for_whatsapp_pairing` waits for the scan.
+- **Consent paste-back** (Gmail and the five other Google agents). On a desktop,
+  `authenticate_<service>` simply opens Google's consent window locally; on a
+  headless machine it hands you the authorization URL to open in your own browser —
+  you approve access and paste the resulting `localhost` redirect URL back into the
+  chat, and `finish_<service>_auth` stores the token. (Creating the OAuth client
+  itself is separate: `start_gmail_browser_setup` / `start_<service>_browser_setup`
+  walks the Google Cloud Console credential setup — Google Chat, whose check tool
+  gives the setup instructions instead, has no such tool.)
+- **Portal walkthrough with token paste-back** (Slack, Discord).
+  `start_slack_browser_auth` / `start_discord_browser_auth` drive the provider's
+  developer portal in the built-in browser while its pages load cleanly; at any login
+  screen, captcha, or page failure the agent stops and asks you to create the app in
+  your own browser and paste the bot token back.
+
+Do interactive auth from a chat surface — the agent may need to ask you questions,
+and the chat panel is where you answer them.
 
 One caveat: backend tools are snapshotted when a session starts, so the session that
 stores a fresh token cannot call the new backend tools itself. Send the real work as
@@ -149,7 +173,8 @@ Covered services (`muse_auth/_common.py` `SERVICE_HOSTS`): the six Google servic
 and `bluebubbles`. Other channels keep their legacy direct-credential path.
 
 The boundary is managed with `python -m kiss.agents.third_party_agents.muse_auth`
-(verbs: `status`, `enroll SERVICE`, `grant SERVICE write`, `audit`, `export SERVICE`) —
+(verbs: `status`, `enroll SERVICE`, `import SERVICE`, `grant SERVICE read|write`,
+`revoke SERVICE`, `export SERVICE`, `clear SERVICE`, `audit`, `daemon`, `stop`) —
 you can run it yourself or simply ask Sorcar to do it:
 
 > Show me the recent Muse auth audit records.
@@ -157,8 +182,12 @@ you can run it yourself or simply ask Sorcar to do it:
 > Grant the github service a single-use write permission.
 
 `enroll` supports only the six Google OAuth services; every other covered service
-enrolls itself when its legacy credential auto-migrates on first use. `grant SERVICE
-write` defaults to a single-use grant (`--scope once`); use `--scope ttl --ttl 3600`,
+enrolls itself when its legacy credential auto-migrates on first use — and the
+Connect-style browser sign-ins for GitHub, Twitch, and Microsoft Teams store their
+grant straight into the vault: as a refresh-token credential the daemon renews itself
+when the grant includes a refresh token (Teams requires one; GitHub OAuth apps issue
+one only with expiring tokens enabled), otherwise as a plain bearer token.
+`grant SERVICE write` defaults to a single-use grant (`--scope once`); use `--scope ttl --ttl 3600`,
 `--scope session`, or `--scope perpetual` for a standing one. Opt out with
 `KISS_MUSE_AUTH=0` in `$KISS_HOME/api_keys.env` (default `~/.kiss/api_keys.env`).
 
@@ -173,8 +202,8 @@ use and the legacy file is removed. "Gateway" marks the modules with `_make_back
 — they can carry inbound prompts and receive scheduled deliveries. Tool names are the
 exact callables the dispatched session sees, i.e. what your prompts can make the
 channel do; every agent also gets its auth tools (`check_<service>_auth`,
-`authenticate_<service>`, `clear_<service>_auth`, plus service-specific browser-setup
-helpers noted below).
+`authenticate_<service>`, `clear_<service>_auth`, plus the service-specific sign-in
+helpers noted below, such as `finish_<service>_auth` and the browser-setup tools).
 
 ### Messaging and device channels (32)
 
@@ -191,22 +220,22 @@ helpers noted below).
 | iMessage (macOS AppleScript) | `imessage` | no | local Messages app, `imessage/config.json` | `send_imessage`, `send_attachment`, `list_conversations`, `get_messages` |
 | IRC | `irc` | yes | server/nick (+ NickServ), `irc/config.json` | `connect_irc`, `join_irc_channel`, `leave_channel`, `post_message`, `send_notice`, `get_topic`, `set_topic`, `kick_user`, `whois`, `identify_nickserv` |
 | LINE | `line` | yes | channel access token, `line/config.json` | `push_text_message`, `reply_message`, `get_profile`, `get_quota`, `leave_group`, `push_image_message` |
-| Matrix | `matrix` | yes | homeserver + access token, optional user/device IDs (matrix-nio), `matrix/config.json` | `list_rooms`, `join_room`, `leave_room`, `send_text_message`, `send_notice`, `get_room_members`, `invite_user`, `kick_user`, `create_room`, `get_profile` |
+| Matrix | `matrix` | yes | browser sign-in via the homeserver's OAuth 2.0 device grant (`authenticate_matrix(homeserver_url)`, `finish_matrix_auth`; matrix.org and other MAS-backed servers; the agent renews the short-lived token itself) or a hand-supplied access token (matrix-nio), `matrix/config.json` | `list_rooms`, `join_room`, `leave_room`, `send_text_message`, `send_notice`, `get_room_members`, `invite_user`, `kick_user`, `create_room`, `get_profile`, `refresh_if_needed` (renews an OAuth-issued token) |
 | Mattermost | `mattermost` | yes | server URL + personal access token, `mattermost/config.json` | `list_teams`, `list_third_party_agents` (channels), `get_channel`, `list_channel_posts`, `create_post`, `delete_post`, `get_user`, `list_users`, `create_direct_message_channel`, `add_reaction` |
-| Microsoft Teams | `msteams` | yes | Azure AD client credentials, `msteams/config.json` | `list_teams`, `get_team`, `list_third_party_agents` (channels), `list_channel_messages`, `post_channel_message`, `reply_to_message`, `list_chats`, `post_chat_message`, `list_team_members` |
-| Nextcloud Talk | `nextcloud_talk` | yes | server URL + username/password, `nextcloud/config.json` | `list_rooms`, `get_room`, `create_room`, `list_participants`, `list_messages`, `post_message`, `set_room_name`, `delete_message` |
+| Microsoft Teams | `msteams` | yes | browser sign-in via the Entra device code flow (`authenticate_msteams(tenant_id, client_id)`, `finish_msteams_auth`; delegated token refreshed by the Muse daemon) or app-only client credentials, `msteams/config.json` | `list_teams`, `get_team`, `list_third_party_agents` (channels), `list_channel_messages`, `post_channel_message`, `reply_to_message`, `list_chats`, `post_chat_message`, `list_team_members` |
+| Nextcloud Talk | `nextcloud_talk` | yes | browser sign-in via Login Flow v2 (`authenticate_nextcloud(url)`, `finish_nextcloud_auth`; app password issued by the server) or username + app password, `nextcloud/config.json` | `list_rooms`, `get_room`, `create_room`, `list_participants`, `list_messages`, `post_message`, `set_room_name`, `delete_message`, `revoke_app_password` |
 | Nostr | `nostr` | no | private key, optional relays (default `wss://relay.damus.io`; pynostr), `nostr/config.json` | `publish_note`, `publish_reply`, `send_dm`, `get_profile`, `set_profile`, `list_relays`, `add_relay`, `remove_relay` |
 | ntfy pub-sub | `ntfy` | yes | `topic` (+ optional `server`, `token`), `ntfy/config.json` | `publish_notification`, `poll_topic` |
 | Phone control (Android companion app) | `phone_control` | yes | device IP + optional port/API key of the companion REST app, `phone/config.json` | `send_sms`, `make_call`, `end_call`, `list_sms_conversations`, `get_sms_messages`, `get_call_log`, `get_device_info`, `list_notifications`, `dismiss_notification`, `send_notification_reply` |
 | QQ bot platform | `qq` | yes | app id/secret (Ed25519 webhook), `qq/config.json` | `send_group_message`, `send_c2c_message` |
-| Signal (signal-cli) | `signal` | yes | registered signal-cli number, `signal/config.json` | `send_signal_message`, `receive_messages`, `send_attachment`, `list_contacts`, `list_groups` |
+| Signal (signal-cli) | `signal` | yes | link like Signal Desktop: `authenticate_signal()` runs `signal-cli link` and shows a QR code to scan from the phone, `finish_signal_auth` records the account; or an already registered signal-cli number, `signal/config.json` | `send_signal_message`, `receive_messages`, `send_attachment`, `list_contacts`, `list_groups` |
 | SimpleX Chat | `simplex` | yes | local `simplex-chat -p 5225` WebSocket, `simplex/config.json` | `send_simplex_message`, `list_simplex_contacts`, `get_simplex_address` |
 | Slack | `slack` | yes | bot token (also `start_slack_browser_auth`); one credential set per workspace in `slack/<workspace>/token.json` | `list_third_party_agents` (channels), `read_messages`, `read_thread`, `post_message`, `update_message`, `delete_message`, `list_users`, `get_user_info`, `create_channel`, `invite_to_channel`, `add_reaction`, `search_messages`, `set_channel_topic`, `upload_file`, `get_channel_info` |
 | SMS / voice (Twilio) | `sms` | yes | account SID + auth token + from number, `sms/config.json` | `send_sms`, `send_mms`, `list_messages`, `get_message`, `list_phone_numbers`, `get_account_info`, `send_whatsapp_message`, `create_call`, `list_calls`, `get_call`, `cancel_message` |
 | Synology Chat | `synology_chat` | yes | incoming/outgoing webhooks, `synology/config.json` | `post_message`, `send_file_message` |
 | Telegram | `telegram` | yes | @BotFather bot token, `telegram/config.json` | `send_text`, `send_photo`, `send_document`, `edit_message_text`, `delete_message`, `pin_message`, `unpin_message`, `get_chat`, `get_chat_members_count`, `get_chat_member`, `ban_chat_member`, `unban_chat_member`, `get_updates`, `send_poll`, `forward_message` |
 | Tlon / Urbit | `tlon` | no | Eyre HTTP server + code, `tlon/config.json` | `list_groups`, `list_third_party_agents` (channels), `get_messages`, `post_message`, `get_profile`, `poke`, `scry` |
-| Twitch | `twitch` | no | client ID + OAuth access token (all calls, chat included, via Helix), `twitch/config.json` | `get_stream_info`, `get_channel_info`, `get_user_info`, `get_chatters`, `send_chat_message`, `ban_user`, `search_third_party_agents` (channels), `get_clips`, `create_clip` |
+| Twitch | `twitch` | no | browser sign-in via the device code grant (`authenticate_twitch(client_id)`, `finish_twitch_auth`; rotating refresh token kept by the Muse daemon) or client ID + OAuth access token (all calls, chat included, via Helix), `twitch/config.json` | `get_stream_info`, `get_channel_info`, `get_user_info`, `get_chatters`, `send_chat_message`, `ban_user`, `search_third_party_agents` (channels), `get_clips`, `create_clip` |
 | Webhook routes (inbound HMAC webhooks) | `webhook` | yes | listener `port` (routes added via `add_webhook_route`), `webhook/config.json` | `add_webhook_route`, `remove_webhook_route`, `list_webhook_routes` |
 | WeCom group robots | `wecom` | no | robot webhook, `wecom/config.json` | `post_message`, `post_markdown` |
 | Weixin / WeChat Official Accounts | `weixin` | yes | app id/secret, optional callback token (enables callback verification), `weixin/config.json` | `send_text_message`, `get_user_info` |
@@ -228,7 +257,7 @@ through another channel's backend (`deliver_module` routes).
 | --- | --- | --- | --- |
 | Brave Search | `brave_search` | subscription token, `brave_search/config.json` | `brave_web_search`, `brave_news_search`, `brave_image_search`, `brave_video_search` |
 | Firecrawl (scraping/crawling) | `firecrawl` | API key (+ optional self-hosted `base_url`), `firecrawl/config.json` | `firecrawl_scrape`, `firecrawl_map`, `firecrawl_search`, `firecrawl_start_crawl`, `firecrawl_get_crawl_status`, `firecrawl_cancel_crawl` |
-| GitHub | `github` | personal access token (+ optional `read_only: "true"`), `github/config.json` | `gh_get_me`, `gh_search_repositories`, `gh_get_repository`, `gh_list_issues`, `gh_get_issue`, `gh_list_issue_comments`, `gh_search_issues`, `gh_search_code`, `gh_list_pull_requests`, `gh_get_pull_request`, `gh_get_pull_request_diff`, `gh_get_file_contents`, `gh_list_commits`, `gh_list_branches`, `gh_create_issue`, `gh_comment_on_issue`, `gh_update_issue`, `gh_create_pull_request`, `gh_merge_pull_request` |
+| GitHub | `github` | browser sign-in via the OAuth device flow (`authenticate_github(client_id=...)` with a device-flow-enabled OAuth app, `finish_github_auth`) or a personal access token (+ optional `read_only: "true"`), `github/config.json` | `gh_get_me`, `gh_search_repositories`, `gh_get_repository`, `gh_list_issues`, `gh_get_issue`, `gh_list_issue_comments`, `gh_search_issues`, `gh_search_code`, `gh_list_pull_requests`, `gh_get_pull_request`, `gh_get_pull_request_diff`, `gh_get_file_contents`, `gh_list_commits`, `gh_list_branches`, `gh_create_issue`, `gh_comment_on_issue`, `gh_update_issue`, `gh_create_pull_request`, `gh_merge_pull_request` |
 | Google Calendar | `google_calendar` | OAuth2 quintet (`check_google_calendar_auth`, `authenticate_google_calendar`, `clear_google_calendar_auth`, `start_google_calendar_browser_setup`, `finish_google_calendar_auth`), `google_calendar/` | `gcal_list_calendars`, `gcal_list_events`, `gcal_get_event`, `gcal_create_event`, `gcal_update_event`, `gcal_delete_event`, `gcal_quick_add` |
 | Google Docs | `google_docs` | OAuth2 quintet (as above, for `google_docs`), `google_docs/` | `gdocs_create_document`, `gdocs_read_document`, `gdocs_append_text`, `gdocs_replace_text`, `gdocs_insert_text`, `gdocs_batch_update`, `gdocs_list_documents` |
 | Google Drive | `google_drive` | OAuth2 quintet (for `google_drive`), `google_drive/` | `gdrive_search_files`, `gdrive_get_file`, `gdrive_read_file`, `gdrive_download_file`, `gdrive_upload_file`, `gdrive_create_folder`, `gdrive_share_file`, `gdrive_move_file`, `gdrive_trash_file` |
@@ -480,8 +509,25 @@ is just a shell command, you set one up as a scheduled command job:
 
 > Every 2 minutes, run the command `kiss-telegram --channel=-1001234567890 --pairing`.
 
-From then on, anything anyone types to the bot in that Telegram group is a prompt to
-Sorcar, and Sorcar answers in the group. With pairing enabled, unknown senders receive
+You do not have to write that command or know the numeric chat ID yourself. Ask for
+the gateway in plain language and let the chat session do the plumbing: it looks up
+the chat identifier through the channel agent, composes the tick command, and hands it
+to the cron agent as the scheduled command job:
+
+> Find the chat ID of my Telegram group "Sen family" from the bot's recent updates,
+> then schedule a gateway tick of that chat with pairing every 2 minutes.
+
+(Send any message in the bot's group first so a recent update exists to read the ID
+from.) On the four adapters whose `find_channel` resolves names through the platform
+API, even that lookup is unnecessary — the tick's `--channel` value can be the name
+itself, so nothing in the setup ever mentions a number: Slack takes a public channel
+name (without the `#`), Discord a channel name (searched across your guilds), Matrix a
+`#room:server` alias, and Google Chat a space display name:
+
+> Every 2 minutes, run a gateway tick on the Slack channel eng, with pairing.
+
+From then on, anything anyone types to the bot in the gatewayed chat is a prompt to
+Sorcar, and Sorcar answers in the same chat. With pairing enabled, unknown senders receive
 a one-time approval code in-channel (a sender allowlist is the stricter alternative);
 on adapters that implement thread polling (Slack), follow-ups in the same thread
 resume the same daemon chat. Gateway state — per-thread chat continuity, an

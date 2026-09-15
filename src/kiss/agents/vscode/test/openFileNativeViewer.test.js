@@ -389,7 +389,18 @@ async function runTests() {
     [],
     'directory: vscode.open must NOT be invoked',
   );
-  console.log('  ok - directory is refused (isFile guard)');
+  const reveals = executedCommands.filter(c => c.cmd === 'revealInExplorer');
+  assert.strictEqual(
+    reveals.length,
+    1,
+    'directory: revealInExplorer must be invoked exactly once',
+  );
+  assert.strictEqual(
+    reveals[0].args[0].fsPath,
+    path.join(ws, 'src'),
+    'directory: revealInExplorer must target the resolved directory',
+  );
+  console.log('  ok - directory reveals in Explorer (not an editor)');
 
   view.dispose();
   server.close();

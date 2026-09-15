@@ -31,7 +31,8 @@ function checkPathsOnRealFs(msg) {
     }
     let ok = false;
     try {
-      ok = fs.statSync(abs).isFile();
+      const st = fs.statSync(abs);
+      ok = st.isFile() || st.isDirectory();
     } catch {
       ok = false;
     }

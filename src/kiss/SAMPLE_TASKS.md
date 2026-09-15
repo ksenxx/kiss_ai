@@ -12,6 +12,10 @@ Authenticate slack workspace \<<workspace name>>.
 
 ## Task
 
+Every 2 minutes, run a gateway tick on the Slack channel sorcar, with pairing.
+
+## Task
+
 Authenticate Gmail [, or gcal, gdrive, gdoc, gsheets]?
 
 ## Task

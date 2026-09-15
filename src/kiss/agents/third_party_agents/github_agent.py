@@ -5,11 +5,19 @@
 """GitHub Agent — channel agent for the GitHub REST API.
 
 Provides access to GitHub via its REST API (https://api.github.com)
-using a personal access token sent as ``Authorization: Bearer`` with
-``Accept: application/vnd.github+json`` and
-``X-GitHub-Api-Version: 2022-11-28`` on every call.  Stores config in
-``~/.kiss/third_party_agents/github/config.json`` (keys: ``token`` and
-optional ``read_only`` — ``"true"`` blocks every mutating tool).
+using an OAuth or personal access token sent as ``Authorization:
+Bearer`` with ``Accept: application/vnd.github+json`` and
+``X-GitHub-Api-Version: 2022-11-28`` on every call.
+
+Connecting works like the Muse app: ``authenticate_github()`` starts
+GitHub's device flow (RFC 8628) with the OAuth app's public client ID
+and hands back ``https://github.com/login/device`` plus a short code;
+the user signs in and approves in their own browser and
+``finish_github_auth()`` collects the token — nothing is pasted back.
+A personal access token can still be supplied directly.  Stores config
+in ``~/.kiss/third_party_agents/github/config.json`` (keys: ``token``,
+optional ``read_only`` — ``"true"`` blocks every mutating tool — and
+``oauth_client_id``, the device-flow client ID).
 
 GitHub's REST API has no inbound message stream, so this adapter is
 outbound-only and the ``--channel`` poll mode is disabled (``main``
@@ -26,6 +34,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -38,6 +47,15 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
+    save_json_config,
+)
+from kiss.agents.third_party_agents._device_auth import (
+    ConsentSession,
+    DeviceFlowProvider,
+    DeviceFlowSession,
+    TokenGrant,
+    connect_prompt,
+    consent_required,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +70,124 @@ _MERGE_METHODS = ("merge", "squash", "rebase")
 
 _GITHUB_DIR = Path.home() / ".kiss" / "third_party_agents" / "github"
 _config = ChannelConfig(_GITHUB_DIR, ("token",))
+_DEFAULT_OAUTH_BASE = "https://github.com"
+# Scopes requested by the device flow: repository read/write, org and
+# profile reads.  OAuth-app scopes are coarse; the agent's read_only
+# flag is what blocks writes.
+_DEFAULT_SCOPE = "repo read:org read:user"
+
+
+def _device_provider() -> DeviceFlowProvider:
+    """Return GitHub's device-flow endpoints, resolved per call.
+
+    ``GITHUB_OAUTH_BASE`` lets tests point the flow (and the daemon-side
+    token refresh, which only accepts the pinned host or loopback) at a
+    loopback authorization server.
+
+    Returns:
+        The provider with ``/login/device/code`` and
+        ``/login/oauth/access_token`` under the base URL.
+    """
+    base = os.environ.get("GITHUB_OAUTH_BASE", "") or _DEFAULT_OAUTH_BASE
+    return DeviceFlowProvider(
+        device_url=f"{base}/login/device/code",
+        token_url=f"{base}/login/oauth/access_token",
+    )
+
+
+def _relaxed_config() -> dict[str, str]:
+    """Read ``config.json`` without required-key validation.
+
+    After the token is migrated into the Muse vault the config may
+    legitimately lack the ``token`` key while still carrying settings
+    like ``read_only`` and ``oauth_client_id``.
+
+    Returns:
+        The raw config dict (values stringified), or ``{}`` when
+        missing/unreadable.
+    """
+    try:
+        data = json.loads(_config.path.read_text())
+    except Exception:
+        return {}
+    return {k: str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def _device_client_id(explicit: str) -> str:
+    """Resolve the OAuth app client ID used for the device flow.
+
+    Args:
+        explicit: The ``client_id`` argument of ``authenticate_github``.
+
+    Returns:
+        *explicit* when given, else the ``oauth_client_id`` remembered
+        in ``config.json``, else ``$KISS_GITHUB_CLIENT_ID``, else ``""``.
+    """
+    return (
+        explicit.strip()
+        or _relaxed_config().get("oauth_client_id", "")
+        or os.environ.get("KISS_GITHUB_CLIENT_ID", "").strip()
+    )
+
+
+def _split_granted_scopes(scope: str) -> list[str]:
+    """Split GitHub's granted-scope answer into individual scopes.
+
+    Real GitHub reports the granted scopes COMMA-separated in the token
+    answer (``"read:org,read:user,repo"``, verified live 2026-09-15)
+    although the request format is space-separated.  Commas are treated
+    as separators only here in the GitHub adapter: a comma is legal
+    inside a generic OAuth scope token, so the shared device-flow code
+    must not split on it.
+
+    Args:
+        scope: The ``scope`` string from GitHub's token answer.
+
+    Returns:
+        The individual granted scopes, in the order GitHub sent them.
+    """
+    return [s for s in scope.replace(",", " ").split() if s]
+
+
+def _probe_token(api_base: str, token: str) -> tuple[dict[str, Any] | None, str]:
+    """Validate a freshly issued token with a direct ``GET /user``.
+
+    Runs BEFORE the token replaces any stored credential, so a token
+    GitHub rejects leaves the previous configuration untouched.  The
+    request bypasses ambient proxy/netrc settings and never follows a
+    redirect (the header carries the token).
+
+    Args:
+        api_base: The GitHub REST API base URL.
+        token: The access token to validate.
+
+    Returns:
+        ``(user, "")`` with the decoded ``/user`` object on success, or
+        ``(None, error)`` where *error* never contains the token.
+    """
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        with session:
+            resp = session.get(
+                api_base.rstrip("/") + "/user",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": _JSON_ACCEPT,
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                timeout=_TIMEOUT,
+                allow_redirects=False,
+            )
+    except Exception as e:
+        return None, f"{type(e).__name__} while validating the token"
+    if resp.status_code != 200:
+        return None, f"HTTP {resp.status_code}"
+    try:
+        data = resp.json()
+    except ValueError:
+        return None, "non-JSON answer from /user"
+    return (data, "") if isinstance(data, dict) else (None, "unexpected /user answer")
 
 
 def _bad_segment(value: str, name: str) -> str | None:
@@ -229,7 +365,7 @@ class GitHubChannelBackend(ToolMethodBackend):
             _config.scrub_secrets(("token",))
             # The read_only flag lives in config.json; read it leniently
             # so it survives after the token key is migrated out.
-            self._read_only = self._relaxed_config().get("read_only", "false") == "true"
+            self._read_only = _relaxed_config().get("read_only", "false") == "true"
             mode = "read-only" if self._read_only else "read-write"
             self._connection_info = f"GitHub configured ({mode}, Muse-auth)."
             return True
@@ -242,21 +378,6 @@ class GitHubChannelBackend(ToolMethodBackend):
         mode = "read-only" if self._read_only else "read-write"
         self._connection_info = f"GitHub configured ({mode})."
         return True
-
-    def _relaxed_config(self) -> dict[str, str]:
-        """Read ``config.json`` without required-key validation.
-
-        After the token is migrated into the Muse vault the config may
-        legitimately lack the ``token`` key while still carrying
-        settings like ``read_only``.
-
-        Returns:
-            The raw config dict, or ``{}`` when missing/unreadable.
-        """
-        try:
-            return dict(json.loads(_config.path.read_text()))
-        except Exception:
-            return {}
 
     def _api(
         self,
@@ -386,9 +507,7 @@ class GitHubChannelBackend(ToolMethodBackend):
             bad = _bad_segment(owner, "owner") or _bad_segment(repo, "repo")
             if bad:
                 return bad
-            data, err = self._api(
-                "GET", f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
-            )
+            data, err = self._api("GET", f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}")
             if err:
                 return json.dumps({"ok": False, "error": err})
             return json.dumps({"ok": True, "repository": _condense_repo(data)})
@@ -396,8 +515,13 @@ class GitHubChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
     def gh_list_issues(
-        self, owner: str, repo: str, state: str = "open", labels: str = "",
-        per_page: int = 20, page: int = 1,
+        self,
+        owner: str,
+        repo: str,
+        state: str = "open",
+        labels: str = "",
+        per_page: int = 20,
+        page: int = 1,
     ) -> str:
         """List a repository's issues.
 
@@ -592,9 +716,9 @@ class GitHubChannelBackend(ToolMethodBackend):
             )
             if err:
                 return json.dumps({"ok": False, "error": err})
-            return json.dumps(
-                {"ok": True, "pull_requests": [_condense_issue(p) for p in data]}
-            )[:_MAX_OUTPUT]
+            return json.dumps({"ok": True, "pull_requests": [_condense_issue(p) for p in data]})[
+                :_MAX_OUTPUT
+            ]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -703,9 +827,7 @@ class GitHubChannelBackend(ToolMethodBackend):
                 ]
                 return json.dumps({"ok": True, "directory": entries})[:_MAX_OUTPUT]
             if data.get("encoding") == "base64":
-                text = base64.b64decode(data.get("content", "")).decode(
-                    "utf-8", errors="replace"
-                )
+                text = base64.b64decode(data.get("content", "")).decode("utf-8", errors="replace")
                 return json.dumps(
                     {
                         "ok": True,
@@ -717,9 +839,7 @@ class GitHubChannelBackend(ToolMethodBackend):
             if data.get("encoding") == "none":
                 # Files 1-100 MB: the contents API omits the inline
                 # content, so re-fetch the raw text directly.
-                raw, raw_err = self._api(
-                    "GET", api_path, params=params or None, accept=_RAW_ACCEPT
-                )
+                raw, raw_err = self._api("GET", api_path, params=params or None, accept=_RAW_ACCEPT)
                 if raw_err:
                     return json.dumps({"ok": False, "error": raw_err})
                 return json.dumps(
@@ -742,8 +862,13 @@ class GitHubChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
     def gh_list_commits(
-        self, owner: str, repo: str, sha: str = "", path: str = "",
-        per_page: int = 20, page: int = 1,
+        self,
+        owner: str,
+        repo: str,
+        sha: str = "",
+        path: str = "",
+        per_page: int = 20,
+        page: int = 1,
     ) -> str:
         """List a repository's commits.
 
@@ -894,7 +1019,12 @@ class GitHubChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
     def gh_update_issue(
-        self, owner: str, repo: str, number: int, state: str = "", title: str = "",
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        state: str = "",
+        title: str = "",
         body: str = "",
     ) -> str:
         """Update an issue's state, title, and/or body.
@@ -950,7 +1080,13 @@ class GitHubChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
     def gh_create_pull_request(
-        self, owner: str, repo: str, title: str, head: str, base: str, body: str = "",
+        self,
+        owner: str,
+        repo: str,
+        title: str,
+        head: str,
+        base: str,
+        body: str = "",
         draft: bool = False,
     ) -> str:
         """Open a pull request.
@@ -1028,8 +1164,7 @@ class GitHubChannelBackend(ToolMethodBackend):
                 )
             data, err = self._api(
                 "PUT",
-                f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
-                f"/pulls/{int(number)}/merge",
+                f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/pulls/{int(number)}/merge",
                 payload={"merge_method": merge_method},
             )
             if err:
@@ -1060,6 +1195,14 @@ class GitHubAgent(BaseChannelAgent):
         "gh_create_issue, gh_comment_on_issue, gh_update_issue, "
         "gh_create_pull_request, and gh_merge_pull_request. There is no "
         "inbound message stream."
+    ) + connect_prompt(
+        "github",
+        "GitHub",
+        "authenticate_github() with no token (client_id=... if none is remembered)",
+        "It needs the public Client ID of a GitHub OAuth app with 'Enable Device "
+        "Flow' ticked (https://github.com/settings/applications/new); if the user "
+        "prefers, they may instead hand you a personal access token for "
+        "authenticate_github(token=...).",
     )
 
     def __init__(self) -> None:
@@ -1094,54 +1237,197 @@ class GitHubAgent(BaseChannelAgent):
             """
             if not agent._is_authenticated():
                 return (
-                    "Not configured for GitHub. Use authenticate_github() to "
-                    "configure.\n"
-                    "You need a personal access token from "
-                    "https://github.com/settings/tokens (classic or "
-                    "fine-grained). If the GitHub CLI is logged in, "
-                    "`gh auth token` prints an existing token."
+                    "Not configured for GitHub. Call authenticate_github() with no "
+                    "token to sign in the way the Muse app connects: it returns "
+                    "https://github.com/login/device plus a short code for the user "
+                    "to enter in their OWN browser after signing in; then call "
+                    "finish_github_auth(). This needs the Client ID of a GitHub OAuth "
+                    "app with 'Enable Device Flow' ticked (pass client_id=..., or set "
+                    "KISS_GITHUB_CLIENT_ID). Never ask for the user's GitHub password "
+                    "or 2FA code. Alternatively the user may hand you a personal "
+                    "access token (https://github.com/settings/tokens, or `gh auth "
+                    "token` when the GitHub CLI is logged in) for "
+                    "authenticate_github(token=...)."
                 )
             return json.dumps({"ok": True, "read_only": agent._backend._read_only})
 
-        def authenticate_github(token: str, read_only: bool = False) -> str:
-            """Configure the GitHub personal access token.
+        def authenticate_github(
+            token: str = "", read_only: bool = False, client_id: str = "", scope: str = ""
+        ) -> str:
+            """Connect GitHub by browser sign-in (device flow) or with a token.
+
+            Without ``token`` this starts GitHub's device flow with the
+            OAuth app ``client_id`` (argument, remembered config value,
+            or $KISS_GITHUB_CLIENT_ID) and returns a ``consent_required``
+            answer: give the user the verification URL and code
+            (ask_user_question) to complete in their OWN browser, then
+            call finish_github_auth().  With ``token`` the personal
+            access token is stored directly.
 
             Args:
-                token: Personal access token (from
+                token: Optional personal access token (from
                     https://github.com/settings/tokens or `gh auth token`).
                 read_only: When True, every mutating tool (create/update/
                     comment/merge) is refused (default False).
+                client_id: Client ID of a GitHub OAuth app with the device
+                    flow enabled (a public identifier, not a secret).
+                scope: Space-separated OAuth scopes for the device flow
+                    (default "repo read:org read:user").
 
             Returns:
-                Configuration result or error message.
+                A consent_required JSON answer, a configuration result, or
+                an error message.
             """
-            if not token.strip():
-                return "token cannot be empty."
             from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
-            try:
-                _config.save(
-                    {"token": token.strip(), "read_only": "true" if read_only else "false"}
+            if token and not token.strip():
+                # An explicit blank token is a mistake, not a request for
+                # the browser sign-in.
+                return "token cannot be empty."
+            if token.strip():
+                # A hand-supplied token supersedes any browser sign-in
+                # still pending; drop it so a late approval cannot
+                # overwrite this credential.
+                ConsentSession.cancel_active("github")
+                try:
+                    # Keep the remembered OAuth client ID (public) so the
+                    # next browser sign-in does not ask for it again.
+                    meta = dict(_relaxed_config())
+                    meta["read_only"] = "true" if read_only else "false"
+                    if muse_auth_enabled():
+                        # Enroll straight into the Muse vault: store()
+                        # replaces any previous entry atomically and
+                        # invalidates its old surrogates, so there is no
+                        # clear-then-store window in which a failure
+                        # could lose the working credential, and no
+                        # plaintext copy ever lands in the config file.
+                        from kiss.agents.third_party_agents.muse_auth.client import (
+                            store_credentials,
+                        )
+
+                        store_credentials(
+                            "github", {"kind": "bearer", "token": token.strip()}, []
+                        )
+                        meta.pop("token", None)
+                        _config.save(meta)
+                        if not agent._backend.connect():
+                            raise RuntimeError(agent._backend._connection_info)
+                    else:
+                        meta["token"] = token.strip()
+                        _config.save(meta)
+                        agent._backend._token = token.strip()
+                        agent._backend._read_only = read_only
+                except Exception as e:
+                    return json.dumps({"ok": False, "error": f"failed to save GitHub config: {e}"})
+                return json.dumps({"ok": True, "message": "GitHub configured."})
+            resolved_client_id = _device_client_id(client_id)
+            if not resolved_client_id:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "No OAuth app client ID for the GitHub device flow. Ask "
+                        "the user to create one once at "
+                        "https://github.com/settings/applications/new (any homepage "
+                        "and callback URL; tick 'Enable Device Flow') and pass its "
+                        "Client ID as client_id=..., or set KISS_GITHUB_CLIENT_ID. "
+                        "Or pass a personal access token as token=...",
+                    }
                 )
+            try:
+                session = DeviceFlowSession(
+                    "github",
+                    _device_provider(),
+                    resolved_client_id,
+                    scope.strip() or _DEFAULT_SCOPE,
+                )
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
+            # Remember the (public) client ID for next time without
+            # touching anything else in the config: an existing token
+            # and read_only flag stay in force until the new sign-in is
+            # actually finished.
+            meta = dict(_relaxed_config())
+            if meta.get("oauth_client_id") != resolved_client_id:
+                meta["oauth_client_id"] = resolved_client_id
+                save_json_config(_config.path, meta)
+            session.options["read_only"] = read_only
+            session.register()
+            return json.dumps(consent_required("github", "GitHub", session))
+
+        def finish_github_auth() -> str:
+            """Complete a browser sign-in started by authenticate_github().
+
+            Call after the user reports that they entered the code and
+            approved access; the OAuth token GitHub issued is validated
+            with a `/user` read and stored (Muse vault when enabled, where
+            an expiring token is refreshed by the daemon).
+
+            Returns:
+                The configuration result, a pending status while the user
+                has not approved yet, or an error message.
+            """
+            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+            session, status = ConsentSession.finish("github")
+            if status == "pending":
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "status": "pending",
+                        "error": "The user has not approved yet; ask them to finish "
+                        "the sign-in, then call this tool again.",
+                    }
+                )
+            if not isinstance(session, DeviceFlowSession) or session.result is None:
+                return json.dumps({"ok": False, "error": f"GitHub sign-in failed: {status}"})
+            grant = TokenGrant.from_session(session)
+            read_only = bool(session.options.get("read_only", False))
+            # Validate first: a rejected token must not disturb the
+            # credential that is currently in use.
+            data, error = _probe_token(agent._backend._base_url, grant.access_token)
+            if error or data is None:
+                return json.dumps({"ok": False, "error": f"GitHub rejected the new token: {error}"})
+            try:
                 if muse_auth_enabled():
-                    # Re-enroll straight into the Muse vault: clear any
-                    # existing entry first so a rotated token replaces
-                    # the old one (connect() is vault-first and would
-                    # otherwise keep minting the stale credential).
                     from kiss.agents.third_party_agents.muse_auth.client import (
-                        clear_credentials,
+                        store_credentials,
                     )
 
-                    clear_credentials("github")
-                    agent._backend.connect()
+                    meta = dict(_relaxed_config())
+                    meta.pop("token", None)
+                    meta["read_only"] = "true" if read_only else "false"
+                    meta["oauth_client_id"] = session.client_id
+                    save_json_config(_config.path, meta)
+                    # The store atomically replaces any previous vault
+                    # entry; no clear-then-store window.
+                    store_credentials(
+                        "github",
+                        grant.vault_credential(session.provider.token_url, session.client_id),
+                        _split_granted_scopes(grant.scope),
+                    )
+                    if not agent._backend.connect():
+                        raise RuntimeError(agent._backend._connection_info)
                 else:
-                    agent._backend._token = token.strip()
+                    _config.save(
+                        {
+                            "token": grant.access_token,
+                            "read_only": "true" if read_only else "false",
+                            "oauth_client_id": session.client_id,
+                        }
+                    )
+                    agent._backend._token = grant.access_token
                     agent._backend._read_only = read_only
             except Exception as e:
-                return json.dumps(
-                    {"ok": False, "error": f"failed to save GitHub config: {e}"}
-                )
-            return json.dumps({"ok": True, "message": "GitHub configured."})
+                return json.dumps({"ok": False, "error": f"failed to store the GitHub token: {e}"})
+            return json.dumps(
+                {
+                    "ok": True,
+                    "message": "GitHub connected.",
+                    "login": data.get("login", ""),
+                    "read_only": read_only,
+                    "scope": " ".join(_split_granted_scopes(grant.scope)),
+                }
+            )
 
         def clear_github_auth() -> str:
             """Clear the stored GitHub configuration.
@@ -1149,6 +1435,7 @@ class GitHubAgent(BaseChannelAgent):
             Returns:
                 Status message.
             """
+            ConsentSession.cancel_active("github")
             _config.clear()
             agent._backend._token = ""
             agent._backend._read_only = False
@@ -1160,7 +1447,7 @@ class GitHubAgent(BaseChannelAgent):
                 clear_credentials("github")
             return "GitHub configuration cleared."
 
-        return [check_github_auth, authenticate_github, clear_github_auth]
+        return [check_github_auth, authenticate_github, finish_github_auth, clear_github_auth]
 
 
 def main() -> None:

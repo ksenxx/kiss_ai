@@ -235,11 +235,12 @@ def make_google_auth_tools(
     scopes: list[str],
     on_credentials: Any,
 ) -> list:
-    """Build the standard auth tool quartet for a Google Workspace agent.
+    """Build the standard auth tool set for a Google Workspace agent.
 
     Produces ``check_<service>_auth``, ``authenticate_<service>``,
-    ``clear_<service>_auth``, and ``start_<service>_browser_setup``
-    closures whose behaviour mirrors the Gmail agent's auth tools.
+    ``clear_<service>_auth``, ``start_<service>_browser_setup``, and
+    ``finish_<service>_auth`` closures whose behaviour mirrors the
+    Gmail agent's auth tools.
 
     Args:
         agent: The channel agent instance (used to reach its backend).
@@ -253,7 +254,7 @@ def make_google_auth_tools(
             clearing) so the agent can wire its backend.
 
     Returns:
-        The four auth tool callables, named for *service*.
+        The five auth tool callables, named for *service*.
     """
 
     def check_auth() -> str:
@@ -294,9 +295,10 @@ def make_google_auth_tools(
 
     def authenticate() -> str:
         if is_headless_environment():
-            # Remote machine: the user cannot see a local browser, so
-            # hand the agent the consent URL to drive in its built-in
-            # browser with the pages shown inline in the chat webview.
+            # Remote machine: hand back the consent URL for the user to
+            # approve in their own browser; the pasted redirect URL is
+            # replayed against the local consent server, then
+            # finish_<service>_auth() completes the exchange.
             try:
                 session = RemoteOAuthSession.start(service, scopes)
             except Exception as e:
@@ -384,8 +386,9 @@ def make_google_auth_tools(
     finish_auth.__doc__ = (
         f"Complete a remote {label} OAuth consent started by "
         f"authenticate_{service}().\n\n"
-        "Call after the consent pages (driven in the built-in browser and\n"
-        "shown inline in the chat webview) reach 'Authentication complete'.\n\n"
+        "Call after the user has approved consent in their own browser and\n"
+        "the pasted redirect URL has been delivered to the local consent\n"
+        "server (``curl -s '<pasted redirect URL>'``).\n\n"
         "Returns:\n"
         "    Authentication result, a pending status when consent is not\n"
         "    finished, or an error message."
@@ -448,11 +451,14 @@ class RemoteOAuthSession:
     completes consent — useless on a remote machine where the user
     cannot see a local browser window.  This session starts the
     loopback redirect server in a background thread and hands back the
-    authorization URL so the agent can drive the consent pages in its
-    own built-in browser (which runs on this same machine, so the
-    ``localhost`` redirect completes here) while showing each page
-    inline in the chat webview via screenshots.  ``finish`` collects
-    the resulting credentials once consent completes.
+    authorization URL for the USER to open in their own browser (agent
+    browsers frequently cannot reach ``accounts.google.com``, and the
+    sign-in belongs to the user).  The user's browser then lands on a
+    ``http://localhost:PORT/?state=...&code=...`` URL that fails to
+    load on their machine; the user pastes that URL back and the agent
+    replays it against the loopback server here (``curl <url>``) so
+    the exchange completes locally.  ``finish`` collects the resulting
+    credentials once the redirect has been delivered.
     """
 
     _active: dict[str, RemoteOAuthSession] = {}
@@ -573,21 +579,27 @@ def remote_oauth_instructions(service: str, label: str, auth_url: str) -> str:
     Args:
         service: Service directory name (used in the finish tool name).
         label: Human-readable service label.
-        auth_url: The authorization URL to drive.
+        auth_url: The authorization URL to hand to the user.
 
     Returns:
-        Step-by-step instructions for completing consent in the agent's
-        built-in browser with the pages shown inline in the chat webview.
+        Step-by-step instructions for the user-driven consent hand-off:
+        the user authorizes in their own browser and pastes back the
+        loopback redirect URL, which the agent replays locally.
     """
     return (
-        f"The user cannot see a browser window on this machine, so complete the {label} "
-        "consent in YOUR built-in browser (it runs on this machine, so the localhost "
-        f"redirect completes here). Steps: 1) go_to_url('{auth_url}'). 2) After EVERY "
-        f"navigation, call screenshot(file_path='./tmp/{service}_auth_<step>.png') and "
-        "mention that exact file path in your reply text — the chat webview inlines the "
-        "image on every surface so the user can see the authentication page. 3) Use "
-        "ask_user_question() to collect the user's email, password, or 2FA code and enter "
-        "them with type_text(); never echo or store the password anywhere else. 4) When "
-        "the page says 'Authentication complete', call "
-        f"finish_{service}_auth() to store the token."
+        f"Complete the {label} consent WITHOUT driving Google sign-in pages "
+        "yourself: do NOT open accounts.google.com or this auth URL in your "
+        "built-in browser (it is often blocked with net::ERR_FAILED), and "
+        "never ask for or type the user's Google password or 2FA code. "
+        "Steps: 1) Call ask_user_question() giving the user this exact URL "
+        f"to open in their OWN browser: {auth_url} — tell them to approve "
+        "access and paste back the complete redirect URL from the address "
+        "bar (it looks like http://localhost:PORT/?state=...&code=... and "
+        "shows a connection error page, which is expected). 2) The loopback "
+        "consent server runs on THIS machine: deliver the pasted URL to it "
+        "with Bash: curl -s '<pasted redirect URL>' (quote it; it contains "
+        f"& characters). 3) Call finish_{service}_auth() to store the "
+        "token; if it returns 'pending', wait 2 seconds and call it once "
+        "more. If any Google page fails to load in the browser, do not "
+        "retry — use this hand-off."
     )

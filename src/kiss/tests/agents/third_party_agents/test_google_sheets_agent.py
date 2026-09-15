@@ -284,7 +284,7 @@ def _write_synthetic_token() -> None:
 
 
 def test_unauthenticated_agent_exposes_only_auth_tools() -> None:
-    """A fresh agent is unauthenticated and exposes exactly the auth quartet."""
+    """A fresh agent is unauthenticated and exposes exactly the auth tool set."""
     agent = GoogleSheetsAgent()
     assert agent.name == "Google Sheets Agent"
     assert agent._is_authenticated() is False

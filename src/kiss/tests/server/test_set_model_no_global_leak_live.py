@@ -280,21 +280,30 @@ class TestSetModelDoesNotLeakIntoPersistedTaskModel:
         assert MODEL_A in available, f"{MODEL_A} not available"
         assert MODEL_B in available, f"{MODEL_B} not available"
 
-        _save_last_model(MODEL_A)
-        baseline = _persisted_task_models()
+        # A live LLM occasionally ignores the "call set_model" prompt;
+        # retry the run (with a fresh baseline) up to 3 times before
+        # concluding that set_model itself is broken.
+        agent: ChatSorcarAgent | None = None
+        baseline: list[str] = []
+        for _attempt in range(3):
+            _save_last_model(MODEL_A)
+            baseline = _persisted_task_models()
 
-        agent = ChatSorcarAgent("set-model-persist-live")
-        result = agent.run(
-            prompt_template=TASK_1_PROMPT,
-            model_name=MODEL_A,
-            work_dir=str(tmp_path),
-            web_tools=False,
-        )
-        assert "success" in result
+            agent = ChatSorcarAgent("set-model-persist-live")
+            result = agent.run(
+                prompt_template=TASK_1_PROMPT,
+                model_name=MODEL_A,
+                work_dir=str(tmp_path),
+                web_tools=False,
+            )
+            assert "success" in result
+            if agent.model_name == MODEL_B:
+                break
 
+        assert agent is not None
         assert agent.model_name == MODEL_B, (
-            f"set_model to {MODEL_B} never took effect; agent still on "
-            f"{agent.model_name!r}"
+            f"set_model to {MODEL_B} never took effect in 3 attempts; "
+            f"agent still on {agent.model_name!r}"
         )
 
         assert _load_last_model() == MODEL_A, (

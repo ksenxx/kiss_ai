@@ -31,12 +31,12 @@ instead of mocked):
   ``store_credentials`` + ``_wire_muse`` (wire failing although the
   credential was just stored) need the vault cleared between the store
   and the mint by another process.
-* ``TelegramAgent.__init__``'s legacy branch and the legacy
-  ``connect``/``_make_backend``/``authenticate_telegram`` bodies import
-  the ``telegram`` SDK, which is not installed in this environment;
-  the Muse branches (which need no SDK) ARE covered, and the legacy
-  direct-HTTP paths (``poll_messages``/``send_typing``) are covered
-  flag-off against the same emulator.
+* The Telegram connector has no SDK dependency: both the Muse branches
+  and the legacy ``__init__``/``connect``/``_make_backend``/
+  ``authenticate_telegram`` bodies drive the in-house ``_TelegramBot``
+  adapter, and the legacy direction is covered flag-off against the
+  same emulator (``test_telegram_legacy_tools_without_sdk``; the
+  transport itself is exercised in ``test_telegram_legacy_transport.py``).
 * ``_get_access_token`` and the legacy MS Teams ``_token`` refresh
   contact the real ``login.microsoftonline.com`` (hardcoded legacy
   URL), so the legacy directions of the ``_token``/``connect``/
@@ -1232,21 +1232,40 @@ def test_telegram_authenticate_without_precall_config(
 def test_telegram_legacy_tools_without_sdk(
     isolated_kiss_home: Path, api_server: _TokenXApiServer
 ) -> None:
-    """Flag off, without the SDK: legacy tools degrade cleanly."""
+    """Flag off: legacy tools talk to the Bot API directly, no SDK, no daemon.
+
+    The real token travels in the URL path segment and no bearer header
+    is sent (that header only identifies a Muse surrogate).
+    """
     tg_config.save({"bot_token": _REAL_TG_TOKEN})
     backend = _tg_backend(api_server)
-    # Legacy connect needs the (uninstalled) SDK and reports the failure.
-    assert backend.connect() is False
-    assert "Telegram auth failed" in backend._connection_info
-    # Legacy agent construction tolerates the missing SDK.
+    assert backend.connect() is True
+    assert backend._connection_info == "Authenticated as @kissbot"
+    assert backend._muse is False
+    probe = api_server.requests[-1]
+    assert probe["path"] == f"/bot{_REAL_TG_TOKEN}/getMe"
+    assert not any(k.lower() == "authorization" for k in probe["headers"])
+    # Legacy agent construction wires the bot from the persisted config.
     agent = TelegramAgent()
-    assert agent._backend._bot is None
+    assert agent._backend._bot is not None
     agent._backend = backend
     tools = _auth_tools(agent)
-    rejected = json.loads(tools["authenticate_telegram"](_REAL_TG_TOKEN))
-    assert rejected["ok"] is False  # SDK import fails, config untouched
+    status = json.loads(tools["check_telegram_auth"]())
+    assert status == {"ok": True, "username": "kissbot", "first_name": "KISS", "id": 99}
+    rejected = json.loads(tools["authenticate_telegram"]("wrong-token"))
+    assert rejected["ok"] is False and "401" in rejected["error"]
+    assert tg_config.load() == {"bot_token": _REAL_TG_TOKEN}  # config untouched
+    accepted = json.loads(tools["authenticate_telegram"](_REAL_TG_TOKEN))
+    assert accepted["ok"] is True and accepted["username"] == "kissbot"
+    polled = tg_make_backend()
+    assert polled._muse is False
+    polled._api_base = api_server.base()
+    messages, cursor = polled.poll_messages("", "0")
+    assert messages and cursor == "6"
+    assert api_server.requests[-1]["path"] == f"/bot{_REAL_TG_TOKEN}/getUpdates"
     assert "cleared" in tools["clear_telegram_auth"]()
     assert not tg_config.path.exists()
+    assert agent._backend._bot is None
     with pytest.raises(SystemExit):
         tg_make_backend()
     assert not socket_path().exists()

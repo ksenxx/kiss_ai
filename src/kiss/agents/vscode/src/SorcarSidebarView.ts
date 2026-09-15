@@ -18,17 +18,26 @@ function isPathInside(target: string, root: string): boolean {
 
 /**
  * Resolve *p* against *root* and return the resolved path only when it is
- * a real file inside *root* — comparing REAL paths, so a symlink inside
- * the workspace cannot smuggle in a file that actually lives outside it.
+ * a real file or directory inside *root* — comparing REAL paths, so a
+ * symlink inside the workspace cannot smuggle in a path that actually
+ * lives outside it. Directories resolve too: clicking a directory link
+ * reveals it in the Explorer (see _openResolvedFile). Pass
+ * fileOnly=true to reject directories, so a caller that wants a file
+ * can fall through to its next candidate (the pending worktree).
  */
-function resolveWorkspaceFile(p: string, root: string): string | null {
+function resolveWorkspaceFile(
+  p: string,
+  root: string,
+  fileOnly = false,
+): string | null {
   try {
     const resolved = path.resolve(root, p);
     if (!isPathInside(resolved, root)) return null;
     const real = fs.realpathSync(resolved);
     const realRoot = fs.realpathSync(root);
     if (!isPathInside(real, realRoot)) return null;
-    if (!fs.statSync(real).isFile()) return null;
+    const st = fs.statSync(real);
+    if (!st.isFile() && (fileOnly || !st.isDirectory())) return null;
     return resolved;
   } catch {
     return null;
@@ -1111,12 +1120,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     p: string,
     wd: string,
     tabId: string | undefined,
+    fileOnly = false,
   ): string | null {
-    const resolved = resolveWorkspaceFile(p, wd);
+    const resolved = resolveWorkspaceFile(p, wd, fileOnly);
     if (resolved) return resolved;
     const wtDir =
       tabId !== undefined ? this._worktreeDirs.get(tabId) : undefined;
-    if (wtDir && wtDir !== wd) return resolveWorkspaceFile(p, wtDir);
+    if (wtDir && wtDir !== wd) return resolveWorkspaceFile(p, wtDir, fileOnly);
     return null;
   }
 
@@ -1343,10 +1353,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           // that lives only in the tab's pending worktree must open
           // like any other file link — falling through to _startTask
           // would launch an unintended agent run on a path-only prompt.
+          // Regular files ONLY (fileOnly): _resolveTabFile also
+          // resolves directories (for clickable directory links), but
+          // a one-word prompt that happens to name a directory ("src",
+          // "tmp", ...) must still start a task, not reveal the
+          // directory in the Explorer. fileOnly also keeps a workspace
+          // DIRECTORY from shadowing a pending-worktree FILE at the
+          // same relative path: the directory candidate is skipped and
+          // the worktree file still opens.
           const resolved = this._resolveTabFile(
             trimmed,
             effectiveWorkDir,
             tabId,
+            true,
           );
           if (resolved) {
             await this._openResolvedFile(resolved);
@@ -2135,6 +2154,22 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     filePath: string,
     line?: number,
   ): Promise<void> {
+    let isDirectory = false;
+    try {
+      isDirectory = fs.statSync(filePath).isDirectory();
+    } catch {
+      // Deleted between the existence check and the click: fall through
+      // to the file paths below, which surface their own errors.
+    }
+    if (isDirectory) {
+      // A directory link cannot open in an editor; reveal it in the
+      // Explorer instead so the user can browse its contents.
+      await vscode.commands.executeCommand(
+        'revealInExplorer',
+        vscode.Uri.file(filePath),
+      );
+      return;
+    }
     if (isRenderableHtmlExtension(filePath)) {
       // Render the page in a webview tab — like the remote web app
       // does — instead of showing its source in the editor.

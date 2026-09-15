@@ -245,6 +245,50 @@
     if (endTab) sealPanelTimes(endTab.outputFragment, endTs);
   }
 
+  // livedone-coverage:start
+  /**
+   * Stamp every event panel of *root* as having finished on screen.
+   *
+   * Called when a task ends (task_done / task_error / task_stopped /
+   * task_interrupted): a stamped panel keeps the exact collapsed or
+   * expanded state the live stream left it in — the finish must not
+   * explicitly collapse (or hide) any event panel the user was
+   * watching (see applyChevronState). The stamp is a plain JS
+   * property, so a REPLAYED transcript (a reload or reattach builds
+   * fresh DOM from stored events) carries none and keeps the
+   * finished-task digest presentation.
+   *
+   * @param {Element|DocumentFragment|null} root The tab's transcript.
+   */
+  function markPanelsLiveFinished(root) {
+    if (!root || !root.querySelectorAll) return;
+    const panels = root.querySelectorAll('.collapsible');
+    for (let i = 0; i < panels.length; i++) {
+      // A neighbouring task's replayed transcript did not finish on
+      // screen — it keeps its digest, so it takes no stamp.
+      if (panels[i].closest('.adjacent-task')) continue;
+      panels[i]._liveFinished = true;
+    }
+  }
+
+  /**
+   * Stamp the panels of the tab a terminal event names (see
+   * markPanelsLiveFinished). The tab's transcript is #output when it
+   * is on screen and its detached fragment when it is hidden; a
+   * terminal event for a tab this client no longer has is a no-op.
+   *
+   * @param {string|undefined} evTabId The terminal event's tab id.
+   */
+  function markTabPanelsLiveFinished(evTabId) {
+    if (evTabId === undefined || evTabId === activeTabId) {
+      markPanelsLiveFinished(O);
+      return;
+    }
+    const endTab = getTab(evTabId);
+    if (endTab) markPanelsLiveFinished(endTab.outputFragment);
+  }
+  // livedone-coverage:end
+
   function discardProvisionalPanel(el) {
     if (!el) return;
     _activePanels.delete(el);
@@ -1555,6 +1599,10 @@
         tab.contentEditor.layout();
       } catch (_e) {}
     }
+    // A path:NN link opened in the background rendered its editor at
+    // height 0, where a reveal cannot scroll; retry now that the tab
+    // is visible and laid out.
+    revealPendingContentLine(tab);
   }
 
   function hideContentArea() {
@@ -1579,6 +1627,7 @@
   }
 
   function disposeTabContentView(tab) {
+    tab.contentRevealLine = 0;
     if (tab.contentEditor) {
       try {
         tab.contentEditor.dispose();
@@ -1720,6 +1769,45 @@
     return flight;
   }
 
+  // Jump a code content tab to its pending path:NN line, matching the
+  // VS Code extension's editor line reveal. Called when the content is
+  // rendered AND every time the tab is shown: a reveal computed while
+  // the tab is hidden (editor height 0) cannot scroll, so the pending
+  // line is kept until a reveal runs on a visible surface. The line is
+  // clamped to the document, like VS Code clamps an out-of-range :NN.
+  function revealPendingContentLine(tab) {
+    const line = tab.contentRevealLine || 0;
+    if (!(line > 0)) return;
+    if (tab.contentEditor) {
+      try {
+        const editor = tab.contentEditor;
+        const model = editor.getModel();
+        const target = Math.max(
+          1,
+          Math.min(line, model ? model.getLineCount() : line),
+        );
+        editor.setPosition({lineNumber: target, column: 1});
+        editor.revealLineInCenter(target);
+        const dom = editor.getDomNode();
+        if (dom && dom.offsetHeight > 0) tab.contentRevealLine = 0;
+      } catch (_e) {}
+      return;
+    }
+    // Monaco CDN fallback: scroll the <pre> proportionally (uniform
+    // line height under `white-space: pre` + monospace).
+    const pre =
+      tab.contentViewEl &&
+      tab.contentViewEl.querySelector('.content-code-fallback');
+    if (!pre || pre.clientHeight <= 0) return;
+    const total = (pre.textContent || '').split('\n').length;
+    const target = Math.max(1, Math.min(line, total));
+    pre.scrollTop = Math.max(
+      0,
+      ((target - 1) / total) * pre.scrollHeight - pre.clientHeight / 2,
+    );
+    tab.contentRevealLine = 0;
+  }
+
   function renderCodeContent(tab, holder, text, language) {
     ensureMonaco()
       .then(monaco => {
@@ -1733,6 +1821,7 @@
           scrollBeyondLastLine: false,
           theme: 'vs-dark',
         });
+        revealPendingContentLine(tab);
       })
       .catch(() => {
         if (!holder.isConnected || holder.firstChild) return;
@@ -1745,6 +1834,7 @@
         try {
           if (window.hljs) window.hljs.highlightElement(code);
         } catch (_e) {}
+        revealPendingContentLine(tab);
       });
   }
 
@@ -1814,6 +1904,16 @@
     area.appendChild(view);
     tab.contentViewEl = view;
     const lower = (ev.name || '').toLowerCase();
+    // A directory listing is plain text no matter what the directory is
+    // named: without this guard a directory named foo.md or foo.html
+    // would have its listing rendered as markdown/HTML below.
+    if (ev.isDirectory) {
+      const dirHolder = document.createElement('div');
+      dirHolder.className = 'content-monaco-holder';
+      view.appendChild(dirHolder);
+      renderCodeContent(tab, dirHolder, ev.content || '', 'plaintext');
+      return;
+    }
     // mdlink-coverage:start
     // A clicked .md/.markdown link arrives as raw markdown text — unlike
     // a finished-task report, whose markdown openReadyReportTabs already
@@ -1836,6 +1936,12 @@
     const holder = document.createElement('div');
     holder.className = 'content-monaco-holder';
     view.appendChild(holder);
+    // A path:NN link carries the line the file should open at (echoed
+    // by the server's fileContent reply). Only the code surface honors
+    // it — VS Code likewise reveals a line in text editors only, never
+    // in .html/.md previews.
+    const line = parseInt(ev.line, 10);
+    tab.contentRevealLine = line > 0 ? line : 0;
     renderCodeContent(tab, holder, ev.content || '', languageFromPath(lower));
   }
 
@@ -3269,6 +3375,13 @@
         p.classList.remove('chv-hidden');
         continue;
       }
+      // livedone-coverage:start
+      // The panel was on screen when its task finished: the finish must
+      // not explicitly collapse or hide any event panel, so the panel
+      // keeps the exact state the live stream left it in — untouched —
+      // until a replay rebuilds the transcript (markPanelsLiveFinished).
+      if (p._liveFinished) continue;
+      // livedone-coverage:end
       if (p.classList.contains('tc-summary')) {
         p.classList.remove('chv-hidden');
         if (!p.classList.contains('user-pinned')) p.classList.add('collapsed');
@@ -4502,16 +4615,92 @@
     return null;
   }
 
-  function rpPanelForNewSubagent(parentId, taskId) {
+  /**
+   * An event's wall-clock stamp as a number, or 0 when it has none.
+   *
+   * @param {*} ts The event's `ts` (ms since the epoch, daemon-stamped).
+   * @returns {number} The stamp, or 0.
+   */
+  function rpEventTs(ts) {
+    const n = Number(ts);
+    return isFinite(n) && n > 0 ? n : 0;
+  }
+
+  /**
+   * The fan-out panel among *panels* whose call was running when a
+   * sub-agent started at *startTs*, or null.
+   *
+   * Tool calls run one at a time, so the children of a fan-out call
+   * are exactly the sub-agents that started between its `tool_call`
+   * and its `tool_result` (`_rpCallTs`..`_rpDoneTs`, both stamped by
+   * the daemon on the same clock that stamps a sub-agent row's
+   * `startTs`). The result stamp is excluded: a child finishes before
+   * its call's result is stamped, so a start on that very millisecond
+   * is the NEXT call's, which the same model turn may issue at once.
+   * A call whose result has not arrived spans everything after its
+   * start, so panels are tried newest first: a call that never
+   * reported back (a stopped task earlier in the transcript) must not
+   * absorb the children of the calls after it. Events or rows without
+   * stamps (legacy) match nothing, and the caller falls back to
+   * counting.
+   *
+   * @param {Array<Element>} panels Fan-out panels, transcript order.
+   * @param {number} startTs The sub-agent's start stamp (0: unknown).
+   * @returns {Element|null} The spanning panel.
+   */
+  function rpPanelSpanningStart(panels, startTs) {
+    if (!(startTs > 0)) return null;
+    for (let i = panels.length - 1; i >= 0; i--) {
+      const p = panels[i];
+      const callTs = p._rpCallTs || 0;
+      if (!callTs || startTs < callTs) continue;
+      const doneTs = p._rpDoneTs || 0;
+      if (doneTs && startTs >= doneTs) continue;
+      return p;
+    }
+    return null;
+  }
+
+  /**
+   * The fan-out panel a sub-agent of *parentId* belongs to.
+   *
+   * In order of confidence: the panel that already recorded the
+   * sub-agent's task id; the panel whose call was running when the
+   * sub-agent started (rpPanelSpanningStart -- replayed children, whose
+   * announcement carries their row's `startTs`); the first counted
+   * panel still below its declared task count (run_parallel children
+   * arrive in spawn order, and a late starter of an earlier call is
+   * still that call's) -- for a live spawn only a call whose result has
+   * not arrived, since a returned call spawns nothing more, however
+   * few of its declared workers started; else the newest panel --
+   * which for a live spawn is the call still running, so an open-ended
+   * run_agent dispatch takes every child it spawns, however many.
+   *
+   * @param {string} parentId The parent's tab id.
+   * @param {*} taskId The sub-agent's task id.
+   * @param {object} [opts] `startTs`: the sub-agent's start stamp
+   *     when the announcement carries it (`openSubagentTab`); `live`:
+   *     the spawn was just announced (`new_tab`).
+   * @returns {Element|null} The owning panel, or null with no panel.
+   */
+  function rpPanelForNewSubagent(parentId, taskId, opts) {
     const owner = rpPanelOwningTask(parentId, taskId);
     if (owner) return owner;
     const panels = rpDirectPanelsForParent(parentId);
+    if (!panels.length) return null;
+    const live = !!(opts && opts.live);
+    const spanning = rpPanelSpanningStart(
+      panels,
+      rpEventTs(opts ? opts.startTs : 0),
+    );
+    if (spanning) return spanning;
     for (const p of panels) {
+      if (live && p._rpDone) continue;
       const expected = p._rpExpectedCount;
       if (typeof expected !== 'number') continue;
       if ((p._rpSubagents || []).length < expected) return p;
     }
-    return panels.length ? panels[panels.length - 1] : null;
+    return panels[panels.length - 1];
   }
 
   function rpPanelHasOpenTabs(panelEl) {
@@ -4833,13 +5022,30 @@
         p._rpParentTabId === activeTabId || getTab(p._rpParentTabId);
       if (!parentOpen) continue;
       if (rpPanelHasOpenTabs(p)) continue;
-      if (!p.classList.contains('collapsed')) {
-        p.classList.add('collapsed');
-        p.classList.remove('user-pinned');
-        collapsePreview(p);
-      }
-      syncRunParallelPanel(p);
+      // An open-ended fan-out (run_agent) may still spawn: a
+      // multi-<task> dispatch starts its next child only after the
+      // previous one finished, and a collapsed panel would turn that
+      // child's spawn into a tabless entry. Its collapse waits for the
+      // call's result (see the tool_result case).
+      if (p._rpOpenEnded && !p._rpDone) continue;
+      rpCollapsePanel(p);
     }
+  }
+
+  /**
+   * Collapse fan-out panel *panelEl* and close the sub-agent tabs it
+   * owns -- what a finished fan-out does once its last child tab is
+   * gone.
+   *
+   * @param {Element} panelEl The fan-out panel.
+   */
+  function rpCollapsePanel(panelEl) {
+    if (!panelEl.classList.contains('collapsed')) {
+      panelEl.classList.add('collapsed');
+      panelEl.classList.remove('user-pinned');
+      collapsePreview(panelEl);
+    }
+    syncRunParallelPanel(panelEl);
   }
 
   const addCopyButton = window.PanelCopy.addCopyButton;
@@ -4854,8 +5060,22 @@
     for (let i = 0; i < panels.length; i++) {
       const p = panels[i];
       if (p.classList.contains('rc')) continue;
-      if (p.classList.contains('tc-run-parallel'))
+      if (p.classList.contains('tc-run-parallel')) {
         rpAdoptOpenSubagents(p, ownerId);
+        // A fan-out still running when its task's own transcript is
+        // replayed (a client reconnecting mid-run) has children the
+        // daemon is about to announce; collapsed, it would absorb them
+        // as tabless entries and the reconnected client would show no
+        // running sub-agent at all. Only the tab's transcript itself:
+        // a detached copy (a share export, a neighbouring task) owns no
+        // tab and is exported collapsed like any finished fan-out.
+        if (
+          !p._rpDone &&
+          streamTabIsRunning(ownerId) &&
+          rpTaskDomRootForParent(ownerId) === container
+        )
+          continue;
+      }
       if (rpPanelHasOpenTabs(p) && !p._rpDone) continue;
       p.classList.add('collapsed');
       collapsePreview(p);
@@ -5446,17 +5666,38 @@
           hdr.classList.add('tc-h-bash');
           c.classList.add('tc-bash');
         }
-        if (ev.name === 'run_parallel') {
+        // A run_agent dispatch is a fan-out too: the daemon runs its
+        // child under the run_parallel sub-agent contract (nested tab,
+        // subagentDone, a history row under this task), so its panel
+        // gets the same bookkeeping. Without it the child's tab closed
+        // on subagentDone but came back on every replay -- the daemon
+        // re-announces every finished child of a resumed task
+        // (`_open_persisted_subagent_tabs`), and only a collapsed
+        // fan-out panel turns that announcement into a panel entry
+        // instead of a tab. Unlike run_parallel the call declares no
+        // child count: a dispatch may spawn none (an argument error),
+        // one, or several in sequence (a multi-<task> prompt), so the
+        // panel is open-ended (`_rpOpenEnded`): its children are the
+        // ones spawned while the call ran (`_rpCallTs`..`_rpDoneTs`,
+        // see rpPanelSpanningStart) rather than a counted set.
+        if (ev.name === 'run_parallel' || ev.name === 'run_agent') {
           c.classList.add('tc-run-parallel');
           if (ev.tabId !== undefined && ev.tabId !== null)
             c._rpParentTabId = ev.tabId;
           tState.runParallelCount = (tState.runParallelCount || 0) + 1;
           c._rpCallIndex = tState.runParallelCount;
-          c._rpDeclaredTasks = rpDeclaredTaskList(
-            ev.extras ? ev.extras.tasks : undefined,
-          );
-          c._rpExpectedCount =
-            c._rpDeclaredTasks === null ? null : c._rpDeclaredTasks.length;
+          c._rpCallTs = rpEventTs(ev.ts);
+          if (ev.name === 'run_agent') {
+            c._rpOpenEnded = true;
+            c._rpDeclaredTasks = null;
+            c._rpExpectedCount = null;
+          } else {
+            c._rpDeclaredTasks = rpDeclaredTaskList(
+              ev.extras ? ev.extras.tasks : undefined,
+            );
+            c._rpExpectedCount =
+              c._rpDeclaredTasks === null ? null : c._rpDeclaredTasks.length;
+          }
         }
         const isSummary = ev.name === 'summary';
         if (isSummary) {
@@ -5602,7 +5843,15 @@
           tState.lastToolCallEl &&
           tState.lastToolCallEl.classList.contains('tc-run-parallel')
         ) {
-          tState.lastToolCallEl._rpDone = true;
+          const fanout = tState.lastToolCallEl;
+          fanout._rpDone = true;
+          fanout._rpDoneTs = rpEventTs(ev.ts);
+          // An open-ended fan-out's collapse was deferred past its last
+          // child's close (rpAfterTabsClosed) because it might still
+          // spawn; the call returning completes it.
+          if (fanout._rpOpenEnded && !rpPanelHasOpenTabs(fanout)) {
+            rpCollapsePanel(fanout);
+          }
         }
         // report-coverage:start
         if (ev.is_error) tState.pendingReport = null;
@@ -5977,9 +6226,15 @@
    */
   function streamEnd(ctx, ev, target) {
     const t = ev.type;
-    if (target === ctx.container) {
+    // livedone-coverage:start
+    // The result IS the task finishing: the pass that folds older
+    // panels behind each new event must not run for it, or the finish
+    // would explicitly collapse the panels (a done run_parallel
+    // fan-out, the last open tool panel) the user was watching.
+    if (target === ctx.container && t !== 'result') {
       collapseOlderPanels(ctx.container, ctx.tabId);
     }
+    // livedone-coverage:end
     if (t === 'tool_result' && ctx.lastToolName !== 'finish' && !ctx.llmPanel) {
       // The agent is thinking again; the panel its words will land in is
       // opened now so the transcript does not sit empty, and withdrawn
@@ -7984,6 +8239,9 @@
         // donelabel-coverage:end
         markTabDone(ev.tabId, ev.success === false);
         sealTabPanelTimes(ev.tabId, ev.endTs);
+        // livedone-coverage:start
+        markTabPanelsLiveFinished(ev.tabId);
+        // livedone-coverage:end
         clearActionProgressForTab(ev.tabId);
         setReady(doneLabel, ev.tabId, ev.startTs, ev.endTs);
         focusFinishedTab(ev.tabId);
@@ -8014,6 +8272,9 @@
           }
         }
         sealTabPanelTimes(ev.tabId, ev.endTs);
+        // livedone-coverage:start
+        markTabPanelsLiveFinished(ev.tabId);
+        // livedone-coverage:end
         const label =
           t === 'task_error'
             ? 'Error'
@@ -8061,7 +8322,11 @@
           // newest panel: with several run_parallel calls in one task a
           // late spawn belongs to an earlier call, whose collapsed state
           // decides whether it may have a tab.
-          const rpPanel = rpPanelForNewSubagent(parentTabBeforeNew, ev.task_id);
+          const rpPanel = rpPanelForNewSubagent(
+            parentTabBeforeNew,
+            ev.task_id,
+            {live: true},
+          );
           if (
             rpPanel &&
             (rpPanel.classList.contains('collapsed') ||
@@ -8107,7 +8372,9 @@
           ev.task_id === undefined || ev.task_id === null ? '' : ev.task_id;
         let rpPanel = _rpTabPanel.get(ev.tab_id) || null;
         if (!rpPanel && parentId) {
-          rpPanel = rpPanelForNewSubagent(parentId, subTaskId);
+          rpPanel = rpPanelForNewSubagent(parentId, subTaskId, {
+            startTs: ev.startTs,
+          });
         }
         let subTab = getTab(ev.tab_id);
         // A sub-agent the user closed by hand stays closed until its
@@ -8601,6 +8868,9 @@
       );
       clonePanels[i]._rpExpectedCount = origPanels[i]._rpExpectedCount;
       clonePanels[i]._rpDeclaredTasks = origPanels[i]._rpDeclaredTasks;
+      clonePanels[i]._rpOpenEnded = origPanels[i]._rpOpenEnded;
+      clonePanels[i]._rpCallTs = origPanels[i]._rpCallTs;
+      clonePanels[i]._rpDoneTs = origPanels[i]._rpDoneTs;
     }
     return live;
   }
@@ -8637,25 +8907,29 @@
    * to open and close the shared page's sub-agent tabs when the
    * panel is expanded and collapsed.
    *
-   * The claims run in order of confidence, each panel capped at its
-   * declared task count (`_rpExpectedCount`):
+   * The claims run in order of confidence; the start-time and text
+   * tiers stop at a panel's declared task count (`_rpExpectedCount`):
    *
    * 1. exact ids — a live panel names its sub-agents
    *    (`_rpSubagents`, copied onto the clone by shareLiveTranscript);
-   * 2. declared text — a replayed panel's `tasks` argument
+   * 2. start time — a row that started while a call was running
+   *    (its `task_settings.start_ts` within the panel's
+   *    `_rpCallTs`..`_rpDoneTs`, see rpPanelSpanningStart) is that
+   *    call's; this is how an open-ended `run_agent` panel, which
+   *    declares neither count nor text, claims its children, and it
+   *    settles rows whose text alone is ambiguous;
+   * 3. declared text — a replayed panel's `tasks` argument
    *    (`_rpDeclaredTasks`) names its workers' descriptions, which
-   *    are exactly the persisted sub-agent rows' task texts, so a
-   *    child spawned by something else entirely (a `run_agent` call)
-   *    is never dealt to a fan-out that did not declare it;
-   * 3. a panel with no declared list at all (legacy events) takes
-   *    whatever is left only when it is the LAST such panel, so it
-   *    can never swallow a later fan-out's sub-agents.
+   *    are exactly the persisted sub-agent rows' task texts (rows with
+   *    no start stamp, from before stamps were persisted);
+   * 4. a run_parallel panel with no declared list at all (legacy
+   *    events) takes whatever is left only when it is the LAST such
+   *    panel, so it can never swallow a later fan-out's sub-agents.
    *
-   * A child no fan-out claims (e.g. a `run_agent` sub-task) is
-   * flagged `_shareOrphan`: its section is exported with
-   * `data-sub-orphan` and the shared page opens its tab whenever its
-   * parent's transcript is on screen — the live webview opens a tab
-   * for such spawns too.
+   * A child no fan-out claims is flagged `_shareOrphan`: its section
+   * is exported with `data-sub-orphan` and the shared page opens its
+   * tab whenever its parent's transcript is on screen, the static
+   * page having no panel entry to expand for it.
    *
    * @param {Element} root A task's or sub-agent's transcript holder.
    * @param {Array<object>} children Its direct sub-agent descriptors.
@@ -8692,6 +8966,15 @@
         if (at >= 0) take(p, at);
       }
     }
+    for (let at = 0; at < remaining.length;) {
+      const settings = taskSettingsFromEvents(remaining[at].events);
+      const p = rpPanelSpanningStart(
+        panels,
+        rpEventTs(settings ? settings.start_ts : 0),
+      );
+      if (p && capLeft(p) !== 0) take(p, at);
+      else at++;
+    }
     for (const p of panels) {
       const declared = p._rpDeclaredTasks;
       if (!declared) continue;
@@ -8705,7 +8988,7 @@
       }
     }
     const uncounted = panels.filter(
-      p => typeof p._rpExpectedCount !== 'number',
+      p => !p._rpOpenEnded && typeof p._rpExpectedCount !== 'number',
     );
     if (uncounted.length > 0) {
       const last = uncounted[uncounted.length - 1];

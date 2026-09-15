@@ -25,9 +25,11 @@ import asyncio
 import shutil
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
 LONG_TASK = (
@@ -126,10 +128,22 @@ def test_live_remote_task_panel_hover_tooltip(tmp_path: Path) -> None:
                     ignore_https_errors=True,
                     viewport={"width": 1400, "height": 900},
                 )
-                page.goto(
-                    f"https://127.0.0.1:{port}/",
-                    wait_until="domcontentloaded",
-                )
+                # Chromium sporadically aborts the first navigation
+                # with net::ERR_NETWORK_CHANGED on busy hosts (an
+                # interface change mid-request); retry the goto for
+                # such transient network errors only.
+                for attempt in range(3):
+                    try:
+                        page.goto(
+                            f"https://127.0.0.1:{port}/",
+                            wait_until="domcontentloaded",
+                        )
+                        break
+                    except PlaywrightError as exc:
+                        transient = "net::ERR_NETWORK_CHANGED" in str(exc)
+                        if not transient or attempt == 2:
+                            raise
+                        time.sleep(1.0)
                 page.wait_for_selector("#task-panel", state="attached")
 
                 page.evaluate(
