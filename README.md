@@ -62,7 +62,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 663 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 661 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -272,7 +272,7 @@ These agents live in `src/kiss/agents/third_party_agents/`; a prompt-oriented us
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **663 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
+KISS Sorcar ships a catalog of **661 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -282,14 +282,14 @@ KISS Sorcar ships a catalog of **663 models** across **9 provider categories**, 
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 380 |
+| OpenRouter | 378 |
 | Claude Code CLI (`cc/*`) | 14 |
 | Codex CLI (`codex/*`) | 8 |
 
 Current catalog capability totals:
 
-- **643** generation-capable models
-- **484** function-calling-capable models
+- **641** generation-capable models
+- **483** function-calling-capable models
 - **11** embedding models
 
 Full model list:
@@ -592,7 +592,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (380)</strong></summary>
+<summary><strong>OpenRouter (378)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -654,7 +654,6 @@ Full model list:
 - `openrouter/google/gemini-2.5-flash-lite`
 - `openrouter/google/gemini-2.5-pro`
 - `openrouter/google/gemini-2.5-pro-preview`
-- `openrouter/google/gemini-2.5-pro-preview-05-06`
 - `openrouter/google/gemini-3-flash-preview`
 - `openrouter/google/gemini-3-pro-image`
 - `openrouter/google/gemini-3-pro-image-preview`
@@ -751,7 +750,6 @@ Full model list:
 - `openrouter/openai/gpt-3.5-turbo-instruct`
 - `openrouter/openai/gpt-4`
 - `openrouter/openai/gpt-4-turbo`
-- `openrouter/openai/gpt-4-turbo-preview`
 - `openrouter/openai/gpt-4.1`
 - `openrouter/openai/gpt-4.1-mini`
 - `openrouter/openai/gpt-4.1-nano`
