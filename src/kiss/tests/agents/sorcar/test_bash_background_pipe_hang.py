@@ -55,11 +55,19 @@ def _assert_alive_and_kill(pid_file: Path) -> None:
     deadline group-kill either never writes the file or fails the
     liveness probe below.
     """
+    # Poll for parseable *content*, not mere existence: the shell
+    # redirect creates the file empty before echo writes the PID, so an
+    # existence check can win the race and read ''.
     deadline = time.monotonic() + 10
-    while not pid_file.exists() and time.monotonic() < deadline:
+    pid_text = ""
+    while time.monotonic() < deadline:
+        if pid_file.exists():
+            pid_text = pid_file.read_text().strip()
+            if pid_text.isdigit():
+                break
         time.sleep(0.01)
-    assert pid_file.exists(), "background child never started"
-    pid = int(pid_file.read_text())
+    assert pid_text.isdigit(), "background child never started"
+    pid = int(pid_text)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

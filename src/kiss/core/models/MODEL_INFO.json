@@ -2877,8 +2877,8 @@
   },
   "openrouter/deepseek/deepseek-v4-flash": {
     "context_length": 500000,
-    "input_price_per_1M": 0.081,
-    "output_price_per_1M": 0.162,
+    "input_price_per_1M": 0.089,
+    "output_price_per_1M": 0.177,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -2887,7 +2887,7 @@
   "openrouter/deepseek/deepseek-v4-flash-0731": {
     "context_length": 500000,
     "input_price_per_1M": 0.06,
-    "output_price_per_1M": 0.12,
+    "output_price_per_1M": 0.11,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -2915,8 +2915,8 @@
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "context_length": 500000,
-    "input_price_per_1M": 0.579,
-    "output_price_per_1M": 1.738,
+    "input_price_per_1M": 0.983,
+    "output_price_per_1M": 2.95,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -2925,8 +2925,8 @@
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "context_length": 500000,
-    "input_price_per_1M": 0.15,
-    "output_price_per_1M": 0.6,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 1.2,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -2973,15 +2973,6 @@
     "input_price_per_1M": 1.25,
     "output_price_per_1M": 10.0,
     "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "openrouter/google/gemini-2.5-pro-preview-05-06": {
-    "context_length": 500000,
-    "input_price_per_1M": 1.25,
-    "output_price_per_1M": 10.0,
-    "fc": false,
     "emb": false,
     "gen": true,
     "use_responses_api": true
@@ -3877,14 +3868,6 @@
     "emb": false,
     "gen": true,
     "use_responses_api": true
-  },
-  "openrouter/openai/gpt-4-turbo-preview": {
-    "context_length": 128000,
-    "input_price_per_1M": 10.0,
-    "output_price_per_1M": 30.0,
-    "fc": true,
-    "emb": false,
-    "gen": true
   },
   "openrouter/openai/gpt-4.1": {
     "context_length": 500000,
@@ -4981,8 +4964,8 @@
   },
   "openrouter/qwen/qwen3.5-35b-a3b": {
     "context_length": 262144,
-    "input_price_per_1M": 0.312,
-    "output_price_per_1M": 1.25,
+    "input_price_per_1M": 0.163,
+    "output_price_per_1M": 1.3,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -5293,8 +5276,8 @@
   },
   "openrouter/tencent/hy3": {
     "context_length": 262144,
-    "input_price_per_1M": 0.083,
-    "output_price_per_1M": 0.33,
+    "input_price_per_1M": 0.132,
+    "output_price_per_1M": 0.528,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -5639,8 +5622,8 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 500000,
-    "input_price_per_1M": 0.683,
-    "output_price_per_1M": 2.147,
+    "input_price_per_1M": 1.4,
+    "output_price_per_1M": 4.4,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -5649,8 +5632,8 @@
   },
   "openrouter/z-ai/glm-5.2-high": {
     "context_length": 500000,
-    "input_price_per_1M": 0.683,
-    "output_price_per_1M": 2.147,
+    "input_price_per_1M": 1.4,
+    "output_price_per_1M": 4.4,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -5660,8 +5643,8 @@
   },
   "openrouter/z-ai/glm-5.2-max": {
     "context_length": 500000,
-    "input_price_per_1M": 0.683,
-    "output_price_per_1M": 2.147,
+    "input_price_per_1M": 1.4,
+    "output_price_per_1M": 4.4,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -5747,8 +5730,8 @@
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.579,
-    "output_price_per_1M": 1.738,
+    "input_price_per_1M": 0.96,
+    "output_price_per_1M": 2.88,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -5785,8 +5768,8 @@
   },
   "openrouter/~moonshotai/kimi-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 1.975,
-    "output_price_per_1M": 11.06,
+    "input_price_per_1M": 1.875,
+    "output_price_per_1M": 10.5,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -6059,8 +6042,8 @@
   },
   "openrouter/~z-ai/glm-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.9,
-    "output_price_per_1M": 3.069,
+    "input_price_per_1M": 0.877,
+    "output_price_per_1M": 2.97,
     "fc": true,
     "emb": false,
     "gen": true,

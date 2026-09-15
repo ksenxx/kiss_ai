@@ -923,13 +923,26 @@ class SlackAgent(BaseChannelAgent):
 
     channel_system_prompt = (
         "\n\n## Slack Authentication\n"
-        "If authentication is needed, call start_slack_browser_auth() to open "
-        "the Slack API portal, then use browser tools to create an app, configure "
-        "OAuth scopes, install it to a workspace, and copy the xoxb- bot token. "
-        "Complete these steps autonomously — do NOT instruct the user to do them manually. "
-        "You MUST use the user's default browser and computer use to authenticate "
-        "using claude-fable-5 as the model.  Do all the steps on user's behalf and "
-        "ask user's help ONLY if you are stuck on login or captcha."
+        "Always call check_slack_auth() first; if it returns ok, report the "
+        "team and bot user it returns and stop — never re-run setup over a "
+        "valid token.\n"
+        "If it reports not authenticated, the credential is a static bot "
+        "token (starts with xoxb-) created in the Slack API portal "
+        "(https://api.slack.com/apps), which sits behind the user's Slack "
+        "login: never ask for or type the user's Slack password or 2FA code. "
+        "You may call start_slack_browser_auth() and drive the portal with "
+        "browser tools only while no login screen, captcha, or page failure "
+        "appears. On any failed page load, missing display, or login wall, "
+        "do not retry it or relaunch the browser — hand off the token "
+        "instead:\n"
+        "1. Call ask_user_question() asking the user to open "
+        "https://api.slack.com/apps in their OWN browser, create an app "
+        "(From scratch), add bot scopes under OAuth & Permissions (e.g. "
+        "chat:write, channels:read, channels:history), click Install to "
+        "Workspace and approve it, copy the Bot User OAuth Token (xoxb-...), "
+        "and paste it back.\n"
+        "2. Call authenticate_slack(token=<pasted xoxb- token>).\n"
+        "3. Finish by verifying with check_slack_auth()."
     )
 
     def __init__(self, workspace: str = "default") -> None:
@@ -965,10 +978,13 @@ class SlackAgent(BaseChannelAgent):
             """
             if agent._backend._client is None:
                 return (
-                    "Not authenticated with Slack. Call start_slack_browser_auth() "
-                    "to open the Slack API portal in the browser and create an app "
-                    "autonomously, then call authenticate_slack(token=...) with the "
-                    "xoxb- bot token you retrieve."
+                    "Not authenticated with Slack. If browser tools work, call "
+                    "start_slack_browser_auth() to create an app in the Slack API "
+                    "portal; otherwise ask the user (ask_user_question) to create "
+                    "the app at https://api.slack.com/apps in their OWN browser "
+                    "and paste back the xoxb- bot token. Then call "
+                    "authenticate_slack(token=...). Never ask for the user's "
+                    "Slack password or 2FA code."
                 )
             try:
                 resp = agent._backend._client.auth_test()
@@ -1084,14 +1100,17 @@ class SlackAgent(BaseChannelAgent):
             """Begin automated Slack app creation and token retrieval via browser.
 
             Navigates to the Slack API portal. Use your browser tools (go_to_url,
-            click, type_text) to complete the following steps autonomously:
+            click, type_text) to complete the following steps:
             1. Create a new app ("From scratch"), give it a name, select a workspace.
             2. Go to "OAuth & Permissions", add bot scopes
                (channels:read, channels:history, chat:write, etc.).
             3. Click "Install to Workspace" and approve the installation.
             4. Copy the "Bot User OAuth Token" (starts with xoxb-).
             5. Call authenticate_slack(token=<the token>).
-            Use ask_user_question() if you need user help with login or workspace-selection screens.
+            If a login screen, captcha, or page failure appears, do not retry:
+            hand off via ask_user_question() — the user creates the app in
+            their OWN browser and pastes back the xoxb- token. Never ask for
+            the user's Slack password or 2FA code.
 
             Returns:
                 Instructions for navigating the Slack API portal.
@@ -1099,9 +1118,10 @@ class SlackAgent(BaseChannelAgent):
             return (
                 "Open https://api.slack.com/apps with your go_to_url browser "
                 "tool and complete the app creation steps described above. "
-                "If browser tools are unavailable, use "
-                "authenticate_slack(token=...) with an xoxb- token from "
-                "https://api.slack.com/apps."
+                "If browser tools are unavailable or the page fails to load "
+                "or requires login, ask the user (ask_user_question) to "
+                "create the app there in their OWN browser and paste back "
+                "the xoxb- token, then call authenticate_slack(token=...)."
             )
 
         return [

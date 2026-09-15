@@ -131,6 +131,42 @@ def _extra_for_replay(extra: object) -> str:
     )
 
 
+def _start_ts_from_extra(extra: object) -> int:
+    """Return the ``startTs`` (ms since the epoch) persisted in *extra*.
+
+    A task row's ``extra`` JSON carries the run's wall-clock start
+    (stamped by ``ChatSorcarAgent.run`` when it allocated the row, or
+    by the task runner's own start for a daemon-run task — both fall
+    inside the parent's tool call for a sub-agent).  The frontend
+    attributes a re-announced sub-agent to the fan-out call
+    (``run_parallel`` / ``run_agent`` tool call) that was running when
+    it started, so ``openSubagentTab`` announcements carry this stamp.
+
+    Args:
+        extra: The persisted ``extra`` value (a JSON string), or an
+            already parsed dict.
+
+    Returns:
+        The start stamp, or ``0`` when *extra* has none or is
+        malformed.
+    """
+    parsed: object = extra
+    if isinstance(extra, str):
+        if not extra:
+            return 0
+        try:
+            parsed = json.loads(extra)
+        except (json.JSONDecodeError, TypeError):
+            return 0
+    if not isinstance(parsed, dict):
+        return 0
+    try:
+        start_ts = int(parsed.get("startTs", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return start_ts if start_ts > 0 else 0
+
+
 def _coerce_id(value: object) -> str | None:
     """Coerce a DB row id that may be a str or a legacy int to a string.
 
@@ -1672,6 +1708,7 @@ class VSCodeServer(
                     "task_id": result.get("task_id"),
                     "isSubagentTab": True,
                     "isDone": is_done,
+                    "startTs": _start_ts_from_extra(extra_raw),
                 }
             )
 
@@ -1892,6 +1929,9 @@ class VSCodeServer(
                     "taskIndex": idx,
                     "isSubagentTab": True,
                     "isDone": is_done,
+                    # The frontend attributes the row to the fan-out
+                    # call that was running when it started.
+                    "startTs": _start_ts_from_extra(row.get("extra", "")),
                 }
             )
             self.printer.broadcast(

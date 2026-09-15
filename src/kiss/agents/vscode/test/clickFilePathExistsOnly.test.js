@@ -31,7 +31,8 @@ function checkPathsOnRealFs(msg) {
     }
     let ok = false;
     try {
-      ok = fs.statSync(abs).isFile();
+      const st = fs.statSync(abs);
+      ok = st.isFile() || st.isDirectory();
     } catch {
       ok = false;
     }
@@ -160,17 +161,22 @@ function testMissingPathIsNotClickable() {
   console.log('  ok - missing path is not clickable');
 }
 
-function testDirectoryPathIsNotClickable() {
-  const {win} = makeWebview();
+function testDirectoryPathIsClickable() {
+  const {win, posted} = makeWebview();
   const dirPath = path.join(tmpDir, 'somedir');
   send(win, {type: 'prompt', text: 'look in ' + dirPath + ' please'});
+  const links = findLinks(win, dirPath);
   assert.strictEqual(
-    findLinks(win, dirPath).length,
-    0,
-    'directory path must NOT be clickable',
+    links.length,
+    1,
+    'existing directory path must become clickable',
   );
+  clickEl(win, links[0]);
+  const opens = posted.filter(m => m.type === 'openFile');
+  assert.strictEqual(opens.length, 1, 'click must post one openFile');
+  assert.strictEqual(opens[0].path, dirPath);
   win.close();
-  console.log('  ok - directory path is not clickable');
+  console.log('  ok - directory path is clickable and opens');
 }
 
 function testLineSuffixCheckedAgainstStrippedPath() {
@@ -624,7 +630,7 @@ function testBackgroundTabResolvesAgainstItsOwnWorkDir() {
 function runTests() {
   testExistingPathIsClickable();
   testMissingPathIsNotClickable();
-  testDirectoryPathIsNotClickable();
+  testDirectoryPathIsClickable();
   testLineSuffixCheckedAgainstStrippedPath();
   testMissingPathWithLineSuffixNotClickable();
   testCheckPathsDeduplicatesWithinOneMessage();

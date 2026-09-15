@@ -79,11 +79,19 @@ class TestStopAsyncKillsInFlightTunnelStart(unittest.IsolatedAsyncioTestCase):
         )
         # Wait until the fake cloudflared is running, i.e. the spawn is
         # inside its fail-fast window and _tunnel_proc is still unset.
+        # Poll for parseable *content*, not mere existence: write_text
+        # creates the file empty before writing, so an existence check
+        # can win the race and read ''.
         deadline = time.monotonic() + 10
-        while not pid_marker.exists() and time.monotonic() < deadline:
+        pid_text = ""
+        while time.monotonic() < deadline:
+            if pid_marker.exists():
+                pid_text = pid_marker.read_text().strip()
+                if pid_text.isdigit():
+                    break
             await asyncio.sleep(0.02)
-        self.assertTrue(pid_marker.exists(), "fake cloudflared never started")
-        child_pid = int(pid_marker.read_text())
+        self.assertTrue(pid_text.isdigit(), "fake cloudflared never started")
+        child_pid = int(pid_text)
         self.addCleanup(self._kill, child_pid)
         self.assertIsNone(server._tunnel_proc)
 

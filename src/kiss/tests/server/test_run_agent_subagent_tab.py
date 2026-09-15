@@ -428,6 +428,42 @@ class RunAgentSubagentTabTest(unittest.TestCase):
         )
         assert parent.task_id in top_level_ids
 
+        # 6. A parent replay (every webview ``ready`` triggers one per
+        #    bound tab) re-announces the finished child with its row's
+        #    start stamp: the webview attributes the child to the
+        #    fan-out tool call that was running at that time, and only
+        #    an owning, collapsed panel keeps the finished child's tab
+        #    from reopening on every reconnect.
+        child_row = next(
+            row for row in nested if str(row.get("task_id")) == child_task_id
+        )
+        row_start_ts = int(
+            json.loads(str(child_row.get("extra") or "{}")).get("startTs", 0),
+        )
+        assert row_start_ts > 0, f"child row has no startTs: {child_row!r}"
+        self._send_from_viewer({
+            "type": "resumeSession",
+            "chatId": parent.chat_id,
+            "taskId": parent.task_id,
+            "tabId": PARENT_TAB_ID,
+        })
+        replayed = self._wait_for(
+            lambda: next(
+                (
+                    e for e in list(received)
+                    if e.get("type") == "openSubagentTab"
+                    and e.get("tab_id") == f"{PARENT_TAB_ID}__sub_{child_task_id}"
+                ),
+                None,
+            ),
+            what="openSubagentTab re-announce of the finished child",
+        )
+        assert replayed.get("isDone") is True
+        assert replayed.get("parent_tab_id") == PARENT_TAB_ID
+        assert replayed.get("startTs") == row_start_ts, (
+            f"re-announce must carry the row's startTs: {replayed!r}"
+        )
+
     def test_multi_task_dispatch_completes_every_child_row(self) -> None:
         """A multi-``<task>`` dispatch completes each child row's tab.
 

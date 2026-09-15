@@ -4,7 +4,12 @@
 # add your name here
 """Nextcloud Talk Agent — channel agent with Nextcloud Talk API tools.
 
-Provides authenticated access to Nextcloud Talk via username/password.
+Provides authenticated access to Nextcloud Talk with an app password
+obtained through Nextcloud's Login Flow v2: ``authenticate_nextcloud``
+takes only the server URL and hands back a sign-in link the user opens
+in their own browser; once they grant access, ``finish_nextcloud_auth``
+collects the app password the server issued for this client.  A
+username plus password/app password can still be supplied directly.
 Stores config in ``~/.kiss/third_party_agents/nextcloud/config.json``.
 
 Usage::
@@ -29,6 +34,12 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
     save_json_config,
+)
+from kiss.agents.third_party_agents._device_auth import (
+    ConsentSession,
+    NextcloudLoginSession,
+    connect_prompt,
+    consent_required,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,9 +124,7 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
             Keyword arguments carrying headers (and legacy ``auth``).
         """
         if self._muse:
-            return {
-                "headers": {**self._headers(), "Authorization": f"Bearer {self._surrogate}"}
-            }
+            return {"headers": {**self._headers(), "Authorization": f"Bearer {self._surrogate}"}}
         return {"auth": self._auth, "headers": self._headers()}
 
     def _validate_credentials(self) -> tuple[bool, str]:
@@ -139,6 +148,27 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
         if resp.status_code == 200 and statuscode in (200, 201):
             return True, ""
         return False, f"HTTP {resp.status_code}, OCS statuscode {statuscode!r}"
+
+    def revoke_app_password(self) -> bool:
+        """Revoke the app password this connection authenticates with.
+
+        Best effort: Nextcloud deletes the app password of the current
+        session on ``DELETE /ocs/v2.php/core/apppassword``.  Used when a
+        Login Flow v2 password is cleared, so an unused credential does
+        not linger on the server.
+
+        Returns:
+            True when the server confirmed the revocation.
+        """
+        if not self._url:
+            return False
+        try:
+            resp = self._http.delete(
+                f"{self._url}/ocs/v2.php/core/apppassword", timeout=30, **self._auth_kwargs()
+            )
+        except Exception:
+            return False
+        return bool(resp.status_code == 200)
 
     def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
         resp = self._http.get(
@@ -501,41 +531,35 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
 def _muse_authenticate(
     backend: NextcloudTalkChannelBackend, url: str, username: str, password: str
 ) -> str:
-    """Enroll Nextcloud credentials into the Muse vault and validate them.
+    """Enroll already-validated Nextcloud credentials into the Muse vault.
 
-    The password goes straight into the vault as a header-kind Basic
-    credential bound to the configured server origin, and is never
-    written to ``config.json`` (only the non-secret ``url``/``username``
-    metadata is — written first, so a failed enrollment leaves no
-    password on disk).  Validation runs the ``/room`` read through the
-    daemon boundary, so it is audited; invalid credentials leave the
-    vault empty.
+    The caller (:func:`_apply_credentials`) checked the login name and
+    (app) password with a strict ``/room`` read BEFORE this call, so a
+    rejected candidate never touches the previous enrollment and
+    nothing here can leave invalid credentials enrolled.  The password
+    goes straight into the vault as a header-kind Basic credential
+    bound to the configured server origin, atomically replacing any
+    previous entry, and is never written to ``config.json`` (only the
+    non-secret ``url``/``username`` metadata is).  A daemon failure is
+    reported without clearing the vault: whichever credential it holds
+    at that point (the untouched old one or the just-validated new
+    one) is worth keeping.
 
     Args:
         backend: The agent's Nextcloud backend to (re)wire.
-        url: Nextcloud server base URL.
+        url: Nextcloud server base URL (validated).
         username: Nextcloud login name.
         password: Nextcloud password or app password.
 
     Returns:
-        JSON string with the validation result.
+        JSON string with the result.
     """
-    import contextlib
-
     from kiss.agents.third_party_agents.muse_auth._common import (
         insecure_origin_hosts,
         origin_hosts,
-        valid_http_url,
     )
-    from kiss.agents.third_party_agents.muse_auth.client import (
-        clear_credentials,
-        store_credentials,
-    )
+    from kiss.agents.third_party_agents.muse_auth.client import store_credentials
 
-    if not valid_http_url(url):
-        return json.dumps(
-            {"ok": False, "error": f"{url!r} is not a valid http(s):// server URL."}
-        )
     try:
         save_json_config(_config.path, {"url": url, "username": username})
         store_credentials(
@@ -549,33 +573,23 @@ def _muse_authenticate(
             hosts=origin_hosts(url),
             insecure_hosts=insecure_origin_hosts(url),
         )
-        if backend._wire_muse():  # pragma: no branch - credential was just stored
-            # The same strict check connect() uses: HTTP status AND OCS
-            # meta statuscode (list_rooms() would swallow a 401 into an
-            # empty room list, and error envelopes also carry "ocs").
-            ok, detail = backend._validate_credentials()
-            if ok:
-                return json.dumps(
-                    {"ok": True, "message": "Nextcloud credentials saved (Muse-auth)."}
-                )
-            error = json.dumps({"ok": False, "error": f"Authentication failed: {detail}"})
-        else:  # pragma: no cover - defense in depth
-            error = json.dumps({"ok": False, "error": backend._connection_info})
+        if not backend._wire_muse():  # pragma: no cover - credential was just stored
+            return json.dumps({"ok": False, "error": backend._connection_info})
     except Exception as e:
-        error = json.dumps({"ok": False, "error": str(e)})
-    # Roll the vault back so bad credentials are not left enrolled.
-    with contextlib.suppress(Exception):
-        clear_credentials("nextcloud")
-    backend._url = ""
-    backend._auth = ("", "")
-    backend._surrogate = ""
-    backend._http = requests
-    backend._muse = False
-    return error
+        return json.dumps({"ok": False, "error": str(e)})
+    return json.dumps({"ok": True, "message": "Nextcloud credentials saved (Muse-auth)."})
 
 
 class NextcloudTalkAgent(BaseChannelAgent):
     """Channel agent with Nextcloud Talk API tools."""
+
+    channel_system_prompt = connect_prompt(
+        "nextcloud",
+        "Nextcloud",
+        "authenticate_nextcloud(url=...) with only the server URL",
+        "Nothing else is needed: Nextcloud's Login Flow v2 issues a dedicated app "
+        "password for this client once the user grants access.",
+    ).lstrip()
 
     def __init__(self) -> None:
         super().__init__("Nextcloud Talk Agent")
@@ -617,61 +631,111 @@ class NextcloudTalkAgent(BaseChannelAgent):
             """
             if not agent._backend._url:  # pragma: no branch
                 return (
-                    "Not authenticated with Nextcloud Talk. "
-                    "Use authenticate_nextcloud(url=..., username=..., password=...) "
-                    "to configure.\n"
-                    "You need: Nextcloud server URL (e.g. 'https://cloud.example.com'), "
-                    "username, and password (or an app password from "
-                    "Settings > Security > Devices & sessions)."
+                    "Not authenticated with Nextcloud Talk. Call "
+                    "authenticate_nextcloud(url=...) with the server URL (e.g. "
+                    "'https://cloud.example.com'): it returns a sign-in link the "
+                    "user opens in their OWN browser to log in and grant access, "
+                    "then finish_nextcloud_auth() stores the app password the "
+                    "server issued. Never ask for the user's password; only if the "
+                    "server lacks Login Flow v2 may the user hand you an app "
+                    "password (Settings > Security > Devices & sessions) to pass "
+                    "as authenticate_nextcloud(url=..., username=..., password=...)."
                 )
             try:
+                # The strict check (HTTP status AND OCS statuscode): a
+                # revoked app password answers 401 inside an OCS envelope,
+                # which list_rooms() would turn into an empty room list.
+                ok, detail = agent._backend._validate_credentials()
+                if not ok:
+                    return json.dumps({"ok": False, "error": f"Authentication failed: {detail}"})
                 result = json.loads(agent._backend.list_rooms())
-                if result.get("ok"):  # pragma: no branch
-                    return json.dumps({"ok": True, "room_count": len(result.get("rooms", []))})
-                return json.dumps({"ok": False, "error": "Authentication failed."})
+                return json.dumps({"ok": True, "room_count": len(result.get("rooms", []))})
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
 
-        def authenticate_nextcloud(url: str, username: str, password: str) -> str:
-            """Store and validate Nextcloud Talk credentials.
+        def authenticate_nextcloud(url: str, username: str = "", password: str = "") -> str:
+            """Connect to Nextcloud Talk by signing in in the browser.
+
+            With only ``url`` this starts Nextcloud's Login Flow v2 and
+            returns a ``consent_required`` answer carrying the sign-in
+            URL: give it to the user (ask_user_question) to open in their
+            OWN browser, where they log in and click "Grant access"; then
+            call finish_nextcloud_auth().  No password is ever typed into
+            the agent.  Passing ``username`` and ``password`` (an app
+            password) instead stores those credentials directly.
 
             Args:
                 url: Nextcloud server URL (e.g. "https://nextcloud.example.com").
-                username: Nextcloud username.
-                password: Nextcloud password or app password.
+                username: Optional login name for direct configuration.
+                password: Optional password or app password for direct
+                    configuration (must be given together with username).
 
             Returns:
-                Validation result or error message.
+                A consent_required JSON answer, a validation result, or
+                an error message.
             """
-            for val, name in [(url, "url"), (username, "username"), (password, "password")]:
-                if not val.strip():  # pragma: no branch
-                    return f"{name} cannot be empty."
-            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+            from kiss.agents.third_party_agents.muse_auth._common import valid_http_url
 
-            if muse_auth_enabled():
-                return _muse_authenticate(
-                    agent._backend,
-                    url.strip().rstrip("/"),
-                    username.strip(),
-                    password.strip(),
+            url = url.strip().rstrip("/")
+            if not url:
+                return "url cannot be empty."
+            if not valid_http_url(url):
+                return json.dumps(
+                    {"ok": False, "error": f"{url!r} is not a valid http(s):// server URL."}
                 )
-            agent._backend._url = url.strip().rstrip("/")
-            agent._backend._auth = (username.strip(), password.strip())
+            if username.strip() or password.strip():
+                if not (username.strip() and password.strip()):
+                    return "username and password must be given together (or neither)."
+                # Hand-supplied credentials supersede any browser sign-in
+                # still pending; drop it so a late grant cannot overwrite them.
+                ConsentSession.cancel_active("nextcloud")
+                return _apply_credentials(agent._backend, url, username.strip(), password.strip())
             try:
-                result = agent._backend.list_rooms()
-                data = json.loads(result)
-                if data.get("ok"):  # pragma: no branch
-                    _config.save(
-                        {
-                            "url": url.strip().rstrip("/"),
-                            "username": username.strip(),
-                            "password": password.strip(),
-                        }
-                    )
-                    return json.dumps({"ok": True, "message": "Nextcloud credentials saved."})
-                return json.dumps({"ok": False, "error": "Authentication failed."})
+                session = NextcloudLoginSession("nextcloud", url)
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
+            session.register()
+            return json.dumps(consent_required("nextcloud", "Nextcloud", session))
+
+        def finish_nextcloud_auth() -> str:
+            """Complete a browser sign-in started by authenticate_nextcloud().
+
+            Call after the user reports that they granted access in their
+            browser; the app password Nextcloud issued is validated and
+            stored (Muse vault when enabled).
+
+            Returns:
+                The validation result, a pending status while the user has
+                not granted access yet, or an error message.
+            """
+            session, status = ConsentSession.finish("nextcloud")
+            if status == "pending":
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "status": "pending",
+                        "error": "The user has not granted access yet; ask them to "
+                        "finish the sign-in, then call this tool again.",
+                    }
+                )
+            if not isinstance(session, NextcloudLoginSession) or session.result is None:
+                return json.dumps({"ok": False, "error": f"Nextcloud sign-in failed: {status}"})
+            # Login Flow v2 answers with the server's canonical URL, which
+            # clients are meant to use from then on (it falls back to the
+            # URL the user gave when the answer carries none).
+            result = _apply_credentials(
+                agent._backend,
+                session.server_url(),
+                str(session.result["loginName"]),
+                str(session.result["appPassword"]),
+            )
+            if json.loads(result).get("ok"):
+                # Remember that this app password exists only for this
+                # client, so clearing the connection revokes it again.
+                meta = _config.load_metadata() or {}
+                meta["login_flow"] = "true"
+                save_json_config(_config.path, meta)
+            return result
 
         def clear_nextcloud_auth() -> str:
             """Clear the stored Nextcloud credentials.
@@ -679,6 +743,10 @@ class NextcloudTalkAgent(BaseChannelAgent):
             Returns:
                 Status message.
             """
+            ConsentSession.cancel_active("nextcloud")
+            revoked = False
+            if (_config.load_metadata() or {}).get("login_flow") == "true":
+                revoked = agent._backend.revoke_app_password()
             _config.clear()
             agent._backend._url = ""
             agent._backend._auth = ("", "")
@@ -691,9 +759,78 @@ class NextcloudTalkAgent(BaseChannelAgent):
                 from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
 
                 clear_credentials("nextcloud")
+            if revoked:
+                return "Nextcloud authentication cleared; the app password was revoked."
             return "Nextcloud authentication cleared."
 
-        return [check_nextcloud_auth, authenticate_nextcloud, clear_nextcloud_auth]
+        return [
+            check_nextcloud_auth,
+            authenticate_nextcloud,
+            finish_nextcloud_auth,
+            clear_nextcloud_auth,
+        ]
+
+
+def _apply_credentials(
+    backend: NextcloudTalkChannelBackend, url: str, username: str, password: str
+) -> str:
+    """Validate and store a Nextcloud login name plus (app) password.
+
+    Muse-auth mode enrolls the credential into the vault
+    (:func:`_muse_authenticate`); legacy mode validates it directly and
+    writes ``config.json``.
+
+    Args:
+        backend: The agent's Nextcloud backend to (re)wire.
+        url: Nextcloud server base URL (validated, no trailing slash).
+        username: Login name.
+        password: Password or app password.
+
+    Returns:
+        JSON string with the validation result.
+    """
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    # Validate first, directly, so rejected credentials never disturb
+    # the credential currently in use (vault entry or config).
+    ok, detail = _probe_credentials(url, username, password)
+    if not ok:
+        return json.dumps({"ok": False, "error": f"Authentication failed: {detail}"})
+    if muse_auth_enabled():
+        return _muse_authenticate(backend, url, username, password)
+    backend._url = url
+    backend._auth = (username, password)
+    _config.save({"url": url, "username": username, "password": password})
+    return json.dumps({"ok": True, "message": "Nextcloud credentials saved."})
+
+
+def _probe_credentials(url: str, username: str, password: str) -> tuple[bool, str]:
+    """Check a login name plus (app) password with a strict ``/room`` read.
+
+    A throwaway backend issues the request directly (no proxy/netrc
+    environment, no redirects) so the check touches neither the live
+    backend nor any stored credential.
+
+    Args:
+        url: Nextcloud server base URL (validated, no trailing slash).
+        username: Login name.
+        password: Password or app password.
+
+    Returns:
+        ``(True, "")`` when the server accepts the credentials, else
+        ``(False, detail)`` with a credential-free failure detail.
+    """
+    probe = NextcloudTalkChannelBackend()
+    probe._url = url
+    probe._auth = (username, password)
+    session = requests.Session()
+    session.trust_env = False
+    probe._http = session
+    try:
+        with session:
+            return probe._validate_credentials()
+    except Exception as e:
+        return False, f"{type(e).__name__} while validating the credentials"
 
 
 def _make_backend() -> NextcloudTalkChannelBackend:

@@ -1,6 +1,6 @@
 # Models Supported by KISS Sorcar
 
-> KISS Sorcar ships a catalog of **660 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding).
+> KISS Sorcar ships a catalog of **661 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding).
 
 The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json) in the source repository. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
@@ -11,7 +11,7 @@ The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`]
 | OpenAI | 102 |
 | Anthropic | 14 |
 | Gemini | 24 |
-| Together AI | 102 |
+| Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
 | OpenRouter | 378 |
@@ -20,8 +20,8 @@ The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`]
 
 ## Capability Totals
 
-- **640** generation-capable models
-- **481** function-calling-capable models
+- **641** generation-capable models
+- **483** function-calling-capable models
 - **11** embedding models
 
 ## Configuring Model Access
@@ -63,4 +63,4 @@ A running agent can also switch its own model mid-task with the `set_model` tool
 
 When no model is selected, KISS Sorcar defaults to the best available model for the API keys you have configured.
 
-The full per-model list (all 660 entries) is in the [project README](https://github.com/ksenxx/kiss_ai#models-supported).
+The full per-model list (all 661 entries) is in the [project README](https://github.com/ksenxx/kiss_ai#models-supported).

@@ -382,12 +382,17 @@ def _call_every_tool(b: GitHubChannelBackend) -> list[str]:
 
 
 def test_agent_instantiation_unauthenticated() -> None:
-    """A fresh agent is unauthenticated and exposes only the auth trio."""
+    """A fresh agent is unauthenticated and exposes only the auth tools."""
     agent = GitHubAgent()
     assert agent.name == "GitHub Agent"
     assert agent._is_authenticated() is False
     names = [t.__name__ for t in agent._get_tools()]
-    assert names == ["check_github_auth", "authenticate_github", "clear_github_auth"]
+    assert names == [
+        "check_github_auth",
+        "authenticate_github",
+        "finish_github_auth",
+        "clear_github_auth",
+    ]
 
 
 def test_check_auth_unauthenticated_message() -> None:
@@ -418,15 +423,20 @@ def test_authenticate_persists_config_and_exposes_tools() -> None:
     assert checked == {"ok": True, "read_only": False}
 
     names = [t.__name__ for t in agent._get_tools()]
-    assert names[:3] == ["check_github_auth", "authenticate_github", "clear_github_auth"]
-    assert sorted(names[3:]) == sorted(_READ_TOOLS + _WRITE_TOOLS)
+    assert names[:4] == [
+        "check_github_auth",
+        "authenticate_github",
+        "finish_github_auth",
+        "clear_github_auth",
+    ]
+    assert sorted(names[4:]) == sorted(_READ_TOOLS + _WRITE_TOOLS)
     assert "connect" not in names  # channel protocol method, not an LLM tool
 
     cleared = tools["clear_github_auth"]()
     assert "cleared" in cleared.lower()
     assert not _config.path.exists()
     assert agent._is_authenticated() is False
-    assert len(agent._get_tools()) == 3
+    assert len(agent._get_tools()) == 4
 
 
 def test_authenticate_read_only_persisted_as_string() -> None:
@@ -461,7 +471,7 @@ def test_authenticate_persistence_failure_returns_ok_false() -> None:
         assert "failed to save GitHub config" in result["error"]
         assert agent._is_authenticated() is False
         assert agent._backend._token == ""
-        assert len(agent._get_tools()) == 3  # backend tools stay locked
+        assert len(agent._get_tools()) == 4  # backend tools stay locked
     finally:
         blocker.unlink()
 
@@ -471,6 +481,10 @@ def test_authenticate_rejects_empty_token() -> None:
     agent = GitHubAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
     assert "cannot be empty" in tools["authenticate_github"]("  ")
+    # No token at all (and no client ID anywhere) explains both ways to connect.
+    result = json.loads(tools["authenticate_github"]())
+    assert result["ok"] is False
+    assert "client_id" in result["error"] and "token=" in result["error"]
     assert not _config.path.exists()
 
 

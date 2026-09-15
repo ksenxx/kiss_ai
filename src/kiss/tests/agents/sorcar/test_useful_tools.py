@@ -83,8 +83,13 @@ class TestAdversarial:
             for _ in range(20):
                 time.sleep(0.1)
                 if pid_file.exists():
-                    child_pid = int(pid_file.read_text().strip())
-                    break
+                    # Poll for parseable content, not mere existence:
+                    # the shell redirect creates the file empty before
+                    # echo writes the PID.
+                    pid_text = pid_file.read_text().strip()
+                    if pid_text.isdigit():
+                        child_pid = int(pid_text)
+                        break
             if child_pid:
                 _thread.interrupt_main()
 
@@ -145,8 +150,13 @@ class TestStopEvent:
             for _ in range(50):
                 time.sleep(0.1)
                 if pid_file.exists():
-                    child_pid = int(pid_file.read_text().strip())
-                    break
+                    # Poll for parseable content, not mere existence:
+                    # the shell redirect creates the file empty before
+                    # echo writes the PID.
+                    pid_text = pid_file.read_text().strip()
+                    if pid_text.isdigit():
+                        child_pid = int(pid_text)
+                        break
             if child_pid:
                 stop_event.set()
 
@@ -190,8 +200,13 @@ class TestStopEvent:
             for _ in range(50):
                 time.sleep(0.1)
                 if pid_file.exists():
-                    child_pid = int(pid_file.read_text().strip())
-                    break
+                    # Poll for parseable content, not mere existence:
+                    # the shell redirect creates the file empty before
+                    # echo writes the PID.
+                    pid_text = pid_file.read_text().strip()
+                    if pid_text.isdigit():
+                        child_pid = int(pid_text)
+                        break
             if child_pid:
                 stop_event.set()
 
