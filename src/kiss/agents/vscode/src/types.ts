@@ -258,7 +258,12 @@ type ToWebviewMessageBody =
       path: string;
       name: string;
       content?: string;
+      /** True when `path` is a directory and `content` is its plain-text
+       * listing (rendered as text even for md/html-looking names). */
+      isDirectory?: boolean;
       error?: string;
+      /** Echo of the request's `line` (a path:NN link's line number). */
+      line?: number;
     }
   | {type: 'share_done'; ok: boolean; path?: string; error?: string}
   | {
@@ -496,7 +501,8 @@ type ToWebviewMessageBody =
       completions: Array<{type: string; text: string}>;
       query: string;
     }
-  // Daemon: a run_parallel sub-agent tab was retired everywhere.
+  // Daemon: a sub-agent tab (run_parallel or run_agent child) was
+  // retired everywhere.
   | {type: 'closeSubagentTab'; tab_id: string}
   // Daemon: `openTab` was refused (tab limit); `text` explains why.
   | {type: 'openTabRejected'; text: string}
@@ -540,6 +546,10 @@ type ToWebviewMessageBody =
       taskIndex?: number;
       isSubagentTab?: boolean;
       isDone?: boolean;
+      // The sub-agent row's wall-clock start (ms), 0/absent when
+      // unknown; main.js attributes the sub-agent to the fan-out call
+      // (run_parallel / run_agent) that was running at that time.
+      startTs?: number;
     }
   | {type: 'subagentDone'; tab_id?: string; success?: boolean}
   | {

@@ -857,12 +857,12 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertEqual(resp["type"], "models")
 
     async def test_ws_check_paths_reports_existing_files_only(self) -> None:
-        """checkPaths replies pathsExist with true only for real files.
+        """checkPaths replies pathsExist with true only for real paths.
 
         End-to-end over WSS: the chat webview served by the remote
         webapp sends ``checkPaths`` for the file-path-looking strings
         it linkified in event panel contents, and only paths naming an
-        existing regular file may become clickable links.
+        existing regular file or directory may become clickable links.
         """
         work_dir = self.server.work_dir
         real = Path(work_dir) / "real.txt"
@@ -885,7 +885,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                             "real.txt",     # relative to workDir, exists
                             missing,        # absolute, missing
                             "missing.txt",  # relative, missing
-                            "subdir",       # a directory, not a file
+                            "subdir",       # a directory: clickable too
                             too_long,       # triggers OSError on resolve
                             "",             # degenerate: empty
                             42,             # degenerate: not a string
@@ -913,7 +913,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     "real.txt": True,
                     missing: False,
                     "missing.txt": False,
-                    "subdir": False,
+                    "subdir": True,
                     too_long: False,
                 },
             )

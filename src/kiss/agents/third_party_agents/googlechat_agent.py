@@ -511,6 +511,37 @@ class GoogleChatAgent(BaseChannelAgent):
         result = agent.run(prompt_template="List all spaces")
     """
 
+    channel_system_prompt = (
+        "\n\n## Google Chat Authentication\n"
+        "Always call check_googlechat_auth() first; if it returns ok, report "
+        "that and stop — never start an OAuth flow over valid credentials. If "
+        "no credentials exist, follow the setup instructions it returns "
+        "(a service_account.json or an OAuth credentials.json), then call "
+        "authenticate_googlechat() — pass service_account_json_path to use a "
+        "specific service-account file; when it is empty, the default "
+        "service_account.json is used if present, otherwise the OAuth "
+        "credentials.json flow runs.\n"
+        "When authenticate_googlechat() returns status 'consent_required' "
+        "with an auth_url, do NOT open the auth_url or any accounts.google.com "
+        "page in your own browser, and never ask for or type the user's Google "
+        "password or 2FA code: Google sign-in pages are often blocked in the "
+        "built-in browser (net::ERR_FAILED), and the sign-in belongs to the "
+        "user. Hand off consent instead:\n"
+        "1. Call ask_user_question() with the full auth_url, asking the user "
+        "to open it in their OWN browser, approve access, and paste back the "
+        "complete redirect URL from the address bar (it looks like "
+        "http://localhost:PORT/?state=...&code=... and shows a connection "
+        "error page — that is expected).\n"
+        "2. The loopback consent server runs on THIS machine: deliver the "
+        "pasted URL to it with Bash: curl -s '<pasted redirect URL>' (quote "
+        "the URL; it contains & characters).\n"
+        "3. Call finish_googlechat_auth(); if it returns 'pending', wait 2 "
+        "seconds and call it once more.\n"
+        "If any browser navigation to a Google page fails, do not retry it or "
+        "relaunch the browser — switch to this hand-off immediately. Finish "
+        "by verifying with check_googlechat_auth()."
+    )
+
     def __init__(self) -> None:
         super().__init__("Google Chat Agent")
         self._backend = GoogleChatChannelBackend()
@@ -574,9 +605,10 @@ class GoogleChatAgent(BaseChannelAgent):
             service = _load_service(service_account_json_path)
             if service is None and not service_account_json_path:  # pragma: no branch
                 if is_headless_environment():
-                    # Remote machine: hand back the consent URL to drive
-                    # in the built-in browser with the pages shown inline
-                    # in the chat webview.
+                    # Remote machine: hand back the consent URL for the
+                    # user to approve in their own browser; the pasted
+                    # redirect URL is replayed against the local consent
+                    # server, then finish_googlechat_auth() completes it.
                     from kiss.agents.third_party_agents._google_workspace_utils import (
                         RemoteOAuthSession,
                         remote_oauth_instructions,
@@ -631,8 +663,9 @@ class GoogleChatAgent(BaseChannelAgent):
         def finish_googlechat_auth() -> str:
             """Complete a remote Google Chat OAuth consent.
 
-            Call after the consent pages (driven in the built-in browser and
-            shown inline in the chat webview) reach 'Authentication complete'.
+            Call after the user has approved consent in their own browser and
+            the pasted redirect URL has been delivered to the local consent
+            server (``curl -s '<pasted redirect URL>'``).
 
             Returns:
                 Authentication result, a pending status when consent is not

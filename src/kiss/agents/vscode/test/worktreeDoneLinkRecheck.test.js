@@ -37,7 +37,8 @@ function checkPathsLikeHost(msg) {
     for (const root of roots) {
       const abs = path.isAbsolute(p) ? p : path.resolve(root, p);
       try {
-        ok = fs.statSync(abs).isFile();
+        const st = fs.statSync(abs);
+        ok = st.isFile() || st.isDirectory();
       } catch {
         ok = false;
       }
