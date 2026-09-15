@@ -1860,6 +1860,16 @@
     area.appendChild(view);
     tab.contentViewEl = view;
     const lower = (ev.name || '').toLowerCase();
+    // A directory listing is plain text no matter what the directory is
+    // named: without this guard a directory named foo.md or foo.html
+    // would have its listing rendered as markdown/HTML below.
+    if (ev.isDirectory) {
+      const dirHolder = document.createElement('div');
+      dirHolder.className = 'content-monaco-holder';
+      view.appendChild(dirHolder);
+      renderCodeContent(tab, dirHolder, ev.content || '', 'plaintext');
+      return;
+    }
     // mdlink-coverage:start
     // A clicked .md/.markdown link arrives as raw markdown text — unlike
     // a finished-task report, whose markdown openReadyReportTabs already

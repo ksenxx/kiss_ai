@@ -258,6 +258,9 @@ type ToWebviewMessageBody =
       path: string;
       name: string;
       content?: string;
+      /** True when `path` is a directory and `content` is its plain-text
+       * listing (rendered as text even for md/html-looking names). */
+      isDirectory?: boolean;
       error?: string;
       /** Echo of the request's `line` (a path:NN link's line number). */
       line?: number;
