@@ -245,6 +245,50 @@
     if (endTab) sealPanelTimes(endTab.outputFragment, endTs);
   }
 
+  // livedone-coverage:start
+  /**
+   * Stamp every event panel of *root* as having finished on screen.
+   *
+   * Called when a task ends (task_done / task_error / task_stopped /
+   * task_interrupted): a stamped panel keeps the exact collapsed or
+   * expanded state the live stream left it in — the finish must not
+   * explicitly collapse (or hide) any event panel the user was
+   * watching (see applyChevronState). The stamp is a plain JS
+   * property, so a REPLAYED transcript (a reload or reattach builds
+   * fresh DOM from stored events) carries none and keeps the
+   * finished-task digest presentation.
+   *
+   * @param {Element|DocumentFragment|null} root The tab's transcript.
+   */
+  function markPanelsLiveFinished(root) {
+    if (!root || !root.querySelectorAll) return;
+    const panels = root.querySelectorAll('.collapsible');
+    for (let i = 0; i < panels.length; i++) {
+      // A neighbouring task's replayed transcript did not finish on
+      // screen — it keeps its digest, so it takes no stamp.
+      if (panels[i].closest('.adjacent-task')) continue;
+      panels[i]._liveFinished = true;
+    }
+  }
+
+  /**
+   * Stamp the panels of the tab a terminal event names (see
+   * markPanelsLiveFinished). The tab's transcript is #output when it
+   * is on screen and its detached fragment when it is hidden; a
+   * terminal event for a tab this client no longer has is a no-op.
+   *
+   * @param {string|undefined} evTabId The terminal event's tab id.
+   */
+  function markTabPanelsLiveFinished(evTabId) {
+    if (evTabId === undefined || evTabId === activeTabId) {
+      markPanelsLiveFinished(O);
+      return;
+    }
+    const endTab = getTab(evTabId);
+    if (endTab) markPanelsLiveFinished(endTab.outputFragment);
+  }
+  // livedone-coverage:end
+
   function discardProvisionalPanel(el) {
     if (!el) return;
     _activePanels.delete(el);
@@ -3331,6 +3375,13 @@
         p.classList.remove('chv-hidden');
         continue;
       }
+      // livedone-coverage:start
+      // The panel was on screen when its task finished: the finish must
+      // not explicitly collapse or hide any event panel, so the panel
+      // keeps the exact state the live stream left it in — untouched —
+      // until a replay rebuilds the transcript (markPanelsLiveFinished).
+      if (p._liveFinished) continue;
+      // livedone-coverage:end
       if (p.classList.contains('tc-summary')) {
         p.classList.remove('chv-hidden');
         if (!p.classList.contains('user-pinned')) p.classList.add('collapsed');
@@ -6039,9 +6090,15 @@
    */
   function streamEnd(ctx, ev, target) {
     const t = ev.type;
-    if (target === ctx.container) {
+    // livedone-coverage:start
+    // The result IS the task finishing: the pass that folds older
+    // panels behind each new event must not run for it, or the finish
+    // would explicitly collapse the panels (a done run_parallel
+    // fan-out, the last open tool panel) the user was watching.
+    if (target === ctx.container && t !== 'result') {
       collapseOlderPanels(ctx.container, ctx.tabId);
     }
+    // livedone-coverage:end
     if (t === 'tool_result' && ctx.lastToolName !== 'finish' && !ctx.llmPanel) {
       // The agent is thinking again; the panel its words will land in is
       // opened now so the transcript does not sit empty, and withdrawn
@@ -8046,6 +8103,9 @@
         // donelabel-coverage:end
         markTabDone(ev.tabId, ev.success === false);
         sealTabPanelTimes(ev.tabId, ev.endTs);
+        // livedone-coverage:start
+        markTabPanelsLiveFinished(ev.tabId);
+        // livedone-coverage:end
         clearActionProgressForTab(ev.tabId);
         setReady(doneLabel, ev.tabId, ev.startTs, ev.endTs);
         focusFinishedTab(ev.tabId);
@@ -8076,6 +8136,9 @@
           }
         }
         sealTabPanelTimes(ev.tabId, ev.endTs);
+        // livedone-coverage:start
+        markTabPanelsLiveFinished(ev.tabId);
+        // livedone-coverage:end
         const label =
           t === 'task_error'
             ? 'Error'

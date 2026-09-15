@@ -372,6 +372,43 @@ function testChevronPassWorksWithoutButton() {
   win.close();
 }
 
+// A task that finishes ON SCREEN (a real task_done, not a replay)
+// stamps its panels, and the chevron pass leaves them exactly as the
+// stream left them: not hidden, not collapsed.
+function testLiveFinishedPanelsSkipChevronPass() {
+  const {win, posted} = makeWebview();
+  const d = win.document;
+  const ready = posted.find(m => m.type === 'ready');
+  const parentId = ready.tabId;
+  win._testApi.hideWelcome();
+  send(win, {type: 'status', running: true, tabId: parentId, startTs: 1});
+  send(win, {type: 'setTaskText', text: 'live task', tabId: parentId});
+  send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: parentId});
+  send(win, {type: 'tool_result', name: 'Bash', content: 'f', tabId: parentId});
+
+  const panels = Array.from(d.querySelectorAll('#output .collapsible'));
+  assert.ok(panels.length > 0, 'the stream must have rendered panels');
+  const before = panels.map(p => p.classList.contains('collapsed'));
+
+  send(win, {type: 'result', tabId: parentId, summary: 'done', success: true});
+  send(win, {type: 'task_done', tabId: parentId});
+  send(win, {type: 'status', running: false, tabId: parentId});
+  send(win, {type: 'usage_info', tabId: parentId});
+
+  panels.forEach((p, i) => {
+    assert.ok(
+      !p.classList.contains('chv-hidden'),
+      'a live finish must not tuck panel #' + i + ' away',
+    );
+    assert.strictEqual(
+      p.classList.contains('collapsed'),
+      before[i],
+      'a live finish must not change the collapsed state of panel #' + i,
+    );
+  });
+  win.close();
+}
+
 function runTests() {
   const tests = [
     () => testCollapseChatsButtonGone(false),
@@ -380,6 +417,7 @@ function runTests() {
     () => testExpandTaskPanelShowsEntireTask(true),
     testCollapsedPanelKeepsTheWholeTaskOneClickAway,
     testChevronPassWorksWithoutButton,
+    testLiveFinishedPanelsSkipChevronPass,
   ];
   const names = [
     'testCollapseChatsButtonGone(vscode)',
@@ -388,6 +426,7 @@ function runTests() {
     'testExpandTaskPanelShowsEntireTask(remote)',
     'testCollapsedPanelKeepsTheWholeTaskOneClickAway',
     'testChevronPassWorksWithoutButton',
+    'testLiveFinishedPanelsSkipChevronPass',
   ];
   for (let i = 0; i < tests.length; i++) {
     tests[i]();
