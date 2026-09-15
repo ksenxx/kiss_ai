@@ -235,7 +235,7 @@ def make_google_auth_tools(
     scopes: list[str],
     on_credentials: Any,
 ) -> list:
-    """Build the standard auth tool quartet for a Google Workspace agent.
+    """Build the standard auth tool set for a Google Workspace agent.
 
     Produces ``check_<service>_auth``, ``authenticate_<service>``,
     ``clear_<service>_auth``, and ``start_<service>_browser_setup``
@@ -253,7 +253,7 @@ def make_google_auth_tools(
             clearing) so the agent can wire its backend.
 
     Returns:
-        The four auth tool callables, named for *service*.
+        The five auth tool callables, named for *service*.
     """
 
     def check_auth() -> str:
@@ -294,9 +294,10 @@ def make_google_auth_tools(
 
     def authenticate() -> str:
         if is_headless_environment():
-            # Remote machine: the user cannot see a local browser, so
-            # hand the agent the consent URL to drive in its built-in
-            # browser with the pages shown inline in the chat webview.
+            # Remote machine: hand back the consent URL for the user to
+            # approve in their own browser; the pasted redirect URL is
+            # replayed against the local consent server, then
+            # finish_<service>_auth() completes the exchange.
             try:
                 session = RemoteOAuthSession.start(service, scopes)
             except Exception as e:
