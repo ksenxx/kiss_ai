@@ -7,9 +7,10 @@
 Each ``channel_system_prompt`` is appended verbatim to every task
 dispatched to its channel agent, so its wording directly steers the
 subagent's OAuth behaviour.  These tests pin the paste-back consent
-hand-off contract shared by the Gmail, Google Drive, and Google Chat
-prompts: consent is approved by the user in their OWN browser and the
-pasted redirect URL is replayed locally — the agent must never drive
+hand-off contract shared by the Gmail, Google Drive, Google Chat,
+Google Calendar, Google Docs, and Google Sheets prompts: consent is
+approved by the user in their OWN browser and the pasted redirect URL
+is replayed locally — the agent must never drive
 accounts.google.com itself or ask for the user's password.
 """
 
@@ -19,13 +20,19 @@ import pytest
 
 from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent
 from kiss.agents.third_party_agents.gmail_agent import GmailAgent
+from kiss.agents.third_party_agents.google_calendar_agent import GoogleCalendarAgent
+from kiss.agents.third_party_agents.google_docs_agent import GoogleDocsAgent
 from kiss.agents.third_party_agents.google_drive_agent import GoogleDriveAgent
+from kiss.agents.third_party_agents.google_sheets_agent import GoogleSheetsAgent
 from kiss.agents.third_party_agents.googlechat_agent import GoogleChatAgent
 
 _CASES = [
     (GmailAgent, "gmail", "Gmail"),
     (GoogleDriveAgent, "google_drive", "Google Drive"),
     (GoogleChatAgent, "googlechat", "Google Chat"),
+    (GoogleCalendarAgent, "google_calendar", "Google Calendar"),
+    (GoogleDocsAgent, "google_docs", "Google Docs"),
+    (GoogleSheetsAgent, "google_sheets", "Google Sheets"),
 ]
 
 

@@ -238,8 +238,9 @@ def make_google_auth_tools(
     """Build the standard auth tool set for a Google Workspace agent.
 
     Produces ``check_<service>_auth``, ``authenticate_<service>``,
-    ``clear_<service>_auth``, and ``start_<service>_browser_setup``
-    closures whose behaviour mirrors the Gmail agent's auth tools.
+    ``clear_<service>_auth``, ``start_<service>_browser_setup``, and
+    ``finish_<service>_auth`` closures whose behaviour mirrors the
+    Gmail agent's auth tools.
 
     Args:
         agent: The channel agent instance (used to reach its backend).
