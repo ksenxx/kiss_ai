@@ -480,8 +480,25 @@ is just a shell command, you set one up as a scheduled command job:
 
 > Every 2 minutes, run the command `kiss-telegram --channel=-1001234567890 --pairing`.
 
-From then on, anything anyone types to the bot in that Telegram group is a prompt to
-Sorcar, and Sorcar answers in the group. With pairing enabled, unknown senders receive
+You do not have to write that command or know the numeric chat ID yourself. Ask for
+the gateway in plain language and let the chat session do the plumbing: it looks up
+the chat identifier through the channel agent, composes the tick command, and hands it
+to the cron agent as the scheduled command job:
+
+> Find the chat ID of my Telegram group "Sen family" from the bot's recent updates,
+> then schedule a gateway tick of that chat with pairing every 2 minutes.
+
+(Send any message in the bot's group first so a recent update exists to read the ID
+from.) On the four adapters whose `find_channel` resolves names through the platform
+API, even that lookup is unnecessary — the tick's `--channel` value can be the name
+itself, so nothing in the setup ever mentions a number: Slack takes a public channel
+name (without the `#`), Discord a channel name (searched across your guilds), Matrix a
+`#room:server` alias, and Google Chat a space display name:
+
+> Every 2 minutes, run a gateway tick on the Slack channel eng, with pairing.
+
+From then on, anything anyone types to the bot in the gatewayed chat is a prompt to
+Sorcar, and Sorcar answers in the same chat. With pairing enabled, unknown senders receive
 a one-time approval code in-channel (a sender allowlist is the stricter alternative);
 on adapters that implement thread polling (Slack), follow-ups in the same thread
 resume the same daemon chat. Gateway state — per-thread chat continuity, an
