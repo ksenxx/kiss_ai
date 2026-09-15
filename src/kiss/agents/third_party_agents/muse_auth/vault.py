@@ -39,6 +39,7 @@ _OAUTH_ERROR_CODES = frozenset(
     {
         "access_denied",
         "authorization_pending",
+        "bad_refresh_token",
         "expired_token",
         "invalid_client",
         "invalid_grant",
@@ -66,6 +67,124 @@ class _TokenEndpointRedirectError(Exception):
     def __init__(self, status: int) -> None:
         super().__init__(str(status))
         self.status = status
+
+
+def _access_token_usable(entry: dict[str, Any]) -> bool:
+    """Return whether *entry* holds an access token that is still valid.
+
+    Rejects a non-finite/NaN OR implausibly-far-future persisted expiry
+    (an ``inf`` or a ``1e308`` written by an earlier build) before
+    trusting the token: it must never read as valid forever.  The
+    ceiling mirrors the write-path clamp (30 days); the 60 s skew means
+    a token about to expire mid-request is never handed out.
+
+    Args:
+        entry: A dict with ``access_token`` and ``expires_at`` keys
+            (a client-credentials cache or an ``oauth2_refresh_token``
+            credential).
+
+    Returns:
+        True when the stored access token can be used as is.
+    """
+    try:
+        expires_at = float(entry.get("expires_at", 0.0))
+    except (TypeError, ValueError):
+        expires_at = 0.0
+    now = time.time()
+    return bool(
+        entry.get("access_token")
+        and math.isfinite(expires_at)
+        and now < expires_at - 60.0
+        and expires_at <= now + _MAX_CACHE_LIFETIME + 60.0
+    )
+
+
+def _token_lifetime(data: dict[str, Any]) -> float:
+    """Return the sanitized ``expires_in`` of a token response, in seconds.
+
+    A non-finite, non-positive, or absurd lifetime must not create a
+    token that never expires (or non-RFC-8259 JSON).
+
+    Args:
+        data: The decoded token response.
+
+    Returns:
+        The announced lifetime clamped to ``(0, 30 days]``, else 3600.
+    """
+    try:
+        lifetime = float(data.get("expires_in", 3600.0))
+    except (TypeError, ValueError):
+        lifetime = 3600.0
+    if not math.isfinite(lifetime) or not 0.0 < lifetime <= _MAX_CACHE_LIFETIME:
+        lifetime = 3600.0
+    return lifetime
+
+
+def _token_endpoint_exchange(
+    service: str, token_url: str, form: dict[str, str], what: str
+) -> dict[str, Any]:
+    """POST a grant to an OAuth token endpoint and return the token body.
+
+    Like the boundary and the Google refresh, the exchange is immune to
+    ambient proxy/netrc environment configuration.  It never follows a
+    redirect: only the stored ``token_url`` was pinned at enrollment,
+    and a 307/308 would forward the secret-bearing POST body to an
+    unvalidated origin.
+
+    Args:
+        service: Connector service name (for messages).
+        token_url: The pinned token endpoint.
+        form: The URL-encoded grant parameters (may carry secrets).
+        what: Short description of the grant for error messages.
+
+    Returns:
+        The decoded JSON body, guaranteed to carry ``access_token``.
+
+    Raises:
+        RuntimeError: When the exchange fails.  Messages never contain
+            a secret: transport errors are reduced to the exception
+            class plus the (credential-free) token URL, and endpoint
+            refusals carry only a known OAuth error code or the HTTP
+            status.
+    """
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        with session:
+            # GitHub answers form-encoded unless JSON is requested explicitly.
+            resp = session.post(
+                token_url,
+                data=form,
+                headers={"Accept": "application/json"},
+                timeout=30.0,
+                allow_redirects=False,
+            )
+        if 300 <= resp.status_code < 400:
+            raise _TokenEndpointRedirectError(resp.status_code)
+        data = resp.json() if resp.content else {}
+    except _TokenEndpointRedirectError as redirect:
+        raise RuntimeError(
+            f"the token endpoint at {token_url} answered with a redirect "
+            f"(HTTP {redirect.status}); refusing to follow it with the "
+            f"'{service}' credentials"
+        ) from None
+    except Exception as e:
+        raise RuntimeError(
+            f"{type(e).__name__} during the '{service}' {what} at {token_url}"
+        ) from None
+    token = data.get("access_token") if isinstance(data, dict) else None
+    if not resp.ok or not token:
+        # Never relay arbitrary endpoint text (it can reflect the
+        # request form verbatim or in reversible encodings): expose
+        # the error only when it is a known OAuth error code.
+        hint = data.get("error") if isinstance(data, dict) else None
+        detail = hint if isinstance(hint, str) and hint in _OAUTH_ERROR_CODES else (
+            f"HTTP {resp.status_code}"
+        )
+        raise RuntimeError(
+            f"the token endpoint at {token_url} refused the '{service}' {what}: {detail}"
+        )
+    return dict(data)
 
 
 class CredentialVault:
@@ -466,83 +585,66 @@ class CredentialVault:
         """
         info = payload["authorized_user_info"]
         cache = payload.get("cached_token") or {}
-        try:
-            expires_at = float(cache.get("expires_at", 0.0))
-        except (TypeError, ValueError):
-            expires_at = 0.0
-        # Reject a non-finite/NaN OR implausibly-far-future persisted
-        # expiry (an ``inf`` or a ``1e308`` written by an earlier build)
-        # before trusting the cache: it must never read as valid
-        # forever.  The ceiling mirrors the write-path clamp (30 days).
-        # 60s skew: never hand out a token about to expire mid-request.
-        now = time.time()
-        if (
-            cache.get("access_token")
-            and math.isfinite(expires_at)
-            and now < expires_at - 60.0
-            and expires_at <= now + _MAX_CACHE_LIFETIME + 60.0
-        ):
+        if _access_token_usable(cache):
             return str(cache["access_token"])
-        token_url = str(info["token_url"])
-        client_secret = str(info["client_secret"])
         form = {
             "grant_type": "client_credentials",
             "client_id": str(info["client_id"]),
-            "client_secret": client_secret,
+            "client_secret": str(info["client_secret"]),
         }
         if info.get("token_scope"):
             form["scope"] = str(info["token_scope"])
-        # Like the boundary and the Google refresh, the exchange must be
-        # immune to ambient proxy/netrc environment configuration.  It
-        # must also never follow a redirect: only the stored token_url
-        # was pinned at enrollment, and a 307/308 would forward the
-        # secret-bearing POST body to an unvalidated origin.
-        session = requests.Session()
-        session.trust_env = False
-        try:
-            with session:
-                resp = session.post(token_url, data=form, timeout=30.0, allow_redirects=False)
-            if 300 <= resp.status_code < 400:
-                raise _TokenEndpointRedirectError(resp.status_code)
-            data = resp.json() if resp.content else {}
-        except _TokenEndpointRedirectError as redirect:
-            raise RuntimeError(
-                f"the token endpoint at {token_url} answered with a redirect "
-                f"(HTTP {redirect.status}); refusing to follow it with the "
-                f"'{service}' client credentials"
-            ) from None
-        except Exception as e:
-            raise RuntimeError(
-                f"{type(e).__name__} exchanging '{service}' client credentials at {token_url}"
-            ) from None
-        token = data.get("access_token") if isinstance(data, dict) else None
-        if not resp.ok or not token:
-            # Never relay arbitrary endpoint text (it can reflect the
-            # request form verbatim or in reversible encodings): expose
-            # the error only when it is a known OAuth error code.
-            hint = data.get("error") if isinstance(data, dict) else None
-            if isinstance(hint, str) and hint in _OAUTH_ERROR_CODES:
-                detail = hint
-            else:
-                detail = f"HTTP {resp.status_code}"
-            raise RuntimeError(
-                f"the token endpoint at {token_url} refused the '{service}' "
-                f"client-credentials exchange: {detail}"
-            )
-        try:
-            lifetime = float(data.get("expires_in", 3600.0))
-        except (TypeError, ValueError):
-            lifetime = 3600.0
-        # A non-finite/non-positive/absurd lifetime must not create a
-        # cache entry that never expires (or non-RFC-8259 JSON).
-        if not math.isfinite(lifetime) or not 0.0 < lifetime <= _MAX_CACHE_LIFETIME:
-            lifetime = 3600.0
+        data = _token_endpoint_exchange(
+            service, str(info["token_url"]), form, "client-credentials exchange"
+        )
         payload["cached_token"] = {
-            "access_token": str(token),
-            "expires_at": time.time() + lifetime,
+            "access_token": str(data["access_token"]),
+            "expires_at": time.time() + _token_lifetime(data),
         }
         write_private_file(path, json.dumps(payload))
-        return str(token)
+        return str(data["access_token"])
+
+    def _refresh_token_grant(self, service: str, path: Path, payload: dict[str, Any]) -> str:
+        """Return a valid access token for an ``oauth2_refresh_token`` entry.
+
+        These entries come from a device-authorization sign-in with a
+        PUBLIC OAuth client (GitHub, Twitch, Microsoft Entra): the
+        stored access token is used until shortly before it expires,
+        then the daemon runs the refresh-token grant HERE — the agent
+        process never sees the refresh token — and rewrites the entry
+        in place (preserving the credential generation).  Providers
+        that rotate refresh tokens (Twitch, Microsoft) hand back a new
+        one, which replaces the stored one.  Must be called with the
+        vault lock held.
+
+        Args:
+            service: Connector service name.
+            path: The service's vault file.
+            payload: The loaded vault payload (mutated with new tokens).
+
+        Returns:
+            A currently valid access token.
+
+        Raises:
+            RuntimeError: When the refresh fails (credential-free message).
+        """
+        info = payload["authorized_user_info"]
+        if _access_token_usable(info):
+            return str(info["access_token"])
+        form = {
+            "grant_type": "refresh_token",
+            "refresh_token": str(info["refresh_token"]),
+            "client_id": str(info["client_id"]),
+        }
+        if info.get("token_scope"):
+            form["scope"] = str(info["token_scope"])
+        data = _token_endpoint_exchange(service, str(info["token_url"]), form, "token refresh")
+        info["access_token"] = str(data["access_token"])
+        if data.get("refresh_token"):
+            info["refresh_token"] = str(data["refresh_token"])
+        info["expires_at"] = time.time() + _token_lifetime(data)
+        write_private_file(path, json.dumps(payload))
+        return str(info["access_token"])
 
     def resolve_token(self, service: str, generation: str | None = None) -> str:
         """Return a currently valid real bearer token for *service*.
@@ -578,6 +680,8 @@ class CredentialVault:
                 return str(info["token"])
             if info.get("kind") == "oauth2_client_credentials":
                 return self._client_credentials_token(service, path, payload)
+            if info.get("kind") == "oauth2_refresh_token":
+                return self._refresh_token_grant(service, path, payload)
             scopes = payload.get("scopes") or None
             creds = Credentials.from_authorized_user_info(info, scopes)
             if not creds.valid:

@@ -75,6 +75,7 @@ dependencies = [
     # PostgreSQL driver for the postgres channel agent
     # (kiss.agents.third_party_agents.postgres_agent).
     "psycopg[binary]>=3.2.0",
+    "qrcode>=8.0",
 ]
 
 [build-system]
@@ -119,6 +120,7 @@ dev = [
     "types-requests>=2.32.4.20260107",
     "pyright>=1.1.408",
     "starlette>=0.38.0",
+    "types-qrcode>=8.2.0.20260518",
 ]
 
 # Minimal dependencies for kiss.core module only
