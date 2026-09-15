@@ -90,6 +90,12 @@ SERVICE_HOSTS: dict[str, tuple[str, ...]] = {
 # egress risk — the same exception Sentinel makes for plaintext HTTP).
 TOKEN_ENDPOINT_HOSTS: dict[str, tuple[str, ...]] = {
     "msteams": ("login.microsoftonline.com",),
+    # ``oauth2_refresh_token`` entries (device-authorization sign-ins
+    # with a public client) refresh against these endpoints; the
+    # refresh token is a bearer-equivalent secret and must never be
+    # POSTed anywhere else.
+    "github": ("github.com",),
+    "twitch": ("id.twitch.tv",),
 }
 
 
@@ -310,11 +316,13 @@ SURROGATE_PREFIX = "muse-sgt."
 # acquisition, which a v4 daemon would fail to resolve; v6: the atomic
 # store-if-absent critical section and the transport-write generation
 # gate — a v5 daemon could fail a concurrent auto-migration and could
-# emit a rotated-away credential resolved before connection setup).
+# emit a rotated-away credential resolved before connection setup;
+# v7: daemon-side ``oauth2_refresh_token`` credentials from device-
+# authorization sign-ins, which a v6 daemon would fail to resolve).
 # The client restarts a running daemon whose ``status`` reports an
 # older protocol, so a detached pre-upgrade daemon cannot serve new
 # clients.
-PROTOCOL_VERSION = 6
+PROTOCOL_VERSION = 7
 
 # One JSON object per line; requests carrying request/response bodies
 # are base64-encoded, so cap the frame to keep the daemon safe from

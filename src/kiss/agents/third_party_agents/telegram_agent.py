@@ -117,28 +117,40 @@ def _ns_message(msg: dict[str, Any] | None) -> Any:
     )
 
 
-class _MuseTelegramBot:
-    """Telegram Bot API adapter that executes at the Muse boundary.
+class _TelegramBot:
+    """Synchronous Telegram Bot API adapter speaking raw Bot API JSON.
 
-    Duck-types the slice of ``python-telegram-bot``'s sync ``Bot``
-    surface the backend uses, speaking raw Bot API JSON: each request
-    URL embeds the SURROGATE in the token path segment
-    (``/bot<surrogate>/<Method>``) and the daemon splices in the real
-    bot token — a path-kind vault credential — just before the send,
-    so this process never holds it.
+    Provides the slice of a sync ``Bot`` surface the backend uses
+    (``get_me``, ``send_message``, ...) on top of a ``requests``-style
+    session, so the agent has no dependency on ``python-telegram-bot``.
+
+    Two transports share this class:
+
+    * Muse mode (no *session* given): the request URL embeds the
+      SURROGATE in the token path segment (``/bot<surrogate>/<Method>``)
+      and a ``MuseBoundarySession`` carries it to the daemon, which
+      splices in the real bot token — a path-kind vault credential —
+      just before the send, so this process never holds it.
+    * Legacy mode (a plain ``requests.Session``): *token* is the real
+      bot token and requests go straight to the Bot API.
 
     Attributes:
-        token: The surrogate token; ``_bot_token`` reads it for the
-            backend's direct Bot API calls (poll/typing), which flow
-            through the same boundary.
+        token: The surrogate (Muse) or real (legacy) bot token;
+            ``_bot_token`` reads it for the backend's direct Bot API
+            calls (poll/typing), which flow through the same transport.
     """
 
-    def __init__(self, backend: TelegramChannelBackend, surrogate: str) -> None:
-        from kiss.agents.third_party_agents.muse_auth.client import MuseBoundarySession
-
+    def __init__(
+        self, backend: TelegramChannelBackend, token: str, session: Any | None = None
+    ) -> None:
         self._backend = backend
-        self.token = surrogate
-        self._session = MuseBoundarySession("telegram")
+        self.token = token
+        self._muse = session is None
+        if session is None:
+            from kiss.agents.third_party_agents.muse_auth.client import MuseBoundarySession
+
+            session = MuseBoundarySession("telegram")
+        self._session = session
 
     def _call(
         self,
@@ -146,10 +158,12 @@ class _MuseTelegramBot:
         payload: dict[str, Any] | None = None,
         files: dict[str, Any] | None = None,
     ) -> Any:
-        """Execute one Bot API method at the boundary.
+        """Execute one Bot API method over the configured transport.
 
         The API base is read from the backend per call, so tests can
-        re-point an already-wired backend at an emulator.
+        re-point an already-wired backend at an emulator.  The bearer
+        header identifying the surrogate is only sent in Muse mode; in
+        legacy mode the real token already sits in the URL.
 
         Args:
             api_method: Bot API method name (e.g. ``"getMe"``).
@@ -166,7 +180,7 @@ class _MuseTelegramBot:
                 denials surface here with their grant instructions.
         """
         url = f"{self._backend._api_base}/bot{self.token}/{api_method}"
-        headers = {"Authorization": f"Bearer {self.token}"}
+        headers = {"Authorization": f"Bearer {self.token}"} if self._muse else {}
         if files:
             resp = self._session.request(
                 "POST", url, headers=headers, data=payload, files=files, timeout=120
@@ -333,10 +347,10 @@ class _MuseTelegramBot:
 class TelegramChannelBackend(ToolMethodBackend):
     """Channel backend for Telegram Bot API.
 
-    Uses python-telegram-bot sync Bot for most API calls; message
-    polling (``poll_messages``) and typing indicators speak the Bot API
-    directly over HTTP against ``_api_base`` so they honor persisted
-    cursors and remain testable against a local server.
+    Uses the sync :class:`_TelegramBot` adapter for most API calls;
+    message polling (``poll_messages``) and typing indicators speak the
+    Bot API directly over HTTP against ``_api_base`` so they honor
+    persisted cursors and remain testable against a local server.
     """
 
     def __init__(self) -> None:
@@ -406,7 +420,7 @@ class TelegramChannelBackend(ToolMethodBackend):
             # migrated, so a newer token a concurrent writer placed in
             # config between the store and here is not deleted.
             _scrub_config_token(expected=token)
-        self._bot = _MuseTelegramBot(self, handle.token)
+        self._bot = _TelegramBot(self, handle.token)
         self._http = MuseBoundarySession("telegram")
         self._muse = True
         return True
@@ -454,9 +468,7 @@ class TelegramChannelBackend(ToolMethodBackend):
             self._connection_info = "No Telegram token found."
             return False
         try:
-            from telegram import Bot
-
-            self._bot = Bot(token=cfg["bot_token"])
+            self._bot = _TelegramBot(self, cfg["bot_token"], requests.Session())
             me = self._bot.get_me()
             self._connection_info = f"Authenticated as @{me.username}"
             return True
@@ -1103,12 +1115,7 @@ class TelegramAgent(BaseChannelAgent):
             return
         cfg = _config.load()
         if cfg:  # pragma: no branch
-            try:
-                from telegram import Bot
-
-                self._backend._bot = Bot(token=cfg["bot_token"])
-            except Exception:
-                pass
+            self._backend._bot = _TelegramBot(self._backend, cfg["bot_token"], requests.Session())
 
     def _is_authenticated(self) -> bool:
         """Return True if the backend is authenticated."""
@@ -1160,11 +1167,9 @@ class TelegramAgent(BaseChannelAgent):
             if muse_auth_enabled():
                 return _muse_authenticate(agent._backend, bot_token)
             try:
-                from telegram import Bot
-
-                bot = Bot(token=bot_token)
+                bot = _TelegramBot(agent._backend, bot_token, requests.Session())
                 me = bot.get_me()
-                _config.save({"bot_token": bot_token.strip()})
+                _config.save({"bot_token": bot_token})
                 agent._backend._bot = bot
                 return json.dumps(
                     {
@@ -1217,9 +1222,7 @@ def _make_backend() -> TelegramChannelBackend:
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-telegram -t 'authenticate'")
         sys.exit(1)
-    from telegram import Bot
-
-    backend._bot = Bot(token=cfg["bot_token"])
+    backend._bot = _TelegramBot(backend, cfg["bot_token"], requests.Session())
     return backend
 
 

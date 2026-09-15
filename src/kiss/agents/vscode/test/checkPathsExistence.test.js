@@ -8,7 +8,9 @@
 // End-to-end test of the extension host's 'checkPaths' handler: the chat
 // webview asks which file paths exist, and SorcarSidebarView must reply
 // with a 'pathsExist' message where a path is true ONLY when clicking it
-// would actually open a file (inside the workspace, exists, is a file).
+// would actually open something (inside the workspace, exists, and is a
+// regular file or a directory — a clicked directory link is revealed in
+// the Explorer).
 
 const assert = require('assert');
 const fs = require('fs');
@@ -88,9 +90,13 @@ const vscodeStub = {
     tabGroups: {all: []},
   },
   commands: {
-    executeCommand: () => Promise.resolve(),
+    executeCommand: (cmd, ...args) => {
+      executedCommands.push({cmd, args});
+      return Promise.resolve();
+    },
   },
 };
+const executedCommands = [];
 
 const origResolve = Module._resolveFilename;
 Module._resolveFilename = function (request, parent, ...rest) {
@@ -197,7 +203,7 @@ async function runTests() {
       'src/main.py', // exists (relative)
       realFile, // exists (absolute)
       'src/missing.py', // does not exist
-      'src', // a directory, not a file
+      'src', // a directory: clickable, reveals in the Explorer
       '../escape.txt', // resolves outside the workspace
       outsideFile, // absolute path outside the workspace
       '', // degenerate: empty
@@ -227,7 +233,7 @@ async function runTests() {
     false,
     'missing file must be false',
   );
-  assert.strictEqual(reply.results['src'], false, 'directory must be false');
+  assert.strictEqual(reply.results['src'], true, 'directory must be true');
   assert.strictEqual(
     reply.results['../escape.txt'],
     false,
@@ -256,6 +262,20 @@ async function runTests() {
     'malformed paths field must yield empty results',
   );
   console.log('  ok - malformed checkPaths yields an empty pathsExist');
+
+  // Clicking a directory link reveals the directory in the Explorer
+  // instead of trying to open it in an editor.
+  wv.fireMessage({type: 'openFile', path: 'src', workDir: ws, tabId: 'tab1'});
+  const reveal = await waitFor(
+    () => executedCommands.find(c => c.cmd === 'revealInExplorer'),
+    'openFile on a directory must execute revealInExplorer',
+  );
+  assert.strictEqual(
+    reveal.args[0].fsPath,
+    path.join(ws, 'src'),
+    'revealInExplorer must target the resolved directory',
+  );
+  console.log('  ok - openFile on a directory reveals it in the Explorer');
 
   view.dispose();
 }

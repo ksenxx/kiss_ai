@@ -592,8 +592,10 @@ def test_twitch_muse_authenticate_rollback_and_clear(
         tools["authenticate_twitch"]("cid1", "", "twitch-rotated-invalid", "")
     )
     assert result["ok"] is False
-    assert not vault_has_credentials("twitch")
-    assert "Not authenticated" in tools["check_twitch_auth"]()
+    # A rejected rotation is probed before it is stored: the working
+    # credential stays enrolled and usable.
+    assert vault_has_credentials("twitch")
+    assert json.loads(tools["check_twitch_auth"]())["ok"] is True
     assert json.loads(
         tools["authenticate_twitch"]("cid1", "", _REAL_TWITCH_TOKEN, "")
     )["ok"] is True
@@ -838,7 +840,9 @@ def test_nextcloud_muse_authenticate_rollback_and_clear(
         tools["authenticate_nextcloud"](api_server.base(), "bot", "nc-rotated-invalid")
     )
     assert result["ok"] is False
-    assert not vault_has_credentials("nextcloud")
+    # A rejected rotation leaves the working credential in place.
+    assert vault_has_credentials("nextcloud")
+    assert json.loads(tools["check_nextcloud_auth"]())["ok"] is True
     result = json.loads(
         tools["authenticate_nextcloud"]("https://bad..host", "bot", _REAL_NC_PASSWORD)
     )

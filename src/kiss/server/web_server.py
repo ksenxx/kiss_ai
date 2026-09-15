@@ -776,6 +776,65 @@ class _HeadAwareServerConnection(ServerConnection):
 
 _OPEN_FILE_MAX_BYTES = 2_000_000
 
+# Caps on an openFile directory-listing reply, so one click on a huge
+# directory (node_modules, .git/objects, ...) cannot produce a
+# multi-megabyte WSS message: at most this many entries, and at most
+# this many characters of entry lines (deep absolute prefixes repeat on
+# every line, so an entry cap alone does not bound the reply size); the
+# header and truncation-note lines are the only text beyond that.
+_DIR_LISTING_MAX_ENTRIES = 2_000
+_DIR_LISTING_MAX_CHARS = 512_000
+
+
+def _directory_listing_text(directory: Path) -> str:
+    """Render *directory* as the plain-text listing served for a dir click.
+
+    The remote-web client shows ``openFile`` replies in a text content
+    tab, so a clicked directory link is answered with this listing
+    instead of file bytes: one absolute path per line, directories
+    first (marked with a trailing ``/``), each group sorted by name.
+    Unreadable directories raise ``OSError`` for the caller's existing
+    error handling; listings longer than
+    :data:`_DIR_LISTING_MAX_ENTRIES` entries or whose entry lines would
+    exceed :data:`_DIR_LISTING_MAX_CHARS` characters are truncated with
+    a trailing note.
+
+    Args:
+        directory: The resolved, existing directory to list.
+
+    Returns:
+        The listing text, starting with a ``<path>:`` header line.
+    """
+    dirs: list[str] = []
+    files: list[str] = []
+    for entry in sorted(directory.iterdir(), key=lambda p: p.name):
+        try:
+            is_dir = entry.is_dir()
+        except OSError:
+            is_dir = False
+        if is_dir:
+            dirs.append(f"{entry}/")
+        else:
+            files.append(str(entry))
+    entries = dirs + files
+    lines = [f"{directory}:", ""]
+    shown = 0
+    used_chars = 0
+    for entry_line in entries:
+        if shown >= _DIR_LISTING_MAX_ENTRIES:
+            break
+        if used_chars + len(entry_line) + 1 > _DIR_LISTING_MAX_CHARS:
+            break
+        lines.append(entry_line)
+        used_chars += len(entry_line) + 1
+        shown += 1
+    omitted = len(entries) - shown
+    if omitted:
+        lines.append(f"... {omitted} more entries not shown")
+    if not entries:
+        lines.append("(empty directory)")
+    return "\n".join(lines) + "\n"
+
 # The curl installer (scripts/install.sh) clones the public repo into
 # ~/.kiss/kiss_ai; the Update button runs the install.sh of that clone.  Kept
 # literal (not $KISS_HOME-relative) to match the installer and the extension's
@@ -5383,8 +5442,8 @@ class RemoteAccessServer:
             tab_id: The requesting client's tab id (may be ``""``).
 
         Returns:
-            The resolved path when it names an existing regular file,
-            otherwise ``None``.
+            The resolved path when it names an existing regular file
+            or directory, otherwise ``None``.
         """
         try:
             path = Path(os.path.expanduser(raw_path))
@@ -5401,7 +5460,7 @@ class RemoteAccessServer:
                     candidates.append(Path(wt_dir) / path)
             for candidate in candidates:
                 resolved = candidate.resolve()
-                if resolved.is_file():
+                if resolved.is_file() or resolved.is_dir():
                     return resolved
         except OSError:
             return None
@@ -5421,9 +5480,15 @@ class RemoteAccessServer:
 
             {"type": "fileContent", "path": <resolved abs path>,
              "name": <basename>, "tabId": <echo of cmd tabId>,
+             "line": <echo of cmd line, when a positive int>,
              "content": <utf-8 text>}          # on success
             {"type": "fileContent", "path": ..., "name": ...,
              "tabId": ..., "error": <message>}  # on failure
+
+        A ``path:NN`` link's line number arrives as the command's
+        ``line`` field; echoing it lets ``media/main.js`` jump the
+        opened content tab to that line, matching the VS Code
+        extension's editor line reveal.
 
         Relative paths are resolved against the command's ``workDir``
         (stamped per-connection by
@@ -5431,7 +5496,9 @@ class RemoteAccessServer:
         fall back to the daemon work dir.  Missing files, unreadable
         files, files larger than :data:`_OPEN_FILE_MAX_BYTES`, and
         binary files (NUL byte in the first 8 KiB) produce an ``error``
-        reply instead of content.
+        reply instead of content.  A path naming a directory replies
+        with a plain-text listing (:func:`_directory_listing_text`) as
+        the ``content``.
 
         Args:
             cmd: The parsed ``openFile`` command (``path``, optional
@@ -5443,6 +5510,9 @@ class RemoteAccessServer:
             return
         work_dir = self._cmd_work_dir(cmd)
         tab_id = self._cmd_str(cmd, "tabId")
+        line = cmd.get("line")
+        if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+            line = 0
 
         def _read_file() -> dict[str, Any]:
             reply: dict[str, Any] = {
@@ -5451,10 +5521,23 @@ class RemoteAccessServer:
                 "name": Path(raw_path).name,
                 "tabId": tab_id,
             }
+            if line:
+                reply["line"] = line
             try:
                 path = self._resolve_tab_file(raw_path, work_dir, tab_id)
                 if path is None:
                     reply["error"] = f"File not found: {raw_path}"
+                    return reply
+                if path.is_dir():
+                    # A clicked directory link: reply with a plain-text
+                    # listing instead of file content.  isDirectory
+                    # tells the client to render the listing as plain
+                    # text even when the directory NAME looks like a
+                    # markdown/HTML file (foo.md, foo.html, ...).
+                    reply["path"] = str(path)
+                    reply["name"] = path.name or str(path)
+                    reply["isDirectory"] = True
+                    reply["content"] = _directory_listing_text(path)
                     return reply
                 if path.stat().st_size > _OPEN_FILE_MAX_BYTES:
                     reply["error"] = f"File too large to display: {raw_path}"
@@ -5692,8 +5775,9 @@ class RemoteAccessServer:
         Handles the ``checkPaths`` command sent by ``media/main.js``
         after it linkifies file-path-looking strings in event panel
         contents: a path is rendered as a clickable link ONLY when this
-        check confirms it names an existing regular file, i.e. that a
-        subsequent ``openFile`` click would actually serve content.
+        check confirms it names an existing regular file or directory,
+        i.e. that a subsequent ``openFile`` click would actually serve
+        content (file text or a directory listing).
         Paths are resolved exactly like :meth:`_handle_open_file`
         resolves them (``~`` expansion, then relative to the command's
         ``workDir``, falling back to the daemon work dir).  The reply

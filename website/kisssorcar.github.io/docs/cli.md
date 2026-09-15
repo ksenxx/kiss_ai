@@ -32,8 +32,9 @@ Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and
 
 - `@` file/folder mentions with ranked project-file completion.
 - Per-task **git worktree isolation** — worktrees are pre-warmed in the background for fast task start, with auto-commit and merge on success, or an interactive merge/discard prompt — toggle both in the Settings panel.
-- A pre-run **task classifier** (a single fast non-agentic model call — structured output with a plain-text fallback; skipped for `cc/*` and `codex/*` models) that detects whether the task is a development task that requires creating or editing files — non-development tasks (questions, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. Toggleable in the Settings panel.
+- A pre-run **task classifier** (normally one fast non-agentic model call — structured output, with one plain-text retry if that fails; skipped for `cc/*` and `codex/*` models) that detects whether the task is a development task that requires creating or editing files — non-development tasks (questions, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. Toggleable in the Settings panel.
 - A model picker, per-task budget caps, chat history with resume (filtered to the current workspace by default), an agent dashboard (burger menu, bottom-left), and inline rendering of tool-generated images in the chat panels.
+- **Image and PDF attachments**: attach files to a task via the picker, paste, or drag-and-drop — images (HEIC/HEIF converted, oversized ones re-encoded) and PDFs are sent to the model along with the prompt.
 - **Persistent agent memory** (on by default): standard Sorcar runs get seven `memory_*` tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks (not for Docker runs, `cc/*`/`codex/*` models, runs that drop the built-in toolset, or runs whose `model_config` supplies its own `system_instruction`). Pages are Markdown files under `~/.kiss/memories` with a SQLite vector index (OpenAI embeddings when an `OPENAI_API_KEY` is available, otherwise a fully offline hashed embedder). Toggle it — or point it at a custom directory — in the Settings panel, or set `KISS_USE_MEMORY=0`.
 - Wake-word voice chat ("sorcar, …") via the mic button, including steering a running agent by voice.
 - Live steering: inject a message into a running agent, or switch its model mid-run. Wrapping the message in `<task>…</task>` tags instead queues it as a follow-up task that runs sequentially after the current task finishes.
@@ -41,11 +42,11 @@ Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and
 - Scheduled automations: ask in plain language ("every weekday at 9am, summarize my unread Slack messages") and the built-in cron agent (also runnable from the shell as `kiss-cron`) creates, lists, pauses, resumes, or removes the schedule. A job runs an unattended LLM task or a plain shell command and can deliver its result to an authenticated messaging channel (25 of the 32 channels support delivery, e.g. `telegram:123456`, `email:user@example.com`).
 - API keys, a custom model endpoint, custom HTTP headers, budget limits, and the remote-access password, all set in the Settings panel.
 
-The remote web app is the same interface served over a cloudflared tunnel: copy the URL and password from the Settings panel and open it on any device.
+The remote web app is the same interface served over a cloudflared tunnel: copy the URL and password from the Settings panel and open it on any device. Its desktop mode adds a docked **Task Info sidebar** next to the chat — live token, cost, step, elapsed-time, machine, work-dir, and budget metrics for the visible tab's running task, plus a live view of that task's own `tmp/PROGRESS.md`.
 
 ## Python Client API
 
-Any Python process can run a task on the daemon with `kiss.server.sorcar.run` and block until it finishes:
+Any Python process can run a task on the daemon with `kiss.server.sorcar.run` and block until it finishes (up to `timeout`, one hour by default):
 
 ```python
 from kiss.server import sorcar
@@ -81,8 +82,8 @@ Keyword options:
 | `classify_tasks` | Per-run override of pre-run task classification: `True` forces it on, `False` skips it, `None` (default) uses the daemon's persisted setting — the settings panel's "Classify tasks before running" checkbox |
 | `use_memory` | Per-run persistent-memory override: `True` gives the run (and its `run_parallel` sub-agents) the `memory_*` tools plus the memory protocol, `False` withholds them, `None` (default) uses the daemon's default — a non-empty `KISS_USE_MEMORY` environment variable on the daemon process, else the settings panel's "Use persistent memory" checkbox. The memory safety gates (stripped basic tools, Docker runs, `cc/*`/`codex/*` models, a caller `system_instruction`) always win |
 | `is_parallel` | Whether the agent may spawn parallel sub-agents (default `True`) |
-| `timeout` | Maximum seconds to wait for the task to finish (default `3600`) |
-| `stop_on_timeout` | Also stop the task when `timeout` expires; default `False` — the task keeps running |
+| `timeout` | How long the client waits for the result — `3600` seconds by default, `None` waits indefinitely; on expiry the client raises `TimeoutError` while the daemon task keeps running |
+| `stop_on_timeout` | Also stop the task when `timeout` expires (default `False`) |
 | `sock_path` | Daemon Unix-domain-socket path override |
 
 The returned `TaskResult` carries `text`, `success`, `cost`, `tokens`, `steps`, `chat_id`, and `task_id`.

@@ -261,8 +261,14 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         await self._send(writer, {"type": "runUpdate"})
         notice = await self._drain_until(reader, "notice")
         self.assertIn("update of KISS Sorcar", str(notice.get("text")))
+        # Poll for the marker *content*, not mere existence: the shell
+        # redirect creates the file empty before echo writes to it, so
+        # an existence check can win the race and read ''.
         for _ in range(200):
-            if boot_marker.exists():
+            if (
+                boot_marker.exists()
+                and boot_marker.read_text().strip() == "1"
+            ):
                 break
             await asyncio.sleep(0.05)
         self.assertTrue(

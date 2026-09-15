@@ -345,14 +345,22 @@ def test_install_sh_perl_reexec_creates_new_session_id_for_child(
 
     proc = _spawn_harness(harness)
     try:
+        # Poll for parseable *content*, not mere existence: the shell
+        # redirect creates the file empty before echo writes the PID,
+        # so an existence check can win the race and read ''.
         deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline and not child_pid_file.exists():
+        pid_text = ""
+        while time.monotonic() < deadline:
+            if child_pid_file.exists():
+                pid_text = child_pid_file.read_text().strip()
+                if pid_text.isdigit():
+                    break
             time.sleep(0.05)
-        assert child_pid_file.exists(), (
+        assert pid_text.isdigit(), (
             "harness did not write its post-re-exec PID; the re-exec "
             "block either failed or never ran"
         )
-        child_pid = int(child_pid_file.read_text().strip())
+        child_pid = int(pid_text)
 
         parent_sid = os.getsid(proc.pid)
         child_sid = os.getsid(child_pid)
