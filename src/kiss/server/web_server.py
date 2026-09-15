@@ -5421,9 +5421,15 @@ class RemoteAccessServer:
 
             {"type": "fileContent", "path": <resolved abs path>,
              "name": <basename>, "tabId": <echo of cmd tabId>,
+             "line": <echo of cmd line, when a positive int>,
              "content": <utf-8 text>}          # on success
             {"type": "fileContent", "path": ..., "name": ...,
              "tabId": ..., "error": <message>}  # on failure
+
+        A ``path:NN`` link's line number arrives as the command's
+        ``line`` field; echoing it lets ``media/main.js`` jump the
+        opened content tab to that line, matching the VS Code
+        extension's editor line reveal.
 
         Relative paths are resolved against the command's ``workDir``
         (stamped per-connection by
@@ -5443,6 +5449,9 @@ class RemoteAccessServer:
             return
         work_dir = self._cmd_work_dir(cmd)
         tab_id = self._cmd_str(cmd, "tabId")
+        line = cmd.get("line")
+        if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+            line = 0
 
         def _read_file() -> dict[str, Any]:
             reply: dict[str, Any] = {
@@ -5451,6 +5460,8 @@ class RemoteAccessServer:
                 "name": Path(raw_path).name,
                 "tabId": tab_id,
             }
+            if line:
+                reply["line"] = line
             try:
                 path = self._resolve_tab_file(raw_path, work_dir, tab_id)
                 if path is None:

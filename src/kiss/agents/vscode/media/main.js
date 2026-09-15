@@ -1555,6 +1555,10 @@
         tab.contentEditor.layout();
       } catch (_e) {}
     }
+    // A path:NN link opened in the background rendered its editor at
+    // height 0, where a reveal cannot scroll; retry now that the tab
+    // is visible and laid out.
+    revealPendingContentLine(tab);
   }
 
   function hideContentArea() {
@@ -1579,6 +1583,7 @@
   }
 
   function disposeTabContentView(tab) {
+    tab.contentRevealLine = 0;
     if (tab.contentEditor) {
       try {
         tab.contentEditor.dispose();
@@ -1720,6 +1725,45 @@
     return flight;
   }
 
+  // Jump a code content tab to its pending path:NN line, matching the
+  // VS Code extension's editor line reveal. Called when the content is
+  // rendered AND every time the tab is shown: a reveal computed while
+  // the tab is hidden (editor height 0) cannot scroll, so the pending
+  // line is kept until a reveal runs on a visible surface. The line is
+  // clamped to the document, like VS Code clamps an out-of-range :NN.
+  function revealPendingContentLine(tab) {
+    const line = tab.contentRevealLine || 0;
+    if (!(line > 0)) return;
+    if (tab.contentEditor) {
+      try {
+        const editor = tab.contentEditor;
+        const model = editor.getModel();
+        const target = Math.max(
+          1,
+          Math.min(line, model ? model.getLineCount() : line),
+        );
+        editor.setPosition({lineNumber: target, column: 1});
+        editor.revealLineInCenter(target);
+        const dom = editor.getDomNode();
+        if (dom && dom.offsetHeight > 0) tab.contentRevealLine = 0;
+      } catch (_e) {}
+      return;
+    }
+    // Monaco CDN fallback: scroll the <pre> proportionally (uniform
+    // line height under `white-space: pre` + monospace).
+    const pre =
+      tab.contentViewEl &&
+      tab.contentViewEl.querySelector('.content-code-fallback');
+    if (!pre || pre.clientHeight <= 0) return;
+    const total = (pre.textContent || '').split('\n').length;
+    const target = Math.max(1, Math.min(line, total));
+    pre.scrollTop = Math.max(
+      0,
+      ((target - 1) / total) * pre.scrollHeight - pre.clientHeight / 2,
+    );
+    tab.contentRevealLine = 0;
+  }
+
   function renderCodeContent(tab, holder, text, language) {
     ensureMonaco()
       .then(monaco => {
@@ -1733,6 +1777,7 @@
           scrollBeyondLastLine: false,
           theme: 'vs-dark',
         });
+        revealPendingContentLine(tab);
       })
       .catch(() => {
         if (!holder.isConnected || holder.firstChild) return;
@@ -1745,6 +1790,7 @@
         try {
           if (window.hljs) window.hljs.highlightElement(code);
         } catch (_e) {}
+        revealPendingContentLine(tab);
       });
   }
 
@@ -1836,6 +1882,12 @@
     const holder = document.createElement('div');
     holder.className = 'content-monaco-holder';
     view.appendChild(holder);
+    // A path:NN link carries the line the file should open at (echoed
+    // by the server's fileContent reply). Only the code surface honors
+    // it — VS Code likewise reveals a line in text editors only, never
+    // in .html/.md previews.
+    const line = parseInt(ev.line, 10);
+    tab.contentRevealLine = line > 0 ? line : 0;
     renderCodeContent(tab, holder, ev.content || '', languageFromPath(lower));
   }
 

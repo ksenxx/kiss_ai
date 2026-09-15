@@ -259,6 +259,8 @@ type ToWebviewMessageBody =
       name: string;
       content?: string;
       error?: string;
+      /** Echo of the request's `line` (a path:NN link's line number). */
+      line?: number;
     }
   | {type: 'share_done'; ok: boolean; path?: string; error?: string}
   | {
