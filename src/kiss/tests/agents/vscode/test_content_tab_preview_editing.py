@@ -364,6 +364,17 @@ class TestMarkdownHtmlEditSource:
 
     _HOSTILE_HTML = (
         "<!DOCTYPE html><html><head><script>\n"
+        "// Poison every configurable KeyboardEvent accessor so that\n"
+        "// ANY real keypress reads as a plain Ctrl+S; the bridge must\n"
+        "// see through this via its captured native getters.\n"
+        "try {\n"
+        "  var KP = KeyboardEvent.prototype;\n"
+        "  Object.defineProperty(KP, 'ctrlKey', {get: () => true});\n"
+        "  Object.defineProperty(KP, 'metaKey', {get: () => false});\n"
+        "  Object.defineProperty(KP, 'altKey', {get: () => false});\n"
+        "  Object.defineProperty(KP, 'shiftKey', {get: () => false});\n"
+        "  Object.defineProperty(KP, 'key', {get: () => 's'});\n"
+        "} catch (_e) {}\n"
         "window.addEventListener('message', function (e) {\n"
         "  // steal the save port if it is ever visible to page code\n"
         "  if (e.ports && e.ports[0]) {\n"
@@ -399,10 +410,12 @@ class TestMarkdownHtmlEditSource:
         iframe as the Ctrl+S bridge, so they try everything: posting
         the retired kissPreviewSaveKey shape, spoofing the port
         delivery (synthetic events are not trusted), synthesizing
-        Ctrl+S keydowns (also not trusted), and eavesdropping for the
-        port (the bridge hides its delivery event). None of it may
-        save; a REAL Ctrl+S inside the same hostile preview still
-        must."""
+        Ctrl+S keydowns (also not trusted), eavesdropping for the
+        port (the bridge hides its delivery event), and poisoning the
+        KeyboardEvent.prototype getters so a real plain keypress reads
+        as Ctrl+S (the bridge uses captured native getters). None of
+        it may save; a REAL Ctrl+S inside the same hostile preview
+        still must."""
         context, page, sent = _open_page(browser, harness)
         try:
             path = _fresh_file(harness, "hostile.html", self._HOSTILE_HTML)
@@ -426,9 +439,18 @@ class TestMarkdownHtmlEditSource:
             assert not any(f.get("type") == "saveFile" for f in sent)
             assert page.locator(_DIRTY_TAB).count() == 1
             assert path.read_text() == self._HOSTILE_HTML
+            # A REAL but plain keypress must not save either, even
+            # though the page poisoned every KeyboardEvent.prototype
+            # accessor to make it read as Ctrl+S: the bridge consults
+            # the native getters it captured before page scripts ran.
+            frame.locator("body").click()
+            page.keyboard.press("x")
+            page.wait_for_timeout(600)
+            assert not any(f.get("type") == "saveFile" for f in sent)
+            assert page.locator(_DIRTY_TAB).count() == 1
+            assert path.read_text() == self._HOSTILE_HTML
             # The genuine shortcut still works from inside the very
             # same hostile document.
-            frame.locator("body").click()
             page.keyboard.press("Control+s")
             _wait_for_disk(path, "victim edit")
             assert (

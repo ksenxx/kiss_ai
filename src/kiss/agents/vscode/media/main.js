@@ -2297,9 +2297,15 @@
       'if(ps&&ps[0])port=ps[0];' +
       '});' +
       'document.addEventListener("keydown",function(e){' +
+      // e.isTrusted is [LegacyUnforgeable]; every OTHER property is
+      // read through the getters captured above, because the page can
+      // redefine the configurable KeyboardEvent.prototype accessors
+      // to make a harmless real keypress look like Ctrl+S.
       'if(!e.isTrusted)return;' +
-      'if(!(e.ctrlKey||e.metaKey)||e.altKey||e.shiftKey)return;' +
-      'if(e.key!=="s"&&e.key!=="S")return;' +
+      'if(!(app(ctrlGet,e,[])||app(metaGet,e,[]))' +
+      '||app(altGet,e,[])||app(shiftGet,e,[]))return;' +
+      'var k=app(keyGet,e,[]);' +
+      'if(k!=="s"&&k!=="S")return;' +
       'app(prevent,e,[]);' +
       'if(port!==null)try{app(portPost,port,["save"])}catch(_e){}' +
       '},true);' +
