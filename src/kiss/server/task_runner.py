@@ -28,7 +28,9 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from kiss.agents.sorcar import worktree_pool
 from kiss.agents.sorcar.git_worktree import (
+    _WORKTREE_SUBDIR,
     GitWorktreeOps,
     strip_worktree_suffix,
 )
@@ -39,6 +41,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.sorcar_agent import _broadcast_subagent_done
+from kiss.agents.sorcar.task_classifier import classification_will_call_model
 from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
     _WorktreeCleanupOutcome,
@@ -1372,14 +1375,48 @@ class _TaskRunnerMixin:
         _classify_enabled = (
             _raw_classify if isinstance(_raw_classify, bool) else None
         )
+        # When a classifier round trip (~2 s) is about to happen, start
+        # preparing a spare worktree NOW on a background thread so the
+        # ~1.5 s full checkout of ``git worktree add`` overlaps that
+        # wait instead of following it.  ``_acquire_task_worktree``
+        # consumes the spare (a near-instant reset) when this run does
+        # use a worktree; otherwise it stays pooled for the next one.
+        # Maintenance passes are skipped (``exclude_branches_fn=None``):
+        # the orphan reclaim can squash-merge into the main branch,
+        # which must not happen underneath a run that is about to work
+        # in the main tree.  The post-acquisition refill keeps its
+        # maintenance pass.  Gated three ways: the client asked for
+        # worktrees (a user who turned them off gets no spare checkout
+        # on disk they did not ask for; a development verdict still
+        # forces one inline, as before); a classifier call is really
+        # imminent (without one there is nothing to overlap, and the
+        # run would only wait on a checkout it just started); and the
+        # run is not itself inside a kiss worktree (a nested sub-agent
+        # run keeps today's acquire-then-refill path so no extra spare
+        # is nested under a worktree that is about to be removed).
+        _classify_task_text = prompt + append_to_prompt
+        _classify_model_config = (
+            _raw_mc_early
+            if isinstance(_raw_mc_early, dict)
+            else build_model_config(load_config())
+        )
+        repo = GitWorktreeOps.discover_repo(Path(work_dir))
+        if (
+            use_worktree
+            and repo is not None
+            and _WORKTREE_SUBDIR not in repo.parts
+            and classification_will_call_model(
+                _classify_task_text,
+                agent._resolve_model_name(model),
+                _classify_model_config,
+                _classify_enabled,
+            )
+        ):
+            worktree_pool.prewarm_async(repo, None)
         _classify_verdict = agent.classify_task_for_run(
             model_name=model,
-            task=prompt + append_to_prompt,
-            model_config=(
-                _raw_mc_early
-                if isinstance(_raw_mc_early, dict)
-                else build_model_config(load_config())
-            ),
+            task=_classify_task_text,
+            model_config=_classify_model_config,
             enabled=_classify_enabled,
         )
         if _classify_verdict is not None:
@@ -1388,7 +1425,6 @@ class _TaskRunnerMixin:
                 state.use_worktree = use_worktree
 
         if not use_worktree:
-            repo = GitWorktreeOps.discover_repo(Path(work_dir))
             with self._state_lock:
                 if any(
                     _wt_merge_on_repo(t, repo)

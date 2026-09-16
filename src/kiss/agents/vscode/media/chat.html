@@ -143,7 +143,20 @@
 
     <div id="sidebar">
       <button id="sidebar-close">&times;</button>
-      <div id="sidebar-tab-history-panel" class="sidebar-section sidebar-tab-panel">
+      <!-- The remote webapp's activity bar: a VS Code-like narrow strip
+           on the panel's left edge switching between the Tasks (history),
+           Explorer (workspace files) and Source Control (git changes +
+           commit graph) views.  Hidden everywhere but body.remote-chat
+           (the remote page's stylesheet shows it): a VS Code window has
+           the real Explorer and Source Control views. -->
+      <div id="sidebar-body">
+        <nav id="activity-bar" role="tablist" aria-orientation="vertical" aria-label="Side panel views">
+          <button type="button" id="activity-tasks" class="activity-btn active" role="tab" aria-selected="true" aria-controls="sidebar-tab-history-panel" data-view="tasks" title="Tasks" aria-label="Tasks"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h10M7 17h6"/></svg></button>
+          <button type="button" id="activity-explorer" class="activity-btn" role="tab" aria-selected="false" tabindex="-1" aria-controls="sidebar-explorer-panel" data-view="explorer" title="Explorer" aria-label="Explorer"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h6"/></svg></button>
+          <button type="button" id="activity-scm" class="activity-btn" role="tab" aria-selected="false" tabindex="-1" aria-controls="sidebar-scm-panel" data-view="scm" title="Source Control" aria-label="Source Control"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="8" r="2.2"/><path d="M6 7.2v9.6"/><path d="M18 10.2c0 3.3-3 4.3-6 5.3-2 .7-4 1.3-5.4 2.9"/></svg></button>
+        </nav>
+        <div id="sidebar-views">
+      <div id="sidebar-tab-history-panel" class="sidebar-section sidebar-tab-panel sidebar-view" data-view="tasks" role="tabpanel" aria-labelledby="activity-tasks">
         <div class="sidebar-hdr">History (same color = same chat)</div>
         <div class="search-wrap">
           <input type="text" id="history-search" placeholder="Search history...">
@@ -181,6 +194,37 @@
         </div>
         <div id="history-list">
           <div class="sidebar-empty">No conversations yet</div>
+        </div>
+      </div>
+      <!-- Explorer view (remote webapp only): the workspace's folders and
+           files as an expandable tree (listDir -> dirListing).  A file
+           click goes through openFile, so it opens as a content tab. -->
+      <div id="sidebar-explorer-panel" class="sidebar-section sidebar-tab-panel sidebar-view" data-view="explorer" role="tabpanel" aria-labelledby="activity-explorer" hidden>
+        <div class="sidebar-hdr sidebar-hdr-row"><span>Explorer</span><button type="button" id="explorer-refresh" class="sidebar-hdr-btn" title="Refresh explorer" aria-label="Refresh explorer"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg></button></div>
+        <div id="explorer-tree" class="explorer-tree" role="tree" aria-label="Workspace files">
+          <div class="sidebar-empty">No workspace folder</div>
+        </div>
+      </div>
+      <!-- Source Control view (remote webapp only): the working tree's
+           changes (gitStatus) above a graph of the recent commits
+           (gitLog); a commit expands to the files it modified. -->
+      <div id="sidebar-scm-panel" class="sidebar-section sidebar-tab-panel sidebar-view" data-view="scm" role="tabpanel" aria-labelledby="activity-scm" hidden>
+        <div class="sidebar-hdr sidebar-hdr-row"><span>Source Control</span><span id="scm-branch" class="scm-branch"></span><button type="button" id="scm-refresh" class="sidebar-hdr-btn" title="Refresh source control" aria-label="Refresh source control"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg></button></div>
+        <div id="scm-body" class="scm-body">
+          <div id="scm-changes-section" class="scm-section">
+            <button type="button" id="scm-changes-toggle" class="scm-section-hdr" aria-expanded="true" aria-controls="scm-changes"><svg class="scm-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Changes</span><span id="scm-changes-count" class="scm-count"></span></button>
+            <div id="scm-changes" class="scm-list" role="tree" aria-label="Changes">
+              <div class="sidebar-empty">No changes</div>
+            </div>
+          </div>
+          <div id="scm-graph-section" class="scm-section">
+            <button type="button" id="scm-graph-toggle" class="scm-section-hdr" aria-expanded="true" aria-controls="scm-graph"><svg class="scm-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Graph</span><span id="scm-graph-count" class="scm-count"></span></button>
+            <div id="scm-graph" class="scm-list" role="tree" aria-label="Commit graph">
+              <div class="sidebar-empty">No commits</div>
+            </div>
+          </div>
+        </div>
+      </div>
         </div>
       </div>
       <div id="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize history panel" aria-controls="sidebar" tabindex="0"></div>
