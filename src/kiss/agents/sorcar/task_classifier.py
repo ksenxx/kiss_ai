@@ -22,19 +22,32 @@ The classification is a single non-agentic ``generate()`` call — no
 tool loop, no tools — that returns the STRUCTURED verdict
 ``{"is_simple": <bool>, "is_development": <bool>}``.  The structure is
 enforced twice over: the provider's own structured-output mechanism
-pins :data:`_VERDICT_JSON_SCHEMA` on the request (``output_format`` on
-Anthropic, ``response_json_schema`` on Gemini, ``response_format`` on
-the OpenAI-compatible vendors), and the prompt demands the same bare
-JSON object so the verdict survives even on an endpoint without schema
-support.  Should a provider reject the structured-output parameters,
-one plain retry (same prompt, no schema knobs) recovers.
-:func:`_parse_verdict` extracts the object even when a lax model wraps
-it in code fences or prose, and accepts only genuinely boolean values.
+pins :data:`_VERDICT_JSON_SCHEMA` on the request (``response_json_schema``
+on Gemini, ``response_format`` on the OpenAI-compatible vendors), and
+the prompt demands the same bare JSON object so the verdict survives
+even on an endpoint without schema support.  Should a provider reject
+the structured-output parameters, one plain retry (same prompt, no
+schema knobs) recovers.  :func:`_parse_verdict` extracts the object
+even when a lax model wraps it in code fences or prose, and accepts
+only genuinely boolean values.
+
+Anthropic models get the plain prompt only.  Measured on the live API,
+``output_format`` adds ~280 input tokens of grammar and 1.0–1.4 s of
+latency to a call that otherwise takes 0.6 s (haiku) / 2.1 s (fable),
+and forcing ``thinking.type=disabled`` is rejected outright (HTTP 400)
+by the adaptive-thinking generation (``claude-fable-5``,
+``claude-opus-5``, Opus >= 4.6) — every such run used to pay a wasted
+round trip before the plain fallback.  The Anthropic adapter picks the
+right thinking mode for the model on its own, and the 1000-token
+output cap keeps a fixed-budget model's thinking off.
 
 The call is kept fast on purpose: one generation, a hard
 :data:`CLASSIFIER_MAX_TOKENS` output cap (which also keeps extended
-thinking off on models where a thinking budget would not fit), thinking
-explicitly disabled on Anthropic models, and a terse JSON-only answer.
+thinking off on models where a thinking budget would not fit), and a
+terse JSON-only answer.  Verdicts are also memoised per
+``(model, endpoint, task text)`` in a small JSON file under the KISS
+home (:func:`_cache_path`): a re-submitted prompt — a retry, a
+template, a "hi" — skips the LLM call and launches immediately.
 
 Classification is best-effort and optional.  It runs only when
 :func:`classification_enabled` says so (the ``classify_tasks`` config
@@ -47,17 +60,39 @@ the agent behaves exactly as it did without a classifier.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import threading
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
 
 logger = logging.getLogger(__name__)
 
 _DISABLE_ENV = "KISS_DISABLE_TASK_CLASSIFIER"
+
+# Verdict cache: file name under the KISS home and the maximum number
+# of entries kept (oldest dropped first).  Each entry is ~100 bytes.
+CLASSIFIER_CACHE_FILENAME = "task_classifier_cache.json"
+CLASSIFIER_CACHE_MAX_ENTRIES = 2000
+# A memo is reused for at most this long.  A verdict is the model's
+# reading of the prompt; re-asking once a week keeps a stale or
+# unlucky first reading from sticking forever while still sparing
+# every near-term repeat (retries, templates, follow-ups) the call.
+CLASSIFIER_CACHE_TTL_SECONDS = 7 * 24 * 3600.0
+
+# In-process mirror of the cache file, keyed by :func:`_cache_key`, in
+# insertion order.  ``None`` until first use.  Guarded by
+# ``_cache_lock`` together with the file it mirrors.
+_cache_lock = threading.Lock()
+_cache: dict[str, dict[str, Any]] | None = None
+_cache_loaded_from: Path | None = None
 
 # Hard output cap for the single classification generation, applied over
 # any caller-configured output limit.  The verdict is a one-line JSON
@@ -320,13 +355,14 @@ def _structured_output_config(
 
     Returns:
         A copy of *base_config* that pins :data:`_VERDICT_JSON_SCHEMA`
-        on the request — ``output_format`` for Anthropic (with thinking
-        disabled: a one-line verdict needs no reasoning budget, and
-        skipping it keeps the call fast), ``response_json_schema`` for
-        Gemini, Chat-Completions ``response_format`` for the registered
+        on the request — ``response_json_schema`` for Gemini,
+        Chat-Completions ``response_format`` for the registered
         OpenAI-compatible vendors — or ``None`` when the provider has no
-        structured-output mechanism the adapters can carry (the caller
-        then relies on the prompt alone).
+        structured-output mechanism worth carrying: unknown providers,
+        and Anthropic, whose ``output_format`` grammar measurably slows
+        the call down (see the module docstring) while the prompt alone
+        already yields the bare JSON object.  The caller then relies on
+        the prompt alone.
     """
     from kiss.core.models.model_info import (
         OPENAI_COMPATIBLE_PROVIDERS,
@@ -340,13 +376,6 @@ def _structured_output_config(
     # its schema enforcement.
     provider = get_model_provider(_strip_provider_prefix(model_name))
     config = dict(base_config)
-    if provider == "Anthropic":
-        config["output_format"] = {
-            "type": "json_schema",
-            "schema": _VERDICT_JSON_SCHEMA,
-        }
-        config["thinking"] = {"type": "disabled"}
-        return config
     if provider == "Gemini":
         config["response_mime_type"] = "application/json"
         config["response_json_schema"] = _VERDICT_JSON_SCHEMA
@@ -362,6 +391,184 @@ def _structured_output_config(
         }
         return config
     return None
+
+
+def _cache_path() -> Path:
+    """Return the verdict cache file: ``<KISS home>/task_classifier_cache.json``.
+
+    Resolved on every call so a ``KISS_HOME`` change (the test suite
+    isolates one per test) switches files.
+    """
+    return kiss_home() / CLASSIFIER_CACHE_FILENAME
+
+
+def _cache_key(task: str, model_name: str, model_config: dict[str, Any] | None) -> str:
+    """Return the cache key for one classification request.
+
+    Args:
+        task: The (already truncated) task text sent to the classifier.
+        model_name: The classifying model.
+        model_config: The run's model configuration.  The WHOLE mapping
+            takes part in the key (canonical JSON, so key order is
+            irrelevant): endpoint, credentials, headers and provider
+            routing can all send the same model name to a different
+            backend, and two requests that may be answered differently
+            must never share a memo.  Only the digest is stored, never
+            the values.
+
+    Returns:
+        A hex SHA-256 digest of the classifier prompt, model name,
+        model configuration and task text.  Including the prompt prefix
+        retires every memo automatically when the classification
+        criteria change in a later release.
+    """
+    config_json = json.dumps(model_config or {}, sort_keys=True, default=str)
+    digest = hashlib.sha256()
+    for part in (_CLASSIFIER_PROMPT_PREFIX, model_name, config_json):
+        digest.update(part.encode("utf-8"))
+        digest.update(b"\0")
+    digest.update(task.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _read_cache_file(path: Path) -> dict[str, dict[str, Any]]:
+    """Parse the cache file at *path*, dropping invalid or expired entries.
+
+    Args:
+        path: The cache file.
+
+    Returns:
+        Valid, unexpired entries (``is_simple``/``is_development``
+        booleans plus the ``ts`` write time) in file order.  A missing,
+        unreadable or malformed file yields an empty mapping.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    oldest_valid = time.time() - CLASSIFIER_CACHE_TTL_SECONDS
+    entries: dict[str, dict[str, Any]] = {}
+    for key, value in raw.items():
+        if not (isinstance(key, str) and isinstance(value, dict)):
+            continue
+        is_simple = value.get("is_simple")
+        is_development = value.get("is_development")
+        ts = value.get("ts")
+        if not (isinstance(is_simple, bool) and isinstance(is_development, bool)):
+            continue
+        if not isinstance(ts, (int, float)) or ts < oldest_valid:
+            continue
+        entries[key] = {
+            "is_simple": is_simple, "is_development": is_development, "ts": ts,
+        }
+    return entries
+
+
+def _load_cache_locked() -> dict[str, dict[str, Any]]:
+    """Return the in-process cache, (re)loading it from disk when needed.
+
+    Caller holds ``_cache_lock``.  The mirror is (re)read whenever the
+    cache path changed (``KISS_HOME`` switched) or nothing is loaded.
+    """
+    global _cache, _cache_loaded_from
+    path = _cache_path()
+    if _cache is None or _cache_loaded_from != path:
+        _cache = _read_cache_file(path)
+        _cache_loaded_from = path
+    return _cache
+
+
+def cached_classification(
+    task: str, model_name: str, model_config: dict[str, Any] | None = None
+) -> TaskClassification | None:
+    """Return the memoised verdict for *task* on *model_name*, if any.
+
+    Args:
+        task: The task text exactly as :func:`classify_task` would send
+            it (after truncation).
+        model_name: The classifying model.
+        model_config: The run's model configuration, or ``None``.
+
+    Returns:
+        The cached :class:`TaskClassification`, or ``None`` on a miss
+        or when the memo is older than :data:`CLASSIFIER_CACHE_TTL_SECONDS`.
+    """
+    key = _cache_key(task, model_name, model_config)
+    with _cache_lock:
+        entry = _load_cache_locked().get(key)
+    if entry is None or entry["ts"] < time.time() - CLASSIFIER_CACHE_TTL_SECONDS:
+        return None
+    return TaskClassification(
+        is_simple=entry["is_simple"], is_development=entry["is_development"],
+    )
+
+
+def remember_classification(
+    task: str,
+    model_name: str,
+    model_config: dict[str, Any] | None,
+    classification: TaskClassification,
+) -> None:
+    """Memoise *classification* for *task* on *model_name* and persist it.
+
+    Memos another process wrote to the file since this process last
+    read it are merged in first (newer write wins per key), so
+    concurrent daemon and CLI processes only ever lose a memo to a
+    same-instant race, never to a stale mirror.  The cache is bounded
+    at :data:`CLASSIFIER_CACHE_MAX_ENTRIES` (oldest first) and written
+    atomically; a write failure only loses the memo, never the verdict.
+
+    Args:
+        task: The task text exactly as sent to the classifier.
+        model_name: The classifying model.
+        model_config: The run's model configuration, or ``None``.
+        classification: The verdict to remember.
+    """
+    key = _cache_key(task, model_name, model_config)
+    with _cache_lock:
+        cache = _load_cache_locked()
+        path = _cache_path()
+        for other_key, other in _read_cache_file(path).items():
+            mine = cache.get(other_key)
+            if mine is None or mine["ts"] < other["ts"]:
+                cache[other_key] = other
+        cache.pop(key, None)
+        cache[key] = {
+            "is_simple": classification.is_simple,
+            "is_development": classification.is_development,
+            "ts": time.time(),
+        }
+        while len(cache) > CLASSIFIER_CACHE_MAX_ENTRIES:
+            del cache[next(iter(cache))]
+        tmp_path = path.with_name(path.name + f".{os.getpid()}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path.write_text(json.dumps(cache), encoding="utf-8")
+            os.replace(tmp_path, path)
+        except OSError:
+            logger.debug("Could not persist classifier cache", exc_info=True)
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
+def clear_classification_cache() -> None:
+    """Forget every memoised verdict, in memory and on disk.
+
+    Used by tests and by callers that change the classifier prompt
+    semantics.
+    """
+    global _cache, _cache_loaded_from
+    with _cache_lock:
+        _cache = None
+        _cache_loaded_from = None
+        try:
+            _cache_path().unlink()
+        except OSError:
+            pass
 
 
 def _attempt_classification(
@@ -406,6 +613,81 @@ def _attempt_classification(
     )
 
 
+def _model_runs_task_to_completion(model_name: str) -> bool:
+    """Whether *model_name* is a run-to-completion CLI model (cc/codex).
+
+    Args:
+        model_name: The classifying model.
+
+    Returns:
+        ``True`` for models classification must skip; ``False`` for
+        every other model and for names the registry cannot resolve.
+    """
+    from kiss.core.models.model_info import model_runs_task_to_completion
+
+    try:
+        return bool(model_runs_task_to_completion(model_name))
+    except Exception:
+        return False
+
+
+def _truncate_task(task: str) -> str:
+    """Return *task* cut to :data:`CLASSIFIER_TASK_MAX_CHARS` for the classifier.
+
+    The gist suffices for classification; the full prompt belongs to
+    the main run.  Truncation bounds the call's input cost and latency
+    no matter how large the task is, and the same text keys the
+    verdict cache.
+
+    Args:
+        task: The task prompt about to be classified.
+
+    Returns:
+        *task* unchanged when it fits, else its prefix plus a marker.
+    """
+    if len(task) <= CLASSIFIER_TASK_MAX_CHARS:
+        return task
+    return task[:CLASSIFIER_TASK_MAX_CHARS] + "\n... [task truncated for classification]"
+
+
+def classification_will_call_model(
+    task: str,
+    model_name: str,
+    model_config: dict[str, Any] | None = None,
+    enabled_override: bool | None = None,
+) -> bool:
+    """Whether :func:`classify_task` would make an LLM round trip now.
+
+    Lets callers overlap other launch work (e.g. preparing a spare git
+    worktree) with the classifier's wait — and skip that overlap when
+    there is nothing to wait for.  Applies exactly the gates
+    :func:`classify_task` applies before generating: the classifier
+    must be enabled (see :func:`classification_enabled`), the model must
+    not be a run-to-completion CLI model, and the verdict must not be
+    memoised already.  Best-effort by nature: the answer is a snapshot,
+    and a concurrent memo write or settings change between this call
+    and :func:`classify_task` can make the two disagree.  Callers must
+    only use it to schedule work that is harmless either way.
+
+    Args:
+        task: The task prompt as it will be passed to
+            :func:`classify_task` (before truncation).
+        model_name: The classifying model.
+        model_config: The run's model configuration (endpoint), or
+            ``None``.
+        enabled_override: Per-run ``classify_tasks`` override, see
+            :func:`classification_enabled`.
+
+    Returns:
+        ``True`` when a classification LLM call is imminent.
+    """
+    if not classification_enabled(enabled_override):
+        return False
+    if _model_runs_task_to_completion(model_name):
+        return False
+    return cached_classification(_truncate_task(task), model_name, model_config) is None
+
+
 def classify_task(
     task: str,
     model_name: str,
@@ -431,15 +713,10 @@ def classify_task(
         A :class:`ClassifierRun` whose ``classification`` is ``None``
         on any failure, and whose usage fields always report what the
         attempt(s) actually spent so callers can fold it into the
-        task's totals.
+        task's totals.  A verdict served from the cache reports zero
+        usage and zero steps.
     """
-    from kiss.core.models.model_info import model_runs_task_to_completion
-
-    try:
-        runs_to_completion = model_runs_task_to_completion(model_name)
-    except Exception:
-        runs_to_completion = False
-    if runs_to_completion:
+    if _model_runs_task_to_completion(model_name):
         # cc/* and codex/* models are full coding agents with native
         # host tools: KISSAgent hands them the whole prompt in one CLI
         # invocation, so such a model could actually EXECUTE the
@@ -452,13 +729,17 @@ def classify_task(
         return ClassifierRun(
             classification=None, budget_used=0.0, tokens_used=0, steps=0,
         )
-    if len(task) > CLASSIFIER_TASK_MAX_CHARS:
-        # The gist suffices for classification; the full prompt belongs
-        # to the main run.  Truncation bounds this call's input cost and
-        # latency no matter how large the task is.
-        task = (
-            task[:CLASSIFIER_TASK_MAX_CHARS]
-            + "\n... [task truncated for classification]"
+    task = _truncate_task(task)
+    cached = cached_classification(task, model_name, model_config)
+    if cached is not None:
+        logger.info(
+            "Task classification served from cache: is_simple=%s "
+            "is_development=%s",
+            cached.is_simple,
+            cached.is_development,
+        )
+        return ClassifierRun(
+            classification=cached, budget_used=0.0, tokens_used=0, steps=0,
         )
     base_config = _classifier_model_config(model_config)
     structured_config = _structured_output_config(base_config, model_name)
@@ -478,6 +759,8 @@ def classify_task(
         steps += attempt_steps
         if classification is not None:
             break
+    if classification is not None:
+        remember_classification(task, model_name, model_config, classification)
     return ClassifierRun(
         classification=classification,
         budget_used=budget_used,

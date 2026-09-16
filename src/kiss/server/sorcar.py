@@ -273,6 +273,9 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("openFile", required=("path",), handler="open_file"),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
     ApiCommand("getInfoFile", handler="get_info_file"),
+    ApiCommand("listDir", handler="list_dir"),
+    ApiCommand("gitStatus", handler="git_status"),
+    ApiCommand("gitLog", handler="git_log"),
     ApiCommand("shareChat", required=("chatId", "html"), handler="share_chat"),
     ApiCommand(
         "shareChatTasks", required=("chatId",), handler="share_chat_tasks"
@@ -469,6 +472,18 @@ class ServerBackend(Protocol):
     ) -> None: ...
 
     async def _handle_get_info_file(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_list_dir(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_git_status(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_git_log(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
@@ -1014,6 +1029,63 @@ class ServerApi:
         if ctx.is_uds:
             return
         await self._backend._handle_get_info_file(cmd, ctx.endpoint)
+
+    async def list_dir(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """List a directory for the remote webapp's Explorer view.
+
+        The remote webapp's task-history panel carries a VS Code-like
+        activity bar whose Explorer view browses the workspace: opening
+        the view lists the work dir, expanding a folder lists that
+        folder, and clicking a file goes through ``openFile``.  The
+        reply is a ``dirListing`` event sent to the requester only.
+        UDS clients (VS Code windows) have a real Explorer, so a
+        UDS-delivered ``listDir`` is dropped as a defensive no-op,
+        exactly like ``getInfoFile``.
+
+        Args:
+            cmd: The ``listDir`` command (optional ``path``,
+                ``workDir``, ``tabId``, ``token``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_list_dir(cmd, ctx.endpoint)
+
+    async def git_status(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Report working-tree changes for the remote Source Control view.
+
+        The activity bar's Source Control view lists the repository's
+        staged, unstaged and untracked changes (VS Code's "Changes"
+        section) from this command's ``gitStatus`` reply, sent to the
+        requester only.  A UDS-delivered ``gitStatus`` is dropped as a
+        defensive no-op, exactly like ``getInfoFile``.
+
+        Args:
+            cmd: The ``gitStatus`` command (optional ``workDir``,
+                ``tabId``, ``token``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_git_status(cmd, ctx.endpoint)
+
+    async def git_log(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Report recent commits for the remote Source Control graph.
+
+        The activity bar's Source Control view draws a commit graph
+        (VS Code's "Graph" section) with each commit's modified files
+        from this command's ``gitLog`` reply, sent to the requester
+        only.  A UDS-delivered ``gitLog`` is dropped as a defensive
+        no-op, exactly like ``getInfoFile``.
+
+        Args:
+            cmd: The ``gitLog`` command (optional ``workDir``,
+                ``tabId``, ``token``, ``limit``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_git_log(cmd, ctx.endpoint)
 
     async def share_chat(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Write a chat webview's transcript as a standalone HTML page.
