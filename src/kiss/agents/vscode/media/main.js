@@ -765,6 +765,20 @@
       contentSaveTimer: null,
       contentSaveBar: null,
       contentReloadRequested: false,
+      // A previewable (.md/.html) content tab renders its PREVIEW by
+      // default with an "Edit source" toggle in the Save bar (see
+      // renderPreviewableContent): which surface is showing (kept
+      // across a reload from disk so the tab lands back where the
+      // user was), whether the source is markdown (re-rendered
+      // through markdownReportToHtml) or raw HTML, the text read from
+      // disk (the editor is created lazily on the first toggle), the
+      // two surface holders, and the toggle button.
+      contentSourceMode: false,
+      contentIsMarkdown: false,
+      contentSourceText: '',
+      contentPreviewHolder: null,
+      contentMonacoHolder: null,
+      contentModeBtn: null,
       // Set on a sub-agent tab opened by a run_parallel fan-out, naming
       // the conversation that started it.
       isSubagentTab: false,
@@ -1673,6 +1687,13 @@
     clearTimeout(tab.contentSaveTimer);
     tab.contentSaveTimer = null;
     tab.contentSaveBar = null;
+    // contentSourceMode and contentIsMarkdown deliberately survive: a
+    // reload from disk re-renders the tab, and the user should land
+    // back on the surface (preview / source) they were on.
+    tab.contentSourceText = '';
+    tab.contentPreviewHolder = null;
+    tab.contentMonacoHolder = null;
+    tab.contentModeBtn = null;
     if (tab.contentEditor) {
       try {
         tab.contentEditor.dispose();
@@ -1898,8 +1919,11 @@
     function onCdnFailure() {
       if (!holder.isConnected || holder.firstChild) return;
       // The <pre> fallback is a viewer: without an editor there is
-      // nothing the Save bar could save.
-      if (tab.contentSaveBar) {
+      // nothing the Save bar could save. A previewable (.md/.html)
+      // tab keeps its bar anyway — the Edit source / Preview toggle
+      // lives there — with the Save button disabled forever, since
+      // text that cannot be edited never goes dirty.
+      if (tab.contentSaveBar && !tab.contentModeBtn) {
         tab.contentSaveBar.remove();
         tab.contentSaveBar = null;
       }
@@ -1948,6 +1972,93 @@
     bar.appendChild(btn);
     view.appendChild(bar);
     tab.contentSaveBar = bar;
+  }
+
+  // The Edit source / Preview toggle of a previewable (.md/.html)
+  // content tab, placed in the Save bar before the Save button.
+  function appendContentModeToggle(tab, bar) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'content-mode-btn';
+    btn.addEventListener('click', () => {
+      setContentSourceMode(tab, !tab.contentSourceMode);
+    });
+    bar.insertBefore(btn, bar.querySelector('.content-save-btn'));
+    tab.contentModeBtn = btn;
+  }
+
+  // The text a previewable tab would save right now: the editor's
+  // buffer once it exists (it holds any unsaved edits), otherwise the
+  // text read from disk (before the first Edit source toggle).
+  function contentSourceValue(tab) {
+    if (tab.contentEditor) {
+      try {
+        return tab.contentEditor.getModel().getValue();
+      } catch (_e) {}
+    }
+    return tab.contentSourceText || '';
+  }
+
+  // (Re)build a previewable tab's preview iframe from the text it
+  // would save right now, so a preview returned to after editing
+  // shows the edits, not the stale file on disk.
+  function renderContentPreviewFrame(tab) {
+    const holder = tab.contentPreviewHolder;
+    if (!holder) return;
+    while (holder.firstChild) holder.removeChild(holder.firstChild);
+    const src = contentSourceValue(tab);
+    const iframe = appendContentHtmlFrame(
+      holder,
+      tab.contentIsMarkdown ? markdownReportToHtml(src) : src,
+      true,
+    );
+    wireContentPreviewSaveKey(tab, iframe);
+  }
+
+  // Switch a previewable tab between its rendered preview and the
+  // editable Monaco source. The editor is created on the FIRST switch
+  // to source and then kept alive (hidden, never disposed), so its
+  // undo history and unsaved edits survive round trips; the preview
+  // is instead re-rendered on every return, to show those edits.
+  function setContentSourceMode(tab, sourceMode) {
+    tab.contentSourceMode = !!sourceMode;
+    if (tab.contentModeBtn) {
+      tab.contentModeBtn.textContent = tab.contentSourceMode
+        ? 'Preview'
+        : 'Edit source';
+    }
+    const preview = tab.contentPreviewHolder;
+    const source = tab.contentMonacoHolder;
+    if (!preview || !source) return;
+    if (tab.contentSourceMode) {
+      preview.style.display = 'none';
+      source.style.display = '';
+      // The firstChild guard covers the CDN fallback, whose <pre>
+      // viewer has no tab.contentEditor. (Rapid toggling while a
+      // Monaco load is in flight can queue extra onMonaco callbacks —
+      // the holder is still empty then — but each re-checks
+      // tab.contentEditor, so only one editor is ever created.)
+      if (!tab.contentEditor && !source.firstChild) {
+        renderCodeContent(
+          tab,
+          source,
+          tab.contentSourceText || '',
+          tab.contentIsMarkdown ? 'markdown' : 'html',
+          true,
+        );
+      }
+      if (tab.contentEditor) {
+        tab.contentEditor.focus();
+        // A path:NN link clicked while the tab sat in preview mode
+        // left its line reveal pending (the editor was hidden, height
+        // 0); the editor is on screen now.
+        revealPendingContentLine(tab);
+      }
+    } else {
+      source.style.display = 'none';
+      preview.style.display = '';
+      renderContentPreviewFrame(tab);
+    }
   }
 
   function setContentSaveStatus(tab, text, isError) {
@@ -2135,17 +2246,158 @@
   }
   // ctxmenu-coverage:end
 
+  // A Ctrl/Cmd+S pressed while focus sits INSIDE a preview iframe
+  // never reaches this document's keydown listener: the sandboxed
+  // document is a separate (opaque-origin) browsing context. This
+  // bootstrap, shipped into an EDITABLE tab's preview, forwards the
+  // shortcut to the parent (and eats the browser's "Save page"
+  // dialog).
+  //
+  // The channel must be one the PREVIEWED PAGE cannot forge — its own
+  // scripts run in this same iframe, and a plain window message from
+  // them is indistinguishable from one sent by this bootstrap. So the
+  // parent hands the bootstrap a private MessagePort instead (see
+  // wireContentPreviewSaveKey): only the holder of a port can talk on
+  // it. To keep the page from stealing the port or spoofing its
+  // delivery, this script is inserted BEFORE any previewed markup
+  // (withContentSaveKeyBridge) and captures every primitive it needs
+  // (Reflect.apply, the MessageEvent getters, stopImmediatePropagation,
+  // MessagePort.postMessage) while the realm is still pristine; its
+  // window listener is therefore FIRST in line and hides the delivery
+  // event from later listeners with the captured native
+  // stopImmediatePropagation. e.isTrusted is [LegacyUnforgeable], so
+  // synthetic events the page dispatches can never pass for the real
+  // delivery or a real keypress.
+  function contentSaveKeyBridgeHtml() {
+    return (
+      '<script>(function(){"use strict";' +
+      'var app=Reflect.apply;' +
+      'var MP=MessageEvent.prototype;' +
+      'var gd=Object.getOwnPropertyDescriptor;' +
+      'var dataGet=gd(MP,"data").get;' +
+      'var srcGet=gd(MP,"source").get;' +
+      'var portsGet=gd(MP,"ports").get;' +
+      'var stopNow=Event.prototype.stopImmediatePropagation;' +
+      'var prevent=Event.prototype.preventDefault;' +
+      'var portPost=MessagePort.prototype.postMessage;' +
+      'var KP=KeyboardEvent.prototype;' +
+      'var keyGet=gd(KP,"key").get;' +
+      'var ctrlGet=gd(KP,"ctrlKey").get;' +
+      'var metaGet=gd(KP,"metaKey").get;' +
+      'var altGet=gd(KP,"altKey").get;' +
+      'var shiftGet=gd(KP,"shiftKey").get;' +
+      'var parentWin=window.parent;' +
+      'var port=null;' +
+      'window.addEventListener("message",function(e){' +
+      'var d=null;try{d=app(dataGet,e,[])}catch(_e){return}' +
+      'if(!d||d.kissPreviewSavePort!==true)return;' +
+      'app(stopNow,e,[]);' +
+      'if(port!==null||!e.isTrusted||app(srcGet,e,[])!==parentWin)return;' +
+      'var ps=null;try{ps=app(portsGet,e,[])}catch(_e){return}' +
+      'if(ps&&ps[0])port=ps[0];' +
+      '});' +
+      'document.addEventListener("keydown",function(e){' +
+      'if(!e.isTrusted)return;' +
+      'if(!(e.ctrlKey||e.metaKey)||e.altKey||e.shiftKey)return;' +
+      'if(e.key!=="s"&&e.key!=="S")return;' +
+      'app(prevent,e,[]);' +
+      'if(port!==null)try{app(portPost,port,["save"])}catch(_e){}' +
+      '},true);' +
+      '})();<\/script>'
+    );
+  }
+
+  // The bridge goes right after the doctype (or at the very start):
+  // it must be the FIRST script the iframe parses, so it runs before
+  // any script of the previewed page — see contentSaveKeyBridgeHtml.
+  // (Inserting before an existing doctype would push the document
+  // into quirks mode and change how the preview renders.)
+  function withContentSaveKeyBridge(html) {
+    const boot = contentSaveKeyBridgeHtml();
+    const m = /^\s*<!doctype[^>]*>/i.exec(html);
+    if (!m) return boot + html;
+    const at = m.index + m[0].length;
+    return html.slice(0, at) + boot + html.slice(at);
+  }
+
   // Render *html* inside *view* in a sandboxed iframe (`allow-scripts`
   // only, i.e. an opaque origin), with the Copy / Select All context
-  // menu shipped into the document (see withContentContextMenu).
-  function appendContentHtmlFrame(view, html) {
+  // menu shipped into the document (see withContentContextMenu) and,
+  // for an editable preview, the Ctrl/Cmd+S bridge. Returns the
+  // iframe so the caller can wire its save port.
+  function appendContentHtmlFrame(view, html, saveKeyBridge) {
     const iframe = document.createElement('iframe');
     iframe.className = 'content-html-frame';
     iframe.setAttribute('sandbox', 'allow-scripts');
+    if (saveKeyBridge) html = withContentSaveKeyBridge(html || '');
     // ctxmenu-coverage:start
     iframe.srcdoc = withContentContextMenu(html);
     // ctxmenu-coverage:end
     view.appendChild(iframe);
+    return iframe;
+  }
+
+  // Hand the bridge inside *iframe* its private save port. A message
+  // on port1 can only come from the port2 the bootstrap holds in a
+  // closure — the previewed page has no way to reach either port, so
+  // unlike a window message it cannot fake a Ctrl/Cmd+S (verified by
+  // test_hostile_preview_page_cannot_forge_a_save).
+  function wireContentPreviewSaveKey(tab, iframe) {
+    if (typeof MessageChannel !== 'function') return;
+    const channel = new MessageChannel();
+    iframe.addEventListener('load', () => {
+      try {
+        iframe.contentWindow.postMessage(
+          {kissPreviewSavePort: true},
+          '*',
+          [channel.port2],
+        );
+      } catch (_e) {}
+    });
+    channel.port1.onmessage = () => {
+      // Saves only while this tab is the one on screen and still
+      // shows THIS iframe (a re-rendered preview gets a new port).
+      if (activeTabId !== tab.id || !tab.contentEditor) return;
+      if (!iframe.isConnected) return;
+      saveContentTab(tab, false);
+    };
+  }
+
+  // A .md or .html file opens as its rendered preview — like VS Code's
+  // markdown preview — plus, when the daemon reported a version stamp
+  // (the file is strictly UTF-8, so its source can be edited and saved
+  // back byte-for-byte), a Save bar whose "Edit source" toggle flips
+  // to the same editable Monaco surface every other text file gets.
+  // Without a stamp (invalid UTF-8, or an older daemon without
+  // saveFile) the preview renders alone, read-only, as before.
+  function renderPreviewableContent(tab, view, ev, isMarkdown) {
+    tab.contentIsMarkdown = isMarkdown;
+    tab.contentSourceText = ev.content || '';
+    if (typeof ev.version !== 'string') {
+      tab.contentFileVersion = '';
+      appendContentHtmlFrame(
+        view,
+        isMarkdown
+          ? markdownReportToHtml(tab.contentSourceText)
+          : tab.contentSourceText,
+      );
+      return;
+    }
+    tab.contentFileVersion = ev.version;
+    appendContentSaveBar(tab, view);
+    appendContentModeToggle(tab, tab.contentSaveBar);
+    const preview = document.createElement('div');
+    preview.className = 'content-preview-holder';
+    view.appendChild(preview);
+    tab.contentPreviewHolder = preview;
+    const source = document.createElement('div');
+    source.className = 'content-monaco-holder';
+    source.style.display = 'none';
+    view.appendChild(source);
+    tab.contentMonacoHolder = source;
+    // Land on the surface the tab was on: a conflict's "Reload from
+    // disk" re-renders a tab whose user was mid-edit in source mode.
+    setContentSourceMode(tab, tab.contentSourceMode);
   }
 
   function renderContentView(tab, ev) {
@@ -2170,23 +2422,39 @@
       renderCodeContent(tab, dirHolder, ev.content || '', 'plaintext', false);
       return;
     }
+    // A path:NN link carries the line the file should open at (echoed
+    // by the server's fileContent reply). Code surfaces honor it —
+    // including a previewable tab's Edit source editor, where the
+    // reveal stays pending until that editor is first shown. The
+    // rendered preview itself never scrolls to a line, and a report
+    // carries no line, like VS Code.
+    const line = parseInt(ev.line, 10);
+    tab.contentRevealLine = line > 0 ? line : 0;
     // mdlink-coverage:start
     // A clicked .md/.markdown link arrives as raw markdown text — unlike
     // a finished-task report, whose markdown openReadyReportTabs already
-    // converted to HTML and flagged isReport. Convert it here and render
-    // the result the same way an .html file renders.
+    // converted to HTML and flagged isReport. Render its converted
+    // preview, with an Edit source toggle when the file can be saved.
     if (
       !ev.isReport &&
       (lower.endsWith('.md') || lower.endsWith('.markdown'))
     ) {
-      appendContentHtmlFrame(view, markdownReportToHtml(ev.content || ''));
+      renderPreviewableContent(tab, view, ev, true);
       return;
     }
     // mdlink-coverage:end
     // report-coverage:start
-    if (ev.isReport || lower.endsWith('.html') || lower.endsWith('.htm')) {
+    // A finished task's report never gets the Edit source toggle: a
+    // markdown report's content is the CONVERTED HTML, not the bytes
+    // of the file on disk, so saving it back would overwrite the
+    // markdown source with rendered HTML.
+    if (ev.isReport) {
       // report-coverage:end
       appendContentHtmlFrame(view, ev.content || '');
+      return;
+    }
+    if (lower.endsWith('.html') || lower.endsWith('.htm')) {
+      renderPreviewableContent(tab, view, ev, false);
       return;
     }
     // A file the daemon read from disk (it reported a version stamp)
@@ -2198,12 +2466,6 @@
     const holder = document.createElement('div');
     holder.className = 'content-monaco-holder';
     view.appendChild(holder);
-    // A path:NN link carries the line the file should open at (echoed
-    // by the server's fileContent reply). Only the code surface honors
-    // it — VS Code likewise reveals a line in text editors only, never
-    // in .html/.md previews.
-    const line = parseInt(ev.line, 10);
-    tab.contentRevealLine = line > 0 ? line : 0;
     renderCodeContent(
       tab,
       holder,

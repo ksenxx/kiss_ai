@@ -3122,6 +3122,15 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   min-height: 0;
 }
 
+/* The preview surface of a .md/.html content tab: itself a flex
+   column so its .content-html-frame child stretches to fill it. */
+#content-tab-area .content-preview-holder {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 #content-tab-area .content-code-fallback {
   height: 100%;
   box-sizing: border-box;
@@ -3185,6 +3194,24 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 }
 
 #content-tab-area .content-save-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The Edit source / Preview toggle of a .md/.html tab: a secondary
+   button next to the accent-colored Save. */
+#content-tab-area .content-mode-btn {
+  flex: 0 0 auto;
+  padding: 2px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#content-tab-area .content-mode-btn:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 1px;
 }
