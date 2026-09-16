@@ -1804,6 +1804,397 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
   flex: 1;
 }
 
+/* The history panel's inner layout: an activity bar (remote webapp
+   only, see body.remote-chat rules in remote-codex.css) beside the
+   stacked views.  Exactly one .sidebar-view is shown at a time; the
+   others carry the hidden attribute. */
+#sidebar-body {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-height: 0;
+  min-width: 0;
+}
+
+#sidebar-views {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.sidebar-view[hidden] { display: none !important; }
+
+/* VS Code-like activity bar: a narrow vertical strip of icon buttons
+   on the panel's left edge.  Hidden by default (the VS Code webview
+   and its history-panel mode never show it); the negative margins
+   undo the panel's own padding so the strip runs flush with the
+   panel's top, bottom and left edges like VS Code's does.
+   --sidebar-pad-x mirrors the panel's horizontal padding (16px, or the
+   collapsing desktop value set in remote-codex.css). */
+#activity-bar {
+  display: none;
+  flex: 0 0 40px;
+  width: 40px;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 0;
+  margin: -16px 10px -16px calc(-1 * var(--sidebar-pad-x, 16px));
+  background: color-mix(in srgb, var(--fg) 4%, var(--bg2));
+  border-right: 1px solid var(--border);
+  box-sizing: border-box;
+}
+
+.activity-btn {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  border-right: 2px solid transparent;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  font-size: 22px;
+  cursor: pointer;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.activity-btn:hover { color: var(--fg); }
+
+.activity-btn.active {
+  color: var(--fg);
+  border-left-color: var(--fg);
+}
+
+.activity-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* Header rows of the Explorer / Source Control views: the label on
+   the left, a refresh button (and the branch name) on the right. */
+.sidebar-hdr-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-hdr-row > span:first-child { flex: 1; }
+
+.sidebar-hdr-btn {
+  background: none;
+  border: none;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  font-size: var(--fs-md);
+}
+
+.sidebar-hdr-btn:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+.scm-branch {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 50%;
+  font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace);
+}
+
+/* Explorer tree: one .explorer-row per entry, indented by depth via
+   the --depth custom property (VS Code's 8px per level plus the
+   chevron column).  A folder row carries a chevron that rotates when
+   expanded; the folder's children live in the following .explorer-kids
+   container. */
+.explorer-tree {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+  font-size: var(--fs-base);
+  user-select: none;
+}
+
+.explorer-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  line-height: 22px;
+  padding-left: calc(var(--depth, 0) * 12px + 4px);
+  padding-right: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  color: var(--fg);
+  border-radius: 3px;
+}
+
+.explorer-row:hover,
+.scm-row:hover,
+.scm-commit:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+.explorer-row:focus-visible,
+.scm-row:focus-visible,
+.scm-commit:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.explorer-chevron {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.12s ease;
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+}
+
+.explorer-row.expanded > .explorer-chevron { transform: rotate(90deg); }
+
+.explorer-row.is-file > .explorer-chevron { visibility: hidden; }
+
+.explorer-icon {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--fg) 75%, transparent);
+}
+
+.explorer-row.is-dir > .explorer-icon { color: var(--yellow); }
+
+.explorer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explorer-kids[hidden] { display: none; }
+
+.explorer-row.loading > .explorer-name,
+.explorer-note {
+  color: var(--dim);
+  font-style: italic;
+}
+
+.explorer-note {
+  padding-left: calc(var(--depth, 0) * 12px + 24px);
+  height: 22px;
+  line-height: 22px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Source Control view: two collapsible sections ("Changes" and
+   "Graph") stacked in a scrolling body.  Rows reuse the Explorer row
+   geometry; the status letter sits at the right edge, colored like
+   VS Code's decorations (M yellow-ish, A green, D red, U green,
+   R/C blue-ish, ! red). */
+.scm-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  font-size: var(--fs-base);
+  user-select: none;
+}
+
+.scm-section { flex: 0 0 auto; }
+
+.scm-section-hdr {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 2px 0;
+  margin: 0;
+  background: none;
+  border: none;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+}
+
+.scm-section-hdr:hover { color: var(--accent); }
+
+.scm-section-chevron {
+  flex: 0 0 auto;
+  transition: transform 0.12s ease;
+}
+
+.scm-section-hdr[aria-expanded="true"] .scm-section-chevron { transform: rotate(90deg); }
+
+.scm-count {
+  margin-left: auto;
+  font-weight: 400;
+  font-size: var(--fs-sm);
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  border-radius: 10px;
+  padding: 0 7px;
+  min-width: 10px;
+  text-align: center;
+}
+
+.scm-count:empty { display: none; }
+
+.scm-list[hidden] { display: none; }
+
+.scm-group-hdr {
+  height: 22px;
+  line-height: 22px;
+  padding-left: 4px;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+  white-space: nowrap;
+}
+
+.scm-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  line-height: 22px;
+  padding-left: calc(var(--depth, 0) * 12px + 4px);
+  padding-right: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  color: var(--fg);
+  border-radius: 3px;
+}
+
+.scm-row .explorer-icon { flex: 0 0 16px; }
+
+.scm-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.scm-dir {
+  color: color-mix(in srgb, var(--fg) 50%, transparent);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.scm-status {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  min-width: 12px;
+  text-align: center;
+  font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace);
+}
+
+.scm-status-M, .scm-status-T { color: var(--yellow); }
+.scm-status-A, .scm-status-U { color: var(--green); }
+.scm-status-D { color: var(--red); }
+.scm-status-R, .scm-status-C { color: var(--cyan); }
+.scm-status-conflict { color: var(--red); }
+
+.scm-row.is-deleted .scm-path { text-decoration: line-through; opacity: 0.7; }
+
+/* Commit graph rows: a lane-graph SVG cell on the left (one lane =
+   14px), then the subject, refs and metadata.  Clicking a commit
+   expands its file list below it. */
+.scm-commit {
+  display: flex;
+  align-items: stretch;
+  min-height: 24px;
+  cursor: pointer;
+  border-radius: 3px;
+  color: var(--fg);
+  padding-right: 6px;
+}
+
+.scm-commit.expanded { background: color-mix(in srgb, var(--fg) 5%, transparent); }
+
+.scm-graph-cell {
+  flex: 0 0 auto;
+  display: block;
+}
+
+.scm-commit-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  line-height: 24px;
+  white-space: nowrap;
+}
+
+.scm-commit-subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.scm-ref {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  padding: 0 5px;
+  border-radius: 8px;
+  line-height: 16px;
+  border: 1px solid color-mix(in srgb, var(--fg) 30%, transparent);
+  color: color-mix(in srgb, var(--fg) 80%, transparent);
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.scm-ref.is-head {
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.scm-ref.is-tag {
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
+
+.scm-commit-meta {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: color-mix(in srgb, var(--fg) 50%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+
+.scm-commit-files { padding-bottom: 2px; }
+
+.scm-commit-files[hidden] { display: none; }
+
+.scm-commit.is-worktree .scm-commit-subject { font-style: italic; }
+
 .sidebar-loading {
   text-align: center;
   padding: 12px;
