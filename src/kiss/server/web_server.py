@@ -5462,7 +5462,8 @@ class RemoteAccessServer:
                 resolved = candidate.resolve()
                 if resolved.is_file() or resolved.is_dir():
                     return resolved
-        except OSError:
+        except (OSError, ValueError):
+            # ValueError: a path with an embedded NUL byte.
             return None
         return None
 
@@ -5822,6 +5823,189 @@ class RemoteAccessServer:
             await self._endpoint_send(endpoint, json.dumps(reply))
         except Exception:
             logger.debug("checkPaths: failed to write reply", exc_info=True)
+
+    async def _reply_direct(
+        self, endpoint: Any, reply: dict[str, Any], what: str,
+    ) -> None:
+        """Send *reply* to *endpoint* only, logging (not raising) failures.
+
+        Shared tail of the Explorer / Source Control handlers below:
+        their replies go to the requesting connection alone, and a
+        client that vanished mid-request must not surface an error.
+        """
+        try:
+            await self._endpoint_send(endpoint, json.dumps(reply))
+        except Exception:
+            logger.debug("%s: failed to write reply", what, exc_info=True)
+
+    async def _handle_list_dir(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """List a directory for the remote webapp's Explorer view.
+
+        Handles the ``listDir`` command sent by ``media/main.js`` when
+        the Explorer view opens (the workspace root) or the user expands
+        a folder.  ``path`` is resolved like ``openFile`` resolves it
+        (``~`` expansion, then relative to the command's ``workDir``,
+        falling back to the daemon work dir); an empty ``path`` names
+        the work dir itself.  The reply goes directly to the requesting
+        *endpoint* — never broadcast — with the shape::
+
+            {"type": "dirListing", "path": <abs dir>, "root": <work dir>,
+             "tabId": <echo>, "token": <echo>,
+             "entries": [{"name", "path", "isDir"}, ...],
+             "truncated": <bool>}                 # on success
+            {"type": "dirListing", "path": ..., "root": ..., "tabId": ...,
+             "token": ..., "error": <message>}    # on failure
+
+        Args:
+            cmd: The parsed ``listDir`` command (optional ``path``,
+                ``workDir``, ``tabId``, ``token``).
+            endpoint: The requesting WSS connection.
+        """
+        from kiss.server.explorer import list_directory
+
+        raw_path = self._cmd_str(cmd, "path")
+        work_dir = self._cmd_work_dir(cmd)
+        tab_id = self._cmd_str(cmd, "tabId")
+        token = self._cmd_str(cmd, "token")
+
+        def _list() -> dict[str, Any]:
+            reply: dict[str, Any] = {
+                "type": "dirListing",
+                "path": raw_path or work_dir,
+                "root": work_dir,
+                "tabId": tab_id,
+                "token": token,
+            }
+            try:
+                path = self._resolve_tab_file(
+                    raw_path or work_dir, work_dir, tab_id,
+                )
+                if path is None or not path.is_dir():
+                    reply["error"] = (
+                        f"Directory not found: {raw_path or work_dir}"
+                    )
+                    return reply
+                reply["path"] = str(path)
+                reply.update(list_directory(path))
+            except Exception as exc:
+                # OSError (unreadable), ValueError (NUL in a name), or
+                # anything else: the view must get a reply either way.
+                reply["error"] = f"Failed to list {raw_path or work_dir}: {exc}"
+            return reply
+
+        reply = await asyncio.to_thread(_list)
+        await self._reply_direct(endpoint, reply, "listDir")
+
+    @staticmethod
+    def _git_provider_result(
+        provider: Any, work_dir: str, *args: Any,
+    ) -> dict[str, Any]:
+        """Run a ``kiss.server.explorer`` git provider, never raising.
+
+        The provider returns either data or ``{"error": ...}``; an
+        unexpected exception (a path with a NUL byte, a broken git
+        install, ...) becomes an ``error`` reply too, so the client's
+        view never sits at "Loading..." for a command that was accepted.
+        """
+        try:
+            result: dict[str, Any] = provider(work_dir, *args)
+            return result
+        except Exception as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    async def _handle_git_status(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Report the working-tree changes for the Source Control view.
+
+        Handles the ``gitStatus`` command sent by ``media/main.js`` when
+        the Source Control view opens or refreshes.  The repository is
+        the one containing the command's ``workDir`` (falling back to
+        the daemon work dir).  The reply goes directly to the requesting
+        *endpoint* with the shape::
+
+            {"type": "gitStatus", "workDir": <work dir>, "tabId": <echo>,
+             "token": <echo>, "repo": <abs repo root>, "branch": <name>,
+             "changes": [{"path", "absPath", "status", "group"}, ...]}
+            {"type": "gitStatus", "workDir": ..., "tabId": ..., "token": ...,
+             "error": <message>}                  # not a repo / git failed
+
+        See :func:`kiss.server.explorer.git_status` for the row fields.
+
+        Args:
+            cmd: The parsed ``gitStatus`` command (optional ``workDir``,
+                ``tabId``, ``token``).
+            endpoint: The requesting WSS connection.
+        """
+        from kiss.server.explorer import git_status
+
+        work_dir = self._cmd_work_dir(cmd)
+        reply: dict[str, Any] = {
+            "type": "gitStatus",
+            "workDir": work_dir,
+            "tabId": self._cmd_str(cmd, "tabId"),
+            "token": self._cmd_str(cmd, "token"),
+        }
+        if not os.path.isdir(work_dir):
+            reply["error"] = f"Directory not found: {work_dir}"
+        else:
+            reply.update(
+                await asyncio.to_thread(
+                    self._git_provider_result, git_status, work_dir,
+                )
+            )
+        await self._reply_direct(endpoint, reply, "gitStatus")
+
+    async def _handle_git_log(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Report the recent commits for the Source Control graph.
+
+        Handles the ``gitLog`` command sent by ``media/main.js`` when the
+        Source Control view opens or refreshes.  The repository is the
+        one containing the command's ``workDir`` (falling back to the
+        daemon work dir); ``limit`` caps the number of commits
+        (default :data:`kiss.server.explorer.GIT_LOG_DEFAULT_LIMIT`).
+        The reply goes directly to the requesting *endpoint* with the
+        shape::
+
+            {"type": "gitLog", "workDir": <work dir>, "tabId": <echo>,
+             "token": <echo>, "repo": <abs repo root>, "head": <sha>,
+             "commits": [{"sha", "shortSha", "parents", "author", "date",
+                          "refs", "subject", "files"}, ...]}
+            {"type": "gitLog", "workDir": ..., "tabId": ..., "token": ...,
+             "error": <message>}                  # not a repo / git failed
+
+        See :func:`kiss.server.explorer.git_log` for the row fields.
+
+        Args:
+            cmd: The parsed ``gitLog`` command (optional ``workDir``,
+                ``tabId``, ``token``, ``limit``).
+            endpoint: The requesting WSS connection.
+        """
+        from kiss.server.explorer import GIT_LOG_DEFAULT_LIMIT, git_log
+
+        work_dir = self._cmd_work_dir(cmd)
+        limit = cmd.get("limit")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            limit = GIT_LOG_DEFAULT_LIMIT
+        reply: dict[str, Any] = {
+            "type": "gitLog",
+            "workDir": work_dir,
+            "tabId": self._cmd_str(cmd, "tabId"),
+            "token": self._cmd_str(cmd, "token"),
+        }
+        if not os.path.isdir(work_dir):
+            reply["error"] = f"Directory not found: {work_dir}"
+        else:
+            reply.update(
+                await asyncio.to_thread(
+                    self._git_provider_result, git_log, work_dir, limit,
+                )
+            )
+        await self._reply_direct(endpoint, reply, "gitLog")
 
     def _tab_task_agent(self, tab_id: str) -> Any:
         """Return the agent of the task *tab_id* is running or viewing.

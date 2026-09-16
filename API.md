@@ -272,6 +272,18 @@
   - `cmd`: The ``getInfoFile`` command (optional ``workDir``, ``tabId``, ``knownSig``).
   - `ctx`: The transport context of the current call.
 
+- **list_dir** — List a directory for the remote webapp's Explorer view. The remote webapp's task-history panel carries a VS Code-like activity bar whose Explorer view browses the workspace: opening the view lists the work dir, expanding a folder lists that folder, and clicking a file goes through ``openFile``.  The reply is a ``dirListing`` event sent to the requester only. UDS clients (VS Code windows) have a real Explorer, so a UDS-delivered ``listDir`` is dropped as a defensive no-op, exactly like ``getInfoFile``.<br/>`async list_dir(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``listDir`` command (optional ``path``, ``workDir``, ``tabId``, ``token``).
+  - `ctx`: The transport context of the current call.
+
+- **git_status** — Report working-tree changes for the remote Source Control view. The activity bar's Source Control view lists the repository's staged, unstaged and untracked changes (VS Code's "Changes" section) from this command's ``gitStatus`` reply, sent to the requester only.  A UDS-delivered ``gitStatus`` is dropped as a defensive no-op, exactly like ``getInfoFile``.<br/>`async git_status(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``gitStatus`` command (optional ``workDir``, ``tabId``, ``token``).
+  - `ctx`: The transport context of the current call.
+
+- **git_log** — Report recent commits for the remote Source Control graph. The activity bar's Source Control view draws a commit graph (VS Code's "Graph" section) with each commit's modified files from this command's ``gitLog`` reply, sent to the requester only.  A UDS-delivered ``gitLog`` is dropped as a defensive no-op, exactly like ``getInfoFile``.<br/>`async git_log(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``gitLog`` command (optional ``workDir``, ``tabId``, ``token``, ``limit``).
+  - `ctx`: The transport context of the current call.
+
 - **share_chat** — Write a chat webview's transcript as a standalone HTML page. The chat webview serialized the highlighted tab's static task panel and event panels (its ``shareChat`` command carries the markup) and asks the daemon to save them as ``reports/chat-<chatId>.html`` under the tab's work dir.  Both transports take this path — the VS Code extension host forwards the webview's ``shareChat`` over UDS, the remote webapp sends it over WSS — so the page is built in exactly one place.  The reply is a direct ``share_done`` event to the requester.<br/>`async share_chat(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``shareChat`` command (``chatId``, ``html``, optional ``title``, ``workDir``, ``tabId``).
   - `ctx`: The transport context of the current call.
