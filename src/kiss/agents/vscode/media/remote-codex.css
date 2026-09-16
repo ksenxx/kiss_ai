@@ -462,6 +462,56 @@ body.remote-chat .server-reset-confirm-btn {
   }
 }
 
+/* The activity bar (Tasks / Explorer / Source Control) exists only on
+   the remote page: a VS Code window has the real Explorer and Source
+   Control views.  Colors come from the Codex palette so the strip
+   reads as a slightly darker column beside the panel, like VS Code's
+   activity bar beside its sidebar. */
+body.remote-chat #activity-bar {
+  display: flex;
+  background: var(--surface2);
+  border-right: 1px solid var(--border-8);
+}
+
+body.remote-chat .activity-btn {
+  color: var(--dim);
+}
+
+body.remote-chat .activity-btn:hover,
+body.remote-chat .activity-btn.active {
+  color: var(--fg);
+}
+
+body.remote-chat .activity-btn.active {
+  border-left-color: var(--fg);
+}
+
+body.remote-chat .explorer-row:hover,
+body.remote-chat .scm-row:hover,
+body.remote-chat .scm-commit:hover {
+  background: var(--hover);
+}
+
+body.remote-chat .explorer-row.is-dir > .explorer-icon {
+  color: var(--dim);
+}
+
+body.remote-chat .scm-commit.expanded {
+  background: var(--hover-faint);
+}
+
+body.remote-chat .scm-section-hdr:hover {
+  color: var(--fg);
+}
+
+/* The phone drawer's close button (#sidebar-close, absolute at the
+   panel's top-right) would otherwise sit on top of the Explorer /
+   Source Control header's refresh button.  Desktop docking hides the
+   close button, and the media query below drops this padding again. */
+body.remote-chat #sidebar .sidebar-hdr-row {
+  padding-right: 40px;
+}
+
 body.remote-chat #sidebar-resizer {
   display: none;
 }
@@ -548,6 +598,10 @@ body.remote-chat .running-item-ids::before {
     display: none;
   }
 
+  body.remote-chat.remote-desktop #sidebar .sidebar-hdr-row {
+    padding-right: 0;
+  }
+
   body.remote-chat.remote-desktop #sidebar.open {
     transform: none;
     width: var(--sidebar-w, var(--sidebar-default-w));
@@ -561,6 +615,11 @@ body.remote-chat .running-item-ids::before {
        panel width. */
     padding-left: min(16px, calc(var(--sidebar-w, var(--sidebar-default-w)) / 4));
     padding-right: min(16px, calc(var(--sidebar-w, var(--sidebar-default-w)) / 4));
+
+    /* The activity bar (main.css #activity-bar) cancels this padding
+       with a negative left margin so it stays flush with the panel's
+       edge however narrow the panel gets. */
+    --sidebar-pad-x: min(16px, calc(var(--sidebar-w, var(--sidebar-default-w)) / 4));
   }
 
   body.remote-chat.remote-desktop #sidebar-overlay {

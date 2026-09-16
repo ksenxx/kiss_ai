@@ -48,6 +48,23 @@ export type FromWebviewMessage =
       tabId?: string;
     }
   | {type: 'checkPaths'; paths: string[]; workDir?: string; tabId?: string}
+  // Remote webapp only (the activity bar's Explorer / Source Control
+  // views); the daemon drops these when a VS Code window sends them.
+  | {
+      type: 'listDir';
+      path?: string;
+      workDir?: string;
+      tabId?: string;
+      token?: string;
+    }
+  | {type: 'gitStatus'; workDir?: string; tabId?: string; token?: string}
+  | {
+      type: 'gitLog';
+      workDir?: string;
+      tabId?: string;
+      token?: string;
+      limit?: number;
+    }
   | {
       type: 'shareChat';
       chatId: string;
@@ -264,6 +281,57 @@ type ToWebviewMessageBody =
       error?: string;
       /** Echo of the request's `line` (a path:NN link's line number). */
       line?: number;
+    }
+  | {
+      // Reply to `listDir` (web_server.py _handle_list_dir), sent only to
+      // the requesting connection: the Explorer view's folder contents.
+      type: 'dirListing';
+      path: string;
+      root: string;
+      tabId?: string;
+      token?: string;
+      entries?: Array<{name: string; path: string; isDir: boolean}>;
+      truncated?: boolean;
+      error?: string;
+    }
+  | {
+      // Reply to `gitStatus` (web_server.py _handle_git_status): the
+      // Source Control view's "Changes" rows.
+      type: 'gitStatus';
+      workDir: string;
+      tabId?: string;
+      token?: string;
+      repo?: string;
+      branch?: string;
+      changes?: Array<{
+        path: string;
+        absPath: string;
+        status: string;
+        group: 'merge' | 'staged' | 'changes';
+        origPath?: string;
+      }>;
+      error?: string;
+    }
+  | {
+      // Reply to `gitLog` (web_server.py _handle_git_log): the Source
+      // Control view's commit graph rows, newest first.
+      type: 'gitLog';
+      workDir: string;
+      tabId?: string;
+      token?: string;
+      repo?: string;
+      head?: string;
+      commits?: Array<{
+        sha: string;
+        shortSha: string;
+        parents: string[];
+        author: string;
+        date: string;
+        refs: string[];
+        subject: string;
+        files: Array<{path: string; status: string; origPath?: string}>;
+      }>;
+      error?: string;
     }
   | {type: 'share_done'; ok: boolean; path?: string; error?: string}
   | {
