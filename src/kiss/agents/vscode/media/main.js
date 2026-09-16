@@ -1150,6 +1150,8 @@
     // restored transcript rather than from the tab's own name.
     updateVisibleTask();
     // visibletask-coverage:end
+    // The Explorer / Source Control views follow the tab's workspace.
+    refreshSidebarDataViews(false);
   }
 
   // Light / dark theme toggle for the REMOTE webapp only.  The VS Code
@@ -1603,6 +1605,9 @@
     // height 0, where a reveal cannot scroll; retry now that the tab
     // is visible and laid out.
     revealPendingContentLine(tab);
+    // A content tab browses the workspace of the chat it was opened
+    // from (sidebarWorkDir), which may differ from the previous tab's.
+    refreshSidebarDataViews(false);
   }
 
   function hideContentArea() {
@@ -2004,6 +2009,10 @@
     // Freeze the owner's scope so the content tab stays pinned to its
     // workspace even after the owner closes (see tabScopeWorkDir).
     tab.ownerScopeWorkDir = ownerScope;
+    // And the folder the owner really works in (which may differ from
+    // the visibility scope), so the Explorer / Source Control views
+    // keep browsing it while this tab is up even once the owner closes.
+    tab.ownerBrowseWorkDir = ownerTab ? workDirForTab(ownerTab.id) : '';
     tabs.push(tab);
     renderContentView(tab, ev);
     // switchToTab refuses hidden tabs, so a foreign-scoped file opens
@@ -2545,6 +2554,8 @@
     reportSurvivingChatTab();
     renderTabBar();
     persistTabState();
+    // The Explorer / Source Control views browse the workspace too.
+    refreshSidebarDataViews(false);
   }
   // workspacescope-coverage:end
 
@@ -3185,6 +3196,1275 @@
     }
   }
   // metainfo-coverage:end
+
+  // activitybar-coverage:start
+  // ---- Activity bar: Tasks / Explorer / Source Control views ----
+  //
+  // The remote webapp's history panel carries a VS Code-like activity
+  // bar (#activity-bar, shown by remote-codex.css) switching between
+  // three stacked .sidebar-view panels: Tasks (the history list),
+  // Explorer (the workspace file tree, listDir -> dirListing) and
+  // Source Control (gitStatus -> "Changes", gitLog -> commit "Graph").
+  // The VS Code webview keeps the bar hidden and the Tasks view up.
+  const SIDEBAR_VIEWS = ['tasks', 'explorer', 'scm'];
+  const SIDEBAR_VIEW_KEY = 'kiss-sidebar-view';
+  const activityBar = document.getElementById('activity-bar');
+  const explorerTree = document.getElementById('explorer-tree');
+  const scmChangesList = document.getElementById('scm-changes');
+  const scmChangesCount = document.getElementById('scm-changes-count');
+  const scmGraphList = document.getElementById('scm-graph');
+  const scmGraphCount = document.getElementById('scm-graph-count');
+  const scmBranchEl = document.getElementById('scm-branch');
+  const scmBodyEl = document.getElementById('scm-body');
+  let activeSidebarView = 'tasks';
+  // Task news that arrived while a data view was hidden (or the drawer
+  // closed) is remembered here, so the view reloads when it next shows.
+  let explorerDirty = false;
+  let scmDirty = false;
+
+  /**
+   * The workspace the side views browse: the active tab's work dir.  A
+   * content tab (a file opened from the Explorer, say) has none of its
+   * own and browses the workspace of the chat it was opened from, so
+   * opening a file never flips the tree to another folder.  That is
+   * the owner chat's BROWSE work dir (workDirForTab), not its visibility
+   * scope: a standalone API task may run in a scratch dir while being
+   * shown under the calling workspace, and the Explorer follows the
+   * folder the task really works in.
+   */
+  function sidebarWorkDir() {
+    let tab = getTab(activeTabId);
+    for (let i = 0; tab && tab.isContentTab && i < tabs.length; i++) {
+      const owner = getTab(tab.ownerTabId);
+      if (!owner) {
+        // The owner closed: use the browse folder frozen at open time.
+        const frozen = tab.ownerBrowseWorkDir;
+        return typeof frozen === 'string' && frozen && !isRootDir(frozen)
+          ? frozen
+          : workDirForTab('');
+      }
+      tab = owner;
+    }
+    return workDirForTab(tab ? tab.id : activeTabId);
+  }
+
+  function sidebarIsOpen() {
+    return HISTORY_PANEL_MODE || sidebar.classList.contains('open');
+  }
+
+  /**
+   * Show one side view and hide the others, VS Code activity-bar
+   * style.  Showing the Explorer or Source Control view (re)loads it
+   * for the current workspace.  The choice is remembered in
+   * localStorage so a reload comes back to the same view.
+   *
+   * @param {string} view 'tasks' | 'explorer' | 'scm'
+   */
+  function setSidebarView(view) {
+    if (!activityBar) return;
+    if (SIDEBAR_VIEWS.indexOf(view) < 0) view = 'tasks';
+    activeSidebarView = view;
+    activityBar.querySelectorAll('.activity-btn').forEach(btn => {
+      const on = btn.dataset.view === view;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+      // Roving tabindex: only the selected tab is in the tab order.
+      btn.tabIndex = on ? 0 : -1;
+    });
+    document.querySelectorAll('#sidebar-views .sidebar-view').forEach(p => {
+      p.hidden = p.dataset.view !== view;
+    });
+    try {
+      window.localStorage.setItem(SIDEBAR_VIEW_KEY, view);
+    } catch {}
+    refreshSidebarDataViews(false);
+  }
+
+  /**
+   * Bring the Explorer / Source Control views up to date with the
+   * current workspace.  Called when a view is shown, when the active
+   * tab or the workspace scope changes (restoreTab, showContentTab,
+   * applyWorkspaceScope), and — with `force` — whenever the daemon
+   * reports task news (refreshHistory), since a finished task may have
+   * written files or committed.
+   *
+   * Only the view on screen reloads right away.  Task news marks BOTH
+   * views dirty first, so a hidden view (or one behind a closed phone
+   * drawer) reloads the moment it is shown instead of staying stale.
+   *
+   * @param {boolean} force Reload even if the workspace is unchanged.
+   */
+  function refreshSidebarDataViews(force) {
+    if (!activityBar || !document.body.classList.contains('remote-chat'))
+      return;
+    if (force) {
+      explorerDirty = true;
+      scmDirty = true;
+    }
+    if (!sidebarIsOpen()) return;
+    if (activeSidebarView === 'explorer') {
+      refreshExplorer(explorerDirty);
+      explorerDirty = false;
+    } else if (activeSidebarView === 'scm') {
+      refreshSourceControl(scmDirty);
+      scmDirty = false;
+    }
+  }
+
+  /** Re-apply the view remembered from the last visit (remote only). */
+  function restoreSidebarView() {
+    if (!activityBar || !document.body.classList.contains('remote-chat'))
+      return;
+    let saved = null;
+    try {
+      saved = window.localStorage.getItem(SIDEBAR_VIEW_KEY);
+    } catch {}
+    setSidebarView(saved || activeSidebarView);
+  }
+
+  /** Last path segment of a file system path ('' for a bare root). */
+  function pathBaseName(p) {
+    const s = String(p || '').replace(/[\\/]+$/, '');
+    const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    return i >= 0 ? s.slice(i + 1) : s;
+  }
+
+  /** Directory part of a relative path ('' when there is none). */
+  function pathDirName(p) {
+    const s = String(p || '');
+    const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    return i >= 0 ? s.slice(0, i) : '';
+  }
+
+  /**
+   * Ask the daemon to open a file as a content tab (fileContent).  On
+   * the phone layout the drawer closes so the tab is visible, exactly
+   * as after a history-row click; the docked desktop panel stays.
+   */
+  function openWorkspaceFile(path, workDir) {
+    api.send({
+      type: 'openFile',
+      path: path,
+      workDir: workDir || sidebarWorkDir(),
+      tabId: activeTabId,
+    });
+    closeSidebar();
+  }
+
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  /** A 16px stroke icon: `d` is one or more SVG path strings. */
+  function svgIcon(cls, paths, fill) {
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('width', '16');
+    svg.setAttribute('height', '16');
+    svg.setAttribute('fill', fill ? 'currentColor' : 'none');
+    svg.setAttribute('stroke', fill ? 'none' : 'currentColor');
+    svg.setAttribute('stroke-width', '1.3');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+    if (cls) svg.setAttribute('class', cls);
+    paths.forEach(d => {
+      const p = document.createElementNS(SVG_NS, 'path');
+      p.setAttribute('d', d);
+      svg.appendChild(p);
+    });
+    return svg;
+  }
+
+  const ICON_CHEVRON = ['M6 4l4 4-4 4'];
+  const ICON_FOLDER = [
+    'M1.5 4a1 1 0 0 1 1-1h3l1.5 1.8h6.5a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V4z',
+  ];
+  const ICON_FOLDER_OPEN = [
+    'M1.5 4a1 1 0 0 1 1-1h3l1.5 1.8h6.5a1 1 0 0 1 1 1V7',
+    'M1.5 12l1.6-5h11.4l-1.6 5z',
+  ];
+  const ICON_FILE = [
+    'M9 1.5H4a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5.5z',
+    'M9 1.5v4h4',
+  ];
+
+  // ---- Explorer ----
+  //
+  // One .explorer-row per entry; a folder row is followed by an
+  // .explorer-kids container holding its children once listed.
+  // `explorerDirs` maps a folder's request path to its node so a
+  // dirListing reply (token = generation + ':' + path) finds it; the
+  // generation lets a rebuilt tree ignore replies meant for the old one.
+  let explorerRoot = '';
+  let explorerGeneration = 0;
+  const explorerDirs = new Map();
+
+  function explorerToken(path) {
+    return explorerGeneration + ':' + path;
+  }
+
+  /**
+   * Make sure the Explorer shows the current workspace.  An unchanged
+   * workspace is left alone unless `force`, in which case every folder
+   * already listed is re-listed in place (expansion state kept).
+   */
+  function refreshExplorer(force) {
+    if (!explorerTree) return;
+    const wd = sidebarWorkDir();
+    if (wd === explorerRoot && explorerDirs.size) {
+      if (force) reloadExplorerDirs();
+      return;
+    }
+    buildExplorerRoot(wd);
+  }
+
+  function buildExplorerRoot(wd) {
+    explorerRoot = wd;
+    explorerGeneration++;
+    explorerDirs.clear();
+    explorerTree.textContent = '';
+    if (!wd) {
+      const empty = document.createElement('div');
+      empty.className = 'sidebar-empty';
+      empty.textContent = 'No workspace folder';
+      explorerTree.appendChild(empty);
+      return;
+    }
+    const rootRow = createExplorerRow(
+      explorerTree,
+      {name: pathBaseName(wd) || wd, path: wd, isDir: true},
+      0,
+    );
+    toggleExplorerDir(rootRow, true);
+  }
+
+  /** Re-list every folder that has been listed so far. */
+  function reloadExplorerDirs() {
+    explorerDirs.forEach((node, path) => {
+      if (!node.loaded && !node.loading) return;
+      node.loading = true;
+      api.listDir({
+        path: path,
+        workDir: explorerRoot,
+        tabId: activeTabId,
+        token: explorerToken(path),
+      });
+    });
+  }
+
+  /**
+   * Append the row for one directory entry (and, for a folder, its
+   * empty children container) to `container`.
+   *
+   * @returns {HTMLElement} The row element.
+   */
+  function createExplorerRow(container, entry, depth) {
+    const row = document.createElement('div');
+    row.className = 'explorer-row ' + (entry.isDir ? 'is-dir' : 'is-file');
+    row.style.setProperty('--depth', String(depth));
+    row.setAttribute('role', 'treeitem');
+    row.setAttribute('aria-level', String(depth + 1));
+    // Roving tabindex: the tree is ONE tab stop (see rovingFocus).
+    row.tabIndex = -1;
+    row.dataset.explorerPath = entry.path;
+    row.title = entry.path;
+    const chevron = document.createElement('span');
+    chevron.className = 'explorer-chevron';
+    chevron.appendChild(svgIcon('', ICON_CHEVRON));
+    row.appendChild(chevron);
+    const icon = document.createElement('span');
+    icon.className = 'explorer-icon';
+    icon.appendChild(svgIcon('', entry.isDir ? ICON_FOLDER : ICON_FILE));
+    row.appendChild(icon);
+    const name = document.createElement('span');
+    name.className = 'explorer-name';
+    name.textContent = entry.name;
+    row.appendChild(name);
+    container.appendChild(row);
+    if (entry.isDir) {
+      row.setAttribute('aria-expanded', 'false');
+      const kids = document.createElement('div');
+      kids.className = 'explorer-kids';
+      kids.setAttribute('role', 'group');
+      kids.hidden = true;
+      container.appendChild(kids);
+      explorerDirs.set(entry.path, {
+        row: row,
+        kids: kids,
+        depth: depth,
+        loaded: false,
+        loading: false,
+        parent: entry.parent || '',
+        // The folder's real location (a symlink's target), known from
+        // the listing that produced it; the daemon fills it in for the
+        // folder itself once it is listed.
+        realPath: entry.real || '',
+      });
+    }
+    return row;
+  }
+
+  /**
+   * Whether expanding *node* would re-enter a folder already open above
+   * it: a symlink pointing at one of its own ancestors.
+   */
+  function explorerIsCycle(node) {
+    if (!node.realPath) return false;
+    for (
+      let up = explorerDirs.get(node.parent);
+      up;
+      up = explorerDirs.get(up.parent)
+    ) {
+      if (up.realPath && up.realPath === node.realPath) return true;
+    }
+    return false;
+  }
+
+  function explorerNote(container, depth, text) {
+    const note = document.createElement('div');
+    note.className = 'explorer-note';
+    note.style.setProperty('--depth', String(depth));
+    note.textContent = text;
+    container.appendChild(note);
+  }
+
+  /**
+   * Expand or collapse a folder row.  The first expansion asks the
+   * daemon for the listing and shows "Loading..." until it arrives.
+   *
+   * @param {HTMLElement} row The folder's .explorer-row.
+   * @param {boolean} [expand] Force a state; toggles when omitted.
+   */
+  function toggleExplorerDir(row, expand) {
+    const path = row.dataset.explorerPath;
+    const node = explorerDirs.get(path);
+    if (!node) return;
+    const open =
+      expand === undefined ? !row.classList.contains('expanded') : expand;
+    row.classList.toggle('expanded', open);
+    row.setAttribute('aria-expanded', open ? 'true' : 'false');
+    node.kids.hidden = !open;
+    const icon = row.querySelector('.explorer-icon');
+    if (icon) {
+      icon.textContent = '';
+      icon.appendChild(svgIcon('', open ? ICON_FOLDER_OPEN : ICON_FOLDER));
+    }
+    if (open && !node.loaded && !node.loading) {
+      if (explorerIsCycle(node)) {
+        // A symlink back into its own ancestry would expand for ever.
+        node.loaded = true;
+        node.kids.textContent = '';
+        explorerNote(node.kids, node.depth + 1, '(symbolic link cycle)');
+        return;
+      }
+      node.loading = true;
+      row.classList.add('loading');
+      explorerNote(node.kids, node.depth + 1, 'Loading...');
+      api.listDir({
+        path: path,
+        workDir: explorerRoot,
+        tabId: activeTabId,
+        token: explorerToken(path),
+      });
+    }
+  }
+
+  /**
+   * Handle a dirListing reply: fill the folder it answers, keeping the
+   * rows (and expanded sub-trees) of entries that are still present.
+   */
+  function handleDirListing(ev) {
+    const token = String(ev.token || '');
+    const sep = token.indexOf(':');
+    if (sep < 0 || parseInt(token.slice(0, sep), 10) !== explorerGeneration)
+      return;
+    const node = explorerDirs.get(token.slice(sep + 1));
+    if (!node) return;
+    node.loading = false;
+    node.loaded = true;
+    node.row.classList.remove('loading');
+    if (typeof ev.path === 'string' && ev.path) node.realPath = ev.path;
+    const kids = node.kids;
+    const depth = node.depth + 1;
+    if (ev.error) {
+      kids.textContent = '';
+      explorerNote(kids, depth, String(ev.error));
+      return;
+    }
+    const entries = Array.isArray(ev.entries) ? ev.entries : [];
+    const parentPath = token.slice(sep + 1);
+    // Existing rows by path, so a re-listing keeps expanded folders.
+    const keep = new Map();
+    kids.querySelectorAll(':scope > .explorer-row').forEach(r => {
+      keep.set(r.dataset.explorerPath, r);
+    });
+    const fresh = document.createDocumentFragment();
+    entries.forEach(entry => {
+      if (!entry || typeof entry.name !== 'string' || !entry.name) return;
+      // Rows are keyed by the path AS THIS TREE NAMES IT (parent as
+      // requested + name), not by the server's canonical path: two
+      // symlinked folders pointing at one target must stay two
+      // independent nodes.  The daemon resolves the path on request.
+      const childPath = joinPath(parentPath, entry.name);
+      const old = keep.get(childPath);
+      if (old) {
+        keep.delete(childPath);
+        const oldNode = explorerDirs.get(childPath);
+        if (!!oldNode === !!entry.isDir) {
+          fresh.appendChild(old);
+          if (oldNode) fresh.appendChild(oldNode.kids);
+          return;
+        }
+        // The entry changed kind (file <-> folder): the old row and
+        // whatever it registered go before the replacement is made.
+        dropExplorerSubtree(childPath);
+        old.remove();
+      }
+      createExplorerRow(
+        fresh,
+        {
+          name: entry.name,
+          path: childPath,
+          isDir: !!entry.isDir,
+          parent: parentPath,
+          // A plain sub-folder of a resolved folder is at its parent's
+          // real path + name; a symlinked one is wherever it points.
+          real:
+            typeof entry.real === 'string'
+              ? entry.real
+              : node.realPath
+                ? joinPath(node.realPath, entry.name)
+                : '',
+        },
+        depth,
+      );
+    });
+    rovingFocus(explorerTree, '.explorer-row');
+    // Rows for entries that disappeared take their sub-trees with them.
+    keep.forEach((r, p) => {
+      dropExplorerSubtree(p);
+      r.remove();
+    });
+    kids.textContent = '';
+    kids.appendChild(fresh);
+    if (!entries.length) explorerNote(kids, depth, '(empty)');
+    if (ev.truncated) explorerNote(kids, depth, '(more entries not shown)');
+  }
+
+  /** `parent/name`, without doubling the separator after a `/` root. */
+  function joinPath(parent, name) {
+    const p = String(parent || '');
+    if (!p) return name;
+    const sepChar = p.indexOf('\\') >= 0 && p.indexOf('/') < 0 ? '\\' : '/';
+    return p.endsWith(sepChar) ? p + name : p + sepChar + name;
+  }
+
+  /** Forget a folder and every listed folder beneath it. */
+  function dropExplorerSubtree(path) {
+    const node = explorerDirs.get(path);
+    if (!node) return;
+    node.kids.querySelectorAll('.explorer-row.is-dir').forEach(r => {
+      explorerDirs.delete(r.dataset.explorerPath);
+    });
+    explorerDirs.delete(path);
+  }
+
+  function onExplorerActivate(row) {
+    if (row.classList.contains('is-dir')) toggleExplorerDir(row);
+    else openWorkspaceFile(row.dataset.explorerPath, explorerRoot);
+  }
+
+  // ---- Source Control ----
+  //
+  // Both halves (Changes and Graph) reload together; replies carrying
+  // a stale token (an older refresh, or another workspace) are dropped.
+  let scmWorkDir = '';
+  let scmGeneration = 0;
+  let scmStatus = null;
+  let scmLog = null;
+  let scmRefreshTimer = null;
+  const scmExpanded = new Set();
+  const SCM_LANE_W = 14;
+  const SCM_ROW_H = 24;
+  const SCM_MAX_LANES = 24;
+  const SCM_LANE_COLORS = [
+    '#3794ff',
+    '#f9a825',
+    '#e55c9c',
+    '#38b2ac',
+    '#b180f0',
+    '#4ec9b0',
+    '#ff8c42',
+    '#9cdcfe',
+  ];
+  const SCM_WORKTREE_SHA = '*';
+
+  /**
+   * (Re)load the Source Control view for the current workspace.  An
+   * unchanged workspace is left alone unless `force`; forced reloads
+   * are debounced since task news can arrive in bursts.
+   */
+  function refreshSourceControl(force) {
+    if (!scmChangesList || !scmGraphList) return;
+    const wd = sidebarWorkDir();
+    if (wd !== scmWorkDir) {
+      // Another workspace: reload right away, and forget a refresh
+      // scheduled for the previous one.
+      cancelScmRefreshTimer();
+      requestSourceControl(wd);
+      return;
+    }
+    if (!force || scmRefreshTimer !== null) return;
+    scmRefreshTimer = setTimeout(() => {
+      scmRefreshTimer = null;
+      // The view may have gone off screen meanwhile: leave it dirty
+      // so it reloads when shown instead of asking git for nothing.
+      if (activeSidebarView === 'scm' && sidebarIsOpen()) {
+        requestSourceControl(sidebarWorkDir());
+      } else {
+        scmDirty = true;
+      }
+    }, 400);
+  }
+
+  function cancelScmRefreshTimer() {
+    if (scmRefreshTimer === null) return;
+    clearTimeout(scmRefreshTimer);
+    scmRefreshTimer = null;
+  }
+
+  function requestSourceControl(wd) {
+    const changed = wd !== scmWorkDir;
+    scmWorkDir = wd;
+    scmGeneration++;
+    if (changed || !wd) {
+      // Another workspace (or none): drop the old data and show the
+      // loading / no-workspace state.  A same-workspace refresh keeps
+      // the current rows up until the fresh replies land.
+      scmStatus = null;
+      scmLog = null;
+      renderScmChanges();
+      renderScmGraph();
+    }
+    if (!wd) return;
+    const token = String(scmGeneration);
+    api.gitStatus({workDir: wd, tabId: activeTabId, token: token});
+    api.gitLog({workDir: wd, tabId: activeTabId, token: token, limit: 50});
+  }
+
+  /**
+   * Whether the status and log on hand answer the same request.  The
+   * graph combines both (the uncommitted row hangs off the log's HEAD),
+   * so during a same-workspace refresh it is rebuilt only once BOTH
+   * fresh replies are in — never from a new status over an old log.
+   */
+  function scmPairComplete() {
+    return (
+      !!scmStatus &&
+      !!scmLog &&
+      String(scmStatus.token || '') === String(scmLog.token || '')
+    );
+  }
+
+  function handleGitStatus(ev) {
+    if (String(ev.token || '') !== String(scmGeneration)) return;
+    scmStatus = ev;
+    renderScmChanges();
+    if (scmPairComplete()) renderScmGraph();
+  }
+
+  function handleGitLog(ev) {
+    if (String(ev.token || '') !== String(scmGeneration)) return;
+    scmLog = ev;
+    if (scmPairComplete()) renderScmGraph();
+  }
+
+  function scmEmpty(container, text) {
+    const empty = document.createElement('div');
+    empty.className = 'sidebar-empty';
+    empty.textContent = text;
+    container.appendChild(empty);
+  }
+
+  /** The VS Code decoration letter for a status code. */
+  function scmStatusLetter(status) {
+    return status === '!' ? '!' : String(status || '').slice(0, 1);
+  }
+
+  /**
+   * One file row of the Changes list or of an expanded commit.
+   *
+   * @param {object} change {path, absPath?, status, origPath?}
+   * @param {string} repo Repository root, used when absPath is absent.
+   * @param {number} depth Indentation level.
+   */
+  function createScmFileRow(change, repo, depth) {
+    const status = scmStatusLetter(change.status);
+    const row = document.createElement('div');
+    row.className = 'scm-row';
+    if (status === 'D') row.classList.add('is-deleted');
+    row.style.setProperty('--depth', String(depth));
+    row.setAttribute('role', 'treeitem');
+    row.tabIndex = -1;
+    const abs =
+      change.absPath ||
+      (repo ? repo.replace(/[\\/]+$/, '') + '/' + change.path : change.path);
+    row.dataset.scmPath = abs;
+    row.dataset.scmStatus = status;
+    row.title =
+      (change.origPath ? change.origPath + ' \u2192 ' : '') +
+      change.path +
+      (status === 'D' ? ' (deleted)' : '');
+    const icon = document.createElement('span');
+    icon.className = 'explorer-icon';
+    icon.appendChild(svgIcon('', ICON_FILE));
+    row.appendChild(icon);
+    const name = document.createElement('span');
+    name.className = 'scm-path';
+    name.textContent = pathBaseName(change.path);
+    row.appendChild(name);
+    const dir = document.createElement('span');
+    dir.className = 'scm-dir';
+    dir.textContent = pathDirName(change.path);
+    row.appendChild(dir);
+    const badge = document.createElement('span');
+    badge.className =
+      'scm-status scm-status-' + (status === '!' ? 'conflict' : status);
+    badge.textContent = status;
+    row.appendChild(badge);
+    return row;
+  }
+
+  const SCM_GROUP_LABELS = {
+    merge: 'Merge Changes',
+    staged: 'Staged Changes',
+    changes: 'Changes',
+  };
+
+  function renderScmChanges() {
+    if (!scmChangesList) return;
+    scmChangesList.textContent = '';
+    if (scmBranchEl) {
+      scmBranchEl.textContent =
+        scmStatus && !scmStatus.error && scmStatus.branch
+          ? String(scmStatus.branch)
+          : '';
+      scmBranchEl.title = scmBranchEl.textContent;
+    }
+    if (!scmWorkDir) {
+      scmChangesCount.textContent = '';
+      scmEmpty(scmChangesList, 'No workspace folder');
+      return;
+    }
+    if (!scmStatus) {
+      scmChangesCount.textContent = '';
+      scmEmpty(scmChangesList, 'Loading...');
+      return;
+    }
+    if (scmStatus.error) {
+      scmChangesCount.textContent = '';
+      scmEmpty(scmChangesList, String(scmStatus.error));
+      return;
+    }
+    const changes = Array.isArray(scmStatus.changes) ? scmStatus.changes : [];
+    scmChangesCount.textContent = changes.length ? String(changes.length) : '';
+    if (!changes.length) {
+      scmEmpty(scmChangesList, 'No changes');
+      return;
+    }
+    const groups = ['merge', 'staged', 'changes'].filter(g => {
+      return changes.some(c => c.group === g);
+    });
+    groups.forEach(g => {
+      const rows = changes.filter(c => c.group === g);
+      let depth = 0;
+      if (groups.length > 1) {
+        const hdr = document.createElement('div');
+        hdr.className = 'scm-group-hdr';
+        hdr.textContent = SCM_GROUP_LABELS[g] + ' (' + rows.length + ')';
+        scmChangesList.appendChild(hdr);
+        depth = 1;
+      }
+      rows.forEach(c => {
+        scmChangesList.appendChild(createScmFileRow(c, scmStatus.repo, depth));
+      });
+    });
+    rovingFocus(scmBodyEl, '.scm-commit, .scm-row');
+  }
+
+  /**
+   * Lay the commit rows (newest first, no parent before all of its
+   * children) out on lanes, VS Code / gitk style.
+   *
+   * Each lane heads towards one commit (the sha it expects next).  A
+   * row's commit sits on the lane expecting it (a new lane when none
+   * does — a branch tip); the first parent continues that lane, other
+   * parents join the lane already heading to them or open a new one,
+   * and every other lane heading to this commit ends here.
+   *
+   * @param {Array<{sha:string,parents:string[]}>} rows
+   * @returns {Array<{lane:number,color:number,segments:Array}>}
+   *   `segments` are {kind:'in'|'out'|'through', from?, to?, color}:
+   *   'in' runs from lane `from` at the top edge to the commit dot,
+   *   'out' from the dot to lane `to` at the bottom edge, 'through'
+   *   from `from` (top) to `to` (bottom) past the commit.
+   */
+  function computeGraphLanes(rows) {
+    let lanes = [];
+    let nextColor = 0;
+    const out = [];
+    rows.forEach(row => {
+      let idx = lanes.findIndex(l => l.sha === row.sha);
+      const segments = [];
+      if (idx < 0) {
+        idx = lanes.length;
+        lanes.push({sha: row.sha, color: nextColor++});
+      } else {
+        segments.push({kind: 'in', from: idx, color: lanes[idx].color});
+      }
+      const color = lanes[idx].color;
+      const parents = Array.isArray(row.parents) ? row.parents : [];
+      const next = [];
+      lanes.forEach((lane, i) => {
+        if (lane.sha === row.sha) {
+          if (i !== idx)
+            segments.push({kind: 'in', from: i, color: lane.color});
+          return;
+        }
+        segments.push({
+          kind: 'through',
+          from: i,
+          to: next.length,
+          color: lane.color,
+        });
+        next.push(lane);
+      });
+      if (parents.length) {
+        let down = next.findIndex(l => l.sha === parents[0]);
+        if (down < 0) {
+          down = Math.min(idx, next.length);
+          next.splice(down, 0, {sha: parents[0], color: color});
+          segments.forEach(s => {
+            if (s.kind === 'through' && s.to >= down) s.to++;
+          });
+        }
+        segments.push({kind: 'out', to: down, color: next[down].color});
+        for (let p = 1; p < parents.length; p++) {
+          let j = next.findIndex(l => l.sha === parents[p]);
+          if (j < 0) {
+            j = next.length;
+            next.push({sha: parents[p], color: nextColor++});
+          }
+          segments.push({kind: 'out', to: j, color: next[j].color});
+        }
+      }
+      out.push({
+        lane: idx,
+        color: color,
+        segments: segments,
+        width: Math.max(lanes.length, next.length),
+      });
+      lanes = next;
+    });
+    return out;
+  }
+
+  function laneX(i) {
+    return i * SCM_LANE_W + SCM_LANE_W / 2;
+  }
+
+  function laneColor(i) {
+    return SCM_LANE_COLORS[i % SCM_LANE_COLORS.length];
+  }
+
+  /** The SVG cell drawing one row of the lane graph. */
+  function renderGraphCell(layout, lanesShown, isWorktree) {
+    const w = lanesShown * SCM_LANE_W;
+    const h = SCM_ROW_H;
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'scm-graph-cell');
+    svg.setAttribute('width', String(w));
+    svg.setAttribute('height', String(h));
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    svg.setAttribute('aria-hidden', 'true');
+    // Lanes past the cap fold onto the last drawn lane: a very wide
+    // history degrades to overlapping lines there, but every commit
+    // keeps its dot and every edge stays on screen.
+    const clampLane = i => Math.min(i, lanesShown - 1);
+    const cx = laneX(clampLane(layout.lane));
+    const cy = h / 2;
+    layout.segments.forEach(s => {
+      const path = document.createElementNS(SVG_NS, 'path');
+      let d;
+      if (s.kind === 'through') {
+        const x1 = laneX(clampLane(s.from));
+        const x2 = laneX(clampLane(s.to));
+        d =
+          x1 === x2
+            ? 'M' + x1 + ' 0 V' + h
+            : 'M' +
+              x1 +
+              ' 0 C' +
+              x1 +
+              ' ' +
+              cy +
+              ' ' +
+              x2 +
+              ' ' +
+              cy +
+              ' ' +
+              x2 +
+              ' ' +
+              h;
+      } else if (s.kind === 'in') {
+        const x1 = laneX(clampLane(s.from));
+        d =
+          x1 === cx
+            ? 'M' + cx + ' 0 V' + cy
+            : 'M' +
+              x1 +
+              ' 0 C' +
+              x1 +
+              ' ' +
+              cy +
+              ' ' +
+              cx +
+              ' ' +
+              cy +
+              ' ' +
+              cx +
+              ' ' +
+              cy;
+      } else {
+        const x2 = laneX(clampLane(s.to));
+        d =
+          x2 === cx
+            ? 'M' + cx + ' ' + cy + ' V' + h
+            : 'M' +
+              cx +
+              ' ' +
+              cy +
+              ' C' +
+              cx +
+              ' ' +
+              cy +
+              ' ' +
+              x2 +
+              ' ' +
+              cy +
+              ' ' +
+              x2 +
+              ' ' +
+              h;
+      }
+      path.setAttribute('d', d);
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke', laneColor(s.color));
+      path.setAttribute('stroke-width', '2');
+      svg.appendChild(path);
+    });
+    const dot = document.createElementNS(SVG_NS, 'circle');
+    dot.setAttribute('cx', String(cx));
+    dot.setAttribute('cy', String(cy));
+    // The working-tree row gets a hollow dot, commits a filled one.
+    dot.setAttribute('r', '3.5');
+    dot.setAttribute('fill', isWorktree ? 'none' : laneColor(layout.color));
+    dot.setAttribute('stroke', laneColor(layout.color));
+    dot.setAttribute('stroke-width', '2');
+    svg.appendChild(dot);
+    return svg;
+  }
+
+  /** "3h ago"-style age of an ISO date; '' when unparsable. */
+  function scmRelativeTime(iso) {
+    const t = Date.parse(iso || '');
+    if (isNaN(t)) return '';
+    const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 60) return 'now';
+    const m = Math.round(s / 60);
+    if (m < 60) return m + 'm ago';
+    const h = Math.round(m / 60);
+    if (h < 48) return h + 'h ago';
+    const d = Math.round(h / 24);
+    if (d < 60) return d + 'd ago';
+    const mo = Math.round(d / 30);
+    if (mo < 24) return mo + 'mo ago';
+    return Math.round(d / 365) + 'y ago';
+  }
+
+  /** The graph rows: an "uncommitted changes" row (when any) + commits. */
+  function scmGraphRows() {
+    const commits =
+      scmLog && !scmLog.error && Array.isArray(scmLog.commits)
+        ? scmLog.commits
+        : [];
+    const rows = [];
+    const changes =
+      scmStatus && !scmStatus.error && Array.isArray(scmStatus.changes)
+        ? scmStatus.changes
+        : [];
+    if (changes.length) {
+      const seen = new Set();
+      const files = [];
+      changes.forEach(c => {
+        if (seen.has(c.path)) return;
+        seen.add(c.path);
+        files.push(c);
+      });
+      rows.push({
+        sha: SCM_WORKTREE_SHA,
+        shortSha: '',
+        parents: scmLog && scmLog.head ? [scmLog.head] : [],
+        author: '',
+        date: '',
+        refs: [],
+        subject: 'Uncommitted changes',
+        files: files,
+        isWorktree: true,
+      });
+    }
+    return rows.concat(commits);
+  }
+
+  function renderScmGraph() {
+    if (!scmGraphList) return;
+    scmGraphList.textContent = '';
+    if (!scmWorkDir) {
+      scmGraphCount.textContent = '';
+      scmEmpty(scmGraphList, 'No workspace folder');
+      return;
+    }
+    if (!scmLog) {
+      scmGraphCount.textContent = '';
+      scmEmpty(scmGraphList, 'Loading...');
+      return;
+    }
+    if (scmLog.error) {
+      scmGraphCount.textContent = '';
+      scmEmpty(scmGraphList, String(scmLog.error));
+      return;
+    }
+    const rows = scmGraphRows();
+    const commitCount = rows.filter(r => !r.isWorktree).length;
+    scmGraphCount.textContent = commitCount ? String(commitCount) : '';
+    if (!rows.length) {
+      scmEmpty(scmGraphList, 'No commits');
+      return;
+    }
+    const layouts = computeGraphLanes(rows);
+    let lanesShown = 1;
+    layouts.forEach(l => {
+      lanesShown = Math.max(lanesShown, l.width);
+    });
+    lanesShown = Math.min(lanesShown, SCM_MAX_LANES);
+    const repo = scmLog.repo || (scmStatus && scmStatus.repo) || '';
+    rows.forEach((row, i) => {
+      scmGraphList.appendChild(
+        createScmCommitRow(row, layouts[i], lanesShown, repo),
+      );
+    });
+    rovingFocus(scmBodyEl, '.scm-commit, .scm-row');
+  }
+
+  function createScmCommitRow(commit, layout, lanesShown, repo) {
+    const wrap = document.createElement('div');
+    wrap.className = 'scm-commit-wrap';
+    const row = document.createElement('div');
+    row.className = 'scm-commit' + (commit.isWorktree ? ' is-worktree' : '');
+    row.setAttribute('role', 'treeitem');
+    row.tabIndex = -1;
+    row.dataset.scmSha = commit.sha;
+    const expanded = scmExpanded.has(commit.sha);
+    row.classList.toggle('expanded', expanded);
+    row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    row.title = commit.isWorktree
+      ? 'Working tree changes'
+      : [commit.sha, commit.author, commit.date, '', commit.subject].join('\n');
+    row.appendChild(renderGraphCell(layout, lanesShown, !!commit.isWorktree));
+    const main = document.createElement('div');
+    main.className = 'scm-commit-main';
+    const subject = document.createElement('span');
+    subject.className = 'scm-commit-subject';
+    subject.textContent = commit.subject || commit.shortSha || '';
+    main.appendChild(subject);
+    (Array.isArray(commit.refs) ? commit.refs : []).forEach(r => {
+      const ref = document.createElement('span');
+      ref.className = 'scm-ref';
+      let label = String(r);
+      if (label.indexOf('HEAD -> ') === 0) {
+        label = label.slice(8);
+        ref.classList.add('is-head');
+      } else if (label === 'HEAD') {
+        ref.classList.add('is-head');
+      } else if (label.indexOf('tag: ') === 0) {
+        label = label.slice(5);
+        ref.classList.add('is-tag');
+      }
+      ref.textContent = label;
+      ref.title = String(r);
+      main.appendChild(ref);
+    });
+    const meta = document.createElement('span');
+    meta.className = 'scm-commit-meta';
+    if (commit.isWorktree) {
+      meta.textContent =
+        commit.files.length + ' file' + (commit.files.length === 1 ? '' : 's');
+    } else {
+      // The narrow panel leaves the subject little room: only the age
+      // rides along, the sha / author / date live in the tooltip.
+      meta.textContent = scmRelativeTime(commit.date);
+    }
+    main.appendChild(meta);
+    row.appendChild(main);
+    wrap.appendChild(row);
+    const files = document.createElement('div');
+    files.className = 'scm-commit-files';
+    files.setAttribute('role', 'group');
+    files.hidden = !expanded;
+    if (expanded) fillScmCommitFiles(files, commit, repo);
+    wrap.appendChild(files);
+    return wrap;
+  }
+
+  function fillScmCommitFiles(container, commit, repo) {
+    container.textContent = '';
+    const files = Array.isArray(commit.files) ? commit.files : [];
+    if (!files.length) {
+      const note = document.createElement('div');
+      note.className = 'explorer-note';
+      note.style.setProperty('--depth', '1');
+      note.textContent =
+        commit.parents && commit.parents.length > 1
+          ? '(merge commit)'
+          : '(no files)';
+      container.appendChild(note);
+      return;
+    }
+    files.forEach(f => {
+      container.appendChild(createScmFileRow(f, repo, 1));
+    });
+  }
+
+  function toggleScmCommit(row) {
+    const sha = row.dataset.scmSha;
+    const wrap = row.parentNode;
+    const files = wrap ? wrap.querySelector('.scm-commit-files') : null;
+    if (!files) return;
+    const open = !scmExpanded.has(sha);
+    if (open) scmExpanded.add(sha);
+    else scmExpanded.delete(sha);
+    row.classList.toggle('expanded', open);
+    row.setAttribute('aria-expanded', open ? 'true' : 'false');
+    files.hidden = !open;
+    if (open) {
+      const commit = scmGraphRows().find(c => c.sha === sha);
+      const repo =
+        (scmLog && scmLog.repo) || (scmStatus && scmStatus.repo) || '';
+      if (commit) fillScmCommitFiles(files, commit, repo);
+    }
+  }
+
+  function onScmActivate(target) {
+    const commit = target.closest('.scm-commit');
+    if (commit) {
+      toggleScmCommit(commit);
+      return;
+    }
+    const file = target.closest('.scm-row');
+    if (!file || file.dataset.scmStatus === 'D') return;
+    openWorkspaceFile(file.dataset.scmPath, scmWorkDir);
+  }
+
+  /** Wire the activity bar, the Explorer and the Source Control view. */
+  /** The visible (rendered) items matching *selector* under *root*. */
+  function visibleTreeItems(root, selector) {
+    return Array.from(root.querySelectorAll(selector)).filter(el => {
+      return el.offsetParent !== null || el.getClientRects().length > 0;
+    });
+  }
+
+  /**
+   * Roving tabindex for a tree-like list: exactly one item is in the
+   * page's tab order — *current* when given (the item that just took
+   * focus), else whichever item already had the stop, else the first
+   * visible one — and the rest are reachable with the arrow keys.
+   *
+   * @param {Element} root The list container.
+   * @param {string} selector The item rows.
+   * @param {Element} [current] The item that should own the tab stop.
+   */
+  function rovingFocus(root, selector, current) {
+    if (!root) return;
+    const items = Array.from(root.querySelectorAll(selector));
+    if (!items.length) return;
+    let stop = current && items.indexOf(current) >= 0 ? current : null;
+    if (!stop) stop = items.find(el => el.tabIndex === 0) || null;
+    if (!stop || (!current && stop.offsetParent === null)) {
+      stop = visibleTreeItems(root, selector)[0] || items[0];
+    }
+    items.forEach(el => {
+      el.tabIndex = el === stop ? 0 : -1;
+    });
+  }
+
+  /**
+   * Move focus among the VISIBLE items of a tree-like list with the
+   * Up / Down / Home / End keys (the ARIA tree keyboard model).
+   *
+   * @param {KeyboardEvent} e The keydown.
+   * @param {Element} root The list container.
+   * @param {string} selector The focusable item rows.
+   * @param {Element} current The row that has focus.
+   * @returns {boolean} Whether the key was handled.
+   */
+  function treeArrowNav(e, root, selector, current) {
+    if (
+      e.key !== 'ArrowUp' &&
+      e.key !== 'ArrowDown' &&
+      e.key !== 'Home' &&
+      e.key !== 'End'
+    )
+      return false;
+    const items = visibleTreeItems(root, selector);
+    if (!items.length) return false;
+    let idx = items.indexOf(current);
+    if (e.key === 'Home') idx = 0;
+    else if (e.key === 'End') idx = items.length - 1;
+    else if (e.key === 'ArrowDown') idx = Math.min(items.length - 1, idx + 1);
+    else idx = Math.max(0, idx - 1);
+    e.preventDefault();
+    rovingFocus(root, selector, items[idx]);
+    items[idx].focus();
+    return true;
+  }
+
+  /** The .explorer-row a folder's children container belongs to. */
+  function explorerParentRow(row) {
+    const kids = row.parentNode;
+    if (!kids || !kids.classList || !kids.classList.contains('explorer-kids'))
+      return null;
+    const parent = kids.previousSibling;
+    return parent && parent.classList.contains('explorer-row') ? parent : null;
+  }
+
+  /** Wire the activity bar, the Explorer and the Source Control view. */
+  function setupActivityBar() {
+    if (!activityBar) return;
+    activityBar.addEventListener('click', e => {
+      const btn = e.target.closest('.activity-btn');
+      if (btn && btn.dataset.view) setSidebarView(btn.dataset.view);
+    });
+    // Vertical tablist keyboard model: Up / Down (and Home / End) move
+    // between the buttons and select the view they land on.
+    activityBar.addEventListener('keydown', e => {
+      const btns = Array.from(activityBar.querySelectorAll('.activity-btn'));
+      const idx = btns.indexOf(e.target.closest('.activity-btn'));
+      if (idx < 0) return;
+      let next = -1;
+      if (e.key === 'ArrowDown') next = (idx + 1) % btns.length;
+      else if (e.key === 'ArrowUp')
+        next = (idx + btns.length - 1) % btns.length;
+      else if (e.key === 'Home') next = 0;
+      else if (e.key === 'End') next = btns.length - 1;
+      if (next < 0) return;
+      e.preventDefault();
+      btns[next].focus();
+      setSidebarView(btns[next].dataset.view);
+    });
+    const explorerRefresh = document.getElementById('explorer-refresh');
+    if (explorerRefresh) {
+      explorerRefresh.addEventListener('click', () => refreshExplorer(true));
+    }
+    const scmRefresh = document.getElementById('scm-refresh');
+    if (scmRefresh) {
+      scmRefresh.addEventListener('click', () => {
+        // A manual refresh goes out now and supersedes any pending
+        // debounced one (its token would be stale anyway).
+        cancelScmRefreshTimer();
+        scmDirty = false;
+        requestSourceControl(sidebarWorkDir());
+      });
+    }
+    if (explorerTree) {
+      explorerTree.addEventListener('click', e => {
+        const row = e.target.closest('.explorer-row');
+        if (row) onExplorerActivate(row);
+      });
+      explorerTree.addEventListener('focusin', e => {
+        const row = e.target.closest('.explorer-row');
+        if (row) rovingFocus(explorerTree, '.explorer-row', row);
+      });
+      explorerTree.addEventListener('keydown', e => {
+        const row = e.target.closest('.explorer-row');
+        if (!row) return;
+        if (treeArrowNav(e, explorerTree, '.explorer-row', row)) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onExplorerActivate(row);
+          return;
+        }
+        if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+        e.preventDefault();
+        const isDir = row.classList.contains('is-dir');
+        const expanded = row.getAttribute('aria-expanded') === 'true';
+        if (e.key === 'ArrowRight') {
+          // Right: open a closed folder, else step into its first child.
+          if (!isDir) return;
+          if (!expanded) {
+            toggleExplorerDir(row, true);
+            return;
+          }
+          const first = row.nextSibling
+            ? row.nextSibling.querySelector(':scope > .explorer-row')
+            : null;
+          if (first) {
+            rovingFocus(explorerTree, '.explorer-row', first);
+            first.focus();
+          }
+          return;
+        }
+        // Left: close an open folder, else go up to the parent folder.
+        if (isDir && expanded) {
+          toggleExplorerDir(row, false);
+          return;
+        }
+        const parent = explorerParentRow(row);
+        if (parent) {
+          rovingFocus(explorerTree, '.explorer-row', parent);
+          parent.focus();
+        }
+      });
+    }
+    const scmBody = scmBodyEl;
+    if (scmBody) {
+      scmBody.addEventListener('click', e => {
+        const hdr = e.target.closest('.scm-section-hdr');
+        if (hdr) {
+          const open = hdr.getAttribute('aria-expanded') !== 'true';
+          hdr.setAttribute('aria-expanded', open ? 'true' : 'false');
+          const list = document.getElementById(
+            hdr.getAttribute('aria-controls'),
+          );
+          if (list) list.hidden = !open;
+          return;
+        }
+        onScmActivate(e.target);
+      });
+      scmBody.addEventListener('focusin', e => {
+        const item = e.target.closest('.scm-commit, .scm-row');
+        if (item) rovingFocus(scmBody, '.scm-commit, .scm-row', item);
+      });
+      scmBody.addEventListener('keydown', e => {
+        const item = e.target.closest('.scm-commit, .scm-row');
+        if (!item) return;
+        if (treeArrowNav(e, scmBody, '.scm-commit, .scm-row', item)) return;
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        onScmActivate(item);
+      });
+    }
+    restoreSidebarView();
+  }
+  // activitybar-coverage:end
 
   // The welcome screen lives inside the scrolling chat container, so
   // whatever scroll offset the previous content left behind (a finished
@@ -7045,6 +8325,12 @@
         generation: historyGeneration,
       });
     }
+    // Task news (a run started or finished, a commit landed) may have
+    // changed the workspace: re-list the Explorer folders on screen /
+    // re-read git for the Source Control view.  A hidden view — or one
+    // behind a closed phone drawer — is only marked dirty and reloads
+    // when it next shows.
+    refreshSidebarDataViews(true);
   }
 
   function setServerLoading(loading) {
@@ -7391,6 +8677,19 @@
         return;
       case 'pathsExist':
         handlePathsExist(ev);
+        return;
+      // Replies of the activity bar's Explorer / Source Control views
+      // (remote webapp only).  They are matched to the request by token,
+      // so no tab check is needed: a reply for a tree or workspace that
+      // is no longer shown simply finds no taker.
+      case 'dirListing':
+        handleDirListing(ev);
+        return;
+      case 'gitStatus':
+        handleGitStatus(ev);
+        return;
+      case 'gitLog':
+        handleGitLog(ev);
         return;
       case 'share_tasks': {
         // share-coverage:start
@@ -10550,6 +11849,8 @@
           query: historySearch ? historySearch.value : '',
           generation: historyGeneration,
         });
+        // The drawer may have missed task news while closed.
+        refreshSidebarDataViews(false);
       }
     }
     if (menuBtn) {
@@ -10644,6 +11945,7 @@
     }
     sidebarClose.addEventListener('click', () => closeSidebar(true));
     sidebarOverlay.addEventListener('click', closeSidebar);
+    setupActivityBar();
     applyRemoteTheme(getSavedRemoteTheme());
     if (
       document.body.classList.contains('remote-chat') &&
@@ -10660,6 +11962,7 @@
               query: historySearch ? historySearch.value : '',
               generation: historyGeneration,
             });
+            refreshSidebarDataViews(false);
           }
           sidebarOverlay.classList.remove('open');
         } else {
