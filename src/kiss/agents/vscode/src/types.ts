@@ -48,6 +48,24 @@ export type FromWebviewMessage =
       tabId?: string;
     }
   | {type: 'checkPaths'; paths: string[]; workDir?: string; tabId?: string}
+  // Remote webapp only: write an editable content tab's Monaco text back
+  // to the file it was opened from (web_server.py _handle_save_file);
+  // the daemon drops it when a VS Code window sends it.
+  | {
+      type: 'saveFile';
+      path: string;
+      content: string;
+      workDir?: string;
+      tabId?: string;
+      /** `<content tab id>:<save sequence>`, echoed so the reply settles
+       * exactly the request still awaited (a straggler for an earlier,
+       * timed-out save finds no taker). */
+      token?: string;
+      /** The `version` stamp the fileContent reply reported; a file whose
+       * stamp changed since is refused (`conflict`) unless `force` is set. */
+      version?: string;
+      force?: boolean;
+    }
   // Remote webapp only (the activity bar's Explorer / Source Control
   // views); the daemon drops these when a VS Code window sends them.
   | {
@@ -281,6 +299,26 @@ type ToWebviewMessageBody =
       error?: string;
       /** Echo of the request's `line` (a path:NN link's line number). */
       line?: number;
+      /** The file's `"<st_mtime_ns>:<st_size>"` stamp as read; `saveFile`
+       * hands it back so a file changed on disk while open is not silently
+       * overwritten. A string: nanosecond mtimes exceed 2^53. */
+      version?: string;
+    }
+  | {
+      // Reply to `saveFile` (web_server.py _handle_save_file), sent only
+      // to the requesting connection.
+      type: 'fileSaved';
+      ok: boolean;
+      path: string;
+      name: string;
+      tabId?: string;
+      token?: string;
+      /** The file's version stamp after the write (on success). */
+      version?: string;
+      error?: string;
+      /** True when the write was refused because the file changed on
+       * disk since it was opened (retry with `force` to overwrite). */
+      conflict?: boolean;
     }
   | {
       // Reply to `listDir` (web_server.py _handle_list_dir), sent only to

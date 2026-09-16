@@ -3099,25 +3099,32 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   overflow: hidden;
 }
 
+/* A column: the optional Save bar on top, the editor / frame filling
+   the rest (min-height: 0 so the editor shrinks instead of overflowing). */
 #content-tab-area .content-tab-view {
   width: 100%;
   height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 #content-tab-area .content-html-frame {
   width: 100%;
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   border: 0;
   background: #fff;
 }
 
 #content-tab-area .content-monaco-holder {
   width: 100%;
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 #content-tab-area .content-code-fallback {
   height: 100%;
+  box-sizing: border-box;
   overflow: auto;
   margin: 0;
   padding: 8px 12px;
@@ -3126,8 +3133,72 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   white-space: pre;
 }
 
+#content-tab-area .content-save-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+  font-size: 12px;
+}
+
+#content-tab-area .content-save-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* keep the file name visible when the path is cut */
+  text-align: left;
+  color: var(--dim);
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+#content-tab-area .content-save-status {
+  flex: 0 0 auto;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+#content-tab-area .content-save-status.error {
+  color: var(--red);
+}
+
+#content-tab-area .content-save-btn {
+  flex: 0 0 auto;
+  padding: 2px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#content-tab-area .content-save-btn:disabled {
+  background: transparent;
+  color: var(--dim);
+  cursor: default;
+}
+
+#content-tab-area .content-save-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .chat-tab .content-tab-icon {
   margin-right: 4px;
   font-size: 11px;
   line-height: 1;
+}
+
+/* Unsaved edits: VS Code's filled dot next to the file name. */
+.chat-tab .chat-tab-dirty {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--fg);
 }

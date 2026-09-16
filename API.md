@@ -264,6 +264,10 @@
   - `cmd`: The ``openFile`` command.
   - `ctx`: The transport context of the current call.
 
+- **save_file** — Write a remote-web client's edits back to a file on disk. The remote webapp opens a file (``openFile``) in an editable Monaco editor inside a content tab; Ctrl/Cmd+S or the tab's Save button sends the editor's full text here.  The file must already exist (the editor never creates files) and is replaced atomically; the ``version`` stamp taken from the ``fileContent`` reply lets the daemon refuse to overwrite a file that changed on disk since it was opened unless ``force`` is set.  The reply is a ``fileSaved`` event sent to the requester only.  UDS clients (VS Code windows) edit files in real editor tabs, so a UDS-delivered ``saveFile`` is dropped as a defensive no-op, exactly like ``openFile``.<br/>`async save_file(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``saveFile`` command (``path``, ``content``, optional ``workDir``, ``tabId``, ``token``, ``version``, ``force``).
+  - `ctx`: The transport context of the current call.
+
 - **check_paths** — Report which file paths exist to a remote-web client. The chat webview linkifies file-path-looking strings in event panel contents lazily: a path only becomes a clickable link after this check confirms that clicking it (``openFile``) would actually serve something — a file's content or a directory's listing.  UDS clients (VS Code windows) never take this path: their webview's ``checkPaths`` is consumed by the extension host, which checks the local filesystem itself — so a UDS-delivered ``checkPaths`` is dropped as a defensive no-op.<br/>`async check_paths(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``checkPaths`` command.
   - `ctx`: The transport context of the current call.

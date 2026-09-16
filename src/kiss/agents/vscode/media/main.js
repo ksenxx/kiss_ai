@@ -750,6 +750,21 @@
       contentPath: '',
       contentViewEl: null,
       contentEditor: null,
+      // Editing state of a content tab's Monaco editor (see
+      // renderCodeContent / saveContentTab): the model version that
+      // matches the file on disk, whether the text has drifted from
+      // it, the on-disk version stamp the fileContent reply reported
+      // (sent back on save so a file changed underneath is not
+      // silently overwritten), and whether a save is in flight.
+      contentDirty: false,
+      contentSavedVersionId: 0,
+      contentPendingVersionId: 0,
+      contentFileVersion: '',
+      contentSaving: false,
+      contentSaveToken: '',
+      contentSaveTimer: null,
+      contentSaveBar: null,
+      contentReloadRequested: false,
       // Set on a sub-agent tab opened by a run_parallel fan-out, naming
       // the conversation that started it.
       isSubagentTab: false,
@@ -1328,7 +1343,8 @@
         'chat-tab' +
         (tab.id === activeTabId ? ' active' : '') +
         (tab.isSubagentTab ? ' subagent-tab' : '') +
-        (tab.isContentTab ? ' content-tab' : '');
+        (tab.isContentTab ? ' content-tab' : '') +
+        (tab.isContentTab && tab.contentDirty ? ' content-dirty' : '');
       el.dataset.tabId = tab.id;
       el.setAttribute('role', 'tab');
       el.setAttribute('tabindex', tab.id === rovingStopId ? '0' : '-1');
@@ -1382,12 +1398,28 @@
       label.textContent = tab.title;
       el.appendChild(label);
 
+      // Unsaved edits in a content tab's editor show as VS Code's
+      // filled dot next to the name, so the user sees what a close
+      // would throw away before the confirmation asks.
+      if (tab.isContentTab && tab.contentDirty) {
+        const dirty = document.createElement('span');
+        dirty.className = 'chat-tab-dirty';
+        dirty.textContent = '\u25CF';
+        dirty.title = 'Unsaved changes';
+        el.appendChild(dirty);
+      }
+
       const closeBtn = document.createElement('span');
       closeBtn.className = 'chat-tab-close';
       closeBtn.textContent = '\u00d7';
       closeBtn.setAttribute('role', 'button');
       closeBtn.setAttribute('tabindex', '0');
-      closeBtn.setAttribute('aria-label', 'Close tab');
+      closeBtn.setAttribute(
+        'aria-label',
+        tab.isContentTab && tab.contentDirty
+          ? 'Close tab (unsaved changes)'
+          : 'Close tab',
+      );
       closeBtn.addEventListener('click', e => {
         e.stopPropagation();
         closeTab(tab.id);
@@ -1633,6 +1665,14 @@
 
   function disposeTabContentView(tab) {
     tab.contentRevealLine = 0;
+    tab.contentDirty = false;
+    tab.contentSavedVersionId = 0;
+    tab.contentPendingVersionId = 0;
+    tab.contentSaving = false;
+    tab.contentSaveToken = '';
+    clearTimeout(tab.contentSaveTimer);
+    tab.contentSaveTimer = null;
+    tab.contentSaveBar = null;
     if (tab.contentEditor) {
       try {
         tab.contentEditor.dispose();
@@ -1651,6 +1691,17 @@
     });
     if (idx < 0) return;
     const tab = tabs[idx];
+    // Like VS Code, closing an editor with unsaved edits asks first;
+    // the edits live only in this tab's Monaco model.
+    if (
+      tab.contentDirty &&
+      !window.confirm(
+        (tab.title || 'This file') +
+          ' has unsaved changes. Close without saving?',
+      )
+    ) {
+      return;
+    }
     tabs.splice(idx, 1);
     disposeTabContentView(tab);
     if (activeTabId === tabId) {
@@ -1813,35 +1864,232 @@
     tab.contentRevealLine = 0;
   }
 
-  function renderCodeContent(tab, holder, text, language) {
-    ensureMonaco()
-      .then(monaco => {
-        if (!holder.isConnected || tab.contentEditor) return;
-        tab.contentEditor = monaco.editor.create(holder, {
-          value: text,
-          language: language,
-          readOnly: true,
-          automaticLayout: true,
-          minimap: {enabled: false},
-          scrollBeyondLastLine: false,
-          theme: 'vs-dark',
-        });
-        revealPendingContentLine(tab);
-      })
-      .catch(() => {
-        if (!holder.isConnected || holder.firstChild) return;
-        const pre = document.createElement('pre');
-        pre.className = 'content-code-fallback';
-        const code = document.createElement('code');
-        code.textContent = text;
-        pre.appendChild(code);
-        holder.appendChild(pre);
-        try {
-          if (window.hljs) window.hljs.highlightElement(code);
-        } catch (_e) {}
-        revealPendingContentLine(tab);
+  // The Monaco editor of a file content tab is a real editor: the user
+  // types into it and saves with Ctrl/Cmd+S or the Save button of the
+  // bar above it (a phone has no Ctrl+S). Only a directory listing
+  // stays read-only — there is no file to write it back to. The
+  // model's alternative version id (which returns to its old value on
+  // undo) tells whether the text still matches what was saved.
+  function renderCodeContent(tab, holder, text, language, editable) {
+    function onMonaco(monaco) {
+      if (!holder.isConnected || tab.contentEditor) return;
+      const editor = monaco.editor.create(holder, {
+        value: text,
+        language: language,
+        readOnly: !editable,
+        automaticLayout: true,
+        minimap: {enabled: false},
+        scrollBeyondLastLine: false,
+        theme: 'vs-dark',
       });
+      tab.contentEditor = editor;
+      if (editable) {
+        const model = editor.getModel();
+        tab.contentSavedVersionId = model.getAlternativeVersionId();
+        editor.onDidChangeModelContent(() => {
+          setContentTabDirty(
+            tab,
+            model.getAlternativeVersionId() !== tab.contentSavedVersionId,
+          );
+        });
+      }
+      revealPendingContentLine(tab);
+    }
+    function onCdnFailure() {
+      if (!holder.isConnected || holder.firstChild) return;
+      // The <pre> fallback is a viewer: without an editor there is
+      // nothing the Save bar could save.
+      if (tab.contentSaveBar) {
+        tab.contentSaveBar.remove();
+        tab.contentSaveBar = null;
+      }
+      const pre = document.createElement('pre');
+      pre.className = 'content-code-fallback';
+      const code = document.createElement('code');
+      code.textContent = text;
+      pre.appendChild(code);
+      holder.appendChild(pre);
+      try {
+        if (window.hljs) window.hljs.highlightElement(code);
+      } catch (_e) {}
+      revealPendingContentLine(tab);
+    }
+    // Two-argument then: the fallback answers a FAILED Monaco load
+    // only. A bug in onMonaco itself must surface as an unhandled
+    // rejection in the console, not vanish into the <pre> path.
+    ensureMonaco().then(onMonaco, onCdnFailure);
   }
+
+  // The bar above an editable content tab's editor: the file's path,
+  // a status word (Unsaved changes / Saving / Saved / the error), and
+  // the Save button.
+  function appendContentSaveBar(tab, view) {
+    const bar = document.createElement('div');
+    bar.className = 'content-save-bar';
+    const pathEl = document.createElement('span');
+    pathEl.className = 'content-save-path';
+    // The CSS clips the START of a long path (direction: rtl) so the
+    // file name stays visible; the LRM marks keep the slashes at both
+    // ends from being reordered by the bidi algorithm.
+    pathEl.textContent = '\u200e' + tab.contentPath + '\u200e';
+    pathEl.title = tab.contentPath;
+    const status = document.createElement('span');
+    status.className = 'content-save-status';
+    status.setAttribute('role', 'status');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'content-save-btn';
+    btn.textContent = 'Save';
+    btn.title = 'Save (Ctrl+S / \u2318S)';
+    btn.disabled = true;
+    btn.addEventListener('click', () => saveContentTab(tab, false));
+    bar.appendChild(pathEl);
+    bar.appendChild(status);
+    bar.appendChild(btn);
+    view.appendChild(bar);
+    tab.contentSaveBar = bar;
+  }
+
+  function setContentSaveStatus(tab, text, isError) {
+    const bar = tab.contentSaveBar;
+    if (!bar) return;
+    const status = bar.querySelector('.content-save-status');
+    status.textContent = text;
+    status.classList.toggle('error', !!isError);
+    bar.querySelector('.content-save-btn').disabled =
+      tab.contentSaving || !tab.contentDirty;
+  }
+
+  function setContentTabDirty(tab, dirty) {
+    if (tab.contentDirty !== dirty) {
+      tab.contentDirty = dirty;
+      renderTabBar();
+    }
+    setContentSaveStatus(tab, dirty ? 'Unsaved changes' : '', false);
+  }
+
+  // Send the editor's text to the daemon (saveFile -> fileSaved). The
+  // model version being saved is remembered so edits typed while the
+  // save is in flight keep the tab dirty once the reply lands. `force`
+  // overwrites a file that changed on disk since it was opened (the
+  // daemon otherwise refuses with `conflict`, see handleFileSaved).
+  //
+  // Every request gets its own token: a reply that arrives after the
+  // request timed out and a NEWER save went out must not be mistaken
+  // for the newer one (it would mark text the disk never saw as saved).
+  let contentSaveSeq = 0;
+  function saveContentTab(tab, force) {
+    const editor = tab.contentEditor;
+    if (!editor || tab.contentSaving || !tab.contentPath) return;
+    if (!tab.contentDirty && !force) return;
+    const model = editor.getModel();
+    contentSaveSeq += 1;
+    tab.contentSaving = true;
+    tab.contentSaveToken = tab.id + ':' + contentSaveSeq;
+    tab.contentPendingVersionId = model.getAlternativeVersionId();
+    setContentSaveStatus(tab, 'Saving\u2026', false);
+    // A reply lost to a dropped connection must not leave the Save
+    // button disabled forever; the token is retired with the wait so
+    // a straggling reply is ignored.
+    clearTimeout(tab.contentSaveTimer);
+    tab.contentSaveTimer = setTimeout(() => {
+      if (!tab.contentSaving) return;
+      tab.contentSaving = false;
+      tab.contentSaveToken = '';
+      setContentSaveStatus(tab, 'Save failed: no reply from the server', true);
+    }, 30000);
+    api.saveFile({
+      path: tab.contentPath,
+      content: model.getValue(),
+      workDir: tab.ownerBrowseWorkDir || workDirForTab(tab.ownerTabId),
+      tabId: tab.ownerTabId,
+      token: tab.contentSaveToken,
+      version: tab.contentFileVersion,
+      force: !!force,
+    });
+  }
+
+  // Re-read the file from disk into the tab, dropping its edits: the
+  // flag lets handleFileContent replace a dirty tab's editor, which it
+  // otherwise refuses to do (a click on the file's link must not throw
+  // the user's unsaved work away).
+  function reloadContentTab(tab) {
+    tab.contentReloadRequested = true;
+    api.send({
+      type: 'openFile',
+      path: tab.contentPath,
+      workDir: tab.ownerBrowseWorkDir || workDirForTab(tab.ownerTabId),
+      tabId: tab.ownerTabId || activeTabId,
+    });
+  }
+
+  function handleFileSaved(ev) {
+    // Only the reply to the save still awaited settles a tab; a reply
+    // to an earlier, timed-out request finds no taker.
+    const tab = tabs.find(t => {
+      return t.isContentTab && !!ev.token && t.contentSaveToken === ev.token;
+    });
+    if (!tab || !tab.contentEditor) return;
+    clearTimeout(tab.contentSaveTimer);
+    tab.contentSaving = false;
+    tab.contentSaveToken = '';
+    if (ev.ok) {
+      tab.contentSavedVersionId = tab.contentPendingVersionId;
+      if (typeof ev.version === 'string') {
+        tab.contentFileVersion = ev.version;
+      }
+      const model = tab.contentEditor.getModel();
+      setContentTabDirty(
+        tab,
+        model.getAlternativeVersionId() !== tab.contentSavedVersionId,
+      );
+      if (!tab.contentDirty) setContentSaveStatus(tab, 'Saved', false);
+      return;
+    }
+    const error = ev.error || 'Save failed';
+    setContentSaveStatus(tab, error, true);
+    if (ev.conflict) {
+      updateNotification({
+        id: 'file-save-conflict-' + tab.id,
+        message:
+          error + '. Overwrite it with your edits, or reload it and lose them?',
+        severity: 'warning',
+        actions: [
+          {label: 'Overwrite', onClick: () => saveContentTab(tab, true)},
+          {label: 'Reload from disk', onClick: () => reloadContentTab(tab)},
+        ],
+      });
+      return;
+    }
+    updateNotification({
+      id: 'file-save-error',
+      message: error,
+      severity: 'error',
+    });
+  }
+
+  // Ctrl/Cmd+S saves the active content tab wherever focus is (the
+  // editor, its Save bar, the tab strip) instead of opening the
+  // browser's "Save page" dialog. Capture phase: it must win over the
+  // editor's own key handling.
+  document.addEventListener(
+    'keydown',
+    e => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      if (e.key !== 's' && e.key !== 'S') return;
+      const tab = getTab(activeTabId);
+      if (!tab || !tab.isContentTab || !tab.contentEditor) return;
+      e.preventDefault();
+      saveContentTab(tab, false);
+    },
+    true,
+  );
+
+  window.addEventListener('beforeunload', e => {
+    if (!tabs.some(t => t.isContentTab && t.contentDirty)) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
 
   // ctxmenu-coverage:start
   // An opened .html file renders inside an iframe sandboxed with
@@ -1902,6 +2150,9 @@
 
   function renderContentView(tab, ev) {
     const area = ensureContentArea();
+    // A reload replaces edited text with the file on disk: the tab
+    // strip's dirty dot goes with it.
+    setContentTabDirty(tab, false);
     disposeTabContentView(tab);
     const view = document.createElement('div');
     view.className = 'content-tab-view';
@@ -1916,7 +2167,7 @@
       const dirHolder = document.createElement('div');
       dirHolder.className = 'content-monaco-holder';
       view.appendChild(dirHolder);
-      renderCodeContent(tab, dirHolder, ev.content || '', 'plaintext');
+      renderCodeContent(tab, dirHolder, ev.content || '', 'plaintext', false);
       return;
     }
     // mdlink-coverage:start
@@ -1938,6 +2189,12 @@
       appendContentHtmlFrame(view, ev.content || '');
       return;
     }
+    // A file the daemon read from disk (it reported a version stamp)
+    // is opened for editing; content from an older daemon that reports
+    // none keeps the read-only viewer, since it has no saveFile.
+    const editable = typeof ev.version === 'string';
+    tab.contentFileVersion = editable ? ev.version : '';
+    if (editable) appendContentSaveBar(tab, view);
     const holder = document.createElement('div');
     holder.className = 'content-monaco-holder';
     view.appendChild(holder);
@@ -1947,7 +2204,13 @@
     // in .html/.md previews.
     const line = parseInt(ev.line, 10);
     tab.contentRevealLine = line > 0 ? line : 0;
-    renderCodeContent(tab, holder, ev.content || '', languageFromPath(lower));
+    renderCodeContent(
+      tab,
+      holder,
+      ev.content || '',
+      languageFromPath(lower),
+      editable,
+    );
   }
 
   // mayFocus tells whether this content tab is allowed to become the
@@ -1980,6 +2243,13 @@
         });
       }
       // tableak-coverage:end
+      // A failed reload keeps the tab's edits, so the next click on
+      // the file's link must protect them again.
+      tabs.forEach(t => {
+        if (t.isContentTab && t.contentPath === ev.path) {
+          t.contentReloadRequested = false;
+        }
+      });
       return;
     }
     const path = ev.path || '';
@@ -1989,15 +2259,29 @@
     // "currently hidden" is not enough, two different foreign
     // workspaces are both hidden here.
     const scopeKey = normalizeHistoryWorkDir(ownerScope);
+    // A tab reloading itself from disk (reloadContentTab) is the
+    // target no matter which scope the reply was attributed to.
     const existing = tabs.find(t => {
       return (
         t.isContentTab &&
         t.contentPath === path &&
-        normalizeHistoryWorkDir(tabScopeWorkDir(t)) === scopeKey
+        (t.contentReloadRequested ||
+          normalizeHistoryWorkDir(tabScopeWorkDir(t)) === scopeKey)
       );
     });
     if (existing) {
-      renderContentView(existing, ev);
+      // Unsaved edits win over a fresh copy of the file: like VS Code,
+      // opening a file that is already open in a dirty editor merely
+      // brings that editor forward (and jumps to the requested line).
+      // Only an explicit reload replaces the text.
+      if (existing.contentDirty && !existing.contentReloadRequested) {
+        const line = parseInt(ev.line, 10);
+        existing.contentRevealLine = line > 0 ? line : 0;
+        revealPendingContentLine(existing);
+      } else {
+        renderContentView(existing, ev);
+      }
+      existing.contentReloadRequested = false;
       if (activeTabId === existing.id) showContentTab(existing);
       else if (mayFocus) switchToTab(existing.id);
       return;
@@ -8674,6 +8958,13 @@
         }
         // tableak-coverage:end
         handleFileContent(ev, true, ev.tabId);
+        return;
+      // A save reply is matched to its content tab by the per-request
+      // token it echoes (see saveContentTab), so no active-tab check
+      // applies: the reply for a tab the user has since switched away
+      // from still settles that tab.
+      case 'fileSaved':
+        handleFileSaved(ev);
         return;
       case 'pathsExist':
         handlePathsExist(ev);

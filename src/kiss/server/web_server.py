@@ -189,6 +189,42 @@ def _write_text_to(tmp: Path, text: str) -> None:
     tmp.write_text(text, encoding="utf-8")
 
 
+_SAVE_FILE_LOCK = threading.Lock()
+"""Serializes ``saveFile``'s version check + publish across worker threads.
+
+One lock for every path, deliberately: saves are rare, short, and
+already run off the event loop in :func:`asyncio.to_thread`, so the
+simplicity beats a per-path lock table that would need its own
+housekeeping.  (Sibling daemons are not covered — see
+``RemoteAccessServer._handle_save_file``.)
+"""
+
+
+def _file_version(st: os.stat_result) -> str:
+    """Return the ``"<st_mtime_ns>:<st_size>"`` stamp of a file's state.
+
+    Sent with ``fileContent`` and echoed by ``saveFile`` so
+    ``RemoteAccessServer._handle_save_file`` can tell whether the file
+    changed on disk while it was open in the remote editor.  A string,
+    deliberately: ``st_mtime_ns`` (about 1.8e18) does not survive the
+    round trip through a JavaScript number (2^53 ≈ 9e15), so an
+    integer stamp compared back on the server would never match.
+    """
+    return f"{st.st_mtime_ns}:{st.st_size}"
+
+
+def _write_bytes_with_mode(tmp: Path, data: bytes, st: os.stat_result) -> None:
+    """Write *data* to *tmp* and copy *st*'s permission bits onto it.
+
+    Writer for :func:`_atomic_publish` used by
+    ``RemoteAccessServer._handle_save_file``: ``Path.replace`` swaps
+    the inode, so without this an executable script saved from the
+    web editor would come back non-executable.
+    """
+    tmp.write_bytes(data)
+    os.chmod(tmp, stat_module.S_IMODE(st.st_mode))
+
+
 def _atomic_write_text(target: Path, text: str) -> None:
     """Atomically write *text* (UTF-8) to *target*.
 
@@ -5482,14 +5518,19 @@ class RemoteAccessServer:
             {"type": "fileContent", "path": <resolved abs path>,
              "name": <basename>, "tabId": <echo of cmd tabId>,
              "line": <echo of cmd line, when a positive int>,
-             "content": <utf-8 text>}          # on success
+             "content": <utf-8 text>,
+             "version": "<st_mtime_ns>:<st_size>"}   # on success
             {"type": "fileContent", "path": ..., "name": ...,
              "tabId": ..., "error": <message>}  # on failure
 
         A ``path:NN`` link's line number arrives as the command's
         ``line`` field; echoing it lets ``media/main.js`` jump the
         opened content tab to that line, matching the VS Code
-        extension's editor line reveal.
+        extension's editor line reveal.  ``version`` stamps the file
+        as read (:func:`_file_version`); the client's ``saveFile``
+        sends it back so :meth:`_handle_save_file` can detect a file
+        that changed on disk while it was open (directory listings
+        carry no ``version``: they are never saved).
 
         Relative paths are resolved against the command's ``workDir``
         (stamped per-connection by
@@ -5540,7 +5581,8 @@ class RemoteAccessServer:
                     reply["isDirectory"] = True
                     reply["content"] = _directory_listing_text(path)
                     return reply
-                if path.stat().st_size > _OPEN_FILE_MAX_BYTES:
+                st = path.stat()
+                if st.st_size > _OPEN_FILE_MAX_BYTES:
                     reply["error"] = f"File too large to display: {raw_path}"
                     return reply
                 data = path.read_bytes()
@@ -5549,7 +5591,21 @@ class RemoteAccessServer:
                     return reply
                 reply["path"] = str(path)
                 reply["name"] = path.name
-                reply["content"] = data.decode("utf-8", errors="replace")
+                try:
+                    reply["content"] = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    # Not valid UTF-8 (Latin-1, a stray byte, ...): show
+                    # it with replacement characters but WITHOUT a
+                    # version stamp, so the client keeps its read-only
+                    # viewer — saving the U+FFFDs back would corrupt
+                    # the bytes the decoder could not represent.
+                    reply["content"] = data.decode("utf-8", errors="replace")
+                    return reply
+                # The client hands this back with its saveFile command,
+                # so _handle_save_file can tell that the file changed on
+                # disk while it was open in the editor.  Its presence is
+                # also what makes the client's editor editable.
+                reply["version"] = _file_version(st)
             except OSError as exc:
                 reply["error"] = f"Failed to read {raw_path}: {exc}"
             return reply
@@ -5559,6 +5615,124 @@ class RemoteAccessServer:
             await self._endpoint_send(endpoint, json.dumps(reply))
         except Exception:
             logger.debug("openFile: failed to write reply", exc_info=True)
+
+    async def _handle_save_file(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Write a remote-web client's editor text back to its file.
+
+        Handles the ``saveFile`` command sent by ``media/main.js`` when
+        the user saves an editable content tab (Ctrl/Cmd+S or its Save
+        button).  The reply is a single ``fileSaved`` JSON object sent
+        directly to the requesting *endpoint* — never broadcast —
+        with the shape::
+
+            {"type": "fileSaved", "ok": true,
+             "path": <resolved abs path>, "name": <basename>,
+             "tabId": <echo>, "token": <echo>,
+             "version": "<st_mtime_ns>:<st_size>" after the write}  # ok
+            {"type": "fileSaved", "ok": false, "path": ..., "name": ...,
+             "tabId": ..., "token": ..., "error": <message>,
+             "conflict": true}   # conflict=true only for a stale version
+
+        The path is resolved exactly like :meth:`_handle_open_file`
+        resolves it and MUST name an existing regular file: the editor
+        only ever shows files the daemon served, so a path that names
+        nothing (or a directory) is refused rather than created.  The
+        content must be a string no larger than
+        :data:`_OPEN_FILE_MAX_BYTES` (the display cap — anything bigger
+        could not have been opened).  When the command carries the
+        ``version`` the ``fileContent`` reply reported, a file whose
+        current :func:`_file_version` no longer matches was changed by
+        someone else while it was open (the agent, a shell, another
+        client):
+        the write is refused with ``conflict`` set unless ``force`` is
+        true, so the client can offer the user an explicit overwrite.
+        Check and write happen under :data:`_SAVE_FILE_LOCK`, so of two
+        clients of THIS daemon racing with the same stale stamp exactly
+        one wins; a sibling process writing the file concurrently is
+        outside that guarantee (the same as any editor's).
+        The file is replaced atomically (pid-unique temp +
+        ``Path.replace``, see :func:`_atomic_publish`) with its
+        permission bits preserved, and written byte-for-byte as UTF-8
+        without newline translation so CRLF files stay CRLF.
+
+        Args:
+            cmd: The parsed ``saveFile`` command (``path``,
+                ``content``, optional ``workDir``, ``tabId``,
+                ``token``, ``version``, ``force``).
+            endpoint: The requesting WSS connection.
+        """
+        raw_path = self._cmd_str(cmd, "path")
+        if not raw_path:
+            return
+        content = cmd.get("content")
+        work_dir = self._cmd_work_dir(cmd)
+        tab_id = self._cmd_str(cmd, "tabId")
+        token = self._cmd_str(cmd, "token")
+        expected_version = self._cmd_str(cmd, "version")
+        force = cmd.get("force") is True
+
+        def _write_file() -> dict[str, Any]:
+            reply: dict[str, Any] = {
+                "type": "fileSaved",
+                "ok": False,
+                "path": raw_path,
+                "name": Path(raw_path).name,
+                "tabId": tab_id,
+                "token": token,
+            }
+            if not isinstance(content, str):
+                reply["error"] = "Nothing to save: the content is not text"
+                return reply
+            try:
+                # JSON may legally carry a lone surrogate ("\ud800"),
+                # which has no UTF-8 form: refuse it instead of raising
+                # past the reply.
+                data = content.encode("utf-8")
+            except UnicodeEncodeError:
+                reply["error"] = "Nothing to save: the content is not valid text"
+                return reply
+            if len(data) > _OPEN_FILE_MAX_BYTES:
+                reply["error"] = f"File too large to save: {raw_path}"
+                return reply
+            try:
+                path = self._resolve_tab_file(raw_path, work_dir, tab_id)
+                if path is None:
+                    reply["error"] = f"File not found: {raw_path}"
+                    return reply
+                reply["path"] = str(path)
+                reply["name"] = path.name
+                if path.is_dir():
+                    reply["error"] = f"Cannot save a directory: {raw_path}"
+                    return reply
+                # The version check and the publish must be one step:
+                # two clients saving the same file with the same stale
+                # stamp would otherwise both pass the check and the
+                # second silently overwrite the first.
+                with _SAVE_FILE_LOCK:
+                    st = path.stat()
+                    if (
+                        expected_version
+                        and not force
+                        and _file_version(st) != expected_version
+                    ):
+                        reply["error"] = (
+                            f"{path.name} changed on disk since it was opened"
+                        )
+                        reply["conflict"] = True
+                        return reply
+                    _atomic_publish(
+                        path, partial(_write_bytes_with_mode, data=data, st=st),
+                    )
+                    reply["ok"] = True
+                    reply["version"] = _file_version(path.stat())
+            except OSError as exc:
+                reply["error"] = f"Failed to save {raw_path}: {exc}"
+            return reply
+
+        reply = await asyncio.to_thread(_write_file)
+        await self._reply_direct(endpoint, reply, "saveFile")
 
     async def _handle_share_chat(
         self, cmd: dict[str, Any], endpoint: Any,

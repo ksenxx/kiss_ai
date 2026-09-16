@@ -271,6 +271,9 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("getFiles", required=("prefix",)),
     ApiCommand("recordFileUsage", required=("path",)),
     ApiCommand("openFile", required=("path",), handler="open_file"),
+    ApiCommand(
+        "saveFile", required=("path", "content"), handler="save_file"
+    ),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
     ApiCommand("getInfoFile", handler="get_info_file"),
     ApiCommand("listDir", handler="list_dir"),
@@ -456,6 +459,10 @@ class ServerBackend(Protocol):
     async def _run_cmd(self, cmd: dict[str, Any]) -> None: ...
 
     async def _handle_open_file(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_save_file(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
@@ -985,6 +992,31 @@ class ServerApi:
         if ctx.is_uds:
             return
         await self._backend._handle_open_file(cmd, ctx.endpoint)
+
+    async def save_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Write a remote-web client's edits back to a file on disk.
+
+        The remote webapp opens a file (``openFile``) in an editable
+        Monaco editor inside a content tab; Ctrl/Cmd+S or the tab's
+        Save button sends the editor's full text here.  The file must
+        already exist (the editor never creates files) and is replaced
+        atomically; the ``version`` stamp taken from the ``fileContent``
+        reply lets the daemon refuse to overwrite a file that changed
+        on disk since it was opened unless ``force`` is set.  The reply
+        is a ``fileSaved`` event sent to the requester only.  UDS
+        clients (VS Code windows) edit files in real editor tabs, so
+        a UDS-delivered ``saveFile`` is dropped as a defensive no-op,
+        exactly like ``openFile``.
+
+        Args:
+            cmd: The ``saveFile`` command (``path``, ``content``,
+                optional ``workDir``, ``tabId``, ``token``, ``version``,
+                ``force``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_save_file(cmd, ctx.endpoint)
 
     async def check_paths(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Report which file paths exist to a remote-web client.

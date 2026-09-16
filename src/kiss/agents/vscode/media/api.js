@@ -36,6 +36,7 @@
     'getFiles',
     'recordFileUsage',
     'openFile',
+    'saveFile',
     'checkPaths',
     'getInfoFile',
     'listDir',
