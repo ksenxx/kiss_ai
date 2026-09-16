@@ -3995,8 +3995,11 @@
     return e;
   }
 
+  // The lookbehind also rejects "$": "$HOME/kiss" is a shell expansion,
+  // not a path named HOME/kiss, and matching it would make
+  // mergeSplitPathText() pull "HOME" out of its hljs-variable span.
   const _LINK_FILEPATH_RE =
-    /(?<![\w@:%/.~-])((?:(?:~|\.{1,2})?\/|[A-Za-z0-9_+-]+\/)[A-Za-z0-9_./+-]*[A-Za-z0-9_+/-](?::\d+)?)/g;
+    /(?<![\w@:%/.~$-])((?:(?:~|\.{1,2})?\/|[A-Za-z0-9_+-]+\/)[A-Za-z0-9_./+-]*[A-Za-z0-9_+/-](?::\d+)?)/g;
   const _LINK_SKIP_TAGS = new Set([
     'A',
     'SCRIPT',
@@ -4380,10 +4383,74 @@
       span.replaceWith(span.ownerDocument.createTextNode(span.textContent));
     }
     hljs.highlightElement(bl);
+    mergeSplitPathText(bl);
     const holder = bl.closest('[data-link-wd]');
     if (holder) {
       linkifyFilePaths(bl, holder.dataset.linkWd, holder.dataset.linkTab);
     }
+  }
+
+  /**
+   * Put every file path in a highlighted block back into one text node.
+   *
+   * hljs.highlightElement() tokenizes the block and may split a path
+   * over several token spans: a GNU `ls -l` listing of /home/... paths
+   * auto-detects as Swift, whose grammar reads "/home/" and "/kiss/" as
+   * regexp literals, so "/home/u/kiss/API.md" ends up as five text
+   * nodes.  linkifyFilePaths() matches per text node and would only see
+   * the fragments (linking "/home/" and leaving the real path inert).
+   * Matching _LINK_FILEPATH_RE against the block's whole text instead,
+   * any match that straddles text nodes is replaced by a single text
+   * node holding the same characters; the block's text is unchanged and
+   * the token spans outside the path keep their highlighting.  Matches
+   * are handled last to first so earlier offsets stay valid.
+   */
+  function mergeSplitPathText(bl) {
+    const text = bl.textContent;
+    if (!text || text.indexOf('/') < 0) return;
+    const doc = bl.ownerDocument;
+    const nodes = [];
+    const walker = doc.createTreeWalker(bl, NodeFilter.SHOW_TEXT);
+    let node;
+    let offset = 0;
+    while ((node = walker.nextNode())) {
+      // An empty text node holds no character, so it must not shadow
+      // the node that really starts at this offset.
+      if (!node.nodeValue.length) continue;
+      nodes.push({node, start: offset});
+      offset += node.nodeValue.length;
+    }
+    if (nodes.length < 2) return;
+    const matches = [];
+    _LINK_FILEPATH_RE.lastIndex = 0;
+    let m;
+    while ((m = _LINK_FILEPATH_RE.exec(text)) !== null) {
+      matches.push({start: m.index, end: m.index + m[1].length});
+    }
+    for (let i = matches.length - 1; i >= 0; i--) {
+      const {start, end} = matches[i];
+      const first = _textNodeAt(nodes, start);
+      const last = _textNodeAt(nodes, end - 1);
+      if (first === last) continue;
+      const range = doc.createRange();
+      range.setStart(first.node, start - first.start);
+      range.setEnd(last.node, end - last.start);
+      range.deleteContents();
+      range.insertNode(doc.createTextNode(text.slice(start, end)));
+    }
+  }
+
+  // The entry of *nodes* (sorted by start offset) whose text node holds
+  // character *pos* of the concatenated block text.
+  function _textNodeAt(nodes, pos) {
+    let lo = 0;
+    let hi = nodes.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (nodes[mid].start <= pos) lo = mid;
+      else hi = mid - 1;
+    }
+    return nodes[lo];
   }
 
   function hlBlock(el) {
