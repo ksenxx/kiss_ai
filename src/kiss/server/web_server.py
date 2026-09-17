@@ -812,6 +812,31 @@ class _HeadAwareServerConnection(ServerConnection):
 
 _OPEN_FILE_MAX_BYTES = 2_000_000
 
+# Binary files the remote webapp shows in a tab instead of refusing: a
+# PDF opens in the browser's built-in viewer, an image as a picture.
+# Their bytes travel base64-encoded inside the fileContent reply, so
+# the cap keeps one reply well under the 64 MiB WebSocket frame limit.
+_OPEN_BINARY_MAX_BYTES = 24 * 1024 * 1024
+_INLINE_BINARY_MIMES: frozenset[str] = frozenset(
+    {
+        "application/pdf",
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+        "image/x-icon",
+        "image/vnd.microsoft.icon",
+        "image/avif",
+    }
+)
+
+
+def _inline_binary_mime(path: Path) -> str:
+    """The MIME type *path* is served inline as, or ``""`` for text/other."""
+    mime = mimetypes.guess_type(path.name, strict=False)[0] or ""
+    return mime if mime in _INLINE_BINARY_MIMES else ""
+
 # Caps on an openFile directory-listing reply, so one click on a huge
 # directory (node_modules, .git/objects, ...) cannot produce a
 # multi-megabyte WSS message: at most this many entries, and at most
@@ -3323,6 +3348,7 @@ def _build_html() -> str:
         "API_SRC": _media_url("api.js"),
         "PANEL_COPY_SRC": _media_url("panelCopy.js"),
         "CTX_MENU_SRC": _media_url("contentContextMenu.js"),
+        "TREE_MENU_SRC": _media_url("treeContextMenu.js"),
         "MAIN_SRC": _media_url("main.js"),
         "SHIM_SCRIPT": (
             "<script>window.__HLJS_THEME_CSS__ = "
@@ -5610,8 +5636,16 @@ class RemoteAccessServer:
              "line": <echo of cmd line, when a positive int>,
              "content": <utf-8 text>,
              "version": "<st_mtime_ns>:<st_size>"}   # on success
+            {"type": "fileContent", "path": ..., "name": ..., "tabId": ...,
+             "binary": true, "mime": "application/pdf" | "image/...",
+             "size": <bytes>, "base64": <bytes>}   # PDF / image viewer
             {"type": "fileContent", "path": ..., "name": ...,
              "tabId": ..., "error": <message>}  # on failure
+
+        A PDF or image (``_INLINE_BINARY_MIMES``, up to
+        ``_OPEN_BINARY_MAX_BYTES``) is served base64-encoded so the
+        client can show it in a viewer tab instead of refusing it as a
+        binary file.
 
         A ``path:NN`` link's line number arrives as the command's
         ``line`` field; echoing it lets ``media/main.js`` jump the
@@ -5655,6 +5689,10 @@ class RemoteAccessServer:
             }
             if line:
                 reply["line"] = line
+            if cmd.get("background") is True:
+                # The Explorer's "Open to the Side": the client opens
+                # the tab without switching to it.
+                reply["background"] = True
             try:
                 path = self._resolve_tab_file(raw_path, work_dir, tab_id)
                 if path is None:
@@ -5672,6 +5710,24 @@ class RemoteAccessServer:
                     reply["content"] = _directory_listing_text(path)
                     return reply
                 st = path.stat()
+                inline_mime = _inline_binary_mime(path)
+                if inline_mime:
+                    # A PDF or an image: the client shows the bytes in
+                    # a viewer tab (blob: URL) instead of an editor.
+                    if st.st_size > _OPEN_BINARY_MAX_BYTES:
+                        reply["error"] = (
+                            f"File too large to display: {raw_path}"
+                        )
+                        return reply
+                    reply["path"] = str(path)
+                    reply["name"] = path.name
+                    reply["binary"] = True
+                    reply["mime"] = inline_mime
+                    reply["size"] = st.st_size
+                    reply["base64"] = base64.b64encode(
+                        path.read_bytes()
+                    ).decode("ascii")
+                    return reply
                 if st.st_size > _OPEN_FILE_MAX_BYTES:
                     reply["error"] = f"File too large to display: {raw_path}"
                     return reply
@@ -6270,6 +6326,257 @@ class RemoteAccessServer:
                 )
             )
         await self._reply_direct(endpoint, reply, "gitLog")
+
+    async def _handle_git_show(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Serve a commit's patch, a file at a commit, or a revision diff.
+
+        Handles the ``gitShow`` command the remote Source Control graph
+        sends for its commit context menu: "Open Changes" (the whole
+        commit, or one file of it when ``path`` is given), "Open File"
+        (``mode: "file"`` — the file's content at that commit) and
+        "Compare with..." (``base`` given — ``git diff base sha``).
+        The reply goes directly to the requesting *endpoint* with the
+        shape::
+
+            {"type": "gitShow", "workDir", "tabId", "token", "sha",
+             "path", "base", "mode", "repo", "subject"?, "text",
+             "truncated"}                          # on success
+            {"type": "gitShow", ..., "error": <message>}
+
+        Args:
+            cmd: The parsed ``gitShow`` command (``sha``, optional
+                ``path``, ``base``, ``mode``, ``workDir``, ``tabId``,
+                ``token``).
+            endpoint: The requesting WSS connection.
+        """
+        from kiss.server.explorer import git_compare, git_file_at, git_show
+
+        work_dir = self._cmd_work_dir(cmd)
+        sha = self._cmd_str(cmd, "sha")
+        path = self._cmd_str(cmd, "path")
+        base = self._cmd_str(cmd, "base")
+        mode = self._cmd_str(cmd, "mode") or "patch"
+        reply: dict[str, Any] = {
+            "type": "gitShow",
+            "workDir": work_dir,
+            "tabId": self._cmd_str(cmd, "tabId"),
+            "token": self._cmd_str(cmd, "token"),
+            "sha": sha,
+            "path": path,
+            "base": base,
+            "mode": mode,
+        }
+        if not os.path.isdir(work_dir):
+            reply["error"] = f"Directory not found: {work_dir}"
+        elif base:
+            reply.update(
+                await asyncio.to_thread(
+                    self._git_provider_result, git_compare, work_dir, base, sha,
+                )
+            )
+        elif mode == "file":
+            reply.update(
+                await asyncio.to_thread(
+                    self._git_provider_result, git_file_at, work_dir, sha, path,
+                )
+            )
+        else:
+            reply.update(
+                await asyncio.to_thread(
+                    self._git_provider_result, git_show, work_dir, sha, path,
+                )
+            )
+        await self._reply_direct(endpoint, reply, "gitShow")
+
+    async def _handle_git_action(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Run a commit context-menu action (checkout, branch, tag, pick).
+
+        Handles the ``gitAction`` command of the remote Source Control
+        graph's context menu; see
+        :func:`kiss.server.explorer.git_action` for what each action
+        runs.  The reply goes directly to the requesting *endpoint*::
+
+            {"type": "gitActionResult", "workDir", "tabId", "token",
+             "action", "sha", "ok": true, "output": <git output>}
+            {"type": "gitActionResult", ..., "error": <git's message>}
+
+        Args:
+            cmd: The parsed ``gitAction`` command (``action``, ``sha``,
+                optional ``name``, ``message``, ``workDir``, ``tabId``,
+                ``token``).
+            endpoint: The requesting WSS connection.
+        """
+        from kiss.server.explorer import git_action
+
+        work_dir = self._cmd_work_dir(cmd)
+        action = self._cmd_str(cmd, "action")
+        sha = self._cmd_str(cmd, "sha")
+        reply: dict[str, Any] = {
+            "type": "gitActionResult",
+            "workDir": work_dir,
+            "tabId": self._cmd_str(cmd, "tabId"),
+            "token": self._cmd_str(cmd, "token"),
+            "action": action,
+            "sha": sha,
+        }
+        if not os.path.isdir(work_dir):
+            reply["error"] = f"Directory not found: {work_dir}"
+        else:
+            reply.update(
+                await asyncio.to_thread(
+                    self._git_provider_result,
+                    git_action,
+                    work_dir,
+                    action,
+                    sha,
+                    self._cmd_str(cmd, "name"),
+                    self._cmd_str(cmd, "message"),
+                )
+            )
+        await self._reply_direct(endpoint, reply, "gitAction")
+
+    def _abs_cmd_path(self, raw: str, work_dir: str) -> str:
+        """*raw* as an absolute LEXICAL path (``~`` expanded, relative to *work_dir*).
+
+        Lexical: ``.`` / ``..`` segments are folded but no symlink is
+        followed, so the path names the Explorer entry itself -- a
+        symlink stays the symlink (Delete unlinks it rather than
+        deleting its target; a dangling one can still be removed).  It
+        also serves an entry that does not exist yet (a rename target),
+        which :meth:`_resolve_tab_file` -- existing paths only -- cannot.
+        """
+        path = Path(os.path.expanduser(raw))
+        if not path.is_absolute() and work_dir:
+            path = Path(work_dir) / path
+        return os.path.normpath(str(path))
+
+    @staticmethod
+    def _inside(path: str, root: str) -> bool:
+        """Whether the lexical *path* is *root* or below it."""
+        root = os.path.normpath(root)
+        try:
+            return os.path.commonpath([path, root]) == root
+        except ValueError:
+            return False
+
+    @classmethod
+    def _confined(cls, path: str, root: str, follow: bool) -> bool:
+        """Whether *path* belongs to the workspace *root* on disk as well.
+
+        Lexical containment (:meth:`_inside`) is not enough: a folder
+        symlink inside the workspace that points outside it makes
+        ``root/portal/x`` a name for ``/elsewhere/x``.  So the REAL
+        location must be under the real root too -- of the entry
+        itself when *follow* (a folder to list, search or paste into, a
+        file to read), of its parent folder otherwise (an entry that is
+        acted on as itself: a symlink is deleted / renamed / copied as
+        the link, wherever it points).
+        """
+        if not cls._inside(path, root):
+            return False
+        try:
+            real_root = os.path.realpath(root)
+            probe = path if follow else os.path.dirname(path)
+            real = os.path.realpath(probe)
+            return os.path.commonpath([real, real_root]) == real_root
+        except (OSError, ValueError):
+            return False
+
+    async def _handle_fs_action(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Run an Explorer context-menu file action.
+
+        Handles the ``fsAction`` command the remote Explorer view sends
+        for New File..., New Folder..., Rename..., Delete, Paste (copy
+        / move), Find in Folder... and Compare Selected; see
+        :func:`kiss.server.fs_actions.fs_action`.  ``path`` (and
+        ``dest`` for ``copy`` / ``move`` / ``compare``) must name
+        existing entries; ``rename``'s ``dest`` is the new path.  Paths
+        are taken lexically (a symlink is the entry, not its target)
+        and must lie inside ``workDir`` -- the Explorer root the menu
+        was opened in -- on disk as well as by name (see
+        :meth:`_confined`).  The reply goes directly to the requesting
+        *endpoint*::
+
+            {"type": "fsResult", "tabId", "token", "action", "path",
+             "ok": true, "path": <result path>, "text"?, ...}
+            {"type": "fsResult", ..., "error": <message>, "exists"?: true}
+
+        Args:
+            cmd: The parsed ``fsAction`` command (``action``, ``path``,
+                optional ``dest``, ``name``, ``query``, ``overwrite``,
+                ``workDir``, ``tabId``, ``token``).
+            endpoint: The requesting WSS connection.
+        """
+        from kiss.server.fs_actions import FS_ACTIONS, fs_action
+
+        work_dir = self._cmd_work_dir(cmd)
+        tab_id = self._cmd_str(cmd, "tabId")
+        action = self._cmd_str(cmd, "action")
+        raw_path = self._cmd_str(cmd, "path")
+        raw_dest = self._cmd_str(cmd, "dest")
+        reply: dict[str, Any] = {
+            "type": "fsResult",
+            "workDir": work_dir,
+            "tabId": tab_id,
+            "token": self._cmd_str(cmd, "token"),
+            "action": action,
+            "path": raw_path,
+        }
+
+        def _run() -> dict[str, Any]:
+            if action not in FS_ACTIONS:
+                return {"error": f"Unknown file action: {action}"}
+            if not raw_path:
+                return {"error": "No path given"}
+            try:
+                # Lexical paths: the Explorer names entries, and a
+                # symlink entry must be acted on as the link, never
+                # as its target (see _abs_cmd_path).  Every path an
+                # action touches must lie under the Explorer's root:
+                # the menu edits the workspace on screen, not the host.
+                path = self._abs_cmd_path(raw_path, work_dir)
+                if not os.path.lexists(path):
+                    return {"error": f"Not found: {raw_path}"}
+                # The entry is acted on as itself (delete / rename /
+                # copy / move); a folder is entered (new entry, search)
+                # and a compared file is read.
+                acts_on_entry = action in ("delete", "rename", "copy", "move")
+                if not self._confined(path, work_dir, follow=not acts_on_entry):
+                    return {"error": f"Not inside the workspace: {raw_path}"}
+                dest = raw_dest
+                if action in ("copy", "move", "compare", "rename"):
+                    if not raw_dest:
+                        return {"error": "No destination given"}
+                    dest = self._abs_cmd_path(raw_dest, work_dir)
+                    if action != "rename" and not os.path.lexists(dest):
+                        return {"error": f"Not found: {raw_dest}"}
+                    # A paste destination folder is entered, a compared
+                    # file read; a rename target is a new sibling name.
+                    if not self._confined(dest, work_dir, follow=action != "rename"):
+                        return {
+                            "error": f"Not inside the workspace: {raw_dest}",
+                        }
+                result = fs_action(
+                    action,
+                    path,
+                    dest=dest,
+                    name=self._cmd_str(cmd, "name"),
+                    query=self._cmd_str(cmd, "query"),
+                    overwrite=cmd.get("overwrite") is True,
+                )
+                result.setdefault("path", path)
+                return result
+            except Exception as exc:
+                return {"error": f"{action} failed: {exc}"}
+
+        reply.update(await asyncio.to_thread(_run))
+        await self._reply_direct(endpoint, reply, "fsAction")
 
     def _tab_task_agent(self, tab_id: str) -> Any:
         """Return the agent of the task *tab_id* is running or viewing.

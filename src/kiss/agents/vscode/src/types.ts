@@ -50,6 +50,8 @@ export type FromWebviewMessage =
       line?: number;
       workDir?: string;
       tabId?: string;
+      /** Explorer "Open to the Side": open the tab without focusing it. */
+      background?: boolean;
     }
   | {type: 'checkPaths'; paths: string[]; workDir?: string; tabId?: string}
   // Remote webapp only: write an editable content tab's Monaco text back
@@ -86,6 +88,51 @@ export type FromWebviewMessage =
       tabId?: string;
       token?: string;
       limit?: number;
+    }
+  | {
+      // Commit-graph context menu: "Open Changes" (patch of `sha`, or of
+      // `path` in it), "Open File" (`mode: 'file'`, the file at `sha`)
+      // or "Compare with..." (`base` given: `git diff base sha`).
+      type: 'gitShow';
+      sha: string;
+      path?: string;
+      base?: string;
+      mode?: 'patch' | 'file';
+      workDir?: string;
+      tabId?: string;
+      token?: string;
+    }
+  | {
+      // Commit-graph context menu actions (web_server.py _handle_git_action).
+      type: 'gitAction';
+      action: 'checkoutDetached' | 'createBranch' | 'createTag' | 'cherryPick';
+      sha: string;
+      name?: string;
+      message?: string;
+      workDir?: string;
+      tabId?: string;
+      token?: string;
+    }
+  | {
+      // Explorer context menu file actions (web_server.py _handle_fs_action).
+      type: 'fsAction';
+      action:
+        | 'newFile'
+        | 'newFolder'
+        | 'rename'
+        | 'delete'
+        | 'copy'
+        | 'move'
+        | 'findInFolder'
+        | 'compare';
+      path: string;
+      dest?: string;
+      name?: string;
+      query?: string;
+      overwrite?: boolean;
+      workDir?: string;
+      tabId?: string;
+      token?: string;
     }
   | {
       type: 'shareChat';
@@ -154,7 +201,9 @@ export type FromWebviewMessage =
   | {
       type: 'saveConfig';
       config: Record<string, unknown>;
-      apiKeys: Record<string, string>;
+      // Absent when only settings changed (the Explorer's folder
+      // picker saves ``{config: {work_dir}}`` alone).
+      apiKeys?: Record<string, string>;
     }
   | {type: 'getMyModels'}
   | {
@@ -303,10 +352,18 @@ type ToWebviewMessageBody =
       error?: string;
       /** Echo of the request's `line` (a path:NN link's line number). */
       line?: number;
+      /** Echo of the request's `background` flag. */
+      background?: boolean;
       /** The file's `"<st_mtime_ns>:<st_size>"` stamp as read; `saveFile`
        * hands it back so a file changed on disk while open is not silently
        * overwritten. A string: nanosecond mtimes exceed 2^53. */
       version?: string;
+      /** A PDF or image served for a viewer tab: its bytes travel
+       * base64-encoded instead of as `content`. */
+      binary?: boolean;
+      mime?: string;
+      size?: number;
+      base64?: string;
     }
   | {
       // Reply to `saveFile` (web_server.py _handle_save_file), sent only
@@ -332,7 +389,14 @@ type ToWebviewMessageBody =
       root: string;
       tabId?: string;
       token?: string;
-      entries?: Array<{name: string; path: string; isDir: boolean}>;
+      // ``real``: where a symlinked folder points (the daemon adds it
+      // so the tree can spot a symlink cycle).
+      entries?: Array<{
+        name: string;
+        path: string;
+        isDir: boolean;
+        real?: string;
+      }>;
       truncated?: boolean;
       error?: string;
     }
@@ -351,6 +415,24 @@ type ToWebviewMessageBody =
         status: string;
         group: 'merge' | 'staged' | 'changes';
         origPath?: string;
+      }>;
+      /** Every worktree of the repository (main first), each with its
+       * own change rows; `current` marks the one `workDir` is in. */
+      worktrees?: Array<{
+        path: string;
+        name: string;
+        head: string;
+        branch: string;
+        detached: boolean;
+        current: boolean;
+        changes?: Array<{
+          path: string;
+          absPath: string;
+          status: string;
+          group: 'merge' | 'staged' | 'changes';
+          origPath?: string;
+        }>;
+        error?: string;
       }>;
       error?: string;
     }
@@ -371,8 +453,66 @@ type ToWebviewMessageBody =
         date: string;
         refs: string[];
         subject: string;
+        /** The full commit message (subject, blank line, body). */
+        message: string;
         files: Array<{path: string; status: string; origPath?: string}>;
       }>;
+      /** The worktrees whose heads the log starts from (main first). */
+      worktrees?: Array<{
+        path: string;
+        name: string;
+        head: string;
+        branch: string;
+        detached: boolean;
+        current: boolean;
+      }>;
+      error?: string;
+    }
+  | {
+      // Reply to `gitShow` (web_server.py _handle_git_show).
+      type: 'gitShow';
+      workDir: string;
+      tabId?: string;
+      token?: string;
+      sha: string;
+      path: string;
+      base: string;
+      mode: string;
+      repo?: string;
+      subject?: string;
+      text?: string;
+      truncated?: boolean;
+      error?: string;
+    }
+  | {
+      // Reply to `gitAction` (web_server.py _handle_git_action).
+      type: 'gitActionResult';
+      workDir: string;
+      tabId?: string;
+      token?: string;
+      action: string;
+      sha: string;
+      ok?: boolean;
+      output?: string;
+      error?: string;
+    }
+  | {
+      // Reply to `fsAction` (web_server.py _handle_fs_action).
+      type: 'fsResult';
+      workDir: string;
+      tabId?: string;
+      token?: string;
+      action: string;
+      path: string;
+      dest?: string;
+      ok?: boolean;
+      /** `findInFolder` / `compare`: the result text. */
+      text?: string;
+      query?: string;
+      count?: number;
+      truncated?: boolean;
+      /** The destination already exists (paste / rename refused). */
+      exists?: boolean;
       error?: string;
     }
   | {type: 'share_done'; ok: boolean; path?: string; error?: string}

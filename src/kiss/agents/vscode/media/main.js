@@ -1704,6 +1704,12 @@
       tab.contentViewEl.parentNode.removeChild(tab.contentViewEl);
     }
     tab.contentViewEl = null;
+    if (tab.contentBlobUrl) {
+      try {
+        URL.revokeObjectURL(tab.contentBlobUrl);
+      } catch (_e) {}
+      tab.contentBlobUrl = '';
+    }
   }
 
   function closeContentTab(tabId) {
@@ -2428,6 +2434,34 @@
       renderCodeContent(tab, dirHolder, ev.content || '', 'plaintext', false);
       return;
     }
+    // pdfview-coverage:start
+    // A PDF or an image the daemon served as bytes: the browser's own
+    // viewer shows the PDF (a blob: URL in an UNsandboxed frame -- a
+    // sandboxed one has an opaque origin Chromium refuses to navigate
+    // to a blob of), an <img> the picture.
+    if (ev.binary) {
+      renderBinaryContent(tab, view, ev);
+      return;
+    }
+    // pdfview-coverage:end
+    // Text that is not a file on disk (a commit's patch, search
+    // results, a comparison): a read-only viewer, highlighted by the
+    // language hint, never previewed or edited.
+    if (ev.isVirtual) {
+      const holder = document.createElement('div');
+      holder.className = 'content-monaco-holder';
+      view.appendChild(holder);
+      renderCodeContent(
+        tab,
+        holder,
+        ev.content || '',
+        languageFromPath(
+          String(ev.languageName || ev.name || '').toLowerCase(),
+        ),
+        false,
+      );
+      return;
+    }
     // A path:NN link carries the line the file should open at (echoed
     // by the server's fileContent reply). Code surfaces honor it —
     // including a previewable tab's Edit source editor, where the
@@ -2480,6 +2514,62 @@
       editable,
     );
   }
+
+  // pdfview-coverage:start
+  /**
+   * Show a binary file's bytes (base64 in *ev*) in *view*: a PDF in the
+   * browser's PDF viewer, an image as a picture, anything else as a
+   * download link.  The blob: URL is released when the tab is disposed.
+   */
+  function renderBinaryContent(tab, view, ev) {
+    const mime = String(ev.mime || 'application/octet-stream');
+    let url = '';
+    try {
+      const raw = window.atob(String(ev.base64 || ''));
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      url = URL.createObjectURL(new Blob([bytes], {type: mime}));
+    } catch (_e) {
+      url = '';
+    }
+    tab.contentBlobUrl = url;
+    const holder = document.createElement('div');
+    holder.className = 'content-binary-holder';
+    view.appendChild(holder);
+    if (!url) {
+      const note = document.createElement('div');
+      note.className = 'content-binary-note';
+      note.textContent = 'Cannot display ' + (ev.name || 'this file');
+      holder.appendChild(note);
+      return;
+    }
+    if (mime === 'application/pdf') {
+      const frame = document.createElement('iframe');
+      frame.className = 'content-pdf-frame';
+      frame.title = ev.name || 'PDF';
+      frame.src = url;
+      holder.appendChild(frame);
+      return;
+    }
+    if (mime.indexOf('image/') === 0) {
+      const img = document.createElement('img');
+      img.className = 'content-image';
+      img.alt = ev.name || 'image';
+      img.src = url;
+      img.addEventListener('click', () => {
+        img.classList.toggle('content-image-full');
+      });
+      holder.appendChild(img);
+      return;
+    }
+    const link = document.createElement('a');
+    link.className = 'content-binary-note';
+    link.href = url;
+    link.download = ev.name || 'file';
+    link.textContent = 'Download ' + (ev.name || 'file');
+    holder.appendChild(link);
+  }
+  // pdfview-coverage:end
 
   // mayFocus tells whether this content tab is allowed to become the
   // active tab. It defaults to true because every caller but one acts on
@@ -2829,7 +2919,9 @@
     }
   });
   // ctxmenu-coverage:start
-  installParentContentContextMenu();
+  // The handle's close() is what the sidebar's tree menus call so only
+  // one context menu is ever open (showTreeMenu).
+  const parentContentContextMenu = installParentContentContextMenu();
   // ctxmenu-coverage:end
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') closeTabContextMenu();
@@ -3784,7 +3876,15 @@
    * shown under the calling workspace, and the Explorer follows the
    * folder the task really works in.
    */
+  // The folder the user picked with the Explorer's folder picker
+  // (applyPickedWorkDir); '' until they pick one.
+  let pickedWorkDir = '';
+
   function sidebarWorkDir() {
+    // A folder picked with the Explorer's folder picker wins for as
+    // long as it is the workspace (a later settings-panel save of a
+    // different work dir ends the override).
+    if (pickedWorkDir && pickedWorkDir === configWorkDir) return pickedWorkDir;
     let tab = getTab(activeTabId);
     for (let i = 0; tab && tab.isContentTab && i < tabs.length; i++) {
       const owner = getTab(tab.ownerTabId);
@@ -4137,8 +4237,27 @@
     if (typeof ev.path === 'string' && ev.path) node.realPath = ev.path;
     const kids = node.kids;
     const depth = node.depth + 1;
+    // An inline name box being typed into survives the re-listing: a
+    // New File... placeholder (no path of its own) stays put at the
+    // top; a Rename... box lives in the entry's own row, which is
+    // re-used by path below like any other row.  A row that moves in
+    // the DOM loses focus, so it is given back at the end.
+    const editing =
+      explorerInputRow && explorerInputRow.parentNode === kids
+        ? explorerInputRow
+        : null;
+    // A folder row travels with its children container (the sibling
+    // right after it), so a Rename... box on an expanded folder keeps
+    // the folder's listed contents through an error re-listing.
+    const editingNode =
+      editing && explorerDirs.get(editing.dataset.explorerPath);
+    const editingKids = editingNode ? editingNode.kids : null;
+    const focused = document.activeElement;
+    const focusedInKids = focused && kids.contains(focused) ? focused : null;
     if (ev.error) {
-      kids.textContent = '';
+      Array.from(kids.childNodes).forEach(n => {
+        if (n !== editing && n !== editingKids) kids.removeChild(n);
+      });
       explorerNote(kids, depth, String(ev.error));
       return;
     }
@@ -4146,9 +4265,11 @@
     const parentPath = token.slice(sep + 1);
     // Existing rows by path, so a re-listing keeps expanded folders.
     const keep = new Map();
-    kids.querySelectorAll(':scope > .explorer-row').forEach(r => {
-      keep.set(r.dataset.explorerPath, r);
-    });
+    kids
+      .querySelectorAll(':scope > .explorer-row[data-explorer-path]')
+      .forEach(r => {
+        keep.set(r.dataset.explorerPath, r);
+      });
     const fresh = document.createDocumentFragment();
     entries.forEach(entry => {
       if (!entry || typeof entry.name !== 'string' || !entry.name) return;
@@ -4190,15 +4311,37 @@
         depth,
       );
     });
-    rovingFocus(explorerTree, '.explorer-row');
     // Rows for entries that disappeared take their sub-trees with them.
     keep.forEach((r, p) => {
       dropExplorerSubtree(p);
       r.remove();
     });
-    kids.textContent = '';
+    Array.from(kids.childNodes).forEach(n => {
+      if (n !== editing) kids.removeChild(n);
+    });
     kids.appendChild(fresh);
-    if (!entries.length) explorerNote(kids, depth, '(empty)');
+    // Moving a focused row (or the name box inside one) through the
+    // fragment dropped its focus: give it back, with the box's
+    // selection, before the blur handler's deferred commit can run.
+    if (
+      focusedInKids &&
+      focusedInKids.isConnected &&
+      document.activeElement !== focusedInKids
+    ) {
+      const start = focusedInKids.selectionStart;
+      const end = focusedInKids.selectionEnd;
+      focusedInKids.focus({preventScroll: true});
+      if (typeof start === 'number' && typeof end === 'number')
+        focusedInKids.setSelectionRange(start, end);
+    }
+    // One tab stop in the tree: the focused row when there is one
+    // (rows re-attached from the fragment kept a stale tabIndex).
+    const focusedRow =
+      focusedInKids && focusedInKids.isConnected
+        ? focusedInKids.closest('.explorer-row')
+        : null;
+    rovingFocus(explorerTree, '.explorer-row', focusedRow);
+    if (!entries.length && !editing) explorerNote(kids, depth, '(empty)');
     if (ev.truncated) explorerNote(kids, depth, '(more entries not shown)');
   }
 
@@ -4361,6 +4504,7 @@
       change.absPath ||
       (repo ? repo.replace(/[\\/]+$/, '') + '/' + change.path : change.path);
     row.dataset.scmPath = abs;
+    row.dataset.scmRelPath = change.path;
     row.dataset.scmStatus = status;
     row.title =
       (change.origPath ? change.origPath + ' \u2192 ' : '') +
@@ -4417,30 +4561,106 @@
       scmEmpty(scmChangesList, String(scmStatus.error));
       return;
     }
-    const changes = Array.isArray(scmStatus.changes) ? scmStatus.changes : [];
-    scmChangesCount.textContent = changes.length ? String(changes.length) : '';
-    if (!changes.length) {
+    const worktrees = scmWorktrees(scmStatus);
+    let total = 0;
+    worktrees.forEach(wt => {
+      total += Array.isArray(wt.changes) ? wt.changes.length : 0;
+    });
+    scmChangesCount.textContent = total ? String(total) : '';
+    if (!total && worktrees.length <= 1) {
       scmEmpty(scmChangesList, 'No changes');
       return;
     }
-    const groups = ['merge', 'staged', 'changes'].filter(g => {
-      return changes.some(c => c.group === g);
-    });
-    groups.forEach(g => {
-      const rows = changes.filter(c => c.group === g);
+    // One repository (worktree) at a time: the current worktree's
+    // changes come first, then every other worktree of the repository
+    // under its own header (VS Code lists multiple repositories the
+    // same way).  A single worktree keeps the flat list.
+    worktrees.forEach(wt => {
+      const changes = Array.isArray(wt.changes) ? wt.changes : [];
       let depth = 0;
-      if (groups.length > 1) {
-        const hdr = document.createElement('div');
-        hdr.className = 'scm-group-hdr';
-        hdr.textContent = SCM_GROUP_LABELS[g] + ' (' + rows.length + ')';
-        scmChangesList.appendChild(hdr);
+      if (worktrees.length > 1) {
+        scmChangesList.appendChild(createScmWorktreeHeader(wt, changes.length));
         depth = 1;
       }
-      rows.forEach(c => {
-        scmChangesList.appendChild(createScmFileRow(c, scmStatus.repo, depth));
+      if (wt.error) {
+        explorerNote(scmChangesList, depth, String(wt.error));
+        return;
+      }
+      if (!changes.length) {
+        if (worktrees.length > 1) {
+          explorerNote(scmChangesList, depth, 'No changes');
+        }
+        return;
+      }
+      const groups = ['merge', 'staged', 'changes'].filter(g => {
+        return changes.some(c => c.group === g);
+      });
+      groups.forEach(g => {
+        const rows = changes.filter(c => c.group === g);
+        let rowDepth = depth;
+        if (groups.length > 1) {
+          const hdr = document.createElement('div');
+          hdr.className = 'scm-group-hdr';
+          hdr.style.setProperty('--depth', String(depth));
+          hdr.textContent = SCM_GROUP_LABELS[g] + ' (' + rows.length + ')';
+          scmChangesList.appendChild(hdr);
+          rowDepth = depth + 1;
+        }
+        rows.forEach(c => {
+          const row = createScmFileRow(c, wt.path, rowDepth);
+          row.dataset.scmWorktree = wt.path;
+          scmChangesList.appendChild(row);
+        });
       });
     });
     rovingFocus(scmBodyEl, '.scm-commit, .scm-row');
+  }
+
+  /**
+   * The worktrees a gitStatus reply describes, the current one first.
+   * An older daemon (no `worktrees`) yields the repository alone.
+   */
+  function scmWorktrees(status) {
+    const list = Array.isArray(status.worktrees) ? status.worktrees : [];
+    const rows = list.filter(wt => wt && typeof wt.path === 'string');
+    if (!rows.length) {
+      return [
+        {
+          path: status.repo || scmWorkDir,
+          name: pathBaseName(status.repo || scmWorkDir),
+          branch: status.branch || '',
+          head: '',
+          current: true,
+          changes: Array.isArray(status.changes) ? status.changes : [],
+        },
+      ];
+    }
+    return rows.filter(wt => wt.current).concat(rows.filter(wt => !wt.current));
+  }
+
+  /** The "<worktree folder> <branch>" header above one worktree's rows. */
+  function createScmWorktreeHeader(wt, count) {
+    const hdr = document.createElement('div');
+    hdr.className = 'scm-group-hdr scm-worktree-hdr';
+    if (wt.current) hdr.classList.add('is-current');
+    hdr.title = wt.path;
+    const name = document.createElement('span');
+    name.className = 'scm-worktree-name';
+    name.textContent = wt.name || pathBaseName(wt.path);
+    hdr.appendChild(name);
+    const branch = document.createElement('span');
+    branch.className = 'scm-worktree-branch';
+    branch.textContent = wt.branch
+      ? wt.branch
+      : wt.head
+        ? String(wt.head).slice(0, 7)
+        : '';
+    hdr.appendChild(branch);
+    const n = document.createElement('span');
+    n.className = 'scm-count';
+    n.textContent = count ? String(count) : '';
+    hdr.appendChild(n);
+    return hdr;
   }
 
   /**
@@ -4650,11 +4870,15 @@
         ? scmLog.commits
         : [];
     const rows = [];
-    const changes =
-      scmStatus && !scmStatus.error && Array.isArray(scmStatus.changes)
-        ? scmStatus.changes
-        : [];
-    if (changes.length) {
+    const worktrees =
+      scmStatus && !scmStatus.error ? scmWorktrees(scmStatus) : [];
+    // One "Uncommitted changes" row per worktree that has any, each
+    // hanging off that worktree's HEAD (the current worktree's off the
+    // log's HEAD), so a worktree task's pending edits show on its own
+    // branch of the graph.
+    worktrees.forEach((wt, i) => {
+      const changes = Array.isArray(wt.changes) ? wt.changes : [];
+      if (!changes.length) return;
       const seen = new Set();
       const files = [];
       changes.forEach(c => {
@@ -4662,19 +4886,38 @@
         seen.add(c.path);
         files.push(c);
       });
+      const head = wt.current && scmLog && scmLog.head ? scmLog.head : wt.head;
       rows.push({
-        sha: SCM_WORKTREE_SHA,
+        sha: SCM_WORKTREE_SHA + (i ? ':' + wt.path : ''),
         shortSha: '',
-        parents: scmLog && scmLog.head ? [scmLog.head] : [],
+        parents: head ? [head] : [],
         author: '',
         date: '',
         refs: [],
-        subject: 'Uncommitted changes',
+        subject: wt.current
+          ? 'Uncommitted changes'
+          : 'Uncommitted changes (' + (wt.name || pathBaseName(wt.path)) + ')',
         files: files,
         isWorktree: true,
+        worktreePath: wt.path,
       });
-    }
+    });
     return rows.concat(commits);
+  }
+
+  /**
+   * The worktrees (other than the current one) whose HEAD is *sha*, so
+   * the commit row can carry a "worktree" badge like VS Code's graph
+   * decorates the checked-out ref.
+   */
+  function scmWorktreesAt(sha) {
+    const list =
+      scmLog && Array.isArray(scmLog.worktrees)
+        ? scmLog.worktrees
+        : scmStatus && Array.isArray(scmStatus.worktrees)
+          ? scmStatus.worktrees
+          : [];
+    return list.filter(wt => wt && !wt.current && wt.head === sha);
   }
 
   function renderScmGraph() {
@@ -4755,6 +4998,17 @@
       ref.title = String(r);
       main.appendChild(ref);
     });
+    if (!commit.isWorktree) {
+      // Another worktree checked out at this commit: badge it with the
+      // worktree's folder name (its branch ref is among the refs).
+      scmWorktreesAt(commit.sha).forEach(wt => {
+        const ref = document.createElement('span');
+        ref.className = 'scm-ref is-worktree';
+        ref.textContent = wt.name || pathBaseName(wt.path);
+        ref.title = 'Worktree ' + wt.path;
+        main.appendChild(ref);
+      });
+    }
     const meta = document.createElement('span');
     meta.className = 'scm-commit-meta';
     if (commit.isWorktree) {
@@ -4792,7 +5046,9 @@
       return;
     }
     files.forEach(f => {
-      container.appendChild(createScmFileRow(f, repo, 1));
+      const row = createScmFileRow(f, commit.worktreePath || repo, 1);
+      row.dataset.scmCommit = commit.isWorktree ? '' : commit.sha;
+      container.appendChild(row);
     });
   }
 
@@ -4826,7 +5082,6 @@
     openWorkspaceFile(file.dataset.scmPath, scmWorkDir);
   }
 
-  /** Wire the activity bar, the Explorer and the Source Control view. */
   /** The visible (rendered) items matching *selector* under *root*. */
   function visibleTreeItems(root, selector) {
     return Array.from(root.querySelectorAll(selector)).filter(el => {
@@ -4898,6 +5153,1055 @@
     return parent && parent.classList.contains('explorer-row') ? parent : null;
   }
 
+  // ---- Context menus: Explorer rows, commits and their files ----
+  //
+  // Right-clicking a tree row opens the menu VS Code shows for the same
+  // element (MenuId.ExplorerContext / SCMHistoryItemContext /
+  // SCMHistoryItemChangeContext), through the shared TreeContextMenu
+  // widget.  File-system entries become `fsAction` commands, git ones
+  // `gitAction` / `gitShow`; every reply is matched by token to the
+  // request that caused it.
+  const treeMenu = window.TreeContextMenu || null;
+  const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || '');
+  const IS_LINUX = /Linux|X11/.test(navigator.platform || '') && !IS_MAC;
+  // Cut / Copy remember one Explorer entry until Paste (or another
+  // Cut / Copy) replaces it, like VS Code's Explorer clipboard.
+  let explorerClipboard = null;
+  // "Select for Compare" remembers a file until "Compare with Selected".
+  let explorerCompareWith = '';
+  let sidebarRequestSeq = 0;
+  // token -> the request that awaits a reply (fsResult / gitShow /
+  // gitActionResult), so the reply can be acted on in context.
+  const pendingSidebarRequests = new Map();
+
+  function nextSidebarToken(prefix) {
+    sidebarRequestSeq++;
+    return prefix + ':' + sidebarRequestSeq;
+  }
+
+  /** The platform's label for a shortcut (`win` on Windows/Linux). */
+  function keyLabel(win, mac, linux) {
+    if (IS_MAC) return mac;
+    return IS_LINUX && linux ? linux : win;
+  }
+
+  /** Put *text* on the clipboard (the content menu's robust copy). */
+  function copyTextToClipboard(text) {
+    const ctx = window.ContentContextMenu;
+    if (ctx && typeof ctx.copyText === 'function') {
+      ctx.copyText(document, text);
+      return;
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(() => {});
+    }
+  }
+
+  function sidebarError(message) {
+    updateNotification({
+      id: 'sidebar-action-error',
+      message: String(message || 'The action failed'),
+      severity: 'error',
+    });
+  }
+
+  function sidebarInfo(message) {
+    updateNotification({
+      id: 'sidebar-action-info',
+      message: String(message),
+      severity: 'info',
+    });
+  }
+
+  /** *abs* relative to the Explorer root ('' for the root itself). */
+  function explorerRelativePath(abs) {
+    const root = explorerRoot.replace(/[\\/]+$/, '');
+    if (!root) return abs;
+    if (abs === root) return '';
+    const sepChar =
+      root.indexOf('\\') >= 0 && root.indexOf('/') < 0 ? '\\' : '/';
+    return abs.indexOf(root + sepChar) === 0 ? abs.slice(root.length + 1) : abs;
+  }
+
+  /** The folder an Explorer row lives in (the row's parent node path). */
+  function explorerParentPath(row) {
+    const node = explorerDirs.get(row.dataset.explorerPath);
+    if (node && node.parent) return node.parent;
+    const parent = explorerParentRow(row);
+    return parent ? parent.dataset.explorerPath : explorerRoot;
+  }
+
+  /**
+   * Open a read-only text tab that is not a file on disk (a commit's
+   * patch, search results, a comparison).  *key* identifies the tab so
+   * repeating the action refreshes it instead of opening a second one.
+   */
+  function openTextResultTab(key, name, text, languageName) {
+    handleFileContent(
+      {
+        path: key,
+        name: name,
+        content: text,
+        languageName: languageName || '',
+        isVirtual: true,
+      },
+      true,
+      activeTabId,
+    );
+  }
+
+  function sendFsAction(request) {
+    const token = nextSidebarToken('fs');
+    pendingSidebarRequests.set(token, request);
+    api.fsAction({
+      action: request.action,
+      path: request.path,
+      dest: request.dest || '',
+      name: request.name || '',
+      query: request.query || '',
+      overwrite: request.overwrite === true,
+      workDir: explorerRoot || sidebarWorkDir(),
+      tabId: activeTabId,
+      token: token,
+    });
+  }
+
+  /** Handle an fsResult reply: refresh the tree, open results, report errors. */
+  function handleFsResult(ev) {
+    const request = pendingSidebarRequests.get(String(ev.token || ''));
+    if (!request) return;
+    pendingSidebarRequests.delete(String(ev.token || ''));
+    if (ev.error) {
+      if (ev.exists && !request.overwrite) {
+        // VS Code asks before replacing: "A file or folder with the
+        // name 'x' already exists in the destination folder. Do you
+        // want to replace it?"
+        const target = pathBaseName(
+          request.action === 'rename' ? request.dest : request.path,
+        );
+        if (
+          window.confirm(
+            "A file or folder with the name '" +
+              target +
+              "' already exists in the destination folder. Do you want to replace it?",
+          )
+        ) {
+          request.overwrite = true;
+          sendFsAction(request);
+        }
+        return;
+      }
+      sidebarError(ev.error);
+      return;
+    }
+    if (request.action === 'findInFolder') {
+      const text = ev.text
+        ? ev.text + (ev.truncated ? '\n[... more results not shown ...]\n' : '')
+        : 'No results found for ' + JSON.stringify(request.query) + '\n';
+      openTextResultTab(
+        'search://' + request.path + '?q=' + encodeURIComponent(request.query),
+        'Search: ' + request.query,
+        (ev.count ? ev.count + ' result' + (ev.count === 1 ? '' : 's') : '') +
+          (ev.count ? ' in ' + request.path + '\n\n' : '') +
+          text,
+      );
+      return;
+    }
+    if (request.action === 'compare') {
+      openTextResultTab(
+        'compare://' + request.path + '|' + request.dest,
+        pathBaseName(request.path) + ' \u2194 ' + pathBaseName(request.dest),
+        ev.text || '',
+        'x.diff',
+      );
+      return;
+    }
+    // The tree changed on disk: re-list every listed folder (the rows
+    // of entries still present survive, so expansion state is kept)
+    // and let the Source Control view know.
+    if (request.action === 'move' && explorerClipboard) {
+      explorerClipboard = null;
+    }
+    refreshExplorer(true);
+    scmDirty = true;
+    if (activeSidebarView === 'scm') refreshSidebarDataViews(false);
+    // The folder that received the entry opens so the result is seen
+    // (VS Code reveals a pasted / created entry the same way).
+    const target =
+      request.action === 'copy' || request.action === 'move'
+        ? request.dest
+        : request.action === 'newFile' || request.action === 'newFolder'
+          ? request.path
+          : '';
+    const targetNode = target ? explorerDirs.get(target) : null;
+    if (targetNode && !targetNode.row.classList.contains('expanded')) {
+      toggleExplorerDir(targetNode.row, true);
+    }
+    if (request.action === 'newFile' && ev.path) {
+      // Like VS Code, a new file opens in an editor right away.
+      openWorkspaceFile(ev.path, explorerRoot);
+    }
+    if (request.action === 'rename' && ev.path) {
+      // An editor showing the renamed file (or one inside a renamed
+      // folder) follows the new path, as VS Code's editors do.
+      const from = String(request.path);
+      const to = String(ev.path);
+      tabs.forEach(t => {
+        if (!t.isContentTab || typeof t.contentPath !== 'string') return;
+        if (t.contentPath === from) {
+          t.contentPath = to;
+          t.title = pathBaseName(to);
+        } else if (t.contentPath.indexOf(from + '/') === 0) {
+          t.contentPath = to + t.contentPath.slice(from.length);
+        }
+      });
+      renderTabBar();
+    }
+    if (request.action === 'delete') {
+      const gone = String(request.path);
+      tabs
+        .filter(t => {
+          return (
+            t.isContentTab &&
+            typeof t.contentPath === 'string' &&
+            (t.contentPath === gone || t.contentPath.indexOf(gone + '/') === 0)
+          );
+        })
+        .forEach(t => {
+          closeTab(t.id);
+        });
+    }
+  }
+
+  // ---- Explorer inline input (New File / New Folder / Rename) ----
+  //
+  // VS Code edits names in place: a text box takes the row's spot,
+  // Enter commits, Escape cancels.  One box at a time.
+  let explorerInputRow = null;
+
+  function cancelExplorerInput() {
+    if (!explorerInputRow) return;
+    const row = explorerInputRow;
+    explorerInputRow = null;
+    if (row._restore) row._restore();
+    else row.remove();
+  }
+
+  /**
+   * Show an inline text box.  For `newFile` / `newFolder` it is a new
+   * row at the top of *folderRow*'s children; for `rename` it replaces
+   * the name of *row*.  `commit(value)` runs with the entered name.
+   */
+  function startExplorerInput(kind, row, commit) {
+    cancelExplorerInput();
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'explorer-input';
+    input.setAttribute('aria-label', kind === 'rename' ? 'New name' : 'Name');
+    let host;
+    if (kind === 'rename') {
+      const nameEl = row.querySelector('.explorer-name');
+      const oldName = nameEl.textContent;
+      input.value = oldName;
+      nameEl.textContent = '';
+      nameEl.appendChild(input);
+      row.classList.add('is-editing');
+      host = row;
+      host._restore = function () {
+        row.classList.remove('is-editing');
+        nameEl.textContent = oldName;
+      };
+      // Select the stem, like VS Code, so typing replaces the name
+      // but keeps the extension.
+      const dot = row.classList.contains('is-dir')
+        ? -1
+        : oldName.lastIndexOf('.');
+      window.setTimeout(() => {
+        input.focus();
+        input.setSelectionRange(0, dot > 0 ? dot : oldName.length);
+      }, 0);
+    } else {
+      const node = explorerDirs.get(row.dataset.explorerPath);
+      if (!node) return;
+      if (!row.classList.contains('expanded')) toggleExplorerDir(row, true);
+      const isDir = kind === 'newFolder';
+      host = document.createElement('div');
+      host.className =
+        'explorer-row is-editing ' + (isDir ? 'is-dir' : 'is-file');
+      host.style.setProperty('--depth', String(node.depth + 1));
+      const chevron = document.createElement('span');
+      chevron.className = 'explorer-chevron';
+      host.appendChild(chevron);
+      const icon = document.createElement('span');
+      icon.className = 'explorer-icon';
+      icon.appendChild(svgIcon('', isDir ? ICON_FOLDER : ICON_FILE));
+      host.appendChild(icon);
+      const name = document.createElement('span');
+      name.className = 'explorer-name';
+      name.appendChild(input);
+      host.appendChild(name);
+      node.kids.insertBefore(host, node.kids.firstChild);
+      window.setTimeout(() => input.focus(), 0);
+    }
+    explorerInputRow = host;
+    let done = false;
+    function finish(accept) {
+      if (done) return;
+      done = true;
+      const value = input.value.trim();
+      cancelExplorerInput();
+      if (accept && value) commit(value);
+    }
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        finish(true);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        finish(false);
+      } else {
+        // The tree's own key handling (arrows, Enter) must not run.
+        e.stopPropagation();
+      }
+    });
+    input.addEventListener('blur', () => {
+      // A folder listing landing mid-edit re-attaches and refocuses
+      // the box (handleDirListing); only a blur that sticks commits.
+      window.setTimeout(() => {
+        if (input.isConnected && document.activeElement !== input) finish(true);
+      }, 0);
+    });
+    input.addEventListener('click', e => e.stopPropagation());
+  }
+
+  // ---- Explorer context menu ----
+
+  /** Open a file as a content tab without leaving the current tab. */
+  function openWorkspaceFileToSide(path) {
+    api.send({
+      type: 'openFile',
+      path: path,
+      workDir: explorerRoot || sidebarWorkDir(),
+      tabId: activeTabId,
+      background: true,
+    });
+  }
+
+  function explorerMenuItems(row) {
+    const path = row.dataset.explorerPath;
+    const isDir = row.classList.contains('is-dir');
+    const isRoot = path === explorerRoot;
+    const parent = isDir ? path : explorerParentPath(row);
+    const name = pathBaseName(path) || path;
+    const items = [];
+    if (isDir) {
+      items.push({
+        id: 'new-file',
+        label: 'New File...',
+        run: () => {
+          startExplorerInput('newFile', row, value => {
+            sendFsAction({action: 'newFile', path: path, name: value});
+          });
+        },
+      });
+      items.push({
+        id: 'new-folder',
+        label: 'New Folder...',
+        run: () => {
+          startExplorerInput('newFolder', row, value => {
+            sendFsAction({action: 'newFolder', path: path, name: value});
+          });
+        },
+      });
+    } else {
+      items.push({
+        id: 'open-to-side',
+        label: 'Open to the Side',
+        key: keyLabel('Ctrl+Enter', '\u2303Enter'),
+        run: () => openWorkspaceFileToSide(path),
+      });
+    }
+    items.push({separator: true});
+    if (!isDir) {
+      items.push({
+        id: 'select-for-compare',
+        label: 'Select for Compare',
+        run: () => {
+          explorerCompareWith = path;
+        },
+      });
+      if (explorerCompareWith && explorerCompareWith !== path) {
+        items.push({
+          id: 'compare-with-selected',
+          label: 'Compare with Selected',
+          run: () => {
+            sendFsAction({
+              action: 'compare',
+              path: explorerCompareWith,
+              dest: path,
+            });
+          },
+        });
+      }
+      items.push({separator: true});
+    }
+    if (isDir) {
+      items.push({
+        id: 'find-in-folder',
+        label: 'Find in Folder...',
+        key: keyLabel('Shift+Alt+F', '\u21E7\u2325F'),
+        run: () => {
+          const query = window.prompt('Find in ' + name, '');
+          if (query)
+            sendFsAction({action: 'findInFolder', path: path, query: query});
+        },
+      });
+      items.push({separator: true});
+    }
+    items.push({
+      id: 'cut',
+      label: 'Cut',
+      key: keyLabel('Ctrl+X', '\u2318X'),
+      enabled: !isRoot,
+      run: () => {
+        explorerClipboard = {path: path, cut: true};
+      },
+    });
+    items.push({
+      id: 'copy',
+      label: 'Copy',
+      key: keyLabel('Ctrl+C', '\u2318C'),
+      enabled: !isRoot,
+      run: () => {
+        explorerClipboard = {path: path, cut: false};
+      },
+    });
+    items.push({
+      id: 'paste',
+      label: 'Paste',
+      key: keyLabel('Ctrl+V', '\u2318V'),
+      enabled: !!explorerClipboard,
+      run: () => {
+        if (!explorerClipboard) return;
+        sendFsAction({
+          action: explorerClipboard.cut ? 'move' : 'copy',
+          path: explorerClipboard.path,
+          dest: parent,
+        });
+      },
+    });
+    items.push({separator: true});
+    items.push({
+      id: 'copy-path',
+      label: 'Copy Path',
+      key: keyLabel('Shift+Alt+C', '\u2325\u2318C', 'Ctrl+Alt+C'),
+      run: () => copyTextToClipboard(path),
+    });
+    items.push({
+      id: 'copy-relative-path',
+      label: 'Copy Relative Path',
+      key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
+      run: () => copyTextToClipboard(explorerRelativePath(path) || '.'),
+    });
+    items.push({separator: true});
+    items.push({
+      id: 'rename',
+      label: 'Rename...',
+      key: 'F2',
+      enabled: !isRoot,
+      run: () => {
+        startExplorerInput('rename', row, value => {
+          if (value === name) return;
+          sendFsAction({
+            action: 'rename',
+            path: path,
+            dest: joinPath(parent, value),
+          });
+        });
+      },
+    });
+    items.push({
+      id: 'delete',
+      label: 'Delete',
+      key: keyLabel('Delete', '\u2318\u232B'),
+      enabled: !isRoot,
+      run: () => {
+        if (
+          window.confirm(
+            "Are you sure you want to delete '" +
+              name +
+              "'?\nThis action is irreversible!",
+          )
+        ) {
+          sendFsAction({action: 'delete', path: path});
+        }
+      },
+    });
+    return items;
+  }
+
+  /**
+   * VS Code's Explorer keyboard shortcuts on the focused row: F2
+   * Rename, Delete, Ctrl/Cmd+X/C/V, Copy Path (Shift+Alt+C on
+   * Windows, Ctrl+Alt+C on Linux, Alt+Cmd+C on macOS),
+   * Ctrl/Cmd+Shift+Alt+C Copy Relative Path, Shift+Alt+F Find in
+   * Folder, Ctrl+Enter Open to the Side.  Runs the matching menu item.
+   */
+  function explorerShortcut(e, row) {
+    const key = String(e.key || '').toLowerCase();
+    const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+    let id = '';
+    if (key === 'f2') id = 'rename';
+    else if (key === 'delete' || (IS_MAC && key === 'backspace' && e.metaKey))
+      id = 'delete';
+    else if (key === 'c' && e.altKey && e.shiftKey && mod)
+      id = 'copy-relative-path';
+    else if (key === 'c' && e.altKey && e.shiftKey && !IS_MAC && !e.ctrlKey)
+      id = 'copy-path'; // Windows: Shift+Alt+C
+    else if (key === 'c' && e.altKey && e.ctrlKey && !IS_MAC && !e.shiftKey)
+      id = 'copy-path'; // Linux: Ctrl+Alt+C
+    else if (key === 'c' && e.altKey && e.metaKey && IS_MAC && !e.shiftKey)
+      id = 'copy-path'; // macOS: Alt+Cmd+C
+    else if (key === 'c' && mod && !e.altKey && !e.shiftKey) id = 'copy';
+    else if (key === 'x' && mod && !e.altKey && !e.shiftKey) id = 'cut';
+    else if (key === 'v' && mod && !e.altKey && !e.shiftKey) id = 'paste';
+    else if (key === 'f' && e.altKey && e.shiftKey && !mod)
+      id = 'find-in-folder';
+    else if (key === 'enter' && mod) id = 'open-to-side';
+    if (!id) return false;
+    const item = explorerMenuItems(row).find(i => i.id === id);
+    if (!item || item.enabled === false) return false;
+    e.preventDefault();
+    item.run();
+    return true;
+  }
+
+  function showTreeMenu(e, items, row) {
+    if (!treeMenu || !items.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    cancelExplorerInput();
+    // One menu at a time: a content tab's own context menu (which
+    // closes itself only from the document-level handler this
+    // stopPropagation keeps the event from) goes first.
+    if (parentContentContextMenu) parentContentContextMenu.close();
+    if (row) {
+      row.classList.add('ctx-active');
+      row.focus({preventScroll: true});
+    }
+    treeMenu.show(document, e.clientX || 0, e.clientY || 0, items, () => {
+      if (row) row.classList.remove('ctx-active');
+    });
+  }
+
+  // ---- Source Control context menus ----
+
+  function sendGitAction(action, sha, extra) {
+    const token = nextSidebarToken('git');
+    pendingSidebarRequests.set(
+      token,
+      Object.assign({action: action, sha: sha}, extra || {}),
+    );
+    api.gitAction(
+      Object.assign(
+        {
+          action: action,
+          sha: sha,
+          workDir: scmWorkDir || sidebarWorkDir(),
+          tabId: activeTabId,
+          token: token,
+        },
+        extra || {},
+      ),
+    );
+  }
+
+  function sendGitShow(request) {
+    const token = nextSidebarToken('show');
+    pendingSidebarRequests.set(token, request);
+    api.gitShow({
+      sha: request.sha,
+      path: request.path || '',
+      base: request.base || '',
+      mode: request.mode || 'patch',
+      workDir: scmWorkDir || sidebarWorkDir(),
+      tabId: activeTabId,
+      token: token,
+    });
+  }
+
+  function handleGitActionResult(ev) {
+    const request = pendingSidebarRequests.get(String(ev.token || ''));
+    if (!request) return;
+    pendingSidebarRequests.delete(String(ev.token || ''));
+    if (ev.error) {
+      sidebarError(ev.error);
+      // A failed action may still have changed the repository (a
+      // cherry-pick that stopped on conflicts leaves the conflicted
+      // files in the tree): show that state, as VS Code does.
+    } else {
+      const labels = {
+        checkoutDetached: 'Checked out ' + String(ev.sha).slice(0, 7),
+        createBranch: 'Created branch ' + (request.name || ''),
+        createTag: 'Created tag ' + (request.name || ''),
+        cherryPick: 'Cherry-picked ' + String(ev.sha).slice(0, 7),
+      };
+      sidebarInfo(labels[ev.action] || ev.output || 'Done');
+    }
+    // The repository (may have) changed: reload both views.
+    cancelScmRefreshTimer();
+    scmDirty = false;
+    requestSourceControl(sidebarWorkDir());
+    explorerDirty = true;
+    if (activeSidebarView === 'explorer') refreshSidebarDataViews(false);
+  }
+
+  function handleGitShow(ev) {
+    const request = pendingSidebarRequests.get(String(ev.token || ''));
+    if (!request) return;
+    pendingSidebarRequests.delete(String(ev.token || ''));
+    if (ev.error) {
+      sidebarError(ev.error);
+      return;
+    }
+    const short = String(ev.sha || request.sha).slice(0, 7);
+    const text =
+      (ev.text || '') + (ev.truncated ? '\n[... output truncated ...]\n' : '');
+    if (ev.base) {
+      openTextResultTab(
+        'git-compare://' + (ev.repo || '') + '/' + ev.base + '...' + ev.sha,
+        ev.base + ' \u2194 ' + short,
+        text,
+        'x.diff',
+      );
+      return;
+    }
+    if (ev.mode === 'file') {
+      // VS Code labels the file at a revision "name (shortSha)".
+      openTextResultTab(
+        'git-file://' + (ev.repo || '') + '/' + ev.sha + ':' + ev.path,
+        pathBaseName(ev.path) + ' (' + short + ')',
+        text,
+        pathBaseName(ev.path),
+      );
+      return;
+    }
+    const subject = ev.subject || request.subject || '';
+    openTextResultTab(
+      'git-show://' +
+        (ev.repo || '') +
+        '/' +
+        ev.sha +
+        (ev.path ? ':' + ev.path : ''),
+      short +
+        (ev.path
+          ? ' - ' + pathBaseName(ev.path)
+          : subject
+            ? ' - ' + subject
+            : ''),
+      text,
+      'x.diff',
+    );
+  }
+
+  function scmCommitMenuItems(commit) {
+    const sha = commit.sha;
+    const short = String(sha).slice(0, 7);
+    return [
+      {
+        id: 'open-changes',
+        label: 'Open Changes',
+        run: () => sendGitShow({sha: sha, subject: commit.subject}),
+      },
+      {separator: true},
+      {
+        id: 'checkout-detached',
+        label: 'Checkout (Detached)',
+        run: () => sendGitAction('checkoutDetached', sha),
+      },
+      {separator: true},
+      {
+        id: 'create-branch',
+        label: 'Create Branch...',
+        run: () => {
+          const name = window.prompt(
+            'Branch name\nPlease provide a new branch name (from ' +
+              short +
+              ')',
+            '',
+          );
+          if (name && name.trim()) {
+            sendGitAction('createBranch', sha, {name: name.trim()});
+          }
+        },
+      },
+      {separator: true},
+      {
+        id: 'create-tag',
+        label: 'Create Tag...',
+        run: () => {
+          const name = window.prompt(
+            'Tag name\nPlease provide a tag name (at ' + short + ')',
+            '',
+          );
+          if (!name || !name.trim()) return;
+          // Dismissing the optional message box still creates the
+          // tag -- a lightweight one -- exactly like VS Code.
+          const message = window.prompt(
+            'Message\nPlease provide a message to annotate the tag (optional)',
+            '',
+          );
+          sendGitAction('createTag', sha, {
+            name: name.trim(),
+            message: message === null ? '' : message.trim(),
+          });
+        },
+      },
+      {separator: true},
+      {
+        id: 'cherry-pick',
+        label: 'Cherry Pick',
+        run: () => sendGitAction('cherryPick', sha),
+      },
+      {separator: true},
+      {
+        id: 'compare-with',
+        label: 'Compare with...',
+        run: () => {
+          const base = window.prompt(
+            'Compare ' + short + ' with\nA branch, tag or commit',
+            'HEAD',
+          );
+          if (base && base.trim()) {
+            sendGitShow({sha: sha, base: base.trim()});
+          }
+        },
+      },
+      {separator: true},
+      {
+        id: 'copy-commit-hash',
+        label: 'Copy Commit Hash',
+        run: () => copyTextToClipboard(sha),
+      },
+      {
+        id: 'copy-commit-message',
+        label: 'Copy Commit Message',
+        run: () => copyTextToClipboard(commit.message || commit.subject || ''),
+      },
+    ];
+  }
+
+  function scmFileMenuItems(row) {
+    const sha = row.dataset.scmCommit || '';
+    const relPath = row.dataset.scmRelPath || '';
+    const absPath = row.dataset.scmPath || '';
+    if (sha) {
+      // A file of a commit (MenuId.SCMHistoryItemChangeContext).
+      return [
+        {
+          id: 'open-changes',
+          label: 'Open Changes',
+          run: () => sendGitShow({sha: sha, path: relPath}),
+        },
+        {
+          id: 'open-file',
+          label: 'Open File',
+          enabled: row.dataset.scmStatus !== 'D',
+          run: () => sendGitShow({sha: sha, path: relPath, mode: 'file'}),
+        },
+      ];
+    }
+    // A working-tree change (of any worktree).
+    const deleted = row.dataset.scmStatus === 'D';
+    return [
+      {
+        id: 'open-file',
+        label: 'Open File',
+        enabled: !deleted,
+        run: () =>
+          openWorkspaceFile(absPath, row.dataset.scmWorktree || scmWorkDir),
+      },
+      {separator: true},
+      {
+        id: 'copy-path',
+        label: 'Copy Path',
+        key: keyLabel('Shift+Alt+C', '\u2325\u2318C', 'Ctrl+Alt+C'),
+        run: () => copyTextToClipboard(absPath),
+      },
+      {
+        id: 'copy-relative-path',
+        label: 'Copy Relative Path',
+        key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
+        run: () => copyTextToClipboard(relPath),
+      },
+    ];
+  }
+
+  function onScmContextMenu(e) {
+    const file = e.target.closest('.scm-row');
+    if (file) {
+      showTreeMenu(e, scmFileMenuItems(file), file);
+      return;
+    }
+    const row = e.target.closest('.scm-commit');
+    if (!row || row.classList.contains('is-worktree')) return;
+    const commit = scmGraphRows().find(c => c.sha === row.dataset.scmSha);
+    if (!commit) return;
+    showTreeMenu(e, scmCommitMenuItems(commit), row);
+  }
+
+  // ---- Folder picker (Explorer header) ----
+  //
+  // A modal browser of the host's folders: the path box and the list
+  // navigate (listDir with a `picker:` token), "Select Folder" makes the
+  // folder the workspace — the same pin the settings' work dir sets —
+  // so the Explorer, the Source Control view and new tasks follow it.
+  let folderPickerEl = null;
+  let folderPickerDir = '';
+  let folderPickerSeq = 0;
+  // The folder the last successful listing showed, and the folder a
+  // "Select Folder" click is waiting to have listed first: only a
+  // folder the daemon has actually listed can be picked, so a typo in
+  // the path box never becomes the saved workspace.
+  let folderPickerListed = '';
+  let folderPickerSelectPending = 0; // the listing request (seq) a Select waits for
+
+  function ensureFolderPicker() {
+    if (folderPickerEl) return folderPickerEl;
+    const overlay = document.createElement('div');
+    overlay.id = 'folder-picker';
+    overlay.hidden = true;
+    overlay.innerHTML =
+      '<div class="folder-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="folder-picker-title">' +
+      '<div class="folder-picker-hdr"><span id="folder-picker-title">Open Folder</span>' +
+      '<button type="button" class="folder-picker-close" aria-label="Close">&times;</button></div>' +
+      '<div class="folder-picker-path"><button type="button" class="folder-picker-up" title="Parent folder" aria-label="Parent folder">\u2191</button>' +
+      '<input type="text" class="folder-picker-input" aria-label="Folder path" spellcheck="false"></div>' +
+      '<div class="folder-picker-list" role="listbox" aria-label="Folders"></div>' +
+      '<div class="folder-picker-note"></div>' +
+      '<div class="folder-picker-actions"><button type="button" class="folder-picker-cancel">Cancel</button>' +
+      '<button type="button" class="folder-picker-select">Select Folder</button></div></div>';
+    document.body.appendChild(overlay);
+    folderPickerEl = overlay;
+    const input = overlay.querySelector('.folder-picker-input');
+    overlay
+      .querySelector('.folder-picker-close')
+      .addEventListener('click', closeFolderPicker);
+    overlay
+      .querySelector('.folder-picker-cancel')
+      .addEventListener('click', closeFolderPicker);
+    overlay
+      .querySelector('.folder-picker-select')
+      .addEventListener('click', () => {
+        selectPickedFolder(input.value.trim() || folderPickerDir);
+      });
+    overlay.querySelector('.folder-picker-up').addEventListener('click', () => {
+      folderPickerNavigate(parentFolderPath(folderPickerDir));
+    });
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        folderPickerNavigate(input.value.trim());
+      }
+    });
+    // Like a file dialog: a click highlights a folder (and puts its
+    // path in the box, so "Select Folder" picks it), a double-click
+    // steps into it.
+    overlay
+      .querySelector('.folder-picker-list')
+      .addEventListener('click', e => {
+        const item = e.target.closest('.folder-picker-item');
+        if (!item) return;
+        overlay.querySelectorAll('.folder-picker-item.selected').forEach(el => {
+          el.classList.remove('selected');
+          el.setAttribute('aria-selected', 'false');
+        });
+        item.classList.add('selected');
+        item.setAttribute('aria-selected', 'true');
+        input.value = item.dataset.path;
+      });
+    overlay
+      .querySelector('.folder-picker-list')
+      .addEventListener('dblclick', e => {
+        const item = e.target.closest('.folder-picker-item');
+        if (item) folderPickerNavigate(item.dataset.path);
+      });
+    overlay.addEventListener('mousedown', e => {
+      if (e.target === overlay) closeFolderPicker();
+    });
+    // Escape closes the dialog wherever focus sits (capture phase, so
+    // no other Escape handler runs while the modal is up).
+    document.addEventListener(
+      'keydown',
+      e => {
+        if (overlay.hidden || e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeFolderPicker();
+      },
+      true,
+    );
+    return overlay;
+  }
+
+  /**
+   * The parent of folder *path* ('/' stays '/', a Windows drive root
+   * such as 'C:\\' stays itself rather than becoming the drive-relative
+   * 'C').
+   */
+  function parentFolderPath(path) {
+    const cur = String(path || '').replace(/[\\/]+$/, '');
+    if (!cur) return '/';
+    if (/^[A-Za-z]:$/.test(cur)) return cur + '\\';
+    // A UNC share (two leading backslashes, server, share) is a root.
+    if (/^\\\\[^\\/]+[\\/][^\\/]+$/.test(cur)) return cur + '\\';
+    const i = Math.max(cur.lastIndexOf('/'), cur.lastIndexOf('\\'));
+    const parent = i > 0 ? cur.slice(0, i) : cur.slice(0, 1);
+    return /^[A-Za-z]:$/.test(parent) ? parent + '\\' : parent;
+  }
+
+  /**
+   * "Select Folder": pick *dir* once the daemon has listed it.  The
+   * folder on screen (or one of its listed subfolders, highlighted by
+   * a click) is picked at once; anything else typed into the path box
+   * is listed first and picked only when that listing succeeds -- an
+   * error stays in the dialog instead of becoming the workspace.
+   */
+  function selectPickedFolder(dir) {
+    if (!dir || !folderPickerEl) return;
+    if (isRootDir(dir)) {
+      // The daemon never pins a file-system root as a workspace
+      // (ServerApi.dispatch blanks it); say so instead of half-applying.
+      folderPickerEl.querySelector('.folder-picker-note').textContent =
+        'A file-system root cannot be the working directory; pick a folder.';
+      return;
+    }
+    const listedChild = folderPickerEl.querySelector(
+      '.folder-picker-item[data-path="' + cssEscape(dir) + '"]',
+    );
+    if (dir === folderPickerListed || listedChild) {
+      applyPickedWorkDir(dir);
+      return;
+    }
+    folderPickerNavigate(dir);
+    folderPickerSelectPending = folderPickerSeq;
+  }
+
+  function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === 'function')
+      return window.CSS.escape(value);
+    return String(value).replace(/["\\]/g, '\\$&');
+  }
+
+  function openFolderPicker() {
+    const el = ensureFolderPicker();
+    el.hidden = false;
+    folderPickerListed = '';
+    folderPickerNavigate(sidebarWorkDir() || explorerRoot || '/');
+    const input = el.querySelector('.folder-picker-input');
+    window.setTimeout(() => input.focus(), 0);
+  }
+
+  function closeFolderPicker() {
+    folderPickerSelectPending = 0;
+    if (folderPickerEl) folderPickerEl.hidden = true;
+  }
+
+  function folderPickerNavigate(path) {
+    if (!folderPickerEl || !path) return;
+    // Any navigation supersedes a Select still waiting on its listing.
+    folderPickerSelectPending = 0;
+    folderPickerDir = path;
+    folderPickerSeq++;
+    folderPickerEl.querySelector('.folder-picker-input').value = path;
+    const list = folderPickerEl.querySelector('.folder-picker-list');
+    list.textContent = '';
+    explorerNote(list, 0, 'Loading...');
+    folderPickerEl.querySelector('.folder-picker-note').textContent = '';
+    api.listDir({
+      path: path,
+      workDir: path,
+      tabId: activeTabId,
+      token: 'picker:' + folderPickerSeq,
+    });
+  }
+
+  function handleFolderPickerListing(ev) {
+    if (!folderPickerEl || folderPickerEl.hidden) return;
+    if (String(ev.token) !== 'picker:' + folderPickerSeq) return;
+    const list = folderPickerEl.querySelector('.folder-picker-list');
+    const note = folderPickerEl.querySelector('.folder-picker-note');
+    const input = folderPickerEl.querySelector('.folder-picker-input');
+    list.textContent = '';
+    // The path box follows the listing (git's canonical spelling of
+    // the folder) unless the user has typed something else meanwhile.
+    const untouched = input.value.trim() === folderPickerDir;
+    if (ev.error) {
+      note.textContent = String(ev.error);
+      folderPickerSelectPending = 0;
+      return;
+    }
+    folderPickerDir = ev.path || folderPickerDir;
+    folderPickerListed = folderPickerDir;
+    if (untouched) input.value = folderPickerDir;
+    if (folderPickerSelectPending === folderPickerSeq) {
+      // A "Select Folder" on a typed path: the daemon listed THAT
+      // path, so it is a real folder -- pick it (its canonical
+      // spelling) now.
+      folderPickerSelectPending = 0;
+      applyPickedWorkDir(folderPickerDir);
+      return;
+    }
+    const dirs = (Array.isArray(ev.entries) ? ev.entries : []).filter(en => {
+      return en && en.isDir && typeof en.name === 'string';
+    });
+    if (!dirs.length) explorerNote(list, 0, '(no subfolders)');
+    dirs.forEach(en => {
+      const item = document.createElement('div');
+      item.className = 'folder-picker-item';
+      item.setAttribute('role', 'option');
+      item.dataset.path = joinPath(folderPickerDir, en.name);
+      item.title = item.dataset.path;
+      item.setAttribute('aria-selected', 'false');
+      item.appendChild(svgIcon('', ICON_FOLDER));
+      const name = document.createElement('span');
+      name.textContent = en.name;
+      item.appendChild(name);
+      list.appendChild(item);
+    });
+    if (ev.truncated) explorerNote(list, 0, '(more entries not shown)');
+  }
+
+  /**
+   * Make *dir* the workspace: the settings' work dir box, the daemon's
+   * connection pin (setWorkDir) and the saved config all follow, and
+   * the client re-scopes to the new workspace right away exactly as a
+   * settings-panel save does (saveSettingsIfPopulated).
+   */
+  function applyPickedWorkDir(dir) {
+    closeFolderPicker();
+    const wdInput = document.getElementById('cfg-work-dir');
+    if (wdInput) wdInput.value = dir;
+    api.saveConfig({config: {work_dir: dir}});
+    api.setWorkDir({workDir: dir});
+    if (dir !== configWorkDir) {
+      configWorkDir = dir;
+      applyWorkspaceScope();
+    }
+    // The picked folder is the working directory from now on: the
+    // views browse it even when the active chat had pinned another
+    // folder (sidebarWorkDir), and an idle chat adopts it for its next
+    // task; a running task keeps the folder it started in.
+    pickedWorkDir = dir;
+    const tab = getTab(activeTabId);
+    if (tab && !tab.isContentTab && !tab.isRunning) tab.workDir = dir;
+    explorerRoot = '';
+    scmWorkDir = '';
+    refreshSidebarDataViews(true);
+  }
+
   /** Wire the activity bar, the Explorer and the Source Control view. */
   function setupActivityBar() {
     if (!activityBar) return;
@@ -4926,6 +6230,10 @@
     if (explorerRefresh) {
       explorerRefresh.addEventListener('click', () => refreshExplorer(true));
     }
+    const explorerPick = document.getElementById('explorer-pick-folder');
+    if (explorerPick) {
+      explorerPick.addEventListener('click', openFolderPicker);
+    }
     const scmRefresh = document.getElementById('scm-refresh');
     if (scmRefresh) {
       scmRefresh.addEventListener('click', () => {
@@ -4939,7 +6247,14 @@
     if (explorerTree) {
       explorerTree.addEventListener('click', e => {
         const row = e.target.closest('.explorer-row');
-        if (row) onExplorerActivate(row);
+        if (row && !row.classList.contains('is-editing'))
+          onExplorerActivate(row);
+      });
+      explorerTree.addEventListener('contextmenu', e => {
+        const row = e.target.closest('.explorer-row');
+        if (row && !row.classList.contains('is-editing')) {
+          showTreeMenu(e, explorerMenuItems(row), row);
+        }
       });
       explorerTree.addEventListener('focusin', e => {
         const row = e.target.closest('.explorer-row');
@@ -4947,8 +6262,9 @@
       });
       explorerTree.addEventListener('keydown', e => {
         const row = e.target.closest('.explorer-row');
-        if (!row) return;
+        if (!row || row.classList.contains('is-editing')) return;
         if (treeArrowNav(e, explorerTree, '.explorer-row', row)) return;
+        if (explorerShortcut(e, row)) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           onExplorerActivate(row);
@@ -5001,6 +6317,7 @@
         }
         onScmActivate(e.target);
       });
+      scmBody.addEventListener('contextmenu', onScmContextMenu);
       scmBody.addEventListener('focusin', e => {
         const item = e.target.closest('.scm-commit, .scm-row');
         if (item) rovingFocus(scmBody, '.scm-commit, .scm-row', item);
@@ -5203,7 +6520,7 @@
         ? adjacentContainer.dataset.task || ''
         : currentTaskName;
       if (taskName && panelTask !== taskName) continue;
-      if (inRunning || p.classList.contains('rc')) {
+      if (inRunning || p.classList.contains('rc') || panelShowsImage(p)) {
         p.classList.remove('chv-hidden');
         continue;
       }
@@ -6955,12 +8272,30 @@
   const PANEL_COPY_SVG = window.PanelCopy.PANEL_COPY_SVG;
   const PANEL_CHECK_SVG = window.PanelCopy.PANEL_CHECK_SVG;
 
+  // imagepanel-coverage:start
+  /**
+   * Whether *panel* shows a picture (a tool result's images, see
+   * appendResultImages).  Such a panel is never folded or hidden by the
+   * automatic passes below -- on any surface, a screenshot the agent
+   * took or a chart it produced stays in view; only the user's own
+   * click on the chevron collapses it.
+   */
+  function panelShowsImage(panel) {
+    return !!(
+      panel &&
+      panel.querySelector &&
+      panel.querySelector('img.tr-img')
+    );
+  }
+  // imagepanel-coverage:end
+
   function collapseAllExceptResult(container, ownerTabId) {
     const ownerId = rpOwnerTabIdForContainer(container, ownerTabId);
     const panels = container.querySelectorAll('.collapsible');
     for (let i = 0; i < panels.length; i++) {
       const p = panels[i];
       if (p.classList.contains('rc')) continue;
+      if (panelShowsImage(p)) continue;
       if (p.classList.contains('tc-run-parallel')) {
         rpAdoptOpenSubagents(p, ownerId);
         // A fan-out still running when its task's own transcript is
@@ -7026,6 +8361,7 @@
       const p = panels[i];
       if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
         continue;
+      if (panelShowsImage(p)) continue;
       if (p.classList.contains('tc-run-parallel'))
         rpAdoptOpenSubagents(p, tabId);
       if (rpPanelHasOpenTabs(p) && !p._rpDone) continue;
@@ -7281,7 +8617,21 @@
       }
       wrap.appendChild(box);
     }
-    if (wrap.childElementCount) container.appendChild(wrap);
+    if (!wrap.childElementCount) return;
+    container.appendChild(wrap);
+    // imagepanel-coverage:start
+    // The panel now shows a picture: if an automatic pass folded or
+    // hid it before the result arrived (an older panel of a streaming
+    // transcript), bring it back on screen -- see panelShowsImage.
+    const panel = container.closest ? container.closest('.collapsible') : null;
+    if (panel) {
+      panel.classList.remove('chv-hidden');
+      if (panel.classList.contains('collapsed')) {
+        panel.classList.remove('collapsed');
+        collapsePreview(panel);
+      }
+    }
+    // imagepanel-coverage:end
   }
   // resultimages-coverage:end
 
@@ -7723,11 +9073,16 @@
           for (let ai = adopt.length - 1; ai >= 0; ai--)
             sub.appendChild(adopt[ai]);
           c.appendChild(sub);
-          c.classList.add('collapsed');
-          // The adopted panels are now hidden behind this collapsed
-          // summary; a fan-out panel among them must give its
-          // sub-agent tabs up like any other collapsed fan-out.
-          collapseNestedRunParallel(c);
+          // A summary folds the panels it adopted -- unless one of
+          // them shows an image: a picture the agent produced stays on
+          // screen until the user folds it (panelShowsImage).
+          if (!panelShowsImage(c)) {
+            c.classList.add('collapsed');
+            // The adopted panels are now hidden behind this collapsed
+            // summary; a fan-out panel among them must give its
+            // sub-agent tabs up like any other collapsed fan-out.
+            collapseNestedRunParallel(c);
+          }
         }
         tState.lastToolCallEl = c;
         stampPanelStart(c, ev.ts);
@@ -9263,7 +10618,9 @@
           return;
         }
         // tableak-coverage:end
-        handleFileContent(ev, true, ev.tabId);
+        // "Open to the Side" (Explorer menu) asked for the file without
+        // leaving the current tab; the daemon echoes that request flag.
+        handleFileContent(ev, ev.background !== true, ev.tabId);
         return;
       // A save reply is matched to its content tab by the per-request
       // token it echoes (see saveContentTab), so no active-tab check
@@ -9280,7 +10637,20 @@
       // so no tab check is needed: a reply for a tree or workspace that
       // is no longer shown simply finds no taker.
       case 'dirListing':
+        if (String(ev.token || '').indexOf('picker:') === 0) {
+          handleFolderPickerListing(ev);
+          return;
+        }
         handleDirListing(ev);
+        return;
+      case 'gitShow':
+        handleGitShow(ev);
+        return;
+      case 'gitActionResult':
+        handleGitActionResult(ev);
+        return;
+      case 'fsResult':
+        handleFsResult(ev);
         return;
       case 'gitStatus':
         handleGitStatus(ev);
@@ -14647,6 +16017,13 @@
         configWorkDir = data.config.work_dir;
         applyWorkspaceScope();
       }
+      // The user chose this folder: the sidebar views browse it even
+      // when the active chat (or a content tab's owner) had pinned
+      // another one -- exactly like the Explorer's folder picker.
+      pickedWorkDir = data.config.work_dir;
+      explorerRoot = '';
+      scmWorkDir = '';
+      refreshSidebarDataViews(true);
     }
   }
 

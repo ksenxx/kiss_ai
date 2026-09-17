@@ -280,6 +280,11 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("listDir", handler="list_dir"),
     ApiCommand("gitStatus", handler="git_status"),
     ApiCommand("gitLog", handler="git_log"),
+    ApiCommand("gitShow", required=("sha",), handler="git_show"),
+    ApiCommand(
+        "gitAction", required=("action", "sha"), handler="git_action"
+    ),
+    ApiCommand("fsAction", required=("action", "path"), handler="fs_action"),
     ApiCommand("shareChat", required=("chatId", "html"), handler="share_chat"),
     ApiCommand(
         "shareChatTasks", required=("chatId",), handler="share_chat_tasks"
@@ -492,6 +497,18 @@ class ServerBackend(Protocol):
     ) -> None: ...
 
     async def _handle_git_log(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_git_show(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_git_action(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_fs_action(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
@@ -1130,6 +1147,64 @@ class ServerApi:
         if ctx.is_uds:
             return
         await self._backend._handle_git_log(cmd, ctx.endpoint)
+
+    async def git_show(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Serve a commit's patch / a file at a commit / a revision diff.
+
+        The remote Source Control graph's commit context menu ("Open
+        Changes", "Open File", "Compare with...") reads its text from
+        this command's ``gitShow`` reply, sent to the requester only.
+        A UDS-delivered ``gitShow`` is dropped as a defensive no-op,
+        exactly like ``gitLog``.
+
+        Args:
+            cmd: The ``gitShow`` command (``sha``, optional ``path``,
+                ``base``, ``mode``, ``workDir``, ``tabId``, ``token``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_git_show(cmd, ctx.endpoint)
+
+    async def git_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Run a commit context-menu git action for the remote graph.
+
+        "Checkout (Detached)", "Create Branch...", "Create Tag..." and
+        "Cherry Pick" of the remote Source Control graph's commit menu
+        each send one ``gitAction``; the outcome comes back as a
+        ``gitActionResult`` to the requester only.  A UDS-delivered
+        ``gitAction`` is dropped as a defensive no-op (VS Code windows
+        run the real Git extension).
+
+        Args:
+            cmd: The ``gitAction`` command (``action``, ``sha``,
+                optional ``name``, ``message``, ``workDir``, ``tabId``,
+                ``token``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_git_action(cmd, ctx.endpoint)
+
+    async def fs_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Run an Explorer context-menu file action for the remote webapp.
+
+        New File..., New Folder..., Rename..., Delete, Paste, Find in
+        Folder... and Compare Selected of the remote Explorer's context
+        menu each send one ``fsAction``; the outcome comes back as an
+        ``fsResult`` to the requester only.  A UDS-delivered
+        ``fsAction`` is dropped as a defensive no-op (VS Code windows
+        have the real Explorer).
+
+        Args:
+            cmd: The ``fsAction`` command (``action``, ``path``,
+                optional ``dest``, ``name``, ``query``, ``overwrite``,
+                ``workDir``, ``tabId``, ``token``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_fs_action(cmd, ctx.endpoint)
 
     async def share_chat(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Write a chat webview's transcript as a standalone HTML page.
