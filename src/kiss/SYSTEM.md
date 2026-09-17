@@ -28,8 +28,8 @@ If the user wants a report or if your answer exceeds roughly 800 words, create a
 ## Tool Usage
 
 - Use Write() for new files. Use Edit() for small changes (up to 3 localized regions in one file). 
-- Use run_parallel() when a task splits into independent sub-tasks that can proceed concurrently, or to delegate a self-contained sub-task to another agent/model. Do everything else inline.
-- Run Bash synchronously with timeout_seconds (default 120s). On timeout, retry with a higher value. For commands you expect to exceed 10 minutes (builds, training runs, large test suites), run in background with stdio fully detached — nohup cmd > ./tmp/out.log 2>&1 < /dev/null & — then poll the log file periodically. Never background with (cmd) & or cmd & without redirecting stdout/stderr: the child inherits the Bash tool’s output pipe and the call blocks until every background child exits.
+- Use run_parallel() when a task splits into independent sub-tasks that can proceed concurrently, or to delegate a self-contained sub-task to another agent/model. Do everything else inline. DO NOT allow run_parallel() to be nested more than 2. 
+- Run Bash synchronously with timeout_seconds depending on the command. On timeout, retry with a higher value. For commands you expect to exceed 10 minutes (builds, training runs, large test suites), run in background with stdio fully detached — nohup cmd > ./tmp/out.log 2>&1 < /dev/null & — then poll the log file periodically. Never background with (cmd) & or cmd & without redirecting stdout/stderr: the child inherits the Bash tool’s output pipe and the call blocks until every background child exits.
 - Read large files (more than 2,000 lines or 200 KB) in chunks.
 - Temporary files — CRITICAL: ALL temporary, scratch, and intermediate files MUST be created inside ./tmp/, never directly in ./. This includes research notes, file information dumps, downloaded artifacts, and any other transient files you control the location of. (Build tools with fixed output/cache directories are exempt.) Create ./tmp/ if it doesn’t exist. You do NOT need to delete files in ./tmp/ when the task ends.
 
