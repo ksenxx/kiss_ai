@@ -15,7 +15,6 @@ Split out of ``server.py`` for organisation.
 from __future__ import annotations
 
 import base64
-import ctypes
 import logging
 import math
 import queue
@@ -46,6 +45,7 @@ from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
     _WorktreeCleanupOutcome,
 )
+from kiss.core import tool_interrupt
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import get_available_models
 from kiss.core.printer import parse_result_yaml
@@ -57,21 +57,15 @@ from kiss.server.tools_file import load_tools_file
 
 logger = logging.getLogger(__name__)
 
-ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
-    ctypes.c_ulong,
-    ctypes.py_object,
-]
-
-
 def inject_keyboard_interrupt(tid: int) -> int:
     """Raise ``KeyboardInterrupt`` asynchronously in thread *tid*.
 
-    Single shared wrapper around ``PyThreadState_SetAsyncExc`` (C-R5)
-    used by :meth:`_TaskRunnerMixin._force_stop_thread` and the
-    shutdown path in ``RemoteAccessServer._stop_active_agent_tasks``.
-    When the call reports the exception was set in more than one
-    thread state (``rc > 1``), the injection is undone as CPython's
-    documentation requires.
+    Single shared wrapper (C-R5) used by
+    :meth:`_TaskRunnerMixin._force_stop_thread` and the shutdown path
+    in ``RemoteAccessServer._stop_active_agent_tasks``; the
+    ``PyThreadState_SetAsyncExc`` call itself lives in
+    :func:`kiss.core.tool_interrupt.inject_async_exception`, shared
+    with the per-tool-call interrupt.
 
     Args:
         tid: The target thread's ``ident``.
@@ -79,17 +73,9 @@ def inject_keyboard_interrupt(tid: int) -> int:
     Returns:
         The number of thread states modified: ``0`` when *tid* no
         longer names a live thread, ``1`` on success (values above 1
-        have already been rolled back here).
+        have already been rolled back).
     """
-    rc = int(
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_ulong(tid),
-            ctypes.py_object(KeyboardInterrupt),
-        )
-    )
-    if rc > 1:  # pragma: no cover — rare: exception set in multiple states
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(tid), None)
-    return rc
+    return tool_interrupt.inject_async_exception(tid, KeyboardInterrupt)
 
 
 def wait_for_thread_start(
@@ -648,6 +634,9 @@ class _TaskRunnerMixin:
             self, repo_root: Path | None,
         ) -> str | None: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
+        def _user_answer_clear_tabs(
+            self, ans_tab: str, answered_task_id: str,
+        ) -> list[str]: ...
         def _main_dirty_files(self, work_dir: str = "") -> list[str]: ...
         def _autocommit_changes(
             self,
@@ -2376,6 +2365,127 @@ class _TaskRunnerMixin:
                 viewer_status["taskId"] = client_task_id
             self.printer.broadcast(viewer_status)
 
+    def _resolve_running_state(
+        self, tab_id: str, run_token: str = "",
+    ) -> AgentState | None:
+        """Resolve *tab_id* to the running task state a stop-like command targets.
+
+        Shared by :meth:`_stop_task` (whole-task Stop) and
+        :meth:`_interrupt_tool_call` (per-panel Stop).  Callers hold
+        ``self._state_lock``.
+
+        The tab's own state is used when it owns a stoppable run; a
+        viewer tab that merely subscribes to a task (a second browser
+        window, a history click on a running chat) is resolved through
+        the printer's per-task subscriber map instead.
+
+        Args:
+            tab_id: The tab the command names.
+            run_token: When non-empty, only a state created by the
+                ``run`` carrying this client-minted ``taskId``
+                qualifies (see :meth:`_stop_task`).
+
+        Returns:
+            The owning state, or ``None`` when no running task is
+            reachable from *tab_id*.
+        """
+        owner_state = agent_state.find_by_tab(tab_id)
+        if owner_state is not None and owner_state.stop_event is None:
+            owner_state = None
+        if owner_state is not None and run_token and (
+            owner_state.client_run_token != run_token
+        ):
+            # The tab's current run is not the one this command was
+            # minted for: the original run already finished and the
+            # tab was reused.  Nothing to act on.
+            owner_state = None
+        if owner_state is None:
+            # The tab does not own a running task itself; it may be a
+            # viewer subscribed to one.  Resolve through the printer's
+            # per-task subscriber map.
+            for candidate in self._find_viewer_task_states(tab_id):
+                if run_token and candidate.client_run_token != run_token:
+                    # Token-qualified commands must never leak onto a
+                    # different run through the subscriber map.
+                    continue
+                if candidate.stop_event is not None or candidate.thread_alive():
+                    owner_state = candidate
+                    break
+        return owner_state
+
+    def _interrupt_tool_call(
+        self, tab_id: str, tool_name: str = "", call_id: int | None = None,
+    ) -> None:
+        """Interrupt the tool call the task on *tab_id* is running.
+
+        The per-panel Stop button: unlike :meth:`_stop_task` the task
+        survives — only the tool call in progress on its thread is
+        interrupted (:func:`kiss.core.tool_interrupt.interrupt_tool_call`),
+        and the agent loop receives ``"User interrupted the tool
+        call."`` as that tool's result.  A ``tool_interrupt_ack`` is
+        broadcast to the tab either way so the button can show whether
+        the click landed on a running tool call.
+
+        The interrupt is issued under ``_state_lock``, the lock the
+        printer bridge clears ``task_thread`` under when a run ends, so
+        a pool worker thread that has meanwhile moved on to another
+        task's tool is never hit.
+
+        Args:
+            tab_id: The tab whose tool-call panel was clicked.  Sub-agent
+                tabs resolve to the sub-agent's own thread.
+            tool_name: The tool the clicked panel shows.  The interrupt
+                is rejected when the thread meanwhile moved on to a
+                different tool.
+            call_id: The ``callId`` the clicked panel's ``tool_call``
+                event carried, when the client has one.  Names exactly
+                that call, so a click that arrives after it returned
+                never hits the next call — even one of the same name.
+        """
+        if not tab_id:
+            logger.warning("Tool interrupt requested without a tabId; ignoring")
+            return
+        with self._state_lock:
+            owner_state = self._resolve_running_state(tab_id)
+            task_thread = owner_state.task_thread if owner_state is not None else None
+            pending_ask = owner_state.pending_ask_question if owner_state else ""
+            owner_task_id = owner_state.task_id if owner_state is not None else ""
+            # A finished thread's ident may already name another
+            # thread running another task's tool: only a live thread
+            # is a target.
+            tid = (
+                task_thread.ident
+                if task_thread is not None and task_thread.is_alive()
+                else None
+            )
+            accepted = tid is not None and tool_interrupt.interrupt_tool_call(
+                tid, tool_name, call_id,
+            )
+            if accepted and pending_ask and owner_state is not None:
+                # Cleared here, under the lock, rather than by the task
+                # thread's finally a moment later: a session replay in
+                # between would re-emit the question after the
+                # askUserDone broadcast below and leave a stale modal.
+                owner_state.pending_ask_question = ""
+        logger.info(
+            "Tool interrupt for tab %s (task %s, tool %r, call %s): %s",
+            tab_id,
+            owner_task_id,
+            tool_name,
+            call_id,
+            "accepted" if accepted else "no matching running tool call",
+        )
+        self.printer.broadcast(
+            {"type": "tool_interrupt_ack", "accepted": accepted, "tabId": tab_id},
+        )
+        if accepted and pending_ask:
+            # The interrupted tool is a pending ask_user_question: the
+            # answer wait is aborted, so the question modal must close
+            # on every tab showing it (an answer would do this through
+            # _cmd_user_answer's askUserDone).
+            for clear_tab in self._user_answer_clear_tabs(tab_id, owner_task_id):
+                self.printer.broadcast({"type": "askUserDone", "tabId": clear_tab})
+
     def _stop_task(self, tab_id: str = "", run_token: str = "") -> None:
         """Signal the agent to stop.
 
@@ -2411,28 +2521,7 @@ class _TaskRunnerMixin:
             logger.warning("Stop requested without a tabId; ignoring")
             return
         with self._state_lock:
-            owner_state = agent_state.find_by_tab(tab_id)
-            if owner_state is not None and owner_state.stop_event is None:
-                owner_state = None
-            if owner_state is not None and run_token and (
-                owner_state.client_run_token != run_token
-            ):
-                # The tab's current run is not the one this stop was
-                # minted for: the original run already finished and
-                # the tab was reused.  Nothing to stop.
-                owner_state = None
-            if owner_state is None:
-                # The tab does not own a running task itself; it may be
-                # a viewer subscribed to one.  Resolve through the
-                # printer's per-task subscriber map.
-                for candidate in self._find_viewer_task_states(tab_id):
-                    if run_token and candidate.client_run_token != run_token:
-                        # Token-qualified stops must never leak onto a
-                        # different run through the subscriber map.
-                        continue
-                    if candidate.stop_event is not None or candidate.thread_alive():
-                        owner_state = candidate
-                        break
+            owner_state = self._resolve_running_state(tab_id, run_token)
             stop_event = owner_state.stop_event if owner_state is not None else None
             task_thread = owner_state.task_thread if owner_state is not None else None
             owner_task_id = owner_state.task_id if owner_state is not None else ""
@@ -2634,6 +2723,11 @@ class _TaskRunnerMixin:
 
         Raises:
             KeyboardInterrupt: If the stop event is set before an answer arrives.
+            ToolCallInterrupted: If the user pressed the tool call's own
+                Stop button (``interruptTool``) before answering.  The
+                ``queue.get`` below is a C-level wait, so the watcher
+                also observes the tool call's interrupt event, wakes the
+                wait, and the interrupt is raised here cooperatively.
         """
         stop = getattr(self.printer._thread_local, "stop_event", None)
         if stop is None:
@@ -2644,12 +2738,13 @@ class _TaskRunnerMixin:
             raise KeyboardInterrupt(
                 "User answer queue is missing (tab closed?); aborting wait",
             )
+        interrupt = tool_interrupt.current_tool_interrupt_event()
         sentinel = _STOP_SENTINEL
         cancelled = threading.Event()
 
         def _wake_on_stop() -> None:
             while not cancelled.is_set():
-                if stop.wait(0.1):
+                if stop.wait(0.1) or (interrupt is not None and interrupt.is_set()):
                     if not cancelled.is_set():
                         with suppress(queue.Full):
                             q.put_nowait(cast(str, sentinel))
@@ -2662,6 +2757,11 @@ class _TaskRunnerMixin:
         finally:
             cancelled.set()
         if item is sentinel:
+            if not stop.is_set():
+                # Woken by the tool call's own Stop: raise its
+                # ToolCallInterrupted cooperatively (draining an injected
+                # one first if the grace period had already passed).
+                tool_interrupt.raise_if_interrupted()
             raise KeyboardInterrupt("Stopped while waiting for user")
         return item
 

@@ -236,6 +236,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("submit", required=("prompt",), handler="submit"),
     ApiCommand("appendUserMessage", required=("prompt",)),
     ApiCommand("stop"),
+    ApiCommand("interruptTool", required=("tabId",)),
     ApiCommand("userAnswer", required=("answer",)),
     ApiCommand("newChat"),
     ApiCommand("openTab", required=("tabId",)),

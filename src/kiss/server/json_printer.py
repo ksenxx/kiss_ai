@@ -1555,7 +1555,11 @@ class JsonPrinter(Printer):
                 if live is not None:
                     live.streamed = False
             self.broadcast({"type": "text_end"})
-            self._format_tool_call(str(content), kwargs.get("tool_input", {}))
+            self._format_tool_call(
+                str(content),
+                kwargs.get("tool_input", {}),
+                call_id=kwargs.get("call_id"),
+            )
             return ""
         if type == "tool_result":
             self._emit_tool_result(
@@ -1563,6 +1567,7 @@ class JsonPrinter(Printer):
                 tool_name=kwargs.get("tool_name", ""),
                 is_error=kwargs.get("is_error", False),
                 tool_input=kwargs.get("tool_input"),
+                interrupted=bool(kwargs.get("interrupted", False)),
             )
             return ""
         if type == "usage_info":
@@ -1600,6 +1605,7 @@ class JsonPrinter(Printer):
         tool_name: str,
         is_error: Any,
         tool_input: Any,
+        interrupted: bool = False,
     ) -> None:
         """Broadcast a ``tool_result`` event with the shared treatment.
 
@@ -1617,6 +1623,12 @@ class JsonPrinter(Printer):
             tool_input: The originating tool input dict when available
                 (used to stamp ``path`` / ``start_line`` for Read
                 results).
+            interrupted: ``True`` when the user stopped the tool call
+                through its panel's Stop button.  The event is flagged
+                ``interrupted`` and keeps its content even for a Bash
+                call whose output was streamed (normally blanked as a
+                duplicate), so the panel can show that the call was
+                cut short rather than ending silently.
         """
         self._flush_bash()
         show_result = tool_name != "finish"
@@ -1633,7 +1645,9 @@ class JsonPrinter(Printer):
         # fallback window rather than this call's stale cutoff.
         with self._lock:
             started = self._tool_call_started.pop(self._task_key(), None)
-        result_content = "" if streamed else truncate_result(str(content))
+        result_content = (
+            "" if streamed and not interrupted else truncate_result(str(content))
+        )
         if show_result:
             event: dict[str, Any] = {
                 "type": "tool_result",
@@ -1641,6 +1655,8 @@ class JsonPrinter(Printer):
                 "is_error": is_error,
                 "tool_name": tool_name,
             }
+            if interrupted:
+                event["interrupted"] = True
             if isinstance(tool_input, dict):
                 path = tool_input.get("file_path") or tool_input.get("path")
                 if path:
@@ -1798,7 +1814,23 @@ class JsonPrinter(Printer):
             self._current_block_type = ""
             self.broadcast({"type": "thinking_end"})
 
-    def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
+    def _format_tool_call(
+        self,
+        name: str,
+        tool_input: dict[str, Any],
+        call_id: Any = None,
+    ) -> None:
+        """Broadcast a ``tool_call`` event for *name*.
+
+        Args:
+            name: The tool's name.
+            tool_input: The call's arguments (rendered into the event's
+                ``path`` / ``command`` / ``content`` / diff fields).
+            call_id: The agent's per-call id
+                (``kiss.core.tool_interrupt.ToolCallToken.call_id``),
+                stamped as ``callId`` so the panel's Stop button can
+                name exactly this call in its ``interruptTool`` command.
+        """
         key = self._task_key()
         with self._lock:
             # Same guard as _write_offset: a straggler tool_call for a
@@ -1809,6 +1841,8 @@ class JsonPrinter(Printer):
                 self._tool_call_started[key] = time.time()
         file_path, lang = extract_path_and_lang(tool_input)
         event: dict[str, Any] = {"type": "tool_call", "name": name}
+        if isinstance(call_id, int) and not isinstance(call_id, bool):
+            event["callId"] = call_id
         if file_path:
             event["path"] = file_path
             event["lang"] = lang

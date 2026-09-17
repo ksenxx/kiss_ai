@@ -22,6 +22,14 @@ from kiss.core.kiss_error import (
 )
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
+from kiss.core.tool_interrupt import (
+    USER_INTERRUPTED_MESSAGE,
+    ToolCallInterrupted,
+    end_tool_call,
+    new_tool_call,
+    register_tool_call,
+    unregister_tool_call,
+)
 from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
@@ -822,9 +830,18 @@ class KISSAgent(Base):
         """
         function_name = function_call["name"]
         function_args = _call_args(function_call)
+        # The call's token exists before anything can interrupt it, so
+        # the ``finally`` below always has it; ``finish`` is never
+        # interruptible (its result IS the task's result).
+        token = new_tool_call(function_name)
 
         if self.printer:
-            self.printer.print(function_name, type="tool_call", tool_input=function_args)
+            self.printer.print(
+                function_name,
+                type="tool_call",
+                tool_input=function_args,
+                call_id=token.call_id,
+            )
 
         if blocked is not None:
             if self.printer:
@@ -838,21 +855,49 @@ class KISSAgent(Base):
             return function_name, blocked
 
         is_error = False
+        interrupted = False
+        # The call is registered — inside the try — so the UI's
+        # per-panel Stop button can interrupt it (kiss.core.tool_interrupt):
+        # the interrupt lands as ToolCallInterrupted, raised by the tool
+        # itself at a safe point, injected into it, or — when the tool
+        # returned first — drained by end_tool_call, so it can never
+        # escape into the agent loop.
         try:
-            if function_name not in self.function_map:  # pragma: no cover
-                raise KISSError(f"Function {function_name} is not a registered tool")
-            function_response = str(self.function_map[function_name](**function_args))
-        except BudgetExceededError:
-            raise
-        except (Exception, SystemExit) as e:
-            logger.debug("Exception caught", exc_info=True)
-            fn = self.function_map.get(function_name)
-            sig = inspect.signature(fn) if fn else None
-            sig_str = f"\nExpected signature: {function_name}{sig}" if sig else ""
-            function_response = (
-                f"Failed to call {function_name} with {function_args}: {e}{sig_str}\n"
-            )
-            is_error = True
+            if function_name != "finish":
+                register_tool_call(token)
+            try:
+                if function_name not in self.function_map:  # pragma: no cover
+                    raise KISSError(f"Function {function_name} is not a registered tool")
+                function_response = str(self.function_map[function_name](**function_args))
+            except BudgetExceededError:
+                raise
+            except (Exception, SystemExit) as e:
+                logger.debug("Exception caught", exc_info=True)
+                fn = self.function_map.get(function_name)
+                sig = inspect.signature(fn) if fn else None
+                sig_str = f"\nExpected signature: {function_name}{sig}" if sig else ""
+                function_response = (
+                    f"Failed to call {function_name} with {function_args}: {e}{sig_str}\n"
+                )
+                is_error = True
+            end_tool_call(token)
+        except ToolCallInterrupted as exc:
+            if isinstance(exc.__context__, KeyboardInterrupt | BudgetExceededError):
+                # The interrupt landed while a task Stop or a budget
+                # overrun was already unwinding through the tool: that
+                # outcome is the one that matters, and it must not be
+                # downgraded to a continued task.
+                raise exc.__context__ from None
+            logger.info("Tool call %s interrupted by the user", function_name)
+            function_response = USER_INTERRUPTED_MESSAGE
+            is_error = False
+            interrupted = True
+        finally:
+            # The store comes first, before any call that could give a
+            # pending injection a landing spot: from here on the
+            # watchdog never injects into the unwinding below.
+            token.closing = True
+            unregister_tool_call(token)
 
         if self.printer:
             self.printer.print(
@@ -861,6 +906,7 @@ class KISSAgent(Base):
                 tool_name=function_name,
                 tool_input=function_args,
                 is_error=is_error,
+                interrupted=interrupted,
             )
 
         return function_name, function_response

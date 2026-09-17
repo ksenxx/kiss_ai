@@ -11,6 +11,7 @@
     'submit',
     'appendUserMessage',
     'stop',
+    'interruptTool',
     'userAnswer',
     'newChat',
     'openTab',

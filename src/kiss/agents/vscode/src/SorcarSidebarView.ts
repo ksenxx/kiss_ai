@@ -312,6 +312,10 @@ export interface PanelHooks {
 
 const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   appendUserMessage: ['prompt', 'tabId'],
+  // A tool-call panel's Stop button: the daemon interrupts just that
+  // tool call on the tab's task and answers with a direct
+  // `tool_interrupt_ack` that the client-listener relay passes back.
+  interruptTool: ['tabId', 'toolName', 'callId'],
   getInputHistory: [],
   newChat: ['tabId'],
   openTab: ['tabId', 'title', 'workDir'],

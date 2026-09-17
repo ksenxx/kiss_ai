@@ -2309,7 +2309,8 @@
       'app(prevent,e,[]);' +
       'if(port!==null)try{app(portPost,port,["save"])}catch(_e){}' +
       '},true);' +
-      '})();<\/script>'
+      '})();</' +
+      'script>'
     );
   }
 
@@ -2350,14 +2351,13 @@
   // test_hostile_preview_page_cannot_forge_a_save).
   function wireContentPreviewSaveKey(tab, iframe) {
     if (typeof MessageChannel !== 'function') return;
+    // eslint-disable-next-line no-undef -- MessageChannel is a browser global
     const channel = new MessageChannel();
     iframe.addEventListener('load', () => {
       try {
-        iframe.contentWindow.postMessage(
-          {kissPreviewSavePort: true},
-          '*',
-          [channel.port2],
-        );
+        iframe.contentWindow.postMessage({kissPreviewSavePort: true}, '*', [
+          channel.port2,
+        ]);
       } catch (_e) {}
     });
     channel.port1.onmessage = () => {
@@ -6315,6 +6315,7 @@
     if (node.nodeType === 1 && node.classList) {
       if (
         node.classList.contains('panel-copy-btn') ||
+        node.classList.contains('panel-stop-btn') ||
         node.classList.contains('collapse-chv') ||
         node.classList.contains('collapse-preview') ||
         node.classList.contains('panel-ts') ||
@@ -6948,6 +6949,7 @@
   }
 
   const addCopyButton = window.PanelCopy.addCopyButton;
+  const addStopButton = window.PanelCopy.addStopButton;
   const addPanelTimestamp = window.PanelCopy.addPanelTimestamp;
   const formattedTextFromNode = window.PanelCopy.formattedTextFromNode;
   const PANEL_COPY_SVG = window.PanelCopy.PANEL_COPY_SVG;
@@ -7678,6 +7680,24 @@
           verifyFileLinkCandidates(tcBody, evWorkDir, evOwnerTab);
         }
         addCollapse(c, hdr, ev.ts);
+        // toolstop-coverage:start
+        // The panel's own Stop: interrupts just this tool call on the
+        // task that owns this transcript (a sub-agent tab names the
+        // sub-agent's own task); the event's callId names exactly this
+        // call so a late click cannot hit the next one.  The daemon
+        // answers with a tool_interrupt_ack; the tool then returns
+        // "User interrupted the tool call." and the button hides with
+        // the tool_result.
+        if (typeof ev.callId === 'number') c.dataset.callId = String(ev.callId);
+        // finish is never interruptible: its result IS the task's.
+        if (ev.name !== 'finish') {
+          addStopButton(c, () => {
+            const req = {tabId: evOwnerTab, toolName: ev.name || ''};
+            if (typeof ev.callId === 'number') req.callId = ev.callId;
+            api.interruptTool(req);
+          });
+        }
+        // toolstop-coverage:end
         target.appendChild(c);
         if (isSummary) {
           const sub = mkEl('div', 'summary-sub');
@@ -7757,6 +7777,24 @@
         else confirmReadyReport(tState, ev);
         // report-coverage:end
         if (hadBash && !ev.is_error) {
+          // toolstop-coverage:start
+          // A Bash call the user stopped through its panel: its output
+          // was streamed, so the result would otherwise close the panel
+          // silently. The interrupt message ends the streamed output.
+          if (ev.interrupted && ev.content && tState.lastToolCallEl) {
+            const cut = tState.lastToolCallEl.querySelector(
+              ':scope > .bash-panel > .bash-panel-content',
+            );
+            if (cut) {
+              // Appended as a node: the streamed text may already hold
+              // linkified spans that a textContent write would flatten.
+              const sep = cut.textContent && !cut.textContent.endsWith('\n');
+              cut.appendChild(
+                document.createTextNode((sep ? '\n' : '') + ev.content),
+              );
+            }
+          }
+          // toolstop-coverage:end
           // resultimages-coverage:start
           appendResultImages(ev, tState.lastToolCallEl || target);
           // resultimages-coverage:end
@@ -9374,6 +9412,23 @@
         }
         renderModelList('');
         break;
+      // toolstop-coverage:start
+      case 'tool_interrupt_ack': {
+        // A rejected interrupt (no running tool call owned the tab)
+        // gives the button back at once instead of after its reset
+        // timer, so the UI never looks like a stop is in progress.
+        if (ev.accepted) break;
+        const ackRoot = rpTaskDomRootForParent(
+          ev.tabId === undefined ? activeTabId : ev.tabId,
+        );
+        if (!ackRoot || !ackRoot.querySelectorAll) break;
+        const stopping = ackRoot.querySelectorAll('.panel-stop-btn.stopping');
+        for (let i = 0; i < stopping.length; i++) {
+          if (stopping[i]._kissClearStopping) stopping[i]._kissClearStopping();
+        }
+        break;
+      }
+      // toolstop-coverage:end
       case 'stop_ack':
         // The daemon found nothing to stop for this tab — the click
         // would otherwise have been swallowed in silence, which is

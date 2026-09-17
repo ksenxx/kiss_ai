@@ -33,6 +33,7 @@ from kiss.agents.sorcar.task_classifier import (
 )
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.core import tool_interrupt
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.core.memoryfield.tools import MEMORY_PROTOCOL, MemoryTools
@@ -47,6 +48,7 @@ from kiss.core.models.model_info import (
 )
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
+from kiss.core.tool_interrupt import ToolCallInterrupted
 from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
@@ -384,6 +386,9 @@ def _broadcast_subagent_done(
 # interval, so a 0.1s slice made a deeply nested tree crawl under GIL
 # contention.
 _SUBAGENT_POLL_SECONDS = 1.0
+# The slice while the fan-out runs as a tool call (run_parallel): below
+# kiss.core.tool_interrupt's 1 s injection grace, see _await_subagents.
+_SUBAGENT_TOOL_POLL_SECONDS = 0.4
 _SUBAGENT_STOP_GRACE_SECONDS = 15.0
 
 
@@ -479,16 +484,32 @@ def _await_subagents(
     Returns:
         The sub-agent results, in the order the tasks were given.
 
+    The ``run_parallel`` tool panel's own Stop is honored cooperatively
+    too: each wake checks the running tool call's interrupt and raises
+    ``ToolCallInterrupted`` at once (the caller then signals the
+    children through the fan-out's stop event).
+
     Raises:
         KeyboardInterrupt: When a stop was requested and at least one
             child was still running after the grace period.
+        ToolCallInterrupted: When the user stopped the ``run_parallel``
+            tool call while children were still running.
     """
     pending = set(futures)
     give_up_at: float | None = None
+    # Under a tool call the slice stays well inside the interrupt's
+    # cooperative grace, so the raise below always beats the forced
+    # injection (which would otherwise land inside ``wait``).
+    poll = (
+        _SUBAGENT_TOOL_POLL_SECONDS
+        if tool_interrupt.current_tool_call() is not None
+        else _SUBAGENT_POLL_SECONDS
+    )
     while pending:
-        _done, pending = wait(pending, timeout=_SUBAGENT_POLL_SECONDS)
+        _done, pending = wait(pending, timeout=poll)
         if not pending:
             break
+        tool_interrupt.raise_if_interrupted()
         if stop_event is None or not stop_event.is_set():
             continue
         if give_up_at is None:
@@ -2417,12 +2438,23 @@ def run_tasks_parallel(
         parent_key if is_task_history_id(parent_key) else uuid.uuid4().hex
     )
 
+    # The whole fan-out's own stop signal, chained to the parent's.  It
+    # is set when the user presses the run_parallel panel's own Stop
+    # button (ToolCallInterrupted lands in the parent's wait): the
+    # parent's stop event stays unset then, so without this the
+    # children would keep running, and spending, after the fan-out the
+    # user just stopped had returned.  Any other reason the parent
+    # unwinds leaves the children alone (they are abandoned, their
+    # spend reclaimed later), exactly as before.
+    fanout_stop_event = _SubagentStopEvent(parent_stop_event)
+
     def _run_single(args: tuple[int, str]) -> str:
         idx, task = args
-        # A per-child event, chained to the parent's: stopping ONE
-        # sub-agent must not stop the parent or its siblings, while a
-        # parent stop still reaches every child (_SubagentStopEvent).
-        sub_stop_event = _SubagentStopEvent(parent_stop_event)
+        # A per-child event, chained to the fan-out's and through it to
+        # the parent's: stopping ONE sub-agent must not stop the parent
+        # or its siblings, while a parent stop (or an abandoned
+        # fan-out) still reaches every child (_SubagentStopEvent).
+        sub_stop_event = _SubagentStopEvent(fanout_stop_event)
         tl = getattr(printer, "_thread_local", None) if printer else None
         if tl is not None:
             tl.stop_event = sub_stop_event
@@ -2520,8 +2552,10 @@ def run_tasks_parallel(
             for item in enumerate(tasks):
                 futures.append(pool.submit(_run_single, item))
             results = _await_subagents(futures, parent_stop_event)
-        except BaseException:
+        except BaseException as exc:
             abandoned = any(not f.done() for f in futures)
+            if abandoned and isinstance(exc, ToolCallInterrupted):
+                fanout_stop_event.set()
             raise
     finally:
         # Only a child that ignored its stop event is abandoned; every

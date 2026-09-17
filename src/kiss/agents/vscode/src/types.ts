@@ -32,6 +32,10 @@ export type FromWebviewMessage =
       workDir?: string;
     }
   | {type: 'stop'; tabId?: string}
+  // The Stop button of one tool-call panel: interrupts only that tool
+  // call on the tab's running task; `toolName` guards against a click
+  // that lands after the tool already returned.
+  | {type: 'interruptTool'; tabId: string; toolName?: string; callId?: number}
   | {type: 'appendUserMessage'; prompt: string; tabId?: string}
   | {type: 'selectModel'; model: string; tabId?: string}
   | {type: 'getHistory'; query?: string; offset?: number; generation?: number}
@@ -676,6 +680,13 @@ type ToWebviewMessageBody =
       tabId: string;
     }
   | {
+      // Receipt for a tool-call panel's Stop click: `accepted` is
+      // false when no running tool call of that name owned `tabId`.
+      type: 'tool_interrupt_ack';
+      accepted: boolean;
+      tabId: string;
+    }
+  | {
       type: 'new_tab';
       task_id: string | number;
       parent_tab_id?: string;
@@ -686,6 +697,7 @@ export interface AgentCommand {
   type:
     | 'run'
     | 'stop'
+    | 'interruptTool'
     | 'appendUserMessage'
     | 'getModels'
     | 'selectModel'

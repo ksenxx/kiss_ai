@@ -3045,7 +3045,7 @@ html, body { height: auto; overflow: auto; }
 #app { height: auto; display: block; }
 #output { overflow: visible; }
 /* Chrome that only works inside the live chat webview. */
-.panel-copy-btn, #task-panel-copy { display: none !important; }
+.panel-copy-btn, .panel-stop-btn, #task-panel-copy { display: none !important; }
 /* The sub-agent tab strip (created and driven by share.js, styled by
    the inlined main.css's #tab-bar / .chat-tab rules). It rides along
    the top of the scrolling document, with room on the right for the

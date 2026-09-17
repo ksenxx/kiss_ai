@@ -306,6 +306,9 @@ class _CommandsMixin:
         def _stop_task(
             self, tab_id: str = "", run_token: str = "",
         ) -> None: ...
+        def _interrupt_tool_call(
+            self, tab_id: str, tool_name: str = "", call_id: int | None = None,
+        ) -> None: ...
         def _find_viewer_task_states(
             self, viewer_tab_id: str,
         ) -> list[AgentState]: ...
@@ -751,6 +754,21 @@ class _CommandsMixin:
             cmd.get("tabId", ""),
             run_token=_client_task_id_of(cmd),
         )
+
+    def _cmd_interrupt_tool(self, cmd: dict[str, Any]) -> None:
+        """Interrupt the tool call running on a tab's task (per-panel Stop).
+
+        The task keeps running; only the tool call in progress returns
+        early with ``"User interrupted the tool call."``.  ``callId``
+        (the clicked panel's ``tool_call`` event id) and ``toolName``
+        name the call the user clicked, so a click that arrives after
+        that call finished cannot hit the next one.
+        """
+        tool_name = cmd.get("toolName", "")
+        if not isinstance(tool_name, str):
+            tool_name = ""
+        call_id = _parse_int(cmd.get("callId"))
+        self._interrupt_tool_call(cmd.get("tabId", ""), tool_name, call_id)
 
     def _cmd_get_models(self, cmd: dict[str, Any]) -> None:
         """Send available models list to the requesting connection only."""
@@ -1774,6 +1792,7 @@ class _CommandsMixin:
     _HANDLERS: dict[str, Any] = {
         "run": _cmd_run,
         "stop": _cmd_stop,
+        "interruptTool": _cmd_interrupt_tool,
         "getModels": _cmd_get_models,
         "selectModel": _cmd_select_model,
         "getHistory": _cmd_get_history,

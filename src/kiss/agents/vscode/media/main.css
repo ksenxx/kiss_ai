@@ -879,7 +879,7 @@ body.remote-chat #welcome-config { display: none !important; }
   background: color-mix(in srgb, var(--cyan) 8%, transparent); color: var(--cyan);
 }
 .tc-h.tc-h-bash:hover { color: var(--fg); }
-.tc.collapsed > :not(.tc-h, .panel-copy-btn) { display: none; }
+.tc.collapsed > :not(.tc-h, .panel-copy-btn, .panel-stop-btn) { display: none; }
 
 .tc-summary-desc {
   padding: 6px 12px;
@@ -3035,6 +3035,37 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 }
 
 .panel-copy-btn.copied { color: var(--green); }
+
+/* Per-panel Stop for a running tool call: sits immediately left of the
+   copy button (24px wide at right: 6px) and is shown only while the
+   panel's tool call is in progress -- a .tc stamped with data-start-ms
+   (stampPanelStart) and not yet sealed by data-time-done
+   (finalizePanelTime / sealPanelTimes). */
+.panel-stop-btn {
+  display: none;
+  position: absolute; top: 5px; right: 34px; z-index: 5;
+  align-items: center; justify-content: center;
+  padding: 3px 5px; cursor: pointer;
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  border: 1px solid var(--border); border-radius: 4px;
+  color: var(--red);
+  opacity: 0.8;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+.tc[data-start-ms]:not([data-time-done]) > .panel-stop-btn { display: flex; }
+
+.panel-stop-btn:hover,
+.panel-stop-btn:focus-visible { opacity: 1; }
+
+.panel-stop-btn:hover {
+  background: color-mix(in srgb, var(--red) 15%, transparent);
+}
+
+.panel-stop-btn.stopping {
+  cursor: progress;
+  color: var(--dim);
+  opacity: 0.6;
+}
 
 .panel-ts {
   white-space: nowrap;
