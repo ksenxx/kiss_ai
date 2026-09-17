@@ -1345,7 +1345,11 @@ class _TaskRunnerMixin:
         # effective worktree mode for the whole submission: an
         # ``is_development`` verdict decides worktree isolation, and the
         # claims, merge presentation, auto-commit paths, and persistence
-        # all key off the same value.  The verdict is pre-seeded into
+        # all key off the same value.  The verdict only ever DEMOTES —
+        # a client that pinned ``useWorktree`` off keeps it off (a
+        # channel dispatch classifies for its system prompt while
+        # running in a scratch directory that must never get a
+        # worktree).  The verdict is pre-seeded into
         # the agent (``classify_task_for_run``), which reuses it for its
         # own worktree gating and system prompt selection instead of
         # re-classifying inside the run.  Only this run's effective mode
@@ -1376,8 +1380,8 @@ class _TaskRunnerMixin:
         # in the main tree.  The post-acquisition refill keeps its
         # maintenance pass.  Gated three ways: the client asked for
         # worktrees (a user who turned them off gets no spare checkout
-        # on disk they did not ask for; a development verdict still
-        # forces one inline, as before); a classifier call is really
+        # on disk they did not ask for — and no worktree at all, since
+        # a verdict can only demote, never promote); a classifier call is really
         # imminent (without one there is nothing to overlap, and the
         # run would only wait on a checkout it just started); and the
         # run is not itself inside a kiss worktree (a nested sub-agent
@@ -1409,7 +1413,7 @@ class _TaskRunnerMixin:
             enabled=_classify_enabled,
         )
         if _classify_verdict is not None:
-            use_worktree = _classify_verdict.is_development
+            use_worktree = use_worktree and _classify_verdict.is_development
             with self._state_lock:
                 state.use_worktree = use_worktree
 

@@ -1841,7 +1841,9 @@ class SorcarAgent(RelentlessAgent):
         worktree mode BEFORE calling :meth:`run` — the server's task
         runner decides its main-tree claims, merge presentation, and
         persistence from ``use_worktree``, so it classifies here, sets
-        ``use_worktree = verdict.is_development``, and passes that
+        ``use_worktree = use_worktree and verdict.is_development`` (the
+        verdict can only demote a run that asked for a worktree, never
+        promote a pinned-off one), and passes that
         value to the run.  The pre-seeded verdict is then reused by the
         run itself (worktree gating and system prompt selection) and by
         every later subtask of the same submission, so the driver and

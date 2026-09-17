@@ -283,9 +283,10 @@ class TestPrewarmGating(_PrewarmHarness):
         self.assertEqual(worktree_pool.spare_branches(), set())
 
     def test_no_prewarm_when_the_user_turned_worktrees_off(self) -> None:
-        """Worktrees off in the client: the classifier still runs (and
-        could force a worktree inline, as before) but no spare checkout
-        is put on disk the user did not ask for."""
+        """Worktrees off in the client: the classifier still runs (its
+        verdict picks the system prompt but can no longer force a
+        worktree on a pinned-off run) and no spare checkout is put on
+        disk the user did not ask for."""
         self._run("say hello", use_worktree=False)
         self.assertEqual(len(self.classifier_seen), 1)
         self.assertFalse(
@@ -368,5 +369,29 @@ class TestPrewarmGating(_PrewarmHarness):
         })
         self.assertEqual(len(self.classifier_seen), 1)
         self.assertEqual(worktree_pool.spare_branches(), set())
+        results = self.printer.events_of_type("result")
+        self.assertTrue(results and results[-1].get("success") is not False)
+
+
+class TestDevelopmentVerdictRespectsWorktreePin(_PrewarmHarness):
+    """A development verdict cannot promote a run whose client pinned
+    worktrees off — the channel-dispatch guarantee: ``run_agent``
+    sends ``use_worktree=False`` for a channel sub-task in a scratch
+    directory while leaving classification enabled, so the verdict may
+    pick the system prompt but must never put a worktree there."""
+
+    development_verdict = True
+    agent_writes_file = True
+
+    def test_pinned_off_run_stays_in_the_main_tree(self) -> None:
+        self._run("PREWARM-WRITE: create a file", use_worktree=False)
+        # The classifier really ran (classification was NOT disabled) …
+        self.assertEqual(len(self.classifier_seen), 1)
+        # … but its development verdict created no worktree: the run
+        # executed directly in the repo and the file landed there.
+        agent = self._agent()
+        self.assertIsNone(getattr(agent, "_wt", None))
+        self.assertEqual(self.printer.events_of_type("worktree_created"), [])
+        self.assertTrue((self.repo / "prewarm-written.txt").is_file())
         results = self.printer.events_of_type("result")
         self.assertTrue(results and results[-1].get("success") is not False)

@@ -1514,11 +1514,15 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         branch without ever touching the original one.
 
         Falls back to direct execution (no worktree) when:
-        - ``use_worktree`` kwarg is explicitly ``False``
+        - ``use_worktree`` kwarg is explicitly ``False`` — this pin is
+          authoritative: a classification verdict never re-enables the
+          worktree (a channel dispatch classifies for its system
+          prompt while running in a scratch directory that must never
+          get a worktree)
         - The pre-run task classifier is enabled and reports the task
           is not a development task (``is_development=False``); the
-          verdict likewise FORCES a worktree when it reports
-          ``is_development=True`` (see
+          verdict can only DEMOTE a requested worktree run to direct
+          execution, never promote a pinned-off one (see
           ``kiss.agents.sorcar.task_classifier``)
         - ``work_dir`` is not inside a git repo
         - The repo has no commits
@@ -1571,6 +1575,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # verdict, the task's ``is_development`` decides worktree
         # isolation for THIS run — a development task edits files and
         # gets a worktree; a non-development task does not.  The
+        # verdict only ever DEMOTES: a caller's explicit
+        # ``use_worktree=False`` stays authoritative (a channel
+        # dispatch classifies for its system prompt while running in a
+        # scratch directory that must never get a worktree — a dirty
+        # repo enclosing that directory once cost a 65 GB copy).  The
         # persisted ``is_worktree`` setting is never modified.  A
         # disabled or failed classification keeps the caller's
         # ``use_worktree`` value.  The reset guards against stale state
@@ -1585,7 +1594,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             arguments=kwargs.get("arguments"),
         )
         if classification is not None:
-            use_worktree = classification.is_development
+            use_worktree = use_worktree and classification.is_development
 
         wt_work_dir: Path | None = None
         if use_worktree:

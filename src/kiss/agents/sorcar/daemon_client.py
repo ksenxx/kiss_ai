@@ -565,7 +565,10 @@ def run(
             classification (``kiss.agents.sorcar.task_classifier``),
             which runs one lightweight non-agentic LLM call before the
             task to pick the system prompt (lite vs. full) and decide
-            worktree isolation for the run.  ``True`` forces
+            worktree isolation for the run (the verdict can only
+            demote a run that asked for a worktree to direct
+            execution; a *use_worktree* of ``False`` passed here is
+            never overridden).  ``True`` forces
             classification on, ``False`` skips it — the run then keeps
             the *use_worktree* value passed here and the full system
             prompt — and ``None`` (the default) uses the daemon's

@@ -9,9 +9,11 @@ generation on the run's own model BEFORE a Sorcar agent starts a task.
 The structured JSON verdict ``{"is_simple": ..., "is_development": ...}``
 selects the system prompt (``SYSTEM_LITE.md`` for simple tasks,
 ``SYSTEM.md`` otherwise) and decides worktree isolation for that run
-(``is_development`` becomes the effective ``use_worktree``) without
-touching the persisted ``is_worktree`` setting.  Tasks that only
-request git operations are never development.
+(``use_worktree and is_development`` becomes the effective
+``use_worktree`` — the verdict can only demote a requested worktree
+run, never promote one the caller pinned off) without touching the
+persisted ``is_worktree`` setting.  Tasks that only request git
+operations are never development.
 
 The classification tests call real LLMs (a cheap model) — no mocks.
 The verdict-cache tests use the real local OpenAI-compatible stand-in
@@ -1101,10 +1103,44 @@ def test_non_development_task_skips_worktree(
 
 @live_api
 @requires_anthropic
-def test_development_task_forces_worktree(env: IsolatedKissHome) -> None:
-    """is_development=True turns worktree isolation on for the run,
-    even when the caller asked for none."""
-    agent = WorktreeSorcarAgent("clf-wt-force")
+def test_development_task_keeps_requested_worktree(
+    env: IsolatedKissHome,
+) -> None:
+    """is_development=True keeps worktree isolation on for a run whose
+    caller asked for worktrees (the default)."""
+    agent = WorktreeSorcarAgent("clf-wt-keep")
+    printer = _RaisingPrinter(RuntimeError("stop-after-decision"))
+    result = agent.run(
+        prompt_template=_DEV_TASK,
+        model_name=MODEL,
+        work_dir=str(env.repo),
+        printer=printer,
+    )
+    payload = yaml.safe_load(result)
+    assert payload["success"] is False
+    assert len(printer.events_of_type("worktree_created")) == 1
+    assert agent._wt is not None
+    # The persisted setting was never touched by the runtime decision.
+    from kiss.core.vscode_config import load_config
+
+    assert load_config()["is_worktree"] is True
+    agent.discard()
+    assert agent._wt is None
+
+
+@live_api
+@requires_anthropic
+def test_development_verdict_cannot_override_worktree_pin(
+    env: IsolatedKissHome,
+) -> None:
+    """An explicit use_worktree=False beats an is_development verdict.
+
+    The channel-dispatch guarantee: ``run_agent`` pins
+    ``use_worktree=False`` for a channel sub-task running in a scratch
+    directory while leaving classification enabled, so the verdict may
+    pick the system prompt but must never create a worktree there.
+    """
+    agent = WorktreeSorcarAgent("clf-wt-pinned")
     printer = _RaisingPrinter(RuntimeError("stop-after-decision"))
     result = agent.run(
         prompt_template=_DEV_TASK,
@@ -1115,14 +1151,14 @@ def test_development_task_forces_worktree(env: IsolatedKissHome) -> None:
     )
     payload = yaml.safe_load(result)
     assert payload["success"] is False
-    assert len(printer.events_of_type("worktree_created")) == 1
-    assert agent._wt is not None
-    # The persisted setting was never touched by the runtime override.
-    from kiss.core.vscode_config import load_config
-
-    assert load_config()["is_worktree"] is True
-    agent.discard()
+    # The classifier really ran and returned a development verdict
+    # (the run memoises it) …
+    verdict = cached_classification(_DEV_TASK, MODEL)
+    assert verdict is not None
+    assert verdict.is_development is True
+    # … but the pin is authoritative: no worktree was created.
     assert agent._wt is None
+    assert printer.events_of_type("worktree_created") == []
 
 
 @live_api

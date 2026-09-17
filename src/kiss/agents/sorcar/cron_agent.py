@@ -514,13 +514,13 @@ def _run_prompt_job(
         # any project git lifecycle: no ``extension_agent_path`` is
         # passed here, so this module's ``use_worktree()`` /
         # ``auto_commit()`` getters do NOT apply and the values must be
-        # pinned on the wire.  ``classify_tasks=False`` is pinned too,
-        # because an ``is_development`` classification verdict
-        # overrides an explicit ``use_worktree=False``
-        # (``WorktreeSorcarAgent.run``) — a scheduled job whose prompt
-        # looked like development work used to get a worktree of
-        # whatever git repository happened to enclose the scratch
-        # directory, on every single run.
+        # pinned on the wire.  ``classify_tasks=False`` is pinned too:
+        # cron is the one dispatch mode that never classifies — an
+        # unattended scheduled automation runs repeatedly, and a
+        # classifier round trip on every run buys nothing a one-off
+        # dispatch would not already get.  (The worktree pin alone is
+        # safe regardless: a classification verdict can only demote a
+        # requested worktree run, never promote a pinned-off one.)
         result = daemon_client.run(
             preamble + str(job.get("prompt", "")),
             work_dir=str(work_dir),
