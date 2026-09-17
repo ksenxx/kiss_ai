@@ -13,13 +13,22 @@ from __future__ import annotations
 import base64
 import json
 import stat
+import threading
+from http.server import BaseHTTPRequestHandler
+from typing import Any, cast
 
+import google_auth_httplib2  # type: ignore[import-untyped]
+import httplib2  # type: ignore[import-untyped]
 import pytest
+from googleapiclient.discovery import build
 
+from kiss.agents.third_party_agents._backend_utils import (
+    ThreadedHTTPServer,
+    stop_http_server,
+)
 from kiss.agents.third_party_agents.gmail_agent import (
     GmailAgent,
     GmailChannelBackend,
-    _build_service,
     _credentials_path,
     _extract_attachments,
     _extract_body,
@@ -179,17 +188,100 @@ class TestBodyExtraction:
         assert result[0]["filename"] == "image.png"
 
 
-def _make_error_backend() -> GmailChannelBackend:
-    """Create a GmailChannelBackend with invalid credentials for error testing.
+class _GmailErrorHandler(BaseHTTPRequestHandler):
+    """Replies 401 with a Gmail-shaped JSON error body to every request."""
 
-    Uses the real googleapiclient to test error handling — API calls
-    will fail with HttpError because the token is invalid.
+    def _reply(self) -> None:
+        cast(_GmailErrorServer, self.server).requests.append(
+            {"method": self.command, "path": self.path}
+        )
+        body = json.dumps(
+            {
+                "error": {
+                    "code": 401,
+                    "message": "Invalid Credentials",
+                    "errors": [
+                        {
+                            "message": "Invalid Credentials",
+                            "domain": "global",
+                            "reason": "authError",
+                        }
+                    ],
+                    "status": "UNAUTHENTICATED",
+                }
+            }
+        ).encode("utf-8")
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json; charset=UTF-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        """Reply 401 to GET requests."""
+        self._reply()
+
+    def do_POST(self) -> None:  # noqa: N802
+        """Reply 401 to POST requests."""
+        self._reply()
+
+    def do_PUT(self) -> None:  # noqa: N802
+        """Reply 401 to PUT requests."""
+        self._reply()
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        """Reply 401 to PATCH requests."""
+        self._reply()
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        """Reply 401 to DELETE requests."""
+        self._reply()
+
+    def log_message(self, *args: Any) -> None:  # type: ignore[override]
+        pass
+
+
+class _GmailErrorServer(ThreadedHTTPServer):
+    """ThreadedHTTPServer that records every request it receives."""
+
+    def __init__(self, address: tuple[str, int]) -> None:
+        super().__init__(address, _GmailErrorHandler)
+        self.requests: list[dict[str, str]] = []
+
+
+@pytest.fixture()
+def gmail_error_server():
+    """Start a local 401-only Gmail endpoint; yield (base_url, server)."""
+    server = _GmailErrorServer(("127.0.0.1", 0))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}/"
+    try:
+        yield base_url, server
+    finally:
+        stop_http_server(server, thread)
+
+
+def _make_error_backend(base_url: str) -> GmailChannelBackend:
+    """Create a GmailChannelBackend whose invalid token is rejected locally.
+
+    Uses the real googleapiclient against a local server that answers 401
+    for every request, so API calls fail like they do on an invalid token
+    without ever reaching the real gmail.googleapis.com (and with a bounded
+    transport timeout, so a black-holed network cannot hang the tests).
     """
     from google.oauth2.credentials import Credentials
 
     creds = Credentials(token="invalid-token-for-test")
+    http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=10))
     backend = GmailChannelBackend()
-    backend._service = _build_service(creds)
+    backend._service = build(
+        "gmail",
+        "v1",
+        http=http,
+        static_discovery=True,
+        client_options={"api_endpoint": base_url},
+    )
     return backend
 
 
@@ -216,15 +308,17 @@ class TestGmailTools:
 
     @pytest.mark.parametrize("tool_name,kwargs", _GMAIL_TOOL_ERROR_CASES)
     def test_tool_returns_error_on_invalid_token(
-        self, tool_name: str, kwargs: dict
+        self, gmail_error_server, tool_name: str, kwargs: dict
     ) -> None:
         """Every Gmail tool returns {ok: false, error: ...} with invalid credentials."""
-        backend = _make_error_backend()
+        base_url, server = gmail_error_server
+        backend = _make_error_backend(base_url)
         tools = backend.get_tool_methods()
         fn = next(t for t in tools if t.__name__ == tool_name)
         result = json.loads(fn(**kwargs))
         assert result["ok"] is False
         assert "error" in result
+        assert server.requests, "tool call never reached the local Gmail endpoint"
 
 
 class TestGmailAgent:
@@ -281,15 +375,17 @@ class TestGmailAgent:
         result = clear()
         assert "cleared" in result.lower()
 
-    def test_check_auth_with_invalid_token(self) -> None:
+    def test_check_auth_with_invalid_token(self, gmail_error_server) -> None:
         """check_gmail_auth with an invalid token returns an error."""
+        base_url, server = gmail_error_server
         agent = GmailAgent()
-        agent._backend = _make_error_backend()
+        agent._backend = _make_error_backend(base_url)
         tools = agent._get_tools()
         check = next(t for t in tools if t.__name__ == "check_gmail_auth")
         result = json.loads(check())
         assert result["ok"] is False
         assert "error" in result
+        assert server.requests, "check_gmail_auth never reached the local Gmail endpoint"
 
 
 class TestCLIMain:

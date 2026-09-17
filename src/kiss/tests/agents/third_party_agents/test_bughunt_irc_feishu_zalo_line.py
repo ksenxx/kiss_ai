@@ -173,18 +173,20 @@ class TestIRCBugs:
         assert result["ok"] is True, result
         self.server.send_line(":alice!u@h PRIVMSG #ch ::) hello")
         self.server.send_line(":srv NOTICE kissbot :please use PRIVMSG to chat")
+        # Sentinel PRIVMSG on the same TCP connection: FIFO ordering guarantees
+        # the NOTICE was processed before the sentinel is queued, so once the
+        # sentinel arrives we know the NOTICE was (correctly) not enqueued.
+        self.server.send_line(":bob!u@h PRIVMSG #ch :sentinel")
         messages: list = []
         deadline = time.time() + 5.0
-        while time.time() < deadline and not messages:
-            messages, _ = self.backend.poll_messages("", "")
+        while time.time() < deadline and len(messages) < 2:
+            more, _ = self.backend.poll_messages("", "")
+            messages.extend(more)
             time.sleep(0.1)
-        time.sleep(0.5)
-        more, _ = self.backend.poll_messages("", "")
-        messages.extend(more)
-        assert len(messages) == 1, messages
+        assert [m["text"] for m in messages] == [":) hello", "sentinel"], messages
         assert messages[0]["user"] == "alice"
         assert messages[0]["target"] == "#ch"
-        assert messages[0]["text"] == ":) hello"
+        assert messages[1]["user"] == "bob"
 
     def test_send_message_unconnected_raises(self) -> None:
         """(D) send_message must raise when not connected so retries work."""

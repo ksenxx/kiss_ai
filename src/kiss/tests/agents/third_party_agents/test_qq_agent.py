@@ -37,11 +37,23 @@ from kiss.agents.third_party_agents.qq_agent import (
 _SECRET = "kiss-qq-test-secret"
 
 
-def _free_port() -> int:
-    """Reserve and return a free TCP port."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+def _connect_on_ephemeral_port(backend: QQChannelBackend) -> int:
+    """Connect through the PUBLIC ``connect()`` on an ephemeral port.
+
+    Rewrites the persisted config's port to ``"0"`` (``authenticate_qq``
+    deliberately rejects port 0, so the test adjusts the stored config
+    directly), then drives the public ``connect()`` end to end — config
+    loading, ``_apply_config`` and the webhook server start included —
+    and reads the OS-assigned port back from the bound server (no
+    reserve-close-rebind race).
+    """
+    cfg = _config.load()
+    assert cfg is not None
+    cfg["port"] = "0"
+    _config.save(cfg)
+    assert backend.connect() is True
+    assert backend._webhook_server is not None
+    return int(backend._webhook_server.server_address[1])
 
 
 def _test_key() -> Ed25519PrivateKey:
@@ -199,10 +211,9 @@ def test_send_messages_with_cached_token() -> None:
 
 def test_webhook_validation_challenge() -> None:
     """The op-13 challenge response verifies with the derived public key."""
-    port = _free_port()
-    _authenticated_agent(api_base="http://127.0.0.1:1/", port=str(port))
+    _authenticated_agent(api_base="http://127.0.0.1:1/")
     backend = QQChannelBackend()
-    assert backend.connect() is True
+    port = _connect_on_ephemeral_port(backend)
     try:
         challenge = json.dumps(
             {"op": 13, "d": {"plain_token": "PT0kEn", "event_ts": "1712345678"}}
@@ -230,10 +241,9 @@ def test_webhook_validation_challenge() -> None:
 
 def test_webhook_signed_events_and_bad_signature() -> None:
     """Signed events are queued and polled; bad signatures get 401."""
-    port = _free_port()
-    _authenticated_agent(api_base="http://127.0.0.1:1/", port=str(port))
+    _authenticated_agent(api_base="http://127.0.0.1:1/")
     backend = QQChannelBackend()
-    assert backend.connect() is True
+    port = _connect_on_ephemeral_port(backend)
     try:
         url = f"http://127.0.0.1:{port}/"
 
@@ -325,10 +335,9 @@ def test_webhook_signed_events_and_bad_signature() -> None:
 
 def test_webhook_bad_content_length() -> None:
     """Missing/negative/non-decimal Content-Length gets 400; oversized gets 413."""
-    port = _free_port()
-    _authenticated_agent(api_base="http://127.0.0.1:1/", port=str(port))
+    _authenticated_agent(api_base="http://127.0.0.1:1/")
     backend = QQChannelBackend()
-    assert backend.connect() is True
+    port = _connect_on_ephemeral_port(backend)
     try:
         assert _raw_post_status(port, "") == 400
         assert _raw_post_status(port, "Content-Length: -5\r\n") == 400

@@ -50,7 +50,6 @@ import base64
 import json
 import os
 import threading
-import time
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -70,7 +69,6 @@ from kiss.agents.third_party_agents.muse_auth import __main__ as muse_cli
 from kiss.agents.third_party_agents.muse_auth._common import (
     PROTOCOL_VERSION,
     muse_auth_dir,
-    socket_path,
 )
 from kiss.agents.third_party_agents.muse_auth.client import (
     MuseAuthError,
@@ -80,7 +78,6 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     ensure_daemon,
     grant,
     mint_surrogate,
-    stop_daemon,
     store_credentials,
     vault_has_credentials,
 )
@@ -92,6 +89,11 @@ from kiss.agents.third_party_agents.twitch_agent import TwitchChannelBackend
 from kiss.agents.third_party_agents.twitch_agent import _config as twitch_config
 from kiss.agents.third_party_agents.zalo_agent import ZaloChannelBackend
 from kiss.agents.third_party_agents.zalo_agent import _config as zalo_config
+from kiss.tests.agents.third_party_agents.muse_test_utils import (
+    auth_tools,
+    setup_muse_env,
+    teardown_muse_env,
+)
 
 _REAL_MM_TOKEN = "mm-real-secret"
 _REAL_TWITCH_TOKEN = "twitch-real-secret"
@@ -385,9 +387,6 @@ def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     BlueBubbles, and Synology deliberately get none, so their tests
     prove the enrollment-time origin binding.
     """
-    monkeypatch.setenv("KISS_MUSE_AUTH", "1")
-    directory = muse_auth_dir()
-    directory.mkdir(parents=True, exist_ok=True)
     policy = {
         "defaults": {"read": "allow", "write": "ask"},
         "services": {
@@ -396,17 +395,9 @@ def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
             "line": {"extra_hosts": ["127.0.0.1"]},
         },
     }
-    (directory / "policy.json").write_text(json.dumps(policy))
+    setup_muse_env(monkeypatch, policy)
     yield isolated_kiss_home
-    stop_daemon()
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and socket_path().exists():
-        time.sleep(0.05)
-
-
-def _auth_tools(agent: Any) -> dict[str, Any]:
-    """Return an agent's auth tools keyed by function name."""
-    return {tool.__name__: tool for tool in agent._get_auth_tools()}
+    teardown_muse_env()
 
 
 # ---------------------------------------------------------------- Mattermost
@@ -481,7 +472,7 @@ def test_mattermost_muse_authenticate_rotation_rollback_clear(
     from kiss.agents.third_party_agents.mattermost_agent import MattermostAgent
 
     agent = MattermostAgent()
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     result = json.loads(
         tools["authenticate_mattermost"](
             "127.0.0.1", _REAL_MM_TOKEN, port=api_server.port, scheme="http"
@@ -578,7 +569,7 @@ def test_twitch_muse_authenticate_rollback_and_clear(
 
     agent = TwitchAgent()
     agent._backend._helix_base = api_server.base("/helix")
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     result = json.loads(
         tools["authenticate_twitch"]("cid1", "cs-secret", _REAL_TWITCH_TOKEN, "kisscaster")
     )
@@ -673,7 +664,7 @@ def test_zalo_muse_authenticate_rollback_and_clear(
 
     monkeypatch.setenv("ZALO_API_BASE", api_server.base("/v2.0/oa"))
     agent = ZaloAgent()
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     result = json.loads(tools["authenticate_zalo"](_REAL_ZALO_TOKEN, oa_id="OA1"))
     assert result["ok"] is True
     assert vault_has_credentials("zalo")
@@ -734,7 +725,7 @@ def test_line_muse_authenticate_rollback_and_clear(
 
     monkeypatch.setenv("LINE_API_BASE", api_server.base(""))
     agent = LineAgent()
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     result = json.loads(tools["authenticate_line"](_REAL_LINE_TOKEN, "cs1"))
     assert result["ok"] is True
     assert vault_has_credentials("line")
@@ -827,7 +818,7 @@ def test_nextcloud_muse_authenticate_rollback_and_clear(
     from kiss.agents.third_party_agents.nextcloud_talk_agent import NextcloudTalkAgent
 
     agent = NextcloudTalkAgent()
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     result = json.loads(
         tools["authenticate_nextcloud"](api_server.base(), "bot", _REAL_NC_PASSWORD)
     )
@@ -1038,7 +1029,7 @@ def test_synology_muse_authenticate_and_clear(
     from kiss.agents.third_party_agents.synology_chat_agent import SynologyChatAgent
 
     agent = SynologyChatAgent()
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     webhook = api_server.base(f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}")
     result = json.loads(tools["authenticate_synology"](webhook, token="verify1"))
     assert result["ok"] is True
@@ -1257,7 +1248,7 @@ def test_legacy_mode_unchanged(
 
     line_config.clear()
     agent = LineAgent()
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     result = json.loads(tools["authenticate_line"]("tok"))
     assert result["ok"] is False
     assert line_config.load() is None
@@ -1497,7 +1488,7 @@ def test_bluebubbles_agent_init_and_clear_tool(
     agent = BlueBubblesAgent()
     assert agent._backend._muse is True
     assert vault_has_credentials("bluebubbles")
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     assert "cleared" in tools["clear_bluebubbles_auth"]()
     assert not vault_has_credentials("bluebubbles")
     assert agent._backend._muse is False
@@ -1631,7 +1622,7 @@ def test_synology_tokenless_rotation_never_revives_vault_token(
     from kiss.agents.third_party_agents.synology_chat_agent import SynologyChatAgent
 
     agent = SynologyChatAgent()
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     webhook = api_server.base(f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}")
     assert json.loads(tools["authenticate_synology"](webhook))["ok"] is True
     assert vault_has_credentials("synology")
@@ -1731,7 +1722,7 @@ def test_nextcloud_ocs_error_envelope_is_rejected(
     clear_credentials("nextcloud")
     nc_config.clear()
     agent = NextcloudTalkAgent()
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     result = json.loads(
         tools["authenticate_nextcloud"](api_server.base(), "bot", "nc-bad-invalid")
     )

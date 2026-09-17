@@ -200,7 +200,7 @@
            files as an expandable tree (listDir -> dirListing).  A file
            click goes through openFile, so it opens as a content tab. -->
       <div id="sidebar-explorer-panel" class="sidebar-section sidebar-tab-panel sidebar-view" data-view="explorer" role="tabpanel" aria-labelledby="activity-explorer" hidden>
-        <div class="sidebar-hdr sidebar-hdr-row"><span>Explorer</span><button type="button" id="explorer-refresh" class="sidebar-hdr-btn" title="Refresh explorer" aria-label="Refresh explorer"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg></button></div>
+        <div class="sidebar-hdr sidebar-hdr-row"><span>Explorer</span><button type="button" id="explorer-pick-folder" class="sidebar-hdr-btn" title="Open Folder..." aria-label="Open Folder..."><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v6M9 14h6"/></svg></button><button type="button" id="explorer-refresh" class="sidebar-hdr-btn" title="Refresh explorer" aria-label="Refresh explorer"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg></button></div>
         <div id="explorer-tree" class="explorer-tree" role="tree" aria-label="Workspace files">
           <div class="sidebar-empty">No workspace folder</div>
         </div>
@@ -466,6 +466,7 @@
   <script{{NONCE_ATTR}} src="{{API_SRC}}"></script>
   <script{{NONCE_ATTR}} src="{{PANEL_COPY_SRC}}"></script>
   <script{{NONCE_ATTR}} src="{{CTX_MENU_SRC}}"></script>
+  <script{{NONCE_ATTR}} src="{{TREE_MENU_SRC}}"></script>
   <script{{NONCE_ATTR}} src="{{MAIN_SRC}}"></script>
   <script{{NONCE_ATTR}}>window.__VOICE__ = {{VOICE_CONFIG}};</script>
   <script{{NONCE_ATTR}} src="{{VOICE_SRC}}"></script>

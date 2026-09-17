@@ -59,7 +59,6 @@ import json
 import os
 import socket
 import threading
-import time
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -77,7 +76,6 @@ from kiss.agents.third_party_agents.muse_auth import __main__ as muse_cli
 from kiss.agents.third_party_agents.muse_auth._common import (
     builtin_hosts,
     muse_auth_dir,
-    socket_path,
 )
 from kiss.agents.third_party_agents.muse_auth.client import (
     MuseBoundarySession,
@@ -90,6 +88,12 @@ from kiss.agents.third_party_agents.muse_auth.client import (
 )
 from kiss.agents.third_party_agents.ntfy_agent import NtfyChannelBackend
 from kiss.agents.third_party_agents.ntfy_agent import _config as ntfy_config
+from kiss.tests.agents.third_party_agents.muse_test_utils import (
+    auth_tools,
+    setup_muse_env,
+    teardown_muse_env,
+    wait_daemon_stopped,
+)
 
 _REAL_DISCORD_TOKEN = "discord-real-secret"
 _REAL_HA_TOKEN = "ha-real-secret"
@@ -300,9 +304,6 @@ def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     (their real hosts are fixed); Home Assistant and ntfy deliberately
     get none, so their tests prove the enrollment-time host extension.
     """
-    monkeypatch.setenv("KISS_MUSE_AUTH", "1")
-    directory = muse_auth_dir()
-    directory.mkdir(parents=True, exist_ok=True)
     policy = {
         "defaults": {"read": "allow", "write": "ask"},
         "services": {
@@ -310,12 +311,9 @@ def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
             "govee": {"extra_hosts": ["127.0.0.1"]},
         },
     }
-    (directory / "policy.json").write_text(json.dumps(policy))
+    setup_muse_env(monkeypatch, policy)
     yield isolated_kiss_home
-    stop_daemon()
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and socket_path().exists():
-        time.sleep(0.05)
+    teardown_muse_env()
 
 
 def _discord_backend(api_server: _DeviceApiServer) -> DiscordChannelBackend:
@@ -436,7 +434,7 @@ def test_discord_authenticate_rotation_rollback_clear(
     )
     agent = DiscordAgent()
     assert agent._backend._bot_token == ""
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     assert "Not authenticated" in tools["check_discord_auth"]()
 
     # Enrollment validates through the boundary and never writes the
@@ -542,7 +540,7 @@ def test_homeassistant_authenticate_and_clear_tools(
 
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     agent = HomeAssistantAgent()
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     assert "Not configured" in tools["check_homeassistant_auth"]()
     assert "cannot be empty" in tools["authenticate_homeassistant"]("", "")
 
@@ -616,7 +614,7 @@ def test_ntfy_tokenless_stays_legacy_and_rotation(
 
     server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     agent = NtfyAgent()
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     assert "Not configured" in tools["check_ntfy_auth"]()
 
     # Tokenless configuration: legacy direct path, no vault, no grants.
@@ -693,9 +691,7 @@ def test_govee_header_kind_credential_and_action_classes(
 
     # Surrogates die with the daemon; the CLI re-mints and retries once.
     stop_daemon()
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and socket_path().exists():
-        time.sleep(0.05)
+    wait_daemon_stopped()
     state_after_restart = govee.state({"sku": "H6008", "device": "AA:BB"})
     assert state_after_restart["data"]["device"] == "AA:BB"
     assert api_server.header("Govee-API-Key") == _REAL_GOVEE_KEY
@@ -890,7 +886,7 @@ def test_discord_legacy_mode_unchanged(
     assert backend._connection_info == "No Discord token found."
 
     agent = DiscordAgent()
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     assert json.loads(tools["authenticate_discord"](_REAL_DISCORD_TOKEN))["ok"] is True
     # Legacy mode stores the plaintext token and sends it directly.
     assert json.loads(discord_config.path.read_text())["bot_token"] == _REAL_DISCORD_TOKEN
@@ -940,7 +936,7 @@ def test_homeassistant_no_credential_and_bad_host(
     # front (before any vault or config change), not after a partial
     # migration.
     agent = HomeAssistantAgent()
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     result = tools["authenticate_homeassistant"]("http://bad!:1", "tok")
     assert "http(s):// URL with a hostname" in result
     assert not vault_has_credentials("homeassistant")
@@ -969,7 +965,7 @@ def test_ntfy_enrollment_host_helpers_and_bad_host(muse_env: Path) -> None:
     assert _insecure_extra_hosts("http://127.0.0.1:99") == ()
 
     agent = NtfyAgent()
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     result = tools["authenticate_ntfy"]("t1", "http://bad!:1", "tok")
     assert "http(s):// URL with a hostname" in result
     assert not vault_has_credentials("ntfy")
@@ -1022,7 +1018,7 @@ def test_failed_enrollment_is_transactional(
 
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     ha_agent = HomeAssistantAgent()
-    ha_tools = {t.__name__: t for t in ha_agent._get_auth_tools()}
+    ha_tools = auth_tools(ha_agent)
     assert json.loads(ha_tools["authenticate_homeassistant"](base_url, "ha-good"))["ok"] is True
 
     # The daemon rejects a malformed token (embedded newline) at the
@@ -1035,7 +1031,7 @@ def test_failed_enrollment_is_transactional(
     assert api_server.header("Authorization") == "Bearer ha-good"
 
     ntfy_agent_obj = NtfyAgent()
-    ntfy_tools = {t.__name__: t for t in ntfy_agent_obj._get_auth_tools()}
+    ntfy_tools = auth_tools(ntfy_agent_obj)
     assert json.loads(ntfy_tools["authenticate_ntfy"]("t1", base_url, "tk-good"))["ok"] is True
     failed = json.loads(ntfy_tools["authenticate_ntfy"]("t1", base_url, "tk\nevil"))
     assert failed["ok"] is False
@@ -1069,14 +1065,16 @@ def test_boundary_ignores_ambient_proxy_env(
     server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     ntfy_config.save({"topic": "t1", "server": server_url, "token": _REAL_NTFY_TOKEN})
     backend = NtfyChannelBackend()
-    assert backend.connect() and backend._muse
-    polled = json.loads(backend.poll_topic())
-    assert polled["ok"] is True
-    assert api_server.header("Authorization") == f"Bearer {_REAL_NTFY_TOKEN}"
-    stop_daemon()
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and socket_path().exists():
-        time.sleep(0.05)
+    try:
+        assert backend.connect() and backend._muse
+        polled = json.loads(backend.poll_topic())
+        assert polled["ok"] is True
+        assert api_server.header("Authorization") == f"Bearer {_REAL_NTFY_TOKEN}"
+    finally:
+        # Not muse_env: stop the daemon even when an assert above fails,
+        # or the detached subprocess outlives the test session.
+        stop_daemon()
+        wait_daemon_stopped()
 
 
 def test_rotation_invalidates_old_surrogates(
@@ -1093,7 +1091,7 @@ def test_rotation_invalidates_old_surrogates(
     assert old_backend.connect()
 
     agent = DiscordAgent()
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     assert json.loads(tools["authenticate_discord"]("tok-new"))["ok"] is True
 
     # The old backend's surrogate is from the previous generation: it
@@ -1314,13 +1312,13 @@ def test_authenticate_rejects_malformed_ports(muse_env: Path) -> None:
     from kiss.agents.third_party_agents.homeassistant_agent import HomeAssistantAgent
     from kiss.agents.third_party_agents.ntfy_agent import NtfyAgent
 
-    ha_tools = {t.__name__: t for t in HomeAssistantAgent()._get_auth_tools()}
+    ha_tools = auth_tools(HomeAssistantAgent())
     assert "valid port" in ha_tools["authenticate_homeassistant"](
         "http://localhost:not-a-port", "tok"
     )
     assert not vault_has_credentials("homeassistant")
 
-    ntfy_tools = {t.__name__: t for t in NtfyAgent()._get_auth_tools()}
+    ntfy_tools = auth_tools(NtfyAgent())
     assert "valid port" in ntfy_tools["authenticate_ntfy"]("t1", "http://localhost:99999", "tok")
     assert not vault_has_credentials("ntfy")
 
@@ -1330,7 +1328,7 @@ def test_authenticate_rejects_malformed_ports(muse_env: Path) -> None:
     from kiss.agents.third_party_agents.muse_auth.client import store_credentials
 
     store_credentials("firecrawl", {"kind": "bearer", "token": "fc-old"}, [])
-    fc_tools = {t.__name__: t for t in FirecrawlAgent()._get_auth_tools()}
+    fc_tools = auth_tools(FirecrawlAgent())
     assert "valid port" in fc_tools["authenticate_firecrawl"]("fc-new", "http://host:not-a-port")
     assert vault_has_credentials("firecrawl")
     assert not firecrawl_config.path.exists()
@@ -1440,7 +1438,7 @@ def test_valid_http_url_rejects_userinfo_and_accepts_ipv4_mapped(muse_env: Path)
     # Userinfo is refused before any state change: no password reaches
     # config.json and nothing is enrolled.
     assert not valid_http_url("http://alice:secret@127.0.0.1:9")
-    tools = {t.__name__: t for t in HomeAssistantAgent()._get_auth_tools()}
+    tools = auth_tools(HomeAssistantAgent())
     result = tools["authenticate_homeassistant"]("http://alice:secret@127.0.0.1:9", "tok")
     assert "http(s):// URL" in result
     assert not ha_config.path.exists()
@@ -1637,7 +1635,7 @@ def test_authenticate_accepts_terminal_dot_host(
     # must be accepted (canonicalized to 127.0.0.1), not rejected.
     port = api_server.server_address[1]
     agent = HomeAssistantAgent()
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     result = json.loads(
         tools["authenticate_homeassistant"](f"http://127.0.0.1.:{port}", "ha-fqdn")
     )
@@ -1674,7 +1672,7 @@ def test_wiring_failure_leaves_agents_constructible(
     assert "wiring failed" in ntfy_agent_obj._backend._connection_info
     # The check tool is honest about the broken credential rather than
     # reporting the topic as authenticated, and connect() fails closed.
-    ntfy_tools = {t.__name__: t for t in ntfy_agent_obj._get_auth_tools()}
+    ntfy_tools = auth_tools(ntfy_agent_obj)
     checked = json.loads(ntfy_tools["check_ntfy_auth"]())
     assert checked["ok"] is False and "wiring failed" in checked["error"]
     assert not NtfyChannelBackend().connect()
@@ -1685,12 +1683,12 @@ def test_authenticate_rejects_malformed_urls(muse_env: Path) -> None:
     from kiss.agents.third_party_agents.homeassistant_agent import HomeAssistantAgent
     from kiss.agents.third_party_agents.ntfy_agent import NtfyAgent
 
-    ha_tools = {t.__name__: t for t in HomeAssistantAgent()._get_auth_tools()}
+    ha_tools = auth_tools(HomeAssistantAgent())
     result = ha_tools["authenticate_homeassistant"]("homeassistant.local:8123", "tok")
     assert "http(s):// URL with a hostname" in result
     assert not vault_has_credentials("homeassistant")
 
-    ntfy_tools = {t.__name__: t for t in NtfyAgent()._get_auth_tools()}
+    ntfy_tools = auth_tools(NtfyAgent())
     result = ntfy_tools["authenticate_ntfy"]("t1", "ntfy.local:8080", "tok")
     assert "http(s):// URL with a hostname" in result
     assert not vault_has_credentials("ntfy")

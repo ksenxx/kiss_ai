@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
+from kiss.core import tool_interrupt
 
 _MAX_LINE_BYTES = 64 * 1024 * 1024
 """Read buffer limit for a single daemon event line.
@@ -79,6 +80,14 @@ class StopUnconfirmedTimeoutError(TimeoutError):
     workspace.  Callers that report the timeout onward — the
     ``run_agent`` dispatch — must not claim the task was stopped.
     """
+
+_TOOL_CALL_WAKE_SECONDS = 0.5
+"""Socket read wake-up interval while :func:`run` serves a tool call.
+
+The ``run_agent`` tool's panel has a Stop button; the wait polls the
+tool call's interrupt on every wake (``tool_interrupt.raise_if_interrupted``),
+so this bounds how long that button takes to act.
+"""
 
 _NO_DEADLINE_WAKE_SECONDS = 10.0
 """Socket read wake-up interval for a ``timeout=None`` wait.
@@ -556,7 +565,10 @@ def run(
             classification (``kiss.agents.sorcar.task_classifier``),
             which runs one lightweight non-agentic LLM call before the
             task to pick the system prompt (lite vs. full) and decide
-            worktree isolation for the run.  ``True`` forces
+            worktree isolation for the run (the verdict can only
+            demote a run that asked for a worktree to direct
+            execution; a *use_worktree* of ``False`` passed here is
+            never overridden).  ``True`` forces
             classification on, ``False`` skips it — the run then keeps
             the *use_worktree* value passed here and the full system
             prompt — and ``None`` (the default) uses the daemon's
@@ -752,6 +764,13 @@ def run(
         started = False
         stopping = False  # stop-on-timeout sent; awaiting confirmation
         timeout_msg = f"Task did not finish within {timeout} seconds"
+        # Inside a tool call (the run_agent dispatch) the wait wakes
+        # often enough for that call's Stop button to feel immediate.
+        wake_seconds = (
+            _TOOL_CALL_WAKE_SECONDS
+            if tool_interrupt.current_tool_call() is not None
+            else _NO_DEADLINE_WAKE_SECONDS
+        )
         while True:
             newline_at = recv_buf.find(b"\n", scanned)
             if newline_at < 0:
@@ -766,11 +785,16 @@ def run(
                     # misreport the task as failed — fail loudly
                     # instead.
                     raise _frame_limit_error()
+                # The calling task's tool-call panel Stop is honored
+                # cooperatively: every wake checks it (raising
+                # ToolCallInterrupted, which the finally below turns
+                # into a stop of the dispatched task).
+                tool_interrupt.raise_if_interrupted()
                 if deadline is None:
                     # No deadline: wake periodically so an injected
                     # abort (see _NO_DEADLINE_WAKE_SECONDS) can be
                     # delivered; the timeout is retried, not an error.
-                    sock.settimeout(_NO_DEADLINE_WAKE_SECONDS)
+                    sock.settimeout(wake_seconds)
                 else:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -826,7 +850,12 @@ def run(
                             # place a stored result may be returned).
                             raise StopUnconfirmedTimeoutError(timeout_msg)
                         raise TimeoutError(timeout_msg)
-                    sock.settimeout(remaining)
+                    # Capped like the no-deadline wait: an injected
+                    # abort (the calling task's Stop) cannot land inside
+                    # ``recv``, and a silent daemon would otherwise hold
+                    # it back — and the cooperative check above — for
+                    # the whole *remaining*.
+                    sock.settimeout(min(remaining, wake_seconds))
                 try:
                     chunk = sock.recv(65536)
                 except TimeoutError:

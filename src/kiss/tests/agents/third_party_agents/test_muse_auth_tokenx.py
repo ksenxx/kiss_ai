@@ -115,6 +115,12 @@ from kiss.agents.third_party_agents.muse_auth.client import (
 from kiss.agents.third_party_agents.telegram_agent import TelegramAgent, TelegramChannelBackend
 from kiss.agents.third_party_agents.telegram_agent import _config as tg_config
 from kiss.agents.third_party_agents.telegram_agent import _make_backend as tg_make_backend
+from kiss.tests.agents.third_party_agents.muse_test_utils import (
+    auth_tools,
+    setup_muse_env,
+    teardown_muse_env,
+    wait_daemon_stopped,
+)
 
 _REAL_TG_TOKEN = "7000000001:AAtelegram-real-secret_x"
 _REAL_MS_SECRET = "msteams-real-client-secret"
@@ -399,9 +405,6 @@ def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     port — the redirect tests rely on the second emulator's different
     port being a different, but still allowlisted, origin).
     """
-    monkeypatch.setenv("KISS_MUSE_AUTH", "1")
-    directory = muse_auth_dir()
-    directory.mkdir(parents=True, exist_ok=True)
     policy = {
         "defaults": {"read": "allow", "write": "ask"},
         "services": {
@@ -412,17 +415,9 @@ def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
             "telegram": {"extra_hosts": ["127.0.0.1"]},
         },
     }
-    (directory / "policy.json").write_text(json.dumps(policy))
+    setup_muse_env(monkeypatch, policy)
     yield isolated_kiss_home
-    stop_daemon()
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and socket_path().exists():
-        time.sleep(0.05)
-
-
-def _auth_tools(agent: Any) -> dict[str, Any]:
-    """Return an agent's auth tools keyed by function name."""
-    return {tool.__name__: tool for tool in agent._get_auth_tools()}
+    teardown_muse_env()
 
 
 def _ms_env(monkeypatch: pytest.MonkeyPatch, api_server: _TokenXApiServer) -> None:
@@ -541,12 +536,12 @@ def test_msteams_bad_secret_fails_without_leaking_it(
 
 
 def test_msteams_token_endpoint_down_is_a_safe_error(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path,
+    api_server: _TokenXApiServer,
+    refusing_port: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A dead token endpoint reports class + URL, never form contents."""
-    refusing = _TokenXApiServer(("127.0.0.1", 0))
-    refusing_port = refusing.port
-    refusing.server_close()  # bound then closed: connections are refused
     monkeypatch.setenv("MSTEAMS_LOGIN_BASE", f"http://127.0.0.1:{refusing_port}")
     _ms_config()
     backend = _ms_backend(api_server)
@@ -618,7 +613,7 @@ def test_msteams_authenticate_tool_success_and_rollback(
     _ms_env(monkeypatch, api_server)
     agent = MSTeamsAgent.__new__(MSTeamsAgent)
     agent._backend = _ms_backend(api_server)
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     # Tenant/value validation happens before any state change.
     bad_tenant = tools["authenticate_msteams"]("bad/tenant", "c", "s")
     assert "tenant_id must be" in bad_tenant
@@ -934,7 +929,7 @@ def test_telegram_authenticate_tool_success_and_rollback(
     """authenticate_telegram validates via the boundary and rolls back."""
     agent = TelegramAgent.__new__(TelegramAgent)
     agent._backend = _tg_backend(api_server)
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     unsafe = json.loads(tools["authenticate_telegram"]("bad token"))
     assert unsafe["ok"] is False
     assert "URL-path-safe" in unsafe["error"]
@@ -1040,7 +1035,7 @@ def test_msteams_probe_policy_denial_and_nonjson_graph(
     assert backend.connect() is True
     agent = MSTeamsAgent.__new__(MSTeamsAgent)
     agent._backend = backend
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     # Sentinel reloads policy per decision: flip Graph reads to "ask".
     policy_path = muse_auth_dir() / "policy.json"
     policy = json.loads(policy_path.read_text())
@@ -1115,7 +1110,7 @@ def test_msteams_scrub_edge_cases_and_legacy_paths(
     # The legacy clear tool needs no daemon either.
     agent = MSTeamsAgent.__new__(MSTeamsAgent)
     agent._backend = backend
-    assert "cleared" in _auth_tools(agent)["clear_msteams_auth"]()
+    assert "cleared" in auth_tools(agent)["clear_msteams_auth"]()
     assert not ms_config.path.exists()
     assert not socket_path().exists()
 
@@ -1128,7 +1123,7 @@ def test_msteams_authenticate_unpinned_login_base_rolls_back(
     agent = MSTeamsAgent.__new__(MSTeamsAgent)
     agent._backend = _ms_backend(api_server)
     result = json.loads(
-        _auth_tools(agent)["authenticate_msteams"](_MS_TENANT, _MS_CLIENT_ID, _REAL_MS_SECRET)
+        auth_tools(agent)["authenticate_msteams"](_MS_TENANT, _MS_CLIENT_ID, _REAL_MS_SECRET)
     )
     assert result["ok"] is False
     assert "unpinned OAuth token endpoint" in result["error"]
@@ -1223,7 +1218,7 @@ def test_telegram_authenticate_without_precall_config(
     """A rejected token with no prior config leaves no config behind."""
     agent = TelegramAgent.__new__(TelegramAgent)
     agent._backend = _tg_backend(api_server)
-    rejected = json.loads(_auth_tools(agent)["authenticate_telegram"]("1:wrong-token"))
+    rejected = json.loads(auth_tools(agent)["authenticate_telegram"]("1:wrong-token"))
     assert rejected["ok"] is False
     assert not vault_has_credentials("telegram")
     assert not tg_config.path.exists()
@@ -1249,7 +1244,7 @@ def test_telegram_legacy_tools_without_sdk(
     agent = TelegramAgent()
     assert agent._backend._bot is not None
     agent._backend = backend
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     status = json.loads(tools["check_telegram_auth"]())
     assert status == {"ok": True, "username": "kissbot", "first_name": "KISS", "id": 99}
     rejected = json.loads(tools["authenticate_telegram"]("wrong-token"))
@@ -1291,11 +1286,11 @@ def test_daemon_refuses_a_tampered_unsafe_path_credential(
         )
 
 
-def test_transport_failures_redact_url_credentials(muse_env: Path) -> None:
+def test_transport_failures_redact_url_credentials(
+    muse_env: Path, refusing_port: int
+) -> None:
     """Refused connections report class + credential-free URL only."""
-    refused = _TokenXApiServer(("127.0.0.1", 0))
-    port = refused.port
-    refused.server_close()
+    port = refusing_port
     # Path placement: the message shows the redacted path form.
     store_credentials("telegram", {"kind": "path", "token": _REAL_TG_TOKEN}, [])
     handle = mint_surrogate("telegram")
@@ -1475,13 +1470,13 @@ def test_failed_rotations_keep_the_prior_credential(
     tg_agent = TelegramAgent.__new__(TelegramAgent)
     tg_agent._backend = tg_backend
     rejected = json.loads(
-        _auth_tools(tg_agent)["authenticate_telegram"]("1:rotated-but-wrong")
+        auth_tools(tg_agent)["authenticate_telegram"]("1:rotated-but-wrong")
     )
     assert rejected["ok"] is False
     assert vault_has_credentials("telegram")
     assert not vault_has_credentials("telegram-pending")
     # The previously wired backend still works end to end.
-    assert json.loads(_auth_tools(tg_agent)["check_telegram_auth"]())["ok"] is True
+    assert json.loads(auth_tools(tg_agent)["check_telegram_auth"]())["ok"] is True
     assert api_server.requests[-1]["path"] == f"/bot{_REAL_TG_TOKEN}/getMe"
     # MS Teams: same contract.
     _ms_config()
@@ -1490,7 +1485,7 @@ def test_failed_rotations_keep_the_prior_credential(
     ms_agent = MSTeamsAgent.__new__(MSTeamsAgent)
     ms_agent._backend = ms_backend
     refused = json.loads(
-        _auth_tools(ms_agent)["authenticate_msteams"](
+        auth_tools(ms_agent)["authenticate_msteams"](
             _MS_TENANT, _MS_CLIENT_ID, "msteams-rotated-wrong"
         )
     )
@@ -1590,7 +1585,7 @@ def test_telegram_authenticate_handles_nonjson_probe(
     api_server.getme_nonjson = True
     agent = TelegramAgent.__new__(TelegramAgent)
     agent._backend = _tg_backend(api_server)
-    result = json.loads(_auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
+    result = json.loads(auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
     assert result["ok"] is False
     assert "getMe failed" in result["error"]
     # Nothing was enrolled and no scratch entry lingered.
@@ -1714,7 +1709,7 @@ def test_concurrent_scratch_validation_is_isolated(
     def authenticate(key: str, token: str) -> None:
         agent = TelegramAgent.__new__(TelegramAgent)
         agent._backend = _tg_backend(api_server)
-        results[key] = json.loads(_auth_tools(agent)["authenticate_telegram"](token))
+        results[key] = json.loads(auth_tools(agent)["authenticate_telegram"](token))
 
     good = threading.Thread(target=authenticate, args=("good", _REAL_TG_TOKEN))
     bad = threading.Thread(target=authenticate, args=("bad", "1:concurrent-bad-token"))
@@ -1742,7 +1737,7 @@ def test_scratch_validation_obeys_root_deny_policy(
     policy_path.write_text(json.dumps(policy))
     agent = TelegramAgent.__new__(TelegramAgent)
     agent._backend = _tg_backend(api_server)
-    result = json.loads(_auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
+    result = json.loads(auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
     assert result["ok"] is False
     assert "policy denies" in result["error"]
     assert not vault_has_credentials("telegram")
@@ -1792,13 +1787,13 @@ def test_ask_policy_grant_is_inherited_by_scratch_validation(
     agent = TelegramAgent.__new__(TelegramAgent)
     agent._backend = _tg_backend(api_server)
     # Without a grant, validation cannot proceed (read is ask).
-    denied = json.loads(_auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
+    denied = json.loads(auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
     assert denied["ok"] is False
     assert "requires user approval" in denied["error"]
     # A telegram read grant (the root identity) approves the scratch
     # probe, so authentication succeeds.
     grant("telegram", "read", "perpetual")
-    saved = json.loads(_auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
+    saved = json.loads(auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
     assert saved["ok"] is True
     assert vault_has_credentials("telegram")
 
@@ -1949,7 +1944,7 @@ def test_ask_remediation_names_the_grantable_root(
     policy_path.write_text(json.dumps(policy))
     agent = TelegramAgent.__new__(TelegramAgent)
     agent._backend = _tg_backend(api_server)
-    denied = json.loads(_auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
+    denied = json.loads(auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
     assert denied["ok"] is False
     # The printed command grants ``telegram`` (grantable), never a
     # random ``telegram-pending-<hex>`` (which a retry would replace).
@@ -2036,9 +2031,7 @@ def test_scratch_files_are_swept_at_daemon_startup(muse_env: Path) -> None:
     os.utime(stale, (old, old))
     # Restart the daemon (protocol handshake tears down and respawns).
     stop_daemon()
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and socket_path().exists():
-        time.sleep(0.05)
+    wait_daemon_stopped()
     ensure_daemon()
     # Give the startup sweep a moment.
     deadline = time.monotonic() + 5.0
@@ -2227,6 +2220,39 @@ def test_config_lock_makes_scrub_a_compare_and_swap(muse_env: Path) -> None:
     assert json.loads(ms_config.path.read_text())["client_secret"] == "newer-sec"
 
 
+def _wait_for_blocked_connect(port: int, timeout: float = 10.0) -> bool:
+    """Poll ``/proc/net/tcp`` until a connect to ``port`` sits in SYN-SENT.
+
+    A socket whose remote address is ``127.0.0.1:port`` and whose state is
+    SYN-SENT (``02``) proves the daemon has authorized the request and
+    resolved the credential -- pinning the vault generation, which happens
+    strictly before the transport connect -- and is now blocked in the
+    kernel on the saturated accept backlog.  On platforms without
+    ``/proc/net/tcp`` a fixed grace sleep is the best approximation.
+
+    Args:
+        port: The listener port the daemon's connect is aimed at.
+        timeout: Deadline in seconds for the half-open connect to appear.
+
+    Returns:
+        True once the half-open connect is visible (or after the
+        fallback sleep), False if the deadline passed without one.
+    """
+    proc_tcp = Path("/proc/net/tcp")
+    if not proc_tcp.exists():  # pragma: no cover - non-Linux fallback
+        time.sleep(1.0)
+        return True
+    want_remote = f"0100007F:{port:04X}"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for line in proc_tcp.read_text().splitlines()[1:]:
+            fields = line.split()
+            if len(fields) > 3 and fields[2] == want_remote and fields[3] == "02":
+                return True
+        time.sleep(0.02)
+    return False
+
+
 def test_rotation_during_connection_setup_never_emits_old_credential(
     muse_env: Path,
 ) -> None:
@@ -2278,9 +2304,10 @@ def test_rotation_during_connection_setup_never_emits_old_credential(
     try:
         thread = threading.Thread(target=blocked_request)
         thread.start()
-        # Give the boundary time to authorize, resolve, and enter the
-        # kernel connect (which blocks on the saturated backlog).
-        time.sleep(1.0)
+        # Wait until the boundary has authorized, resolved the credential
+        # (pinning the generation), and entered the kernel connect, which
+        # blocks on the saturated backlog with the socket in SYN-SENT.
+        assert _wait_for_blocked_connect(port), "daemon connect never blocked on the backlog"
         assert "error" not in result
         # The rotation completes while the connect is still blocked.
         store_credentials("telegram", {"kind": "path", "token": "2:new-generation-token"}, [])

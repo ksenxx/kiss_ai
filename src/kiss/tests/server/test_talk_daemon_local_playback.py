@@ -144,7 +144,17 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
     async def _connect(
         self, tab_id: str
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Open one UDS client and announce ``ready``."""
+        """Open one UDS client showing the canonical tab *tab_id*.
+
+        The tab is created in the shared tab registry first — as any
+        run on it would do before emitting a talk — because the daemon
+        plays natively only for tabs a local webview SHOWS: a registry
+        tab is shown by every attached chat webview, and the ``ready``
+        this client announces next is what attaches it.
+        """
+        self.server._vscode_server.tab_registry.update_tab(
+            tab_id, title="webview chat", create=True,
+        )
         reader, writer = await asyncio.open_unix_connection(
             str(self.uds_path), limit=16 * 1024 * 1024
         )

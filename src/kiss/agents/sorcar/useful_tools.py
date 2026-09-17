@@ -31,6 +31,7 @@ from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SLUG_PREFIX,
     _WORKTREE_SUBDIR,
 )
+from kiss.core import tool_interrupt
 from kiss.core.models.model import (
     READ_TOOL_BINARY_MIME_TYPES,
     encode_binary_attachment,
@@ -545,19 +546,22 @@ def _kill_process_group(process: subprocess.Popen) -> None:
 
 
 def _stop_monitor(
-    stop_event: threading.Event,
+    stop_events: list[threading.Event],
     process: subprocess.Popen,
     done: threading.Event,
 ) -> None:
-    """Wait for *stop_event* to fire, then kill *process* group.
+    """Wait for any of *stop_events* to fire, then kill *process* group.
 
-    Exits when *done* is set (process finished normally) or *stop_event*
-    fires (agent was stopped).
+    Exits when *done* is set (process finished normally) or one of the
+    events fires: the task's stop event (the agent was stopped) or the
+    running tool call's interrupt event (the user pressed the tool
+    panel's Stop button).
     """
     while not done.wait(timeout=0.2):
-        if stop_event.is_set():
-            _kill_process_group(process)
-            return
+        for event in stop_events:
+            if event.is_set():
+                _kill_process_group(process)
+                return
 
 
 class UsefulTools:
@@ -654,19 +658,28 @@ class UsefulTools:
     def _start_stop_monitor(
         self, process: subprocess.Popen, done: threading.Event,
     ) -> None:
-        """Start a daemon thread that kills *process* if ``stop_event`` fires.
+        """Start a daemon thread that kills *process* on a stop or interrupt.
 
-        No-op when this instance has no ``stop_event``.  The monitor
+        Watches this instance's ``stop_event`` and the interrupt event of
+        the tool call running on the calling thread
+        (:func:`kiss.core.tool_interrupt.current_tool_interrupt_event`),
+        so both the task's Stop button and the tool panel's own Stop
+        button kill the shell.  No-op when neither exists.  The monitor
         exits when *done* is set (process finished normally).
 
         Args:
             process: The running subprocess to watch.
             done: Event the caller sets once the process has finished.
         """
-        if self.stop_event:
+        events = [
+            event
+            for event in (self.stop_event, tool_interrupt.current_tool_interrupt_event())
+            if event is not None
+        ]
+        if events:
             threading.Thread(
                 target=_stop_monitor,
-                args=(self.stop_event, process, done),
+                args=(events, process, done),
                 daemon=True,
             ).start()
 
@@ -931,8 +944,9 @@ class UsefulTools:
         chunks: list[str],
         deadline: float,
         stop: threading.Event | None = None,
+        interrupt: threading.Event | None = None,
     ) -> bool:
-        """Consume streamed lines from *out_queue* until EOF, *deadline* or *stop*.
+        """Consume streamed lines from *out_queue* until EOF, *deadline*, *stop* or *interrupt*.
 
         Runs on the thread that called :meth:`Bash` so that
         ``stream_callback`` executes with the caller's thread-local
@@ -947,25 +961,33 @@ class UsefulTools:
             out_queue: Queue fed by the reader thread; ``None`` marks EOF.
             chunks: Accumulator that received lines are appended to.
             deadline: ``time.monotonic()`` timestamp to stop waiting at.
-            stop: When given, polled every 0.2 s; the wait also ends
-                once it is set.  ``_stop_monitor`` alone cannot end the
-                wait when the shell has already exited but a background
-                child still holds the stdout pipe (no group to kill),
-                so without this a stop would block for the whole
-                *deadline*.
+            stop: When given, the wait also ends once it is set.
+                ``_stop_monitor`` alone cannot end the wait when the
+                shell has already exited but a background child still
+                holds the stdout pipe (no group to kill), so without
+                this a stop would block for the whole *deadline*.
+            interrupt: The running tool call's interrupt event (the
+                tool panel's Stop button), ending the wait the same way.
+
+        The queue is polled in 0.2 s slices rather than one long C-level
+        wait, so the loop keeps returning to Python: that is where an
+        asynchronously injected exception — the task Stop's
+        ``KeyboardInterrupt`` — can land and reach :meth:`Bash`'s
+        process-group kill.
 
         Returns:
-            True when the EOF sentinel was received, False on deadline
-            or stop.
+            True when the EOF sentinel was received, False on deadline,
+            stop or interrupt.
         """
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
-            if stop is not None:
-                if stop.is_set():
-                    return False
-                remaining = min(remaining, 0.2)
+            if stop is not None and stop.is_set():
+                return False
+            if interrupt is not None and interrupt.is_set():
+                return False
+            remaining = min(remaining, 0.2)
             try:
                 line = out_queue.get(timeout=remaining)
             except queue.Empty:
@@ -1032,9 +1054,10 @@ class UsefulTools:
             reader = threading.Thread(target=_drain_stdout, daemon=True)
             self._start_stop_monitor(process, done)
             reader.start()
+            interrupt = tool_interrupt.current_tool_interrupt_event()
             eof = self._consume_stream(
                 out_queue, chunks, time.monotonic() + timeout_seconds,
-                stop=self.stop_event,
+                stop=self.stop_event, interrupt=interrupt,
             )
             if not eof:
                 # A stop is not a timeout: the shell is killed (the
@@ -1042,12 +1065,17 @@ class UsefulTools:
                 # reported, exactly as when the stop landed on a running
                 # shell before this loop learned to observe it.
                 stopped = self.stop_event is not None and self.stop_event.is_set()
+                interrupted = interrupt is not None and interrupt.is_set()
                 still_running = process.poll() is None
-                timed_out = still_running and not stopped
+                timed_out = still_running and not stopped and not interrupted
                 if still_running:
                     _kill_process_group(process)
+                # The tool panel's Stop keeps this whole tail inside the
+                # interrupt's 1 s cooperative grace: a longer EOF wait
+                # would let the forced injection land in this loop
+                # instead of at the raise below.
                 eof = self._consume_stream(
-                    out_queue, chunks, time.monotonic() + 5,
+                    out_queue, chunks, time.monotonic() + (0.5 if interrupted else 5),
                 )
                 if not eof:
                     abandoned.set()
@@ -1062,12 +1090,22 @@ class UsefulTools:
                 except subprocess.TimeoutExpired:  # pragma: no cover
                     _kill_process_group(process)
         except BaseException:
+            # The reader thread outlives this frame: in discard mode it
+            # closes the pipe itself once the child lets go of it.
+            abandoned.set()
             _kill_process_group(process)
             raise
         finally:
             done.set()
             if eof:
                 process.stdout.close()  # type: ignore[union-attr]
+
+        # The tool panel's own Stop: whether the monitor killed the shell
+        # (EOF) or the loop above noticed the event first, the shell is
+        # dead and its pipe closed or abandoned, so this is the safe
+        # point to raise the interrupt the agent loop turns into "User
+        # interrupted the tool call.".
+        tool_interrupt.raise_if_interrupted()
 
         if timed_out:
             return "Error: Command execution timeout"

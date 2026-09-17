@@ -404,6 +404,7 @@ export function buildChatHtml(
     API_SRC: u('api.js'),
     PANEL_COPY_SRC: u('panelCopy.js'),
     CTX_MENU_SRC: u('contentContextMenu.js'),
+    TREE_MENU_SRC: u('treeContextMenu.js'),
     MAIN_SRC: u('main.js'),
     SHIM_SCRIPT: '',
     TRICKS_JSON: tricksJson,

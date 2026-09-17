@@ -32,7 +32,6 @@ from kiss.agents.sorcar.git_worktree import (
     _reclaim_process_lock,
     repo_lock,
 )
-from kiss.agents.sorcar.persistence import _allocate_chat_id
 from kiss.agents.sorcar.sorcar_agent import (
     _generate_commit_message,
     auto_commit_changes,
@@ -1514,11 +1513,15 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         branch without ever touching the original one.
 
         Falls back to direct execution (no worktree) when:
-        - ``use_worktree`` kwarg is explicitly ``False``
+        - ``use_worktree`` kwarg is explicitly ``False`` — this pin is
+          authoritative: a classification verdict never re-enables the
+          worktree (a channel dispatch classifies for its system
+          prompt while running in a scratch directory that must never
+          get a worktree)
         - The pre-run task classifier is enabled and reports the task
           is not a development task (``is_development=False``); the
-          verdict likewise FORCES a worktree when it reports
-          ``is_development=True`` (see
+          verdict can only DEMOTE a requested worktree run to direct
+          execution, never promote a pinned-off one (see
           ``kiss.agents.sorcar.task_classifier``)
         - ``work_dir`` is not inside a git repo
         - The repo has no commits
@@ -1548,9 +1551,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             if auto_commit is None
             else bool(auto_commit)
         )
-        if self._chat_id == "":
-            self._chat_id = _allocate_chat_id()
-
         printer = kwargs.get("printer")
         if printer is not None:
             # Bind the caller's printer BEFORE any worktree setup.  The
@@ -1571,6 +1571,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # verdict, the task's ``is_development`` decides worktree
         # isolation for THIS run — a development task edits files and
         # gets a worktree; a non-development task does not.  The
+        # verdict only ever DEMOTES: a caller's explicit
+        # ``use_worktree=False`` stays authoritative (a channel
+        # dispatch classifies for its system prompt while running in a
+        # scratch directory that must never get a worktree — a dirty
+        # repo enclosing that directory once cost a 65 GB copy).  The
         # persisted ``is_worktree`` setting is never modified.  A
         # disabled or failed classification keeps the caller's
         # ``use_worktree`` value.  The reset guards against stale state
@@ -1585,7 +1590,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             arguments=kwargs.get("arguments"),
         )
         if classification is not None:
-            use_worktree = classification.is_development
+            use_worktree = use_worktree and classification.is_development
 
         wt_work_dir: Path | None = None
         if use_worktree:
@@ -1886,8 +1891,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             # (a tab close must not auto-merge work the user asked
             # to throw away).
             self._pending_review = False
+            # No separate ``prune``: :meth:`GitWorktreeOps.remove`
+            # already prunes on every path that can leave a stale
+            # registration behind (same contract
+            # ``_commit_and_clean_worktree`` relies on).
             GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
-            GitWorktreeOps.prune(wt.repo_root)
             if wt.original_branch:
                 ok, err = GitWorktreeOps.checkout(
                     wt.repo_root,

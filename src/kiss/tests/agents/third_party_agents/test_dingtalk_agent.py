@@ -40,11 +40,26 @@ from kiss.agents.third_party_agents.dingtalk_agent import (
 _AUTH_TRIO = {"check_dingtalk_auth", "authenticate_dingtalk", "clear_dingtalk_auth"}
 
 
-def _free_port() -> int:
-    """Return an OS-assigned free TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+def _connected_backend(config: dict[str, Any]) -> tuple[DingTalkChannelBackend, int]:
+    """Persist *config* and connect via the public path on an ephemeral port.
+
+    ``_port_from_config`` remaps port 0 to ``_DEFAULT_WEBHOOK_PORT``, so
+    that default (a module config constant, not a test double) is
+    temporarily rebound to 0: the public ``connect()`` then binds an
+    OS-assigned port in the server that keeps it — no
+    reserve-close-rebind race — and the really bound port is read back
+    from the live server.
+    """
+    dingtalk_mod._config.save({**config, "port": "0"})
+    patcher = pytest.MonkeyPatch()
+    try:
+        patcher.setattr(dingtalk_mod, "_DEFAULT_WEBHOOK_PORT", 0)
+        backend = DingTalkChannelBackend()
+        assert backend.connect() is True
+    finally:
+        patcher.undo()
+    assert backend._webhook_server is not None
+    return backend, int(backend._webhook_server.server_address[1])
 
 
 def _dingtalk_sign(key: str, timestamp_ms: str) -> str:
@@ -266,17 +281,13 @@ def _post_callback(port: int, payload: dict[str, Any], headers: dict[str, str]) 
 
 def test_inbound_callback_signed_queue_and_poll() -> None:
     """A correctly signed callback is queued, normalized, and pollable."""
-    port = _free_port()
-    dingtalk_mod._config.save(
+    backend, port = _connected_backend(
         {
             "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=x",
             "secret": "",
             "outgoing_token": "OUTtoken",
-            "port": str(port),
         }
     )
-    backend = DingTalkChannelBackend()
-    assert backend.connect() is True
     try:
         ts = str(int(time.time() * 1000))
         payload = {
@@ -309,17 +320,9 @@ def test_inbound_callback_signed_queue_and_poll() -> None:
 
 def test_inbound_callback_bad_sign_and_stale_timestamp_rejected() -> None:
     """Wrong signatures and >1h-old timestamps get 401 and are not queued."""
-    port = _free_port()
-    dingtalk_mod._config.save(
-        {
-            "webhook_url": "https://x?access_token=1",
-            "secret": "",
-            "outgoing_token": "OUTtoken",
-            "port": str(port),
-        }
+    backend, port = _connected_backend(
+        {"webhook_url": "https://x?access_token=1", "secret": "", "outgoing_token": "OUTtoken"}
     )
-    backend = DingTalkChannelBackend()
-    assert backend.connect() is True
     try:
         payload = {"conversationId": "c", "text": {"content": "hi"}}
         ts = str(int(time.time() * 1000))
@@ -340,17 +343,9 @@ def test_inbound_callback_bad_sign_and_stale_timestamp_rejected() -> None:
 
 def test_inbound_callback_unverified_when_no_token_and_channel_filter() -> None:
     """Without outgoing_token callbacks are accepted; poll filters by channel."""
-    port = _free_port()
-    dingtalk_mod._config.save(
-        {
-            "webhook_url": "https://x?access_token=1",
-            "secret": "",
-            "outgoing_token": "",
-            "port": str(port),
-        }
+    backend, port = _connected_backend(
+        {"webhook_url": "https://x?access_token=1", "secret": "", "outgoing_token": ""}
     )
-    backend = DingTalkChannelBackend()
-    assert backend.connect() is True
     try:
         for cid, sender in (("c1", "u1"), ("c2", "u2")):
             payload = {
@@ -392,17 +387,9 @@ def test_inbound_callback_bad_content_length_handled_and_server_stays_up() -> No
     rejected before the body is read, and the server keeps serving valid
     signed callbacks afterwards.
     """
-    port = _free_port()
-    dingtalk_mod._config.save(
-        {
-            "webhook_url": "https://x?access_token=1",
-            "secret": "",
-            "outgoing_token": "OUTtoken",
-            "port": str(port),
-        }
+    backend, port = _connected_backend(
+        {"webhook_url": "https://x?access_token=1", "secret": "", "outgoing_token": "OUTtoken"}
     )
-    backend = DingTalkChannelBackend()
-    assert backend.connect() is True
     try:
         assert "400" in _raw_http_post(port, "-1")
         assert "400" in _raw_http_post(port, "nope")

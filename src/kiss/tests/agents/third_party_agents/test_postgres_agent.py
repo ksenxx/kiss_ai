@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import json
 import shutil
-import socket
 import stat
 import subprocess
 import sys
 import time
+import uuid
 
 import psycopg
 import pytest
@@ -237,35 +237,46 @@ class TestPostgresLive:
     @pytest.fixture(scope="class")
     def pg_uri(self):
         """Start a disposable PostgreSQL container; yield its connection URI."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-        sock.close()
         subprocess.run(
             ["docker", "pull", "postgres:17-alpine"],
             check=True,
             capture_output=True,
             timeout=900,
         )
-        container_id = subprocess.run(
-            [
-                "docker",
-                "run",
-                "-d",
-                "--rm",
-                "-e",
-                "POSTGRES_PASSWORD=kisstest",
-                "-p",
-                f"127.0.0.1:{port}:5432",
-                "postgres:17-alpine",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        ).stdout.strip()
-        uri = f"postgresql://postgres:kisstest@127.0.0.1:{port}/postgres"
+        # Pre-generate the container name so cleanup can target it even if
+        # `docker run` times out after the daemon has created the container,
+        # and let Docker pick the host port (`::5432`) to avoid the
+        # reserve/close/re-bind port race.
+        name = f"kiss-pg-test-{uuid.uuid4().hex}"
         try:
+            subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "-d",
+                    "--rm",
+                    "--name",
+                    name,
+                    "-e",
+                    "POSTGRES_PASSWORD=kisstest",
+                    "-p",
+                    "127.0.0.1::5432",
+                    "postgres:17-alpine",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            mapping = subprocess.run(
+                ["docker", "port", name, "5432"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            ).stdout.strip()
+            port = int(mapping.splitlines()[0].rsplit(":", 1)[1])
+            uri = f"postgresql://postgres:kisstest@127.0.0.1:{port}/postgres"
             deadline = time.monotonic() + 120
             while True:
                 try:
@@ -280,7 +291,7 @@ class TestPostgresLive:
             yield uri
         finally:
             subprocess.run(
-                ["docker", "rm", "-f", container_id],
+                ["docker", "rm", "-f", name],
                 capture_output=True,
                 timeout=60,
                 check=False,

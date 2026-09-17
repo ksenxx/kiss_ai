@@ -14,9 +14,13 @@ SAME model to answer two questions about the task:
 - ``is_development``: the task is a software development task that
   requires creating or editing files.  Tasks that only request git
   operations (commit, merge, rebase, resolving merge conflicts, ...)
-  are NOT development.  The verdict becomes the run's effective
+  are NOT development.  The verdict decides the run's effective
   ``is_worktree`` value (worktree isolation on/off) without ever
-  touching the persisted ``is_worktree`` setting.
+  touching the persisted ``is_worktree`` setting — but it can only
+  DEMOTE a run that asked for a worktree to direct execution, never
+  promote a run whose caller pinned ``use_worktree=False`` (a channel
+  dispatch classifies for its system prompt while running in a
+  scratch directory that must never get a worktree).
 
 The classification is a single non-agentic ``generate()`` call — no
 tool loop, no tools — that returns the STRUCTURED verdict

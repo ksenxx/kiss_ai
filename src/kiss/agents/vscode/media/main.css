@@ -879,7 +879,7 @@ body.remote-chat #welcome-config { display: none !important; }
   background: color-mix(in srgb, var(--cyan) 8%, transparent); color: var(--cyan);
 }
 .tc-h.tc-h-bash:hover { color: var(--fg); }
-.tc.collapsed > :not(.tc-h, .panel-copy-btn) { display: none; }
+.tc.collapsed > :not(.tc-h, .panel-copy-btn, .panel-stop-btn) { display: none; }
 
 .tc-summary-desc {
   padding: 6px 12px;
@@ -2064,10 +2064,12 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
 
 .scm-list[hidden] { display: none; }
 
+/* Under a worktree header (several worktrees) the group headers indent
+   by --depth; a single worktree keeps them flush. */
 .scm-group-hdr {
   height: 22px;
   line-height: 22px;
-  padding-left: 4px;
+  padding-left: calc(var(--depth, 0) * 12px + 4px);
   font-weight: 600;
   color: color-mix(in srgb, var(--fg) 70%, transparent);
   white-space: nowrap;
@@ -2180,6 +2182,283 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
 .scm-ref.is-tag {
   border-color: var(--yellow);
   color: var(--yellow);
+}
+
+/* Another worktree checked out at this commit (its folder name). */
+.scm-ref.is-worktree {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+/* Multiple worktrees: one header per worktree (folder name, branch,
+   change count) above its groups; the group headers indent below it
+   (see .scm-group-hdr). */
+.scm-worktree-hdr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding-right: 6px;
+  color: var(--fg);
+}
+
+.scm-worktree-hdr.is-current .scm-worktree-name::after {
+  content: ' (current)';
+  font-weight: 400;
+  color: color-mix(in srgb, var(--fg) 50%, transparent);
+}
+
+.scm-worktree-branch {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 400;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+}
+
+/* Explorer inline name box (New File / New Folder / Rename...). */
+.explorer-row.is-editing { cursor: default; }
+
+.explorer-input {
+  width: 100%;
+  min-width: 60px;
+  height: 20px;
+  padding: 0 4px;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  outline: none;
+}
+
+.explorer-row.ctx-active,
+.scm-row.ctx-active,
+.scm-commit.ctx-active {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* Sidebar context menu (Explorer rows, commits, changed files): the
+   VS Code menu -- label left, shortcut right, greyed disabled items. */
+.tree-ctx-menu {
+  position: fixed;
+  z-index: 300;
+  min-width: 220px;
+  padding: 4px 0;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 50%);
+  font-size: var(--fs-base);
+  color: var(--fg);
+  user-select: none;
+}
+
+.tree-ctx-menu[hidden] { display: none; }
+
+.tree-ctx-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 4px 14px 4px 22px;
+  cursor: pointer;
+  white-space: nowrap;
+  outline: none;
+}
+
+.tree-ctx-item:hover,
+.tree-ctx-item:focus {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.tree-ctx-item.disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.tree-ctx-item.disabled:hover { background: none; }
+
+.tree-ctx-key {
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  font-size: var(--fs-xs);
+}
+
+.tree-ctx-sep {
+  height: 1px;
+  margin: 4px 10px;
+  background: var(--border);
+}
+
+/* Folder picker: a modal folder browser opened from the Explorer header. */
+#folder-picker {
+  position: fixed;
+  inset: 0;
+  z-index: 290;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10vh;
+  background: rgb(0 0 0 / 40%);
+}
+
+#folder-picker[hidden] { display: none; }
+
+.folder-picker-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, calc(100vw - 32px));
+  max-height: 70vh;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgb(0 0 0 / 50%);
+  color: var(--fg);
+  font-size: var(--fs-base);
+}
+
+.folder-picker-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+
+.folder-picker-close {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.folder-picker-path {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+}
+
+.folder-picker-up {
+  flex: 0 0 auto;
+  min-width: 28px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.folder-picker-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.folder-picker-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.folder-picker-list {
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow: auto;
+  margin: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.folder-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.folder-picker-item svg { flex: 0 0 16px; color: var(--yellow); }
+
+.folder-picker-item:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+.folder-picker-item.selected {
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.folder-picker-note {
+  min-height: 18px;
+  padding: 4px 12px;
+  font-size: var(--fs-xs);
+  color: var(--red);
+}
+
+.folder-picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 12px 12px;
+}
+
+.folder-picker-actions button {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.folder-picker-select {
+  border-color: var(--accent) !important;
+  background: color-mix(in srgb, var(--accent) 25%, transparent) !important;
+}
+
+/* PDF / image viewer tabs (binary fileContent). */
+.content-binary-holder {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.content-pdf-frame {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: none;
+  background: var(--bg);
+}
+
+.content-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  margin: auto;
+  cursor: zoom-in;
+}
+
+.content-image.content-image-full {
+  max-width: none;
+  max-height: none;
+  cursor: zoom-out;
+}
+
+.content-binary-note {
+  margin: 24px;
+  color: var(--fg);
 }
 
 .scm-commit-meta {
@@ -3036,6 +3315,37 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 
 .panel-copy-btn.copied { color: var(--green); }
 
+/* Per-panel Stop for a running tool call: sits immediately left of the
+   copy button (24px wide at right: 6px) and is shown only while the
+   panel's tool call is in progress -- a .tc stamped with data-start-ms
+   (stampPanelStart) and not yet sealed by data-time-done
+   (finalizePanelTime / sealPanelTimes). */
+.panel-stop-btn {
+  display: none;
+  position: absolute; top: 5px; right: 34px; z-index: 5;
+  align-items: center; justify-content: center;
+  padding: 3px 5px; cursor: pointer;
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  border: 1px solid var(--border); border-radius: 4px;
+  color: var(--red);
+  opacity: 0.8;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+.tc[data-start-ms]:not([data-time-done]) > .panel-stop-btn { display: flex; }
+
+.panel-stop-btn:hover,
+.panel-stop-btn:focus-visible { opacity: 1; }
+
+.panel-stop-btn:hover {
+  background: color-mix(in srgb, var(--red) 15%, transparent);
+}
+
+.panel-stop-btn.stopping {
+  cursor: progress;
+  color: var(--dim);
+  opacity: 0.6;
+}
+
 .panel-ts {
   white-space: nowrap;
 }
@@ -3099,25 +3409,41 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   overflow: hidden;
 }
 
+/* A column: the optional Save bar on top, the editor / frame filling
+   the rest (min-height: 0 so the editor shrinks instead of overflowing). */
 #content-tab-area .content-tab-view {
   width: 100%;
   height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 #content-tab-area .content-html-frame {
   width: 100%;
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   border: 0;
   background: #fff;
 }
 
 #content-tab-area .content-monaco-holder {
   width: 100%;
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* The preview surface of a .md/.html content tab: itself a flex
+   column so its .content-html-frame child stretches to fill it. */
+#content-tab-area .content-preview-holder {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 #content-tab-area .content-code-fallback {
   height: 100%;
+  box-sizing: border-box;
   overflow: auto;
   margin: 0;
   padding: 8px 12px;
@@ -3126,8 +3452,90 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   white-space: pre;
 }
 
+#content-tab-area .content-save-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+  font-size: 12px;
+}
+
+#content-tab-area .content-save-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* keep the file name visible when the path is cut */
+  text-align: left;
+  color: var(--dim);
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+#content-tab-area .content-save-status {
+  flex: 0 0 auto;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+#content-tab-area .content-save-status.error {
+  color: var(--red);
+}
+
+#content-tab-area .content-save-btn {
+  flex: 0 0 auto;
+  padding: 2px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#content-tab-area .content-save-btn:disabled {
+  background: transparent;
+  color: var(--dim);
+  cursor: default;
+}
+
+#content-tab-area .content-save-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The Edit source / Preview toggle of a .md/.html tab: a secondary
+   button next to the accent-colored Save. */
+#content-tab-area .content-mode-btn {
+  flex: 0 0 auto;
+  padding: 2px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#content-tab-area .content-mode-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .chat-tab .content-tab-icon {
   margin-right: 4px;
   font-size: 11px;
   line-height: 1;
+}
+
+/* Unsaved edits: VS Code's filled dot next to the file name. */
+.chat-tab .chat-tab-dirty {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--fg);
 }

@@ -39,9 +39,12 @@ channel's authenticated API tools (credentials persisted under
 ``~/.kiss``) on top of the standard tools (bash, files, browser) — and
 the sub-task runs in the channel agents' shared work directory
 (``~/.kiss/channel_work``), outside the project git lifecycle: like a
-cron dispatch, a channel dispatch passes ``use_worktree=False``,
-``auto_commit=False``, and ``classify_tasks=False``, so no git
-worktree is ever created for it (see ``_dispatch``).  For a path-named agent script, whatever
+cron dispatch, a channel dispatch passes ``use_worktree=False`` and
+``auto_commit=False``, so no git worktree is ever created for it, while
+pre-run task classification stays enabled (``classify_tasks=None`` —
+the daemon default decides; a verdict can only demote, never force a
+worktree).  Only a cron dispatch additionally pins
+``classify_tasks=False`` (see ``_dispatch``).  For a path-named agent script, whatever
 getters the file defines (``tools``, ``model``,
 ``system_prompt``, ...) configure the session the same way; a
 relative path is resolved against the CALLING task's work directory
@@ -271,6 +274,7 @@ def _dispatch(
     parent_agent: Any = None,
     scope_work_dir: str = "",
     git_lifecycle: bool = True,
+    classify: bool = True,
 ) -> str:
     """Submit an agent-script task to the kiss-web daemon and wait.
 
@@ -306,20 +310,28 @@ def _dispatch(
             (standalone tools-file use) leaves the scope falling back
             to *work_dir*.
         git_lifecycle: Whether the sub-task runs through the standard
-            project git lifecycle (worktree isolation + auto-commit +
-            pre-run task classification).  ``False`` — the channel
-            mode — dispatches with ``use_worktree=False``,
-            ``auto_commit=False``, and ``classify_tasks=False``: a
+            project git lifecycle (worktree isolation + auto-commit).
+            ``False`` — the channel and cron modes — dispatches with
+            ``use_worktree=False`` and ``auto_commit=False``: a
             channel session acts on an external service from a scratch
             directory (``~/.kiss/channel_work``), so worktree setup
             would only copy whatever git repository happens to enclose
             that directory (a dirty repo at ``$HOME`` once stalled a
             gmail dispatch for minutes copying 65 GB before the task
-            could even start), and classification must be pinned off
-            because an ``is_development`` verdict overrides an
-            explicit ``use_worktree=False``
-            (``WorktreeSorcarAgent.run``).  An agent script's own
-            getters still win over all three values on the daemon.
+            could even start).  The pin is safe alongside
+            classification: a verdict can only demote a requested
+            worktree run, never promote a pinned-off one
+            (``WorktreeSorcarAgent.run``).
+        classify: Whether the sub-task may be classified before it
+            runs.  ``True`` (channel and path modes) sends
+            ``classify_tasks=None`` — no per-run override, the
+            daemon's persisted "Classify tasks before running" setting
+            decides — so a simple channel task still gets the reduced
+            SYSTEM_LITE prompt.  ``False`` (the cron mode) pins
+            classification off: unattended scheduled automations run
+            repeatedly and must not spend a classifier round trip per
+            run.  An agent script's own getters still win over all
+            three wire values on the daemon.
 
     Returns:
         The sub-task's YAML result ("success" and "summary" keys), or
@@ -361,7 +373,7 @@ def _dispatch(
             model=model_name,
             use_worktree=git_lifecycle,
             auto_commit=git_lifecycle,
-            classify_tasks=None if git_lifecycle else False,
+            classify_tasks=None if classify else False,
             max_budget=budget,
             timeout=timeout,
             stop_on_timeout=True,
@@ -489,10 +501,9 @@ def _run_agent(
         # same way — its tools() supplies the cron_job tool and
         # its work_dir()/use_worktree()/auto_commit()
         # getters keep the session in ~/.kiss/cron/work, out of the
-        # calling project's git lifecycle.  ``git_lifecycle=False``
-        # additionally pins classification off, because an
-        # ``is_development`` verdict would override even the getters'
-        # ``use_worktree() -> False`` (see ``_dispatch``).
+        # calling project's git lifecycle.  ``classify=False``
+        # additionally pins classification off — cron is the one
+        # dispatch mode that never classifies (see ``_dispatch``).
         from kiss.agents.sorcar import cron_agent
 
         return _dispatch(
@@ -501,6 +512,7 @@ def _run_agent(
             model_name, budget, wait, parent_agent,
             scope_work_dir=parent_work_dir,
             git_lifecycle=False,
+            classify=False,
         )
     channels = available_channels()
     matches = [name for name in channels if _squash(name) == squashed]

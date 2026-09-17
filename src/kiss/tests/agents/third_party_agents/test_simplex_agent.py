@@ -16,6 +16,7 @@ import json
 import stat
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -284,7 +285,12 @@ def test_poll_filters_by_channel(simplex_server: str) -> None:
     backend = agent._backend
     assert backend.connect() is True
 
-    messages, _ = backend.poll_messages("team", "0", limit=10)
+    # The server handler pushes newChatItems asynchronously after the WS
+    # handshake, so retry the poll until the push has been queued.
+    messages: list[dict[str, str]] = []
+    deadline = time.time() + 10.0
+    while time.time() < deadline and not messages:
+        messages, _ = backend.poll_messages("team", "0", limit=10)
     assert [m["text"] for m in messages] == ["hi from group"]
     # The non-matching direct message was discarded; the queue is empty now.
     again, _ = backend.poll_messages("", "0", limit=10)

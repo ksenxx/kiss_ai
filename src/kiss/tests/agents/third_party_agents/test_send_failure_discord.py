@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -31,14 +31,7 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents.discord_agent import DiscordChannelBackend
-
-
-class _RecordingServer(ThreadingHTTPServer):
-    """HTTP server that records every request it handles."""
-
-    def __init__(self, address: tuple[str, int], handler: type) -> None:
-        super().__init__(address, handler)
-        self.requests: list[dict[str, Any]] = []
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer
 
 
 class _SendHandler(BaseHTTPRequestHandler):
@@ -59,7 +52,7 @@ class _SendHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length) if length else b""
         path = urlsplit(self.path).path
-        cast(_RecordingServer, self.server).requests.append(
+        cast(RecordingServer, self.server).requests.append(
             {
                 "method": self.command,
                 "path": path,
@@ -76,12 +69,12 @@ class _SendHandler(BaseHTTPRequestHandler):
 class TestDiscordSendMessageFailures:
     """End-to-end tests against a local Discord-shaped HTTP server."""
 
-    server: _RecordingServer
+    server: RecordingServer
     api_base: str
 
     @classmethod
     def setup_class(cls) -> None:
-        cls.server = _RecordingServer(("127.0.0.1", 0), _SendHandler)
+        cls.server = RecordingServer(("127.0.0.1", 0), _SendHandler)
         thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         thread.start()
         cls.api_base = f"http://127.0.0.1:{cls.server.server_address[1]}"

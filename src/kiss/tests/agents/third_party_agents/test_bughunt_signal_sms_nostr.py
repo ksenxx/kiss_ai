@@ -85,14 +85,22 @@ class TestSignalBackend(unittest.TestCase):
     """End-to-end tests driving SignalChannelBackend through a real fake signal-cli."""
 
     def setUp(self) -> None:
-        """Install a real executable signal-cli script on PATH and a test config."""
+        """Install a real executable signal-cli script on PATH and a test config.
+
+        Each global mutation registers its restoration with ``addCleanup``
+        immediately, so state is restored even when ``setUp`` itself fails
+        part-way (unittest skips ``tearDown`` in that case, but cleanups run).
+        """
         self._tmpdir = tempfile.mkdtemp(prefix="bughunt-signal-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
         cli = Path(self._tmpdir) / "signal-cli"
         cli.write_text(_FAKE_SIGNAL_CLI, encoding="utf-8")
         cli.chmod(0o755)
         self._old_path = os.environ["PATH"]
         os.environ["PATH"] = self._tmpdir + os.pathsep + self._old_path
+        self.addCleanup(os.environ.__setitem__, "PATH", self._old_path)
         _backup_config(_SIGNAL_CONFIG, _SIGNAL_BACKUP)
+        self.addCleanup(_restore_config, _SIGNAL_CONFIG, _SIGNAL_BACKUP)
         from kiss.agents.third_party_agents.signal_agent import (
             SignalChannelBackend,
             _config,
@@ -101,12 +109,6 @@ class TestSignalBackend(unittest.TestCase):
         _config.save({"phone_number": "+1BOT"})
         self._backend = SignalChannelBackend()
         self.assertTrue(self._backend.connect())
-
-    def tearDown(self) -> None:
-        """Restore PATH and the original signal config."""
-        os.environ["PATH"] = self._old_path
-        _restore_config(_SIGNAL_CONFIG, _SIGNAL_BACKUP)
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_poll_with_channel_returns_only_that_sender(self) -> None:
         """A configured channel_id surfaces only that sender's envelopes.
@@ -217,18 +219,97 @@ class TestSMSBackend(unittest.TestCase):
 
     @unittest.skipIf(find_spec("twilio") is None, "twilio not installed")
     def test_poll_messages_with_bad_credentials_returns_empty(self) -> None:
-        """poll_messages must swallow API failures and return ([], oldest)."""
+        """poll_messages must swallow API failures and return ([], oldest).
+
+        Hermetic: a local HTTP server emulates Twilio's exact
+        authentication-error response (HTTP 401, error code 20003), and
+        the SDK is routed to it through its supported ``http_client``
+        parameter — a subclass of the real ``TwilioHttpClient`` that
+        re-hosts each request URL onto the emulator and performs a REAL
+        HTTP round trip.  No DNS, egress, or api.twilio.com dependency;
+        the finite transport timeout stays as defense in depth.
+        """
         import importlib
+        import json as json_module
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.parse import urlsplit, urlunsplit
 
         from kiss.agents.third_party_agents.sms_agent import SMSChannelBackend
 
         twilio_rest = importlib.import_module("twilio.rest")
-        backend = SMSChannelBackend()
-        backend._client = twilio_rest.Client("AC" + "0" * 32, "invalid-token")
-        backend._from_number = "+1BOT"
-        messages, cursor = backend.poll_messages("+1AAA", "123.0", limit=5)
-        self.assertEqual(messages, [])
-        self.assertEqual(cursor, "123.0")
+        twilio_http = importlib.import_module("twilio.http.http_client")
+
+        hits: list[str] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                """Answer every request with Twilio's 20003 auth error."""
+                hits.append(self.path)
+                body = json_module.dumps(
+                    {
+                        "code": 20003,
+                        "detail": "Your AccountSid or AuthToken was incorrect.",
+                        "message": "Authentication Error - invalid username",
+                        "more_info": "https://www.twilio.com/docs/errors/20003",
+                        "status": 401,
+                    }
+                ).encode("utf-8")
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                """Silence request logging."""
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        local_netloc = f"127.0.0.1:{server.server_port}"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+
+        class LocalTwilioHttpClient(twilio_http.TwilioHttpClient):  # type: ignore[misc, name-defined]
+            """Real Twilio transport re-hosted onto the local emulator."""
+
+            def request(  # noqa: PLR0913
+                self,
+                method: str,
+                url: str,
+                params: dict | None = None,
+                data: dict | None = None,
+                headers: dict | None = None,
+                auth: tuple | None = None,
+                timeout: float | None = None,
+                allow_redirects: bool = False,
+            ):
+                """Swap the URL's host for the emulator and really send."""
+                parts = urlsplit(url)
+                local = urlunsplit(
+                    ("http", local_netloc, parts.path, parts.query, parts.fragment)
+                )
+                return super().request(
+                    method, local, params=params, data=data, headers=headers,
+                    auth=auth, timeout=timeout, allow_redirects=allow_redirects,
+                )
+
+        try:
+            backend = SMSChannelBackend()
+            backend._client = twilio_rest.Client(
+                "AC" + "0" * 32,
+                "invalid-token",
+                http_client=LocalTwilioHttpClient(timeout=10),
+            )
+            backend._from_number = "+1BOT"
+            messages, cursor = backend.poll_messages("+1AAA", "123.0", limit=5)
+            self.assertEqual(messages, [])
+            self.assertEqual(cursor, "123.0")
+            # The SDK really hit the local Twilio-shaped endpoint.
+            self.assertTrue(hits, "the emulator never received the request")
+            self.assertIn("/2010-04-01/Accounts/AC", hits[0])
+            self.assertIn("/Messages.json", hits[0])
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 class TestNostrBackend(unittest.TestCase):

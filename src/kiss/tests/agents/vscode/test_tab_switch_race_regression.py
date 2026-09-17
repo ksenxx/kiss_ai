@@ -931,6 +931,11 @@ class TestPerTabT0(unittest.TestCase):
         KEPT so the tab can render "Done (Xm Ys)" from agent
         wall-clock."""
         switch_src = _extract_function(self.js, "switchToTab")
+        # switchToTab delegates its activation tail (restore, running
+        # state, timers, chevron, focus) to activateAdjacentTab, so the
+        # real delegate is evaluated too: the asserted behavior stays
+        # the same.
+        activate_src = _extract_function(self.js, "activateAdjacentTab")
         result = _run_node(_make_test_script(
             r"""
             var tabs = [
@@ -971,6 +976,8 @@ class TestPerTabT0(unittest.TestCase):
             function isTabHidden() { return false; }
             """
             + switch_src
+            + "\n"
+            + activate_src
             + r"""
             switchToTab(2);
             if (isRunning !== false) {

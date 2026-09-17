@@ -60,12 +60,35 @@ def _isolate_config(
     monkeypatch.setitem(
         vars(_vc), "CONFIG_PATH", fake_home / ".kiss" / "config.json",
     )
-    for key in API_KEY_ENV_VARS:
-        val = os.environ.get(key)
+    # Protect API-key env vars against DIRECT os.environ writes made by
+    # save_api_key/load_api_keys during the tests.
+    #
+    # Present keys: ``monkeypatch.setenv(key, current)`` records the
+    # original value as the EARLIEST undo entry; monkeypatch undoes in
+    # reverse order, so even when a test's own ``monkeypatch.delenv``
+    # captures a mid-test mutated value, the setup-time record is
+    # applied last and the original wins.
+    #
+    # Absent keys: ``monkeypatch.delenv(key, raising=False)`` records
+    # NOTHING, so a key the tests then set directly (e.g. a fake
+    # ANTHROPIC_WORKSPACE_ID written by load_api_keys()) leaked into
+    # every later test file in the process and poisoned live Anthropic
+    # calls with a 400 "must be a valid workspace ID".  The explicit
+    # snapshot restore after ``yield`` removes such keys.
+    env_snapshot = {key: os.environ.get(key) for key in API_KEY_ENV_VARS}
+    for key, val in env_snapshot.items():
         if val is not None:
             monkeypatch.setenv(key, val)
         else:
-            monkeypatch.delenv(key, raising=False)
+            # Record the key's ABSENCE as the earliest undo entries: the
+            # setenv records "was absent" (undo deletes), the delenv
+            # keeps it absent during the test.  Without this pair, a
+            # test that writes the key directly (save_api_key) and then
+            # calls its own monkeypatch.delenv leaves that delenv's
+            # captured mid-test value as the LAST undo applied,
+            # resurrecting the leak after the explicit restore below.
+            monkeypatch.setenv(key, "")
+            monkeypatch.delenv(key)
     from kiss.core import config as config_module
 
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG", config_module.DEFAULT_CONFIG)
@@ -74,6 +97,11 @@ def _isolate_config(
     yield
     for _k, _v in snapshot.items():
         setattr(saved, _k, _v)
+    for key, val in env_snapshot.items():
+        if val is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = val
 
 
 def _installed_posix_shell() -> str:
@@ -1278,3 +1306,38 @@ class TestReviewRegressions:
         load_api_keys()
         elapsed = _time.monotonic() - start
         assert elapsed < 5.0, f"load_api_keys blocked for {elapsed:.1f}s"
+
+
+# Environment snapshot taken when pytest imports this module (before any
+# of its tests run): the leak guard below compares against it.
+_ENV_AT_IMPORT = {k: os.environ.get(k) for k in API_KEY_ENV_VARS}
+
+
+class TestNoApiKeyEnvLeak:
+    """This file's tests must not leak API-key env vars to later files.
+
+    ``_isolate_config`` used ``monkeypatch.delenv(key, raising=False)``
+    for keys ABSENT from the environment — which records no restoration
+    action — while tests such as
+    ``test_code_only_upgrade_retires_systemd_mirror`` make
+    ``load_api_keys()`` write fake values (``v-ANTHROPIC_WORKSPACE_ID``)
+    straight into ``os.environ``.  The fake workspace id then survived
+    into later test FILES in the same pytest process, where a live
+    Anthropic call sent it as the ``anthropic-workspace-id`` header and
+    the API rejected the run with 400 "must be a valid workspace ID"
+    (full-suite run 2026-09-17, split py_08).
+
+    Defined last in this module so, in pytest's definition order, it
+    runs after every test above has had the chance to leak.
+    """
+
+    def test_env_restored_after_all_prior_tests(self) -> None:
+        leaked = {
+            k: (os.environ.get(k), _ENV_AT_IMPORT[k])
+            for k in sorted(API_KEY_ENV_VARS)
+            if os.environ.get(k) != _ENV_AT_IMPORT[k]
+        }
+        assert not leaked, (
+            "API-key env vars changed by earlier tests in this file were "
+            f"not restored (current, at-import): {leaked}"
+        )

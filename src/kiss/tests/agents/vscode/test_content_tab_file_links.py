@@ -202,9 +202,13 @@ class TestContentTabFileLinks:
             assert "# KISS-MD-TITLE" not in frame.locator("body").inner_text()
             label = page.locator(".chat-tab.content-tab .chat-tab-label")
             assert label.inner_text() == "notes.md"
-            assert page.locator(
-                "#content-tab-area .content-monaco-holder",
-            ).count() == 0
+            # The Edit source surface stays dormant until its toggle is
+            # clicked: the holder exists (hidden), but no editor was
+            # mounted into it (see test_content_tab_preview_editing.py).
+            holder = page.locator("#content-tab-area .content-monaco-holder")
+            assert holder.count() == 1
+            assert not holder.is_visible()
+            assert page.locator("#content-tab-area .monaco-editor").count() == 0
         finally:
             context.close()
 

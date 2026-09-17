@@ -144,6 +144,20 @@ class ThreadBackend(RecordingBackend):
         return list(self.thread_replies.get(thread_ts, [])), ""
 
 
+class ThreadPollFailBackend(ThreadBackend):
+    """Thread backend whose thread polling raises a configured error."""
+
+    def __init__(self, poll_error: str = "thread poll failed", **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.poll_error = poll_error
+
+    def poll_thread_messages(
+        self, channel_id: str, thread_ts: str, oldest: str, limit: int = 100
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Simulate a transport failure during thread polling."""
+        raise ConnectionError(self.poll_error)
+
+
 class RaisingTypingBackend(RecordingBackend):
     """Backend whose typing indicator always fails."""
 
@@ -956,16 +970,6 @@ class TestThreadContinuations:
 
     def test_thread_poll_failure_skips_thread(self, tmp_path: Path) -> None:
         """A failing poll_thread_messages skips the thread gracefully."""
-
-        class FailingThreadBackend(ThreadBackend):
-            """Thread backend whose thread polling raises."""
-
-            def poll_thread_messages(
-                self, channel_id: str, thread_ts: str, oldest: str, limit: int = 100
-            ) -> tuple[list[dict[str, Any]], str]:
-                """Simulate a transport failure during thread polling."""
-                raise ConnectionError("thread poll failed")
-
         state_path = tmp_path / "s.json"
         now = time.time()
         thread_ts = f"{now - 60:.4f}"
@@ -976,7 +980,7 @@ class TestThreadContinuations:
             "updated_at": now - 60,
         }
         save_channel_state(state_path, state)
-        runner = _make_runner(FailingThreadBackend(), state_path)
+        runner = _make_runner(ThreadPollFailBackend(), state_path)
         assert runner.run_once() == 0
         assert load_channel_state(state_path)["failures"] == 0
 
@@ -1010,17 +1014,9 @@ class TestThreadContinuations:
 
     def test_bot_posted_after_poll_failure_is_safe(self, tmp_path: Path) -> None:
         """A failing re-poll falls back to sending the summary."""
-
-        class RepollFailBackend(ThreadBackend):
-            """Thread backend whose thread polling raises."""
-
-            def poll_thread_messages(
-                self, channel_id: str, thread_ts: str, oldest: str, limit: int = 100
-            ) -> tuple[list[dict[str, Any]], str]:
-                """Simulate a transport failure during the re-poll."""
-                raise ConnectionError("re-poll failed")
-
-        runner = _make_runner(RepollFailBackend(), tmp_path / "s.json")
+        runner = _make_runner(
+            ThreadPollFailBackend(poll_error="re-poll failed"), tmp_path / "s.json"
+        )
         assert runner._bot_posted_after("C1", "100.0", 0.0) is False
 
 
@@ -1197,19 +1193,11 @@ class TestContinuationFailureCursor:
         self, tmp_path: Path
     ) -> None:
         """A thread-poll failure keeps the cursor and skips the breaker."""
-
-        class FailingThreadBackend(ThreadBackend):
-            """Thread backend whose thread polling raises."""
-
-            def poll_thread_messages(
-                self, channel_id: str, thread_ts: str, oldest: str, limit: int = 100
-            ) -> tuple[list[dict[str, Any]], str]:
-                """Simulate a transport failure during thread polling."""
-                raise ConnectionError("thread poll failed")
-
         state_path = tmp_path / "s.json"
         self._seed_state(state_path, "100.0", "101.0")
-        runner = self._make_launch_runner(FailingThreadBackend(cursor="99"), state_path)
+        runner = self._make_launch_runner(
+            ThreadPollFailBackend(cursor="99"), state_path
+        )
         assert runner.run_once() == 0
         state = load_channel_state(state_path)
         assert state["cursor"] == "42", "a failed thread poll must keep the old cursor"

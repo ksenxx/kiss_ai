@@ -34,13 +34,6 @@ from kiss.agents.third_party_agents.weixin_agent import (
 )
 
 
-def _free_port() -> int:
-    """Reserve and return a free TCP port."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 def _signed_params(ts: str = "1712345678", nonce: str = "n0nce") -> dict[str, str]:
     """Build valid signature query parameters for the 'cbtok' callback token."""
     sig = hashlib.sha1("".join(sorted(["cbtok", ts, nonce])).encode()).hexdigest()
@@ -155,6 +148,26 @@ def _authenticated_agent(
     return agent
 
 
+def _connected_backend(callback_token: str = "cbtok") -> tuple[WeixinChannelBackend, int]:
+    """Authenticate and connect the callback backend on an ephemeral port.
+
+    ``authenticate_weixin`` deliberately rejects port ``"0"``, so after
+    authenticating, the persisted config's port is rewritten to ``"0"``
+    directly; the public ``connect()`` then binds an OS-assigned port
+    in the server that keeps it (no reserve-close-rebind race), and the
+    really bound port is read back from the live server.
+    """
+    _authenticated_agent(api_base="http://127.0.0.1:1/", callback_token=callback_token)
+    cfg = _config.load()
+    assert cfg is not None
+    cfg["port"] = "0"
+    _config.save(cfg)
+    backend = WeixinChannelBackend()
+    assert backend.connect() is True
+    assert backend._callback_server is not None
+    return backend, int(backend._callback_server.server_address[1])
+
+
 def test_unauthenticated_state() -> None:
     """Fresh agent exposes only the auth trio and reports unconfigured."""
     _config.clear()
@@ -239,10 +252,7 @@ def test_get_user_info() -> None:
 
 def test_callback_verification_and_inbound_xml() -> None:
     """The callback server handles GET verification and normalizes POST XML."""
-    port = _free_port()
-    _authenticated_agent(api_base="http://127.0.0.1:1/", port=str(port))
-    backend = WeixinChannelBackend()
-    assert backend.connect() is True
+    backend, port = _connected_backend()
     try:
         url = f"http://127.0.0.1:{port}/"
         ts, nonce = "1712345678", "n0nce"
@@ -302,10 +312,7 @@ def test_callback_verification_and_inbound_xml() -> None:
 
 def test_callback_post_requires_signature_when_token_configured() -> None:
     """Unsigned or badly signed POSTs are rejected with 401 and never queued."""
-    port = _free_port()
-    _authenticated_agent(api_base="http://127.0.0.1:1/", port=str(port))
-    backend = WeixinChannelBackend()
-    assert backend.connect() is True
+    backend, port = _connected_backend()
     try:
         url = f"http://127.0.0.1:{port}/"
         xml = b"<xml><FromUserName>evil</FromUserName><Content>inject</Content></xml>"
@@ -331,10 +338,7 @@ def test_callback_post_requires_signature_when_token_configured() -> None:
 
 def test_callback_post_without_token_allows_unsigned() -> None:
     """With no callback token configured, unsigned POSTs are still queued."""
-    port = _free_port()
-    _authenticated_agent(api_base="http://127.0.0.1:1/", port=str(port), callback_token="")
-    backend = WeixinChannelBackend()
-    assert backend.connect() is True
+    backend, port = _connected_backend(callback_token="")
     try:
         xml = (
             "<xml><FromUserName>openid7</FromUserName><CreateTime>1</CreateTime>"
@@ -351,10 +355,7 @@ def test_callback_post_without_token_allows_unsigned() -> None:
 
 def test_callback_post_bad_content_length() -> None:
     """Missing/negative/non-decimal Content-Length gets 400; oversized gets 413."""
-    port = _free_port()
-    _authenticated_agent(api_base="http://127.0.0.1:1/", port=str(port), callback_token="")
-    backend = WeixinChannelBackend()
-    assert backend.connect() is True
+    backend, port = _connected_backend(callback_token="")
     try:
         assert _raw_post_status(port, "") == 400
         assert _raw_post_status(port, "Content-Length: -5\r\n") == 400
