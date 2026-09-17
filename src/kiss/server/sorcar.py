@@ -236,6 +236,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("submit", required=("prompt",), handler="submit"),
     ApiCommand("appendUserMessage", required=("prompt",)),
     ApiCommand("stop"),
+    ApiCommand("interruptTool", required=("tabId",)),
     ApiCommand("userAnswer", required=("answer",)),
     ApiCommand("newChat"),
     ApiCommand("openTab", required=("tabId",)),
@@ -271,11 +272,19 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("getFiles", required=("prefix",)),
     ApiCommand("recordFileUsage", required=("path",)),
     ApiCommand("openFile", required=("path",), handler="open_file"),
+    ApiCommand(
+        "saveFile", required=("path", "content"), handler="save_file"
+    ),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
     ApiCommand("getInfoFile", handler="get_info_file"),
     ApiCommand("listDir", handler="list_dir"),
     ApiCommand("gitStatus", handler="git_status"),
     ApiCommand("gitLog", handler="git_log"),
+    ApiCommand("gitShow", required=("sha",), handler="git_show"),
+    ApiCommand(
+        "gitAction", required=("action", "sha"), handler="git_action"
+    ),
+    ApiCommand("fsAction", required=("action", "path"), handler="fs_action"),
     ApiCommand("shareChat", required=("chatId", "html"), handler="share_chat"),
     ApiCommand(
         "shareChatTasks", required=("chatId",), handler="share_chat_tasks"
@@ -459,6 +468,10 @@ class ServerBackend(Protocol):
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
+    async def _handle_save_file(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
     async def _handle_share_chat(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
@@ -484,6 +497,18 @@ class ServerBackend(Protocol):
     ) -> None: ...
 
     async def _handle_git_log(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_git_show(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_git_action(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_fs_action(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
@@ -682,11 +707,20 @@ class ServerApi:
     def _record_tab(self, tab_id: str, ctx: ApiContext) -> None:
         """Record *tab_id* as touched by this connection.
 
-        For local UDS peers, registers the id with the printer's
-        local-tab bookkeeping (talk-playback arbitration).  The
+        For local UDS peers, records the connection's INTEREST in the
+        id with the printer's local-tab bookkeeping (talk-playback
+        arbitration).  Interest is recorded before the handler runs
+        and regardless of whether the tab currently exists: the talk
+        fan-out decides "shown" at talk time from the canonical facts
+        (``VSCodeServer._local_tab_shown`` — registry membership plus
+        an attached webview for registry tabs; for every other tab
+        this interest plus either the tab's own non-closed agent
+        state or, for a viewer without a state of its own, its live
+        task subscription), so a stale record for a closed tab is
+        inert and a record made for a ``run_agent`` ``api-…`` tab or
+        a sub-agent viewer is what lets that tab count.  The
         connection's ``local_tabs`` set is mutated only inside the
-        printer, under the same lock that guards the shared
-        local-UDS tab counts and the canonical-close prune.
+        printer, under its own lock.
 
         Args:
             tab_id: The non-empty frontend tab identifier.
@@ -916,23 +950,25 @@ class ServerApi:
 
         Sanitizes the command's ``restoredTabs`` ONCE (warnings
         included) and writes the cleaned list back so the backend's
-        own sanitize pass finds nothing left to reject or truncate,
-        then RECONCILES a UDS connection's local-tab bookkeeping
-        (local-UDS talk muting) to exactly the tabs the client shows
-        after this ready: its own announced tab, the restored tabs,
-        and every canonical tab-registry tab (after a webview reload
-        ``ready`` announces only the fresh placeholder tab, yet the
-        client adopts every registry tab from the ``tabs_state``
-        snapshot — without the sync a talk event for an adopted
-        background tab would skip daemon-native playback and stay
-        silent, since webviews cannot autoplay).  Reconciling —
-        rather than only adding — also drops stale ids, so a repeated
-        ``ready`` self-heals bookkeeping left over from canonical
-        tabs closed while the connection was attached.  The sync
+        own sanitize pass finds nothing left to reject or truncate.
+        For a UDS connection it then (1) marks the connection as
+        hosting a chat webview — every attached webview mirrors the
+        whole canonical tab registry from ``tabs_state``, so this flag
+        is what makes a registry tab's talk play natively on this
+        machine (webviews cannot autoplay), including for background
+        tabs the client adopts from the snapshot and tabs other clients
+        publish later; and (2) RECONCILES the connection's per-tab
+        interest to exactly the tabs the client announced (its own tab
+        and the restored tabs), which bounds the interest a connection
+        accumulates for tabs closed while it was attached.  No registry
+        snapshot is copied into the bookkeeping: the talk fan-out reads
+        the registry itself at decision time
+        (``VSCodeServer._local_tab_shown``), so there is nothing that
+        a close racing this ``ready`` could leave stale.  The sync
         updates the connection's ``local_tabs`` set in place, so
-        disconnect cleanup is unchanged.  Finally fans the command
-        out through the backend's ready handler (models / input
-        history / config / session replay).
+        disconnect cleanup is unchanged.  Finally fans the command out
+        through the backend's ready handler (models / input history /
+        config / session replay).
 
         Args:
             cmd: The ``ready`` command.
@@ -940,14 +976,14 @@ class ServerApi:
         """
         cmd["restoredTabs"] = self._backend._sanitized_restored_tabs(cmd)
         if ctx.is_uds:
+            conn_id = ctx.conn_state["conn_id"]
+            self._backend._printer.mark_uds_webview(conn_id)
             shown = {rt["tabId"] for rt in cmd["restoredTabs"] if rt["tabId"]}
             own_tab = cmd.get("tabId")
             if isinstance(own_tab, str) and own_tab:
                 shown.add(own_tab)
-            registry = self._backend._vscode_server.tab_registry
-            shown.update(entry["tabId"] for entry in registry.snapshot())
             self._backend._printer.sync_local_uds_tabs(
-                ctx.conn_state["conn_id"],
+                conn_id,
                 shown,
                 ctx.conn_state.setdefault("local_tabs", set()),
             )
@@ -985,6 +1021,31 @@ class ServerApi:
         if ctx.is_uds:
             return
         await self._backend._handle_open_file(cmd, ctx.endpoint)
+
+    async def save_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Write a remote-web client's edits back to a file on disk.
+
+        The remote webapp opens a file (``openFile``) in an editable
+        Monaco editor inside a content tab; Ctrl/Cmd+S or the tab's
+        Save button sends the editor's full text here.  The file must
+        already exist (the editor never creates files) and is replaced
+        atomically; the ``version`` stamp taken from the ``fileContent``
+        reply lets the daemon refuse to overwrite a file that changed
+        on disk since it was opened unless ``force`` is set.  The reply
+        is a ``fileSaved`` event sent to the requester only.  UDS
+        clients (VS Code windows) edit files in real editor tabs, so
+        a UDS-delivered ``saveFile`` is dropped as a defensive no-op,
+        exactly like ``openFile``.
+
+        Args:
+            cmd: The ``saveFile`` command (``path``, ``content``,
+                optional ``workDir``, ``tabId``, ``token``, ``version``,
+                ``force``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_save_file(cmd, ctx.endpoint)
 
     async def check_paths(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Report which file paths exist to a remote-web client.
@@ -1086,6 +1147,64 @@ class ServerApi:
         if ctx.is_uds:
             return
         await self._backend._handle_git_log(cmd, ctx.endpoint)
+
+    async def git_show(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Serve a commit's patch / a file at a commit / a revision diff.
+
+        The remote Source Control graph's commit context menu ("Open
+        Changes", "Open File", "Compare with...") reads its text from
+        this command's ``gitShow`` reply, sent to the requester only.
+        A UDS-delivered ``gitShow`` is dropped as a defensive no-op,
+        exactly like ``gitLog``.
+
+        Args:
+            cmd: The ``gitShow`` command (``sha``, optional ``path``,
+                ``base``, ``mode``, ``workDir``, ``tabId``, ``token``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_git_show(cmd, ctx.endpoint)
+
+    async def git_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Run a commit context-menu git action for the remote graph.
+
+        "Checkout (Detached)", "Create Branch...", "Create Tag..." and
+        "Cherry Pick" of the remote Source Control graph's commit menu
+        each send one ``gitAction``; the outcome comes back as a
+        ``gitActionResult`` to the requester only.  A UDS-delivered
+        ``gitAction`` is dropped as a defensive no-op (VS Code windows
+        run the real Git extension).
+
+        Args:
+            cmd: The ``gitAction`` command (``action``, ``sha``,
+                optional ``name``, ``message``, ``workDir``, ``tabId``,
+                ``token``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_git_action(cmd, ctx.endpoint)
+
+    async def fs_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Run an Explorer context-menu file action for the remote webapp.
+
+        New File..., New Folder..., Rename..., Delete, Paste, Find in
+        Folder... and Compare Selected of the remote Explorer's context
+        menu each send one ``fsAction``; the outcome comes back as an
+        ``fsResult`` to the requester only.  A UDS-delivered
+        ``fsAction`` is dropped as a defensive no-op (VS Code windows
+        have the real Explorer).
+
+        Args:
+            cmd: The ``fsAction`` command (``action``, ``path``,
+                optional ``dest``, ``name``, ``query``, ``overwrite``,
+                ``workDir``, ``tabId``, ``token``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_fs_action(cmd, ctx.endpoint)
 
     async def share_chat(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Write a chat webview's transcript as a standalone HTML page.

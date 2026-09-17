@@ -1217,15 +1217,55 @@ class _MergeFlowMixin:
                     wt_dir,
                 ):
                     return
+                # Ownership re-check (M-C1): the reads above ran
+                # OUTSIDE the lock, and the plain-``PRESENT`` caller
+                # holds no claim at all, so between
+                # ``_finalize_pending_worktree`` observing "idle, no
+                # pending worktree" and this point a new task may have
+                # started on the tab and set up the very worktree the
+                # probe just found empty — its own worktree task is
+                # invisible to ``_any_non_wt_running``.  Refuse unless
+                # the tab is still the one we read, still holds this
+                # pending worktree, and is either idle or busy solely
+                # with OUR claim (the ``PRESENT_CLAIMED`` caller
+                # already owns ``is_merging`` on this thread).  A
+                # foreign ``is_merging`` holder is refused instead of
+                # having its live flag captured and blindly restored
+                # after it cleared it — a stale ``is_merging=True``
+                # wedges the tab until daemon restart.
+                if (
+                    agent_state.find_by_tab(tab_id) is not state
+                    or state.agent is not wt_agent
+                    or not wt_agent._wt_pending
+                ):
+                    return
+                if state.busy() and (
+                    state.merge_thread is not threading.current_thread()
+                ):
+                    return
                 prev_merging = state.is_merging
                 prev_thread = state.merge_thread
                 state.is_merging = True
                 state.merge_thread = threading.current_thread()
             try:
-                # Automatic path: rescue git-ignored task output the
-                # changed-files probe cannot see (see
-                # WorktreeSorcarAgent.discard).
-                wt_agent.discard(rescue_ignored=True)
+                # Re-probe UNDER the claim: the probe above ran before
+                # ownership was established, so a task could write
+                # ordinary output and fully finish (clearing ``busy``)
+                # between that empty answer and the claim — the
+                # under-lock identity checks all still pass, yet acting
+                # on the stale ``[]`` would discard completed task
+                # output (gpt-5.6-sol conc review, finding 8).  With
+                # the claim held, task admission refuses new runs in
+                # this worktree, so this second answer cannot go stale
+                # before it is acted on.  A now-non-empty worktree
+                # falls through to the ``worktree_done`` presentation
+                # below, exactly as if the first probe had seen it.
+                changed = self._get_worktree_changed_files(tab_id)
+                if not changed:
+                    # Automatic path: rescue git-ignored task output
+                    # the changed-files probe cannot see (see
+                    # WorktreeSorcarAgent.discard).
+                    wt_agent.discard(rescue_ignored=True)
             finally:
                 with self._state_lock:
                     state.is_merging = prev_merging
@@ -1234,7 +1274,6 @@ class _MergeFlowMixin:
                 # tab busy and deferred disposal; nothing later
                 # would dispose it (F4-29).
                 self._dispose_if_closed(tab_id)
-            return
         if not changed:
             return
         event: dict[str, Any] = {

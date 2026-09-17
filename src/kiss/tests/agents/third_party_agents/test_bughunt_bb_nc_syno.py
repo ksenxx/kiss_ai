@@ -387,8 +387,10 @@ class TestSynologyChat:
         _restore_config(syno_mod._config.path, self._backup)
 
     def _post_webhook(self, fields: dict[str, str]) -> None:
+        assert self._backend is not None and self._backend._webhook_server is not None
+        port = self._backend._webhook_server.server_address[1]
         req = urllib.request.Request(
-            f"http://127.0.0.1:{syno_mod._DEFAULT_WEBHOOK_PORT}/",
+            f"http://127.0.0.1:{port}/",
             data=urlencode(fields).encode("utf-8"),
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             method="POST",
@@ -396,13 +398,29 @@ class TestSynologyChat:
         with urllib.request.urlopen(req, timeout=10) as resp:
             assert resp.status == 200
 
-    def test_webhook_parses_synology_form_fields(self) -> None:
+    def test_webhook_parses_synology_form_fields(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Synology outgoing webhooks POST form fields directly (not a
         Slack-style payload= JSON blob); the handler must parse them and
-        verify the configured token."""
+        verify the configured token.
+
+        Drives the PUBLIC configured ``connect()`` end to end — config
+        loading, attribute wiring, and the webhook server start.  The
+        webhook port is a constant baked into
+        ``_start_webhook_server``'s default argument, so that default
+        (a config value, not a test double) is rebound to 0 for the
+        test: the OS assigns a free port, where the fixed 18083 would
+        race with parallel pytest processes.
+        """
         syno_mod._config.save({"webhook_url": self._url + "/webhook", "token": "sekret"})
         self._backend = SynologyChatChannelBackend()
+        monkeypatch.setattr(
+            SynologyChatChannelBackend._start_webhook_server, "__defaults__", (0,),
+        )
         assert self._backend.connect() is True
+        assert self._backend._webhook_url == self._url + "/webhook"
+        assert self._backend._token == "sekret"
         self._post_webhook(
             {
                 "token": "sekret",

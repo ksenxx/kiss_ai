@@ -9,9 +9,11 @@ generation on the run's own model BEFORE a Sorcar agent starts a task.
 The structured JSON verdict ``{"is_simple": ..., "is_development": ...}``
 selects the system prompt (``SYSTEM_LITE.md`` for simple tasks,
 ``SYSTEM.md`` otherwise) and decides worktree isolation for that run
-(``is_development`` becomes the effective ``use_worktree``) without
-touching the persisted ``is_worktree`` setting.  Tasks that only
-request git operations are never development.
+(``use_worktree and is_development`` becomes the effective
+``use_worktree`` — the verdict can only demote a requested worktree
+run, never promote one the caller pinned off) without touching the
+persisted ``is_worktree`` setting.  Tasks that only request git
+operations are never development.
 
 The classification tests call real LLMs (a cheap model) — no mocks.
 The verdict-cache tests use the real local OpenAI-compatible stand-in
@@ -43,7 +45,7 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _ClassifierSpend
 from kiss.agents.sorcar.task_classifier import (
     _VERDICT_JSON_SCHEMA,
     CLASSIFIER_CACHE_FILENAME,
@@ -936,10 +938,8 @@ def test_classify_for_run_disabled_by_override(
     )
     assert agent._classification_attempted is True
     assert agent._classification_preseeded is True
-    # No classification ran, so no classifier spend was banked.
-    assert agent._classifier_budget_used == 0.0
-    assert agent._classifier_tokens_used == 0
-    assert agent._classifier_steps == 0
+    # No classification ran, so no classifier spend was published.
+    assert agent._classifier_spend is None
     # The run reuses the seed instead of re-classifying.
     assert agent._classify_task_once(MODEL, _DEV_TASK, None) is None
 
@@ -962,18 +962,14 @@ def test_fold_classifier_usage_banks_and_resets(
 ) -> None:
     """Classifier spend lands in the run totals exactly once."""
     agent = SorcarAgent("clf-fold")
-    agent._classifier_budget_used = 0.25
-    agent._classifier_tokens_used = 123
-    agent._classifier_steps = 2
+    agent._classifier_spend = _ClassifierSpend("classifier:t", 0.25, 123, 2)
     agent._classification_attempted = True
     agent._task_classification = TaskClassification(True, False)
     agent._fold_classifier_usage()
     assert agent.budget_used == pytest.approx(0.25)
     assert agent.total_tokens_used == 123
     assert agent.total_steps == 2
-    assert agent._classifier_budget_used == 0.0
-    assert agent._classifier_tokens_used == 0
-    assert agent._classifier_steps == 0
+    assert agent._classifier_spend is None
     assert agent._classification_attempted is False
     assert agent._task_classification is None
     # Folding again is a no-op: the counters were reset.
@@ -1101,10 +1097,44 @@ def test_non_development_task_skips_worktree(
 
 @live_api
 @requires_anthropic
-def test_development_task_forces_worktree(env: IsolatedKissHome) -> None:
-    """is_development=True turns worktree isolation on for the run,
-    even when the caller asked for none."""
-    agent = WorktreeSorcarAgent("clf-wt-force")
+def test_development_task_keeps_requested_worktree(
+    env: IsolatedKissHome,
+) -> None:
+    """is_development=True keeps worktree isolation on for a run whose
+    caller asked for worktrees (the default)."""
+    agent = WorktreeSorcarAgent("clf-wt-keep")
+    printer = _RaisingPrinter(RuntimeError("stop-after-decision"))
+    result = agent.run(
+        prompt_template=_DEV_TASK,
+        model_name=MODEL,
+        work_dir=str(env.repo),
+        printer=printer,
+    )
+    payload = yaml.safe_load(result)
+    assert payload["success"] is False
+    assert len(printer.events_of_type("worktree_created")) == 1
+    assert agent._wt is not None
+    # The persisted setting was never touched by the runtime decision.
+    from kiss.core.vscode_config import load_config
+
+    assert load_config()["is_worktree"] is True
+    agent.discard()
+    assert agent._wt is None
+
+
+@live_api
+@requires_anthropic
+def test_development_verdict_cannot_override_worktree_pin(
+    env: IsolatedKissHome,
+) -> None:
+    """An explicit use_worktree=False beats an is_development verdict.
+
+    The channel-dispatch guarantee: ``run_agent`` pins
+    ``use_worktree=False`` for a channel sub-task running in a scratch
+    directory while leaving classification enabled, so the verdict may
+    pick the system prompt but must never create a worktree there.
+    """
+    agent = WorktreeSorcarAgent("clf-wt-pinned")
     printer = _RaisingPrinter(RuntimeError("stop-after-decision"))
     result = agent.run(
         prompt_template=_DEV_TASK,
@@ -1115,14 +1145,14 @@ def test_development_task_forces_worktree(env: IsolatedKissHome) -> None:
     )
     payload = yaml.safe_load(result)
     assert payload["success"] is False
-    assert len(printer.events_of_type("worktree_created")) == 1
-    assert agent._wt is not None
-    # The persisted setting was never touched by the runtime override.
-    from kiss.core.vscode_config import load_config
-
-    assert load_config()["is_worktree"] is True
-    agent.discard()
+    # The classifier really ran and returned a development verdict
+    # (the run memoises it) …
+    verdict = cached_classification(_DEV_TASK, MODEL)
+    assert verdict is not None
+    assert verdict.is_development is True
+    # … but the pin is authoritative: no worktree was created.
     assert agent._wt is None
+    assert printer.events_of_type("worktree_created") == []
 
 
 @live_api
@@ -1167,15 +1197,11 @@ def test_reset_drops_stale_unfolded_usage(env: IsolatedKissHome) -> None:
     agent = SorcarAgent("clf-stale-usage")
     agent._classification_attempted = True
     agent._task_classification = TaskClassification(True, False)
-    agent._classifier_budget_used = 0.5
-    agent._classifier_tokens_used = 42
-    agent._classifier_steps = 1
+    agent._classifier_spend = _ClassifierSpend("classifier:stale", 0.5, 42, 1)
     agent._reset_task_classification()
     assert agent._classification_attempted is False
     assert agent._task_classification is None
-    assert agent._classifier_budget_used == 0.0
-    assert agent._classifier_tokens_used == 0
-    assert agent._classifier_steps == 0
+    assert agent._classifier_spend is None
 
 
 def test_reset_keeps_preseeded_verdict(env: IsolatedKissHome) -> None:
@@ -1242,7 +1268,8 @@ def test_classify_task_for_run_enabled_override_beats_config(
     )
     assert verdict is not None
     assert verdict.is_development is True
-    assert agent._classifier_budget_used > 0.0
+    spend = agent._classifier_spend
+    assert spend is not None and spend.budget > 0.0
 
 
 @live_api

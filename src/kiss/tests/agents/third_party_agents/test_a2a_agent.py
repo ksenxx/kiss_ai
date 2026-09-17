@@ -42,13 +42,6 @@ def _clean_a2a_config():
     _config.clear()
 
 
-def _free_port() -> int:
-    """Reserve and return a free TCP port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
 def _tool_names(tools: list) -> set[str]:
     """Return the ``__name__`` set of a tool list."""
     return {t.__name__ for t in tools}
@@ -59,16 +52,43 @@ def _auth_tool(agent: A2AAgent, name: str):
     return next(t for t in agent._get_auth_tools() if t.__name__ == name)
 
 
-def _configured_backend(port: int, token: str = "") -> A2AChannelBackend:
-    """Authenticate the channel and return a connected poll-mode backend."""
+def _configured_backend(token: str = "") -> tuple[A2AChannelBackend, int]:
+    """Authenticate on an ephemeral port; return the connected backend and port.
+
+    Authenticates with port ``"0"`` and reads the OS-assigned port back
+    from the bound server, avoiding the bind/close/re-bind port race.
+    The bound port is then published into the backend's runtime state so
+    the agent card it serves advertises a USABLE url (with the persisted
+    request left as ``"0"``): ``connect()`` keeps ``_port`` equal to the
+    configured string, so a port-0 bind would otherwise advertise
+    ``http://127.0.0.1:0/`` — a card no peer could call.  The tests
+    below discover the peer THROUGH the advertised card url, so a wrong
+    url fails them.
+    """
     agent = A2AAgent()
-    result = _auth_tool(agent, "authenticate_a2a")(
-        bind_host="127.0.0.1", port=str(port), token=token
-    )
+    result = _auth_tool(agent, "authenticate_a2a")(bind_host="127.0.0.1", port="0", token=token)
     assert json.loads(result)["ok"] is True
     backend = a2a_mod._make_backend()
     assert backend.connect() is True
-    return backend
+    assert backend._server is not None
+    port = int(backend._server.server_address[1])
+    assert port != 0
+    backend._port = str(port)
+    return backend, port
+
+
+def _discovered_base(port: int) -> str:
+    """Fetch the agent card over HTTP and return its advertised base url.
+
+    Exercises the public discovery path: the card must advertise the
+    really-bound port, and every subsequent request uses the card's own
+    url rather than out-of-band knowledge of the server address.
+    """
+    card = requests.get(
+        f"http://127.0.0.1:{port}/.well-known/agent-card.json", timeout=10
+    ).json()
+    assert card["url"] == f"http://127.0.0.1:{port}/", card["url"]
+    return str(card["url"]).rstrip("/")
 
 
 def _rpc(base: str, method: str, params: dict, token: str = "") -> requests.Response:
@@ -155,14 +175,17 @@ def test_tools_module_function() -> None:
 
 def test_inbound_outbound_end_to_end(refusing_port: int) -> None:
     """Full lifecycle over real HTTP: card, auth, send, poll, reply, get."""
-    port = _free_port()
-    base = f"http://127.0.0.1:{port}"
-    backend = _configured_backend(port, token="sekret")
+    backend, port = _configured_backend(token="sekret")
+    # Discover the peer through its own advertised card url — the url
+    # must carry the really-bound port, and it is what every following
+    # request uses.
+    base = _discovered_base(port)
     try:
         # Agent card is served on both well-known paths.
         for path in ("/.well-known/agent-card.json", "/.well-known/agent.json"):
             card = requests.get(base + path, timeout=10).json()
             assert card["name"] == "KISS Sorcar"
+            assert card["url"] == base + "/"
             assert card["protocolVersion"] == "0.2"
             assert card["capabilities"] == {"streaming": False}
             assert card["skills"][0]["id"] == "general"
@@ -277,8 +300,7 @@ def test_inbound_outbound_end_to_end(refusing_port: int) -> None:
 
 def test_message_send_without_context_creates_one() -> None:
     """message/send without contextId gets a fresh uuid context."""
-    port = _free_port()
-    backend = _configured_backend(port)
+    backend, port = _configured_backend()
     try:
         resp = _rpc(f"http://127.0.0.1:{port}", "message/send", _send_params("no ctx"))
         task = resp.json()["result"]
@@ -291,8 +313,7 @@ def test_message_send_without_context_creates_one() -> None:
 
 def test_multi_part_text_concatenation() -> None:
     """All text parts are concatenated; non-text parts are ignored."""
-    port = _free_port()
-    backend = _configured_backend(port)
+    backend, port = _configured_backend()
     try:
         params = _send_params("first", "ctx-parts")
         params["message"]["parts"] = [
@@ -310,9 +331,8 @@ def test_multi_part_text_concatenation() -> None:
 
 def test_turn_limit_per_context_per_hour() -> None:
     """The 21st inbound message in one context within an hour is rejected."""
-    port = _free_port()
+    backend, port = _configured_backend()
     base = f"http://127.0.0.1:{port}"
-    backend = _configured_backend(port)
     try:
         for i in range(20):
             resp = _rpc(base, "message/send", _send_params(f"msg {i}", "ctx-limit"))
@@ -345,9 +365,8 @@ def _audit_entries() -> list[dict]:
 
 def test_same_context_pending_tasks_each_get_their_own_reply() -> None:
     """Two pending tasks in one context are completed independently."""
-    port = _free_port()
+    backend, port = _configured_backend()
     base = f"http://127.0.0.1:{port}"
-    backend = _configured_backend(port)
     try:
         task_a = _rpc(base, "message/send", _send_params("question A", "ctx")).json()["result"]
         task_b = _rpc(base, "message/send", _send_params("question B", "ctx")).json()["result"]
@@ -382,9 +401,8 @@ def test_same_context_pending_tasks_each_get_their_own_reply() -> None:
 
 def test_empty_thread_ts_falls_back_to_newest_pending() -> None:
     """With an empty thread_ts, the newest pending task completes."""
-    port = _free_port()
+    backend, port = _configured_backend()
     base = f"http://127.0.0.1:{port}"
-    backend = _configured_backend(port)
     try:
         _rpc(base, "message/send", _send_params("old", "ctx"))
         task_new = _rpc(base, "message/send", _send_params("new", "ctx")).json()["result"]
@@ -397,9 +415,8 @@ def test_empty_thread_ts_falls_back_to_newest_pending() -> None:
 
 def test_invalid_envelope_params_and_message_are_rejected() -> None:
     """Bad envelopes and params get JSON-RPC errors, never a crash."""
-    port = _free_port()
+    backend, port = _configured_backend()
     base = f"http://127.0.0.1:{port}"
-    backend = _configured_backend(port)
     try:
         # params.message is not an object -> -32602, audited, server alive.
         resp = requests.post(
@@ -436,9 +453,8 @@ def test_invalid_envelope_params_and_message_are_rejected() -> None:
 
 def test_bad_content_length_is_handled_and_server_stays_up() -> None:
     """Negative, non-numeric, missing, and oversized Content-Length."""
-    port = _free_port()
+    backend, port = _configured_backend()
     base = f"http://127.0.0.1:{port}"
-    backend = _configured_backend(port)
     try:
         assert " 400 " in _raw_post(port, "Content-Length: -1")
         assert " 400 " in _raw_post(port, "Content-Length: nope")
@@ -467,7 +483,8 @@ def test_non_loopback_bind_requires_token() -> None:
     assert json.loads(auth(bind_host="0.0.0.0", port="18099", token="tok"))["ok"] is True
 
     # connect() independently refuses an unsafe persisted config.
-    _config.save({"bind_host": "0.0.0.0", "port": str(_free_port()), "token": ""})
+    # The unsafe config is refused before any bind, so the port is never used.
+    _config.save({"bind_host": "0.0.0.0", "port": "18099", "token": ""})
     backend = a2a_mod._make_backend()
     assert backend.connect() is False
     assert "without a token" in backend.connection_info
@@ -479,9 +496,11 @@ def test_connect_fails_without_config_or_bad_port() -> None:
     assert backend.connect() is False
     assert "No A2A config" in backend.connection_info
 
-    port = _free_port()
-    first = _configured_backend(port)
+    first, port = _configured_backend()
     try:
+        # Point the persisted config at the port the first backend holds,
+        # so the second backend's bind deterministically fails.
+        _config.save({"bind_host": "127.0.0.1", "port": str(port), "token": ""})
         second = a2a_mod._make_backend()
         assert second.connect() is False
         assert "bind failed" in second.connection_info
@@ -491,9 +510,8 @@ def test_connect_fails_without_config_or_bad_port() -> None:
 
 def test_overlong_content_length_rejected_400() -> None:
     """A 5000-digit Content-Length gets 400 instead of an int() crash."""
-    port = _free_port()
+    backend, port = _configured_backend()
     base = f"http://127.0.0.1:{port}"
-    backend = _configured_backend(port)
     try:
         assert " 400 " in _raw_post(port, "Content-Length: " + "9" * 5000)
         good = _rpc(base, "message/send", _send_params("after overlong length", "ctx-len2"))
@@ -504,9 +522,8 @@ def test_overlong_content_length_rejected_400() -> None:
 
 def test_invalid_jsonrpc_id_types_rejected_32600() -> None:
     """JSON-RPC ids must be a string, number, or null; others get -32600."""
-    port = _free_port()
+    backend, port = _configured_backend()
     base = f"http://127.0.0.1:{port}"
-    backend = _configured_backend(port)
     try:
         for bad_id in ({"invalid": "object-id"}, ["array-id"], True):
             payload: dict[str, Any] = {

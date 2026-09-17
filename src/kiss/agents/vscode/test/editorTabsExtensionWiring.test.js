@@ -12,13 +12,14 @@
 //    the mode is ON and to the sidebar view when OFF;
 //  - flipping kissSorcar.editorTabsMode ON migrates the registry's
 //    tabs into panels (enterMode) and closes the secondary sidebar
-//    (workbench.action.closeAuxiliaryBar); OFF closes all panels AND
-//    the secondary sidebar without refocusing the chat;
+//    (workbench.action.closeAuxiliaryBar); OFF closes all panels and
+//    opens the secondary sidebar on the KISS Sorcar chat view, focusing
+//    its composer (sidebarView.focusChatInput);
 //  - the KS activity-bar button's dummy tree (non-editor mode): on
 //    becoming visible it closes the primary sidebar and reveals the
 //    chat in the secondary sidebar without creating a chat — except
-//    right after an editorTabsMode flip, which must leave the
-//    secondary sidebar closed.
+//    right after an editorTabsMode flip, whose config handler already
+//    revealed the chat (no second, competing reveal).
 //
 // The panel manager and sidebar view are replaced by instrumented
 // fakes (the real ones have their own end-to-end suites:
@@ -143,6 +144,7 @@ const calls = {
     appendToInput: [],
     openSettingsUI: 0,
     gitCommit: 0,
+    widenToOneThird: 0,
   },
   manager: {
     openNewChat: 0,
@@ -172,6 +174,8 @@ const registryEntries = [
 const registryTabsAddedListeners = [];
 
 const sidebarInstances = [];
+// The one-time widening's first-resolve hook, when armed.
+let firstResolveCb = null;
 
 class FakeSidebarView {
   constructor(_uri, panelHooks) {
@@ -223,8 +227,11 @@ class FakeSidebarView {
   generateCommitMessage() {
     return Promise.resolve();
   }
-  onFirstResolve() {}
+  onFirstResolve(cb) {
+    firstResolveCb = cb;
+  }
   widenToOneThird() {
+    calls.sidebar.widenToOneThird += 1;
     return Promise.resolve();
   }
   runUpdate() {}
@@ -776,28 +783,30 @@ async function runTest() {
   historyController.panelHooks.onEvent({kind: 'title', title: 'ignored'});
   assert.strictEqual(calls.manager.openChat.length, 1);
 
-  // --- flip the mode OFF: panels close, secondary sidebar closes --------
+  // --- flip the mode OFF: panels close, the secondary sidebar opens on
+  // the KISS Sorcar chat view with its composer focused -----------------
   const focusBeforeModeOff = calls.sidebar.focusChatInput;
   executedCommands.length = 0;
   editorTabsMode = false;
   await fireConfigChange();
   assert.strictEqual(calls.manager.closeAll, 1);
-  assert.ok(
-    executedCommands.some(
-      e => e.cmd === 'workbench.action.closeAuxiliaryBar',
-    ),
-    'mode off closes the secondary sidebar',
-  );
   assert.strictEqual(
     calls.sidebar.focusChatInput,
-    focusBeforeModeOff,
-    'mode off must NOT reopen/refocus the sidebar chat',
+    focusBeforeModeOff + 1,
+    'mode off reveals the secondary-sidebar chat and focuses its composer',
+  );
+  assert.ok(
+    !executedCommands.some(
+      e => e.cmd === 'workbench.action.closeAuxiliaryBar',
+    ),
+    'mode off must NOT close the secondary sidebar it just revealed',
   );
 
   // The flip pops the dummy tree up in the still-open primary sidebar
   // (the history panel hides, the tree takes its spot): the handler
-  // closes the primary sidebar but must leave the secondary sidebar
-  // closed — this is a mode flip, not a KS click.
+  // closes the primary sidebar but must not issue a second, competing
+  // reveal of the secondary-sidebar chat — the config handler already
+  // did that; this is a mode flip, not a KS click.
   executedCommands.length = 0;
   for (const cb of treeVisibilityListeners) cb({visible: true});
   await new Promise(r => setTimeout(r, 120));
@@ -808,8 +817,8 @@ async function runTest() {
   );
   assert.strictEqual(
     calls.sidebar.focusChatInput,
-    focusBeforeModeOff,
-    'tree shown by the mode flip: secondary sidebar stays closed',
+    focusBeforeModeOff + 1,
+    'tree shown by the mode flip: no second reveal of the sidebar chat',
   );
 
   // --- a session with NO persisted panel-id record (pre-upgrade
@@ -897,6 +906,117 @@ async function runTest() {
       /* fs watchers on tmp dirs */
     }
   }
+
+  // --- the mode-OFF reveal must END with the chat composer focused,
+  // even when the secondary sidebar has never been widened: a window
+  // that started in editor-tabs mode resolves the sidebar view for the
+  // first time on that reveal, which arms the one-time widening; its
+  // focus handoff must go back to the chat, not the editor group.
+  // The earlier activations' config listeners must not fire here (the
+  // stub's disposables are no-ops), so start from clean listener sets.
+  configListeners.length = 0;
+  treeVisibilityListeners.length = 0;
+  registryTabsAddedListeners.length = 0;
+  firstResolveCb = null;
+  editorTabsMode = true;
+  const activateUnwidened = async () => {
+    const c = {
+      extensionUri: vscodeStub.Uri.file(tmpExtPath),
+      extensionPath: tmpExtPath,
+      subscriptions: [],
+      workspaceState: makeMemento(),
+      globalState: makeMemento(),
+    };
+    await c.workspaceState.update('firstLaunchDone', true);
+    // `sidebarWidened` unset: the widening is armed on first resolve.
+    fakePanelCount = 0;
+    vscodeStub.window.tabGroups = {all: []};
+    extension.activate(c);
+    assert.ok(firstResolveCb, 'the widening hooks the first resolve');
+    return c;
+  };
+  const disposeCtx = c => {
+    for (const d of c.subscriptions) {
+      try {
+        if (d && typeof d.dispose === 'function') d.dispose();
+      } catch {
+        /* fs watchers on tmp dirs */
+      }
+    }
+  };
+  const runWidening = async () => {
+    firstResolveCb();
+    firstResolveCb = null;
+    // The widening waits 500ms after the resolve, then runs its awaits.
+    await new Promise(r => setTimeout(r, 700));
+  };
+
+  const ctx3 = await activateUnwidened();
+  const focusBeforeOff3 = calls.sidebar.focusChatInput;
+  const widenBefore3 = calls.sidebar.widenToOneThird;
+  executedCommands.length = 0;
+  editorTabsMode = false;
+  await fireConfigChange();
+  assert.strictEqual(
+    calls.sidebar.focusChatInput,
+    focusBeforeOff3 + 1,
+    'mode off (never widened): the reveal focuses the chat',
+  );
+  // The reveal resolved the view: the widening runs, then hands focus
+  // back to the chat composer instead of the editor group.
+  await runWidening();
+  assert.strictEqual(
+    calls.sidebar.widenToOneThird,
+    widenBefore3 + 1,
+    'first resolve on the mode-off reveal: the sidebar is widened once',
+  );
+  assert.ok(
+    executedCommands.some(e => e.cmd === 'workbench.action.focusAuxiliaryBar'),
+    'the widening still focuses the secondary sidebar for its resizes',
+  );
+  assert.ok(
+    !executedCommands.some(
+      e => e.cmd === 'workbench.action.focusFirstEditorGroup',
+    ),
+    'widening after the mode-off reveal must NOT move focus to the editor',
+  );
+  assert.strictEqual(
+    calls.sidebar.focusChatInput,
+    focusBeforeOff3 + 2,
+    'widening after the mode-off reveal refocuses the chat composer',
+  );
+  assert.strictEqual(
+    ctx3.workspaceState.get('sidebarWidened'),
+    true,
+    'the widening is still recorded as done',
+  );
+  disposeCtx(ctx3);
+
+  // Contrast: a first resolve NOT caused by a mode flip (the user opened
+  // the sidebar chat in a window that was in sidebar mode all along)
+  // keeps the widening's original handoff to the editor group.
+  configListeners.length = 0;
+  treeVisibilityListeners.length = 0;
+  registryTabsAddedListeners.length = 0;
+  editorTabsMode = false;
+  const ctx4 = await activateUnwidened();
+  const focusBefore4 = calls.sidebar.focusChatInput;
+  executedCommands.length = 0;
+  await runWidening();
+  assert.ok(
+    executedCommands.some(
+      e => e.cmd === 'workbench.action.focusFirstEditorGroup',
+    ),
+    'widening without a mode flip hands focus to the editor group',
+  );
+  assert.strictEqual(
+    calls.sidebar.focusChatInput,
+    focusBefore4,
+    'widening without a mode flip does not refocus the chat',
+  );
+  assert.strictEqual(ctx4.workspaceState.get('sidebarWidened'), true);
+  disposeCtx(ctx4);
+
   fs.rmSync(tmpExtPath, {recursive: true, force: true});
   console.log('editorTabsExtensionWiring: all tests passed');
 }

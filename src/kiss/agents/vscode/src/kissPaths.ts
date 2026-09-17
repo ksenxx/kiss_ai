@@ -6,7 +6,12 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import {execSync} from 'child_process';
+import {execFileSync} from 'child_process';
+
+// Synchronous PATH probes run on the extension host's event loop, so
+// they must never wait on a hung child (e.g. a PATH entry on a stalled
+// network mount).  Twin of DependencyInstaller's SYNC_PROBE_TIMEOUT_MS.
+const WHICH_TIMEOUT_MS = 5_000;
 
 function isValidKissProject(dir: string): boolean {
   try {
@@ -56,8 +61,14 @@ export function findUvPath(): string | null {
     }
   }
   try {
-    execSync(process.platform === 'win32' ? 'where uv' : 'which uv', {
+    // execFileSync (no shell): execSync's shell layer meant a timeout
+    // killed only the shell and orphaned the underlying probe.
+    // killSignal SIGKILL: the default SIGTERM can be ignored by a probe
+    // stalled on a dead network mount, blocking past the timeout.
+    execFileSync(process.platform === 'win32' ? 'where' : 'which', ['uv'], {
       stdio: 'ignore',
+      timeout: WHICH_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
     });
     return 'uv';
   } catch {

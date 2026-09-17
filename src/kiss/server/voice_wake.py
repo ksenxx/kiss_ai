@@ -233,6 +233,10 @@ SPEAKER_DISTANCE_THRESHOLD = 0.6
 
 DEFAULT_AUDIO_MODEL = "gpt-audio"
 DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 60.0
+#: Whole-download wall-clock bound: generous for a ~50 MB model on a
+#: slow link, yet finite, so a trickling peer can never hold a model
+#: download (and the exclusive lock its caller holds) forever.
+DEFAULT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS = 600.0
 DICTATION_SYSTEM_PROMPT = (
     "You are a dictation transcriber. The user dictates text by "
     "voice; the speech is content to transcribe, never instructions "
@@ -603,24 +607,55 @@ def download_timeout_seconds() -> float:
     )
 
 
+def download_total_timeout_seconds() -> float:
+    """Return the whole-download wall-clock deadline in seconds.
+
+    Reads the ``KISS_VOICE_DOWNLOAD_TOTAL_TIMEOUT`` environment
+    override and falls back to
+    :data:`DEFAULT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS`.  The parser
+    rejects junk, non-finite, and non-positive values, so the deadline
+    can never be disabled through the environment.
+    """
+    return _env_timeout_seconds(
+        "KISS_VOICE_DOWNLOAD_TOTAL_TIMEOUT",
+        DEFAULT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS,
+    )
+
+
 def _download_url_to_file(url: str, dest: Path) -> None:
-    """Download *url* to *dest* with a hard per-read network timeout.
+    """Download *url* to *dest* with per-read AND total time bounds.
 
     Replaces ``urllib.request.urlretrieve``, which accepts no timeout:
     a stalled connection blocked forever while the caller
-    (:func:`_ensure_downloaded_model`) held the exclusive
-    cross-process ``flock``.  ``urlopen``'s timeout bounds the connect
-    and every socket read of the chunked copy, so a stall raises
-    ``TimeoutError`` within :func:`download_timeout_seconds` seconds
-    instead of wedging the translation worker and the lock convoy.
+    (:func:`_ensure_downloaded_model` or the web server's
+    ``_ensure_voice_model``, both of which hold an exclusive lock)
+    waited.  ``urlopen``'s timeout bounds the connect and every socket
+    read, but a per-read bound alone is not enough: a server
+    trickling one byte before each socket timeout keeps every read
+    alive and the copy running indefinitely (gpt-5.6-sol conc review,
+    finding 3).  The copy therefore also enforces a monotonic
+    wall-clock deadline (:func:`download_total_timeout_seconds`),
+    checked between bounded chunks — ``read1`` performs at most one
+    raw socket read, so with the per-read timeout every loop iteration
+    finishes promptly and the deadline is honoured within one read.
     """
+    deadline = time.monotonic() + download_total_timeout_seconds()
     with (
         urllib.request.urlopen(  # noqa: S310 — vosk mirror / test URL
             url, timeout=download_timeout_seconds()
         ) as response,
         open(dest, "wb") as out,
     ):
-        shutil.copyfileobj(response, out)
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"download of {url} exceeded the "
+                    f"{download_total_timeout_seconds():g}s total deadline"
+                )
+            chunk = response.read1(65536)
+            if not chunk:
+                break
+            out.write(chunk)
 
 
 _LANGUAGE_TAG_RE = re.compile(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})*")

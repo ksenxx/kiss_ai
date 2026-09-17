@@ -24,8 +24,8 @@ audio-player child process (``KISS_SORCAR_PLAY_CMD``) — no mocks:
    snapshot never re-registered in ``_local_uds_tab_counts``, so a
    talk for a background tab skipped daemon-native playback entirely
    (the webview cannot autoplay → silence).  ``ready`` on a UDS
-   connection now synchronizes the connection's local-tab membership
-   from the canonical tab registry.
+   connection now marks the connection as an attached chat webview,
+   and every registry tab counts as shown while one is attached.
 3. The local-tab bookkeeping used to be ADD-ONLY per connection:
    closing a canonical tab removed it from every client UI (via the
    ``tabs_state`` broadcast) but never pruned it from any live UDS
@@ -33,9 +33,16 @@ audio-player child process (``KISS_SORCAR_PLAY_CMD``) — no mocks:
    (decremented only on socket disconnect).  A still-running task's
    talk for the closed tab then triggered daemon-native playback even
    though NO local webview showed the tab, and a repeated ``ready``
-   could not self-heal.  Registry removal (close / displacement) now
-   prunes the id everywhere, and ``ready`` reconciles instead of only
-   adding.
+   could not self-heal.  The fan-out now decides "shown" at talk time
+   (``WebPrinter.shown_local_uds_tabs`` → ``VSCodeServer._local_tab_shown``),
+   in order: a registry tab is shown while a chat webview is attached
+   (every webview mirrors the registry); otherwise a tab a UDS peer
+   addressed is shown while its own task state is alive and not
+   closed; otherwise an addressed tab with no state of its own is a
+   still-subscribed viewer of a live task and is shown unless it is a
+   registry tab.  A registry removal therefore retires the tab from
+   native playback by itself, and ``ready`` reconciles the
+   connection's interest set instead of only adding to it.
 """
 
 from __future__ import annotations
@@ -265,6 +272,12 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         WSS copy goes to a DIFFERENT device and must stay unmuted.
         """
         tab_id = "shared-tab-" + uuid.uuid4().hex[:8]
+        # The tab must EXIST canonically: a registry tab is shown by
+        # every attached chat webview, which is what the talk fan-out
+        # checks at talk time for native playback.
+        self.server._vscode_server.tab_registry.update_tab(
+            tab_id, title="shared chat", create=True,
+        )
         uds_reader, _uds_writer = await self._connect_uds(tab_id)
         url = f"wss://127.0.0.1:{self.port}/ws"
         async with connect(url, ssl=_no_verify_ssl()) as ws:
@@ -306,14 +319,16 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         self.assertEqual(base64.b64decode(markers[0]["audio_b64"]), MP3_BYTES)
 
     async def test_ready_registers_canonical_background_tabs(self) -> None:
-        """ITEM 2: a fresh UDS reconnect covers snapshot-adopted tabs.
+        """ITEM 2: an attached webview covers snapshot-adopted tabs.
 
         After a webview reload, ``ready`` announces only the active
         placeholder tab; the canonical background tabs the client
         adopts from the ``tabs_state`` snapshot never arrive in
         tab-carrying commands.  A talk event for such a background tab
         must still trigger daemon-native playback (and mute the UDS
-        copy) — the webview shows the tab and cannot autoplay.
+        copy) — the webview shows the tab and cannot autoplay.  The
+        ``ready`` marks the connection as an attached chat webview,
+        which is what makes every registry tab count for it.
         """
         active_tab = "active-tab-" + uuid.uuid4().hex[:8]
         bg_tab = "bg-tab-" + uuid.uuid4().hex[:8]
@@ -341,8 +356,8 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
             1,
             "the daemon must play the clip natively for a canonical "
             "background tab shown by the reconnected local webview — "
-            "ready must sync the connection's local-tab membership from "
-            "the canonical tab registry",
+            "ready must mark the connection as an attached webview, "
+            "which covers every registry tab",
         )
         self.assertEqual(base64.b64decode(markers[0]["audio_b64"]), MP3_BYTES)
         self.assertTrue(
@@ -373,7 +388,7 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
                     return
 
     async def test_closed_canonical_tab_stops_native_playback(self) -> None:
-        """ITEM 3a: closing a busy canonical tab prunes muting bookkeeping.
+        """ITEM 3a: closing a busy canonical tab ends native playback for it.
 
         A closed busy tab keeps its task subscription until the task
         finishes (``_drop_tab_state`` defers teardown), so the still
@@ -389,8 +404,8 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         registry = self.server._vscode_server.tab_registry
         registry.update_tab(closed_tab, title="busy chat", create=True)
 
-        # The UDS ready adopts the canonical tab into the local-tab
-        # bookkeeping (regression 2 above).
+        # The UDS ready marks the connection as an attached webview,
+        # which is what makes the canonical tab count (regression 2).
         uds_reader, uds_writer = await self._connect_uds("placeholder-tab")
         await asyncio.sleep(0.1)
 
@@ -423,31 +438,44 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
             0,
             "the canonical tab was closed on every client, so the daemon "
             "must NOT play the still-running task's talk clip natively — "
-            "registry removal must prune the local-UDS tab bookkeeping",
+            "the registry removal must retire the tab from the fan-out's "
+            "shown set",
         )
 
     async def test_repeated_ready_drops_stale_local_tabs(self) -> None:
-        """ITEM 3b: a repeated ``ready`` reconciles, not merely adds.
+        """ITEM 3b: a repeated ``ready`` reconciles the interest set.
 
-        Pre-populate the connection's local-tab bookkeeping from a
-        registry snapshot, shrink the registry behind the connection's
-        back, then re-announce ``ready``: the stale id must be dropped
-        (membership becomes the current snapshot), so a talk for the
-        vanished tab no longer triggers daemon-native playback.
+        Record interest in a canonical tab, shrink the registry WITHOUT
+        the server close path (no ``frontend_closed`` marking, no
+        prune), then re-announce ``ready``: the connection's interest
+        is reconciled to the tabs it announces (the stale entry is
+        dropped, bounding the set), and a talk for the vanished tab
+        must not trigger daemon-native playback — the fan-out reads
+        the registry at talk time.
         """
         stale_tab = "stale-tab-" + uuid.uuid4().hex[:8]
         registry = self.server._vscode_server.tab_registry
         registry.update_tab(stale_tab, title="stale chat", create=True)
 
-        # Pre-populate: ready adopts the registry snapshot.
+        # Attach the webview while the tab is canonical and address
+        # the tab so the connection records interest in it.
         uds_reader, uds_writer = await self._connect_uds("placeholder-tab")
-        await asyncio.sleep(0.1)
+        uds_writer.write(
+            (json.dumps({"type": "getTabsState", "tabId": stale_tab}) + "\n")
+            .encode("utf-8")
+        )
+        await uds_writer.drain()
+        await asyncio.sleep(0.2)
+        printer = self.server._printer
+        with printer._ws_lock:
+            self.assertIn(stale_tab, printer._local_uds_tab_counts)
 
-        # Shrink the registry WITHOUT the server close path, so only
-        # the ready-time reconciliation can heal the bookkeeping.
+        # Shrink the registry WITHOUT the server close path: nothing
+        # server-side marks or prunes the tab.
         self.assertTrue(registry.close_tab(stale_tab))
 
-        # Repeated ready on the SAME connection must drop the stale id.
+        # Repeated ready on the SAME connection reconciles its interest
+        # to the tabs it announces, dropping the stale entry.
         uds_writer.write(
             (
                 json.dumps({
@@ -459,6 +487,8 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         )
         await uds_writer.drain()
         await asyncio.sleep(0.3)
+        with printer._ws_lock:
+            self.assertNotIn(stale_tab, printer._local_uds_tab_counts)
 
         self.server._printer.subscribe_tab(self.task_id, stale_tab)
         self.server._printer.broadcast(
@@ -477,17 +507,18 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         self.assertEqual(
             len(list(self.marker_dir.glob("*.json"))),
             0,
-            "a repeated ready must reconcile the connection's local-tab "
-            "membership to the current registry snapshot (drop stale "
-            "ids), so the daemon must not play the vanished tab's talk",
+            "the tab is gone from the registry, so whatever bookkeeping "
+            "the connection still carries, the daemon must not play the "
+            "vanished tab's talk",
         )
 
     async def test_disconnect_unregisters_registry_synced_tabs(self) -> None:
-        """Registry-synced local tabs get the SAME disconnect cleanup.
+        """Disconnect detaches the webview: registry tabs stop counting.
 
         After the only UDS client disconnects, a talk for a registry
-        tab must no longer trigger daemon playback: the ready-time
-        registry sync shares the connection's ``local_tabs`` cleanup.
+        tab must no longer trigger daemon playback: the disconnect
+        cleanup drops the connection's webview mark along with its
+        interest set.
         """
         bg_tab = "bg-tab-" + uuid.uuid4().hex[:8]
         registry = self.server._vscode_server.tab_registry
