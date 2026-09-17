@@ -1244,9 +1244,19 @@ class VSCodeServer(
             if state is not None:
                 state.frontend_closed = True
         removal_token = self.tab_registry.close_tab(tab_id)
+        # Prune BEFORE broadcasting, like the displacement path in
+        # ``_registry_update_tab``: the ``tabs_state`` broadcast is the
+        # observable "tab is gone" signal, so a client that sees it and
+        # issues no further commands must not observe stale local-UDS
+        # talk bookkeeping for the tab (the old broadcast-then-prune
+        # order raced exactly that observation).  This orders only THIS
+        # close's own two effects; registry and printer keep separate
+        # locks, so commands racing the close (a UDS re-registration, a
+        # ``ready`` sync snapshot, a ``resumeSession`` republication)
+        # can still interleave between them.
+        self._prune_local_uds_tab(tab_id)
         if removal_token:
             self._broadcast_tabs_state()
-        self._prune_local_uds_tab(tab_id)
         # The removal token lets the cleanup tail stand down when a
         # later publication (a concurrent ``resumeSession`` reopen)
         # has legitimately taken the tab over; a tab that was never in
