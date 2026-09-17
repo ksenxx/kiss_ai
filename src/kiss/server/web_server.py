@@ -70,7 +70,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
 from http import HTTPStatus
@@ -2255,8 +2255,19 @@ class WebPrinter(JsonPrinter):
         super().__init__()
         self._ws_clients: set[ServerConnection] = set()
         self._uds_writers: set[asyncio.StreamWriter] = set()
+        # Local-UDS talk bookkeeping.  This printer owns two facts:
+        # which UDS connection addressed which tab id (INTEREST: the
+        # per-connection sets and their shared reference counts) and
+        # which UDS connections host a chat webview (``ready`` seen).
+        # Whether a tab is SHOWN by a local webview is decided at talk
+        # time by the rule installed via ``set_local_tab_visibility``
+        # from those facts plus the canonical ones (tab registry, live
+        # agent state) — never from a copy of registry state kept
+        # here.  See ``shown_local_uds_tabs``.
         self._local_uds_tab_counts: dict[str, int] = {}
         self._uds_local_tab_sets: dict[str, set[str]] = {}
+        self._uds_webview_conns: set[str] = set()
+        self._local_tab_visibility: Callable[[str, bool, bool], bool] | None = None
         self._conn_endpoints: dict[str, Any] = {}
         self._ws_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -2546,18 +2557,98 @@ class WebPrinter(JsonPrinter):
         else:
             counts[key] = count - 1
 
+    def set_local_tab_visibility(
+        self, decide: Callable[[str, bool, bool], bool],
+    ) -> None:
+        """Install the daemon's "does a local webview show this tab" rule.
+
+        The daemon's :class:`~kiss.server.server.VSCodeServer` installs
+        :meth:`~kiss.server.server.VSCodeServer._local_tab_shown`.  The
+        talk fan-out consults it at decision time
+        (:meth:`shown_local_uds_tabs`) with the two facts this printer
+        owns — whether some UDS connection recorded interest in the
+        tab and whether any UDS webview is attached at all — so the
+        bookkeeping here never has to mirror registry state: a stale
+        or pruned interest entry can neither resurrect a closed tab nor
+        hide a reopened one.  Without a rule (a standalone printer)
+        every interesting tab counts as shown.
+
+        Args:
+            decide: ``decide(tab_id, interested, webview_attached)``
+                returns ``True`` when a local webview shows *tab_id*.
+        """
+        with self._ws_lock:
+            self._local_tab_visibility = decide
+
+    def mark_uds_webview(self, conn_id: str) -> None:
+        """Record that UDS connection *conn_id* hosts a chat webview.
+
+        Called on the connection's ``ready``: a VS Code chat webview
+        announces itself that way, while headless UDS peers (the
+        ``run_agent`` daemon client, tests) never do.  Every attached
+        webview mirrors the whole canonical tab registry, so this flag
+        — not per-tab interest — is what decides native playback for
+        registry tabs (see :meth:`shown_local_uds_tabs`).  Cleared by
+        :meth:`unregister_local_uds_tabs` on disconnect.
+
+        Args:
+            conn_id: The UDS connection's id.
+        """
+        with self._ws_lock:
+            self._uds_webview_conns.add(conn_id)
+
+    def shown_local_uds_tabs(self, tab_ids: Iterable[str]) -> set[str]:
+        """Return the subset of *tab_ids* a local UDS webview shows.
+
+        Reads this printer's two facts under its own lock — the
+        interest set and whether a webview is attached — then hands
+        each candidate to the installed visibility rule, which reads
+        the canonical facts (tab registry, live agent state) under
+        their own locks.  Nothing here is a copy of registry state, so
+        no interleaving of a close, a re-registration, a ``ready`` sync
+        or a reopen can leave a stale decision behind; the residual
+        window is the read itself (a disconnect or a republication
+        landing between the two reads can misjudge ONE utterance, and
+        the next decision is correct again).  The rule runs outside
+        ``_ws_lock`` on purpose: it takes the agent-state lock, which
+        several broadcasters already hold while entering this printer.
+
+        Args:
+            tab_ids: Candidate tab ids (a talk event's targets).
+
+        Returns:
+            The ids a local webview currently shows.
+        """
+        with self._ws_lock:
+            interested = {t for t in tab_ids if t in self._local_uds_tab_counts}
+            webview_attached = bool(self._uds_webview_conns)
+            decide = self._local_tab_visibility
+        if decide is None:
+            return interested
+        return {
+            t for t in tab_ids if decide(t, t in interested, webview_attached)
+        }
+
     def register_local_uds_tab(
         self, conn_id: str, tab_id: str, local_tabs: set[str]
     ) -> None:
-        """Mark *tab_id* as shown by the local UDS connection *conn_id*.
+        """Record the local UDS connection *conn_id*'s interest in *tab_id*.
+
+        Interest is what a UDS command's ``tabId`` proves: this peer
+        addressed the tab.  It takes part in the native-playback
+        decision only for tabs no attached webview mirrors from the
+        registry (a ``run_agent`` dispatch's ``api-…`` tab, a sub-agent
+        viewer tab, a placeholder the registry refused at its cap, a
+        headless client's own registry tab) — together with the tab's
+        live agent state or task subscription — so a stale entry for a
+        closed registry tab is inert.
 
         Args:
             conn_id: The UDS connection's id.
             tab_id: The frontend tab id seen on a UDS command.
             local_tabs: The connection's mutable local-tab set (lives
                 in its ``conn_state``).  Membership is checked and
-                updated under the printer lock, so a concurrent
-                canonical-close prune cannot race the registration.
+                updated under the printer lock.
         """
         with self._ws_lock:
             self._uds_local_tab_sets[conn_id] = local_tabs
@@ -2569,16 +2660,15 @@ class WebPrinter(JsonPrinter):
     def sync_local_uds_tabs(
         self, conn_id: str, tab_ids: set[str], local_tabs: set[str]
     ) -> None:
-        """Reconcile *conn_id*'s local-tab membership to exactly *tab_ids*.
+        """Reconcile *conn_id*'s interest set to exactly *tab_ids*.
 
         The ``ready``-time sync: missing ids are added and stale ones
-        dropped (with matching reference-count updates), so a repeated
-        ``ready`` self-heals bookkeeping left over from canonical tabs
-        that were closed while this connection was attached.
+        dropped (with matching reference-count updates), so a webview
+        reload bounds the interest a connection accumulated.
 
         Args:
             conn_id: The UDS connection's id.
-            tab_ids: The tab ids the connection currently shows.
+            tab_ids: The tab ids the client announced in its ``ready``.
             local_tabs: The connection's mutable local-tab set.
         """
         with self._ws_lock:
@@ -2591,16 +2681,17 @@ class WebPrinter(JsonPrinter):
             local_tabs.update(tab_ids)
 
     def prune_local_uds_tab(self, tab_id: str) -> None:
-        """Drop *tab_id* from every UDS connection's local-tab bookkeeping.
+        """Drop *tab_id* from every UDS connection's interest set.
 
-        Called when a tab is removed from the canonical tab registry
-        (explicit close or one-tab-per-chat displacement): the
-        ``tabs_state`` broadcast removes the tab from every client UI,
-        so no local webview shows it anymore — a still-running task's
-        talk for the id must no longer trigger daemon-native playback.
+        Called when the canonical registry removes a tab (close or
+        displacement).  Bookkeeping hygiene only: the visibility rule
+        decides registry tabs from the registry and the attached
+        webviews, not from interest, so a prune racing a reopen cannot
+        hide the reopened tab.  Tabs outside the registry are never
+        pruned here — interest is part of their decision.
 
         Args:
-            tab_id: The registry-removed frontend tab id.
+            tab_id: The frontend tab id the registry removed.
         """
         with self._ws_lock:
             for local_tabs in self._uds_local_tab_sets.values():
@@ -2618,6 +2709,7 @@ class WebPrinter(JsonPrinter):
             tab_ids: The connection's remaining local-tab ids.
         """
         with self._ws_lock:
+            self._uds_webview_conns.discard(conn_id)
             self._uds_local_tab_sets.pop(conn_id, None)
             for tab_id in tab_ids:
                 self._decrement_count(self._local_uds_tab_counts, tab_id)
@@ -2652,10 +2744,8 @@ class WebPrinter(JsonPrinter):
             event: The ``talk`` event (no ``tabId`` stamp yet).
             targets: Subscriber tab ids for the event's task.
         """
-        with self._ws_lock:
-            local_uds_tabs = set(self._local_uds_tab_counts)
-        local_web_targets = [t for t in targets if t in local_uds_tabs]
-        daemon_plays = bool(local_web_targets) and self._play_talk_clip_locally(
+        local_uds_tabs = self.shown_local_uds_tabs(targets)
+        daemon_plays = bool(local_uds_tabs) and self._play_talk_clip_locally(
             event
         )
         base = json.dumps(event)[:-1]

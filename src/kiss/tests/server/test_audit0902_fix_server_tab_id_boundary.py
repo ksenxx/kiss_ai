@@ -219,6 +219,14 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             return line.decode("utf-8")
 
         try:
+            # A chat webview announces ``ready`` before anything else;
+            # the daemon answers with the (empty) registry snapshot.
+            writer.write(
+                (json.dumps({"type": "ready", "tabId": "placeholder"}) + "\n")
+                .encode("utf-8"),
+            )
+            await writer.drain()
+            await self._recv_until(recv, "tabs_state")
             writer.write(
                 (json.dumps({"type": "openTab", "tabId": RAW_TAB}) + "\n")
                 .encode("utf-8"),
@@ -229,7 +237,14 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             printer = self.server._printer
             with printer._ws_lock:
                 local_tabs = dict(printer._local_uds_tab_counts)
-            self.assertEqual(local_tabs, {CANON_TAB: 1})
+            # ONE interest entry for the opened tab, keyed by the
+            # canonical id (the padded spelling never reaches the
+            # bookkeeping), and the talk fan-out counts the tab as
+            # shown by the attached local webview.
+            self.assertEqual(local_tabs, {"placeholder": 1, CANON_TAB: 1})
+            self.assertEqual(
+                printer.shown_local_uds_tabs([CANON_TAB]), {CANON_TAB},
+            )
 
             writer.write(
                 (json.dumps({"type": "closeTab", "tabId": CANON_TAB}) + "\n")
@@ -238,9 +253,13 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             await writer.drain()
             tabs = await self._recv_until(recv, "tabs_state")
             self.assertEqual(tabs["tabs"], [])
+            # The close prunes the interest entry and, decisively,
+            # removes the tab from the registry: the fan-out no longer
+            # counts it as shown.
             with printer._ws_lock:
                 local_tabs = dict(printer._local_uds_tab_counts)
-            self.assertEqual(local_tabs, {})
+            self.assertEqual(local_tabs, {"placeholder": 1})
+            self.assertEqual(printer.shown_local_uds_tabs([CANON_TAB]), set())
         finally:
             writer.close()
             await writer.wait_closed()

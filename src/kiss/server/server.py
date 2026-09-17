@@ -427,6 +427,16 @@ class VSCodeServer(
         self.tab_registry = TabRegistry(
             Path(_persistence._KISS_DIR) / "tabs.json",
         )
+        # The printer's local-UDS talk bookkeeping only knows which
+        # connection addressed which tab and whether a chat webview is
+        # attached; whether a tab is SHOWN by a local webview is decided
+        # at talk time by ``_local_tab_shown`` from the canonical facts
+        # (duck-typed: only the daemon's ``WebPrinter`` has the hook).
+        # The bound method reads ``self.tab_registry`` on every call,
+        # so ``use_private_tab_registry`` swaps are honoured.
+        install_visibility = getattr(self.printer, "set_local_tab_visibility", None)
+        if install_visibility is not None:
+            install_visibility(self._local_tab_shown)
         self._tab_chat_views: dict[str, str] = {}
         # Rebind surviving chat views from the persisted registry so a
         # follow-up ``run`` after a daemon restart continues the tab's
@@ -492,6 +502,59 @@ class VSCodeServer(
         """
         self.tab_registry = TabRegistry(path)
         self._tab_chat_views = dict(self.tab_registry.bindings())
+
+    def _local_tab_shown(
+        self, tab_id: str, interested: bool, webview_attached: bool,
+    ) -> bool:
+        """Decide whether a local UDS webview shows *tab_id* right now.
+
+        The rule behind ``WebPrinter.shown_local_uds_tabs`` — the
+        daemon-native talk playback decision.  It is evaluated at talk
+        time from the canonical facts instead of from bookkeeping that
+        mirrors them, which is what makes the decision immune to the
+        interleavings of a close with a re-registration, a ``ready``
+        sync or a ``resumeSession`` reopen: no copy exists that could
+        go stale.  *tab_id* is always a talk target, i.e. a tab the
+        printer currently has subscribed to a live task.
+
+        * A tab listed in the canonical registry is shown by EVERY
+          attached chat webview (clients mirror the whole registry
+          from ``tabs_state``), so it counts as soon as a webview is
+          attached — per-connection interest is irrelevant, which is
+          why a prune racing a reopen cannot hide the reopened tab.
+        * Otherwise some UDS peer must have addressed the tab
+          (*interested*).  If the tab runs a task of its own — a
+          ``run_agent`` dispatch's ``api-…`` tab, a ``run_parallel``
+          child's synthetic tab, a placeholder the registry refused at
+          its cap, or a registry tab with no webview attached whose
+          headless owner (``daemon_client.run``) is still connected —
+          it counts while that state is not ``frontend_closed``, the
+          flag every close path (``_close_tab``, displacement, the
+          deferred ``_dispose_if_closed``) raises and every reopen
+          (``_replay_session``) clears.
+        * A tab with no state of its own is a VIEWER of another tab's
+          task (a sub-agent tab the client opened for a running child,
+          a tab resuming a running chat before its registry
+          publication lands): being a talk target proves it is still
+          subscribed, and closing a viewer unsubscribes it
+          (``_teardown_tab_resources`` → ``cleanup_tab``), so it counts
+          unless it is a registry tab that no webview shows.
+
+        Args:
+            tab_id: The frontend tab identifier a talk event targets.
+            interested: Some UDS connection addressed *tab_id*.
+            webview_attached: Some UDS connection hosts a chat webview.
+        """
+        in_registry = self.tab_registry.has_tab(tab_id)
+        if in_registry and webview_attached:
+            return True
+        if not interested:
+            return False
+        with self._state_lock:
+            state = agent_state.find_by_tab(tab_id)
+            if state is not None:
+                return not state.frontend_closed
+        return not in_registry
 
     @staticmethod
     def _run_orphan_sweep(still_running: set[str], boot_ts: float) -> None:
@@ -1244,19 +1307,26 @@ class VSCodeServer(
             if state is not None:
                 state.frontend_closed = True
         removal_token = self.tab_registry.close_tab(tab_id)
-        # Prune BEFORE broadcasting, like the displacement path in
-        # ``_registry_update_tab``: the ``tabs_state`` broadcast is the
-        # observable "tab is gone" signal, so a client that sees it and
-        # issues no further commands must not observe stale local-UDS
-        # talk bookkeeping for the tab (the old broadcast-then-prune
-        # order raced exactly that observation).  This orders only THIS
-        # close's own two effects; registry and printer keep separate
-        # locks, so commands racing the close (a UDS re-registration, a
-        # ``ready`` sync snapshot, a ``resumeSession`` republication)
-        # can still interleave between them.
-        self._prune_local_uds_tab(tab_id)
         if removal_token:
+            # Registry tab: prune its local-UDS interest (hygiene) and
+            # broadcast.  The prune is not the playback decision —
+            # ``_local_tab_shown`` decides registry tabs from the
+            # registry plus "a webview is attached" — so a prune that
+            # lands after a concurrent reopen's re-registration cannot
+            # hide the reopened tab, and a stale re-registration after
+            # it cannot resurrect the closed one.  Prune BEFORE the
+            # broadcast so a client that sees the snapshot never
+            # observes stale bookkeeping.
+            self._prune_local_uds_tab(tab_id)
             self._broadcast_tabs_state()
+        # No prune for a tab the registry did not list (a sub-agent
+        # viewer, a ``run_agent`` ``api-…`` tab, a duplicate close):
+        # interest IS part of the decision for those, and a stale
+        # duplicate close landing inside a reopen would otherwise strip
+        # the reopened tab's interest.  ``_drop_tab_state`` below
+        # retires such a tab through its agent state (``frontend_closed``)
+        # or its subscriptions (``cleanup_tab``); the interest entry
+        # itself is reconciled by the connection's next ``ready``.
         # The removal token lets the cleanup tail stand down when a
         # later publication (a concurrent ``resumeSession`` reopen)
         # has legitimately taken the tab over; a tab that was never in
@@ -1265,14 +1335,16 @@ class VSCodeServer(
         self._drop_tab_state(tab_id, removal_token=removal_token or None)
 
     def _prune_local_uds_tab(self, tab_id: str) -> None:
-        """Drop a closed tab from the printer's talk-playback bookkeeping.
+        """Drop a registry-removed tab from the local-UDS interest sets.
 
-        A tab removed from the canonical registry disappears from
-        every client UI (``tabs_state`` / ``closeSubagentTab``), so no
-        local webview shows it anymore — but a busy tab's task
-        subscription is deliberately retained until the task finishes,
-        and its talk events must not keep triggering daemon-native
-        playback.  Duck-typed like ``cleanup_tab``: only the daemon's
+        Bookkeeping hygiene for a tab the registry just removed (close
+        or displacement): it bounds the interest a long-lived
+        connection accumulates as the user opens and closes tabs.  The
+        playback decision for registry tabs does not depend on
+        interest — see :meth:`_local_tab_shown` — so the prune can
+        never hide a concurrently reopened tab.  Never called for tabs
+        outside the registry, whose interest is part of the decision.
+        Duck-typed like ``cleanup_tab``: only the daemon's
         :class:`~kiss.server.web_server.WebPrinter` tracks local UDS
         tabs.
 

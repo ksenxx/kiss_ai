@@ -690,11 +690,20 @@ class ServerApi:
     def _record_tab(self, tab_id: str, ctx: ApiContext) -> None:
         """Record *tab_id* as touched by this connection.
 
-        For local UDS peers, registers the id with the printer's
-        local-tab bookkeeping (talk-playback arbitration).  The
+        For local UDS peers, records the connection's INTEREST in the
+        id with the printer's local-tab bookkeeping (talk-playback
+        arbitration).  Interest is recorded before the handler runs
+        and regardless of whether the tab currently exists: the talk
+        fan-out decides "shown" at talk time from the canonical facts
+        (``VSCodeServer._local_tab_shown`` — registry membership plus
+        an attached webview for registry tabs; for every other tab
+        this interest plus either the tab's own non-closed agent
+        state or, for a viewer without a state of its own, its live
+        task subscription), so a stale record for a closed tab is
+        inert and a record made for a ``run_agent`` ``api-…`` tab or
+        a sub-agent viewer is what lets that tab count.  The
         connection's ``local_tabs`` set is mutated only inside the
-        printer, under the same lock that guards the shared
-        local-UDS tab counts and the canonical-close prune.
+        printer, under its own lock.
 
         Args:
             tab_id: The non-empty frontend tab identifier.
@@ -924,23 +933,25 @@ class ServerApi:
 
         Sanitizes the command's ``restoredTabs`` ONCE (warnings
         included) and writes the cleaned list back so the backend's
-        own sanitize pass finds nothing left to reject or truncate,
-        then RECONCILES a UDS connection's local-tab bookkeeping
-        (local-UDS talk muting) to exactly the tabs the client shows
-        after this ready: its own announced tab, the restored tabs,
-        and every canonical tab-registry tab (after a webview reload
-        ``ready`` announces only the fresh placeholder tab, yet the
-        client adopts every registry tab from the ``tabs_state``
-        snapshot — without the sync a talk event for an adopted
-        background tab would skip daemon-native playback and stay
-        silent, since webviews cannot autoplay).  Reconciling —
-        rather than only adding — also drops stale ids, so a repeated
-        ``ready`` self-heals bookkeeping left over from canonical
-        tabs closed while the connection was attached.  The sync
+        own sanitize pass finds nothing left to reject or truncate.
+        For a UDS connection it then (1) marks the connection as
+        hosting a chat webview — every attached webview mirrors the
+        whole canonical tab registry from ``tabs_state``, so this flag
+        is what makes a registry tab's talk play natively on this
+        machine (webviews cannot autoplay), including for background
+        tabs the client adopts from the snapshot and tabs other clients
+        publish later; and (2) RECONCILES the connection's per-tab
+        interest to exactly the tabs the client announced (its own tab
+        and the restored tabs), which bounds the interest a connection
+        accumulates for tabs closed while it was attached.  No registry
+        snapshot is copied into the bookkeeping: the talk fan-out reads
+        the registry itself at decision time
+        (``VSCodeServer._local_tab_shown``), so there is nothing that
+        a close racing this ``ready`` could leave stale.  The sync
         updates the connection's ``local_tabs`` set in place, so
-        disconnect cleanup is unchanged.  Finally fans the command
-        out through the backend's ready handler (models / input
-        history / config / session replay).
+        disconnect cleanup is unchanged.  Finally fans the command out
+        through the backend's ready handler (models / input history /
+        config / session replay).
 
         Args:
             cmd: The ``ready`` command.
@@ -948,14 +959,14 @@ class ServerApi:
         """
         cmd["restoredTabs"] = self._backend._sanitized_restored_tabs(cmd)
         if ctx.is_uds:
+            conn_id = ctx.conn_state["conn_id"]
+            self._backend._printer.mark_uds_webview(conn_id)
             shown = {rt["tabId"] for rt in cmd["restoredTabs"] if rt["tabId"]}
             own_tab = cmd.get("tabId")
             if isinstance(own_tab, str) and own_tab:
                 shown.add(own_tab)
-            registry = self._backend._vscode_server.tab_registry
-            shown.update(entry["tabId"] for entry in registry.snapshot())
             self._backend._printer.sync_local_uds_tabs(
-                ctx.conn_state["conn_id"],
+                conn_id,
                 shown,
                 ctx.conn_state.setdefault("local_tabs", set()),
             )
