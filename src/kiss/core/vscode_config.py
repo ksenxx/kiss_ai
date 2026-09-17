@@ -289,7 +289,11 @@ def save_config(data: dict[str, Any]) -> None:
             # through a buffered file object (a bare ``os.write`` may
             # legally write fewer bytes than asked and the truncated file
             # would be published) and ``os.replace``-s it into position.
-            atomic_write_text(cfg_path, json.dumps(existing, indent=2))
+            # mode=0o600 is FORCED (not just the new-file default): the
+            # config stores ``remote_password`` and ``tunnel_token``, so
+            # it must never be group/world-readable — and forcing it also
+            # repairs a config.json a prior release published as 0644.
+            atomic_write_text(cfg_path, json.dumps(existing, indent=2), mode=0o600)
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 

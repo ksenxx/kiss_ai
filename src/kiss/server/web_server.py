@@ -70,7 +70,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
 from http import HTTPStatus
@@ -114,6 +114,7 @@ from kiss.server.voice_wake import (
     DEFAULT_AUDIO_MODEL,
     MODEL_NAME,
     SpeakerIdentifier,
+    _download_url_to_file,
     default_models_dir,
     transcribe_pcm,
 )
@@ -189,6 +190,42 @@ def _write_text_to(tmp: Path, text: str) -> None:
     tmp.write_text(text, encoding="utf-8")
 
 
+_SAVE_FILE_LOCK = threading.Lock()
+"""Serializes ``saveFile``'s version check + publish across worker threads.
+
+One lock for every path, deliberately: saves are rare, short, and
+already run off the event loop in :func:`asyncio.to_thread`, so the
+simplicity beats a per-path lock table that would need its own
+housekeeping.  (Sibling daemons are not covered — see
+``RemoteAccessServer._handle_save_file``.)
+"""
+
+
+def _file_version(st: os.stat_result) -> str:
+    """Return the ``"<st_mtime_ns>:<st_size>"`` stamp of a file's state.
+
+    Sent with ``fileContent`` and echoed by ``saveFile`` so
+    ``RemoteAccessServer._handle_save_file`` can tell whether the file
+    changed on disk while it was open in the remote editor.  A string,
+    deliberately: ``st_mtime_ns`` (about 1.8e18) does not survive the
+    round trip through a JavaScript number (2^53 ≈ 9e15), so an
+    integer stamp compared back on the server would never match.
+    """
+    return f"{st.st_mtime_ns}:{st.st_size}"
+
+
+def _write_bytes_with_mode(tmp: Path, data: bytes, st: os.stat_result) -> None:
+    """Write *data* to *tmp* and copy *st*'s permission bits onto it.
+
+    Writer for :func:`_atomic_publish` used by
+    ``RemoteAccessServer._handle_save_file``: ``Path.replace`` swaps
+    the inode, so without this an executable script saved from the
+    web editor would come back non-executable.
+    """
+    tmp.write_bytes(data)
+    os.chmod(tmp, stat_module.S_IMODE(st.st_mode))
+
+
 def _atomic_write_text(target: Path, text: str) -> None:
     """Atomically write *text* (UTF-8) to *target*.
 
@@ -206,9 +243,16 @@ def _download_voice_model_to(tmp: Path) -> None:
     """Download the browser voice-model archive to *tmp*.
 
     Writer callback for :func:`_atomic_publish` used by
-    :func:`_ensure_voice_model`.
+    :func:`_ensure_voice_model`.  Uses the timeout-bounded
+    :func:`kiss.server.voice_wake._download_url_to_file` rather than
+    ``urllib.request.urlretrieve``, which accepts no timeout: a
+    black-holed connection blocked forever while the caller held
+    ``_voice_model_lock`` on a default-executor thread, and every
+    retrying ``/voice-model.tar.gz`` request then parked another
+    shared executor worker on the lock until the daemon stopped
+    dispatching commands entirely.
     """
-    urllib.request.urlretrieve(VOICE_MODEL_URL, tmp)
+    _download_url_to_file(VOICE_MODEL_URL, tmp)
 
 
 def _ensure_voice_model() -> Path | None:
@@ -775,6 +819,31 @@ class _HeadAwareServerConnection(ServerConnection):
 
 
 _OPEN_FILE_MAX_BYTES = 2_000_000
+
+# Binary files the remote webapp shows in a tab instead of refusing: a
+# PDF opens in the browser's built-in viewer, an image as a picture.
+# Their bytes travel base64-encoded inside the fileContent reply, so
+# the cap keeps one reply well under the 64 MiB WebSocket frame limit.
+_OPEN_BINARY_MAX_BYTES = 24 * 1024 * 1024
+_INLINE_BINARY_MIMES: frozenset[str] = frozenset(
+    {
+        "application/pdf",
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+        "image/x-icon",
+        "image/vnd.microsoft.icon",
+        "image/avif",
+    }
+)
+
+
+def _inline_binary_mime(path: Path) -> str:
+    """The MIME type *path* is served inline as, or ``""`` for text/other."""
+    mime = mimetypes.guess_type(path.name, strict=False)[0] or ""
+    return mime if mime in _INLINE_BINARY_MIMES else ""
 
 # Caps on an openFile directory-listing reply, so one click on a huge
 # directory (node_modules, .git/objects, ...) cannot produce a
@@ -2219,8 +2288,19 @@ class WebPrinter(JsonPrinter):
         super().__init__()
         self._ws_clients: set[ServerConnection] = set()
         self._uds_writers: set[asyncio.StreamWriter] = set()
+        # Local-UDS talk bookkeeping.  This printer owns two facts:
+        # which UDS connection addressed which tab id (INTEREST: the
+        # per-connection sets and their shared reference counts) and
+        # which UDS connections host a chat webview (``ready`` seen).
+        # Whether a tab is SHOWN by a local webview is decided at talk
+        # time by the rule installed via ``set_local_tab_visibility``
+        # from those facts plus the canonical ones (tab registry, live
+        # agent state) — never from a copy of registry state kept
+        # here.  See ``shown_local_uds_tabs``.
         self._local_uds_tab_counts: dict[str, int] = {}
         self._uds_local_tab_sets: dict[str, set[str]] = {}
+        self._uds_webview_conns: set[str] = set()
+        self._local_tab_visibility: Callable[[str, bool, bool], bool] | None = None
         self._conn_endpoints: dict[str, Any] = {}
         self._ws_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -2510,18 +2590,98 @@ class WebPrinter(JsonPrinter):
         else:
             counts[key] = count - 1
 
+    def set_local_tab_visibility(
+        self, decide: Callable[[str, bool, bool], bool],
+    ) -> None:
+        """Install the daemon's "does a local webview show this tab" rule.
+
+        The daemon's :class:`~kiss.server.server.VSCodeServer` installs
+        :meth:`~kiss.server.server.VSCodeServer._local_tab_shown`.  The
+        talk fan-out consults it at decision time
+        (:meth:`shown_local_uds_tabs`) with the two facts this printer
+        owns — whether some UDS connection recorded interest in the
+        tab and whether any UDS webview is attached at all — so the
+        bookkeeping here never has to mirror registry state: a stale
+        or pruned interest entry can neither resurrect a closed tab nor
+        hide a reopened one.  Without a rule (a standalone printer)
+        every interesting tab counts as shown.
+
+        Args:
+            decide: ``decide(tab_id, interested, webview_attached)``
+                returns ``True`` when a local webview shows *tab_id*.
+        """
+        with self._ws_lock:
+            self._local_tab_visibility = decide
+
+    def mark_uds_webview(self, conn_id: str) -> None:
+        """Record that UDS connection *conn_id* hosts a chat webview.
+
+        Called on the connection's ``ready``: a VS Code chat webview
+        announces itself that way, while headless UDS peers (the
+        ``run_agent`` daemon client, tests) never do.  Every attached
+        webview mirrors the whole canonical tab registry, so this flag
+        — not per-tab interest — is what decides native playback for
+        registry tabs (see :meth:`shown_local_uds_tabs`).  Cleared by
+        :meth:`unregister_local_uds_tabs` on disconnect.
+
+        Args:
+            conn_id: The UDS connection's id.
+        """
+        with self._ws_lock:
+            self._uds_webview_conns.add(conn_id)
+
+    def shown_local_uds_tabs(self, tab_ids: Iterable[str]) -> set[str]:
+        """Return the subset of *tab_ids* a local UDS webview shows.
+
+        Reads this printer's two facts under its own lock — the
+        interest set and whether a webview is attached — then hands
+        each candidate to the installed visibility rule, which reads
+        the canonical facts (tab registry, live agent state) under
+        their own locks.  Nothing here is a copy of registry state, so
+        no interleaving of a close, a re-registration, a ``ready`` sync
+        or a reopen can leave a stale decision behind; the residual
+        window is the read itself (a disconnect or a republication
+        landing between the two reads can misjudge ONE utterance, and
+        the next decision is correct again).  The rule runs outside
+        ``_ws_lock`` on purpose: it takes the agent-state lock, which
+        several broadcasters already hold while entering this printer.
+
+        Args:
+            tab_ids: Candidate tab ids (a talk event's targets).
+
+        Returns:
+            The ids a local webview currently shows.
+        """
+        with self._ws_lock:
+            interested = {t for t in tab_ids if t in self._local_uds_tab_counts}
+            webview_attached = bool(self._uds_webview_conns)
+            decide = self._local_tab_visibility
+        if decide is None:
+            return interested
+        return {
+            t for t in tab_ids if decide(t, t in interested, webview_attached)
+        }
+
     def register_local_uds_tab(
         self, conn_id: str, tab_id: str, local_tabs: set[str]
     ) -> None:
-        """Mark *tab_id* as shown by the local UDS connection *conn_id*.
+        """Record the local UDS connection *conn_id*'s interest in *tab_id*.
+
+        Interest is what a UDS command's ``tabId`` proves: this peer
+        addressed the tab.  It takes part in the native-playback
+        decision only for tabs no attached webview mirrors from the
+        registry (a ``run_agent`` dispatch's ``api-…`` tab, a sub-agent
+        viewer tab, a placeholder the registry refused at its cap, a
+        headless client's own registry tab) — together with the tab's
+        live agent state or task subscription — so a stale entry for a
+        closed registry tab is inert.
 
         Args:
             conn_id: The UDS connection's id.
             tab_id: The frontend tab id seen on a UDS command.
             local_tabs: The connection's mutable local-tab set (lives
                 in its ``conn_state``).  Membership is checked and
-                updated under the printer lock, so a concurrent
-                canonical-close prune cannot race the registration.
+                updated under the printer lock.
         """
         with self._ws_lock:
             self._uds_local_tab_sets[conn_id] = local_tabs
@@ -2533,16 +2693,15 @@ class WebPrinter(JsonPrinter):
     def sync_local_uds_tabs(
         self, conn_id: str, tab_ids: set[str], local_tabs: set[str]
     ) -> None:
-        """Reconcile *conn_id*'s local-tab membership to exactly *tab_ids*.
+        """Reconcile *conn_id*'s interest set to exactly *tab_ids*.
 
         The ``ready``-time sync: missing ids are added and stale ones
-        dropped (with matching reference-count updates), so a repeated
-        ``ready`` self-heals bookkeeping left over from canonical tabs
-        that were closed while this connection was attached.
+        dropped (with matching reference-count updates), so a webview
+        reload bounds the interest a connection accumulated.
 
         Args:
             conn_id: The UDS connection's id.
-            tab_ids: The tab ids the connection currently shows.
+            tab_ids: The tab ids the client announced in its ``ready``.
             local_tabs: The connection's mutable local-tab set.
         """
         with self._ws_lock:
@@ -2555,16 +2714,17 @@ class WebPrinter(JsonPrinter):
             local_tabs.update(tab_ids)
 
     def prune_local_uds_tab(self, tab_id: str) -> None:
-        """Drop *tab_id* from every UDS connection's local-tab bookkeeping.
+        """Drop *tab_id* from every UDS connection's interest set.
 
-        Called when a tab is removed from the canonical tab registry
-        (explicit close or one-tab-per-chat displacement): the
-        ``tabs_state`` broadcast removes the tab from every client UI,
-        so no local webview shows it anymore — a still-running task's
-        talk for the id must no longer trigger daemon-native playback.
+        Called when the canonical registry removes a tab (close or
+        displacement).  Bookkeeping hygiene only: the visibility rule
+        decides registry tabs from the registry and the attached
+        webviews, not from interest, so a prune racing a reopen cannot
+        hide the reopened tab.  Tabs outside the registry are never
+        pruned here — interest is part of their decision.
 
         Args:
-            tab_id: The registry-removed frontend tab id.
+            tab_id: The frontend tab id the registry removed.
         """
         with self._ws_lock:
             for local_tabs in self._uds_local_tab_sets.values():
@@ -2582,6 +2742,7 @@ class WebPrinter(JsonPrinter):
             tab_ids: The connection's remaining local-tab ids.
         """
         with self._ws_lock:
+            self._uds_webview_conns.discard(conn_id)
             self._uds_local_tab_sets.pop(conn_id, None)
             for tab_id in tab_ids:
                 self._decrement_count(self._local_uds_tab_counts, tab_id)
@@ -2616,10 +2777,8 @@ class WebPrinter(JsonPrinter):
             event: The ``talk`` event (no ``tabId`` stamp yet).
             targets: Subscriber tab ids for the event's task.
         """
-        with self._ws_lock:
-            local_uds_tabs = set(self._local_uds_tab_counts)
-        local_web_targets = [t for t in targets if t in local_uds_tabs]
-        daemon_plays = bool(local_web_targets) and self._play_talk_clip_locally(
+        local_uds_tabs = self.shown_local_uds_tabs(targets)
+        daemon_plays = bool(local_uds_tabs) and self._play_talk_clip_locally(
             event
         )
         base = json.dumps(event)[:-1]
@@ -2754,14 +2913,31 @@ class WebPrinter(JsonPrinter):
                     self._send_locks[endpoint] = lock
             return lock
 
-    async def _locked_send(self, endpoint: Any, data: str) -> None:
+    async def _locked_send(
+        self,
+        endpoint: Any,
+        data: str,
+        admit: Callable[[], bool] | None = None,
+    ) -> None:
         """Send one payload to one endpoint under its FIFO send lock.
 
         Args:
             endpoint: The client connection to write to.
             data: The JSON payload (already encoded with ``json.dumps``).
+            admit: Optional last-moment admission check, evaluated
+                AFTER the send lock is acquired; a ``False`` result
+                drops the payload without touching the wire.  The
+                voice-wake delivery boundary re-validates its listener
+                generation here: a report validated before queueing
+                behind an in-flight send can be retired by a
+                concurrent ``stop()`` while it waits, and a check that
+                runs only before the lock would still write the stale
+                payload once the lock opens (gpt-5.6-sol round-4
+                review, finding 6).
         """
         async with self.send_lock(endpoint):
+            if admit is not None and not admit():
+                return
             if isinstance(endpoint, asyncio.StreamWriter):
                 await self._uds_send(endpoint, data)
             else:
@@ -3009,7 +3185,7 @@ html, body { height: auto; overflow: auto; }
 #app { height: auto; display: block; }
 #output { overflow: visible; }
 /* Chrome that only works inside the live chat webview. */
-.panel-copy-btn, #task-panel-copy { display: none !important; }
+.panel-copy-btn, .panel-stop-btn, #task-panel-copy { display: none !important; }
 /* The sub-agent tab strip (created and driven by share.js, styled by
    the inlined main.css's #tab-bar / .chat-tab rules). It rides along
    the top of the scrolling document, with room on the right for the
@@ -3197,6 +3373,7 @@ def _build_html() -> str:
         "API_SRC": _media_url("api.js"),
         "PANEL_COPY_SRC": _media_url("panelCopy.js"),
         "CTX_MENU_SRC": _media_url("contentContextMenu.js"),
+        "TREE_MENU_SRC": _media_url("treeContextMenu.js"),
         "MAIN_SRC": _media_url("main.js"),
         "SHIM_SCRIPT": (
             "<script>window.__HLJS_THEME_CSS__ = "
@@ -5375,6 +5552,31 @@ class RemoteAccessServer:
         )
 
         async def _send(event: dict[str, Any]) -> None:
+            # The delivery boundary of the controller's generation
+            # tag: drop a report whose listener generation was retired
+            # (a stop or a replacement spawn superseded it) so a
+            # wedged stale ``listening: false`` can never contradict a
+            # successor's ``listening: true``, and strip the tag so
+            # the wire protocol is unchanged.  Payloads that pass are
+            # written under the per-endpoint FIFO send lock
+            # (``_endpoint_send``), so accepted reports reach the wire
+            # in send-start order (gpt-5.6-sol round-3 review,
+            # findings 2-3).  The generation is RE-validated inside
+            # that lock (the ``admit`` callable): a report that passed
+            # the pre-check can queue behind an in-flight send and be
+            # retired by a concurrent stop before the lock opens —
+            # validation only before the wait would still write the
+            # stale payload (gpt-5.6-sol round-4 review, finding 6).
+            gen = event.pop("voiceGen", None)
+            if isinstance(gen, int):
+                if not self._voice_wake.accepts(conn_id, gen):
+                    return
+                await self._endpoint_send(
+                    endpoint,
+                    json.dumps(event),
+                    admit=partial(self._voice_wake.accepts, conn_id, gen),
+                )
+                return
             await self._endpoint_send(endpoint, json.dumps(event))
 
         await self._voice_wake.start(conn_id, sensitivity, _send)
@@ -5482,14 +5684,27 @@ class RemoteAccessServer:
             {"type": "fileContent", "path": <resolved abs path>,
              "name": <basename>, "tabId": <echo of cmd tabId>,
              "line": <echo of cmd line, when a positive int>,
-             "content": <utf-8 text>}          # on success
+             "content": <utf-8 text>,
+             "version": "<st_mtime_ns>:<st_size>"}   # on success
+            {"type": "fileContent", "path": ..., "name": ..., "tabId": ...,
+             "binary": true, "mime": "application/pdf" | "image/...",
+             "size": <bytes>, "base64": <bytes>}   # PDF / image viewer
             {"type": "fileContent", "path": ..., "name": ...,
              "tabId": ..., "error": <message>}  # on failure
+
+        A PDF or image (``_INLINE_BINARY_MIMES``, up to
+        ``_OPEN_BINARY_MAX_BYTES``) is served base64-encoded so the
+        client can show it in a viewer tab instead of refusing it as a
+        binary file.
 
         A ``path:NN`` link's line number arrives as the command's
         ``line`` field; echoing it lets ``media/main.js`` jump the
         opened content tab to that line, matching the VS Code
-        extension's editor line reveal.
+        extension's editor line reveal.  ``version`` stamps the file
+        as read (:func:`_file_version`); the client's ``saveFile``
+        sends it back so :meth:`_handle_save_file` can detect a file
+        that changed on disk while it was open (directory listings
+        carry no ``version``: they are never saved).
 
         Relative paths are resolved against the command's ``workDir``
         (stamped per-connection by
@@ -5524,6 +5739,10 @@ class RemoteAccessServer:
             }
             if line:
                 reply["line"] = line
+            if cmd.get("background") is True:
+                # The Explorer's "Open to the Side": the client opens
+                # the tab without switching to it.
+                reply["background"] = True
             try:
                 path = self._resolve_tab_file(raw_path, work_dir, tab_id)
                 if path is None:
@@ -5540,7 +5759,26 @@ class RemoteAccessServer:
                     reply["isDirectory"] = True
                     reply["content"] = _directory_listing_text(path)
                     return reply
-                if path.stat().st_size > _OPEN_FILE_MAX_BYTES:
+                st = path.stat()
+                inline_mime = _inline_binary_mime(path)
+                if inline_mime:
+                    # A PDF or an image: the client shows the bytes in
+                    # a viewer tab (blob: URL) instead of an editor.
+                    if st.st_size > _OPEN_BINARY_MAX_BYTES:
+                        reply["error"] = (
+                            f"File too large to display: {raw_path}"
+                        )
+                        return reply
+                    reply["path"] = str(path)
+                    reply["name"] = path.name
+                    reply["binary"] = True
+                    reply["mime"] = inline_mime
+                    reply["size"] = st.st_size
+                    reply["base64"] = base64.b64encode(
+                        path.read_bytes()
+                    ).decode("ascii")
+                    return reply
+                if st.st_size > _OPEN_FILE_MAX_BYTES:
                     reply["error"] = f"File too large to display: {raw_path}"
                     return reply
                 data = path.read_bytes()
@@ -5549,16 +5787,145 @@ class RemoteAccessServer:
                     return reply
                 reply["path"] = str(path)
                 reply["name"] = path.name
-                reply["content"] = data.decode("utf-8", errors="replace")
+                try:
+                    reply["content"] = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    # Not valid UTF-8 (Latin-1, a stray byte, ...): show
+                    # it with replacement characters but WITHOUT a
+                    # version stamp, so the client keeps its read-only
+                    # viewer — saving the U+FFFDs back would corrupt
+                    # the bytes the decoder could not represent.
+                    reply["content"] = data.decode("utf-8", errors="replace")
+                    return reply
+                # The client hands this back with its saveFile command,
+                # so _handle_save_file can tell that the file changed on
+                # disk while it was open in the editor.  Its presence is
+                # also what makes the client's editor editable.
+                reply["version"] = _file_version(st)
             except OSError as exc:
                 reply["error"] = f"Failed to read {raw_path}: {exc}"
             return reply
 
         reply = await asyncio.to_thread(_read_file)
-        try:
-            await self._endpoint_send(endpoint, json.dumps(reply))
-        except Exception:
-            logger.debug("openFile: failed to write reply", exc_info=True)
+        await self._reply_direct(endpoint, reply, "openFile")
+
+    async def _handle_save_file(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Write a remote-web client's editor text back to its file.
+
+        Handles the ``saveFile`` command sent by ``media/main.js`` when
+        the user saves an editable content tab (Ctrl/Cmd+S or its Save
+        button).  The reply is a single ``fileSaved`` JSON object sent
+        directly to the requesting *endpoint* — never broadcast —
+        with the shape::
+
+            {"type": "fileSaved", "ok": true,
+             "path": <resolved abs path>, "name": <basename>,
+             "tabId": <echo>, "token": <echo>,
+             "version": "<st_mtime_ns>:<st_size>" after the write}  # ok
+            {"type": "fileSaved", "ok": false, "path": ..., "name": ...,
+             "tabId": ..., "token": ..., "error": <message>,
+             "conflict": true}   # conflict=true only for a stale version
+
+        The path is resolved exactly like :meth:`_handle_open_file`
+        resolves it and MUST name an existing regular file: the editor
+        only ever shows files the daemon served, so a path that names
+        nothing (or a directory) is refused rather than created.  The
+        content must be a string no larger than
+        :data:`_OPEN_FILE_MAX_BYTES` (the display cap — anything bigger
+        could not have been opened).  When the command carries the
+        ``version`` the ``fileContent`` reply reported, a file whose
+        current :func:`_file_version` no longer matches was changed by
+        someone else while it was open (the agent, a shell, another
+        client):
+        the write is refused with ``conflict`` set unless ``force`` is
+        true, so the client can offer the user an explicit overwrite.
+        Check and write happen under :data:`_SAVE_FILE_LOCK`, so of two
+        clients of THIS daemon racing with the same stale stamp exactly
+        one wins; a sibling process writing the file concurrently is
+        outside that guarantee (the same as any editor's).
+        The file is replaced atomically (pid-unique temp +
+        ``Path.replace``, see :func:`_atomic_publish`) with its
+        permission bits preserved, and written byte-for-byte as UTF-8
+        without newline translation so CRLF files stay CRLF.
+
+        Args:
+            cmd: The parsed ``saveFile`` command (``path``,
+                ``content``, optional ``workDir``, ``tabId``,
+                ``token``, ``version``, ``force``).
+            endpoint: The requesting WSS connection.
+        """
+        raw_path = self._cmd_str(cmd, "path")
+        if not raw_path:
+            return
+        content = cmd.get("content")
+        work_dir = self._cmd_work_dir(cmd)
+        tab_id = self._cmd_str(cmd, "tabId")
+        token = self._cmd_str(cmd, "token")
+        expected_version = self._cmd_str(cmd, "version")
+        force = cmd.get("force") is True
+
+        def _write_file() -> dict[str, Any]:
+            reply: dict[str, Any] = {
+                "type": "fileSaved",
+                "ok": False,
+                "path": raw_path,
+                "name": Path(raw_path).name,
+                "tabId": tab_id,
+                "token": token,
+            }
+            if not isinstance(content, str):
+                reply["error"] = "Nothing to save: the content is not text"
+                return reply
+            try:
+                # JSON may legally carry a lone surrogate ("\ud800"),
+                # which has no UTF-8 form: refuse it instead of raising
+                # past the reply.
+                data = content.encode("utf-8")
+            except UnicodeEncodeError:
+                reply["error"] = "Nothing to save: the content is not valid text"
+                return reply
+            if len(data) > _OPEN_FILE_MAX_BYTES:
+                reply["error"] = f"File too large to save: {raw_path}"
+                return reply
+            try:
+                path = self._resolve_tab_file(raw_path, work_dir, tab_id)
+                if path is None:
+                    reply["error"] = f"File not found: {raw_path}"
+                    return reply
+                reply["path"] = str(path)
+                reply["name"] = path.name
+                if path.is_dir():
+                    reply["error"] = f"Cannot save a directory: {raw_path}"
+                    return reply
+                # The version check and the publish must be one step:
+                # two clients saving the same file with the same stale
+                # stamp would otherwise both pass the check and the
+                # second silently overwrite the first.
+                with _SAVE_FILE_LOCK:
+                    st = path.stat()
+                    if (
+                        expected_version
+                        and not force
+                        and _file_version(st) != expected_version
+                    ):
+                        reply["error"] = (
+                            f"{path.name} changed on disk since it was opened"
+                        )
+                        reply["conflict"] = True
+                        return reply
+                    _atomic_publish(
+                        path, partial(_write_bytes_with_mode, data=data, st=st),
+                    )
+                    reply["ok"] = True
+                    reply["version"] = _file_version(path.stat())
+            except OSError as exc:
+                reply["error"] = f"Failed to save {raw_path}: {exc}"
+            return reply
+
+        reply = await asyncio.to_thread(_write_file)
+        await self._reply_direct(endpoint, reply, "saveFile")
 
     async def _handle_share_chat(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -5630,10 +5997,7 @@ class RemoteAccessServer:
             return reply
 
         reply = await asyncio.to_thread(_write_page)
-        try:
-            await self._endpoint_send(endpoint, json.dumps(reply))
-        except Exception:
-            logger.debug("shareChat: failed to write reply", exc_info=True)
+        await self._reply_direct(endpoint, reply, "shareChat")
 
     async def _handle_share_chat_tasks(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -5761,12 +6125,7 @@ class RemoteAccessServer:
             return reply
 
         reply = await asyncio.to_thread(_load_tasks)
-        try:
-            await self._endpoint_send(endpoint, json.dumps(reply))
-        except Exception:
-            logger.debug(
-                "shareChatTasks: failed to write reply", exc_info=True,
-            )
+        await self._reply_direct(endpoint, reply, "shareChatTasks")
 
     async def _handle_check_paths(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -5819,10 +6178,441 @@ class RemoteAccessServer:
             "workDir": raw_work_dir,
             "tabId": tab_id,
         }
+        await self._reply_direct(endpoint, reply, "checkPaths")
+
+    async def _reply_direct(
+        self, endpoint: Any, reply: dict[str, Any], what: str,
+    ) -> None:
+        """Send *reply* to *endpoint* only, logging (not raising) failures.
+
+        Shared tail of the Explorer / Source Control handlers below:
+        their replies go to the requesting connection alone, and a
+        client that vanished mid-request must not surface an error.
+        """
         try:
             await self._endpoint_send(endpoint, json.dumps(reply))
         except Exception:
-            logger.debug("checkPaths: failed to write reply", exc_info=True)
+            logger.debug("%s: failed to write reply", what, exc_info=True)
+
+    async def _handle_list_dir(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """List a directory for the remote webapp's Explorer view.
+
+        Handles the ``listDir`` command sent by ``media/main.js`` when
+        the Explorer view opens (the workspace root) or the user expands
+        a folder.  ``path`` is resolved like ``openFile`` resolves it
+        (``~`` expansion, then relative to the command's ``workDir``,
+        falling back to the daemon work dir); an empty ``path`` names
+        the work dir itself.  The reply goes directly to the requesting
+        *endpoint* — never broadcast — with the shape::
+
+            {"type": "dirListing", "path": <abs dir>, "root": <work dir>,
+             "tabId": <echo>, "token": <echo>,
+             "entries": [{"name", "path", "isDir"}, ...],
+             "truncated": <bool>}                 # on success
+            {"type": "dirListing", "path": ..., "root": ..., "tabId": ...,
+             "token": ..., "error": <message>}    # on failure
+
+        Args:
+            cmd: The parsed ``listDir`` command (optional ``path``,
+                ``workDir``, ``tabId``, ``token``).
+            endpoint: The requesting WSS connection.
+        """
+        from kiss.server.explorer import list_directory
+
+        raw_path = self._cmd_str(cmd, "path")
+        work_dir = self._cmd_work_dir(cmd)
+        tab_id = self._cmd_str(cmd, "tabId")
+        token = self._cmd_str(cmd, "token")
+
+        def _list() -> dict[str, Any]:
+            reply: dict[str, Any] = {
+                "type": "dirListing",
+                "path": raw_path or work_dir,
+                "root": work_dir,
+                "tabId": tab_id,
+                "token": token,
+            }
+            try:
+                path = self._resolve_tab_file(
+                    raw_path or work_dir, work_dir, tab_id,
+                )
+                if path is None or not path.is_dir():
+                    reply["error"] = (
+                        f"Directory not found: {raw_path or work_dir}"
+                    )
+                    return reply
+                reply["path"] = str(path)
+                reply.update(list_directory(path))
+            except Exception as exc:
+                # OSError (unreadable), ValueError (NUL in a name), or
+                # anything else: the view must get a reply either way.
+                reply["error"] = f"Failed to list {raw_path or work_dir}: {exc}"
+            return reply
+
+        reply = await asyncio.to_thread(_list)
+        await self._reply_direct(endpoint, reply, "listDir")
+
+    @staticmethod
+    def _git_provider_result(
+        provider: Any, work_dir: str, *args: Any,
+    ) -> dict[str, Any]:
+        """Run a ``kiss.server.explorer`` git provider, never raising.
+
+        The provider returns either data or ``{"error": ...}``; an
+        unexpected exception (a path with a NUL byte, a broken git
+        install, ...) becomes an ``error`` reply too, so the client's
+        view never sits at "Loading..." for a command that was accepted.
+        """
+        try:
+            result: dict[str, Any] = provider(work_dir, *args)
+            return result
+        except Exception as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    async def _handle_git_status(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Report the working-tree changes for the Source Control view.
+
+        Handles the ``gitStatus`` command sent by ``media/main.js`` when
+        the Source Control view opens or refreshes.  The repository is
+        the one containing the command's ``workDir`` (falling back to
+        the daemon work dir).  The reply goes directly to the requesting
+        *endpoint* with the shape::
+
+            {"type": "gitStatus", "workDir": <work dir>, "tabId": <echo>,
+             "token": <echo>, "repo": <abs repo root>, "branch": <name>,
+             "changes": [{"path", "absPath", "status", "group"}, ...]}
+            {"type": "gitStatus", "workDir": ..., "tabId": ..., "token": ...,
+             "error": <message>}                  # not a repo / git failed
+
+        See :func:`kiss.server.explorer.git_status` for the row fields.
+
+        Args:
+            cmd: The parsed ``gitStatus`` command (optional ``workDir``,
+                ``tabId``, ``token``).
+            endpoint: The requesting WSS connection.
+        """
+        from kiss.server.explorer import git_status
+
+        work_dir = self._cmd_work_dir(cmd)
+        reply: dict[str, Any] = {
+            "type": "gitStatus",
+            "workDir": work_dir,
+            "tabId": self._cmd_str(cmd, "tabId"),
+            "token": self._cmd_str(cmd, "token"),
+        }
+        if not os.path.isdir(work_dir):
+            reply["error"] = f"Directory not found: {work_dir}"
+        else:
+            reply.update(
+                await asyncio.to_thread(
+                    self._git_provider_result, git_status, work_dir,
+                )
+            )
+        await self._reply_direct(endpoint, reply, "gitStatus")
+
+    async def _handle_git_log(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Report the recent commits for the Source Control graph.
+
+        Handles the ``gitLog`` command sent by ``media/main.js`` when the
+        Source Control view opens or refreshes.  The repository is the
+        one containing the command's ``workDir`` (falling back to the
+        daemon work dir); ``limit`` caps the number of commits
+        (default :data:`kiss.server.explorer.GIT_LOG_DEFAULT_LIMIT`).
+        The reply goes directly to the requesting *endpoint* with the
+        shape::
+
+            {"type": "gitLog", "workDir": <work dir>, "tabId": <echo>,
+             "token": <echo>, "repo": <abs repo root>, "head": <sha>,
+             "commits": [{"sha", "shortSha", "parents", "author", "date",
+                          "refs", "subject", "files"}, ...]}
+            {"type": "gitLog", "workDir": ..., "tabId": ..., "token": ...,
+             "error": <message>}                  # not a repo / git failed
+
+        See :func:`kiss.server.explorer.git_log` for the row fields.
+
+        Args:
+            cmd: The parsed ``gitLog`` command (optional ``workDir``,
+                ``tabId``, ``token``, ``limit``).
+            endpoint: The requesting WSS connection.
+        """
+        from kiss.server.explorer import GIT_LOG_DEFAULT_LIMIT, git_log
+
+        work_dir = self._cmd_work_dir(cmd)
+        limit = cmd.get("limit")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            limit = GIT_LOG_DEFAULT_LIMIT
+        reply: dict[str, Any] = {
+            "type": "gitLog",
+            "workDir": work_dir,
+            "tabId": self._cmd_str(cmd, "tabId"),
+            "token": self._cmd_str(cmd, "token"),
+        }
+        if not os.path.isdir(work_dir):
+            reply["error"] = f"Directory not found: {work_dir}"
+        else:
+            reply.update(
+                await asyncio.to_thread(
+                    self._git_provider_result, git_log, work_dir, limit,
+                )
+            )
+        await self._reply_direct(endpoint, reply, "gitLog")
+
+    async def _handle_git_show(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Serve a commit's patch, a file at a commit, or a revision diff.
+
+        Handles the ``gitShow`` command the remote Source Control graph
+        sends for its commit context menu: "Open Changes" (the whole
+        commit, or one file of it when ``path`` is given), "Open File"
+        (``mode: "file"`` — the file's content at that commit) and
+        "Compare with..." (``base`` given — ``git diff base sha``).
+        The reply goes directly to the requesting *endpoint* with the
+        shape::
+
+            {"type": "gitShow", "workDir", "tabId", "token", "sha",
+             "path", "base", "mode", "repo", "subject"?, "text",
+             "truncated"}                          # on success
+            {"type": "gitShow", ..., "error": <message>}
+
+        Args:
+            cmd: The parsed ``gitShow`` command (``sha``, optional
+                ``path``, ``base``, ``mode``, ``workDir``, ``tabId``,
+                ``token``).
+            endpoint: The requesting WSS connection.
+        """
+        from kiss.server.explorer import git_compare, git_file_at, git_show
+
+        work_dir = self._cmd_work_dir(cmd)
+        sha = self._cmd_str(cmd, "sha")
+        path = self._cmd_str(cmd, "path")
+        base = self._cmd_str(cmd, "base")
+        mode = self._cmd_str(cmd, "mode") or "patch"
+        reply: dict[str, Any] = {
+            "type": "gitShow",
+            "workDir": work_dir,
+            "tabId": self._cmd_str(cmd, "tabId"),
+            "token": self._cmd_str(cmd, "token"),
+            "sha": sha,
+            "path": path,
+            "base": base,
+            "mode": mode,
+        }
+        if not os.path.isdir(work_dir):
+            reply["error"] = f"Directory not found: {work_dir}"
+        elif base:
+            reply.update(
+                await asyncio.to_thread(
+                    self._git_provider_result, git_compare, work_dir, base, sha,
+                )
+            )
+        elif mode == "file":
+            reply.update(
+                await asyncio.to_thread(
+                    self._git_provider_result, git_file_at, work_dir, sha, path,
+                )
+            )
+        else:
+            reply.update(
+                await asyncio.to_thread(
+                    self._git_provider_result, git_show, work_dir, sha, path,
+                )
+            )
+        await self._reply_direct(endpoint, reply, "gitShow")
+
+    async def _handle_git_action(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Run a commit context-menu action (checkout, branch, tag, pick).
+
+        Handles the ``gitAction`` command of the remote Source Control
+        graph's context menu; see
+        :func:`kiss.server.explorer.git_action` for what each action
+        runs.  The reply goes directly to the requesting *endpoint*::
+
+            {"type": "gitActionResult", "workDir", "tabId", "token",
+             "action", "sha", "ok": true, "output": <git output>}
+            {"type": "gitActionResult", ..., "error": <git's message>}
+
+        Args:
+            cmd: The parsed ``gitAction`` command (``action``, ``sha``,
+                optional ``name``, ``message``, ``workDir``, ``tabId``,
+                ``token``).
+            endpoint: The requesting WSS connection.
+        """
+        from kiss.server.explorer import git_action
+
+        work_dir = self._cmd_work_dir(cmd)
+        action = self._cmd_str(cmd, "action")
+        sha = self._cmd_str(cmd, "sha")
+        reply: dict[str, Any] = {
+            "type": "gitActionResult",
+            "workDir": work_dir,
+            "tabId": self._cmd_str(cmd, "tabId"),
+            "token": self._cmd_str(cmd, "token"),
+            "action": action,
+            "sha": sha,
+        }
+        if not os.path.isdir(work_dir):
+            reply["error"] = f"Directory not found: {work_dir}"
+        else:
+            reply.update(
+                await asyncio.to_thread(
+                    self._git_provider_result,
+                    git_action,
+                    work_dir,
+                    action,
+                    sha,
+                    self._cmd_str(cmd, "name"),
+                    self._cmd_str(cmd, "message"),
+                )
+            )
+        await self._reply_direct(endpoint, reply, "gitAction")
+
+    def _abs_cmd_path(self, raw: str, work_dir: str) -> str:
+        """*raw* as an absolute LEXICAL path (``~`` expanded, relative to *work_dir*).
+
+        Lexical: ``.`` / ``..`` segments are folded but no symlink is
+        followed, so the path names the Explorer entry itself -- a
+        symlink stays the symlink (Delete unlinks it rather than
+        deleting its target; a dangling one can still be removed).  It
+        also serves an entry that does not exist yet (a rename target),
+        which :meth:`_resolve_tab_file` -- existing paths only -- cannot.
+        """
+        path = Path(os.path.expanduser(raw))
+        if not path.is_absolute() and work_dir:
+            path = Path(work_dir) / path
+        return os.path.normpath(str(path))
+
+    @staticmethod
+    def _inside(path: str, root: str) -> bool:
+        """Whether the lexical *path* is *root* or below it."""
+        root = os.path.normpath(root)
+        try:
+            return os.path.commonpath([path, root]) == root
+        except ValueError:
+            return False
+
+    @classmethod
+    def _confined(cls, path: str, root: str, follow: bool) -> bool:
+        """Whether *path* belongs to the workspace *root* on disk as well.
+
+        Lexical containment (:meth:`_inside`) is not enough: a folder
+        symlink inside the workspace that points outside it makes
+        ``root/portal/x`` a name for ``/elsewhere/x``.  So the REAL
+        location must be under the real root too -- of the entry
+        itself when *follow* (a folder to list, search or paste into, a
+        file to read), of its parent folder otherwise (an entry that is
+        acted on as itself: a symlink is deleted / renamed / copied as
+        the link, wherever it points).
+        """
+        if not cls._inside(path, root):
+            return False
+        try:
+            real_root = os.path.realpath(root)
+            probe = path if follow else os.path.dirname(path)
+            real = os.path.realpath(probe)
+            return os.path.commonpath([real, real_root]) == real_root
+        except (OSError, ValueError):
+            return False
+
+    async def _handle_fs_action(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Run an Explorer context-menu file action.
+
+        Handles the ``fsAction`` command the remote Explorer view sends
+        for New File..., New Folder..., Rename..., Delete, Paste (copy
+        / move), Find in Folder... and Compare Selected; see
+        :func:`kiss.server.fs_actions.fs_action`.  ``path`` (and
+        ``dest`` for ``copy`` / ``move`` / ``compare``) must name
+        existing entries; ``rename``'s ``dest`` is the new path.  Paths
+        are taken lexically (a symlink is the entry, not its target)
+        and must lie inside ``workDir`` -- the Explorer root the menu
+        was opened in -- on disk as well as by name (see
+        :meth:`_confined`).  The reply goes directly to the requesting
+        *endpoint*::
+
+            {"type": "fsResult", "tabId", "token", "action", "path",
+             "ok": true, "path": <result path>, "text"?, ...}
+            {"type": "fsResult", ..., "error": <message>, "exists"?: true}
+
+        Args:
+            cmd: The parsed ``fsAction`` command (``action``, ``path``,
+                optional ``dest``, ``name``, ``query``, ``overwrite``,
+                ``workDir``, ``tabId``, ``token``).
+            endpoint: The requesting WSS connection.
+        """
+        from kiss.server.fs_actions import FS_ACTIONS, fs_action
+
+        work_dir = self._cmd_work_dir(cmd)
+        tab_id = self._cmd_str(cmd, "tabId")
+        action = self._cmd_str(cmd, "action")
+        raw_path = self._cmd_str(cmd, "path")
+        raw_dest = self._cmd_str(cmd, "dest")
+        reply: dict[str, Any] = {
+            "type": "fsResult",
+            "workDir": work_dir,
+            "tabId": tab_id,
+            "token": self._cmd_str(cmd, "token"),
+            "action": action,
+            "path": raw_path,
+        }
+
+        def _run() -> dict[str, Any]:
+            if action not in FS_ACTIONS:
+                return {"error": f"Unknown file action: {action}"}
+            if not raw_path:
+                return {"error": "No path given"}
+            try:
+                # Lexical paths: the Explorer names entries, and a
+                # symlink entry must be acted on as the link, never
+                # as its target (see _abs_cmd_path).  Every path an
+                # action touches must lie under the Explorer's root:
+                # the menu edits the workspace on screen, not the host.
+                path = self._abs_cmd_path(raw_path, work_dir)
+                if not os.path.lexists(path):
+                    return {"error": f"Not found: {raw_path}"}
+                # The entry is acted on as itself (delete / rename /
+                # copy / move); a folder is entered (new entry, search)
+                # and a compared file is read.
+                acts_on_entry = action in ("delete", "rename", "copy", "move")
+                if not self._confined(path, work_dir, follow=not acts_on_entry):
+                    return {"error": f"Not inside the workspace: {raw_path}"}
+                dest = raw_dest
+                if action in ("copy", "move", "compare", "rename"):
+                    if not raw_dest:
+                        return {"error": "No destination given"}
+                    dest = self._abs_cmd_path(raw_dest, work_dir)
+                    if action != "rename" and not os.path.lexists(dest):
+                        return {"error": f"Not found: {raw_dest}"}
+                    # A paste destination folder is entered, a compared
+                    # file read; a rename target is a new sibling name.
+                    if not self._confined(dest, work_dir, follow=action != "rename"):
+                        return {
+                            "error": f"Not inside the workspace: {raw_dest}",
+                        }
+                result = fs_action(
+                    action,
+                    path,
+                    dest=dest,
+                    name=self._cmd_str(cmd, "name"),
+                    query=self._cmd_str(cmd, "query"),
+                    overwrite=cmd.get("overwrite") is True,
+                )
+                result.setdefault("path", path)
+                return result
+            except Exception as exc:
+                return {"error": f"{action} failed: {exc}"}
+
+        reply.update(await asyncio.to_thread(_run))
+        await self._reply_direct(endpoint, reply, "fsAction")
 
     async def _reply_direct(
         self, endpoint: Any, reply: dict[str, Any], what: str,
@@ -6189,10 +6979,7 @@ class RemoteAccessServer:
             return reply
 
         reply = await asyncio.to_thread(_read_info)
-        try:
-            await self._endpoint_send(endpoint, json.dumps(reply))
-        except Exception:
-            logger.debug("getInfoFile: failed to write reply", exc_info=True)
+        await self._reply_direct(endpoint, reply, "getInfoFile")
 
     async def _handle_active_tasks_query(self, endpoint: Any) -> None:
         """Report in-flight agent tasks back to a single client.
@@ -6217,17 +7004,11 @@ class RemoteAccessServer:
         handler log line above.
         """
         active_tabs = _snapshot_active_tabs()
-        payload = json.dumps({
+        await self._reply_direct(endpoint, {
             "type": "activeTasksResponse",
             "count": len(active_tabs),
             "tabs": active_tabs,
-        })
-        try:
-            await self._endpoint_send(endpoint, payload)
-        except Exception:
-            logger.debug(
-                "activeTasksQuery: failed to write response", exc_info=True,
-            )
+        }, "activeTasksQuery")
 
 
     def _broadcast_remote_url(self, url: str, tunnel_active: bool) -> None:
@@ -6365,7 +7146,12 @@ class RemoteAccessServer:
         self._broadcast_remote_url(url or "", tunnel_active)
         await self._broadcast_update_available()
 
-    async def _endpoint_send(self, endpoint: Any, data: str) -> None:
+    async def _endpoint_send(
+        self,
+        endpoint: Any,
+        data: str,
+        admit: Callable[[], bool] | None = None,
+    ) -> None:
         """Send ``data`` to either a WSS or a UDS endpoint.
 
         ``endpoint`` is either a :class:`ServerConnection` (WSS) or
@@ -6385,8 +7171,11 @@ class RemoteAccessServer:
         Args:
             endpoint: The connection to send to.
             data: The JSON payload (already encoded with ``json.dumps``).
+            admit: Optional admission check evaluated under the
+                endpoint's send lock — see
+                :meth:`WebPrinter._locked_send`.
         """
-        await self._printer._locked_send(endpoint, data)
+        await self._printer._locked_send(endpoint, data, admit)
 
     @staticmethod
     def _sanitized_restored_tabs(cmd: dict[str, Any]) -> list[dict[str, str]]:
@@ -8238,6 +9027,7 @@ class RemoteAccessServer:
         from kiss.server import agent_state
         from kiss.server.agent_state import AgentState
         from kiss.server.task_runner import (
+            _state_owns_thread,
             inject_keyboard_interrupt,
             wait_for_thread_start,
         )
@@ -8310,9 +9100,27 @@ class RemoteAccessServer:
             remaining = max(0.0, deadline - time.monotonic())
             thread.join(timeout=min(1.0, remaining))
             if thread.is_alive():
-                tid = thread.ident
-                if tid is not None:
-                    inject_keyboard_interrupt(tid)
+                # Re-check ownership under STATE_LOCK immediately
+                # before injecting, exactly like the Stop watchdog
+                # (``_force_stop_thread``).  "Still alive" does not
+                # mean "still ignoring the stop": the worker may have
+                # honoured the cooperative event already and be inside
+                # its legitimate cleanup ``finally`` (persisting the
+                # interrupted row can wait out SQLite's busy timeout),
+                # which this sweep exists to let finish — injecting
+                # there aborted the very persistence/broadcast it
+                # wants.  The predicate also refuses while the thread
+                # performs the state's own post-task worktree merge (a
+                # merge is awaited, never stopped) and, because
+                # ``task_thread`` is cleared under the same lock when a
+                # run finishes, closes the window where a recycled
+                # thread ident would route the interrupt into an
+                # unrelated freshly spawned thread.
+                with agent_state.STATE_LOCK:
+                    if _state_owns_thread(state, thread):
+                        tid = thread.ident
+                        if tid is not None:  # pragma: no branch — live thread has ident
+                            inject_keyboard_interrupt(tid)
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
             if thread.is_alive():
                 logger.warning(

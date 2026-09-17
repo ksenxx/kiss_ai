@@ -81,7 +81,11 @@ class _ApiLaunchBase(unittest.TestCase):
     """Real daemon over a temp UDS; only the LLM boundary is stubbed."""
 
     def setUp(self) -> None:
+        # Every global mutation registers its restoration with
+        # ``addCleanup`` immediately: cleanups run (in LIFO order) even
+        # when ``setUp`` itself fails partway, unlike ``tearDown``.
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-tp-api-launch-")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
@@ -97,18 +101,21 @@ class _ApiLaunchBase(unittest.TestCase):
         _persistence._KISS_DIR = kiss_dir
         _persistence._DB_PATH = kiss_dir / "sorcar.db"
         _persistence._db_conn = None
+        self.addCleanup(self._restore_persistence)
         self._saved_config_override = (
             vars(vscode_config).get("CONFIG_DIR"),
             vars(vscode_config).get("CONFIG_PATH"),
         )
         vscode_config.CONFIG_DIR = kiss_dir
         vscode_config.CONFIG_PATH = kiss_dir / "config.json"
+        self.addCleanup(self._restore_vscode_config)
 
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
             target=self.loop.run_forever, daemon=True,
         )
         self.loop_thread.start()
+        self.addCleanup(self._stop_loop)
         self.server = RemoteAccessServer(
             uds_path=self.sock_path, work_dir=self.repo,
         )
@@ -120,16 +127,21 @@ class _ApiLaunchBase(unittest.TestCase):
             ),
             self.loop,
         ).result(timeout=5)
+        self.addCleanup(self._shutdown_uds_server)
 
         self._saved_sock_override = launcher._SOCK_PATH_OVERRIDE
         launcher._SOCK_PATH_OVERRIDE = self.sock_path
+        self.addCleanup(self._restore_sock_override)
 
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
+        self.addCleanup(self._restore_run_and_discard_agents)
         self.stub_calls: list[dict[str, Any]] = []
 
-    def tearDown(self) -> None:
+    def _restore_sock_override(self) -> None:
         launcher._SOCK_PATH_OVERRIDE = self._saved_sock_override
+
+    def _restore_run_and_discard_agents(self) -> None:
         self._parent_class.run = self._original_run
         for state in agent_state.snapshot():
             if state.agent is not None and state.agent._wt_pending:
@@ -139,6 +151,7 @@ class _ApiLaunchBase(unittest.TestCase):
                     pass
         agent_state.agent_states.clear()
 
+    def _shutdown_uds_server(self) -> None:
         async def _shutdown() -> None:
             with self.server._printer._ws_lock:
                 writers = list(self.server._printer._uds_writers)
@@ -164,10 +177,13 @@ class _ApiLaunchBase(unittest.TestCase):
             ).result(timeout=5)
         except Exception:
             pass
+
+    def _stop_loop(self) -> None:
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
         self.loop.close()
 
+    def _restore_persistence(self) -> None:
         if _persistence._db_conn is not None:
             _persistence._db_conn.close()
         (
@@ -175,6 +191,8 @@ class _ApiLaunchBase(unittest.TestCase):
             _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved_persistence
+
+    def _restore_vscode_config(self) -> None:
         saved_dir, saved_path = self._saved_config_override
         if saved_dir is None:
             if "CONFIG_DIR" in vars(vscode_config):
@@ -186,7 +204,6 @@ class _ApiLaunchBase(unittest.TestCase):
                 delattr(vscode_config, "CONFIG_PATH")
         else:
             vscode_config.CONFIG_PATH = saved_path
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _install_stub(
         self,
@@ -795,6 +812,8 @@ class TestInProcessDaemonBootstrap(_ApiLaunchBase):
 
         self._install_stub(summary="global daemon ok")
         saved_override = launcher._SOCK_PATH_OVERRIDE
+        saved_api_server = launcher._API_SERVER
+        saved_api_server_sock = launcher._API_SERVER_SOCK
         launcher._SOCK_PATH_OVERRIDE = None
         try:
             result = run_agent_via_kiss_web(
@@ -821,6 +840,48 @@ class TestInProcessDaemonBootstrap(_ApiLaunchBase):
             assert launcher._API_SERVER_SOCK == first_sock
         finally:
             launcher._SOCK_PATH_OVERRIDE = saved_override
+            created = launcher._API_SERVER
+            created_sock = launcher._API_SERVER_SOCK
+            if created is not None and created is not saved_api_server:
+                # The process-global daemon was created against this
+                # test's temporary persistence/config environment; shut
+                # it down and restore the globals so later tests build
+                # their own instead of reusing a daemon wired to a
+                # deleted tmpdir (mirrors _ApiLaunchBase cleanup for
+                # the per-test server).
+                created_loop = created._loop
+                if created_loop is not None:
+
+                    async def _cancel_pending() -> None:
+                        pending = [
+                            t for t in asyncio.all_tasks()
+                            if t is not asyncio.current_task()
+                        ]
+                        for t in pending:
+                            t.cancel()
+                        if pending:
+                            await asyncio.gather(
+                                *pending, return_exceptions=True,
+                            )
+
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            _cancel_pending(), created_loop,
+                        ).result(timeout=5)
+                    except Exception:
+                        pass
+                    created_loop.call_soon_threadsafe(created_loop.stop)
+                    for thread in threading.enumerate():
+                        if thread.name == "kiss-tp-api-server":
+                            thread.join(timeout=5)
+                    if not created_loop.is_running():
+                        created_loop.close()
+                if created_sock:
+                    shutil.rmtree(
+                        Path(created_sock).parent, ignore_errors=True,
+                    )
+            launcher._API_SERVER = saved_api_server
+            launcher._API_SERVER_SOCK = saved_api_server_sock
 
 
 class TestCarrierAgentDirectRuns(_ApiLaunchBase):

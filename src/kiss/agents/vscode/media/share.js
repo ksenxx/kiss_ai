@@ -29,6 +29,7 @@
     if (node.nodeType === 1 && node.classList) {
       if (
         node.classList.contains('panel-copy-btn') ||
+        node.classList.contains('panel-stop-btn') ||
         node.classList.contains('collapse-chv') ||
         node.classList.contains('collapse-preview') ||
         node.classList.contains('panel-ts') ||

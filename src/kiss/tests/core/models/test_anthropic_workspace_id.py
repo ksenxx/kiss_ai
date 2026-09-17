@@ -43,6 +43,32 @@ from kiss.tests.core.models.anthropic_sse_harness import ScriptedAnthropicServer
 
 _MODEL = "claude-workspace-under-test"
 
+# Snapshot of the variable at import time: the module-final guard test
+# asserts the suite leaves ``os.environ`` exactly as it found it (pytest
+# runs tests in definition order within a file).
+_WORKSPACE_ENV_AT_IMPORT = os.environ.get("ANTHROPIC_WORKSPACE_ID")
+
+
+def _pin_workspace_env(monkeypatch) -> None:
+    """Register the true pre-test state as the EARLIEST monkeypatch record.
+
+    ``save_api_key``/``load_api_keys`` write ``os.environ`` directly, and a
+    later mid-test ``monkeypatch.delenv`` on the then-present key records
+    the *leaked* value as its undo — which teardown replays last-in-first-
+    out, resurrecting the leak for every later test in the process (this
+    exact sequence made a live-model test fail with a bogus
+    ``anthropic-workspace-id`` header).  Registering the genuine pre-test
+    state first means its undo runs *last* and always wins.
+    """
+    current = os.environ.get("ANTHROPIC_WORKSPACE_ID")
+    if current is not None:
+        monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", current)
+    else:
+        # setenv-then-delenv leaves an undo pair whose final replay
+        # deletes the key (the setenv record remembers it was absent).
+        monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "")
+        monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID")
+
 _WORKSPACE_400 = {
     "type": "error",
     "error": {
@@ -220,6 +246,7 @@ def test_workspace_id_settings_store_roundtrip(tmp_path, monkeypatch) -> None:
     startup ``load_api_keys()`` turns it into ``os.environ`` and config
     state — which is where :class:`AnthropicModel` reads it from.
     """
+    _pin_workspace_env(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("KISS_HOME", str(tmp_path / ".kiss"))
     monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
@@ -256,3 +283,16 @@ def test_workspace_id_settings_store_roundtrip(tmp_path, monkeypatch) -> None:
     )
     assert "ANTHROPIC_WORKSPACE_ID" not in os.environ
     assert DEFAULT_CONFIG.ANTHROPIC_WORKSPACE_ID == ""
+
+
+def test_workspace_env_restored_after_module() -> None:
+    """The suite must leave ``ANTHROPIC_WORKSPACE_ID`` exactly as it found it.
+
+    Defined last so it runs after every other test in this file (pytest
+    preserves definition order).  Before the ``_pin_workspace_env`` fix the
+    round-trip test's mid-test ``monkeypatch.delenv`` resurrected
+    ``wrkspc_roundtrip`` into the process environment at teardown, poisoning
+    every later live Anthropic call in the same pytest process — this test
+    failed with exactly that leaked value.
+    """
+    assert os.environ.get("ANTHROPIC_WORKSPACE_ID") == _WORKSPACE_ENV_AT_IMPORT

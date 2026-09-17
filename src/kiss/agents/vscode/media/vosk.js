@@ -730,12 +730,49 @@
     function createModel(modelUrl, logLevel = 0) {
         return __awaiter(this, void 0, void 0, function* () {
             const model = new Model(modelUrl, logLevel);
-            return new Promise((resolve, reject) => model.on("load", (message) => {
-                if (message.result) {
-                    resolve(model);
-                }
-                reject();
-            }));
+            return new Promise((resolve, reject) => {
+                let settled = false;
+                // A Worker that fails before its script ever runs never
+                // posts a load message and cannot process the protocol
+                // {action:'terminate'} message, so it must be reclaimed
+                // with the real Worker.terminate(); otherwise every failed
+                // start leaks a live Web Worker nobody can reach.
+                const dropBootListener = () => {
+                    // Some minimal Worker shims lack removeEventListener;
+                    // the settled flag alone already makes both paths
+                    // one-shot, so removal is best-effort tidiness.
+                    if (typeof model.worker.removeEventListener === "function") {
+                        model.worker.removeEventListener("error", onBootError);
+                    }
+                };
+                const onBootError = (err) => {
+                    if (settled)
+                        return;
+                    settled = true;
+                    dropBootListener();
+                    model.worker.terminate();
+                    model._ready = false;
+                    const detail = err && err.message ? ": " + err.message : "";
+                    reject(new Error("Failed to start the speech worker for " + modelUrl + detail));
+                };
+                model.worker.addEventListener("error", onBootError);
+                model.on("load", (message) => {
+                    if (settled)
+                        return;
+                    settled = true;
+                    dropBootListener();
+                    if (message.result) {
+                        resolve(model);
+                    }
+                    else {
+                        // The worker booted but the model failed to load: free
+                        // the worker, or every failed attempt leaks a live Web
+                        // Worker (and its multi-MB blob) nobody can reach.
+                        model.terminate();
+                        reject(new Error("Failed to load the speech model from " + modelUrl));
+                    }
+                });
+            });
         });
     }
 

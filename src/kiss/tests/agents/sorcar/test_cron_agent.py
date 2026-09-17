@@ -374,15 +374,15 @@ def test_prompt_job_skips_git_lifecycle(
 
     ``_run_prompt_job`` submits without an ``extension_agent_path``,
     so the module's ``use_worktree()``/``auto_commit()`` getters never
-    apply on the daemon — the values must be pinned on the wire, and
-    ``classify_tasks`` must be pinned off too, because an
-    ``is_development`` classification verdict overrides an explicit
-    ``use_worktree=False`` (``WorktreeSorcarAgent.run``).  Before the
-    pin, a scheduled job whose prompt looked like development work
-    created a git worktree of whatever repository enclosed
-    ``~/.kiss/cron/work`` on every run.  The real path is exercised up
-    to the daemon-client boundary; only that boundary call is
-    captured, to read the arguments the job runner computed.
+    apply on the daemon — the values must be pinned on the wire.
+    ``classify_tasks`` is pinned off too: cron is the one dispatch
+    mode that never classifies (an unattended automation runs
+    repeatedly, and a classifier round trip per run buys nothing).
+    Before the worktree pin, a scheduled job whose prompt looked like
+    development work created a git worktree of whatever repository
+    enclosed ``~/.kiss/cron/work`` on every run.  The real path is
+    exercised up to the daemon-client boundary; only that boundary
+    call is captured, to read the arguments the job runner computed.
     """
     from kiss.agents.sorcar import daemon_client
 

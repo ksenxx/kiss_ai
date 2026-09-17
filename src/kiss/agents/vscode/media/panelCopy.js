@@ -17,9 +17,15 @@
     'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
     'stroke-linejoin="round" aria-hidden="true">' +
     '<polyline points="20 6 9 17 4 12"/></svg>';
+  const PANEL_STOP_SVG =
+    '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" ' +
+    'stroke="currentColor" stroke-width="2" stroke-linejoin="round" ' +
+    'aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/>' +
+    '</svg>';
 
   const SKIP_CLASSES = [
     'panel-copy-btn',
+    'panel-stop-btn',
     'collapse-chv',
     'collapse-preview',
     'panel-ts',
@@ -298,6 +304,65 @@
     panelEl.appendChild(btn);
   }
 
+  // panelstop-coverage:start
+  /**
+   * Add the per-panel Stop button to a tool-call panel, immediately
+   * left of its copy button.
+   *
+   * The button exists on every tool-call panel; the stylesheet shows
+   * it only while the panel's tool call is running (a `.tc` with
+   * `data-start-ms` and no `data-time-done`, the same marks the
+   * elapsed-time ticker uses), so it disappears by itself when the
+   * tool result arrives or the task ends.  A click calls *onStop* and
+   * puts the button in the `stopping` state; the state clears after
+   * *resetMs* (default 5 s) so a tool that ignores the interrupt can
+   * be asked again.
+   *
+   * @param {Element} panelEl The `.tc` tool-call panel.
+   * @param {function(): void} onStop Sends the interrupt request.
+   * @param {number} [resetMs] How long a click stays in the
+   *     `stopping` state.
+   * @returns {HTMLButtonElement|null} The button, or null when the
+   *     panel already has one.
+   */
+  function addStopButton(panelEl, onStop, resetMs) {
+    if (!panelEl || panelEl.querySelector(':scope > .panel-stop-btn'))
+      return null;
+    const doc = panelEl.ownerDocument || document;
+    const btn = doc.createElement('button');
+    btn.type = 'button';
+    btn.className = 'panel-stop-btn';
+    btn.title = 'Stop this tool call';
+    btn.setAttribute('aria-label', 'Stop this tool call');
+    btn.innerHTML = PANEL_STOP_SVG;
+    let resetTimer = null;
+    function clearStopping() {
+      resetTimer = null;
+      btn.classList.remove('stopping');
+      btn.disabled = false;
+    }
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (btn.classList.contains('stopping')) return;
+      btn.classList.add('stopping');
+      btn.disabled = true;
+      if (resetTimer) clearTimeout(resetTimer);
+      resetTimer = setTimeout(
+        clearStopping,
+        typeof resetMs === 'number' ? resetMs : 5000,
+      );
+      onStop();
+    });
+    btn._kissClearStopping = function () {
+      if (resetTimer) clearTimeout(resetTimer);
+      clearStopping();
+    };
+    panelEl.appendChild(btn);
+    return btn;
+  }
+  // panelstop-coverage:end
+
   // panelts-coverage:start
   function formatEventTs(ts) {
     const n = Number(ts);
@@ -369,12 +434,14 @@
     getRawText: getRawText,
     formattedTextFromNode: formattedTextFromNode,
     addCopyButton: addCopyButton,
+    addStopButton: addStopButton,
     fallbackCopyText: fallbackCopyText,
     formatEventTs: formatEventTs,
     ensurePanelFoot: ensurePanelFoot,
     addPanelTimestamp: addPanelTimestamp,
     PANEL_COPY_SVG: PANEL_COPY_SVG,
     PANEL_CHECK_SVG: PANEL_CHECK_SVG,
+    PANEL_STOP_SVG: PANEL_STOP_SVG,
   };
 
   if (root && typeof root === 'object') {

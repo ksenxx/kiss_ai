@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple, cast
 
 import yaml
 
@@ -33,7 +33,9 @@ from kiss.agents.sorcar.task_classifier import (
 )
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.core import tool_interrupt
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
+from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.core.memoryfield.tools import MEMORY_PROTOCOL, MemoryTools
 from kiss.core.models.model import Attachment
@@ -47,6 +49,7 @@ from kiss.core.models.model_info import (
 )
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
+from kiss.core.tool_interrupt import ToolCallInterrupted
 from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
@@ -337,7 +340,30 @@ def _yaml_failure(exc: BaseException) -> str:
 
 
 def _agent_usage(agent: Any) -> tuple[float, int, int]:
-    """Return ``(budget_used, total_tokens_used, total_steps)`` for *agent*."""
+    """Return ``(budget_used, total_tokens_used, total_steps)`` for *agent*.
+
+    A :class:`~kiss.agents.sorcar.relentless_agent.RelentlessAgent`
+    derives the triple from one append-only usage ledger; it MUST be
+    read once through ``usage_snapshot()``, which sums a single ledger
+    reference.  Three separate property reads each sum the ledger
+    afresh, so concurrent banks between them tear the triple — a final
+    abandoned-child reclaim that read the OLD budget with the NEW
+    tokens/steps then discarded the child and permanently lost its
+    spend from the parent's accounting.  The per-attribute fallback
+    serves agent-shaped objects whose fields are plain attributes.
+
+    A bare :class:`KISSAgent` also exposes ``usage_snapshot()``, but
+    its third element is the SESSION dimension ``step_count`` — not
+    the folded ``total_steps`` this reader reports — so it goes
+    through the attribute fallback on purpose (its per-field property
+    reads are each one atomic snapshot load; only ledger-bearing
+    agents need the cross-field snapshot here, because only their
+    per-property reads re-sum a concurrently growing ledger).
+    """
+    snapshot = getattr(agent, "usage_snapshot", None)
+    if callable(snapshot) and not isinstance(agent, KISSAgent):
+        budget, tokens, steps = cast("tuple[float, int, int]", snapshot())
+        return float(budget or 0.0), int(tokens or 0), int(steps or 0)
     return (
         float(getattr(agent, "budget_used", 0.0) or 0.0),
         int(getattr(agent, "total_tokens_used", 0) or 0),
@@ -384,6 +410,9 @@ def _broadcast_subagent_done(
 # interval, so a 0.1s slice made a deeply nested tree crawl under GIL
 # contention.
 _SUBAGENT_POLL_SECONDS = 1.0
+# The slice while the fan-out runs as a tool call (run_parallel): below
+# kiss.core.tool_interrupt's 1 s injection grace, see _await_subagents.
+_SUBAGENT_TOOL_POLL_SECONDS = 0.4
 _SUBAGENT_STOP_GRACE_SECONDS = 15.0
 
 
@@ -479,16 +508,32 @@ def _await_subagents(
     Returns:
         The sub-agent results, in the order the tasks were given.
 
+    The ``run_parallel`` tool panel's own Stop is honored cooperatively
+    too: each wake checks the running tool call's interrupt and raises
+    ``ToolCallInterrupted`` at once (the caller then signals the
+    children through the fan-out's stop event).
+
     Raises:
         KeyboardInterrupt: When a stop was requested and at least one
             child was still running after the grace period.
+        ToolCallInterrupted: When the user stopped the ``run_parallel``
+            tool call while children were still running.
     """
     pending = set(futures)
     give_up_at: float | None = None
+    # Under a tool call the slice stays well inside the interrupt's
+    # cooperative grace, so the raise below always beats the forced
+    # injection (which would otherwise land inside ``wait``).
+    poll = (
+        _SUBAGENT_TOOL_POLL_SECONDS
+        if tool_interrupt.current_tool_call() is not None
+        else _SUBAGENT_POLL_SECONDS
+    )
     while pending:
-        _done, pending = wait(pending, timeout=_SUBAGENT_POLL_SECONDS)
+        _done, pending = wait(pending, timeout=poll)
         if not pending:
             break
+        tool_interrupt.raise_if_interrupted()
         if stop_event is None or not stop_event.is_set():
             continue
         if give_up_at is None:
@@ -547,6 +592,25 @@ def _collect_unfinished_usage(
             )
 
 
+class _ClassifierSpend(NamedTuple):
+    """One pre-run task classification's complete, immutable spend.
+
+    ``SorcarAgent._classify_task_once`` publishes the WHOLE outcome —
+    the retry-stable fold key together with all three spend dimensions
+    — as one instance with a single ``STORE_ATTR``, so an
+    asynchronously injected stop can only leave the agent with the
+    complete outcome or with no outcome at all, never with a torn
+    subset (round-6 finding 3: a stop between separate key and spend
+    stores made the mandatory fold consume a zero triple and clear the
+    transaction, silently dropping real provider spend).
+    """
+
+    key: str
+    budget: float
+    tokens: int
+    steps: int
+
+
 class _AbandonedSubagent:
     """A sub-agent thread its parent gave up waiting for.
 
@@ -564,44 +628,139 @@ class _AbandonedSubagent:
         future: Future[str],
         agent: Any,
         counted: tuple[float, int, int],
+        epoch: Any = None,
     ) -> None:
-        """Record *future*/*agent* and the usage already attributed."""
+        """Record *future*/*agent*, the usage already attributed, and the epoch.
+
+        Args:
+            future: The abandoned worker's future.
+            agent: The abandoned child's agent.
+            counted: The ``(budget, tokens, steps)`` the parent has
+                already attributed for this child.
+            epoch: The parent's usage-ledger epoch token
+                (``RelentlessAgent._usage_epoch()``) at registration,
+                or ``None`` when the parent has no ledger.  Every
+                reclaim commit is BOUND to this exact object: after a
+                ``reset_usage()`` (the next run's task boundary) the
+                child's further spend settles into the discarded
+                prior-epoch ledger — it belongs to the finished PRIOR
+                task and must not corrupt the new task's accounting
+                (round-4 finding 3; round-6 finding 2 closed the
+                check-then-commit race by binding the commit itself,
+                not just checking the token first).  The item stays
+                tracked for liveness either way (worktree-deletion
+                safety).
+        """
         self.future = future
         self.agent = agent
-        self.counted = counted
+        self.epoch = epoch
+        # The transaction identity of this source's reclaim commits:
+        # generation ``g``'s ledger record carries the retry-stable
+        # source ``"reclaim:<txn_id>"`` with sequence ``g`` —
+        # generations are committed in increasing order (the ledger's
+        # per-source monotonic-seq contract), so pre- and post-append
+        # retries deduplicate to exactly one contribution per
+        # generation.
+        self.txn_id = uuid.uuid4().hex
+        # ``(generation, counted)`` advances in ONE store, only AFTER
+        # generation ``generation``'s ledger append: an interrupt
+        # anywhere in the commit retries the SAME transaction.
+        self.checkpoint: tuple[int, tuple[float, int, int]] = (0, counted)
+        # Write-ahead intent ``(generation, live_snapshot)``: fixes the
+        # amount generation ``generation`` banks BEFORE the append, so
+        # a retry re-appends the identical record (same key, same
+        # values) instead of recomputing a different delta that
+        # first-record-wins dedup would silently drop.
+        self.pending: tuple[int, tuple[float, int, int]] | None = None
 
-    def unbanked_usage(self) -> tuple[float, int, int]:
-        """Return the spend not yet attributed to the parent.
+    @property
+    def counted(self) -> tuple[float, int, int]:
+        """The ``(budget, tokens, steps)`` already attributed to the parent."""
+        return self.checkpoint[1]
+
+    def bank_unbanked(self, parent: Any) -> tuple[float, int, int]:
+        """Attribute the child's spend since the last checkpoint, exactly once.
+
+        The commit order is append-then-advance with a write-ahead
+        intent, so an asynchronously injected stop at ANY point makes
+        the next reclaim retry the SAME transaction:
+
+        1. Load the checkpoint ``(generation, counted)``.
+        2. Reuse (or record — one store) the pending intent
+           ``(generation, live)``; the live snapshot is clamped to
+           ``counted`` because a mid-handoff read can momentarily
+           REGRESS (RelentlessAgent detaches ``_current_executor``
+           before folding its spend), and banking a negative delta or
+           lowering the checkpoint would double-count later.
+        3. Append the delta as ONE keyed ledger record — source
+           ``"reclaim:<txn_id>"``, seq ``generation`` — bound to
+           :attr:`epoch`, the ledger object captured at registration.
+           A retry that finds the intent re-appends the identical
+           record and read-side dedup counts it once; the pre-round-5
+           order (advance ``counted`` first, append second) let a stop
+           between the two permanently drop a finished child's spend.
+           Binding the commit to the captured epoch object (round-6
+           finding 2) means a ``reset_usage()`` racing this step can
+           never divert the delta into the NEW task's ledger: the
+           record lands in the discarded prior-epoch object, which
+           nobody sums.
+        4. Advance the checkpoint in ONE store, then clear the intent.
+           A stale intent from a completed generation (stop between 4
+           and the clear) is recognized by its generation number and
+           discarded.
+
+        Callers serialize on ``_abandoned_lock``; this method is not
+        safe for concurrent calls on one item.
+
+        Args:
+            parent: The agent whose ledger receives the attribution.
 
         Returns:
-            The ``(budget, tokens, steps)`` delta between the child's
-            live figures and what the parent has already counted.
-            Never negative: a live snapshot can momentarily REGRESS —
-            RelentlessAgent detaches ``_current_executor`` BEFORE
-            ``_accumulate_usage`` folds its spend into the cumulative
-            counters at every session handoff, so a read in that
-            window sees neither.  Like ``_collect_unfinished_usage``
-            and ``_LiveUsageMonitor._emit``, the snapshot is clamped
-            to what was already counted; otherwise a reclaim would
-            SUBTRACT banked spend from the parent and reset
-            ``counted`` downward, double-counting it later.
+            The ``(budget, tokens, steps)`` delta banked by this call
+            (``(0.0, 0, 0)`` when the child reported nothing new) —
+            callers use it to surface late spend that settled into a
+            superseded epoch.
         """
-        live = _live_agent_usage(self.agent)
-        live = (
-            max(live[0], self.counted[0]),
-            max(live[1], self.counted[1]),
-            max(live[2], self.counted[2]),
-        )
+        generation, counted = self.checkpoint
+        pending = self.pending
+        if pending is not None and pending[0] != generation:
+            # A finished generation's leftover intent (the stop landed
+            # between the checkpoint advance and the intent clear).
+            self.pending = None
+            pending = None
+        if pending is None:
+            live = _live_agent_usage(self.agent)
+            live = (
+                max(live[0], counted[0]),
+                max(live[1], counted[1]),
+                max(live[2], counted[2]),
+            )
+            if live == counted:
+                return (0.0, 0, 0)
+            pending = (generation, live)
+            self.pending = pending
+        live = pending[1]
         delta = (
-            live[0] - self.counted[0],
-            live[1] - self.counted[1],
-            live[2] - self.counted[2],
+            live[0] - counted[0],
+            live[1] - counted[1],
+            live[2] - counted[2],
         )
-        # Test hook (no-op in production): widens the read-modify-
-        # write window so concurrency tests can prove the caller
-        # serialises reclaims (see reclaim_abandoned_subagents).
+        # Test hook (no-op in production): widens the commit window so
+        # concurrency tests can prove the caller serialises reclaims
+        # (see reclaim_abandoned_subagents).
         _race_delay()
-        self.counted = live
+        if delta[0] or delta[1] or delta[2]:
+            _attribute_sub_usage(
+                parent,
+                delta[0],
+                delta[1],
+                delta[2],
+                key=f"reclaim:{self.txn_id}",
+                seq=generation,
+                epoch=self.epoch,
+            )
+        self.checkpoint = (generation + 1, live)
+        self.pending = None
         return delta
 
 
@@ -643,16 +802,34 @@ def _register_abandoned(
         sub_agents: The children's agents, in the same order.
         sub_usage: Per-child ``(cost, tokens, steps)`` already counted.
     """
-    pending = getattr(parent_agent, "_abandoned_subagents", None)
     lock = getattr(parent_agent, "_abandoned_lock", None)
-    if pending is None or lock is None:
+    if lock is None:
         return
+    # Tag each item with the parent's CURRENT ledger epoch: every
+    # reclaim commit for the item is bound to this object, so late
+    # spend after the parent's next reset_usage() (a new task) settles
+    # into the discarded epoch instead of the new task's accounting.
+    epoch_of = getattr(parent_agent, "_usage_epoch", None)
+    epoch = epoch_of() if callable(epoch_of) else None
     with lock:
+        # The tracking list is fetched INSIDE the lock: reading it
+        # before acquisition let a concurrent reclaim (which used to
+        # replace the attribute under the lock) strand a live child in
+        # a detached list, so worktree cleanup saw no abandoned
+        # children while the child's thread still wrote into the
+        # directory (round-6 finding 4).  Reclaim also mutates the
+        # list in place now, so the object registered into is always
+        # the object reclaim scans.
+        pending = getattr(parent_agent, "_abandoned_subagents", None)
+        if pending is None:
+            return
         for idx, future in enumerate(futures):
             if future.done() or sub_agents[idx] is None:
                 continue
             pending.append(
-                _AbandonedSubagent(future, sub_agents[idx], sub_usage[idx])
+                _AbandonedSubagent(
+                    future, sub_agents[idx], sub_usage[idx], epoch=epoch,
+                )
             )
 
 
@@ -678,6 +855,16 @@ def _executor_usage(agent: Any) -> tuple[float, int, int]:
     executor = getattr(agent, "_current_executor", None)
     if executor is None:
         return 0.0, 0, 0
+    # ONE coherent snapshot when the executor publishes one (KISSAgent
+    # stores its whole triple as one immutable record): this function
+    # is polled from other threads (_LiveUsageMonitor, unfinished-usage
+    # collection, abandoned-child reclaim) while the executor thread
+    # updates the counters, and three separate property reads could
+    # pair one response's tokens with the pre-response cost.
+    snapshot = getattr(executor, "usage_snapshot", None)
+    if callable(snapshot):
+        budget, tokens, steps = cast("tuple[float, int, int]", snapshot())
+        return float(budget or 0.0), int(tokens or 0), int(steps or 0)
     return (
         float(getattr(executor, "budget_used", 0.0) or 0.0),
         int(getattr(executor, "total_tokens_used", 0) or 0),
@@ -827,7 +1014,15 @@ class _LiveUsageMonitor:
         )
 
 
-def _attribute_sub_usage(agent: Any, budget: float, tokens: int, steps: int) -> None:
+def _attribute_sub_usage(
+    agent: Any,
+    budget: float,
+    tokens: int,
+    steps: int,
+    key: str | None = None,
+    seq: int = 0,
+    epoch: Any = None,
+) -> None:
     """Attribute sub-agents' cost, tokens, and steps to the parent *agent*.
 
     Without this, sub-agent budgets would be invisible to the parent
@@ -836,33 +1031,62 @@ def _attribute_sub_usage(agent: Any, budget: float, tokens: int, steps: int) -> 
     additional spend immediately (the offsets are otherwise
     snapshotted only at session start).
 
-    The whole read-modify-write runs under the agent's ``_usage_lock``
-    (see :meth:`RelentlessAgent.__init__`): this function is called
-    concurrently by the agent thread (a fan-out's ``finally``, a
-    ``talk`` synthesis bank) and by server threads
-    (:meth:`SorcarAgent.reclaim_abandoned_subagents` from worktree
-    cleanup / teardown / discard), and unserialized increments lost
-    updates.  ``reclaim_abandoned_subagents`` calls this while holding
-    ``_abandoned_lock``, so the (fixed) lock order is
-    ``_abandoned_lock`` → ``_usage_lock``; nothing acquires them in
-    the opposite order.  A minimal agent-shaped object without the
-    lock attribute gets a throwaway lock (no cross-thread protection,
-    but such objects are single-threaded by construction).
+    The delta is committed through the agent's
+    :meth:`RelentlessAgent._attribute_usage` — ONE atomic append of an
+    immutable record carrying all three dimensions to the agent's
+    append-only usage ledger.  No writer can overwrite or lose another
+    writer's record: this function is called concurrently by the agent
+    thread (a fan-out's ``finally``, a ``talk`` synthesis bank) and by
+    server threads (:meth:`SorcarAgent.reclaim_abandoned_subagents`
+    from worktree cleanup / teardown / discard), and it can also cross
+    a :meth:`RelentlessAgent._reset` — three separate property stores
+    used to let the reset land between them and publish an impossible
+    mixed state (zero budget, pre-reset tokens/steps), whereas the
+    single record now lands wholly in the old epoch (discarded with
+    it) or wholly in the new one.  The append takes no lock, so a
+    caller holding ``_abandoned_lock`` (``reclaim_abandoned_subagents``)
+    can never deadlock here, even after an injected stop.  A minimal
+    agent-shaped object without ``_attribute_usage`` gets plain
+    attribute increments (no cross-thread protection, but such objects
+    are single-threaded by construction).
+
+    Args:
+        agent: The parent agent receiving the attribution.
+        budget: USD spend to add.
+        tokens: Token count to add.
+        steps: Step count to add.
+        key: Stable transaction source for a retryable adjustment (an
+            abandoned-child reclaim); ``None`` for one-shot
+            attributions (fan-out totals, TTS), which need no dedup
+            identity because they are appended at most once.
+        seq: Per-*key* monotonic sequence number (a reclaim's
+            generation); ignored for one-shot attributions.
+        epoch: The ledger epoch object the commit is bound to (see
+            ``RelentlessAgent._attribute_usage``), or ``None`` for the
+            agent's current epoch.  A reclaim passes the epoch
+            captured when the abandoned child was registered, so a
+            concurrent reset can never divert a prior task's spend
+            into the new task's ledger.
     """
-    lock = getattr(agent, "_usage_lock", None) or threading.Lock()
-    with lock:
+    attribute = getattr(agent, "_attribute_usage", None)
+    if callable(attribute):
+        attribute(budget, tokens, steps, key=key, seq=seq, epoch=epoch)
+    else:
         agent.budget_used = float(getattr(agent, "budget_used", 0.0) or 0.0) + budget
         agent.total_tokens_used = (
             int(getattr(agent, "total_tokens_used", 0) or 0) + tokens
         )
         agent.total_steps = int(getattr(agent, "total_steps", 0) or 0) + steps
-        if agent.printer is not None:
-            try:
-                agent.printer.budget_offset = agent.budget_used
-                agent.printer.tokens_offset = agent.total_tokens_used
-                agent.printer.steps_offset = agent.total_steps
-            except Exception:
-                pass
+    if agent.printer is not None:
+        try:
+            # One coherent triple (see _agent_usage): separate property
+            # reads could tear across a concurrent snapshot publish.
+            budget_total, tokens_total, steps_total = _agent_usage(agent)
+            agent.printer.budget_offset = budget_total
+            agent.printer.tokens_offset = tokens_total
+            agent.printer.steps_offset = steps_total
+        except Exception:
+            pass
 
 
 def _attribute_tts_usage(agent: Any, usage: dict[str, Any]) -> None:
@@ -999,9 +1223,10 @@ class SorcarAgent(RelentlessAgent):
         # :meth:`_classify_task_once`).  ``_classification_attempted``
         # makes the classifier run at most once per task even though
         # both ``WorktreeSorcarAgent.run`` (for the worktree decision)
-        # and :meth:`run` (for the system prompt) consult it; the
-        # usage counters hold the classifier's spend until
-        # :meth:`_fold_classifier_usage` banks it into the run totals.
+        # and :meth:`run` (for the system prompt) consult it; one
+        # immutable ``_classifier_spend`` record holds the classifier's
+        # spend until :meth:`_fold_classifier_usage` banks it into the
+        # run totals.
         self._task_classification: TaskClassification | None = None
         self._classification_attempted: bool = False
         # True when the verdict was established by an external driver
@@ -1011,9 +1236,14 @@ class SorcarAgent(RelentlessAgent):
         # the driver's own worktree bookkeeping never disagrees with
         # the agent's.  Cleared by the next classify_task_for_run call.
         self._classification_preseeded: bool = False
-        self._classifier_budget_used: float = 0.0
-        self._classifier_tokens_used: int = 0
-        self._classifier_steps: int = 0
+        # The UNFOLDED classifier spend: one immutable record carrying
+        # the retry-stable fold key AND all three spend dimensions,
+        # published with a single store (see :class:`_ClassifierSpend`)
+        # — never a partial subset.  The fold appends its ledger record
+        # under the record's key BEFORE clearing this field, so a
+        # stop-interrupted fold retried later re-appends the SAME key
+        # and read-side dedup makes the spend count exactly once.
+        self._classifier_spend: _ClassifierSpend | None = None
         # Sub-agent threads this agent stopped waiting for; see
         # :class:`_AbandonedSubagent` and :meth:`reclaim_abandoned_subagents`.
         # Touched by the agent thread and by server threads (worktree
@@ -1053,13 +1283,13 @@ class SorcarAgent(RelentlessAgent):
             # is never blocked for this caller's full timeout.
             wait([item.future for item in pending], timeout=timeout)
         # The whole bank-and-forget sequence holds the lock:
-        # ``item.unbanked_usage()`` (read-modify-write of
-        # ``item.counted``) and ``_attribute_sub_usage`` (read-modify-
-        # write of this agent's ``budget_used`` totals) would otherwise
-        # race a concurrent reclaimer — the agent thread and server-
-        # side worktree cleanup call this concurrently — double-
-        # counting spend or losing a totals update.  Neither callee
-        # acquires ``_abandoned_lock``, so this cannot deadlock.
+        # ``item.bank_unbanked()`` (an intent/checkpoint transaction on
+        # the item) would otherwise race a concurrent reclaimer — the
+        # agent thread and server-side worktree cleanup call this
+        # concurrently — double-counting the child's spend.
+        # (``_attribute_sub_usage`` itself is one lock-free ledger
+        # append and needs no serialization.)  Neither callee acquires
+        # ``_abandoned_lock``, so this cannot deadlock.
         #
         # The pass runs over the CURRENT list, not the pre-wait
         # snapshot: a child abandoned by a fan-out that ended during
@@ -1067,15 +1297,45 @@ class SorcarAgent(RelentlessAgent):
         # the shared working directory on True), and one that a
         # concurrent reclaimer already banked and forgot must not be
         # banked again.
+        epoch_of = getattr(self, "_usage_epoch", None)
+        current_epoch = epoch_of() if callable(epoch_of) else None
         with self._abandoned_lock:
             still_running: list[_AbandonedSubagent] = []
             for item in self._abandoned_subagents:
-                budget, tokens, steps = item.unbanked_usage()
-                if budget or tokens or steps:
-                    _attribute_sub_usage(self, budget, tokens, steps)
+                # Every commit is BOUND to item.epoch (the ledger
+                # object captured at registration), so no epoch
+                # check-then-commit race with reset_usage() exists: an
+                # item registered under a PRIOR epoch settles its
+                # further spend into that finished task's discarded
+                # ledger, never into the current task's totals.  Late
+                # spend settled that way is REAL provider spend that
+                # no live task reports — an explicit, documented
+                # undercount (the finished task's terminal accounting
+                # was already persisted when it ended), surfaced in
+                # the log below.  The thread is still tracked so a
+                # live child keeps blocking worktree deletion.
+                banked = item.bank_unbanked(self)
+                if (
+                    any(banked)
+                    and item.epoch is not None
+                    and item.epoch is not current_epoch
+                ):
+                    logger.info(
+                        "Abandoned sub-agent spend "
+                        "(budget=%.6f tokens=%d steps=%d) arrived after "
+                        "its task's usage epoch ended; settled into the "
+                        "finished task's ledger, not the current task.",
+                        banked[0],
+                        banked[1],
+                        banked[2],
+                    )
                 if not item.future.done():
                     still_running.append(item)
-            self._abandoned_subagents = still_running
+            # In-place update: registration appends to the same list
+            # object it fetched under this lock, so replacing the
+            # attribute could strand a concurrent registration's items
+            # in a detached list (round-6 finding 4).
+            self._abandoned_subagents[:] = still_running
         return not still_running
 
     def _subagent_budget_share(self, num_tasks: int) -> float | None:
@@ -1803,9 +2063,7 @@ class SorcarAgent(RelentlessAgent):
             return
         self._classification_attempted = False
         self._task_classification = None
-        self._classifier_budget_used = 0.0
-        self._classifier_tokens_used = 0
-        self._classifier_steps = 0
+        self._classifier_spend = None
 
     def classify_task_for_run(
         self,
@@ -1820,7 +2078,9 @@ class SorcarAgent(RelentlessAgent):
         worktree mode BEFORE calling :meth:`run` — the server's task
         runner decides its main-tree claims, merge presentation, and
         persistence from ``use_worktree``, so it classifies here, sets
-        ``use_worktree = verdict.is_development``, and passes that
+        ``use_worktree = use_worktree and verdict.is_development`` (the
+        verdict can only demote a run that asked for a worktree, never
+        promote a pinned-off one), and passes that
         value to the run.  The pre-seeded verdict is then reused by the
         run itself (worktree gating and system prompt selection) and by
         every later subtask of the same submission, so the driver and
@@ -1901,9 +2161,21 @@ class SorcarAgent(RelentlessAgent):
             model_name=self._resolve_model_name(model_name),
             model_config=model_config,
         )
-        self._classifier_budget_used = outcome.budget_used
-        self._classifier_tokens_used = outcome.tokens_used
-        self._classifier_steps = outcome.steps
+        # ONE immutable publication: the retry-stable fold key and the
+        # whole spend triple become visible together with a single
+        # store, so an injected stop leaves either the complete outcome
+        # or no outcome — never a key paired with a zero triple that
+        # the mandatory fold would consume and clear (round-6
+        # finding 3).  A stop between the model call returning and
+        # this store loses the whole outcome, which is the documented
+        # all-or-nothing semantics: an unpublished classification was
+        # never committed, so nothing partial can leak into totals.
+        self._classifier_spend = _ClassifierSpend(
+            f"classifier:{uuid.uuid4().hex}",
+            outcome.budget_used,
+            outcome.tokens_used,
+            outcome.steps,
+        )
         self._task_classification = outcome.classification
         if outcome.classification is not None:
             logger.info(
@@ -1921,14 +2193,36 @@ class SorcarAgent(RelentlessAgent):
         cumulative counters, so folding earlier would be erased.  Also
         clears the classification state so a reused agent instance
         starts its next run fresh.
+
+        The fold is one :meth:`RelentlessAgent._attribute_usage`
+        ledger append: it runs UNCONDITIONALLY on every unwind path,
+        including after a stop-injected ``KeyboardInterrupt`` unwound a
+        session bank mid-commit.  The append is lock-free, so it always
+        terminates — an earlier lock-based design deadlocked ``run``'s
+        mandatory ``finally`` forever on a lock the injection leaked.
+
+        The fold consumes ``_classifier_spend`` — ONE immutable record
+        carrying the stable transaction key and the whole spend triple
+        (see :class:`_ClassifierSpend`), so it can never observe a
+        torn subset of the outcome (round-6 finding 3).  The keyed
+        append happens BEFORE the record is cleared, so a stop
+        injected anywhere in this method is retry-safe: a stop before
+        the append leaves the record intact for a later fold to
+        commit; a stop after it leaves it intact too, and the retry's
+        same-key re-append deduplicates on read — exactly once either
+        way (round-4 finding 2b: the previous unkeyed append-once
+        design lost the spend on a pre-append stop and could not be
+        retried safely).
         """
-        with self._usage_lock:
-            self.budget_used += self._classifier_budget_used
-            self.total_tokens_used += self._classifier_tokens_used
-            self.total_steps += self._classifier_steps
-        self._classifier_budget_used = 0.0
-        self._classifier_tokens_used = 0
-        self._classifier_steps = 0
+        spend = self._classifier_spend
+        if spend is not None:
+            self._attribute_usage(
+                spend.budget,
+                spend.tokens,
+                spend.steps,
+                key=spend.key,
+            )
+            self._classifier_spend = None
         self._reset_task_classification()
 
     def run(  # type: ignore[override]
@@ -2417,12 +2711,23 @@ def run_tasks_parallel(
         parent_key if is_task_history_id(parent_key) else uuid.uuid4().hex
     )
 
+    # The whole fan-out's own stop signal, chained to the parent's.  It
+    # is set when the user presses the run_parallel panel's own Stop
+    # button (ToolCallInterrupted lands in the parent's wait): the
+    # parent's stop event stays unset then, so without this the
+    # children would keep running, and spending, after the fan-out the
+    # user just stopped had returned.  Any other reason the parent
+    # unwinds leaves the children alone (they are abandoned, their
+    # spend reclaimed later), exactly as before.
+    fanout_stop_event = _SubagentStopEvent(parent_stop_event)
+
     def _run_single(args: tuple[int, str]) -> str:
         idx, task = args
-        # A per-child event, chained to the parent's: stopping ONE
-        # sub-agent must not stop the parent or its siblings, while a
-        # parent stop still reaches every child (_SubagentStopEvent).
-        sub_stop_event = _SubagentStopEvent(parent_stop_event)
+        # A per-child event, chained to the fan-out's and through it to
+        # the parent's: stopping ONE sub-agent must not stop the parent
+        # or its siblings, while a parent stop (or an abandoned
+        # fan-out) still reaches every child (_SubagentStopEvent).
+        sub_stop_event = _SubagentStopEvent(fanout_stop_event)
         tl = getattr(printer, "_thread_local", None) if printer else None
         if tl is not None:
             tl.stop_event = sub_stop_event
@@ -2520,8 +2825,10 @@ def run_tasks_parallel(
             for item in enumerate(tasks):
                 futures.append(pool.submit(_run_single, item))
             results = _await_subagents(futures, parent_stop_event)
-        except BaseException:
+        except BaseException as exc:
             abandoned = any(not f.done() for f in futures)
+            if abandoned and isinstance(exc, ToolCallInterrupted):
+                fanout_stop_event.set()
             raise
     finally:
         # Only a child that ignored its stop event is abandoned; every

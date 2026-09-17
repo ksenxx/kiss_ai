@@ -30,6 +30,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import sys
 import tempfile
 import threading
 import unittest
@@ -396,6 +397,77 @@ class TestServerApiOverUds(unittest.TestCase):
         # No error and no voiceWakeState reply: the very next event is
         # the follow-up command's response.
         self.assertEqual(event.get("type"), "activeTasksResponse")
+
+    def test_voice_wake_events_reach_the_wire_without_generation_tag(
+        self,
+    ) -> None:
+        """The daemon send wrapper strips the ``voiceGen`` tag.
+
+        Every event of :class:`VoiceWakeController` carries a
+        listener-generation tag so the per-connection send wrapper can
+        discard a retired generation's stale report (gpt-5.6-sol
+        round-3 review, findings 2-3).  The tag is a daemon-internal
+        delivery-boundary token: a real listener stand-in started
+        through ``voiceWakeStart`` over the production UDS dispatcher
+        must stream ``voiceWakeEvent`` / ``voiceWakeState`` payloads
+        whose wire shape is unchanged — no ``voiceGen`` key.
+        """
+        self.server._voice_wake._listener_args = [
+            sys.executable, "-u", "-c",
+            "import time\nprint('READY', flush=True)\ntime.sleep(60)\n",
+        ]
+
+        async def _talk() -> list[dict[str, Any]]:
+            reader, writer = await asyncio.open_unix_connection(
+                self.sock_path
+            )
+            try:
+                writer.write(
+                    json.dumps({"type": "voiceWakeStart"}).encode() + b"\n"
+                )
+                await writer.drain()
+                events: list[dict[str, Any]] = []
+                while True:
+                    line = await asyncio.wait_for(
+                        reader.readline(), timeout=15
+                    )
+                    if not line:
+                        raise AssertionError(
+                            "connection closed before voiceWakeState"
+                        )
+                    event: dict[str, Any] = json.loads(line)
+                    if str(event.get("type", "")).startswith("voiceWake"):
+                        events.append(event)
+                    if (
+                        event.get("type") == "voiceWakeState"
+                        and event.get("listening") is True
+                    ):
+                        return events
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        try:
+            events = asyncio.run_coroutine_threadsafe(
+                _talk(), self.loop
+            ).result(timeout=30)
+            self.assertTrue(events)
+            self.assertTrue(
+                any(e.get("type") == "voiceWakeState" for e in events)
+            )
+            for event in events:
+                self.assertNotIn(
+                    "voiceGen", event,
+                    "the delivery boundary leaked the internal "
+                    "generation tag to the wire",
+                )
+        finally:
+            # Reap the stand-in listener even on failure (the closed
+            # connection's disconnect cleanup also stops it; stop is
+            # idempotent).
+            asyncio.run_coroutine_threadsafe(
+                self.server._voice_wake.stop_all(), self.loop
+            ).result(timeout=15)
 
     def test_local_only_commands_are_dropped_for_remote_clients(self) -> None:
         """The UDS-gated handlers must ignore WSS-delivered commands.
