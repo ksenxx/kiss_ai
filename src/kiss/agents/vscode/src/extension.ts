@@ -112,12 +112,19 @@ export function activate(context: vscode.ExtensionContext): void {
   // into editor tabs (the sidebar view hides via its `when` clause)
   // and CLOSES the secondary sidebar — the chats now live in editor
   // tabs, so the bar the sidebar chat occupied must not linger empty;
-  // OFF closes the panels without retiring their chats and CLOSES the
-  // secondary sidebar — the sidebar view re-adopts the chats from
-  // `tabs_state` when a KS button (or anything else) next reveals it.
+  // OFF closes the panels without retiring their chats and OPENS the
+  // secondary sidebar on the KISS Sorcar chat view, focusing its
+  // composer — the chats moved there, so that is where the user must
+  // land (the view re-adopts them from `tabs_state` as it resolves).
   // Guarded like the other optional host APIs (see
   // registerWebviewPanelSerializer): absent only in test stubs.
   let modeSwitchAt = 0;
+  // Set by the OFF branch: its reveal must END with the chat composer
+  // focused. A window that started in editor-tabs mode resolves the
+  // sidebar view for the first time on that reveal, which arms the
+  // one-time widening below; its focus handoff then goes back to the
+  // chat instead of the editor group.
+  let refocusChatAfterWiden = false;
   if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
     context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration(e => {
@@ -148,9 +155,13 @@ export function activate(context: vscode.ExtensionContext): void {
           );
         } else {
           panelManager!.closeAll();
-          void vscode.commands.executeCommand(
-            'workbench.action.closeAuxiliaryBar',
-          );
+          // focusChatInput runs kissSorcar.chatViewSecondary.focus
+          // (the view is contributable again — its `when` clause just
+          // flipped true), which opens the secondary sidebar on the
+          // KISS Sorcar view, waits for the webview to resolve and
+          // focuses the composer.
+          refocusChatAfterWiden = true;
+          void sidebarView!.focusChatInput();
         }
       }),
     );
@@ -691,9 +702,12 @@ export function activate(context: vscode.ExtensionContext): void {
     const gen = treeVisGen;
     // The tree also pops up when editorTabsMode flips OFF while the
     // KISS container is the active primary-sidebar view (the history
-    // panel hides, the tree takes its spot). That flip must leave the
-    // secondary sidebar CLOSED, so give its config handler — which may
-    // run in this same tick — a moment to record itself, then bail.
+    // panel hides, the tree takes its spot). The flip's config handler
+    // already opens the secondary sidebar on the chat and focuses its
+    // composer; a second reveal from here would race it (two
+    // `.focus` commands and two focusInput posts against a view still
+    // resolving), so give the config handler — which may run in this
+    // same tick — a moment to record itself, then bail.
     await new Promise(r => setTimeout(r, 50));
     if (Date.now() - modeSwitchAt < 2000) return;
     if (gen !== treeVisGen) return;
@@ -723,9 +737,19 @@ export function activate(context: vscode.ExtensionContext): void {
           if (sidebarView !== view) return;
           await view.widenToOneThird();
           if (sidebarView !== view) return;
-          await vscode.commands.executeCommand(
-            'workbench.action.focusFirstEditorGroup',
-          );
+          // Hand focus back: to the editor group the user came from,
+          // or — when the view first resolved because the user just
+          // switched editor-tabs mode OFF — to the chat composer that
+          // reveal promised (the widening's own focusAuxiliaryBar and
+          // resize commands landed on top of it).
+          if (refocusChatAfterWiden) {
+            refocusChatAfterWiden = false;
+            await view.focusChatInput();
+          } else {
+            await vscode.commands.executeCommand(
+              'workbench.action.focusFirstEditorGroup',
+            );
+          }
           if (sidebarView !== view) return;
           await context.workspaceState.update('sidebarWidened', true);
         } catch (err) {

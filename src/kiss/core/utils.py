@@ -10,8 +10,10 @@ import logging
 import os
 import posixpath
 import re
+import stat
 import string
 import tempfile
+import uuid
 from pathlib import Path
 from typing import IO, Any, cast
 
@@ -71,7 +73,12 @@ def dump_yaml(data: Any, stream: IO[str] | None = None, **kwargs: Any) -> Any:
     return yaml.dump(data, stream, Dumper=_KissDumper, **kwargs)
 
 
-def atomic_write_text(target: Path, content: str, mode: int | None = None) -> None:
+def atomic_write_text(
+    target: Path,
+    content: str,
+    mode: int | None = None,
+    create_mode: int = 0o600,
+) -> None:
     """Write *content* to *target* so readers never see a partial file.
 
     The content is staged in a sibling temp file and then
@@ -81,6 +88,25 @@ def atomic_write_text(target: Path, content: str, mode: int | None = None) -> No
     trajectory visualizer, another daemon, the VS Code extension — can
     observe an empty or half-written document.
 
+    Permission semantics, in priority order:
+
+    1. An explicit *mode* always wins, for new AND existing targets
+       (secret-bearing callers force ``0o600`` regardless of history).
+    2. An existing target keeps its current bits — a deliberately
+       ``chmod``-ed file is never clobbered on update (``os.replace``
+       publishes the STAGED inode's mode, so this must be copied over
+       explicitly).
+    3. A NEW target is created with *create_mode* filtered by the
+       process umask.  The default is ``0o600``: several callers store
+       secrets (``config.json`` holds ``remote_password`` and
+       ``tunnel_token``, trajectories hold prompts and tool results,
+       ``MY_MODELS.json`` holds API keys), so private-by-default is the
+       only safe default — exactly what the pre-consolidation
+       ``mkstemp``-staged helper published.  Callers whose files are
+       meant to be group/world-readable (memory pages) pass
+       ``create_mode=0o666`` to get plain ``Path.write_text`` umask
+       semantics for fresh files.
+
     Args:
         target: Destination path; its parent directory is created.
         content: The full text to write.
@@ -88,9 +114,25 @@ def atomic_write_text(target: Path, content: str, mode: int | None = None) -> No
             ``0o600`` for files holding secrets).  Best effort: a
             filesystem that refuses ``chmod`` is not treated as a write
             failure.
+        create_mode: Permission bits (before the process umask) used
+            only when *target* does not exist and *mode* is ``None``.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=f".{target.name}-", dir=str(target.parent))
+    preserved: int | None = mode
+    if preserved is None:
+        try:
+            preserved = stat.S_IMODE(target.stat().st_mode)
+        except OSError:
+            preserved = None  # new file: created with create_mode below
+    if preserved is None:
+        # Stage with create_mode so the kernel applies the process
+        # umask at creation, exactly like Path.write_text — without the
+        # process-global (and thread-racy) os.umask() probe.
+        fd, tmp = _open_staging_file(target, create_mode)
+    else:
+        # Stage privately; the intended bits are applied only once the
+        # content is complete, just before publication.
+        fd, tmp = tempfile.mkstemp(prefix=f".{target.name}-", dir=str(target.parent))
     try:
         # A buffered file object rather than a bare os.write, whose
         # POSIX-legal short return count would otherwise be ignored and
@@ -99,12 +141,42 @@ def atomic_write_text(target: Path, content: str, mode: int | None = None) -> No
             staged.write(content.encode("utf-8"))
         # Applied to the staged file only: os.replace moves the inode,
         # mode included, so a second chmod on the target would be a no-op.
-        if mode is not None:
-            _try_chmod(tmp, mode)
+        if preserved is not None:
+            _try_chmod(tmp, preserved)
         os.replace(tmp, target)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def _open_staging_file(target: Path, create_mode: int) -> tuple[int, str]:
+    """Exclusively create a unique sibling staging file for *target*.
+
+    Like ``tempfile.mkstemp`` but with a caller-chosen creation mode
+    (``mkstemp`` hardwires ``0o600``), so the kernel derives the final
+    bits from the process umask at creation time.
+
+    Args:
+        target: The destination the staging file will be renamed onto.
+        create_mode: Mode bits passed to ``os.open`` (umask applies).
+
+    Returns:
+        ``(fd, path)`` of the newly created staging file.
+
+    Raises:
+        FileExistsError: If no unique name was found (never in
+            practice: 128-bit random suffixes).
+    """
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
+    for _ in range(10):
+        tmp = str(target.parent / f".{target.name}-{uuid.uuid4().hex}")
+        try:
+            return os.open(tmp, flags, create_mode), tmp
+        except FileExistsError:  # pragma: no cover — 128-bit collision
+            continue
+    raise FileExistsError(  # pragma: no cover — unreachable in practice
+        f"could not create a staging file for {target}"
+    )
 
 
 def _try_chmod(path: str, mode: int) -> None:

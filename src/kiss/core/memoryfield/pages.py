@@ -23,6 +23,8 @@ from typing import Any
 
 import yaml
 
+from kiss.core.utils import atomic_write_text
+
 # Page filenames: ASCII lowercase letters, digits and hyphens, starting and
 # ending with a letter or digit (memoryfield spec, "Pages").
 PAGE_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
@@ -300,8 +302,14 @@ class MemoryDir:
         frontmatter.setdefault("created", now_iso())
         frontmatter["updated"] = now_iso()
         raw = render_page(frontmatter, body)
-        self.root.mkdir(parents=True, exist_ok=True)
-        path.write_text(raw, encoding="utf-8")
+        # Atomic publish (stage + os.replace): the memory directory is shared
+        # by parallel sub-agents and other daemon processes, whose
+        # memory_read / memory_pull / index sync would otherwise observe the
+        # empty or half-written file a plain truncate-then-write exposes.
+        # create_mode=0o666: pages are deliberately plain documents — a new
+        # page gets Path.write_text's umask-derived bits (helper default
+        # 0o600 is for secret-bearing files); an existing page keeps its mode.
+        atomic_write_text(path, raw, create_mode=0o666)
         return Page(name=path.stem, frontmatter=frontmatter, body=body, raw=raw)
 
     def delete(self, name: str) -> None:

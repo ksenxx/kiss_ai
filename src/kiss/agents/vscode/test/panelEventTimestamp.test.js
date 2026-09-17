@@ -88,7 +88,7 @@ function makeWebview(opts) {
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
-fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
+    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=panelts-main.js',
   );
 
@@ -789,8 +789,10 @@ async function run() {
       'the badge must be IN-FLOW in the bar, not absolute in the title row',
     );
     assert.ok(
-      /\.tc\.collapsed\s*>\s*:not\(\.tc-h,\s*\.panel-copy-btn\)/.test(css),
-      'collapsed .tc panels hide everything but header and copy button',
+      /\.tc\.collapsed\s*>\s*:not\(\.tc-h,\s*\.panel-copy-btn(,\s*\.panel-stop-btn)?\)/.test(
+        css,
+      ),
+      'collapsed .tc panels hide everything but header, copy and stop buttons',
     );
     assert.ok(
       /\.llm-panel\.collapsed\s*>\s*:not\(\.llm-panel-hdr,\s*\.panel-copy-btn\)/.test(

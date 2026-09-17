@@ -6,8 +6,7 @@
 
 The server-only json_printer/server.py coverage moved to
 ``kiss.tests.server.test_100pct_branch_coverage``; this file keeps the
-``_channel_cli`` coverage (and the persistence/printer shells whose
-tests moved in earlier reorganizations).
+``_channel_cli`` coverage.
 
 Targets remaining uncovered branches in:
   _channel_cli.py (channel-agent CLI helpers)
@@ -17,40 +16,12 @@ No mocks, patches, fakes, or test doubles.
 
 from __future__ import annotations
 
-import shutil
 import tempfile
 
 from kiss.agents.third_party_agents._channel_cli import (
     _build_arg_parser,
     _build_run_kwargs,
 )
-from kiss.server.json_printer import JsonPrinter
-from kiss.tests.agents.sorcar.test_100pct_branch_coverage import (  # noqa: F401
-    _redirect_db,
-    _restore_db,
-    _SavedState,
-)
-
-
-class TestPersistenceUncoveredBranches:
-    """Cover remaining persistence.py branches."""
-
-    def setup_method(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-        self._saved = _redirect_db(self._tmpdir)
-
-    def teardown_method(self) -> None:
-        _restore_db(self._saved)
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-
-class TestBrowserPrinterPrintBranches:
-    """Cover all print() type branches in json_printer.py."""
-
-    def _make_printer(self) -> JsonPrinter:
-        p = JsonPrinter()
-        p.start_recording()
-        return p
 
 
 class TestCliHelpers:

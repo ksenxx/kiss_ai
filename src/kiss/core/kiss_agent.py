@@ -11,7 +11,7 @@ import inspect
 import logging
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from kiss.core.base import Base
 from kiss.core.kiss_error import (
@@ -22,6 +22,14 @@ from kiss.core.kiss_error import (
 )
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
+from kiss.core.tool_interrupt import (
+    USER_INTERRUPTED_MESSAGE,
+    ToolCallInterrupted,
+    end_tool_call,
+    new_tool_call,
+    register_tool_call,
+    unregister_tool_call,
+)
 from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
@@ -61,6 +69,30 @@ _CONTEXT_OVERFLOW_PHRASES = (
 )
 
 
+class _UsageTotals(NamedTuple):
+    """One immutable ``(budget_used, total_tokens_used, step_count)`` triple.
+
+    A :class:`KISSAgent` publishes its whole usage state as ONE of
+    these records with a single ``STORE_ATTR`` — atomic under both
+    thread interleaving and asynchronously injected exceptions
+    (``PyThreadState_SetAsyncExc``, the server's stop watchdog).  The
+    legacy scalar counters are properties derived from the current
+    record, so no observer — a concurrent live-usage monitor, the
+    parent :class:`RelentlessAgent`'s session bank in its
+    ``except BaseException`` recovery path — can ever see the tokens
+    of a model response without its cost (or vice versa): a stop that
+    lands anywhere inside a response-accounting update either leaves
+    the previous complete triple or the next complete triple.
+    """
+
+    budget_used: float
+    total_tokens_used: int
+    step_count: int
+
+
+_ZERO_USAGE = _UsageTotals(0.0, 0, 0)
+
+
 class _EmptyModelResponseError(KISSError):
     """Raised when a model repeatedly returns no text and no tool calls.
 
@@ -98,6 +130,64 @@ if TYPE_CHECKING:  # pragma: no cover
 
 class KISSAgent(Base):
     """A KISS agent using native function calling."""
+
+    # Class-level default so the derived counter properties below work
+    # from the first ``Base.__init__`` store onwards (each setter then
+    # publishes an instance-level replacement snapshot in one
+    # ``STORE_ATTR``).
+    _usage_totals: _UsageTotals = _ZERO_USAGE
+
+    @property
+    def budget_used(self) -> float:
+        """Cumulative USD spend, derived from the atomic usage snapshot."""
+        return self._usage_totals.budget_used
+
+    @budget_used.setter
+    def budget_used(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self, value: float,
+    ) -> None:
+        # Publishing a whole replacement record keeps the triple
+        # coherent for concurrent readers; single-field writers are
+        # same-thread only (this agent's run loop, pre-run zeroing).
+        self._usage_totals = self._usage_totals._replace(budget_used=float(value))
+
+    @property
+    def total_tokens_used(self) -> int:
+        """Cumulative tokens, derived from the atomic usage snapshot."""
+        return self._usage_totals.total_tokens_used
+
+    @total_tokens_used.setter
+    def total_tokens_used(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self, value: int,
+    ) -> None:
+        self._usage_totals = self._usage_totals._replace(
+            total_tokens_used=int(value)
+        )
+
+    @property
+    def step_count(self) -> int:
+        """Completed agentic steps, derived from the atomic usage snapshot."""
+        return self._usage_totals.step_count
+
+    @step_count.setter
+    def step_count(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self, value: int,
+    ) -> None:
+        self._usage_totals = self._usage_totals._replace(step_count=int(value))
+
+    def usage_snapshot(self) -> tuple[float, int, int]:
+        """Return one coherent ``(budget_used, total_tokens_used, step_count)``.
+
+        Reads the immutable snapshot attribute ONCE, so the triple can
+        never mix dimensions from two different accounting states —
+        unlike three separate property reads, between which a
+        concurrent response-accounting publish could land.  Concurrent
+        readers (``sorcar_agent._executor_usage`` polled by the live
+        usage monitor and by abandoned-child reclaims, the parent's
+        session bank) rely on this.
+        """
+        totals = self._usage_totals
+        return (totals.budget_used, totals.total_tokens_used, totals.step_count)
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -139,10 +229,10 @@ class KISSAgent(Base):
         self._cached_tools_schema: list[dict[str, Any]] | None = None
         self.messages: list[dict[str, Any]] = []
         self.step_count = 0
-        self.total_tokens_used = 0
+        self.total_tokens_used = 0  # pyright: ignore[reportIncompatibleVariableOverride]
         self.context_tokens_used = 0
         self._llm_hook_conversation_index = 0
-        self.budget_used = 0.0
+        self.budget_used = 0.0  # pyright: ignore[reportIncompatibleVariableOverride]
         # ``run_start_timestamp`` is the real wall clock: the saved record
         # pairs it with ``run_end_timestamp``.  The trajectory FILENAME is
         # keyed by (name, id, _trajectory_stamp) in whole seconds; two runs
@@ -555,7 +645,7 @@ class KISSAgent(Base):
             # one shot rather than resume turn-by-turn tool prompting.
             if self.model.runs_task_to_completion:
                 return self._run_task_to_completion()
-            self.step_count += 1
+            self.step_count += 1  # pyright: ignore[reportIncompatibleVariableOverride]
             self._check_limits()
             try:
                 result = self._execute_step()
@@ -822,9 +912,18 @@ class KISSAgent(Base):
         """
         function_name = function_call["name"]
         function_args = _call_args(function_call)
+        # The call's token exists before anything can interrupt it, so
+        # the ``finally`` below always has it; ``finish`` is never
+        # interruptible (its result IS the task's result).
+        token = new_tool_call(function_name)
 
         if self.printer:
-            self.printer.print(function_name, type="tool_call", tool_input=function_args)
+            self.printer.print(
+                function_name,
+                type="tool_call",
+                tool_input=function_args,
+                call_id=token.call_id,
+            )
 
         if blocked is not None:
             if self.printer:
@@ -838,21 +937,49 @@ class KISSAgent(Base):
             return function_name, blocked
 
         is_error = False
+        interrupted = False
+        # The call is registered — inside the try — so the UI's
+        # per-panel Stop button can interrupt it (kiss.core.tool_interrupt):
+        # the interrupt lands as ToolCallInterrupted, raised by the tool
+        # itself at a safe point, injected into it, or — when the tool
+        # returned first — drained by end_tool_call, so it can never
+        # escape into the agent loop.
         try:
-            if function_name not in self.function_map:  # pragma: no cover
-                raise KISSError(f"Function {function_name} is not a registered tool")
-            function_response = str(self.function_map[function_name](**function_args))
-        except BudgetExceededError:
-            raise
-        except (Exception, SystemExit) as e:
-            logger.debug("Exception caught", exc_info=True)
-            fn = self.function_map.get(function_name)
-            sig = inspect.signature(fn) if fn else None
-            sig_str = f"\nExpected signature: {function_name}{sig}" if sig else ""
-            function_response = (
-                f"Failed to call {function_name} with {function_args}: {e}{sig_str}\n"
-            )
-            is_error = True
+            if function_name != "finish":
+                register_tool_call(token)
+            try:
+                if function_name not in self.function_map:  # pragma: no cover
+                    raise KISSError(f"Function {function_name} is not a registered tool")
+                function_response = str(self.function_map[function_name](**function_args))
+            except BudgetExceededError:
+                raise
+            except (Exception, SystemExit) as e:
+                logger.debug("Exception caught", exc_info=True)
+                fn = self.function_map.get(function_name)
+                sig = inspect.signature(fn) if fn else None
+                sig_str = f"\nExpected signature: {function_name}{sig}" if sig else ""
+                function_response = (
+                    f"Failed to call {function_name} with {function_args}: {e}{sig_str}\n"
+                )
+                is_error = True
+            end_tool_call(token)
+        except ToolCallInterrupted as exc:
+            if isinstance(exc.__context__, KeyboardInterrupt | BudgetExceededError):
+                # The interrupt landed while a task Stop or a budget
+                # overrun was already unwinding through the tool: that
+                # outcome is the one that matters, and it must not be
+                # downgraded to a continued task.
+                raise exc.__context__ from None
+            logger.info("Tool call %s interrupted by the user", function_name)
+            function_response = USER_INTERRUPTED_MESSAGE
+            is_error = False
+            interrupted = True
+        finally:
+            # The store comes first, before any call that could give a
+            # pending injection a landing spot: from here on the
+            # watchdog never injects into the unwinding below.
+            token.closing = True
+            unregister_tool_call(token)
 
         if self.printer:
             self.printer.print(
@@ -861,6 +988,7 @@ class KISSAgent(Base):
                 tool_name=function_name,
                 tool_input=function_args,
                 is_error=is_error,
+                interrupted=interrupted,
             )
 
         return function_name, function_response
@@ -913,7 +1041,17 @@ class KISSAgent(Base):
             self.function_map[tool.__name__] = tool
 
     def _update_tokens_and_budget_from_response(self, response: Any) -> None:
-        """Updates token counter and budget from API response."""
+        """Updates token counter and budget from API response.
+
+        The tokens and the cost of one response are committed together
+        as ONE immutable :class:`_UsageTotals` snapshot stored with a
+        single ``STORE_ATTR``.  Separate ``total_tokens_used`` /
+        ``budget_used`` stores allowed an asynchronously injected stop
+        (``PyThreadState_SetAsyncExc``) to land between them, and the
+        parent's ``except BaseException`` recovery bank then recorded a
+        permanently torn source triple — tokens without their cost
+        (round-4 review, finding 1).
+        """
         try:
             usage = self.model.extract_input_output_token_counts_from_response(response)
             audio_input = 0
@@ -942,7 +1080,6 @@ class KISSAgent(Base):
                 + audio_input
                 + audio_output
             )
-            self.total_tokens_used += call_tokens
             if call_tokens > 0:
                 self.context_tokens_used = call_tokens
             cost = calculate_cost(
@@ -955,7 +1092,17 @@ class KISSAgent(Base):
                 num_audio_input_tokens=audio_input,
                 num_audio_output_tokens=audio_output,
             )
-            self.budget_used += cost
+            # ONE store publishes tokens and cost together (see the
+            # docstring): a stop injected anywhere in this method now
+            # leaves either the previous complete triple (the response
+            # is simply unaccounted, exactly as if the stop had landed
+            # before the call) or the next complete triple.
+            totals = self._usage_totals
+            self._usage_totals = _UsageTotals(
+                totals.budget_used + cost,
+                totals.total_tokens_used + call_tokens,
+                totals.step_count,
+            )
         except KISSError:
             raise
         except Exception as e:  # pragma: no cover

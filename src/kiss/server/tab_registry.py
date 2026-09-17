@@ -353,6 +353,93 @@ class TabRegistry:
         with self._lock:
             return self._generations.get(_clean_str(tab_id), 0)
 
+    def stamp_unregistered(self, tab_id: str) -> int:
+        """Stamp a publication token for a tab that has NO registry row.
+
+        The ownership mechanism for tabs the registry cannot admit:
+        ``_replay_session`` calls this BEFORE ``update_tab(...,
+        create=True)``.  When the registry is at capacity the creation
+        fails (publication ``0``, no row), so the row-based ownership
+        checks cannot qualify the replay's backend commit against a
+        concurrent close — this rowless token can: the commit proceeds
+        only while :meth:`generation` still equals it, and a token-0
+        close's cleanup tail invalidates it via
+        :meth:`retire_unregistered` (gpt-5.6-sol round-2 review,
+        finding 1).  When the tab HAS a row, nothing is stamped
+        (``0``): the row's own publication token is the ownership
+        mechanism, and overstamping it would invalidate its owner's
+        pending ``close_tab_if_generation`` undo.  A follow-up
+        ``update_tab`` that does create the row simply re-stamps the
+        tab with a newer token, superseding this one.
+
+        Args:
+            tab_id: The shared tab identifier.
+
+        Returns:
+            The fresh rowless publication token (positive), or ``0``
+            when the tab already has a row (or the id is blank).
+        """
+        tab_id = _clean_str(tab_id)
+        if not tab_id:
+            return 0
+        with self._lock:
+            if self._find_locked(tab_id) is not None:
+                return 0
+            return self._bump_generation_locked(tab_id)
+
+    def retire_unregistered(self, tab_id: str) -> None:
+        """Invalidate a rowless publication token on tab close.
+
+        The close-side half of :meth:`stamp_unregistered`: a close
+        that found no registry row for *tab_id* drops the tab's
+        rowless token (if any) so a capacity replay's pending backend
+        commit — qualified by ``generation(tab_id) ==
+        stamped_token`` — stands down.  A no-op when the tab has a
+        row: that generation belongs to the row's publisher, and the
+        close of a row goes through :meth:`close_tab`, which pops the
+        token itself.
+
+        Args:
+            tab_id: The shared tab identifier being closed.
+        """
+        tab_id = _clean_str(tab_id)
+        if not tab_id:
+            return
+        with self._lock:
+            if self._find_locked(tab_id) is None:
+                self._generations.pop(tab_id, None)
+
+    def retire_unregistered_and_observe(self, tab_id: str) -> int:
+        """Retire a rowless token AND read the clock, atomically.
+
+        The linearization step of the DEFERRED close disposal
+        (``VSCodeServer._dispose_if_closed``): its claim must both
+        retire any pending capacity-replay stamp (exactly as the
+        immediate busy close does, so a replay stamped before the
+        claim stands down at its commit) and draw a clock observation
+        that orders the claim's out-of-lock teardown against later
+        publications (a replay stamped after the claim owns the tab —
+        the teardown stands down via
+        ``VSCodeServer._tab_reopened_since``).  Doing both in ONE
+        locked section closes the seam a two-call sequence would
+        leave: a stamp landing between a separate retire and clock
+        read would be neither retired nor newer than the observation,
+        and the stale teardown could erase its committed reopen
+        (gpt-5.6-sol round-4 review, finding 1).
+
+        Args:
+            tab_id: The shared tab identifier being disposed.
+
+        Returns:
+            The clock observation: every later publication of any tab
+            stamps a strictly larger generation.
+        """
+        tab_id = _clean_str(tab_id)
+        with self._lock:
+            if tab_id and self._find_locked(tab_id) is None:
+                self._generations.pop(tab_id, None)
+            return self._generation_counter
+
     def open_tab(
         self, tab_id: str, title: str = "", work_dir: str = "",
     ) -> OpenTabOutcome:
@@ -429,6 +516,76 @@ class TabRegistry:
         with self._lock:
             return self._generations.get(_clean_str(tab_id), 0) > token
 
+    def _reopened_since_locked(self, tab_id: str, token: int) -> bool:
+        """Locked body of :meth:`reopened_since` (*tab_id* pre-cleaned)."""
+        return (
+            self._generations.get(tab_id, 0) > token
+            or self._find_locked(tab_id) is not None
+        )
+
+    def reopened_since(self, tab_id: str, token: int) -> bool:
+        """Return whether *tab_id* was legitimately reopened after *token*.
+
+        One atomic registry observation combining
+        :meth:`republished_since` (a publication stamped a newer
+        generation) with row presence (a token-0 duplicate close's
+        observation gap — see ``VSCodeServer._tab_reopened_since``).
+        Two separate calls would leave a seam: a rowless publication
+        landing between them is neither newer than the split
+        generation read nor visible as a row, so a stale cleanup could
+        treat a freshly reopened tab as its own (gpt-5.6-sol round-6
+        review, finding 1).
+
+        Args:
+            tab_id: The shared tab identifier.
+            token: A removal token or clock observation.
+
+        Returns:
+            ``True`` when a later publication owns the tab.
+        """
+        tab_id = _clean_str(tab_id)
+        with self._lock:
+            return self._reopened_since_locked(tab_id, token)
+
+    def finalize_removal(self, tab_id: str, token: int) -> bool:
+        """Atomically confirm a teardown's ownership and retire the stamp.
+
+        The linearization point of a close/disposal cleanup tail
+        against rowless capacity-replay publications
+        (:meth:`stamp_unregistered`): in ONE registry-locked section it
+        re-verifies that nobody reopened *tab_id* after *token* (no
+        newer publication, no registry row) and, only then, retires
+        the tab's rowless generation entry.  Because every stamp takes
+        this same lock, a stamp lands strictly before this call (the
+        generation is then newer than *token* — the teardown stands
+        down and the replay's pending commit wins) or strictly after
+        it (the fresh stamp survives untouched — the replay commits
+        into a fully torn-down tab, the serial "closed, then reopened"
+        order).  A check-then-retire split across two lock
+        acquisitions left a seam where a replay stamped between them
+        was erased by a stale teardown (gpt-5.6-sol round-6 review,
+        finding 1).
+
+        Args:
+            tab_id: The shared tab identifier being torn down.
+            token: The teardown's removal token or claim observation.
+
+        Returns:
+            ``True`` when the teardown still owns the tab (its
+            destructive steps may proceed); ``False`` when a later
+            publication reopened it (every cleanup keyed to *token*
+            must stand down).
+        """
+        tab_id = _clean_str(tab_id)
+        with self._lock:
+            if self._reopened_since_locked(tab_id, token):
+                return False
+            # No row exists (just checked), so this only drops a
+            # rowless stamp at or below *token* — never a row owner's
+            # publication token.
+            self._generations.pop(tab_id, None)
+            return True
+
     def close_tab(self, tab_id: str) -> int:
         """Remove a tab.
 
@@ -451,6 +608,30 @@ class TabRegistry:
             token = self._removal_token_locked()
             self._save_locked()
             return token
+
+    def clock(self) -> int:
+        """Return the publication clock's current reading.
+
+        A cleanup tail whose removal found the tab ABSENT (a token-0
+        duplicate close) has no removal token to order itself against
+        later publications; it reads the clock instead — any
+        publication of any tab after this call stamps a strictly
+        larger generation, so ``republished_since(tab_id, clock())``
+        is ``True`` exactly when someone republished *tab_id* after
+        the observation.  The reading is taken in its own locked
+        section, so a publication landing between the caller's
+        ``close_tab`` and this read can stamp a generation ``<=`` the
+        reading; the cleanup guards close that gap by also standing
+        down when the tab is PRESENT in the registry (presence after
+        an absent-close is always a later republication) — see
+        ``VSCodeServer._tab_reopened_since``.
+
+        Returns:
+            The current generation counter (``0`` on a registry that
+            never published).
+        """
+        with self._lock:
+            return self._generation_counter
 
     def close_tab_if_generation(self, tab_id: str, generation: int) -> bool:
         """Remove a tab only if nobody republished it since *generation*.

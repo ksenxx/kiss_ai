@@ -19,7 +19,6 @@ Runs a real local HTTP server standing in for the Telegram Bot API
 from __future__ import annotations
 
 import json
-import socket
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler
@@ -34,13 +33,6 @@ from kiss.agents.third_party_agents.telegram_agent import (
 )
 
 _TOKEN = "123456:TEST-telegram-token"
-
-
-def _free_closed_port() -> int:
-    """Return an OS-assigned TCP port that is closed once this returns."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def _update(update_id: int, chat_id: int, message_id: int, text: str) -> dict[str, Any]:
@@ -185,12 +177,14 @@ def test_server_error_returns_empty_and_cursor_without_raising(
     assert new_cursor == "42"
 
 
-def test_unreachable_server_returns_empty_and_cursor_without_raising() -> None:
-    """An unreachable API host (closed port) yields ([], oldest) and never raises."""
+def test_unreachable_server_returns_empty_and_cursor_without_raising(
+    refusing_port: int,
+) -> None:
+    """An unreachable API host (refused port) yields ([], oldest) and never raises."""
     _config.save({"bot_token": _TOKEN})
     try:
         backend = TelegramChannelBackend()
-        backend._api_base = f"http://127.0.0.1:{_free_closed_port()}"
+        backend._api_base = f"http://127.0.0.1:{refusing_port}"
         messages, new_cursor = backend.poll_messages("42", "7", limit=10)
         assert messages == []
         assert new_cursor == "7"

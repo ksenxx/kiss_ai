@@ -35,7 +35,6 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, cast
 
-import pytest
 from google.oauth2.credentials import Credentials
 
 from kiss.agents.third_party_agents._backend_utils import (
@@ -69,13 +68,6 @@ _SYNTHETIC_INFO = {
 }
 
 
-@pytest.fixture()
-def kiss_home(monkeypatch, tmp_path: Path) -> Path:
-    """Point KISS_HOME at a fresh temp dir so every test starts pristine."""
-    monkeypatch.setenv("KISS_HOME", str(tmp_path))
-    return tmp_path
-
-
 def _synthetic_creds() -> Credentials:
     """Build valid (non-expired) synthetic Google OAuth2 credentials."""
     return cast(
@@ -91,13 +83,13 @@ def _write_token(service: str, text: str) -> Path:
     return path
 
 
-def test_service_dir_and_token_path_follow_kiss_home(kiss_home) -> None:
+def test_service_dir_and_token_path_follow_kiss_home(isolated_kiss_home) -> None:
     """google_service_dir and token_path live under $KISS_HOME."""
-    assert google_service_dir("gsvc") == kiss_home / "third_party_agents" / "gsvc"
-    assert token_path("gsvc") == kiss_home / "third_party_agents" / "gsvc" / "token.json"
+    assert google_service_dir("gsvc") == isolated_kiss_home / "third_party_agents" / "gsvc"
+    assert token_path("gsvc") == isolated_kiss_home / "third_party_agents" / "gsvc" / "token.json"
 
 
-def test_credentials_path_fallback_order(kiss_home) -> None:
+def test_credentials_path_fallback_order(isolated_kiss_home) -> None:
     """credentials_path prefers service dir > google dir > gmail dir > own path."""
     own = google_service_dir(_SERVICE) / "credentials.json"
     shared = google_service_dir("google") / "credentials.json"
@@ -120,12 +112,12 @@ def test_credentials_path_fallback_order(kiss_home) -> None:
     assert credentials_path(_SERVICE) == own
 
 
-def test_load_credentials_missing_file(kiss_home) -> None:
+def test_load_credentials_missing_file(isolated_kiss_home) -> None:
     """load_google_credentials returns None when no token.json exists."""
     assert load_google_credentials(_SERVICE, _SCOPES) is None
 
 
-def test_load_credentials_corrupt_file(kiss_home) -> None:
+def test_load_credentials_corrupt_file(isolated_kiss_home) -> None:
     """load_google_credentials returns None for unparseable token files."""
     _write_token(_SERVICE, "this is not json {")
     assert load_google_credentials(_SERVICE, _SCOPES) is None
@@ -133,7 +125,7 @@ def test_load_credentials_corrupt_file(kiss_home) -> None:
     assert load_google_credentials(_SERVICE, _SCOPES) is None
 
 
-def test_load_credentials_wrong_shape_json_returns_none(kiss_home) -> None:
+def test_load_credentials_wrong_shape_json_returns_none(isolated_kiss_home) -> None:
     """Valid JSON of the wrong shape ([], null, bare string) yields None, not a crash.
 
     Credentials.from_authorized_user_file raises AttributeError on
@@ -144,7 +136,7 @@ def test_load_credentials_wrong_shape_json_returns_none(kiss_home) -> None:
         assert load_google_credentials(_SERVICE, _SCOPES) is None
 
 
-def test_tools_survives_wrong_shape_token_files(kiss_home) -> None:
+def test_tools_survives_wrong_shape_token_files(isolated_kiss_home) -> None:
     """Each Google agent module's tools() works with a wrong-shape token.json."""
     import kiss.agents.third_party_agents.google_calendar_agent as gcal_mod
     import kiss.agents.third_party_agents.google_docs_agent as gdocs_mod
@@ -163,7 +155,7 @@ def test_tools_survives_wrong_shape_token_files(kiss_home) -> None:
             assert all(callable(t) for t in tools)
 
 
-def test_authenticate_with_malformed_credentials_json_returns_ok_false(kiss_home) -> None:
+def test_authenticate_with_malformed_credentials_json_returns_ok_false(isolated_kiss_home) -> None:
     """A malformed credentials.json makes authenticate return ok:false — no raise."""
     agent = GoogleCalendarAgent()
     creds_file = google_service_dir(_SERVICE) / "credentials.json"
@@ -177,7 +169,7 @@ def test_authenticate_with_malformed_credentials_json_returns_ok_false(kiss_home
         assert "OAuth flow failed" in result["error"]
 
 
-def test_load_credentials_valid_synthetic_token(kiss_home) -> None:
+def test_load_credentials_valid_synthetic_token(isolated_kiss_home) -> None:
     """A synthetic non-expired token.json loads as valid credentials."""
     _write_token(_SERVICE, json.dumps(_SYNTHETIC_INFO))
     creds = load_google_credentials(_SERVICE, _SCOPES)
@@ -186,7 +178,7 @@ def test_load_credentials_valid_synthetic_token(kiss_home) -> None:
     assert creds.token == "synthetic-access-token"
 
 
-def test_save_credentials_writes_0600(kiss_home) -> None:
+def test_save_credentials_writes_0600(isolated_kiss_home) -> None:
     """save_google_credentials persists the token with owner-only permissions."""
     save_google_credentials(_SERVICE, _synthetic_creds())
     path = token_path(_SERVICE)
@@ -198,7 +190,7 @@ def test_save_credentials_writes_0600(kiss_home) -> None:
     assert reloaded.token == "synthetic-access-token"
 
 
-def test_clear_credentials_removes_and_tolerates_absence(kiss_home) -> None:
+def test_clear_credentials_removes_and_tolerates_absence(isolated_kiss_home) -> None:
     """clear_google_credentials deletes the token and is a no-op when absent."""
     _write_token(_SERVICE, json.dumps(_SYNTHETIC_INFO))
     clear_google_credentials(_SERVICE)
@@ -207,7 +199,7 @@ def test_clear_credentials_removes_and_tolerates_absence(kiss_home) -> None:
     assert not token_path(_SERVICE).exists()
 
 
-def test_fresh_access_token(kiss_home) -> None:
+def test_fresh_access_token(isolated_kiss_home) -> None:
     """fresh_access_token returns '' for None and the token for valid creds."""
     assert fresh_access_token(None) == ""
     assert fresh_access_token(_synthetic_creds()) == "synthetic-access-token"
@@ -244,7 +236,7 @@ def _expired_creds(token_uri: str) -> Credentials:
     )
 
 
-def test_fresh_access_token_refreshes_expired_creds(kiss_home) -> None:
+def test_fresh_access_token_refreshes_expired_creds(isolated_kiss_home) -> None:
     """Expired creds are refreshed against a real local token endpoint."""
     server = ThreadedHTTPServer(("127.0.0.1", 0), _TokenEndpointHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -257,18 +249,18 @@ def test_fresh_access_token_refreshes_expired_creds(kiss_home) -> None:
         stop_http_server(server, thread)
 
 
-def test_fresh_access_token_returns_empty_when_refresh_fails(kiss_home) -> None:
+def test_fresh_access_token_returns_empty_when_refresh_fails(isolated_kiss_home) -> None:
     """A refresh against an unreachable token endpoint yields '' — no exception."""
     creds = _expired_creds("http://127.0.0.1:9/token")  # discard port; nothing listens
     assert fresh_access_token(creds) == ""
 
 
-def test_run_google_oauth_flow_without_credentials_json(kiss_home) -> None:
+def test_run_google_oauth_flow_without_credentials_json(isolated_kiss_home) -> None:
     """run_google_oauth_flow returns None when no credentials.json exists."""
     assert run_google_oauth_flow(_SERVICE, _SCOPES) is None
 
 
-def test_make_google_auth_tools_names_and_docstrings(kiss_home) -> None:
+def test_make_google_auth_tools_names_and_docstrings(isolated_kiss_home) -> None:
     """make_google_auth_tools builds the 5 named tools with real docstrings."""
     agent = GoogleCalendarAgent()
 
@@ -292,7 +284,7 @@ def test_make_google_auth_tools_names_and_docstrings(kiss_home) -> None:
         assert "Google Calendar" in tool.__doc__
 
 
-def test_auth_tools_end_to_end_flow(kiss_home) -> None:
+def test_auth_tools_end_to_end_flow(isolated_kiss_home) -> None:
     """The generated auth tools work end-to-end on a real agent."""
     agent = GoogleCalendarAgent()
     tools = {t.__name__: t for t in agent._get_auth_tools()}
