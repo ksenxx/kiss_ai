@@ -1489,22 +1489,12 @@
     // in the bar and may never come on screen here.
     if (!tab || isTabHidden(tab)) return;
     saveCurrentTab();
-    if (tab.isContentTab) {
-      activeTabId = tabId;
-      showContentTab(tab);
-      renderTabBar();
-      return;
-    }
-    restoreTab(tab);
+    // activateAdjacentTab owns the activation tail (restore, running
+    // state, timers, chevron, focus); only the bar render and the
+    // selection persistence are this caller's extras.
+    activateAdjacentTab(tab);
     renderTabBar();
-    persistTabState();
-    setRunningState(tab.isRunning);
-    if (!tab.isRunning) {
-      stopTimer();
-      removeSpinner();
-    }
-    applyChevronState(currentTaskName);
-    focusInputWithRetry();
+    if (!tab.isContentTab) persistTabState();
   }
 
   // Which tab takes over when the tab the user was on is closed.
@@ -1710,6 +1700,10 @@
       } catch (_e) {}
       tab.contentBlobUrl = '';
     }
+    // The sticky save-conflict toast belongs to the editor being torn down;
+    // orphaned, its "Reload from disk" action would open a surprise new tab
+    // for a closed editor's path.
+    removeNotification('file-save-conflict-' + tab.id, undefined, false);
   }
 
   function closeContentTab(tabId) {
@@ -2172,8 +2166,20 @@
           error + '. Overwrite it with your edits, or reload it and lose them?',
         severity: 'warning',
         actions: [
-          {label: 'Overwrite', onClick: () => saveContentTab(tab, true)},
-          {label: 'Reload from disk', onClick: () => reloadContentTab(tab)},
+          // The closures outlive the toast's tab if the toast is somehow
+          // still up after the tab closed; acting on a dead tab must no-op.
+          {
+            label: 'Overwrite',
+            onClick: () => {
+              if (getTab(tab.id)) saveContentTab(tab, true);
+            },
+          },
+          {
+            label: 'Reload from disk',
+            onClick: () => {
+              if (getTab(tab.id)) reloadContentTab(tab);
+            },
+          },
         ],
       });
       return;
@@ -2602,9 +2608,18 @@
       }
       // tableak-coverage:end
       // A failed reload keeps the tab's edits, so the next click on
-      // the file's link must protect them again.
+      // the file's link must protect them again. Match by workspace scope
+      // like the success path below: a failed open of the same path issued
+      // by ANOTHER workspace's conversation must not cancel this tab's own
+      // in-flight reload (its success reply would then only reveal a line
+      // instead of replacing the text).
+      const errScopeKey = normalizeHistoryWorkDir(ownerScope);
       tabs.forEach(t => {
-        if (t.isContentTab && t.contentPath === ev.path) {
+        if (
+          t.isContentTab &&
+          t.contentPath === ev.path &&
+          normalizeHistoryWorkDir(tabScopeWorkDir(t)) === errScopeKey
+        ) {
           t.contentReloadRequested = false;
         }
       });
@@ -4092,7 +4107,17 @@
   /** Re-list every folder that has been listed so far. */
   function reloadExplorerDirs() {
     explorerDirs.forEach((node, path) => {
-      if (!node.loaded && !node.loading) return;
+      // A listing for this folder is already in flight.  Re-sending the
+      // identical request now would double the daemon work and the DOM
+      // refill, but the in-flight reply may have read the disk BEFORE
+      // whatever change forced this refresh (e.g. a task wrote a file).
+      // Mark the node dirty instead: handleDirListing issues exactly
+      // one follow-up request when the pending reply lands.
+      if (node.loading) {
+        node.refreshAfterLoad = true;
+        return;
+      }
+      if (!node.loaded) return;
       node.loading = true;
       api.listDir({
         path: path,
@@ -4233,6 +4258,19 @@
     if (!node) return;
     node.loading = false;
     node.loaded = true;
+    if (node.refreshAfterLoad) {
+      // A forced refresh arrived while this listing was in flight, so
+      // the entries below may already be stale: issue exactly one
+      // coalesced follow-up request now that the slot is free.
+      node.refreshAfterLoad = false;
+      node.loading = true;
+      api.listDir({
+        path: token.slice(sep + 1),
+        workDir: explorerRoot,
+        tabId: activeTabId,
+        token: token,
+      });
+    }
     node.row.classList.remove('loading');
     if (typeof ev.path === 'string' && ev.path) node.realPath = ev.path;
     const kids = node.kids;
@@ -4434,9 +4472,12 @@
     if (changed || !wd) {
       // Another workspace (or none): drop the old data and show the
       // loading / no-workspace state.  A same-workspace refresh keeps
-      // the current rows up until the fresh replies land.
+      // the current rows up until the fresh replies land.  The expanded
+      // commits belong to the old repository: a sha expanded there must
+      // not auto-expand in the next one.
       scmStatus = null;
       scmLog = null;
+      scmExpanded.clear();
       renderScmChanges();
       renderScmGraph();
     }
@@ -5058,17 +5099,27 @@
     const files = wrap ? wrap.querySelector('.scm-commit-files') : null;
     if (!files) return;
     const open = !scmExpanded.has(sha);
-    if (open) scmExpanded.add(sha);
-    else scmExpanded.delete(sha);
-    row.classList.toggle('expanded', open);
-    row.setAttribute('aria-expanded', open ? 'true' : 'false');
-    files.hidden = !open;
     if (open) {
+      // The DOM row can outlive the log it was rendered from (a fresh
+      // scmLog is stored before its paired gitStatus arrives and the
+      // render is deferred until the pair completes).  Expanding a
+      // commit that fell out of the fresh log would pin an empty,
+      // never-filled files container open — leave the row collapsed.
       const commit = scmGraphRows().find(c => c.sha === sha);
+      if (!commit) return;
+      scmExpanded.add(sha);
+      row.classList.toggle('expanded', true);
+      row.setAttribute('aria-expanded', 'true');
+      files.hidden = false;
       const repo =
         (scmLog && scmLog.repo) || (scmStatus && scmStatus.repo) || '';
-      if (commit) fillScmCommitFiles(files, commit, repo);
+      fillScmCommitFiles(files, commit, repo);
+      return;
     }
+    scmExpanded.delete(sha);
+    row.classList.toggle('expanded', false);
+    row.setAttribute('aria-expanded', 'false');
+    files.hidden = true;
   }
 
   function onScmActivate(target) {
@@ -5319,7 +5370,15 @@
     // The tree changed on disk: re-list every listed folder (the rows
     // of entries still present survive, so expansion state is kept)
     // and let the Source Control view know.
-    if (request.action === 'move' && explorerClipboard) {
+    // Only the Cut this move consumed is spent: a NEWER Cut made while the
+    // move reply was in flight must survive, or the user's pending Paste
+    // silently loses its entry.
+    if (
+      request.action === 'move' &&
+      explorerClipboard &&
+      explorerClipboard.cut &&
+      explorerClipboard.path === request.path
+    ) {
       explorerClipboard = null;
     }
     refreshExplorer(true);
@@ -6793,6 +6852,10 @@
 
   function resetAdjacentState() {
     adjacentLoading = false;
+    // A loader stranded by a tab switch (the reply was addressed to the
+    // switched-away tab and dropped) came back with the restored
+    // transcript; without its request it would sit there forever.
+    removeAdjacentLoader();
     oldestLoadedTaskId = currentTaskId;
     newestLoadedTaskId = currentTaskId;
     noPrevTask = false;
@@ -6897,18 +6960,19 @@
       ? statusBudget.textContent
       : '';
     container.dataset.metricSteps = statusSteps ? statusSteps.textContent : '';
-    if (statusTokens) statusTokens.textContent = savedTokens;
-    if (statusBudget) statusBudget.textContent = savedBudget;
-    if (statusSteps) statusSteps.textContent = savedSteps;
-    // visibletask-coverage:start
     // Same rule as everywhere else: if the replay swapped the tab on
-    // screen, its numbers are already up and must be left alone.
+    // screen, its numbers (status row included — restoreTab repainted
+    // it from the swapped-in tab) are already up and must be left alone.
     if (activeTabId === savedVisibleTab) {
+      if (statusTokens) statusTokens.textContent = savedTokens;
+      if (statusBudget) statusBudget.textContent = savedBudget;
+      if (statusSteps) statusSteps.textContent = savedSteps;
+      // visibletask-coverage:start
       currentTaskMetrics = savedMetrics;
       stepCount = savedStepCount;
       if (savedTab) savedTab.lastTaskFailed = savedTaskFailed;
+      // visibletask-coverage:end
     }
-    // visibletask-coverage:end
     return container;
   }
 
@@ -6928,6 +6992,21 @@
     }
 
     const taskLabel = task || '(untitled task)';
+
+    // The tab-switch reset rewinds the pagination anchors while spliced
+    // `.adjacent-task` containers survive in the restored transcript, so a
+    // later overscroll can fetch a task that is already on screen. Splicing
+    // it again would stack duplicate regions; just repair the anchor.
+    if (hasTaskId) {
+      const rendered = Array.from(O.querySelectorAll('.adjacent-task')).some(
+        el => el.dataset.taskId === String(taskId),
+      );
+      if (rendered) {
+        if (direction === 'prev') oldestLoadedTaskId = taskId;
+        else newestLoadedTaskId = taskId;
+        return;
+      }
+    }
 
     const container = replayDetachedTranscript(
       events,
@@ -9364,10 +9443,7 @@
         // A successful manual Git Commit is reported by a toast
         // notification instead; only failures earn transcript text.
         if (ev && ev.manual && ev.success) break;
-        const cls2 = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
-        const acDiv = mkEl('div', 'ev ' + cls2);
-        acDiv.textContent = (ev && ev.message) || '';
-        target.appendChild(acDiv);
+        appendActionResultInto(target, ev);
         break;
       }
       case 'warning': {
@@ -9798,20 +9874,26 @@
       tab.id,
     );
 
-    if (statusTokens) tab.statusTokensText = statusTokens.textContent;
-    if (statusBudget) tab.statusBudgetText = statusBudget.textContent;
-    if (statusSteps) tab.statusStepsText = statusSteps.textContent;
-
-    stepCount = prevStepCount;
-    if (statusTokens) statusTokens.textContent = prevTokensText;
-    if (statusBudget) statusBudget.textContent = prevBudgetText;
-    if (statusSteps) statusSteps.textContent = prevStepsText;
-    // visibletask-coverage:start
     // Collapsing a finished run_parallel panel closes its sub-agent
-    // tabs, so this event may have swapped the tab on screen; the
-    // borrowed numbers only go back to the tab they came from.
-    if (activeTabId === prevVisibleTab) currentTaskMetrics = prevMetrics;
-    // visibletask-coverage:end
+    // tabs, so this event may have swapped the tab on screen; restoreTab
+    // then repainted the status row, the step counter and the remembered
+    // metrics from the newly visible tab, all fresher than the borrowed
+    // numbers. The borrowed numbers only go back to the tab they came
+    // from, and the background tab only saves back a row it still owns —
+    // after a swap the row holds the swapped-in tab's values, not this
+    // tab's.
+    if (activeTabId === prevVisibleTab) {
+      if (statusTokens) tab.statusTokensText = statusTokens.textContent;
+      if (statusBudget) tab.statusBudgetText = statusBudget.textContent;
+      if (statusSteps) tab.statusStepsText = statusSteps.textContent;
+      stepCount = prevStepCount;
+      if (statusTokens) statusTokens.textContent = prevTokensText;
+      if (statusBudget) statusBudget.textContent = prevBudgetText;
+      if (statusSteps) statusSteps.textContent = prevStepsText;
+      // visibletask-coverage:start
+      currentTaskMetrics = prevMetrics;
+      // visibletask-coverage:end
+    }
 
     streamEnd(ctx, ev, target);
     if (ev.type === 'result' && ev.step_count) {
@@ -10557,6 +10639,14 @@
         setServerLoading(!ev.connected);
         if (!ev.connected) {
           forgetInFlightPathChecks();
+          // An outage swallows in-flight replies. A getAdjacentTask reply
+          // that never comes must not leave the loader row up and every
+          // later overscroll blocked behind adjacentLoading; sidebar
+          // fs/git requests awaiting a reply are equally dead.
+          adjacentLoading = false;
+          taskWheelPendingDir = '';
+          removeAdjacentLoader();
+          pendingSidebarRequests.clear();
           daemonWasDown = true;
         }
         if (ev.connected) {
@@ -11425,8 +11515,6 @@
         break;
       }
 
-      case 'commitMessage':
-        break;
       case 'droppedPaths':
         // The reply edits the VISIBLE composer, so it must still belong
         // to the tab the files were dropped on: a tab switch during the
@@ -11520,11 +11608,8 @@
             }
             // retrybar-coverage:end
             clearActionProgress(bgWrTab.outputFragment);
-            if (bgWrTab.outputFragment && !isSilentDiscardMessage(ev)) {
-              const cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
-              const div = mkEl('div', 'ev ' + cls);
-              div.textContent = ev.message || '';
-              bgWrTab.outputFragment.appendChild(div);
+            if (!isSilentDiscardMessage(ev)) {
+              appendActionResultInto(bgWrTab.outputFragment, ev);
             }
           }
           break;
@@ -11552,11 +11637,8 @@
             clearActionProgress(bgAdTab.outputFragment);
             // A successful manual Git Commit is reported by a toast
             // notification instead; only failures earn transcript text.
-            if (bgAdTab.outputFragment && !(ev && ev.manual && ev.success)) {
-              const cls = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
-              const div = mkEl('div', 'ev ' + cls);
-              div.textContent = (ev && ev.message) || '';
-              bgAdTab.outputFragment.appendChild(div);
+            if (!(ev && ev.manual && ev.success)) {
+              appendActionResultInto(bgAdTab.outputFragment, ev);
             }
           }
           break;
@@ -11855,8 +11937,9 @@
         // Only types the transcript renderer actually handles may fall
         // through to processOutputEvent. Host messages owned by other
         // listeners (voice.js's voiceWake / voiceTranscribing /
-        // voiceSpeech / voiceState) and genuinely unknown types would
-        // each cost an O(transcript) DOM sweep and a spinner reset.
+        // voiceSpeech / voiceState, the sidebar view's commitMessage)
+        // and genuinely unknown types would each cost an O(transcript)
+        // DOM sweep and a spinner reset.
         if (!TRANSCRIPT_EVENT_TYPES.has(t)) break;
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgTab = findTabByEvt(ev);
@@ -12652,14 +12735,19 @@
     let urlFlashTimer = null;
     copyBtn.addEventListener('click', e => {
       e.preventDefault();
-      navigator.clipboard.writeText(displayUrl).then(() => {
-        copyBtn.innerHTML = checkSvg;
-        if (urlFlashTimer) clearTimeout(urlFlashTimer);
-        urlFlashTimer = setTimeout(() => {
-          urlFlashTimer = null;
-          copyBtn.innerHTML = copySvg;
-        }, 1500);
-      });
+      // A rejected write (webview unfocused) just skips the flash; an
+      // unhandled rejection would be the only other outcome.
+      navigator.clipboard.writeText(displayUrl).then(
+        () => {
+          copyBtn.innerHTML = checkSvg;
+          if (urlFlashTimer) clearTimeout(urlFlashTimer);
+          urlFlashTimer = setTimeout(() => {
+            urlFlashTimer = null;
+            copyBtn.innerHTML = copySvg;
+          }, 1500);
+        },
+        () => {},
+      );
     });
     // urlflash0903-coverage:end
     row.appendChild(link);
@@ -13027,11 +13115,28 @@
     area.insertBefore(bar, area.firstChild);
   }
 
-  function appendActionResult(ev) {
+  /**
+   * Append the terminal result line of a commit / merge / discard flow
+   * to *target* (the visible transcript, a hidden tab's fragment, or a
+   * replay container). One renderer for the foreground, background and
+   * replay variants of `worktree_result` / `main_tree_result` /
+   * `autocommit_done`, which used to carry hand-copied twins.
+   *
+   * @param {Element|DocumentFragment|null} target Where to render.
+   * @param {object} ev The terminal event (success / message).
+   * @returns {Element|null} The appended line, or null without a target.
+   */
+  function appendActionResultInto(target, ev) {
+    if (!target) return null;
     const cls = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
     const div = mkEl('div', 'ev ' + cls);
     div.textContent = (ev && ev.message) || '';
-    O.appendChild(div);
+    target.appendChild(div);
+    return div;
+  }
+
+  function appendActionResult(ev) {
+    const div = appendActionResultInto(O, ev);
     // autoscroll-coverage:start
     autoScrollLatestEventPanel(div);
     // autoscroll-coverage:end
@@ -14749,10 +14854,15 @@
       slot.data = ready.data;
       return true;
     } catch (err) {
+      // A slot the user already removed (idx < 0) settled after its chip was
+      // deleted; surfacing its failure now would render a phantom error chip
+      // for an attachment that no longer exists.
       const idx = ownerFiles.indexOf(slot);
-      if (idx >= 0) ownerFiles.splice(idx, 1);
-      const why = (err && err.message) || 'it could not be attached';
-      ownerErrors.push((file.name || 'attachment') + ': ' + why);
+      if (idx >= 0) {
+        ownerFiles.splice(idx, 1);
+        const why = (err && err.message) || 'it could not be attached';
+        ownerErrors.push((file.name || 'attachment') + ': ' + why);
+      }
       return false;
     } finally {
       slot.pending = false;

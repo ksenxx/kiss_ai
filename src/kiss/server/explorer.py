@@ -57,7 +57,8 @@ _NAME_STATUS_RE = re.compile(r"^[ACDMRTUXB]\d{0,3}$")
 """A ``--name-status`` code: one letter, renames/copies with a score."""
 
 _LOG_HEADER_FIELDS = 7
-"""Fields per commit header: sha, parents, author, date, refs, subject."""
+"""Fields per commit header: sha, parents, author, date, refs,
+subject, body (the ``%x00``-joined format string below)."""
 
 
 def list_directory(directory: Path) -> dict[str, Any]:

@@ -32,7 +32,6 @@ from kiss.agents.sorcar.git_worktree import (
     _reclaim_process_lock,
     repo_lock,
 )
-from kiss.agents.sorcar.persistence import _allocate_chat_id
 from kiss.agents.sorcar.sorcar_agent import (
     _generate_commit_message,
     auto_commit_changes,
@@ -1552,9 +1551,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             if auto_commit is None
             else bool(auto_commit)
         )
-        if self._chat_id == "":
-            self._chat_id = _allocate_chat_id()
-
         printer = kwargs.get("printer")
         if printer is not None:
             # Bind the caller's printer BEFORE any worktree setup.  The
@@ -1895,8 +1891,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             # (a tab close must not auto-merge work the user asked
             # to throw away).
             self._pending_review = False
+            # No separate ``prune``: :meth:`GitWorktreeOps.remove`
+            # already prunes on every path that can leave a stale
+            # registration behind (same contract
+            # ``_commit_and_clean_worktree`` relies on).
             GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
-            GitWorktreeOps.prune(wt.repo_root)
             if wt.original_branch:
                 ok, err = GitWorktreeOps.checkout(
                     wt.repo_root,

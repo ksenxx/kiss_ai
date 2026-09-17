@@ -22,6 +22,13 @@
 
 **Constructor:** `KISSAgent(name: str) -> None`
 
+- **budget_used** — Cumulative USD spend, derived from the atomic usage snapshot.<br/>`budget_used() -> float` *(property)*
+- **budget_used**<br/>`budget_used(value: float) -> None`
+- **total_tokens_used** — Cumulative tokens, derived from the atomic usage snapshot.<br/>`total_tokens_used() -> int` *(property)*
+- **total_tokens_used**<br/>`total_tokens_used(value: int) -> None`
+- **step_count** — Completed agentic steps, derived from the atomic usage snapshot.<br/>`step_count() -> int` *(property)*
+- **step_count**<br/>`step_count(value: int) -> None`
+- **usage_snapshot** — Return one coherent ``(budget_used, total_tokens_used, step_count)``. Reads the immutable snapshot attribute ONCE, so the triple can never mix dimensions from two different accounting states — unlike three separate property reads, between which a concurrent response-accounting publish could land.  Concurrent readers (``sorcar_agent._executor_usage`` polled by the live usage monitor and by abandoned-child reclaims, the parent's session bank) rely on this.<br/>`usage_snapshot() -> tuple[float, int, int]`
 - **run** — Runs the agent's main ReAct loop to solve the task. Run-to-completion models (``cc/*``, ``codex/*`` — see ``Model.runs_task_to_completion``) skip the ReAct loop entirely: the whole task, with *system_prompt* appended after ``CLI_SYSTEM_PROMPT_HEADER``, is handed to the CLI agent in one ``generate()`` call and its final output is returned (wrapped in the registered ``finish`` contract).  *tools* are registered but never exposed to such a model; it uses its own native tools.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, system_prompt: str = '', tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None, print_prompts: bool = True, llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None, tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None) -> str`
   - `model_name`: The name of the model to use for the agent.
   - `prompt_template`: The prompt template for the agent.
@@ -54,6 +61,14 @@
 
 - `name`: The name identifier for the agent.
 
+- **budget_used** — Cumulative USD spend banked so far (see :class:`_UsageEvent`).<br/>`budget_used() -> float` *(property)*
+- **budget_used**<br/>`budget_used(value: float) -> None`
+- **total_tokens_used** — Cumulative tokens banked so far (see :class:`_UsageEvent`).<br/>`total_tokens_used() -> int` *(property)*
+- **total_tokens_used**<br/>`total_tokens_used(value: int) -> None`
+- **total_steps** — Cumulative steps banked so far (see :class:`_UsageEvent`).<br/>`total_steps() -> int` *(property)*
+- **total_steps**<br/>`total_steps(value: int) -> None`
+- **reset_usage** — Reset the whole accounting state to zero in ONE atomic store. Swaps in a fresh ledger epoch with a single ``STORE_ATTR`` — atomic under both thread interleaving and asynchronously injected exceptions.  A writer that already loaded the OLD epoch appends its record there: the transaction linearizes BEFORE the reset and is discarded with the old epoch.  A writer that loads the ledger after the swap lands in the new epoch with its whole triple.  Either way every observable state is coherent — never a mix of pre- and post-reset dimensions, and never a torn triple.  A session bank retried across the swap counts exactly once: its duplicate record carries the same session key, and the old epoch's record is no longer summed. The swap is also the EPOCH BOUNDARY for adjustment sources that outlive a run: abandoned-subagent items are tagged with the epoch token (:meth:`_usage_epoch`) at registration and their reclaims commit into that exact object, so a prior epoch's late spend settles in the discarded ledger and is never banked into the new epoch (an explicit, documented undercount versus real provider spend — see ``SorcarAgent.reclaim_abandoned_subagents``). Also the coherent replacement for zeroing the three counter properties one by one (the server's ``_zero_usage_counters``), which could otherwise interleave with a racing attribution.<br/>`reset_usage() -> None`
+- **usage_snapshot** — Return one coherent ``(budget_used, total_tokens_used, total_steps)``. Sums ONE ledger epoch (see :func:`_ledger_totals`), so the triple always describes a single prefix of the append-only history.  Reading the three properties separately instead can TEAR: each property read sums the ledger afresh, and a concurrent append or reset between two of those reads yields an impossible mix (e.g. the old budget with the new tokens/steps) — a final abandoned-child reclaim that reads such a mix permanently loses the unseen dimension from the parent's accounting.<br/>`usage_snapshot() -> tuple[float, int, int]`
 - **perform_task** — Execute the task with auto-continuation across multiple sub-sessions.<br/>`perform_task(tools: list[Callable[..., Any]], attachments: list[Attachment] | None = None) -> str`
   - `tools`: List of callable tools available to the agent during execution.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.

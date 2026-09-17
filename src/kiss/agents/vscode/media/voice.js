@@ -301,8 +301,29 @@
   }
   // tableak-coverage:end
 
+  /**
+   * Retire the NEWEST unkeyed round — the one begun most recently.
+   *
+   * Used when a just-begun capture is abandoned before its audio was ever
+   * posted (silence timeout, or the pipeline stopping mid-capture): no
+   * transcript will ever answer that round, and the round to close is the
+   * one beginCapture just recorded — the LAST unkeyed entry, not the
+   * oldest, which may still be awaiting its own words. When the rounds
+   * were reset in the meantime there is nothing left to retire.
+   */
+  function retireNewestUnkeyedRound() {
+    if (!unkeyedOwners.length) return;
+    unkeyedOwners.pop();
+    outstandingRounds = Math.max(0, outstandingRounds - 1);
+  }
+
   let model = null;
   let recognizer = null;
+  // The extra grammar-free recognizer run alongside `recognizer` when
+  // kissVoiceDebug=1, so stopBrowserPipeline can free it: each one holds a
+  // worker-side Kaldi recognizer and a model.recognizers entry for the
+  // model's page-long lifetime.
+  let freeRecognizer = null;
   let audioContext = null;
   let mediaStream = null;
   let sourceNode = null;
@@ -700,9 +721,12 @@
     if (!done.speechStarted || !done.chunks.length) {
       // This round produced no audio, so no transcript will ever come back
       // for it. Retire its owner with it, or the next transcript would be
-      // paired with this abandoned utterance's conversation. beginCapture()
-      // records browser-pipeline rounds unkeyed, so this retires the oldest.
-      retireRound(null);
+      // paired with this abandoned utterance's conversation. Rounds
+      // overlap — this capture may have begun while an earlier round's
+      // audio was still being transcribed — so the round to close is the
+      // NEWEST unkeyed one (this capture's own), never the oldest, which
+      // is still waiting for its words.
+      retireNewestUnkeyedRound();
       if (outstandingRounds > 0) flash('voice-transcribing', 60000);
       else flash(null);
       return;
@@ -770,8 +794,71 @@
     return voskLoadPromise;
   }
 
+  // How long a speech-model load may take before it is declared failed.
+  // The vendored createModel settles only when its worker posts a 'load'
+  // message; a worker that fails to boot at all (its blob: URL blocked by
+  // CSP, a top-level script/WASM crash) fires only a Worker 'error' event
+  // that nobody listens for, so without a bound the promise never settles,
+  // `busy` stays true for the page lifetime, and the mic is wedged on
+  // 'loading' with every re-enable deferring to `busy`.
+  const MODEL_LOAD_TIMEOUT_MS =
+    typeof cfg.modelLoadTimeoutMs === 'number' && cfg.modelLoadTimeoutMs > 0
+      ? cfg.modelLoadTimeoutMs
+      : 30000;
+
+  /**
+   * Load (or reuse) the speech model, never hanging: the load is raced
+   * against MODEL_LOAD_TIMEOUT_MS so a worker that never reports settles
+   * this attempt into the ordinary failure path (error painted, `busy`
+   * cleared, re-enable retries). A model that arrives after its timeout
+   * already failed the attempt belongs to nobody: its worker is freed.
+   */
+  function loadModel() {
+    if (model) return Promise.resolve(model);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        settled = true;
+        reject(new Error('speech model load timed out'));
+      }, MODEL_LOAD_TIMEOUT_MS);
+      window.Vosk.createModel(cfg.modelUrl).then(
+        m => {
+          if (settled) {
+            try {
+              m.terminate();
+            } catch (_e) {}
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          model = m;
+          resolve(m);
+        },
+        err => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          // Realm-agnostic error check (`instanceof Error` fails across
+          // window boundaries): anything carrying a message is reported
+          // as-is, the vendored bare reject() gets a message of its own.
+          reject(
+            err && err.message ? err : new Error('failed to load speech model'),
+          );
+        },
+      );
+    });
+  }
+
   function stopBrowserPipeline() {
-    capture = null;
+    if (capture) {
+      // An active capture dies with the pipeline before its audio was
+      // posted (e.g. the webview was hidden mid-utterance), so no
+      // transcript will ever answer its round. Retire it, or the NEXT
+      // transcript would be paired with this abandoned utterance's
+      // conversation and typed into (or dropped for) the wrong task.
+      retireNewestUnkeyedRound();
+      capture = null;
+    }
     clearPreamble();
     if (processorNode) {
       try {
@@ -803,6 +890,12 @@
       } catch (_e) {}
       recognizer = null;
     }
+    if (freeRecognizer) {
+      try {
+        freeRecognizer.remove();
+      } catch (_e) {}
+      freeRecognizer = null;
+    }
   }
 
   function startBrowserPipeline() {
@@ -817,13 +910,7 @@
     busy = true;
     setUi('loading');
     return loadVosk()
-      .then(() => {
-        if (model) return model;
-        return window.Vosk.createModel(cfg.modelUrl).then(m => {
-          model = m;
-          return m;
-        });
-      })
+      .then(() => loadModel())
       .then(() => {
         if (gen !== voiceGen || !enabled) {
           // Superseded while the engine/model loaded: never even ask for
@@ -932,7 +1019,6 @@
             }
           }
         });
-        let freeRecognizer = null;
         if (debugEnabled()) {
           freeRecognizer = new model.KaldiRecognizer(audioContext.sampleRate);
           freeRecognizer.on('result', message => {

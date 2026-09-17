@@ -149,14 +149,28 @@ def _state_owns_thread(
     there aborted that cleanup ("Cleanup interrupted"), so an
     acknowledged stop also answers ``False``.
 
+    A merge is awaited, never stopped: the post-task auto-finalize
+    runs ``wt.merge()`` on the task thread itself, claiming
+    ``state.is_merging`` / ``state.merge_thread`` under
+    :data:`agent_state.STATE_LOCK` (``_handle_worktree_action``), and
+    an injection landing inside the stash → checkout → merge → pop
+    sequence abandons it midway, leaving the user's repository in a
+    state they did not ask for — exactly what the shutdown path's
+    ``_await_active_merges`` refuses to do.  While the target thread
+    itself holds the merge claim this predicate therefore answers
+    ``False``; the run is about to finish on its own.  The guard is
+    deliberately limited to ``merge_thread is thread``: a claim held
+    by a DIFFERENT thread (a foreign ``is_merging`` holder) must not
+    shield a wedged task thread from a legitimate stop.
+
     Args:
         state: The state object resolved at ``_stop_task`` time.
         thread: The task thread captured at ``_stop_task`` time.
 
     Returns:
         ``True`` when the registry entry is unchanged, still owns
-        *thread* and has not yet acknowledged the stop; ``False``
-        otherwise.
+        *thread*, has not yet acknowledged the stop and *thread* is
+        not performing the state's merge; ``False`` otherwise.
     """
     current = agent_state.agent_states.get(state.task_id)
     return (
@@ -164,6 +178,7 @@ def _state_owns_thread(
         and current is state
         and current.task_thread is thread
         and not current.stop_acknowledged
+        and not (current.is_merging and current.merge_thread is thread)
     )
 
 
@@ -558,13 +573,27 @@ def _zero_usage_counters(agent: Any) -> None:
     tools-file failure on a reused agent), whose failure banner would
     otherwise carry the previous run's numbers.
 
+    A ``RelentlessAgent``-derived agent is reset through its
+    ``reset_usage()`` — ONE atomic ledger swap, so a server-thread
+    attribution racing this reset (an abandoned-subagent reclaim)
+    lands wholly before or wholly after it, never as a mixed state.
+    Zeroing the three counter properties one by one instead tears:
+    the racing attribution could land between two of the stores and
+    leave an impossible mix (e.g. zero budget with pre-reset tokens).
+    The per-attribute fallback serves plain agent-shaped objects
+    without the method, whose fields are plain attributes.
+
     Args:
         agent: The agent about to run; attributes are set outright,
             so an agent that has not run yet is handled too.
     """
-    agent.total_tokens_used = 0
-    agent.budget_used = 0.0
-    agent.total_steps = 0
+    reset_usage = getattr(agent, "reset_usage", None)
+    if callable(reset_usage):
+        reset_usage()
+    else:
+        agent.total_tokens_used = 0
+        agent.budget_used = 0.0
+        agent.total_steps = 0
     agent.step_count = 0
 
 
@@ -581,6 +610,14 @@ def _subtask_metrics(agent: object) -> tuple[int, float, int]:
     opposite.  The step count therefore falls back to ``step_count``
     when ``total_steps`` is 0.
 
+    A ``RelentlessAgent``-derived agent is read through ONE
+    ``usage_snapshot()`` call so the triple is coherent: three
+    separate property reads can tear across a concurrent attribution
+    (a server-thread abandoned-subagent reclaim), and this helper's
+    output is persisted (task-history extras) and broadcast (failure
+    result), so a torn read is never repaired.  The per-attribute
+    fallback serves plain agent-shaped objects without the method.
+
     Args:
         agent: The (possibly ``None``) agent to read counters from.
 
@@ -589,6 +626,11 @@ def _subtask_metrics(agent: object) -> tuple[int, float, int]:
         payload and the failure ``result`` banner alike, so the two
         can never disagree.
     """
+    snapshot = getattr(agent, "usage_snapshot", None)
+    if callable(snapshot):
+        cost, tokens, steps = cast("tuple[float, int, int]", snapshot())
+        steps = int(steps or 0) or int(getattr(agent, "step_count", 0) or 0)
+        return int(tokens or 0), float(cost or 0.0), steps
     tokens = int(getattr(agent, "total_tokens_used", 0) or 0)
     cost = float(getattr(agent, "budget_used", 0.0) or 0.0)
     steps = int(getattr(agent, "total_steps", 0) or 0) or int(
@@ -866,13 +908,28 @@ class _TaskRunnerMixin:
                 # same linger the subscriber map gets.
                 setup_result["taskId"] = state.task_id
                 self.printer.ensure_recording_for_task(state.task_id)
-                cleanup_timer = threading.Timer(
-                    300.0,
-                    self.printer.cleanup_task,
-                    args=(state.task_id,),
-                )
-                cleanup_timer.daemon = True
-                cleanup_timer.start()
+                try:
+                    cleanup_timer = threading.Timer(
+                        300.0,
+                        self.printer.cleanup_task,
+                        args=(state.task_id,),
+                    )
+                    cleanup_timer.daemon = True
+                    cleanup_timer.start()
+                except RuntimeError:
+                    # Thread exhaustion ("can't start new thread") —
+                    # the same regime ``_stop_task``'s inline fallback
+                    # and ``_cmd_run``'s spawn-failure handler already
+                    # survive.  The timer was this recording's ONLY
+                    # releaser, so drop it now instead of leaking it
+                    # forever, and fall through: the failure ``result``
+                    # broadcast below must happen unconditionally.
+                    logger.warning(
+                        "Early-failure cleanup timer for task %s could "
+                        "not be started; dropping the recording now",
+                        state.task_id, exc_info=True,
+                    )
+                    self.printer.cleanup_task(state.task_id)
             self.printer.broadcast(setup_result)
         finally:
             if state is None:
@@ -1533,11 +1590,9 @@ class _TaskRunnerMixin:
                 # agent run, ``state.last_user_prompt``, and the
                 # per-subtask persistence all consistent.
                 subtasks = [t + append_to_prompt for t in subtasks]
-            from kiss.core.vscode_config import (
-                build_model_config,
-                load_config,
-            )
-
+            # ``build_model_config`` / ``load_config`` are already
+            # bound: the classification prologue above imports them
+            # unconditionally on every path into this try.
             _vcfg = load_config()
             # ``load_config()`` fills every key from ``DEFAULTS``, so a
             # literal fallback here would be unreachable code that can
@@ -1826,6 +1881,22 @@ class _TaskRunnerMixin:
                         "type": "task_error",
                         "text": f"{_exc_name}: {_outer_exc}",
                     }
+            elif isinstance(
+                _outer_exc, KeyboardInterrupt,
+            ) or _stop_interrupt_wrapped(_outer_exc, state):
+                # A stop/shutdown interrupt landing in the
+                # between-subtask bookkeeping — after ``agent.run``
+                # returned, before the next subtask started — misses
+                # the sentinel check above because ``result_summary``
+                # already carries the finished subtask's success
+                # summary.  ``_cancel_outcome`` must still run: it
+                # acknowledges the stop (without it the watchdog
+                # re-injected into the end-of-run cleanup, aborting
+                # persistence and the worktree presentation), labels a
+                # shutdown as a shutdown, and its label/event replace
+                # the success ones so the stopped run is not persisted
+                # — and auto-merged — as a completed success.
+                result_summary, task_end_event = self._cancel_outcome(state)
             else:
                 task_end_event = task_end_event or {"type": "task_stopped"}
             state.last_result_summary = result_summary

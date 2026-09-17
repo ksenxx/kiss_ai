@@ -114,6 +114,7 @@ from kiss.server.voice_wake import (
     DEFAULT_AUDIO_MODEL,
     MODEL_NAME,
     SpeakerIdentifier,
+    _download_url_to_file,
     default_models_dir,
     transcribe_pcm,
 )
@@ -242,9 +243,16 @@ def _download_voice_model_to(tmp: Path) -> None:
     """Download the browser voice-model archive to *tmp*.
 
     Writer callback for :func:`_atomic_publish` used by
-    :func:`_ensure_voice_model`.
+    :func:`_ensure_voice_model`.  Uses the timeout-bounded
+    :func:`kiss.server.voice_wake._download_url_to_file` rather than
+    ``urllib.request.urlretrieve``, which accepts no timeout: a
+    black-holed connection blocked forever while the caller held
+    ``_voice_model_lock`` on a default-executor thread, and every
+    retrying ``/voice-model.tar.gz`` request then parked another
+    shared executor worker on the lock until the daemon stopped
+    dispatching commands entirely.
     """
-    urllib.request.urlretrieve(VOICE_MODEL_URL, tmp)
+    _download_url_to_file(VOICE_MODEL_URL, tmp)
 
 
 def _ensure_voice_model() -> Path | None:
@@ -2905,14 +2913,31 @@ class WebPrinter(JsonPrinter):
                     self._send_locks[endpoint] = lock
             return lock
 
-    async def _locked_send(self, endpoint: Any, data: str) -> None:
+    async def _locked_send(
+        self,
+        endpoint: Any,
+        data: str,
+        admit: Callable[[], bool] | None = None,
+    ) -> None:
         """Send one payload to one endpoint under its FIFO send lock.
 
         Args:
             endpoint: The client connection to write to.
             data: The JSON payload (already encoded with ``json.dumps``).
+            admit: Optional last-moment admission check, evaluated
+                AFTER the send lock is acquired; a ``False`` result
+                drops the payload without touching the wire.  The
+                voice-wake delivery boundary re-validates its listener
+                generation here: a report validated before queueing
+                behind an in-flight send can be retired by a
+                concurrent ``stop()`` while it waits, and a check that
+                runs only before the lock would still write the stale
+                payload once the lock opens (gpt-5.6-sol round-4
+                review, finding 6).
         """
         async with self.send_lock(endpoint):
+            if admit is not None and not admit():
+                return
             if isinstance(endpoint, asyncio.StreamWriter):
                 await self._uds_send(endpoint, data)
             else:
@@ -5527,6 +5552,31 @@ class RemoteAccessServer:
         )
 
         async def _send(event: dict[str, Any]) -> None:
+            # The delivery boundary of the controller's generation
+            # tag: drop a report whose listener generation was retired
+            # (a stop or a replacement spawn superseded it) so a
+            # wedged stale ``listening: false`` can never contradict a
+            # successor's ``listening: true``, and strip the tag so
+            # the wire protocol is unchanged.  Payloads that pass are
+            # written under the per-endpoint FIFO send lock
+            # (``_endpoint_send``), so accepted reports reach the wire
+            # in send-start order (gpt-5.6-sol round-3 review,
+            # findings 2-3).  The generation is RE-validated inside
+            # that lock (the ``admit`` callable): a report that passed
+            # the pre-check can queue behind an in-flight send and be
+            # retired by a concurrent stop before the lock opens —
+            # validation only before the wait would still write the
+            # stale payload (gpt-5.6-sol round-4 review, finding 6).
+            gen = event.pop("voiceGen", None)
+            if isinstance(gen, int):
+                if not self._voice_wake.accepts(conn_id, gen):
+                    return
+                await self._endpoint_send(
+                    endpoint,
+                    json.dumps(event),
+                    admit=partial(self._voice_wake.accepts, conn_id, gen),
+                )
+                return
             await self._endpoint_send(endpoint, json.dumps(event))
 
         await self._voice_wake.start(conn_id, sensitivity, _send)
@@ -5757,10 +5807,7 @@ class RemoteAccessServer:
             return reply
 
         reply = await asyncio.to_thread(_read_file)
-        try:
-            await self._endpoint_send(endpoint, json.dumps(reply))
-        except Exception:
-            logger.debug("openFile: failed to write reply", exc_info=True)
+        await self._reply_direct(endpoint, reply, "openFile")
 
     async def _handle_save_file(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -5950,10 +5997,7 @@ class RemoteAccessServer:
             return reply
 
         reply = await asyncio.to_thread(_write_page)
-        try:
-            await self._endpoint_send(endpoint, json.dumps(reply))
-        except Exception:
-            logger.debug("shareChat: failed to write reply", exc_info=True)
+        await self._reply_direct(endpoint, reply, "shareChat")
 
     async def _handle_share_chat_tasks(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -6081,12 +6125,7 @@ class RemoteAccessServer:
             return reply
 
         reply = await asyncio.to_thread(_load_tasks)
-        try:
-            await self._endpoint_send(endpoint, json.dumps(reply))
-        except Exception:
-            logger.debug(
-                "shareChatTasks: failed to write reply", exc_info=True,
-            )
+        await self._reply_direct(endpoint, reply, "shareChatTasks")
 
     async def _handle_check_paths(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -6139,10 +6178,7 @@ class RemoteAccessServer:
             "workDir": raw_work_dir,
             "tabId": tab_id,
         }
-        try:
-            await self._endpoint_send(endpoint, json.dumps(reply))
-        except Exception:
-            logger.debug("checkPaths: failed to write reply", exc_info=True)
+        await self._reply_direct(endpoint, reply, "checkPaths")
 
     async def _reply_direct(
         self, endpoint: Any, reply: dict[str, Any], what: str,
@@ -6760,10 +6796,7 @@ class RemoteAccessServer:
             return reply
 
         reply = await asyncio.to_thread(_read_info)
-        try:
-            await self._endpoint_send(endpoint, json.dumps(reply))
-        except Exception:
-            logger.debug("getInfoFile: failed to write reply", exc_info=True)
+        await self._reply_direct(endpoint, reply, "getInfoFile")
 
     async def _handle_active_tasks_query(self, endpoint: Any) -> None:
         """Report in-flight agent tasks back to a single client.
@@ -6788,17 +6821,11 @@ class RemoteAccessServer:
         handler log line above.
         """
         active_tabs = _snapshot_active_tabs()
-        payload = json.dumps({
+        await self._reply_direct(endpoint, {
             "type": "activeTasksResponse",
             "count": len(active_tabs),
             "tabs": active_tabs,
-        })
-        try:
-            await self._endpoint_send(endpoint, payload)
-        except Exception:
-            logger.debug(
-                "activeTasksQuery: failed to write response", exc_info=True,
-            )
+        }, "activeTasksQuery")
 
 
     def _broadcast_remote_url(self, url: str, tunnel_active: bool) -> None:
@@ -6936,7 +6963,12 @@ class RemoteAccessServer:
         self._broadcast_remote_url(url or "", tunnel_active)
         await self._broadcast_update_available()
 
-    async def _endpoint_send(self, endpoint: Any, data: str) -> None:
+    async def _endpoint_send(
+        self,
+        endpoint: Any,
+        data: str,
+        admit: Callable[[], bool] | None = None,
+    ) -> None:
         """Send ``data`` to either a WSS or a UDS endpoint.
 
         ``endpoint`` is either a :class:`ServerConnection` (WSS) or
@@ -6956,8 +6988,11 @@ class RemoteAccessServer:
         Args:
             endpoint: The connection to send to.
             data: The JSON payload (already encoded with ``json.dumps``).
+            admit: Optional admission check evaluated under the
+                endpoint's send lock — see
+                :meth:`WebPrinter._locked_send`.
         """
-        await self._printer._locked_send(endpoint, data)
+        await self._printer._locked_send(endpoint, data, admit)
 
     @staticmethod
     def _sanitized_restored_tabs(cmd: dict[str, Any]) -> list[dict[str, str]]:
@@ -8809,6 +8844,7 @@ class RemoteAccessServer:
         from kiss.server import agent_state
         from kiss.server.agent_state import AgentState
         from kiss.server.task_runner import (
+            _state_owns_thread,
             inject_keyboard_interrupt,
             wait_for_thread_start,
         )
@@ -8881,9 +8917,27 @@ class RemoteAccessServer:
             remaining = max(0.0, deadline - time.monotonic())
             thread.join(timeout=min(1.0, remaining))
             if thread.is_alive():
-                tid = thread.ident
-                if tid is not None:
-                    inject_keyboard_interrupt(tid)
+                # Re-check ownership under STATE_LOCK immediately
+                # before injecting, exactly like the Stop watchdog
+                # (``_force_stop_thread``).  "Still alive" does not
+                # mean "still ignoring the stop": the worker may have
+                # honoured the cooperative event already and be inside
+                # its legitimate cleanup ``finally`` (persisting the
+                # interrupted row can wait out SQLite's busy timeout),
+                # which this sweep exists to let finish — injecting
+                # there aborted the very persistence/broadcast it
+                # wants.  The predicate also refuses while the thread
+                # performs the state's own post-task worktree merge (a
+                # merge is awaited, never stopped) and, because
+                # ``task_thread`` is cleared under the same lock when a
+                # run finishes, closes the window where a recycled
+                # thread ident would route the interrupt into an
+                # unrelated freshly spawned thread.
+                with agent_state.STATE_LOCK:
+                    if _state_owns_thread(state, thread):
+                        tid = thread.ident
+                        if tid is not None:  # pragma: no branch — live thread has ident
+                            inject_keyboard_interrupt(tid)
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
             if thread.is_alive():
                 logger.warning(

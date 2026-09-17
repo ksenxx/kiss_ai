@@ -75,7 +75,11 @@ from kiss.server.json_printer import (
 )
 from kiss.server.merge_flow import _MergeFlowMixin
 from kiss.server.tab_registry import TabRegistry
-from kiss.server.task_runner import _TaskRunnerMixin, parse_task_tags
+from kiss.server.task_runner import (
+    _subtask_metrics,
+    _TaskRunnerMixin,
+    parse_task_tags,
+)
 
 __all__ = [
     "VSCodeServer",
@@ -622,6 +626,11 @@ class VSCodeServer(
             self._last_active_file.pop(conn_id, None)
             self._last_active_content.pop(conn_id, None)
             self._complete_seq_latest.pop(conn_id, None)
+            # The file-picker request token is normally popped by the
+            # scan that answers it, but a scan that failed (A-C1) or
+            # is still in flight when the window closes would leave
+            # the departed connection's entry behind forever.
+            self._files_request_map().pop(conn_id, None)
 
     def _broadcast_tabs_state(self) -> None:
         """Broadcast the canonical tab snapshot to every client.
@@ -1078,6 +1087,14 @@ class VSCodeServer(
         ``_state_lock`` internally (re-entrant, so safe to call with
         it already held).
 
+        The usage triple is read through ONE
+        :func:`_subtask_metrics` call (``usage_snapshot()`` on a
+        ``RelentlessAgent``, per-attribute fallback on plain agents):
+        three separate property reads each sum the append-only usage
+        ledger afresh, and a concurrent attribution between two of
+        those reads shows the monitor an impossible mix (e.g. the old
+        cost with the new tokens/steps).
+
         Args:
             session: The history session dict to update in place.
             task_id: The ``task_history.id`` of the running task.
@@ -1087,9 +1104,9 @@ class VSCodeServer(
             agent = state.agent if state is not None else None
             if state is None or agent is None:
                 return
-            session["tokens"] = int(getattr(agent, "total_tokens_used", 0) or 0)
-            session["cost"] = float(getattr(agent, "budget_used", 0.0) or 0.0)
-            steps = int(getattr(agent, "total_steps", 0) or 0)
+            tokens, cost, steps = _subtask_metrics(agent)
+            session["tokens"] = tokens
+            session["cost"] = cost
             cur = getattr(agent, "_current_executor", None)
             if cur is not None:
                 steps += int(getattr(cur, "step_count", 0) or 0)
@@ -1329,10 +1346,24 @@ class VSCodeServer(
         # itself is reconciled by the connection's next ``ready``.
         # The removal token lets the cleanup tail stand down when a
         # later publication (a concurrent ``resumeSession`` reopen)
-        # has legitimately taken the tab over; a tab that was never in
-        # the registry (sub-agent tabs) has no token and is dropped
-        # unconditionally, as before.
-        self._drop_tab_state(tab_id, removal_token=removal_token or None)
+        # has legitimately taken the tab over.  A close that found the
+        # tab ABSENT (a token-0 duplicate close) reads the publication
+        # clock instead, so a reopen republishing the tab after this
+        # close observed it gone makes the tail stand down too — the
+        # stale duplicate used to run unconditionally and re-marked
+        # the reopened state ``frontend_closed`` / tore down the
+        # re-subscribed viewer.  A publication landing between the
+        # ``close_tab`` above and this clock read can stamp a
+        # generation at or below the reading; ``_tab_reopened_since``
+        # closes that gap by also treating registry PRESENCE as a
+        # reopen (presence after an absent-close is always a later
+        # republication).  A tab that was never published (sub-agent
+        # tabs) has generation 0 and is never present, so those are
+        # still dropped unconditionally.
+        self._drop_tab_state(
+            tab_id,
+            removal_token=removal_token or self.tab_registry.clock(),
+        )
 
     def _prune_local_uds_tab(self, tab_id: str) -> None:
         """Drop a registry-removed tab from the local-UDS interest sets.
@@ -1355,6 +1386,127 @@ class VSCodeServer(
         if prune is not None:
             prune(tab_id)
 
+    def _tab_reopened_since(self, tab_id: str, token: int) -> bool:
+        """True when *tab_id* was legitimately reopened after *token*.
+
+        The stand-down predicate of the close/displacement cleanup
+        tails.  A reopen is visible in either of two ways:
+
+        * a publication stamped a generation newer than *token*
+          (:meth:`TabRegistry.republished_since`) — covers a removal
+          token and a clock observation alike; or
+        * the tab is PRESENT in the registry.  For a real removal
+          token this is implied by the first clause (the removal
+          deleted the row, so presence requires a later publication).
+          For a token-0 duplicate close it closes the observation gap:
+          a reopen publishing between the close's ``close_tab`` (which
+          found the tab absent) and its ``clock()`` read stamps a
+          generation at or below the observation, yet its row proves
+          the reopen happened after the close's registry step.
+
+        Both observations are drawn in ONE registry-locked section
+        (:meth:`TabRegistry.reopened_since`): two separate calls left
+        a seam where a rowless publication landing between them was
+        invisible to both — the stale generation read and a still-false
+        row presence (gpt-5.6-sol round-6 review, finding 1).
+
+        Args:
+            tab_id: The frontend tab identifier being cleaned up.
+            token: The cleanup's removal token or clock observation.
+        """
+        return self.tab_registry.reopened_since(tab_id, token)
+
+    def _commit_replay_publication(
+        self,
+        tab_id: str,
+        chat_id: str,
+        publication: int,
+        source: AgentState | None,
+        fallback_publication: int = 0,
+    ) -> None:
+        """Commit a replay's backend state iff *publication* still owns the tab.
+
+        ``_replay_session`` publishes the reopened tab first and
+        commits the backend state (clearing ``frontend_closed``,
+        binding ``_tab_chat_views``) afterwards, outside any single
+        lock.  Two stale-close races live in that window:
+
+        * a concurrent ``_close_tab`` can REMOVE the replay's own
+          publication before this commit runs — committing anyway
+          leaves the registry saying "closed" while the backend says
+          "open", matching neither serial order (review finding 1);
+        * a token-0 duplicate close whose clock observation predates
+          the viewer attach can run its cleanup tail (which removes
+          the freshly installed printer subscription) between the
+          attach and the publication — the published tab then never
+          receives the running task's fan-out (review finding 2).
+
+        Both close under one ``_state_lock`` section: the commit
+        stands down unless the registry row still exists and nobody
+        republished since *publication* (a newer publication performs
+        its own commit; an absent row means a close owns the final
+        state), and while it does own the row it (re)installs the
+        viewer subscription for a still-live *source* —
+        ``subscribe_tab`` is idempotent, so an undisturbed attach is
+        unaffected.  Lock order: ``STATE_LOCK`` → registry leaf lock /
+        printer locks, the established edges.
+
+        A tab the registry could not admit (``publication == 0``: the
+        registry is at capacity) has no row, so the row-based checks
+        cannot qualify it — yet a token-0 close can complete in the
+        same window and its cleanup must not be overwritten
+        (gpt-5.6-sol round-2 review, finding 1).  Such a commit is
+        qualified by *fallback_publication* instead: the rowless token
+        ``_replay_session`` stamped via
+        :meth:`TabRegistry.stamp_unregistered` BEFORE attempting the
+        row publication.  The token-0 close's cleanup tail retires the
+        stamp (:meth:`TabRegistry.retire_unregistered`) in the same
+        ``_state_lock`` section as its other teardown, so the commit's
+        equality check (``generation(tab_id) == fallback_publication``)
+        fails exactly when a close (or any newer publication) landed
+        after the stamp — a closed tab stays closed, with no chat-view
+        or subscription recreation.
+
+        Args:
+            tab_id: The reopened frontend tab.
+            chat_id: The chat the tab was rebound to.
+            publication: The generation token the replay's own
+                ``_registry_update_tab`` returned.  ``0`` means nothing
+                was published (the registry is at capacity); the commit
+                is then qualified by *fallback_publication*.
+            source: The still-running state the tab was attached to as
+                a viewer, or ``None`` when the chat has no live task.
+            fallback_publication: The rowless publication token stamped
+                before the row publication was attempted, or ``0`` when
+                none could be stamped (the commit then stands down on
+                the capacity path).
+        """
+        with self._state_lock:
+            if publication > 0:
+                if not self.tab_registry.has_tab(tab_id):
+                    return
+                if self.tab_registry.republished_since(tab_id, publication):
+                    return
+            else:
+                if fallback_publication <= 0:
+                    return
+                if (
+                    self.tab_registry.generation(tab_id)
+                    != fallback_publication
+                ):
+                    # A token-0 close retired the stamp, or a newer
+                    # publication (which performs its own commit)
+                    # superseded it: this stale commit owns nothing.
+                    return
+            if source is not None and (
+                source.is_task_active or source.thread_alive()
+            ):
+                self.printer.subscribe_tab(source.task_id, tab_id)
+            state = agent_state.find_by_tab(tab_id)
+            if state is not None:
+                state.frontend_closed = False
+            self._tab_chat_views[tab_id] = chat_id
+
     def _drop_tab_state(
         self, tab_id: str, removal_token: int | None = None,
     ) -> None:
@@ -1373,10 +1525,15 @@ class VSCodeServer(
         registry/state combination matching neither serial order
         (gpt-5.6-sol review 3, missed wiring 1) — so the drop stands
         down when :meth:`TabRegistry.republished_since` reports a
-        newer publication.  ``None`` (tabs that never were in the
-        registry, e.g. sub-agent tabs, and the deferred
-        ``_dispose_if_closed`` path guarded by ``frontend_closed``)
-        keeps the unconditional behaviour.
+        newer publication.  A token-0 duplicate close (the registry
+        did not list the tab) passes the clock OBSERVATION drawn by
+        :meth:`TabRegistry.close_tab_or_observe` instead, so a reopen
+        republishing the tab after the close observed it absent makes
+        this drop stand down exactly like a real removal's tail; a
+        tab that was never published (sub-agent tabs) has generation
+        0 — never greater than any token — and is dropped
+        unconditionally, as before.  ``None`` (direct callers with no
+        registry ordering) keeps the unconditional behaviour.
 
         Removes the tab from
         the agent-state registry, cleans up per-tab printer
@@ -1404,7 +1561,7 @@ class VSCodeServer(
         """
         busy = False
         with self._state_lock:
-            if removal_token is not None and self.tab_registry.republished_since(
+            if removal_token is not None and self._tab_reopened_since(
                 tab_id, removal_token
             ):
                 # A later publication reopened the tab between the
@@ -1419,6 +1576,33 @@ class VSCodeServer(
                 state.frontend_closed = True
                 if state.busy():
                     busy = True
+                    # Retire any rowless capacity-replay stamp HERE, at
+                    # the close's linearization point: the busy path
+                    # returns below without reaching
+                    # ``_teardown_tab_resources``, whose retire would
+                    # only run at the deferred ``_dispose_if_closed`` —
+                    # but a pending capacity commit qualified by that
+                    # stamp would clear ``frontend_closed`` first,
+                    # reopening the closed backend view and preventing
+                    # that deferred disposal from ever running
+                    # (gpt-5.6-sol round-3 review, finding 1).  The
+                    # retire re-verifies ownership and drops the stamp
+                    # in ONE registry-locked step
+                    # (:meth:`TabRegistry.finalize_removal`): a replay
+                    # stamped BEFORE it stands down at its commit,
+                    # while one stamped after it (or between the guard
+                    # above and this line) survives and re-bumps the
+                    # generation, superseding the close as on the
+                    # immediate path (gpt-5.6-sol round-6 review,
+                    # finding 1).  A no-op when the tab has a registry
+                    # row (the row's own publication token belongs to
+                    # its owner).
+                    if removal_token is not None:
+                        self.tab_registry.finalize_removal(
+                            tab_id, removal_token,
+                        )
+                    else:
+                        self.tab_registry.retire_unregistered(tab_id)
                 else:
                     state.is_merging = True
                     # Published with every claim that retires a
@@ -1464,6 +1648,22 @@ class VSCodeServer(
         still raised; otherwise leaves it alone.  Idempotent and safe
         to call when no state exists for *tab_id*.
 
+        The claim carries an ownership token, exactly like the close
+        paths: the teardown runs OUTSIDE the locks, so a capacity
+        replay can stamp a fresh rowless generation and commit a
+        reopen after the claim — an unqualified teardown would then
+        unregister the reopened state and delete its fresh stamp and
+        chat view (gpt-5.6-sol round-4 review, finding 1).  The claim
+        therefore stands down when the tab has a registry row (only a
+        later republication can have created one), retires any
+        pre-claim rowless replay stamp and draws a clock observation
+        in ONE registry-locked step
+        (:meth:`TabRegistry.retire_unregistered_and_observe`), and
+        hands the observation to the teardown as its removal token: a
+        replay stamped before the claim stands down at its own commit
+        (the stamp is gone), while one stamped after it makes the
+        teardown stand down.
+
         Args:
             tab_id: The frontend tab identifier.
         """
@@ -1475,9 +1675,16 @@ class VSCodeServer(
                 return
             if state.busy():
                 return
+            if self.tab_registry.has_tab(tab_id):
+                # A row exists only through a publication AFTER the
+                # close that set ``frontend_closed`` (the close removed
+                # the row): the reopen owns the tab, and its commit
+                # clears the flag under this same lock.
+                return
             state.is_merging = True
             state.merge_thread = threading.current_thread()
-        self._teardown_tab_resources(tab_id, state)
+            token = self.tab_registry.retire_unregistered_and_observe(tab_id)
+        self._teardown_tab_resources(tab_id, state, removal_token=token)
 
     def _teardown_tab_resources(
         self,
@@ -1528,25 +1735,48 @@ class VSCodeServer(
                 never ran a task (e.g. ``closeTab`` for an unknown
                 id).
         """
-        if state is not None:
-            wt_agent = state.agent
-            claim_retained = False
-            if wt_agent is not None and getattr(wt_agent, "_wt_pending", False):
-                try:
-                    claim_retained = not wt_agent.retire_for_disposal()
-                    wt_agent._flush_warnings(self.printer)
-                except Exception:  # pragma: no cover — git/printer failure
-                    logger.debug("Worktree release on tab close failed", exc_info=True)
-                    claim_retained = bool(getattr(wt_agent, "_wt_pending", False))
-            with self._state_lock:
+        wt_agent = state.agent if state is not None else None
+        claim_retained = False
+        if wt_agent is not None and getattr(wt_agent, "_wt_pending", False):
+            try:
+                claim_retained = not wt_agent.retire_for_disposal()
+                wt_agent._flush_warnings(self.printer)
+            except Exception:  # pragma: no cover — git/printer failure
+                logger.debug("Worktree release on tab close failed", exc_info=True)
+                claim_retained = bool(getattr(wt_agent, "_wt_pending", False))
+        # ONE ``_state_lock`` section for every destructive step, with
+        # ONE atomic ownership decision (``finalize_removal``: re-check
+        # + rowless stamp retirement under a single registry lock
+        # acquisition) at its head.  Splitting the tail into two locked
+        # sections, each guarded by its own registry reads, left seams
+        # where a rowless capacity replay could stamp between a guard
+        # and the destructive step it protected — the stale teardown
+        # then unregistered the reopened state or erased the fresh
+        # stamp (gpt-5.6-sol round-6 review, finding 1).  Now a stamp
+        # lands strictly before the decision (the teardown stands down
+        # wholesale; the replay's commit, which also takes
+        # ``_state_lock``, wins) or strictly after it (the stamp
+        # survives and the commit replays into a fully torn-down tab —
+        # the serial "closed, then reopened" order).
+        with self._state_lock:
+            if state is not None:
                 state.is_merging = False
                 state.merge_thread = None
-                if removal_token is not None and self.tab_registry.republished_since(
-                    tab_id, removal_token
+            if removal_token is not None:
+                if not self.tab_registry.finalize_removal(
+                    tab_id, removal_token,
                 ):
-                    # Reopened while the worktree was being retired:
-                    # the new publication owns this state from here on.
+                    # Reopened since the claim (e.g. while the worktree
+                    # was being retired): the new publication owns this
+                    # state — and any fresh rowless stamp — from here on.
                     return
+            else:
+                # Direct callers with no registry ordering keep the
+                # unconditional behaviour; the retire is a no-op when
+                # the tab has a registry row (the row's own publication
+                # token must survive for its owner).
+                self.tab_registry.retire_unregistered(tab_id)
+            if state is not None:
                 if claim_retained:
                     logger.warning(
                         "Tab %s closed but its worktree's keep-for-review "
@@ -1556,11 +1786,6 @@ class VSCodeServer(
                     )
                 else:
                     agent_state.unregister(state.task_id, state)
-        with self._state_lock:
-            if removal_token is not None and self.tab_registry.republished_since(
-                tab_id, removal_token
-            ):
-                return
             self._printer_cleanup_tab(tab_id)
             self._tab_chat_views.pop(tab_id, None)
             self._tab_opened_task_ids.pop(tab_id, None)
@@ -1692,17 +1917,46 @@ class VSCodeServer(
             with self._state_lock:
                 state = agent_state.find_by_tab(tab_id)
                 is_sub_view = state is not None and state.is_subagent
-                if state is not None:
-                    state.frontend_closed = False
-                if chat_id and not is_sub_view:
-                    self._tab_chat_views[tab_id] = chat_id
+            # Publish the reopen BEFORE clearing ``frontend_closed``:
+            # a stale duplicate close's cleanup tail orders itself on
+            # the registry clock (``republished_since``), so with
+            # publish-first it either sees this publication and stands
+            # down, or runs entirely before it — in which case the
+            # commit below lands last and the reopened tab does not
+            # end up marked closed.  The commit itself is qualified by
+            # THIS publication's generation (see
+            # ``_commit_replay_publication``): a close that removed
+            # the publication, or a newer publication, owns the tab
+            # from here on.
             if chat_id and not is_sub_view:
-                self._registry_update_tab(
+                # Stamped BEFORE the row publication: if the registry
+                # is at capacity (publication 0, no row), the commit is
+                # qualified by this rowless token instead, which a
+                # racing token-0 close retires (round-2 finding 1).
+                # Stamped under ``_state_lock``: every close teardown
+                # performs its destructive steps in one ``_state_lock``
+                # section, so serializing the stamp on the same lock
+                # totally orders it against any in-flight teardown — it
+                # can no longer land between a teardown's ownership
+                # check and its cleanup (gpt-5.6-sol round-6 review,
+                # finding 1).
+                with self._state_lock:
+                    fallback = self.tab_registry.stamp_unregistered(tab_id)
+                publication = self._registry_update_tab(
                     tab_id,
                     chat_id=chat_id,
                     task_id=str(task_id) if task_id else "",
                     create=True,
                 )
+                self._commit_replay_publication(
+                    tab_id, chat_id, publication, rebound_state,
+                    fallback_publication=fallback,
+                )
+            else:
+                with self._state_lock:
+                    state = agent_state.find_by_tab(tab_id)
+                    if state is not None:
+                        state.frontend_closed = False
             self._emit_pending_ask(tab_id)
             return
 
@@ -1750,14 +2004,6 @@ class VSCodeServer(
             )
             if live_events:
                 result["events"] = live_events
-        with self._state_lock:
-            state = agent_state.find_by_tab(tab_id)
-            if state is not None:
-                state.frontend_closed = False
-            if subagent_info is None and chat_id:
-                self._tab_chat_views[tab_id] = chat_id
-            else:
-                self._tab_chat_views.pop(tab_id, None)
         if subagent_info is None and chat_id:
             # A resumed chat binds + titles the tab for EVERY client:
             # the shared registry is what makes a history click on one
@@ -1765,13 +2011,41 @@ class VSCodeServer(
             # task is persisted too, so the ready replay path keeps a
             # tab pinned to an older task instead of silently
             # switching every client to the chat's latest task.
-            self._registry_update_tab(
+            # Published BEFORE the ``frontend_closed`` clear below: a
+            # stale duplicate close's cleanup tail orders itself on
+            # the registry clock, so it either sees this publication
+            # and stands down or runs entirely before the commit,
+            # which then lands last — the reopened tab can no longer
+            # end up published yet marked closed.  The commit is
+            # qualified by THIS publication's generation (see
+            # ``_commit_replay_publication``): a close that removed
+            # the publication, or a newer publication, owns the tab.
+            # Stamped BEFORE the row publication: if the registry is
+            # at capacity (publication 0, no row), the commit is
+            # qualified by this rowless token instead, which a racing
+            # token-0 close retires (round-2 finding 1).  Stamped under
+            # ``_state_lock`` so it is totally ordered against every
+            # close teardown's single destructive ``_state_lock``
+            # section (gpt-5.6-sol round-6 review, finding 1).
+            with self._state_lock:
+                fallback = self.tab_registry.stamp_unregistered(tab_id)
+            publication = self._registry_update_tab(
                 tab_id,
                 chat_id=chat_id,
                 title=str(result.get("task", "") or ""),
                 task_id=str(task_id) if task_id else "",
                 create=True,
             )
+            self._commit_replay_publication(
+                tab_id, chat_id, publication, rebound_state,
+                fallback_publication=fallback,
+            )
+        else:
+            with self._state_lock:
+                state = agent_state.find_by_tab(tab_id)
+                if state is not None:
+                    state.frontend_closed = False
+                self._tab_chat_views.pop(tab_id, None)
 
         if subagent_info is not None:
             is_done = _subagent_is_done(result.get("task_id"))

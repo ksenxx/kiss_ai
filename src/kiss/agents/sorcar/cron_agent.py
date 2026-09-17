@@ -552,30 +552,158 @@ def _run_prompt_job(
     return ("ok" if result.success else "error"), summary
 
 
-def _run_command_job(job: dict[str, Any]) -> tuple[str, str | None]:
+def _proc_descendants(root_pid: int) -> set[int]:
+    """Best-effort set of live descendant pids of *root_pid*.
+
+    Walks ``/proc`` (Linux) building the parent→children map from each
+    process's ``stat`` ppid field, then collects the transitive
+    children of *root_pid*.  Returns an empty set on platforms without
+    ``/proc`` (macOS/BSD) and for pids that raced away mid-scan.
+
+    Args:
+        root_pid: The pid whose descendants to collect.
+
+    Returns:
+        The pids of every currently visible descendant of *root_pid*.
+    """
+    children: dict[int, list[int]] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return set()
+    for name in entries:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as fp:
+                data = fp.read()
+        except OSError:
+            continue
+        # The ppid is the second field after the ")" that closes the
+        # (possibly space/paren-containing) command name.
+        fields = data.rpartition(b")")[2].split()
+        if len(fields) >= 2:
+            children.setdefault(int(fields[1]), []).append(int(name))
+    descendants: set[int] = set()
+    stack = [root_pid]
+    while stack:
+        for child in children.get(stack.pop(), []):
+            if child not in descendants:
+                descendants.add(child)
+                stack.append(child)
+    return descendants
+
+
+def _kill_command_tree(proc: subprocess.Popen) -> None:
+    """Best-effort kill of a timed-out command's whole process tree.
+
+    POSIX: kills the command's own process group (every ordinary
+    foreground/background descendant), then — because a descendant that
+    called ``setsid`` or daemonized lives in a NEW group the ``killpg``
+    misses — walks ``/proc`` for surviving descendants by parent chain
+    and kills each one's group and pid.  Descendants are snapshotted
+    BEFORE the group kill: once the shell dies its orphans re-parent to
+    init and the chain is lost.  The scan-and-kill pass is repeated a
+    bounded number of times to catch processes spawned mid-kill.
+    Residual limitation (documented, not guaranteed): a process that
+    double-detaches faster than the bounded rescan, or any descendant
+    on a POSIX system without ``/proc``, can still escape.
+
+    Windows: best-effort ``taskkill /T /F`` on the shell's pid (kills
+    the process tree Windows tracks), then ``proc.kill()`` as a
+    fallback; a descendant that detached from the tree (or a system
+    without ``taskkill``) is not covered.
+
+    Args:
+        proc: The timed-out command's shell process (session leader on
+            POSIX, direct child on Windows).
+    """
+    if os.name == "nt":  # pragma: no cover — Windows CI is not available here
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True, timeout=15, check=False,
+            )
+        proc.kill()
+        return
+    own_pgid = os.getpgrp()
+    for _ in range(3):
+        survivors = _proc_descendants(proc.pid)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, 9)
+        escaped = False
+        for pid in survivors:
+            if pid == os.getpid():  # pragma: no cover — defensive
+                continue
+            try:
+                pgid = os.getpgid(pid)
+            except OSError:
+                continue  # already dead
+            if pgid == proc.pid:
+                continue  # covered by the group kill above
+            escaped = True
+            # Kill the escapee's own group first (a setsid child leads
+            # a new group holding its subtree), then the pid itself.
+            if pgid != own_pgid:  # pragma: no branch — never our own group
+                with contextlib.suppress(OSError):
+                    os.killpg(pgid, 9)
+            with contextlib.suppress(OSError):
+                os.kill(pid, 9)
+        if not escaped:
+            break
+
+
+def _run_command_job(
+    job: dict[str, Any],
+    timeout_seconds: float | None = None,
+) -> tuple[str, str | None]:
     """Run a no-LLM command job (Hermes "no_agent" mode).
+
+    The command runs in its own session (process group), and a timeout
+    kills the WHOLE process tree — not just the shell.
+    ``subprocess.run(..., shell=True, timeout=...)`` kills only the
+    shell on expiry, so every descendant the command spawned survived
+    the timeout and kept running (and writing) forever, with a
+    repeating schedule spawning a fresh orphan tree on every tick; a
+    plain ``killpg`` still missed ``setsid``/daemonizing descendants.
+    See :func:`_kill_command_tree` for the exact guarantees and
+    residual limitations per platform.
 
     Args:
         job: The job dict (uses ``command``).
+        timeout_seconds: Maximum runtime before the command's process
+            group is killed; ``None`` uses
+            :data:`COMMAND_TIMEOUT_SECONDS`.
 
     Returns:
         ``(status, text)``: ``("silent", None)`` when the command
         succeeds with empty output, ``("ok", stdout)`` on success, and
         ``("error", output)`` on non-zero exit or timeout.
     """
+    timeout = COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    proc = subprocess.Popen(
+        str(job["command"]),
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=os.name != "nt",
+    )
     try:
-        proc = subprocess.run(
-            str(job["command"]),
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=COMMAND_TIMEOUT_SECONDS,
-        )
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        return "error", f"command timed out after {COMMAND_TIMEOUT_SECONDS:.0f}s"
-    output = proc.stdout.strip()
+        _kill_command_tree(proc)
+        # The tree is dead, so the pipes close and this drain returns
+        # promptly; the bounded retry guards an exotic straggler that
+        # survived the best-effort tree kill holding the pipe open.
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:  # pragma: no cover — defensive
+            proc.kill()
+        return "error", f"command timed out after {timeout:.0f}s"
+    output = stdout.strip()
     if proc.returncode != 0:
-        detail = (output + "\n" + proc.stderr.strip()).strip()
+        detail = (output + "\n" + stderr.strip()).strip()
         return "error", f"command exited {proc.returncode}: {detail}"
     if not output:
         return "silent", None

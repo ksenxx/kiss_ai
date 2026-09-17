@@ -10,11 +10,15 @@ integration for ``--channel``.
 
 from __future__ import annotations
 
+import json
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler
 from typing import Any
 
 import pytest
 
+from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
 from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
 from kiss.agents.third_party_agents.slack_agent import (
     SlackChannelBackend,
@@ -22,6 +26,30 @@ from kiss.agents.third_party_agents.slack_agent import (
     _token_path,
     main,
 )
+
+
+class _InvalidAuthHandler(BaseHTTPRequestHandler):
+    """Local Slack Web API stand-in answering every call with ``invalid_auth``.
+
+    Returns exactly what ``https://slack.com/api/auth.test`` returns for a
+    bad token, so ``SlackChannelBackend.connect()`` follows its real
+    ``SlackApiError`` path without any network dependence.
+    """
+
+    def do_POST(self) -> None:
+        """Reply 200 with Slack's invalid-token error body."""
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length:
+            self.rfile.read(length)
+        body = json.dumps({"ok": False, "error": "invalid_auth"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        """Silence request logging."""
 
 
 def _backup_and_clear() -> str | None:
@@ -171,8 +199,23 @@ class TestCLIOneShotMode:
 
         When a token exists but is invalid, _make_backend succeeds
         (it only loads the token), but run_once() fails at connect().
+        The Web API is a local server answering ``invalid_auth`` exactly
+        like slack.com does for a bad token, injected into the backend
+        instance ``main()`` constructs via its ``_api_base_url``
+        attribute, so the test is deterministic offline.
         """
         _save_token("xoxb-invalid-for-oneshot-test")
+        server = ThreadedHTTPServer(("127.0.0.1", 0), _InvalidAuthHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base_url = f"http://127.0.0.1:{server.server_address[1]}/api/"
+        original_init = SlackChannelBackend.__init__
+
+        def _init_with_local_api(
+            self: SlackChannelBackend, workspace: str = "default"
+        ) -> None:
+            original_init(self, workspace=workspace)
+            self._api_base_url = base_url
+
         original_argv = sys.argv
         sys.argv = [
             "kiss-slack",
@@ -181,10 +224,14 @@ class TestCLIOneShotMode:
             "-m",
             "test-model",
         ]
+        SlackChannelBackend.__init__ = _init_with_local_api  # type: ignore[method-assign]
         try:
             with pytest.raises(RuntimeError, match="Failed to connect"):
                 main()
         finally:
+            SlackChannelBackend.__init__ = original_init  # type: ignore[method-assign]
             sys.argv = original_argv
+            server.shutdown()
+            server.server_close()
         out = capsys.readouterr().out
         assert "Checking Slack channel for pending messages..." in out

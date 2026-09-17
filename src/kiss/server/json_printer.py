@@ -422,6 +422,57 @@ class JsonPrinter(Printer):
             self._bash_states[key] = bs
         return bs
 
+    def _bash_task_may_create_state(self, key: str) -> bool:
+        """Return whether a NEW ``_BashState`` may be created for *key*.
+
+        The ``_closed_tasks`` tombstone set is bounded, so after
+        :data:`_CLOSED_TASK_MEMORY` later task cleanups an old task's
+        tombstone is evicted and "not in ``_closed_tasks``" no longer
+        proves the task was never closed — a sufficiently delayed
+        ``bash_stream`` fragment could then recreate the freed state
+        and broadcast stale output (gpt-5.6-sol conc review,
+        finding 5).  Until the first eviction, tombstone absence IS
+        proof, and creation stays unconditional (also the behaviour
+        every pre-existing direct-printer test relies on).  After it,
+        creation additionally requires the task to be a POSITIVELY
+        ACTIVE producer in the agent-state registry
+        (``is_task_active``) — a check that cannot forget, no matter
+        how much later the straggler arrives.  Thread liveness is
+        deliberately NOT accepted as a substitute: normal task
+        finalization clears ``is_task_active`` and then runs
+        ``cleanup_task`` on the SAME runner thread, so an already
+        cleaned-up task's state can still be registered with a live
+        thread while the runner executes its post-task tail — a
+        ``thread_alive()`` fallback let exactly that tail recreate the
+        freed state and emit stale output once its tombstone was
+        evicted (gpt-5.6-sol round-2 review, finding 2).  Every real
+        producer (UI runs, sub-agents, standalone runs) is registered
+        active by ``agent_task_allocated`` — UI runs additionally by
+        the task runner — before its first bash fragment, so the
+        active-only gate never drops live output.
+
+        Called with ``_lock`` and ``_bash_lock`` held, which is why it
+        reads the registry dict directly instead of via
+        ``agent_state.get`` — taking ``STATE_LOCK`` here would create
+        a ``_lock`` → ``STATE_LOCK`` edge inverting the established
+        ``STATE_LOCK`` → printer-lock order.  The lock-free point read
+        is safe: it is a single dict lookup plus a plain attribute
+        read, and both race directions converge
+        (a task observed live here is unregistered only at/after its
+        cleanup, whose tombstone mark this caller's ``_lock`` section
+        already checked; a task observed dead can only stay dead).
+
+        Args:
+            key: The non-empty task key a fragment wants state for.
+
+        Returns:
+            ``True`` when creating a ``_BashState`` for *key* is safe.
+        """
+        if not self._closed_tasks_evicted:
+            return True
+        state = agent_state.agent_states.get(key)
+        return state is not None and state.is_task_active
+
     def __init__(self) -> None:
         self._thread_local = _PrinterThreadLocal()
         self._lock = threading.Lock()
@@ -448,6 +499,14 @@ class JsonPrinter(Printer):
         # offset write for one of them is dropped instead of leaking a
         # dict entry nothing would pop again.
         self._closed_tasks: dict[str, None] = {}
+        # Flips (monotonically) the first time the cap above evicts a
+        # tombstone.  From then on "key not in _closed_tasks" no longer
+        # proves the task was never closed, so the bash_stream branch's
+        # state CREATION additionally requires a positive agent-state
+        # liveness check (see _bash_task_may_create_state) — the
+        # bounded tombstone set stays bounded without the guarantee
+        # ever expiring (gpt-5.6-sol conc review, finding 5).
+        self._closed_tasks_evicted = False
         self._recordings: dict[str, list[dict[str, Any]]] = {}
         # task id → (tab_id, conn_id) of the UI tab the task was
         # launched from; set via register_task_ui when a task runs in
@@ -465,6 +524,20 @@ class JsonPrinter(Printer):
         # switched itself to (see broadcast_agent_model_pick).
         self._model_override_tabs: set[str] = set()
         self._task_model_override: dict[str, str] = {}
+        # Serialises {override-state update + modelPick broadcast} in
+        # subscribe_tab's catch-up, broadcast_agent_model_pick, and
+        # restore_model_pick.  Without it a restore could interleave
+        # between a catch-up's state write (under ``_lock``) and its
+        # broadcast (after ``_lock``), leaving the tab's picker showing
+        # a dead agent's model while the tab is no longer in
+        # ``_model_override_tabs`` — an inversion no later restore can
+        # repair.  Held ACROSS the broadcast, which is safe: modelPick
+        # events carry a ``tabId`` so ``broadcast`` never re-enters the
+        # model-pick methods or this lock (base printer: early return;
+        # WebPrinter: worktree tracking + socket send; MemoryPrinter:
+        # list append), and no caller of the three methods holds any
+        # printer lock.  Order: ``_model_pick_lock`` → ``_lock``.
+        self._model_pick_lock = threading.Lock()
         # Absolute paths of files each task changed through the
         # file-mutating tools (Write / Edit), keyed by task id.
         # Consumed by the task-runner's end-of-task auto-commit so
@@ -513,21 +586,30 @@ class JsonPrinter(Printer):
         key = self._coerce_task_id(task_id)
         if not key or not tab_id:
             return
-        with self._lock:
-            self._sweep_expired_subscribers()
-            viewers = self._subscribers.get(key)
-            if viewers is None:
-                viewers = set()
-                self._subscribers[key] = viewers
-            viewers.add(tab_id)
-            # A tab joining a task whose agent already switched models
-            # missed that one-shot event, and would otherwise sit on the
-            # wrong label until the task ended.
-            catch_up = self._task_model_override.get(key, "")
+        # _model_pick_lock keeps the catch-up's state write and its
+        # broadcast atomic w.r.t. restore_model_pick: a restore racing
+        # this subscribe used to discard the tab's membership and
+        # broadcast the user's model FIRST, then the resumed catch-up
+        # broadcast repainted the dead agent's model with the tab no
+        # longer in _model_override_tabs — a stale label no later
+        # restore could fix (restore early-returns for non-members).
+        with self._model_pick_lock:
+            with self._lock:
+                self._sweep_expired_subscribers()
+                viewers = self._subscribers.get(key)
+                if viewers is None:
+                    viewers = set()
+                    self._subscribers[key] = viewers
+                viewers.add(tab_id)
+                # A tab joining a task whose agent already switched
+                # models missed that one-shot event, and would
+                # otherwise sit on the wrong label until the task
+                # ended.
+                catch_up = self._task_model_override.get(key, "")
+                if catch_up:
+                    self._model_override_tabs.add(tab_id)
             if catch_up:
-                self._model_override_tabs.add(tab_id)
-        if catch_up:
-            self.broadcast_model_pick(catch_up, "agent", tab_id)
+                self.broadcast_model_pick(catch_up, "agent", tab_id)
 
     def register_task_ui(
         self,
@@ -887,16 +969,35 @@ class JsonPrinter(Printer):
         """
         if not model:
             return
-        # The task key is resolved ONCE, by _transient_targets itself
-        # (D-R5): re-deriving it here duplicated the resolution rule
-        # and could drift from the key the targets were computed for.
-        task_key, targets = self._transient_targets(task_id, tab_id)
-        with self._lock:
-            self._model_override_tabs.update(targets)
-            if task_key:
-                self._task_model_override[task_key] = model
-        for target in targets:
-            self.broadcast_model_pick(model, "agent", target)
+        # _model_pick_lock: the target registration and the broadcasts
+        # form one atomic step w.r.t. restore_model_pick, so a restore
+        # that observes a target in _model_override_tabs always puts
+        # its own broadcast AFTER the agent broadcast it overrides.
+        with self._model_pick_lock:
+            # The task key is resolved ONCE, by _transient_targets
+            # itself (D-R5): re-deriving it here duplicated the
+            # resolution rule and could drift from the key the targets
+            # were computed for.
+            task_key, targets = self._transient_targets(task_id, tab_id)
+            with self._lock:
+                self._model_override_tabs.update(targets)
+                # Never (re)store the override of a task cleanup_task
+                # already closed: the entry would resurrect the
+                # completed task's metadata and every LATER subscriber
+                # would catch up to the dead agent's model, with no
+                # cleanup left to pop it (gpt-5.6-sol conc review,
+                # finding 4).  cleanup_task marks _closed_tasks and
+                # pops the override under this same _model_pick_lock →
+                # _lock pair, so the check cannot be interleaved.  The
+                # transient broadcast below still goes out to the
+                # lingering subscribers — post-task broadcasts reaching
+                # their tabs during the linger window is the
+                # subscriber set's documented purpose (see
+                # _transient_targets).
+                if task_key and task_key not in self._closed_tasks:
+                    self._task_model_override[task_key] = model
+            for target in targets:
+                self.broadcast_model_pick(model, "agent", target)
 
     def restore_model_pick(self, model: str, tab_id: str) -> None:
         """Put *tab_id*'s own picker back to *model*, if an agent took it.
@@ -908,11 +1009,16 @@ class JsonPrinter(Printer):
             model: The model the user picked for this tab.
             tab_id: The tab whose picker to hand back.
         """
-        with self._lock:
-            if tab_id not in self._model_override_tabs:
-                return
-            self._model_override_tabs.discard(tab_id)
-        self.broadcast_model_pick(model, "restore", tab_id)
+        # _model_pick_lock: membership check, discard, and broadcast
+        # are atomic w.r.t. the two agent-pick writers, so the wire
+        # order of modelPick events always matches the final
+        # _model_override_tabs state (see the lock's __init__ comment).
+        with self._model_pick_lock:
+            with self._lock:
+                if tab_id not in self._model_override_tabs:
+                    return
+                self._model_override_tabs.discard(tab_id)
+            self.broadcast_model_pick(model, "restore", tab_id)
 
     def _inject_task_id(self, event: dict[str, Any]) -> dict[str, Any]:
         """Return *event* with ``taskId`` injected from thread-local storage.
@@ -1048,7 +1154,16 @@ class JsonPrinter(Printer):
         """
         if not tab_id:
             return
-        with self._lock:
+        # _model_pick_lock: this is a WRITER of the model-override
+        # lifecycle state, so it must be serialized with the
+        # subscribe/pick/restore trio.  Without it a
+        # broadcast_agent_model_pick that had already snapshotted its
+        # targets could resume after this cleanup and re-add the
+        # cleaned tab to _model_override_tabs (and emit a trailing
+        # agent modelPick to it) — resurrecting state no later restore
+        # could fix (gpt-5.6-sol conc review, finding 4).  Order:
+        # _model_pick_lock → _lock, the established edge.
+        with self._model_pick_lock, self._lock:
             self._model_override_tabs.discard(tab_id)
             self._sweep_expired_subscribers()
             for task_key in list(self._subscribers.keys()):
@@ -1078,7 +1193,11 @@ class JsonPrinter(Printer):
         lock order matches the flush paths), so a flush that already
         passed its re-check and is broadcasting finishes BEFORE this
         method returns.  After ``cleanup_task`` returns, no stale
-        ``system_output`` for the task can be broadcast.
+        ``system_output`` for the task can be broadcast.  The
+        ``_closed_tasks`` mark (under ``_lock``) lands BEFORE the bash
+        pop, so a straggler ``print(type="bash_stream")`` — whose
+        guard checks the mark and creates state atomically under
+        ``_lock`` — can never re-create the entry under the dead key.
 
         The subscriber set is preserved for ``subscriber_linger_seconds``
         so a broadcast that lands just after the task ends still fans
@@ -1098,6 +1217,49 @@ class JsonPrinter(Printer):
         key = self._coerce_task_id(task_id)
         if not key:
             return
+        # The ``_closed_tasks`` mark (under ``_lock``, below) is taken
+        # BEFORE the bash state is popped (under ``_bash_lock``): the
+        # ``bash_stream`` branch of :meth:`print` checks the mark and
+        # creates its state atomically under ``_lock``, so with this
+        # order every state a straggler fragment could create either
+        # sees the mark (and is dropped) or still exists when the pop
+        # below runs — no interleaving can resurrect an entry keyed by
+        # a dead task id.
+        #
+        # _model_pick_lock: this pops ``_task_model_override`` — model-
+        # override lifecycle state — so it must be serialized with the
+        # subscribe/pick/restore trio.  Without it a
+        # broadcast_agent_model_pick paused between its target snapshot
+        # and its state write could resume after this cleanup and
+        # recreate the completed task's override, feeding a dead
+        # agent's model to every later subscriber (gpt-5.6-sol conc
+        # review, finding 4).  Order: _model_pick_lock → _lock.
+        with self._model_pick_lock, self._lock:
+            self._recordings.pop(key, None)
+            self._changed_paths.pop(key, None)
+            self._task_model_override.pop(key, None)
+            self._tokens_offsets.pop(key, None)
+            self._budget_offsets.pop(key, None)
+            self._steps_offsets.pop(key, None)
+            self._tool_call_started.pop(key, None)
+            self._image_b64_used.pop(key, None)
+            self._closed_tasks.pop(key, None)
+            self._closed_tasks[key] = None
+            while len(self._closed_tasks) > _CLOSED_TASK_MEMORY:
+                self._closed_tasks.pop(next(iter(self._closed_tasks)))
+                self._closed_tasks_evicted = True
+            # The launching-tab entry dies WITH the task (unlike the
+            # subscriber set, which lingers below to serve post-task
+            # broadcasts): _transient_targets must never route through
+            # a tab whose task already ended.
+            self._task_ui.pop(key, None)
+            if key in self._subscribers:
+                if subscriber_linger_seconds <= 0:
+                    self._subscribers.pop(key, None)
+                    self._subscriber_expiry.pop(key, None)
+                else:
+                    self._subscriber_expiry[key] = time.monotonic() + subscriber_linger_seconds
+            self._sweep_expired_subscribers()
         with self._bash_lock:
             bs = self._bash_states.pop(key, None)
             if bs is not None:
@@ -1112,31 +1274,6 @@ class JsonPrinter(Printer):
             # lifetime and must land before cleanup completes.
             with bs.flush_lock:
                 pass
-        with self._lock:
-            self._recordings.pop(key, None)
-            self._changed_paths.pop(key, None)
-            self._task_model_override.pop(key, None)
-            self._tokens_offsets.pop(key, None)
-            self._budget_offsets.pop(key, None)
-            self._steps_offsets.pop(key, None)
-            self._tool_call_started.pop(key, None)
-            self._image_b64_used.pop(key, None)
-            self._closed_tasks.pop(key, None)
-            self._closed_tasks[key] = None
-            while len(self._closed_tasks) > _CLOSED_TASK_MEMORY:
-                self._closed_tasks.pop(next(iter(self._closed_tasks)))
-            # The launching-tab entry dies WITH the task (unlike the
-            # subscriber set, which lingers below to serve post-task
-            # broadcasts): _transient_targets must never route through
-            # a tab whose task already ended.
-            self._task_ui.pop(key, None)
-            if key in self._subscribers:
-                if subscriber_linger_seconds <= 0:
-                    self._subscribers.pop(key, None)
-                    self._subscriber_expiry.pop(key, None)
-                else:
-                    self._subscriber_expiry[key] = time.monotonic() + subscriber_linger_seconds
-            self._sweep_expired_subscribers()
 
     def _sweep_expired_subscribers(self) -> None:
         """Drop subscriber sets whose post-task linger has expired.
@@ -1513,25 +1650,56 @@ class JsonPrinter(Printer):
         if type == "bash_stream":
             text = ""
             gen = 0
-            with self._bash_lock:
-                bs = self._bash_state
-                bs.buffer.append(str(content))
-                gen = bs.generation
-                if time.monotonic() - bs.last_flush >= 0.1:
-                    if bs.timer is not None:
-                        bs.timer.cancel()
-                        bs.timer = None
-                    text = "".join(bs.buffer)
-                    bs.buffer.clear()
-                    bs.last_flush = time.monotonic()
-                elif bs.timer is None:
-                    owner_task = getattr(self._thread_local, "task_id", None)
-                    bs.timer = threading.Timer(
-                        0.1,
-                        partial(self._timer_flush_for_task, owner_task),
-                    )
-                    bs.timer.daemon = True
-                    bs.timer.start()
+            with self._lock:
+                # No-resurrection guard, closing the one straggler
+                # path the sibling guards (_flush_bash,
+                # _emit_tool_result, _format_tool_call,
+                # _collect_result_images, _write_offset) left open: a
+                # bash fragment arriving after ``cleanup_task`` must
+                # not re-create the freed ``_BashState`` — the creating
+                # ``_bash_state`` property would insert an entry keyed
+                # by a dead task id that nothing ever pops (a permanent
+                # leak), and its immediate flush (``last_flush`` 0.0)
+                # would broadcast post-task ``system_output`` to the
+                # lingering subscriber set.  The check and the create
+                # are ATOMIC w.r.t. ``cleanup_task``, which marks
+                # ``_closed_tasks`` under ``_lock`` BEFORE popping the
+                # state under ``_bash_lock``: either the mark precedes
+                # this block (fragment dropped) or the state created
+                # here still exists when the pop runs.  Lock order
+                # ``_lock`` → ``_bash_lock`` is new and acyclic — no
+                # path acquires ``_lock`` while holding ``_bash_lock``
+                # (broadcasts run under ``flush_lock`` only).  The
+                # task-less ""-key path is unaffected: cleanup_task
+                # never closes "".
+                key = self._task_key()
+                if key in self._closed_tasks:
+                    return ""
+                with self._bash_lock:
+                    if (
+                        key
+                        and key not in self._bash_states
+                        and not self._bash_task_may_create_state(key)
+                    ):
+                        return ""
+                    bs = self._bash_state
+                    bs.buffer.append(str(content))
+                    gen = bs.generation
+                    if time.monotonic() - bs.last_flush >= 0.1:
+                        if bs.timer is not None:
+                            bs.timer.cancel()
+                            bs.timer = None
+                        text = "".join(bs.buffer)
+                        bs.buffer.clear()
+                        bs.last_flush = time.monotonic()
+                    elif bs.timer is None:
+                        owner_task = getattr(self._thread_local, "task_id", None)
+                        bs.timer = threading.Timer(
+                            0.1,
+                            partial(self._timer_flush_for_task, owner_task),
+                        )
+                        bs.timer.daemon = True
+                        bs.timer.start()
             if text:
                 with bs.flush_lock:
                     stale = False

@@ -196,7 +196,22 @@ def test_explorer_file_menu_matches_vscode(browser, harness, worktree):
             "#sidebar-context-menu .tree-ctx-key",
             "els => els.map(e => e.textContent)",
         )
-        assert "F2" in keys and "Ctrl+X" in keys and "Shift+Alt+C" in keys
+        # Copy Path renders the platform-correct VS Code chord: Shift+Alt+C
+        # on Windows, Ctrl+Alt+C on Linux, Alt+Cmd+C on macOS.  Headless
+        # Playwright reports the real host platform, so derive it.
+        platform = page.evaluate("() => navigator.platform || ''")
+        is_mac = bool(re.search(r"Mac|iPhone|iPad", platform))
+        is_linux = bool(re.search(r"Linux|X11", platform)) and not is_mac
+        if is_mac:
+            copy_path_key = "\u2325\u2318C"
+            cut_key = "\u2318X"
+        elif is_linux:
+            copy_path_key = "Ctrl+Alt+C"
+            cut_key = "Ctrl+X"
+        else:
+            copy_path_key = "Shift+Alt+C"
+            cut_key = "Ctrl+X"
+        assert "F2" in keys and cut_key in keys and copy_path_key in keys
         # The row under the pointer is highlighted while the menu is up.
         assert _explorer_row(page, "feature.txt").evaluate(
             "el => el.classList.contains('ctx-active')",

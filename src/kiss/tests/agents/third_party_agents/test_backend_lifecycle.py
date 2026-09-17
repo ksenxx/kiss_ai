@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import queue
-import socket
 import threading
 import time
 from typing import Any, cast
@@ -35,27 +34,23 @@ class _FakeSocket:
         self.closed = True
 
 
-def _free_port() -> int:
-    """Return an ephemeral free TCP port on localhost."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 def test_webhook_connect_failure_is_reported() -> None:
     backend = LineChannelBackend()
     backend._message_queue = queue.Queue()
-    port = _free_port()
-    assert backend._start_webhook_server(port=port)
-    conflict = LineChannelBackend()
-    assert not conflict._start_webhook_server(port=port)
-    assert "bind failed" in conflict.connection_info.lower()
-    backend.disconnect()
+    assert backend._start_webhook_server(port=0)
+    try:
+        assert backend._webhook_server is not None
+        port = int(backend._webhook_server.server_address[1])
+        conflict = LineChannelBackend()
+        assert not conflict._start_webhook_server(port=port)
+        assert "bind failed" in conflict.connection_info.lower()
+    finally:
+        backend.disconnect()
 
 
 def test_synology_disconnect_stops_server() -> None:
     backend = SynologyChatChannelBackend()
-    assert backend._start_webhook_server(port=_free_port())
+    assert backend._start_webhook_server(port=0)
     backend.disconnect()
     assert backend._webhook_server is None
     assert backend._webhook_thread is None
@@ -63,7 +58,7 @@ def test_synology_disconnect_stops_server() -> None:
 
 def test_zalo_disconnect_stops_server() -> None:
     backend = ZaloChannelBackend()
-    assert backend._start_webhook_server(port=_free_port())
+    assert backend._start_webhook_server(port=0)
     backend.disconnect()
     assert backend._webhook_server is None
     assert backend._webhook_thread is None

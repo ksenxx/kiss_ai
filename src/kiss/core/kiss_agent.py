@@ -11,7 +11,7 @@ import inspect
 import logging
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from kiss.core.base import Base
 from kiss.core.kiss_error import (
@@ -69,6 +69,30 @@ _CONTEXT_OVERFLOW_PHRASES = (
 )
 
 
+class _UsageTotals(NamedTuple):
+    """One immutable ``(budget_used, total_tokens_used, step_count)`` triple.
+
+    A :class:`KISSAgent` publishes its whole usage state as ONE of
+    these records with a single ``STORE_ATTR`` — atomic under both
+    thread interleaving and asynchronously injected exceptions
+    (``PyThreadState_SetAsyncExc``, the server's stop watchdog).  The
+    legacy scalar counters are properties derived from the current
+    record, so no observer — a concurrent live-usage monitor, the
+    parent :class:`RelentlessAgent`'s session bank in its
+    ``except BaseException`` recovery path — can ever see the tokens
+    of a model response without its cost (or vice versa): a stop that
+    lands anywhere inside a response-accounting update either leaves
+    the previous complete triple or the next complete triple.
+    """
+
+    budget_used: float
+    total_tokens_used: int
+    step_count: int
+
+
+_ZERO_USAGE = _UsageTotals(0.0, 0, 0)
+
+
 class _EmptyModelResponseError(KISSError):
     """Raised when a model repeatedly returns no text and no tool calls.
 
@@ -106,6 +130,64 @@ if TYPE_CHECKING:  # pragma: no cover
 
 class KISSAgent(Base):
     """A KISS agent using native function calling."""
+
+    # Class-level default so the derived counter properties below work
+    # from the first ``Base.__init__`` store onwards (each setter then
+    # publishes an instance-level replacement snapshot in one
+    # ``STORE_ATTR``).
+    _usage_totals: _UsageTotals = _ZERO_USAGE
+
+    @property
+    def budget_used(self) -> float:
+        """Cumulative USD spend, derived from the atomic usage snapshot."""
+        return self._usage_totals.budget_used
+
+    @budget_used.setter
+    def budget_used(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self, value: float,
+    ) -> None:
+        # Publishing a whole replacement record keeps the triple
+        # coherent for concurrent readers; single-field writers are
+        # same-thread only (this agent's run loop, pre-run zeroing).
+        self._usage_totals = self._usage_totals._replace(budget_used=float(value))
+
+    @property
+    def total_tokens_used(self) -> int:
+        """Cumulative tokens, derived from the atomic usage snapshot."""
+        return self._usage_totals.total_tokens_used
+
+    @total_tokens_used.setter
+    def total_tokens_used(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self, value: int,
+    ) -> None:
+        self._usage_totals = self._usage_totals._replace(
+            total_tokens_used=int(value)
+        )
+
+    @property
+    def step_count(self) -> int:
+        """Completed agentic steps, derived from the atomic usage snapshot."""
+        return self._usage_totals.step_count
+
+    @step_count.setter
+    def step_count(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self, value: int,
+    ) -> None:
+        self._usage_totals = self._usage_totals._replace(step_count=int(value))
+
+    def usage_snapshot(self) -> tuple[float, int, int]:
+        """Return one coherent ``(budget_used, total_tokens_used, step_count)``.
+
+        Reads the immutable snapshot attribute ONCE, so the triple can
+        never mix dimensions from two different accounting states —
+        unlike three separate property reads, between which a
+        concurrent response-accounting publish could land.  Concurrent
+        readers (``sorcar_agent._executor_usage`` polled by the live
+        usage monitor and by abandoned-child reclaims, the parent's
+        session bank) rely on this.
+        """
+        totals = self._usage_totals
+        return (totals.budget_used, totals.total_tokens_used, totals.step_count)
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -147,10 +229,10 @@ class KISSAgent(Base):
         self._cached_tools_schema: list[dict[str, Any]] | None = None
         self.messages: list[dict[str, Any]] = []
         self.step_count = 0
-        self.total_tokens_used = 0
+        self.total_tokens_used = 0  # pyright: ignore[reportIncompatibleVariableOverride]
         self.context_tokens_used = 0
         self._llm_hook_conversation_index = 0
-        self.budget_used = 0.0
+        self.budget_used = 0.0  # pyright: ignore[reportIncompatibleVariableOverride]
         # ``run_start_timestamp`` is the real wall clock: the saved record
         # pairs it with ``run_end_timestamp``.  The trajectory FILENAME is
         # keyed by (name, id, _trajectory_stamp) in whole seconds; two runs
@@ -563,7 +645,7 @@ class KISSAgent(Base):
             # one shot rather than resume turn-by-turn tool prompting.
             if self.model.runs_task_to_completion:
                 return self._run_task_to_completion()
-            self.step_count += 1
+            self.step_count += 1  # pyright: ignore[reportIncompatibleVariableOverride]
             self._check_limits()
             try:
                 result = self._execute_step()
@@ -959,7 +1041,17 @@ class KISSAgent(Base):
             self.function_map[tool.__name__] = tool
 
     def _update_tokens_and_budget_from_response(self, response: Any) -> None:
-        """Updates token counter and budget from API response."""
+        """Updates token counter and budget from API response.
+
+        The tokens and the cost of one response are committed together
+        as ONE immutable :class:`_UsageTotals` snapshot stored with a
+        single ``STORE_ATTR``.  Separate ``total_tokens_used`` /
+        ``budget_used`` stores allowed an asynchronously injected stop
+        (``PyThreadState_SetAsyncExc``) to land between them, and the
+        parent's ``except BaseException`` recovery bank then recorded a
+        permanently torn source triple — tokens without their cost
+        (round-4 review, finding 1).
+        """
         try:
             usage = self.model.extract_input_output_token_counts_from_response(response)
             audio_input = 0
@@ -988,7 +1080,6 @@ class KISSAgent(Base):
                 + audio_input
                 + audio_output
             )
-            self.total_tokens_used += call_tokens
             if call_tokens > 0:
                 self.context_tokens_used = call_tokens
             cost = calculate_cost(
@@ -1001,7 +1092,17 @@ class KISSAgent(Base):
                 num_audio_input_tokens=audio_input,
                 num_audio_output_tokens=audio_output,
             )
-            self.budget_used += cost
+            # ONE store publishes tokens and cost together (see the
+            # docstring): a stop injected anywhere in this method now
+            # leaves either the previous complete triple (the response
+            # is simply unaccounted, exactly as if the stop had landed
+            # before the call) or the next complete triple.
+            totals = self._usage_totals
+            self._usage_totals = _UsageTotals(
+                totals.budget_used + cost,
+                totals.total_tokens_used + call_tokens,
+                totals.step_count,
+            )
         except KISSError:
             raise
         except Exception as e:  # pragma: no cover

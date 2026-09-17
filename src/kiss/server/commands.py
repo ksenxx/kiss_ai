@@ -57,8 +57,6 @@ def _kiss_home_is_default() -> bool:
     if not custom:
         return True
     try:
-        from pathlib import Path
-
         return Path(custom).resolve() == (Path.home() / ".kiss").resolve()
     except OSError:
         return False

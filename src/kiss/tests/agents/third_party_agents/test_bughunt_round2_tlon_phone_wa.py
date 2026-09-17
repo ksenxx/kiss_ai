@@ -142,11 +142,17 @@ class TestTlonPokeProtocol:
         self._server, self.base = _start_server()
         self._cfg = _ConfigBackup(_tlon_config.path)
         self._cfg.save()
-        _tlon_config.save(
-            {"ship_url": self.base, "code": "lidlut-tabwed", "ship": "~sampel-palnet"}
-        )
-        self.backend = TlonChannelBackend()
-        assert self.backend.connect() is True
+        try:
+            _tlon_config.save(
+                {"ship_url": self.base, "code": "lidlut-tabwed", "ship": "~sampel-palnet"}
+            )
+            self.backend = TlonChannelBackend()
+            assert self.backend.connect() is True
+        except BaseException:
+            # pytest skips teardown_method when setup_method raises; restore
+            # the config (and stop the server) ourselves so nothing leaks.
+            self.teardown_method()
+            raise
 
     def teardown_method(self) -> None:
         self._server.shutdown()
@@ -207,9 +213,15 @@ class TestTlonPokeWithoutShip:
         self._server, self.base = _start_server()
         self._cfg = _ConfigBackup(_tlon_config.path)
         self._cfg.save()
-        _tlon_config.save({"ship_url": self.base, "code": "lidlut-tabwed"})
-        self.backend = TlonChannelBackend()
-        assert self.backend.connect() is True, "config without 'ship' must still load"
+        try:
+            _tlon_config.save({"ship_url": self.base, "code": "lidlut-tabwed"})
+            self.backend = TlonChannelBackend()
+            assert self.backend.connect() is True, "config without 'ship' must still load"
+        except BaseException:
+            # pytest skips teardown_method when setup_method raises; restore
+            # the config (and stop the server) ourselves so nothing leaks.
+            self.teardown_method()
+            raise
 
     def teardown_method(self) -> None:
         self._server.shutdown()
@@ -231,10 +243,16 @@ class TestPhoneControlSenderFilter:
         self._server, self.base = _start_server()
         self._cfg = _ConfigBackup(_phone_config.path)
         self._cfg.save()
-        port = self._server.server_address[1]
-        _phone_config.save({"device_ip": "127.0.0.1", "device_port": str(port)})
-        self.backend = PhoneControlChannelBackend()
-        assert self.backend.connect() is True
+        try:
+            port = self._server.server_address[1]
+            _phone_config.save({"device_ip": "127.0.0.1", "device_port": str(port)})
+            self.backend = PhoneControlChannelBackend()
+            assert self.backend.connect() is True
+        except BaseException:
+            # pytest skips teardown_method when setup_method raises; restore
+            # the config (and stop the server) ourselves so nothing leaks.
+            self.teardown_method()
+            raise
 
     def teardown_method(self) -> None:
         self._server.shutdown()

@@ -45,7 +45,7 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _ClassifierSpend
 from kiss.agents.sorcar.task_classifier import (
     _VERDICT_JSON_SCHEMA,
     CLASSIFIER_CACHE_FILENAME,
@@ -938,10 +938,8 @@ def test_classify_for_run_disabled_by_override(
     )
     assert agent._classification_attempted is True
     assert agent._classification_preseeded is True
-    # No classification ran, so no classifier spend was banked.
-    assert agent._classifier_budget_used == 0.0
-    assert agent._classifier_tokens_used == 0
-    assert agent._classifier_steps == 0
+    # No classification ran, so no classifier spend was published.
+    assert agent._classifier_spend is None
     # The run reuses the seed instead of re-classifying.
     assert agent._classify_task_once(MODEL, _DEV_TASK, None) is None
 
@@ -964,18 +962,14 @@ def test_fold_classifier_usage_banks_and_resets(
 ) -> None:
     """Classifier spend lands in the run totals exactly once."""
     agent = SorcarAgent("clf-fold")
-    agent._classifier_budget_used = 0.25
-    agent._classifier_tokens_used = 123
-    agent._classifier_steps = 2
+    agent._classifier_spend = _ClassifierSpend("classifier:t", 0.25, 123, 2)
     agent._classification_attempted = True
     agent._task_classification = TaskClassification(True, False)
     agent._fold_classifier_usage()
     assert agent.budget_used == pytest.approx(0.25)
     assert agent.total_tokens_used == 123
     assert agent.total_steps == 2
-    assert agent._classifier_budget_used == 0.0
-    assert agent._classifier_tokens_used == 0
-    assert agent._classifier_steps == 0
+    assert agent._classifier_spend is None
     assert agent._classification_attempted is False
     assert agent._task_classification is None
     # Folding again is a no-op: the counters were reset.
@@ -1203,15 +1197,11 @@ def test_reset_drops_stale_unfolded_usage(env: IsolatedKissHome) -> None:
     agent = SorcarAgent("clf-stale-usage")
     agent._classification_attempted = True
     agent._task_classification = TaskClassification(True, False)
-    agent._classifier_budget_used = 0.5
-    agent._classifier_tokens_used = 42
-    agent._classifier_steps = 1
+    agent._classifier_spend = _ClassifierSpend("classifier:stale", 0.5, 42, 1)
     agent._reset_task_classification()
     assert agent._classification_attempted is False
     assert agent._task_classification is None
-    assert agent._classifier_budget_used == 0.0
-    assert agent._classifier_tokens_used == 0
-    assert agent._classifier_steps == 0
+    assert agent._classifier_spend is None
 
 
 def test_reset_keeps_preseeded_verdict(env: IsolatedKissHome) -> None:
@@ -1278,7 +1268,8 @@ def test_classify_task_for_run_enabled_override_beats_config(
     )
     assert verdict is not None
     assert verdict.is_development is True
-    assert agent._classifier_budget_used > 0.0
+    spend = agent._classifier_spend
+    assert spend is not None and spend.budget > 0.0
 
 
 @live_api

@@ -470,13 +470,70 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     resolveMap: Map<string, () => void>,
     timeoutMs: number | undefined = 120_000,
   ): void {
-    if (tabId !== undefined) {
-      const prev = resolveMap.get(tabId);
-      if (prev) {
-        resolveMap.delete(tabId);
-        progressMap.delete(tabId);
-        prev();
+    // An action sent without a tab id is registered under '' — the same
+    // key the daemon normalizes an omitted command tabId to and echoes
+    // on worktree_progress/worktree_result — so the terminal result,
+    // replacement by a newer action, disconnect, and dispose() all reach
+    // this resolver.  The timeout below is only a safety net.
+    const key = tabId ?? '';
+    const prev = resolveMap.get(key);
+    if (prev) {
+      resolveMap.delete(key);
+      progressMap.delete(key);
+      prev();
+    }
+    // Publish the lifecycle entry SYNCHRONOUSLY, before deferring into
+    // the notification wrapper.  The production webview poster invokes
+    // the task below only in a microtask (Promise.resolve().then(task)
+    // in WebviewNotifications.ts), so a second same-key action — or a
+    // terminal worktree_result / disconnect / dispose() — arriving in
+    // the SAME turn must already find this resolver in the map.  If it
+    // were registered only inside the task, both same-key calls would
+    // pass the replacement check above, the second task would overwrite
+    // the first resolver, and the first toast would stay open for ever
+    // (its safety-net timer's identity guard no longer matching).
+    let settled = false;
+    let ownProgress: vscode.Progress<{message?: string}> | undefined;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    let resolveDone: () => void = () => {};
+    const done = new Promise<void>(resolve => {
+      resolveDone = resolve;
+    });
+    const settle = (): void => {
+      if (settled) return;
+      settled = true;
+      // Cancel the safety-net timer on EVERY settlement path
+      // (replacement, terminal result, disconnect, tab cleanup,
+      // dispose(), or the timer itself).  Otherwise each early-settled
+      // action leaves a referenced 120s timer alive, and those obsolete
+      // timers alone keep an otherwise idle extension-host process
+      // running for up to two minutes.
+      if (timeoutHandle !== undefined) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = undefined;
       }
+      resolveDone();
+    };
+    resolveMap.set(key, settle);
+    if (
+      timeoutMs !== undefined &&
+      Number.isFinite(timeoutMs) &&
+      timeoutMs > 0
+    ) {
+      timeoutHandle = setTimeout(() => {
+        if (resolveMap.get(key) === settle) {
+          resolveMap.delete(key);
+          // Drop the progress object too: a late progress event must
+          // not report() into a toast that has already been closed.
+          if (
+            ownProgress !== undefined &&
+            progressMap.get(key) === ownProgress
+          ) {
+            progressMap.delete(key);
+          }
+          settle();
+        }
+      }, timeoutMs);
     }
     withWebviewNotificationProgress(
       {
@@ -484,31 +541,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         title,
       },
       progress => {
-        if (tabId !== undefined) {
-          progressMap.set(tabId, progress);
+        // This may run a microtask after the entry was published.  If
+        // the entry was superseded or settled meanwhile, do not touch
+        // the maps: `done` is already resolved and closes this toast
+        // at once.
+        if (!settled && resolveMap.get(key) === settle) {
+          progressMap.set(key, progress);
+          ownProgress = progress;
         }
-        return new Promise<void>(resolve => {
-          if (tabId !== undefined) {
-            resolveMap.set(tabId, resolve);
-          }
-          if (
-            timeoutMs !== undefined &&
-            Number.isFinite(timeoutMs) &&
-            timeoutMs > 0
-          ) {
-            setTimeout(() => {
-              if (tabId !== undefined && resolveMap.get(tabId) === resolve) {
-                resolveMap.delete(tabId);
-                // Drop the progress object too: a late progress event must
-                // not report() into a toast that has already been closed.
-                if (progressMap.get(tabId) === progress) {
-                  progressMap.delete(tabId);
-                }
-                resolve();
-              }
-            }, timeoutMs);
-          }
-        });
+        return done;
       },
     );
   }
@@ -1076,21 +1117,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Resolve *p* for a tab: against *wd* first, then against the tab's
-   * pending worktree directory.
-   *
-   * A worktree task's committed artifacts live only on its un-merged
-   * `kiss/wt-*` branch until the user merges (or the next run
-   * auto-retires it), so a path printed in its result panel does not
-   * exist under the workspace root yet and a plain
-   * `resolveWorkspaceFile(p, wd)` reports it missing — leaving the
-   * link permanently grey.  Falling back to the worktree dir recorded
-   * for the tab (`worktree_created` / `worktree_done`) makes the path
-   * resolvable the moment the result renders; after a merge or discard
-   * the `worktree_result` handler drops the entry and the workspace
-   * copy (or genuine absence) wins again.
-   */
-  /**
    * Restore the pending-worktree fallback from a replayed transcript.
    *
    * Applies the same net effect as receiving the nested worktree
@@ -1120,6 +1146,21 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Resolve *p* for a tab: against *wd* first, then against the tab's
+   * pending worktree directory.
+   *
+   * A worktree task's committed artifacts live only on its un-merged
+   * `kiss/wt-*` branch until the user merges (or the next run
+   * auto-retires it), so a path printed in its result panel does not
+   * exist under the workspace root yet and a plain
+   * `resolveWorkspaceFile(p, wd)` reports it missing — leaving the
+   * link permanently grey.  Falling back to the worktree dir recorded
+   * for the tab (`worktree_created` / `worktree_done`) makes the path
+   * resolvable the moment the result renders; after a merge or discard
+   * the `worktree_result` handler drops the entry and the workspace
+   * copy (or genuine absence) wins again.
+   */
   private _resolveTabFile(
     p: string,
     wd: string,
