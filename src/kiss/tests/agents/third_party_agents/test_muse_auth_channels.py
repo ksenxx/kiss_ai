@@ -46,7 +46,6 @@ import gzip
 import json
 import socket
 import threading
-import time
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -82,6 +81,12 @@ from kiss.agents.third_party_agents.slack_agent import (
     _muse_web_client,
     _save_token,
     _token_path,
+)
+from kiss.tests.agents.third_party_agents.muse_test_utils import (
+    auth_tools,
+    setup_muse_env,
+    teardown_muse_env,
+    wait_daemon_stopped,
 )
 
 _REAL_SLACK_TOKEN = "xoxb-real-secret-slack"
@@ -209,9 +214,6 @@ def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     real hosts are fixed); Firecrawl deliberately gets none, so its
     tests prove the enrollment-time ``hosts`` extension works.
     """
-    monkeypatch.setenv("KISS_MUSE_AUTH", "1")
-    directory = muse_auth_dir()
-    directory.mkdir(parents=True, exist_ok=True)
     policy = {
         "defaults": {"read": "allow", "write": "ask"},
         "services": {
@@ -219,12 +221,9 @@ def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
             "brave_search": {"extra_hosts": ["127.0.0.1"]},
         },
     }
-    (directory / "policy.json").write_text(json.dumps(policy))
+    setup_muse_env(monkeypatch, policy)
     yield isolated_kiss_home
-    stop_daemon()
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and socket_path().exists():
-        time.sleep(0.05)
+    teardown_muse_env()
 
 
 def _slack_backend(api_server: _ApiServer) -> SlackChannelBackend:
@@ -352,7 +351,7 @@ def test_slack_token_rotation_and_clear_via_tools(muse_env: Path, api_server: _A
     agent = SlackAgent()
     assert agent._backend._client is None
     agent._backend._api_base_url = f"http://127.0.0.1:{api_server.server_address[1]}/api/"
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
 
     assert json.loads(tools["authenticate_slack"]("xoxb-first"))["ok"] is True
     client = agent._backend._client
@@ -446,7 +445,7 @@ def test_firecrawl_rotation_and_clear_via_tools(muse_env: Path, api_server: _Api
 
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     agent = FirecrawlAgent()
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     assert "Not configured" in tools["check_firecrawl_auth"]()
 
     assert json.loads(tools["authenticate_firecrawl"]("fc-first", base_url))["ok"] is True
@@ -503,7 +502,7 @@ def test_brave_rotation_and_clear_via_tools(muse_env: Path, api_server: _ApiServ
     from kiss.agents.third_party_agents.brave_search_agent import BraveSearchAgent
 
     agent = BraveSearchAgent()
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}/res/v1"
 
     assert json.loads(tools["authenticate_brave_search"]("brave-first"))["ok"] is True
@@ -624,8 +623,12 @@ def _start_relic_daemon() -> tuple[threading.Thread, threading.Event]:
                     send_frame(conn, {"ok": True})
                 else:
                     send_frame(conn, {"ok": True, "services": []})
-        server.close()
+        # Unlink BEFORE close: connects to an unlinked-but-bound UDS fail
+        # immediately (what ensure_daemon polls for), and a late unlink can
+        # no longer delete the NEW daemon's socket bound at the same path
+        # after close() signalled "down".
         path.unlink(missing_ok=True)
+        server.close()
 
     relic = threading.Thread(target=serve_relic, daemon=True)
     relic.start()
@@ -649,9 +652,7 @@ def test_stale_pre_upgrade_daemon_is_replaced(muse_env: Path) -> None:
     # caught without any cache reset: the socket identity changed, so
     # the handshake reruns and replaces the relic again.
     stop_daemon()
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and socket_path().exists():
-        time.sleep(0.05)
+    wait_daemon_stopped()
     relic2, stopped2 = _start_relic_daemon()
     muse_client.ensure_daemon()
     relic2.join(timeout=10.0)
@@ -734,7 +735,7 @@ def test_slack_direct_muse_auth_workspace_is_listed(
 
     agent = SlackAgent(workspace="team3")
     agent._backend._api_base_url = f"http://127.0.0.1:{api_server.server_address[1]}/api/"
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     # Allow the boundary to reach the emulator for this workspace.
     policy_path = muse_auth_dir() / "policy.json"
     policy = json.loads(policy_path.read_text())
@@ -757,7 +758,7 @@ def test_slack_transport_failure_rolls_back_enrollment(
 
     agent = SlackAgent()
     agent._backend._api_base_url = f"http://127.0.0.1:{refusing_port}/api/"
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     result = json.loads(tools["authenticate_slack"]("xoxb-unvalidated-secret"))
     assert result["ok"] is False
     assert "Token validation failed" in result["error"]
@@ -921,7 +922,7 @@ def test_legacy_mode_untouched(isolated_kiss_home: Path, api_server: _ApiServer,
 
     agent = SlackAgent()
     agent._backend._api_base_url = api_base_url
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     assert json.loads(tools["authenticate_slack"](_REAL_SLACK_TOKEN))["ok"] is True
     assert agent._backend._client is not None
     assert agent._backend._client.token == _REAL_SLACK_TOKEN

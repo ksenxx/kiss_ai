@@ -15,7 +15,8 @@ import threading
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple, cast
+from uuid import uuid4
 
 import yaml
 
@@ -34,6 +35,284 @@ from kiss.core.utils import _coerce_bool as _str_to_bool
 from kiss.core.utils import finish, substitute_prompt_args
 
 logger = logging.getLogger(__name__)
+
+
+class _UsageEvent(NamedTuple):
+    """One immutable, append-once record in a task's usage ledger.
+
+    The whole accounting state lives in an APPEND-ONLY list of these
+    records (see :attr:`_UsageLedger.records`): committing a
+    transaction is one ``list.append`` — a single atomic C call, so an
+    asynchronously injected exception (``PyThreadState_SetAsyncExc``,
+    used by the server's stop watchdog) can only land before or after
+    the append, never inside it.  The list is never swapped, cut or
+    reordered within its epoch (round-7 hardening), so THE APPEND IS
+    THE WHOLE COMMIT: the instant it returns, the record is visible to
+    every later reader, forever — there is no confirmation step whose
+    interruption could strand a committed record, and no compaction
+    window in which a committed record is invisible.
+
+    Deduplication identity (``source``, ``seq``):
+
+    * ``source=None`` marks a ONE-SHOT adjustment (a fan-out totals
+      bank, a TTS synthesis bank, a property-setter overwrite delta).
+      Its producer appends it at most once, so it needs no identity:
+      every keyless record counts, and compaction folds it without
+      retaining anything.
+    * A RETRYABLE transaction carries its producer's stable ``source``
+      plus a per-source sequence number that is MONOTONIC in append
+      order: a session bank is ``(_session_key(executor), 0)``, an
+      abandoned-child reclaim is ``("reclaim:<txn>", generation)``,
+      a classifier fold is ``("classifier:<invocation>", 0)``.  A
+      retry after an injected stop re-appends the SAME ``(source,
+      seq)`` with the same values, and readers count each ``(source,
+      seq)`` once (first record wins) while summing
+      (:func:`_ledger_totals`).  The monotonicity contract — a
+      producer never appends ``(source, seq)`` after it has appended
+      ``(source, seq')`` with ``seq' > seq``, except as an identical
+      retry of an already-appended record — is what lets the folded
+      dedup state be one MAX seq per source (:class:`_SeenMap`,
+      O(#producers)) instead of one retained key per event.
+    """
+
+    source: str | None
+    seq: int
+    budget: float
+    tokens: int
+    steps: int
+
+
+class _SeenMap:
+    """Immutable max-``seq``-per-``source`` map for folded ledger records.
+
+    Compaction must remember, for every retryable source it has ever
+    folded, the highest sequence number folded — so a late retry
+    duplicate of a folded record still deduplicates.  Round 6 showed
+    that keeping this as one flat ``frozenset`` of every historical
+    key made compaction quadratic (each fold copied the whole set).
+    This map instead stores the entries as a tuple of plain dict
+    LEVELS, newest last:
+
+    * :meth:`including` adds a fold's newly-seen sources as one new
+      level and then coalesces adjacent levels while the older of the
+      two holds at most twice the entries of the newer — the classic
+      geometric-merge discipline, which keeps the level count
+      O(log #sources) and bounds the TOTAL merge work over an epoch by
+      O(#sources * log #sources).  No fold ever copies the whole
+      historical state again.
+    * :meth:`get` scans levels newest-first; per-source seqs are
+      monotonic and newer levels hold newer folds, so the first hit is
+      the maximum, and merges let the newer level's entries win.
+
+    Instances are immutable after construction (levels are private to
+    the compaction that built them until published inside a
+    :class:`_LedgerView`), so readers on any thread can consult a
+    published map without locks.
+    """
+
+    __slots__ = ("levels", "size")
+
+    def __init__(self, levels: tuple[dict[str, int], ...] = ()) -> None:
+        """Wrap *levels* (newest last); each dict is owned exclusively.
+
+        Args:
+            levels: Max-seq dicts, oldest first.  Callers hand over
+                ownership: the dicts are never mutated afterwards.
+        """
+        self.levels = levels
+        self.size = sum(len(level) for level in levels)
+
+    def get(self, source: str) -> int | None:
+        """Return the highest folded seq for *source*, or ``None``.
+
+        Args:
+            source: The producer's stable transaction source.
+
+        Returns:
+            The maximum folded sequence number, or ``None`` when no
+            record of *source* has been folded.
+        """
+        for level in reversed(self.levels):
+            seq = level.get(source)
+            if seq is not None:
+                return seq
+        return None
+
+    def including(self, delta: dict[str, int]) -> _SeenMap:
+        """Return a new map that also covers *delta* (newest entries).
+
+        Args:
+            delta: Newly folded ``source -> max seq`` entries; the
+                caller hands over ownership of the dict.
+
+        Returns:
+            ``self`` when *delta* is empty, else a new immutable map.
+        """
+        if not delta:
+            return self
+        levels = [*self.levels, delta]
+        while len(levels) >= 2 and len(levels[-2]) <= 2 * len(levels[-1]):
+            newer = levels.pop()
+            older = levels.pop()
+            merged = dict(older)
+            # Newer entries win: per-source seqs are monotonic, so the
+            # newer level's seq for a shared source is the maximum.
+            merged.update(newer)
+            levels.append(merged)
+        return _SeenMap(tuple(levels))
+
+
+class _LedgerView(NamedTuple):
+    """The immutable folded state of one usage-ledger epoch.
+
+    Compaction (:meth:`RelentlessAgent._maybe_compact`) sums
+    ``records[:fold_index]`` into one of these and publishes it with a
+    SINGLE ``STORE_ATTR`` — the only mutation compaction performs, so
+    an asynchronously injected stop anywhere in compaction leaves
+    either the old complete view or the new complete view, never a
+    torn or record-losing intermediate state.  ``seen`` carries the
+    max folded seq per retryable source (see :class:`_SeenMap`) so a
+    retry duplicate of a folded record still counts once.
+    """
+
+    budget: float
+    tokens: int
+    steps: int
+    fold_index: int
+    seen: _SeenMap
+
+
+_EMPTY_VIEW = _LedgerView(0.0, 0, 0, 0, _SeenMap())
+
+#: Compaction threshold: when an epoch's unfolded suffix
+#: (``records[view.fold_index:]``) reaches this length, the next
+#: commit folds it into the view.  Reads are therefore O(threshold)
+#: — never O(records ever appended) — and repeated adjustments (one
+#: ledger append + one totals read each) cost O(n * threshold)
+#: instead of quadratic O(n^2).
+_COMPACTION_THRESHOLD = 200
+
+
+class _UsageLedger:
+    """One accounting epoch: an append-only record list plus a folded view.
+
+    The agent's ``_usage_ledger`` attribute always points at one of
+    these; :meth:`RelentlessAgent.reset_usage` swaps in a fresh
+    instance with a single ``STORE_ATTR`` (the epoch boundary).  The
+    instance itself is the EPOCH TOKEN: abandoned-subagent items
+    record it at registration and their reclaims commit INTO that
+    exact object (:meth:`RelentlessAgent._attribute_usage`'s *epoch*
+    argument), so a reset racing a reclaim can never route a prior
+    epoch's spend into the current one.
+
+    Mutation protocol (lock-free for writers, single-store for
+    compaction):
+
+    * A writer commits by appending one immutable :class:`_UsageEvent`
+      to :attr:`records` — one atomic ``list.append``, which IS the
+      whole commit.  :attr:`records` is never replaced, truncated or
+      reordered within the epoch, so a committed record can never
+      become invisible and a writer can never append into a discarded
+      list.
+    * Compaction publishes one new :class:`_LedgerView` — a single
+      ``STORE_ATTR`` — and touches nothing else.  A reader loads
+      ``view`` once and sums ``records[view.fold_index:]`` on top of
+      it; the view's totals cover exactly ``records[:fold_index]``, a
+      fixed prefix of an append-only list, so EVERY interleaving of
+      reads, commits, compactions and injected stops observes exact
+      totals.
+    * Concurrent compactions are serialized by a non-blocking
+      ``compaction_lock.acquire(False)``: a loser simply skips (a
+      later commit retries).  The lock is never blocked on, so no
+      unwind order can deadlock; if an injected stop leaks it, this
+      epoch merely stops compacting (reads degrade to O(records),
+      still exact) and the next epoch starts fresh.
+
+    Memory: the epoch retains every record it ever banked (a small
+    immutable tuple each) plus one max-seq entry per retryable
+    producer.  Both are linear in real work done — a record per
+    committed transaction, a ``seen`` entry per session / reclaim
+    transaction / classifier invocation — and the epoch is dropped
+    whole at the next ``reset_usage()``.  Read time stays
+    O(:data:`_COMPACTION_THRESHOLD`) and cumulative compaction time is
+    O(n log n) in the number of events (see :class:`_SeenMap`), never
+    the round-6 quadratic full-key-set copy.
+    """
+
+    __slots__ = ("view", "records", "compaction_lock")
+
+    def __init__(self) -> None:
+        """Create an empty epoch."""
+        self.view: _LedgerView = _EMPTY_VIEW
+        self.records: list[_UsageEvent] = []
+        self.compaction_lock = threading.Lock()
+
+
+def _session_key(agent: Base) -> str:
+    """Return the stable, process-unique banking key for *agent*.
+
+    Assigned on first use through ``dict.setdefault`` — one atomic C
+    call — so a banking retry (``perform_task``'s ``except
+    BaseException`` re-bank after an injected stop) and a concurrent
+    server-thread reclaim always observe the SAME key for one session,
+    and their duplicate ledger records deduplicate on read.  A
+    ``uuid4`` hex never collides across executors, unlike ``id()``,
+    which the allocator reuses after garbage collection; the key also
+    stays valid after the executor is collected, so banked executors
+    are never pinned in memory.
+    """
+    key = agent.__dict__.get("_usage_session_key")
+    if key is None:
+        key = agent.__dict__.setdefault("_usage_session_key", uuid4().hex)
+    return str(key)
+
+
+def _ledger_totals(ledger: _UsageLedger) -> tuple[float, int, int]:
+    """Sum one ledger epoch into ``(budget, tokens, steps)``.
+
+    Loads ``ledger.view`` ONCE, then slices the unfolded suffix
+    ``records[view.fold_index:]`` (one atomic C call) and sums it on
+    top of the view's totals.  The view's totals cover EXACTLY
+    ``records[:fold_index]``, a fixed prefix of a list that is only
+    ever appended to — never swapped, cut or reordered — so the pair
+    is coherent under every interleaving: a concurrent compaction
+    publishing a newer view does not disturb this read (it uses the
+    view it loaded), and a concurrent append only extends the suffix
+    with complete transactions.
+
+    Duplicate retryable records — retries re-appending the same
+    ``(source, seq)`` — count once: a suffix record is skipped when
+    its seq is already covered by the view's folded max
+    (``view.seen``) or by an earlier suffix record of the same source
+    (per-source seqs are monotonic in append order, so a max
+    comparison is a membership test).  Keyless one-shot records all
+    count; their producers append them at most once.
+
+    Cost: O(len(suffix)) time per read; compaction keeps that below
+    roughly :data:`_COMPACTION_THRESHOLD` (plus whatever raced in
+    since the last fold), so a read never scales with the number of
+    records EVER appended to the epoch.
+    """
+    view = ledger.view
+    budget = view.budget
+    tokens = view.tokens
+    steps = view.steps
+    seen = view.seen
+    local: dict[str, int] = {}
+    for event in ledger.records[view.fold_index:]:
+        source = event.source
+        if source is not None:
+            folded = seen.get(source)
+            if folded is not None and event.seq <= folded:
+                continue
+            prev = local.get(source)
+            if prev is not None and event.seq <= prev:
+                continue
+            local[source] = event.seq
+        budget += event.budget
+        tokens += event.tokens
+        steps += event.steps
+    return budget, tokens, steps
 
 TASK_PROMPT = """
 {task_description}
@@ -225,29 +504,43 @@ class RelentlessAgent(Base):
 
     work_dir: str = ""
 
+    # The current usage-ledger epoch (see _UsageLedger).  Annotation
+    # only: every access goes through _usage_ledger_object, which
+    # creates the epoch lazily because Base.__init__ zeroes the
+    # counters through the property setters BEFORE this class's
+    # __init__ body runs.
+    _usage_ledger: _UsageLedger
+
     def __init__(self, name: str) -> None:
-        """Initialize the agent and its usage-counter lock.
+        """Initialize the agent and its usage ledger.
 
         Args:
             name: The name identifier for the agent.
         """
         super().__init__(name)
-        # Serializes every read-modify-write of the cumulative usage
-        # counters (``budget_used``, ``total_tokens_used``,
-        # ``total_steps``).  The writers run on different threads of
-        # the SAME agent: the agent thread (:meth:`_accumulate_usage`
-        # at session end, ``_attribute_sub_usage`` when a fan-out or a
-        # ``talk`` synthesis banks its spend) and server threads
+        # The append-only accounting ledger (see :class:`_UsageEvent`
+        # and :meth:`_accumulate_usage`).  The writers run on different
+        # threads of the SAME agent: the agent thread
+        # (:meth:`_accumulate_usage` at session end,
+        # ``_attribute_sub_usage`` when a fan-out or a ``talk``
+        # synthesis banks its spend, :meth:`_reset` at run start,
+        # ``_fold_classifier_usage`` in ``SorcarAgent.run``'s
+        # ``finally``) and server threads
         # (``reclaim_abandoned_subagents`` from worktree cleanup /
-        # teardown / discard).  Without one lock over all of them, two
-        # concurrent read-modify-writes interleave and one side's
-        # increment silently vanishes from the task's accounting.
-        self._usage_lock: threading.Lock = threading.Lock()
-        # Exists from construction, not only after ``_reset``: the
-        # classifier-usage fold in ``SorcarAgent.run``'s ``finally``
-        # (and any other pre-``_reset`` failure path) may touch the
-        # cumulative step counter before the first session starts.
-        self.total_steps: int = 0
+        # teardown / discard).  Each writer commits with one atomic
+        # ``list.append`` of an immutable record, so no lock is needed
+        # — nothing can deadlock on a stop-injected
+        # ``KeyboardInterrupt`` and no writer can overwrite another's
+        # commit.
+        #
+        # The ledger exists from construction, not only after
+        # ``_reset``: the classifier-usage fold in ``SorcarAgent.run``'s
+        # ``finally`` (and any other pre-``_reset`` failure path) may
+        # touch the cumulative counters before the first session
+        # starts.  ``Base.__init__`` above already zeroed the counters
+        # through the property setters (zero deltas append nothing);
+        # this swap just pins the canonical empty ledger.
+        self.reset_usage()
 
     def _reset(
         self,
@@ -272,9 +565,13 @@ class RelentlessAgent(Base):
         )
         self.model_name = model_name if model_name is not None else DEFAULT_MODEL_NAME
         self.verbose = verbose
-        self.budget_used: float = 0.0
-        self.total_tokens_used: int = 0
-        self.total_steps = 0
+        # One atomic ledger swap resets the three counters AND the
+        # banked-session marks together (see reset_usage): a
+        # server-thread attribution in flight
+        # (reclaim_abandoned_subagents) lands wholly in the old epoch
+        # (discarded with it) or wholly in the new one — never a mixed
+        # state, and never a torn triple.
+        self.reset_usage()
         self._current_executor: KISSAgent | None = None
         self.docker_image = docker_image
         self.docker_manager: Any = None
@@ -289,19 +586,357 @@ class RelentlessAgent(Base):
         self.tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None
         self.set_printer(printer, verbose=verbose)
 
-    def _accumulate_usage(self, agent: Base) -> None:
-        """Fold a sub-agent's budget, tokens and steps into the running totals.
+    @property
+    def budget_used(self) -> float:
+        """Cumulative USD spend banked so far (see :class:`_UsageEvent`)."""
+        return _ledger_totals(self._usage_ledger_object())[0]
 
-        Held under ``_usage_lock``: a server-thread reclaim
-        (``reclaim_abandoned_subagents``) can bank an abandoned child's
-        spend into the same counters while a session ends on the agent
-        thread, and an unserialized read-modify-write would lose one
-        side's increment.
+    @budget_used.setter
+    def budget_used(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self, value: float,
+    ) -> None:
+        # Overrides Base's plain attribute with a property on purpose:
+        # the counter is DERIVED from the append-only ledger, so an
+        # absolute overwrite appends the delta that makes the derived
+        # total equal *value*.  A concurrent attribution's append
+        # linearizes AFTER the overwrite (set-then-add) — never a torn
+        # or lost state.  Concurrent absolute overwrites of the SAME
+        # field are not serialized against each other; the production
+        # writers (Base.__init__, the server's pre-run zeroing for
+        # plain agents) are single-threaded, and multi-field zeroing
+        # goes through the atomic reset_usage instead.
+        ledger = self._usage_ledger_object()
+        delta = float(value) - _ledger_totals(ledger)[0]
+        if delta:
+            self._commit_usage_event(
+                ledger,
+                _UsageEvent(None, 0, delta, 0, 0),
+            )
+
+    @property
+    def total_tokens_used(self) -> int:
+        """Cumulative tokens banked so far (see :class:`_UsageEvent`)."""
+        return _ledger_totals(self._usage_ledger_object())[1]
+
+    @total_tokens_used.setter
+    def total_tokens_used(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self, value: int,
+    ) -> None:
+        # Deliberate property-over-attribute override; see budget_used.
+        ledger = self._usage_ledger_object()
+        delta = int(value) - _ledger_totals(ledger)[1]
+        if delta:
+            self._commit_usage_event(
+                ledger,
+                _UsageEvent(None, 0, 0.0, delta, 0),
+            )
+
+    @property
+    def total_steps(self) -> int:
+        """Cumulative steps banked so far (see :class:`_UsageEvent`)."""
+        return _ledger_totals(self._usage_ledger_object())[2]
+
+    @total_steps.setter
+    def total_steps(self, value: int) -> None:
+        # Deliberate property-over-attribute override; see budget_used.
+        ledger = self._usage_ledger_object()
+        delta = int(value) - _ledger_totals(ledger)[2]
+        if delta:
+            self._commit_usage_event(
+                ledger,
+                _UsageEvent(None, 0, 0.0, 0, delta),
+            )
+
+    def _usage_ledger_object(self) -> _UsageLedger:
+        """Return the current ledger epoch, creating it lazily.
+
+        Lazy because ``Base.__init__`` zeroes the counters through the
+        property setters before ``RelentlessAgent.__init__`` runs.
+        ``dict.setdefault`` is one atomic C call, so two racing first
+        touches always share one epoch.
         """
-        with self._usage_lock:
-            self.budget_used += agent.budget_used
-            self.total_tokens_used += agent.total_tokens_used
-            self.total_steps += agent.step_count
+        ledger = self.__dict__.get("_usage_ledger")
+        if ledger is None:
+            ledger = self.__dict__.setdefault("_usage_ledger", _UsageLedger())
+        return cast("_UsageLedger", ledger)
+
+    def _usage_events(self) -> list[_UsageEvent]:
+        """Return the current epoch's append-only record list.
+
+        The list contains EVERY record banked in the epoch, including
+        the prefix already folded into the published view; totals must
+        always be read through :meth:`usage_snapshot` /
+        :func:`_ledger_totals`, never by summing this list.
+        """
+        return self._usage_ledger_object().records
+
+    def _usage_epoch(self) -> _UsageLedger:
+        """Return the current epoch token (the ledger object itself).
+
+        An adjustment producer that outlives task boundaries — the
+        abandoned-subagent bookkeeping in ``sorcar_agent`` — records
+        this token when it registers a source and later commits INTO
+        the recorded object (:meth:`_attribute_usage`'s *epoch*
+        argument), so spend from a source created under a PRIOR epoch
+        can never be attributed to the current one (``reset_usage``
+        swaps the token, and a late commit lands in the discarded
+        object).
+        """
+        return self._usage_ledger_object()
+
+    def _commit_usage_event(self, ledger: _UsageLedger, event: _UsageEvent) -> None:
+        """Append *event* to *ledger* — one atomic, irrevocable commit.
+
+        The single ``list.append`` IS the whole commit: *ledger*'s
+        records list is never swapped, truncated or reordered within
+        its epoch, so the record is visible to every later reader the
+        instant the append returns and stays visible forever.  There
+        is no confirmation step, no re-append, and no drain — an
+        asynchronously injected stop lands strictly before the commit
+        (no trace; a keyed producer's retry re-appends the identical
+        record) or strictly after it (the record is durably counted;
+        a keyed retry deduplicates on read).  A reset swaps the whole
+        ledger object, never this list, so a commit racing a reset
+        linearizes before it and dies with the old epoch — by design.
+
+        After the commit, this opportunistically folds the epoch when
+        the unfolded suffix has grown past the threshold; folding is
+        pure maintenance (see :meth:`_maybe_compact`) and interrupting
+        it loses nothing.
+        """
+        ledger.records.append(event)
+        if len(ledger.records) - ledger.view.fold_index >= _COMPACTION_THRESHOLD:
+            self._maybe_compact(ledger)
+
+    def _maybe_compact(self, ledger: _UsageLedger) -> None:
+        """Fold *ledger*'s unfolded suffix into its view, bounding reads.
+
+        Serialized by a NON-BLOCKING ``compaction_lock.acquire(False)``
+        — a losing caller returns immediately (some later commit will
+        compact), so no unwind order can block or deadlock.  Under the
+        lock, the fold sums ``records[view.fold_index:n]`` exactly as
+        a reader would (dedup against ``view.seen`` plus per-source
+        max within the slice) and then publishes ONE new
+        :class:`_LedgerView` with a single ``STORE_ATTR``.  The
+        records list is NOT touched, so:
+
+        * a reader that loaded the old view keeps summing the old
+          suffix — exact;
+        * a reader that loads the new view sums the shorter suffix on
+          top of the folded totals — exact;
+        * an injected stop anywhere in this method leaves the old
+          complete view published and every record still in place —
+          nothing is ever lost, and the next commit simply re-folds.
+
+        Cumulative fold time over an epoch is O(n log n) in the number
+        of events: each event is summed in exactly one fold (folds
+        cover disjoint slices) and the folded per-source max-seq state
+        merges geometrically (:class:`_SeenMap`) instead of copying
+        the whole historical key set each time (the round-6 quadratic
+        finding).  A stop that leaks the lock merely disables
+        compaction for this epoch: reads degrade to O(records) but
+        stay exact, and the next epoch gets a fresh lock.
+        """
+        if not ledger.compaction_lock.acquire(blocking=False):
+            return
+        try:
+            view = ledger.view
+            records = ledger.records
+            n = len(records)
+            budget = view.budget
+            tokens = view.tokens
+            steps = view.steps
+            seen = view.seen
+            delta: dict[str, int] = {}
+            for event in records[view.fold_index:n]:
+                source = event.source
+                if source is not None:
+                    folded = seen.get(source)
+                    if folded is not None and event.seq <= folded:
+                        continue
+                    prev = delta.get(source)
+                    if prev is not None and event.seq <= prev:
+                        continue
+                    delta[source] = event.seq
+                budget += event.budget
+                tokens += event.tokens
+                steps += event.steps
+            ledger.view = _LedgerView(
+                budget, tokens, steps, n, seen.including(delta),
+            )
+        finally:
+            ledger.compaction_lock.release()
+
+    def reset_usage(self) -> None:
+        """Reset the whole accounting state to zero in ONE atomic store.
+
+        Swaps in a fresh ledger epoch with a single ``STORE_ATTR`` —
+        atomic under both thread interleaving and asynchronously
+        injected exceptions.  A writer that already loaded the OLD
+        epoch appends its record there: the transaction linearizes
+        BEFORE the reset and is discarded with the old epoch.  A writer
+        that loads the ledger after the swap lands in the new epoch
+        with its whole triple.  Either way every observable state is
+        coherent — never a mix of pre- and post-reset dimensions, and
+        never a torn triple.  A session bank retried across the swap
+        counts exactly once: its duplicate record carries the same
+        session key, and the old epoch's record is no longer summed.
+
+        The swap is also the EPOCH BOUNDARY for adjustment sources
+        that outlive a run: abandoned-subagent items are tagged with
+        the epoch token (:meth:`_usage_epoch`) at registration and
+        their reclaims commit into that exact object, so a prior
+        epoch's late spend settles in the discarded ledger and is
+        never banked into the new epoch (an explicit, documented
+        undercount versus real provider spend — see
+        ``SorcarAgent.reclaim_abandoned_subagents``).
+
+        Also the coherent replacement for zeroing the three counter
+        properties one by one (the server's ``_zero_usage_counters``),
+        which could otherwise interleave with a racing attribution.
+        """
+        self._usage_ledger = _UsageLedger()
+
+    def usage_snapshot(self) -> tuple[float, int, int]:
+        """Return one coherent ``(budget_used, total_tokens_used, total_steps)``.
+
+        Sums ONE ledger epoch (see :func:`_ledger_totals`), so the
+        triple always describes a single prefix of the append-only
+        history.  Reading the three properties separately instead can
+        TEAR: each property read sums the ledger afresh, and a
+        concurrent append or reset between two of those reads yields
+        an impossible mix (e.g. the old budget with the new
+        tokens/steps) — a final abandoned-child reclaim that reads
+        such a mix permanently loses the unseen dimension from the
+        parent's accounting.
+        """
+        return _ledger_totals(self._usage_ledger_object())
+
+    def _attribute_usage(
+        self,
+        budget: float,
+        tokens: int,
+        steps: int,
+        key: str | None = None,
+        seq: int = 0,
+        epoch: Any = None,
+    ) -> None:
+        """Add a usage delta to the cumulative counters as ONE record.
+
+        The single atomic ``list.append`` keeps the three dimensions
+        coherent (no reader can ever observe the budget grown but not
+        the tokens) and cannot lose to or erase any other usage writer
+        — including :meth:`_reset` (the record either lands in the old
+        epoch, linearizing before the reset, or in the new one) and a
+        server-thread reclaim.  Never blocks: there is no lock to leak.
+        A zero delta appends nothing, so an empty classifier fold and
+        repeated zero adjustments do not grow the ledger — and a
+        keyed retry of a zero-delta transaction is symmetric (neither
+        attempt appends).
+
+        Args:
+            budget: USD spend to add.
+            tokens: Token count to add.
+            steps: Step count to add.
+            key: Stable transaction source for a RETRYABLE adjustment
+                (abandoned-child reclaim, classifier fold): a retry
+                re-appends the same ``(key, seq)`` and readers count
+                it once.  ``None`` marks a one-shot adjustment
+                (fan-out totals, TTS, property-setter deltas), which
+                is appended at most once by its producer and therefore
+                needs no dedup identity.
+            seq: Per-*key* sequence number, MONOTONIC in commit order
+                (an abandoned-child reclaim passes its generation);
+                ignored for one-shot adjustments.
+            epoch: The ledger epoch object captured at the start of
+                the producer's transaction
+                (:meth:`_usage_epoch`), or ``None`` for the current
+                epoch.  Binding the commit to the captured object
+                closes the check-then-commit race with a concurrent
+                ``reset_usage()``: a commit for a superseded epoch
+                lands in that discarded object instead of being
+                misattributed to the new task's ledger.
+        """
+        if not budget and not tokens and not steps:
+            return
+        ledger = (
+            epoch
+            if isinstance(epoch, _UsageLedger)
+            else self._usage_ledger_object()
+        )
+        self._commit_usage_event(
+            ledger,
+            _UsageEvent(
+                key,
+                int(seq) if key is not None else 0,
+                float(budget),
+                int(tokens),
+                int(steps),
+            ),
+        )
+
+    def _accumulate_usage(self, agent: Base) -> None:
+        """Bank a finished sub-agent's budget, tokens and steps exactly once.
+
+        Exactly-once per *agent* under BOTH asynchronous interruption
+        and concurrency, with no lock and no compare-and-swap:
+
+        * ``perform_task``'s session try block banks the executor on
+          its success path and its ``except BaseException`` handler
+          banks it again before re-raising, so a stop-injected
+          ``KeyboardInterrupt`` (``PyThreadState_SetAsyncExc``,
+          delivered at an arbitrary bytecode boundary) can land
+          ANYWHERE inside the first call.  The commit is one atomic
+          ``list.append`` of an immutable :class:`_UsageEvent`: an
+          injection before the append leaves no trace (the retry banks
+          the full amount once) and an injection after it can at worst
+          make the retry append a DUPLICATE record with the SAME
+          session key (:func:`_session_key` is retry-stable), which
+          readers count once (:func:`_ledger_totals`).
+        * A server-thread reclaim (``reclaim_abandoned_subagents``)
+          racing the agent thread's bank of the same executor likewise
+          appends at most one extra same-key record — deduplicated on
+          read, so no interleaving double-counts or loses the spend.
+
+        The pre-append ledger scan (folded seen map plus the unfolded
+        suffix) is an
+        optimization, not a correctness requirement: it keeps repeated
+        reclaims of an already-banked session from growing the ledger.
+        See ``test_conc2026_relentless_usage_double_bank.py``, which
+        proves the exactly-once property by injecting at every opcode
+        boundary and by racing concurrent bankers.
+
+        The banked triple itself is read through the executor's
+        ``usage_snapshot()`` when it has one (``KISSAgent`` publishes
+        its whole triple as one immutable snapshot), so a concurrent
+        or interrupted response-accounting update on the executor can
+        never hand this bank a torn source triple.
+        """
+        key = _session_key(agent)
+        ledger = self._usage_ledger_object()
+        view = ledger.view
+        if view.seen.get(key) is not None or any(
+            event.source == key
+            for event in ledger.records[view.fold_index:]
+        ):
+            return
+        snapshot = getattr(agent, "usage_snapshot", None)
+        if callable(snapshot):
+            budget, tokens, steps = cast("tuple[float, int, int]", snapshot())
+        else:
+            budget = agent.budget_used
+            tokens = agent.total_tokens_used
+            steps = agent.step_count
+        self._commit_usage_event(
+            ledger,
+            _UsageEvent(
+                key,
+                0,
+                float(budget or 0.0),
+                int(tokens or 0),
+                int(steps or 0),
+            ),
+        )
 
     def _check_total_budget(self) -> None:
         """Raise :class:`KISSError` when the task's cumulative spend exceeds max_budget.
@@ -440,24 +1075,28 @@ class RelentlessAgent(Base):
             )
         system_prompt = self.system_prompt + important_instructions
         for session in range(self.max_sub_sessions):
-            remaining_budget = self.max_budget - self.budget_used
+            # One coherent snapshot for the whole session prologue: a
+            # server-thread reclaim can publish between two separate
+            # property reads and tear the triple (see usage_snapshot).
+            budget_banked, tokens_banked, steps_banked = self.usage_snapshot()
+            remaining_budget = self.max_budget - budget_banked
             if remaining_budget <= 0:
                 raise BudgetExceededError(
                     f"Agent {self.name} budget exhausted "
-                    f"(${self.budget_used:.4f} / ${self.max_budget:.2f})."
+                    f"(${budget_banked:.4f} / ${self.max_budget:.2f})."
                 )
             if self.printer:
-                self.printer.tokens_offset = self.total_tokens_used  # type: ignore[attr-defined]
-                self.printer.budget_offset = self.budget_used  # type: ignore[attr-defined]
-                self.printer.steps_offset = self.total_steps  # type: ignore[attr-defined]
+                self.printer.tokens_offset = tokens_banked  # type: ignore[attr-defined]
+                self.printer.budget_offset = budget_banked  # type: ignore[attr-defined]
+                self.printer.steps_offset = steps_banked  # type: ignore[attr-defined]
             logger.info(
                 "Session %d start: agent=%s budget_remaining=$%.4f "
                 "total_tokens=%d total_steps=%d",
                 session,
                 self.name,
                 remaining_budget,
-                self.total_tokens_used,
-                self.total_steps,
+                tokens_banked,
+                steps_banked,
             )
             executor = KISSAgent(f"{self.name} Session-{session}")
             executor.pre_step_hook = getattr(self, "pre_step_hook", None)
@@ -702,33 +1341,29 @@ class RelentlessAgent(Base):
         """
         if self.printer is None:
             return
-        offset_attrs = (
-            ("tokens_offset", 0),
-            ("budget_offset", 0.0),
-            ("steps_offset", 0),
+        # The printer adds its per-task offsets to every result event's
+        # totals, but this agent's snapshot is already CUMULATIVE, so
+        # the raw values passed down are the snapshot MINUS the current
+        # offsets.  The previous design zeroed the offsets around the
+        # print and restored them afterwards; round-4 finding 5 showed
+        # an asynchronously injected stop could land after the zeroing
+        # and skip (or interrupt) the restoration, leaving the task's
+        # offsets zeroed.  Reading the offsets without ever mutating
+        # them removes that failure mode entirely: there is no shared
+        # state to restore, so no injection point can corrupt it.
+        tokens_offset = int(getattr(self.printer, "tokens_offset", 0) or 0)
+        budget_offset = float(getattr(self.printer, "budget_offset", 0.0) or 0.0)
+        steps_offset = int(getattr(self.printer, "steps_offset", 0) or 0)
+        # One coherent triple (see usage_snapshot): three separate
+        # property reads could tear across a concurrent bank.
+        budget, tokens, steps = self.usage_snapshot()
+        self.printer.print(
+            yaml.dump(payload, sort_keys=False),
+            type="result",
+            step_count=steps - steps_offset,
+            total_tokens=tokens - tokens_offset,
+            cost=f"${budget - budget_offset:.4f}",
         )
-        saved: dict[str, Any] = {}
-        for attr, zero in offset_attrs:
-            if hasattr(self.printer, attr):
-                saved[attr] = getattr(self.printer, attr)
-                try:
-                    setattr(self.printer, attr, zero)
-                except AttributeError:  # pragma: no cover
-                    saved.pop(attr, None)
-        try:
-            self.printer.print(
-                yaml.dump(payload, sort_keys=False),
-                type="result",
-                step_count=self.total_steps,
-                total_tokens=self.total_tokens_used,
-                cost=f"${self.budget_used:.4f}",
-            )
-        finally:
-            for attr, value in saved.items():
-                try:
-                    setattr(self.printer, attr, value)
-                except AttributeError:  # pragma: no cover
-                    pass
 
     def run(
         self,

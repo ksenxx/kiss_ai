@@ -58,7 +58,11 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
     """Third-party agent tasks are open/interactable via remote webview."""
 
     def setUp(self) -> None:
+        # Every global mutation registers its restoration with
+        # ``addCleanup`` immediately: cleanups run (in LIFO order) even
+        # when ``setUp`` itself fails partway, unlike ``tearDown``.
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-tp-webview-")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
@@ -77,18 +81,22 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         _persistence._KISS_DIR = kiss_dir
         _persistence._DB_PATH = kiss_dir / "sorcar.db"
         _persistence._db_conn = None
+        self.addCleanup(self._restore_persistence)
         self._saved_config_override = (
             vars(vscode_config).get("CONFIG_DIR"),
             vars(vscode_config).get("CONFIG_PATH"),
         )
         vscode_config.CONFIG_DIR = kiss_dir
         vscode_config.CONFIG_PATH = kiss_dir / "config.json"
+        self.addCleanup(self._restore_vscode_config)
 
+        self.addCleanup(agent_state.agent_states.clear)
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
             target=self.loop.run_forever, daemon=True,
         )
         self.loop_thread.start()
+        self.addCleanup(self._stop_loop)
 
         self.server = RemoteAccessServer(
             uds_path=self.sock_path, work_dir=self.repo,
@@ -96,22 +104,24 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         self.server._printer._loop = self.loop
         self.server._loop = self.loop
 
+        self._viewer_writer: asyncio.StreamWriter | None = None
+        self._reader_task: concurrent.futures.Future[None] | None = None
         self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
             asyncio.start_unix_server(
                 self.server._uds_handler, path=self.sock_path,
             ),
             self.loop,
         ).result(timeout=5)
-
-        self._viewer_writer: asyncio.StreamWriter | None = None
-        self._reader_task: concurrent.futures.Future[None] | None = None
+        self.addCleanup(self._shutdown_uds_server)
 
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
+        self.addCleanup(self._restore_run)
 
-    def tearDown(self) -> None:
+    def _restore_run(self) -> None:
         self._parent_class.run = self._original_run
 
+    def _shutdown_uds_server(self) -> None:
         async def _shutdown() -> None:
             try:
                 if self._viewer_writer is not None:
@@ -143,11 +153,13 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
             ).result(timeout=5)
         except Exception:
             pass
+
+    def _stop_loop(self) -> None:
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
         self.loop.close()
-        agent_state.agent_states.clear()
 
+    def _restore_persistence(self) -> None:
         if _persistence._db_conn is not None:
             _persistence._db_conn.close()
         (
@@ -155,6 +167,8 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
             _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved_persistence
+
+    def _restore_vscode_config(self) -> None:
         saved_dir, saved_path = self._saved_config_override
         if saved_dir is None:
             if "CONFIG_DIR" in vars(vscode_config):
@@ -166,7 +180,6 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
                 delattr(vscode_config, "CONFIG_PATH")
         else:
             vscode_config.CONFIG_PATH = saved_path
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _open_viewer(self) -> tuple[
         asyncio.StreamWriter, list[dict[str, Any]], threading.Event,

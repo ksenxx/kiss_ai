@@ -31,17 +31,25 @@ Both external commands honour environment overrides —
 ``KISS_SORCAR_PLAY_CMD`` (receives the audio file path as its last
 argument) and ``KISS_SORCAR_SAY_CMD`` (receives the utterance text as
 its last argument), each parsed with :func:`shlex.split`, so tests
-can substitute real scripted child processes.
+can substitute real scripted child processes.  The hung-playback
+timeout honours ``KISS_SORCAR_PLAY_TIMEOUT`` (seconds, default 600)
+for the same reason.  Because an override may be a wrapper script
+whose real player runs as a grandchild, each playback child is
+started in its own process group (POSIX) and a timeout kills the
+whole group — killing only the direct child would leave the
+grandchild holding the audio device and overlapping the next clip.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
+import math
 import os
 import queue
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -52,8 +60,13 @@ logger = logging.getLogger(__name__)
 
 _PLAY_CMD_ENV = "KISS_SORCAR_PLAY_CMD"
 _SAY_CMD_ENV = "KISS_SORCAR_SAY_CMD"
+_PLAY_TIMEOUT_ENV = "KISS_SORCAR_PLAY_TIMEOUT"
 _MAX_TALK_IDS = 500
 _PLAYBACK_TIMEOUT = 600.0
+# Grace between the group SIGTERM and the SIGKILL escalation: long
+# enough for a well-behaved player to release the audio device, short
+# enough that the serialising worker is never stuck behind a zombie.
+_KILL_GRACE = 5.0
 
 _FALLBACK_PLAYERS: tuple[tuple[str, ...], ...] = (
     ("mpg123", "-q"),
@@ -136,12 +149,85 @@ def say_command() -> list[str] | None:
     return _resolve_command(_SAY_CMD_ENV, ["say"], _FALLBACK_SAY)
 
 
+def _playback_timeout() -> float:
+    """Return the hung-playback timeout in seconds.
+
+    Honours the ``KISS_SORCAR_PLAY_TIMEOUT`` environment variable so
+    tests can force the timeout path with a real hung child instead
+    of waiting out the 600 s default; a missing, malformed,
+    non-finite, or non-positive value falls back to
+    ``_PLAYBACK_TIMEOUT`` — ``inf`` (or an overflowing literal such
+    as ``1e999``) would otherwise pass the ``> 0`` gate and hand
+    ``Popen.wait`` an infinite timeout, disabling the hung-playback
+    group kill entirely (gpt-5.6-sol conc review, finding 6).
+
+    Returns:
+        The timeout in seconds (always finite and > 0).
+    """
+    raw = os.environ.get(_PLAY_TIMEOUT_ENV, "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning("Malformed %s: %r", _PLAY_TIMEOUT_ENV, raw)
+            return _PLAYBACK_TIMEOUT
+        if math.isfinite(value) and value > 0:
+            return value
+    return _PLAYBACK_TIMEOUT
+
+
+def _signal_group(pid: int, sig: signal.Signals) -> bool:
+    """Best-effort signal to *pid*'s whole process group.
+
+    Args:
+        pid: The group leader's pid (the child was spawned with
+            ``start_new_session=True`` on POSIX).
+        sig: The signal to deliver.
+
+    Returns:
+        ``True`` when the group was signalled; ``False`` when the
+        platform has no ``os.killpg`` (Windows) or the call failed —
+        the caller then falls back to killing the process alone.
+    """
+    killpg = getattr(os, "killpg", None)
+    if killpg is None:
+        return False
+    try:
+        killpg(pid, sig)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def _kill_playback(proc: subprocess.Popen[bytes]) -> None:
+    """Kill a hung playback child and every process it spawned.
+
+    The child was started in its own session (POSIX), so signalling
+    its process group reaches grandchildren too — a
+    ``KISS_SORCAR_PLAY_CMD`` wrapper script's real player must die
+    with the wrapper, or it would keep the audio device and play over
+    the next clip.  SIGTERM first (players flush and release the
+    device), escalating to SIGKILL after ``_KILL_GRACE`` seconds.  On
+    platforms without process groups (Windows) the direct child alone
+    is killed, as before.
+    """
+    if not _signal_group(proc.pid, signal.SIGTERM):
+        proc.kill()
+        return
+    try:
+        proc.wait(timeout=_KILL_GRACE)
+    except subprocess.TimeoutExpired:
+        pass
+    _signal_group(proc.pid, signal.SIGKILL)
+
+
 def _run_playback(argv: list[str]) -> bool:
     """Run one playback child to completion; ``True`` on exit code 0.
 
     Output is suppressed so a chatty player never pollutes the
     daemon's terminal or logs.  A hung child is killed after
-    ``_PLAYBACK_TIMEOUT`` seconds.
+    :func:`_playback_timeout` seconds — together with its whole
+    process group on POSIX (see :func:`_kill_playback`).
     """
     try:
         proc = subprocess.Popen(
@@ -149,13 +235,14 @@ def _run_playback(argv: list[str]) -> bool:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=(os.name == "posix"),
         )
     except OSError:
         return False
     try:
-        return proc.wait(timeout=_PLAYBACK_TIMEOUT) == 0
+        return proc.wait(timeout=_playback_timeout()) == 0
     except subprocess.TimeoutExpired:
-        proc.kill()
+        _kill_playback(proc)
         proc.wait()
         return False
 

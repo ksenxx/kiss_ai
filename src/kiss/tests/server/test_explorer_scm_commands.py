@@ -755,17 +755,20 @@ class TestParsers:
         ]
 
     def test_git_log_records(self) -> None:
-        """The exact ``git log -z --name-status`` token stream: six header
-        tokens per commit, then ``\\nSTATUS`` / path pairs (rename
-        triples); a file-less commit runs straight into the next header,
-        and a truncated trailing entry is dropped rather than misread."""
+        """The exact ``git log -z --name-status`` token stream: seven header
+        tokens per commit (the last the full ``%B`` message), then
+        ``\\nSTATUS`` / path pairs (rename triples); a file-less commit
+        runs straight into the next header, and a truncated trailing
+        entry is dropped rather than misread."""
         sha_a, sha_b = "a" * 40, "b" * 40
         text = "\0".join(
             [
                 sha_a, sha_b + " " + "c" * 40, "Ann", "2026-01-02T03:04:05+00:00",
                 "HEAD -> main, tag: v1, topic,comma", "Merge \x1f it",
+                "Merge \x1f it\n\nBody line one.\nBody line two.\n",
                 # merge without files: next header follows directly
                 sha_b, "", "Bob", "2026-01-01T00:00:00+00:00", "", "Root commit",
+                "Root commit\n",
                 "\nA", "new.py", "R100", "old.py", "new2.py", "M", "dir/x\ty.py",
                 "M",  # truncated: status without its path
             ]
@@ -775,7 +778,9 @@ class TestParsers:
         assert commits[0]["parents"] == [sha_b, "c" * 40]
         assert commits[0]["refs"] == ["HEAD -> main", "tag: v1", "topic,comma"]
         assert commits[0]["subject"] == "Merge \x1f it"
+        assert commits[0]["message"] == "Merge \x1f it\n\nBody line one.\nBody line two."
         assert commits[0]["files"] == []
+        assert commits[1]["message"] == "Root commit"
         assert commits[1]["parents"] == []
         assert commits[1]["refs"] == []
         assert commits[1]["files"] == [
@@ -785,4 +790,4 @@ class TestParsers:
         ]
         assert commits[1]["shortSha"] == "b" * 7
         assert parse_git_log("") == []
-        assert parse_git_log("not a sha\0x\0y\0z\0w\0v\0") == []
+        assert parse_git_log("not a sha\0x\0y\0z\0w\0v\0u\0") == []

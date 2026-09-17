@@ -611,42 +611,75 @@ class _AutocompleteMixin:
             request_token = self._files_request_map().get(conn_id)
 
         def _do_refresh() -> None:
-            result = _scan_files(wd)
-            with self._state_lock:
-                existing = self._file_cache.get(wd)
-                if existing is not None:
-                    result = existing
-                else:
-                    self._file_cache[wd] = result
-            # Rank OUTSIDE the lock (usage is a database read), then
-            # re-verify the token and emit UNDER the lock, removing the
-            # token only after the emission (audit0903 F5).  The old
-            # order — token removed under the lock, emission after
-            # releasing it — let a newer ``getFiles`` from the same
-            # connection (same typed prefix, different work dir) emit
-            # first and this superseded old-workspace list land LAST;
-            # the frontend validates replies only by tab and prefix,
-            # so the picker showed paths from the wrong repository.
-            # Serialized against ``_get_files``'s token installation,
-            # a stale reply is either suppressed here or provably
-            # precedes the newer request's own emission.
-            usage = _load_file_usage()
-            ranked = rank_file_suggestions(
-                result, then_emit_for_prefix, usage,
+            # The whole body is guarded (A-C1): this runs on a daemon
+            # thread with no caller to report to, so an unhandled raise
+            # — e.g. ``_load_file_usage`` hitting a corrupt or
+            # unopenable ``sorcar.db`` — used to kill the thread via
+            # the default excepthook, leaving the picker stuck on its
+            # ``loading`` placeholder AND leaking the connection's
+            # ``_files_latest_request`` token forever (the map's
+            # short-lived contract relies on this function always
+            # reaching its pop).  On failure the token is released so
+            # the connection's next ``getFiles`` completes normally.
+            try:
+                result = _scan_files(wd)
+                with self._state_lock:
+                    existing = self._file_cache.get(wd)
+                    if existing is not None:
+                        result = existing
+                    else:
+                        self._file_cache[wd] = result
+                # Rank OUTSIDE the lock (usage is a database read), then
+                # re-verify the token and emit UNDER the lock, removing
+                # the token only after the emission (audit0903 F5).  The
+                # old order — token removed under the lock, emission
+                # after releasing it — let a newer ``getFiles`` from the
+                # same connection (same typed prefix, different work
+                # dir) emit first and this superseded old-workspace list
+                # land LAST; the frontend validates replies only by tab
+                # and prefix, so the picker showed paths from the wrong
+                # repository.  Serialized against ``_get_files``'s token
+                # installation, a stale reply is either suppressed here
+                # or provably precedes the newer request's own emission.
+                usage = _load_file_usage()
+                ranked = rank_file_suggestions(
+                    result, then_emit_for_prefix, usage,
+                )
+                with self._state_lock:
+                    reqs = self._files_request_map()
+                    if reqs.get(conn_id) is not request_token:
+                        return
+                    self._emit_files(
+                        ranked,
+                        conn_id,
+                        prefix=then_emit_for_prefix,
+                        tab_id=tab_id,
+                    )
+                    reqs.pop(conn_id, None)
+            except Exception:
+                logger.exception(
+                    "background file-cache refresh failed for %s", wd,
+                )
+                with self._state_lock:
+                    reqs = self._files_request_map()
+                    if reqs.get(conn_id) is request_token:
+                        reqs.pop(conn_id, None)
+
+        try:
+            threading.Thread(target=_do_refresh, daemon=True).start()
+        except RuntimeError:
+            # Thread exhaustion (``can't start new thread``): no
+            # worker will ever run ``_do_refresh``'s cleanup, so
+            # release the request token here — leaving it installed
+            # wedged the connection's picker on its loading
+            # placeholder forever (gpt-5.6-sol conc review, finding 9).
+            logger.exception(
+                "file-cache refresh thread failed to start for %s", wd,
             )
             with self._state_lock:
                 reqs = self._files_request_map()
-                if reqs.get(conn_id) is not request_token:
-                    return
-                self._emit_files(
-                    ranked,
-                    conn_id,
-                    prefix=then_emit_for_prefix,
-                    tab_id=tab_id,
-                )
-                reqs.pop(conn_id, None)
-
-        threading.Thread(target=_do_refresh, daemon=True).start()
+                if reqs.get(conn_id) is request_token:
+                    reqs.pop(conn_id, None)
 
     def _refresh_files_after_task(self, work_dir: str = "") -> None:
         """Refresh the ``@``-mention file cache after an agent task ends.
@@ -689,15 +722,34 @@ class _AutocompleteMixin:
         cached_set = set(cached)
 
         def _do_refresh() -> None:
-            result = _scan_files(wd)
-            if set(result) == cached_set:
-                return
-            with self._state_lock:
-                if self._file_cache.get(wd) is not cached:
+            # Guarded like ``_refresh_file_cache._do_refresh`` (A-C1):
+            # no token is held and no reply is owed here, but a raise
+            # (disk error during the scan) would otherwise kill the
+            # daemon thread through the silent default excepthook.
+            try:
+                result = _scan_files(wd)
+                if set(result) == cached_set:
                     return
-                self._file_cache[wd] = result
+                with self._state_lock:
+                    if self._file_cache.get(wd) is not cached:
+                        return
+                    self._file_cache[wd] = result
+            except Exception:
+                logger.exception(
+                    "post-task file-cache refresh failed for %s", wd,
+                )
 
-        threading.Thread(target=_do_refresh, daemon=True).start()
+        try:
+            threading.Thread(target=_do_refresh, daemon=True).start()
+        except RuntimeError:
+            # Thread exhaustion must not propagate into the task
+            # runner's cleanup ``finally`` (this hook's only caller);
+            # the cache merely stays as it was until the next
+            # ``getFiles`` rescans (gpt-5.6-sol conc review, finding 9).
+            logger.exception(
+                "post-task file-cache refresh thread failed to start "
+                "for %s", wd,
+            )
 
     def _emit_files(
         self,
@@ -789,11 +841,18 @@ class _AutocompleteMixin:
                 tab_id=tab_id,
             )
             return
-        usage = _load_file_usage()
-        ranked = rank_file_suggestions(cache, prefix, usage)
-        self._emit_files(ranked, conn_id, prefix=prefix, tab_id=tab_id)
-        with self._state_lock:
-            # This request is answered; drop its token so the map only
-            # ever holds connections with a scan still in flight.
-            if reqs.get(conn_id) is token:
-                del reqs[conn_id]
+        try:
+            usage = _load_file_usage()
+            ranked = rank_file_suggestions(cache, prefix, usage)
+            self._emit_files(ranked, conn_id, prefix=prefix, tab_id=tab_id)
+        finally:
+            # This request is answered (or has failed for good — e.g.
+            # ``_load_file_usage`` hit an unopenable database on this
+            # synchronous cache-hit path, which used to strand the
+            # token and wedge the picker; gpt-5.6-sol conc review,
+            # finding 9); drop its token either way so the map only
+            # ever holds connections with a scan still in flight.  The
+            # identity check keeps a newer request's token intact.
+            with self._state_lock:
+                if reqs.get(conn_id) is token:
+                    del reqs[conn_id]

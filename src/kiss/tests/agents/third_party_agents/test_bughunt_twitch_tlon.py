@@ -177,9 +177,15 @@ class TestTlonBackendBugs:
         self._backup = None
         if _tlon_config.path.exists():
             self._backup = _tlon_config.path.read_text()
-        _tlon_config.save({"ship_url": self.base, "code": "lidlut-tabwed", "ship": "~zod"})
-        self.backend = TlonChannelBackend()
-        assert self.backend.connect() is True
+        try:
+            _tlon_config.save({"ship_url": self.base, "code": "lidlut-tabwed", "ship": "~zod"})
+            self.backend = TlonChannelBackend()
+            assert self.backend.connect() is True
+        except BaseException:
+            # pytest skips teardown_method when setup_method raises; restore
+            # the config (and stop the server) ourselves so nothing leaks.
+            self.teardown_method()
+            raise
 
     def teardown_method(self) -> None:
         self._server.shutdown()

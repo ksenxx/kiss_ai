@@ -70,7 +70,6 @@ from kiss.agents.third_party_agents.muse_auth._common import (
     action_class,
     muse_auth_dir,
     muse_auth_enabled,
-    socket_path,
 )
 from kiss.agents.third_party_agents.muse_auth.client import (
     MuseAuthError,
@@ -82,6 +81,12 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     stop_daemon,
     store_credentials,
     vault_has_credentials,
+)
+from kiss.tests.agents.third_party_agents.muse_test_utils import (
+    auth_tools,
+    setup_muse_env,
+    teardown_muse_env,
+    wait_daemon_stopped,
 )
 
 _REAL_DRIVE_TOKEN = "real-secret-token-drive"
@@ -177,9 +182,6 @@ def api_server() -> Any:
 @pytest.fixture()
 def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     """Enable Muse-auth inside an isolated ``KISS_HOME`` with a live daemon."""
-    monkeypatch.setenv("KISS_MUSE_AUTH", "1")
-    directory = muse_auth_dir()
-    directory.mkdir(parents=True, exist_ok=True)
     policy = {
         "defaults": {"read": "allow", "write": "ask"},
         "services": {
@@ -188,12 +190,9 @@ def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
             "github": {"extra_hosts": ["127.0.0.1"]},
         },
     }
-    (directory / "policy.json").write_text(json.dumps(policy))
+    setup_muse_env(monkeypatch, policy)
     yield isolated_kiss_home
-    stop_daemon()
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and socket_path().exists():
-        time.sleep(0.05)
+    teardown_muse_env()
 
 
 def _drive_backend(base_url: str) -> GoogleDriveChannelBackend:
@@ -268,17 +267,20 @@ def test_ttl_and_session_grants(muse_env: Path, api_server: _ApiServer) -> None:
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     backend = _drive_backend(base_url)
 
-    muse_client.grant("google_drive", "write", "ttl", ttl=0.2)
+    # Allow side: a generous TTL that cannot expire between grant and use
+    # (a tiny TTL here can lapse across the two IPC round trips under load).
+    muse_client.grant("google_drive", "write", "ttl", ttl=30.0)
     assert json.loads(backend.gdrive_create_folder("in-ttl"))["ok"] is True
+    assert muse_client.revoke("google_drive", "write") >= 1
+    # Expiry side: sleeping PAST the deadline is deterministic.
+    muse_client.grant("google_drive", "write", "ttl", ttl=0.2)
     time.sleep(0.4)
     assert json.loads(backend.gdrive_create_folder("post-ttl"))["ok"] is False
 
     muse_client.grant("google_drive", "write", "session")
     assert json.loads(backend.gdrive_create_folder("in-session"))["ok"] is True
     stop_daemon()
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and socket_path().exists():
-        time.sleep(0.05)
+    wait_daemon_stopped()
     # New daemon: the session grant is gone and the old surrogate is stale.
     backend2 = _drive_backend(base_url)
     assert json.loads(backend2.gdrive_create_folder("new-session"))["ok"] is False
@@ -302,9 +304,7 @@ def test_stale_surrogate_raises(muse_env: Path, api_server: _ApiServer) -> None:
     handle = mint_surrogate("google_drive")
     assert handle is not None
     stop_daemon()
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and socket_path().exists():
-        time.sleep(0.05)
+    wait_daemon_stopped()
     session = MuseBoundarySession("google_drive")
     port = api_server.server_address[1]
     with pytest.raises(MuseAuthError, match="stale"):
@@ -964,7 +964,7 @@ def test_remote_oauth_paste_back_consent_flow(
             )
         )
         agent = GoogleCalendarAgent()
-        tools = {t.__name__: t for t in agent._get_auth_tools()}
+        tools = auth_tools(agent)
 
         # Finishing before starting names the authenticate tool.
         early = json.loads(tools["finish_google_calendar_auth"]())
@@ -1285,7 +1285,7 @@ def test_github_token_rotation_via_authenticate(muse_env: Path, api_server: _Api
     from kiss.agents.third_party_agents.github_agent import GitHubAgent
 
     agent = GitHubAgent()
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+    tools = auth_tools(agent)
     assert json.loads(tools["authenticate_github"]("ghp_first"))["ok"] is True
     agent._backend._base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     json.loads(agent._backend.gh_get_me())

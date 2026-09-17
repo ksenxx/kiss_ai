@@ -14,15 +14,17 @@ in ``kiss.tests.agents.sorcar.test_bugs_reproduction``.
 
 
 class TestI2FindChannelReturnsName:
-    def test_find_channel_does_actual_lookup(self) -> None:
+    def test_find_channel_does_actual_lookup(self, refusing_port: int) -> None:
         """find_channel should look up channel by name, not echo it back.
 
         The bug: it returns the name as-is, which is a string like
-        'general', not a Discord snowflake ID.
+        'general', not a Discord snowflake ID. The API base points at a
+        local port that refuses connections, so the lookup path is
+        exercised without leaving the host.
         """
         from kiss.agents.third_party_agents.discord_agent import DiscordChannelBackend
 
-        backend = DiscordChannelBackend()
+        backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{refusing_port}")
         result = backend.find_channel("general")
         assert result != "general" or result is None, (
             f"find_channel('general') returned '{result}' — the name echoed "

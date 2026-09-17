@@ -18,7 +18,6 @@ the root conftest; each test that persists a token clears it afterward.
 from __future__ import annotations
 
 import json
-import socket
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler
@@ -33,13 +32,6 @@ from kiss.agents.third_party_agents.telegram_agent import (
 )
 
 _TOKEN = "123456:TEST-telegram-token"
-
-
-def _free_closed_port() -> int:
-    """Return an OS-assigned TCP port that is closed once this returns."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 class _BotApiReceiver:
@@ -169,12 +161,12 @@ def test_send_typing_swallows_http_500(
     assert receiver.requests[0]["json"]["action"] == "typing"
 
 
-def test_send_typing_swallows_unreachable_server() -> None:
-    """An unreachable API host (closed port) never raises."""
+def test_send_typing_swallows_unreachable_server(refusing_port: int) -> None:
+    """An unreachable API host (refused port) never raises."""
     _config.save({"bot_token": _TOKEN})
     try:
         backend = TelegramChannelBackend()
-        backend._api_base = f"http://127.0.0.1:{_free_closed_port()}"
+        backend._api_base = f"http://127.0.0.1:{refusing_port}"
         backend.send_typing("123456789")
     finally:
         _config.clear()

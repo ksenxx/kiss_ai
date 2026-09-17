@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from kiss.tests.server.test_explorer_scm_commands import (
@@ -66,8 +67,18 @@ def _open_page(browser, harness, width: int = 1400):
         ws.on("framesent", _on_sent)
 
     page.on("websocket", _on_ws)
-    page.goto(harness.base_url + "/")
-    page.wait_for_selector("#task-input", state="visible", timeout=30000)
+    for attempt in range(3):
+        page.goto(harness.base_url + "/")
+        try:
+            page.wait_for_selector("#task-input", state="visible", timeout=30000)
+            break
+        except PlaywrightTimeoutError:
+            # Under full-suite parallel load the page's first WS
+            # connect/auth round-trip can stall past the wait while the
+            # element stays hidden; a fresh navigation re-establishes
+            # the socket.  Persistent invisibility still fails.
+            if attempt == 2:
+                raise
     page.wait_for_selector("body.remote-desktop", state="attached")
     # The workspace is known once the config reply landed.
     page.wait_for_function(

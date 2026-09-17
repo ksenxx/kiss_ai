@@ -181,14 +181,19 @@ class TestVoiceWakeController(unittest.TestCase):
             ready_state = collector.events[0]
             self.assertEqual(
                 ready_state,
-                {"type": "voiceWakeState", "listening": True},
+                # Every controller event carries the sending
+                # listener's generation tag; the daemon's endpoint
+                # wrapper strips it before the wire.
+                {"type": "voiceWakeState", "listening": True,
+                 "voiceGen": 1},
             )
             # A stopped listener reports NO final state: its owner
             # asked for the stop (or disconnected).
-            self.assertNotIn(
-                {"type": "voiceWakeState", "listening": False},
-                collector.events,
-            )
+            self.assertFalse([
+                e for e in collector.events
+                if e.get("type") == "voiceWakeState"
+                and e.get("listening") is False
+            ])
 
         self._run(_scenario())
 
@@ -203,12 +208,25 @@ class TestVoiceWakeController(unittest.TestCase):
             first_pid = controller._listeners["c1"].proc.pid
             await controller.start("c1", None, collector.send)
             self.assertEqual(controller._listeners["c1"].proc.pid, first_pid)
+            # The re-report is delivered by a pump task, never from
+            # under the lifecycle lock (an unbounded send callback
+            # blocking a concurrent stop() forever was gpt-5.6-sol
+            # round-4 finding 2): await its arrival.
+            await collector.wait_for(
+                lambda _e: len([
+                    x for x in collector.events
+                    if x.get("listening") is True
+                ]) >= 2
+            )
             states = [
                 e for e in collector.events
                 if e["type"] == "voiceWakeState"
             ]
+            self.assertEqual(len(states), 2)
             self.assertEqual(
-                states[-1], {"type": "voiceWakeState", "listening": True},
+                states[-1],
+                {"type": "voiceWakeState", "listening": True,
+                 "voiceGen": 1},
             )
             await controller.stop("c1")
 

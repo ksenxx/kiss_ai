@@ -239,10 +239,14 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
     that directory — a dirty repo at ``$HOME`` once stalled a gmail
     dispatch for minutes copying 65 GB before the sub-task's tab could
     even appear.  The dispatch therefore pins ``use_worktree=False``
-    and ``auto_commit=False``, and pins ``classify_tasks=False``
-    because an ``is_development`` classification verdict overrides an
-    explicit ``use_worktree=False`` (``WorktreeSorcarAgent.run``).  A
-    path-mode agent script keeps the standard lifecycle: it operates
+    and ``auto_commit=False``.  Classification stays ENABLED for a
+    channel dispatch (``classify_tasks=None`` — the daemon default
+    decides, so a simple channel task gets the lite system prompt);
+    the worktree pin is safe because a verdict can only demote a
+    requested worktree run, never promote a pinned-off one
+    (``WorktreeSorcarAgent.run``).  Only cron — an unattended
+    automation that runs repeatedly — pins ``classify_tasks=False``.
+    A path-mode agent script keeps the standard lifecycle: it operates
     on the calling project unless its own getters say otherwise.  The
     real dispatch path is exercised up to the daemon-client boundary;
     only that boundary call is captured.
@@ -263,15 +267,16 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
     caller.mkdir()
     tool = make_run_agent_tool(str(caller))
 
-    # Channel mode: no worktree, no auto-commit, classification off.
+    # Channel mode: no worktree, no auto-commit; classification
+    # follows the daemon's configured default (no per-run override).
     tool("ntfy", "say hi")
     assert captured[0]["use_worktree"] is False
     assert captured[0]["auto_commit"] is False
-    assert captured[0]["classify_tasks"] is False
+    assert captured[0]["classify_tasks"] is None
 
-    # Cron mode: same — the module getters already return False for
-    # use_worktree/auto_commit, and the wire fields agree with them
-    # while classification is pinned off.
+    # Cron mode: the module getters already return False for
+    # use_worktree/auto_commit, the wire fields agree with them, and
+    # classification is pinned off — cron never classifies.
     captured.clear()
     tool("cron", "run 'echo hi' every 5 minutes")
     assert captured[0]["use_worktree"] is False

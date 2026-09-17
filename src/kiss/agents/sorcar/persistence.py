@@ -1828,8 +1828,9 @@ def _allocate_chat_id() -> str:
     Generates a new UUID-style string that can be used as a unique
     chat session identifier.
 
-    This is used by ``WorktreeSorcarAgent`` to name worktree branches
-    *before* the first task in a session is persisted.
+    Used by ``ChatSorcarAgent.run`` to fix the session id *before* the
+    first task row is persisted, so every early consumer (worktree
+    setup, printers) sees the same id the row will carry.
 
     Returns:
         A unique 32-character string suitable for use as a ``chat_id``.
