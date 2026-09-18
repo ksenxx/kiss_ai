@@ -7,7 +7,7 @@
 # Deploy *this* KISS Sorcar checkout to a remote Linux machine and publish its
 # web app (``kiss-web``) so it is reachable from any machine in the world.
 #
-# Usage:  ./sorcar-cloud user@ip-address
+# Usage:  ./rsorcar user@ip-address
 #
 # Flow:
 #   1. Check SSH connectivity to user@ip-address, and that no task is running
@@ -152,14 +152,15 @@ WEB_PORT="${SORCAR_WEB_PORT:-8787}"
 [[ "$WEB_PORT" =~ ^[0-9]+$ ]] && ((WEB_PORT >= 1 && WEB_PORT <= 65535)) \
     || die "SORCAR_WEB_PORT must be a port number, got '$WEB_PORT'."
 
-for tool in git ssh scp rsync curl; do
+for tool in git ssh scp tar curl; do
     command -v "$tool" &>/dev/null || die "$tool is not installed."
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$SCRIPT_DIR/install.sh" ]] || die "No install.sh next to $0 — is this a KISS Sorcar checkout?"
 [[ -f "$SCRIPT_DIR/scripts/sync-repo.sh" ]] || die "No scripts/sync-repo.sh next to $0 — step 3 needs it."
-for helper in scripts/install-api-keys.sh scripts/sync-task-db.sh \
+for helper in scripts/install-ssh-identity.sh \
+              scripts/install-api-keys.sh scripts/sync-task-db.sh \
               scripts/collect-github-auth.sh scripts/install-github-auth.sh \
               src/kiss/scripts/sync_db.py src/kiss/scripts/relocate_work_dir.py \
               src/kiss/scripts/carry_over_tables.py \
@@ -242,31 +243,41 @@ fi
 # ---------------------------------------------------------------------------
 if [[ -d "$HOME/.ssh" ]]; then
     step "Copying ~/.ssh/ to $TARGET (keeping the remote's authorized_keys) ..."
+    # The files travel as a tar stream over the ssh connection itself, and
+    # scripts/install-ssh-identity.sh unpacks them on the other side: a fresh
+    # cloud image has no rsync, and this step runs before the checkout (and
+    # its helpers) is on the remote, so the helper is shipped by itself first.
     # A private key cannot be reconstructed, and the remote may well have one
     # of its own under a name this machine also uses (id_ed25519, config,
-    # known_hosts).  --backup moves every file this copy would overwrite into
-    # a directory of its own instead of destroying it; the directory is
-    # outside ~/.ssh so ssh never reads what is in it, and rsync only creates
-    # it if there was something to put there.
+    # known_hosts): the helper moves every file this copy would replace into a
+    # directory of its own instead of destroying it — outside ~/.ssh so ssh
+    # never reads what is in it, and only created if there was something to
+    # put there.  authorized_keys never travels: on the remote it is what lets
+    # this machine in.
     SSH_BACKUP="$REMOTE_HOME/.kiss/ssh-replaced-$(date -u +%Y%m%dT%H%M%SZ)"
     ssh "$TARGET" 'mkdir -p "$HOME/.ssh" "$HOME/.kiss" && chmod 700 "$HOME/.ssh" "$HOME/.kiss"'
-    rsync -aHz -e ssh --backup --backup-dir="$SSH_BACKUP" \
-        --exclude='authorized_keys' --exclude='authorized_keys2' \
-        --exclude='environment' --exclude='*.sock' --exclude='.DS_Store' \
-        "$HOME/.ssh/" "$TARGET:.ssh/"
-    # ssh refuses to use a key whose permissions are group/world readable.
-    ssh "$TARGET" "SSH_BACKUP=$(shquote "$SSH_BACKUP") bash -s" <<'FIXSSH'
-set -e
-chmod 700 "$HOME/.ssh"
-find "$HOME/.ssh" -type f -exec chmod 600 {} +
-find "$HOME/.ssh" -type f \( -name '*.pub' -o -name 'known_hosts*' \) -exec chmod 644 {} +
-if [ -d "$SSH_BACKUP" ]; then
-    chmod -R go-rwx "$SSH_BACKUP"
-    echo "[$(hostname -s)] kept the ssh files this copy replaced in ${SSH_BACKUP/#$HOME/~}:"
-    find "$SSH_BACKUP" -type f | sed "s|^$SSH_BACKUP/|         |"
-fi
-FIXSSH
-    info "SSH identity copied to $REMOTE_HOME/.ssh."
+    scp -q "$SCRIPT_DIR/scripts/install-ssh-identity.sh" "$TARGET:.kiss/"
+    # Only regular files and symlinks are listed: a socket (an ssh agent's,
+    # say) cannot go into an archive, and a directory named here would be
+    # archived with everything in it, excluded or not.
+    SSH_FILES=()
+    while IFS= read -r -d '' f; do SSH_FILES+=("$f"); done < <(
+        cd "$HOME/.ssh" && find . -mindepth 1 \
+            \( -name authorized_keys -o -name authorized_keys2 -o -name environment \
+               -o -name '*.sock' -o -name .DS_Store \) -prune \
+            -o \( -type f -o -type l \) -print0)
+    if ((${#SSH_FILES[@]} > 0)); then
+        # COPYFILE_DISABLE keeps macOS's tar from adding a ._file of extended
+        # attributes beside every file, and --no-xattrs from writing the
+        # attributes themselves into headers GNU tar warns about on the remote.
+        COPYFILE_DISABLE=1 tar -cf - --no-xattrs -C "$HOME/.ssh" -- "${SSH_FILES[@]}" \
+            | ssh "$TARGET" "SSH_BACKUP=$(shquote "$SSH_BACKUP") \
+                bash \"\$HOME/.kiss/install-ssh-identity.sh\"" \
+            || die "Could not copy ~/.ssh/ to $TARGET."
+        info "SSH identity copied to $REMOTE_HOME/.ssh (${#SSH_FILES[@]} files)."
+    else
+        warn "Nothing in ~/.ssh to copy (authorized_keys never travels) — skipping."
+    fi
 else
     warn "No local ~/.ssh directory — skipping."
 fi

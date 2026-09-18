@@ -11,11 +11,19 @@ non-interactively before restoring the pre-release stash — and that a failing
 install aborts the release with the stash restored.
 
 Runs ``scripts/test_rsorcar_local_install.sh``, which executes the real
-``./rsorcar`` against a stubbed remote (ssh/scp/rsync/curl answer what a
-healthy deploy sees) and verifies that the deploy ends by running
-``./install.sh`` on the local machine, after the summary box and before
-"Done." — and that a failing local install fails the deploy without hiding
-the remote URL and password.
+``./rsorcar`` against a stubbed remote (ssh/scp/curl answer what a healthy
+deploy sees) and verifies that the deploy ends by running ``./install.sh`` on
+the local machine, after the summary box and before "Done." — and that a
+failing local install fails the deploy without hiding the remote URL and
+password.  The same run copies a fake ``~/.ssh`` as a tar stream through the
+ssh stub into the real ``scripts/install-ssh-identity.sh``: the deploy must
+not need rsync on the remote (a fresh Debian image has none).
+
+Runs ``scripts/test_install_ssh_identity.sh``, which exercises that remote
+half on its own: files land under their relative paths, replaced files with
+different content are kept in ``$SSH_BACKUP``, ``authorized_keys`` is never
+touched, permissions are fixed, and a missing ``SSH_BACKUP`` or ``tar`` fails
+with a clear message.
 """
 
 import subprocess
@@ -46,3 +54,8 @@ def test_release_runs_local_install_before_finishing() -> None:
 def test_rsorcar_runs_local_install_before_finishing() -> None:
     """rsorcar must run ./install.sh locally after the deploy summary, before Done."""
     run_suite("test_rsorcar_local_install.sh")
+
+
+def test_install_ssh_identity_receives_the_ssh_copy() -> None:
+    """install-ssh-identity.sh must install a tar stream into ~/.ssh, keeping replaced files."""
+    run_suite("test_install_ssh_identity.sh")

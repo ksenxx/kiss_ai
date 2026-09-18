@@ -2,11 +2,11 @@
 # End-to-end test for the local install step at the end of ./rsorcar.
 # Run: bash scripts/test_rsorcar_local_install.sh
 #
-# Runs the real rsorcar against a fake remote: ssh/scp/rsync/curl are PATH
-# stubs that answer exactly what a healthy deploy would see (a reachable host,
-# no running task, a live tunnel URL), and the checkout-local helpers that do
-# the heavy lifting (sync-repo.sh, sync-task-db.sh) are no-ops.  install.sh in
-# the checkout is a recorder, so the test observes the new final step:
+# Runs the real rsorcar against a fake remote: ssh/scp/curl are PATH stubs
+# that answer exactly what a healthy deploy would see (a reachable host, no
+# running task, a live tunnel URL), and the checkout-local helpers that do the
+# heavy lifting (sync-repo.sh, sync-task-db.sh) are no-ops.  install.sh in the
+# checkout is a recorder, so the test observes the final step:
 #   * rsorcar runs install.sh on the LOCAL machine, non-interactively and
 #     without launching an editor, after printing the deploy summary,
 #   * when started from a linked git worktree, it runs the MAIN repository's
@@ -14,10 +14,19 @@
 #     points the persistent launchers at its own directory),
 #   * and a failing local install fails the script without hiding the
 #     remote URL and password printed just before it.
+# The ~/.ssh/ copy of step 2 runs for real through the ssh stub: the fake
+# HOME has an ~/.ssh with a key, an authorized_keys and an agent socket, and
+# the stub hands the tar stream rsorcar sends to the real
+# scripts/install-ssh-identity.sh with HOME set to the fake remote home — so
+# the test sees the key arrive, the excluded files stay behind, and the
+# remote's authorized_keys survive.  No rsync anywhere: the remote may not
+# have it.
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WORK="$(mktemp -d)"
+# The physical path: rsorcar resolves the main repository with cd && pwd, and
+# on macOS mktemp answers under /var, a symlink to /private/var.
+WORK="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 
 fail() { echo "FAIL: $1"; exit 1; }
@@ -52,6 +61,7 @@ EOF
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/install-api-keys.sh"
     local helper
     for helper in scripts/collect-github-auth.sh scripts/install-github-auth.sh \
+                  scripts/install-ssh-identity.sh \
                   src/kiss/scripts/sync_db.py src/kiss/scripts/relocate_work_dir.py \
                   src/kiss/scripts/carry_over_tables.py \
                   src/kiss/scripts/db_fingerprint.py \
@@ -61,13 +71,28 @@ EOF
     done
 }
 
-# --- Fixture: fake HOME, fake remote HOME and the ssh/scp/rsync/curl stubs ---
+# --- Fixture: fake HOME, fake remote HOME and the ssh/scp/curl stubs ---------
 # $1: fixture dir
 make_env() {
     local fix="$1"
-    mkdir -p "$fix/home/.kiss" "$fix/rhome" "$fix/bin"
+    mkdir -p "$fix/home/.kiss" "$fix/home/.ssh/agent" "$fix/rhome/.ssh" "$fix/rhome/.kiss" "$fix/bin"
     # The key store the deploy ships (no ~/*rc file in the fake HOME).
     echo 'export FAKE_API_KEY=x' > "$fix/home/.kiss/api_keys.env"
+    # The ssh identity the deploy copies (step 2), with the files it must
+    # leave behind: authorized_keys, a socket, a .DS_Store.
+    echo 'local private key' > "$fix/home/.ssh/id_test"
+    echo 'local public key' > "$fix/home/.ssh/id_test.pub"
+    echo 'local authorized_keys' > "$fix/home/.ssh/authorized_keys"
+    : > "$fix/home/.ssh/.DS_Store"
+    # Bound by a relative name: a Unix socket path is limited to about 100
+    # bytes, and a long TMPDIR would push the absolute path past that.
+    (cd "$fix/home/.ssh/agent" \
+        && python3 -c 'import socket; socket.socket(socket.AF_UNIX).bind("x.sock")')
+    # The remote's own authorized_keys: the file that lets the deploy in.
+    echo 'remote authorized_keys' > "$fix/rhome/.ssh/authorized_keys"
+    # The scp stub copies nothing, so the remote half of the copy is put where
+    # rsorcar's scp would have put it.
+    cp "$REPO_ROOT/scripts/install-ssh-identity.sh" "$fix/rhome/.kiss/"
 
     # ssh stub: answers each probe rsorcar sends a healthy deploy's answer.
     cat > "$fix/bin/ssh" <<EOF
@@ -85,11 +110,11 @@ case "\$cmd" in
     *remote-url.json*) echo "$FAKE_URL" ;;
     *remote_password*) echo "$FAKE_PW" ;;
     *'git log -1'*) printf 'abc123 fake commit\n0\n' ;;
+    *install-ssh-identity.sh*) HOME="$fix/rhome" bash -c "\$cmd" ;;   # the real remote half, fed the tar stream
     *) [ -t 0 ] || cat >/dev/null; exit 0 ;;
 esac
 EOF
     printf '#!/bin/bash\nexit 0\n' > "$fix/bin/scp"
-    printf '#!/bin/bash\nexit 0\n' > "$fix/bin/rsync"
     printf '#!/bin/bash\nprintf 200\n' > "$fix/bin/curl"
     chmod +x "$fix/bin/"*
 }
@@ -113,6 +138,20 @@ grep -qx 'args=--non-interactive' "$WORK/ok/install-marker.txt" \
 grep -qx 'skip_launch=1' "$WORK/ok/install-marker.txt" \
     || fail "local install.sh not run with KISS_SKIP_LAUNCH=1"
 pass "rsorcar runs install.sh locally, non-interactively, no editor launch"
+
+RSSH="$WORK/ok/rhome/.ssh"
+[[ "$(cat "$RSSH/id_test")" == "local private key" ]] || fail "the ssh key did not reach the remote ~/.ssh"
+[[ "$(cat "$RSSH/id_test.pub")" == "local public key" ]] || fail "the public key did not reach the remote ~/.ssh"
+[[ "$(cat "$RSSH/authorized_keys")" == "remote authorized_keys" ]] \
+    || fail "the remote's authorized_keys was overwritten: $(cat "$RSSH/authorized_keys")"
+[[ ! -e "$RSSH/.DS_Store" && ! -e "$RSSH/agent" ]] \
+    || fail "excluded files were copied: $(ls -A "$RSSH")"
+[[ -z "$(find "$WORK/ok/rhome/.kiss" -maxdepth 1 -name 'ssh-replaced-*')" ]] \
+    || fail "a backup directory was created although nothing was replaced"
+echo "$OUT" | grep -q "SSH identity copied to $WORK/ok/rhome/.ssh (2 files)" \
+    || fail "the ssh copy was not reported with its file count:
+$OUT"
+pass "the ssh identity travels as a tar stream: key arrives, authorized_keys and excluded files stay put"
 
 URL_LINE=$(echo "$OUT" | grep -n "URL:.*$FAKE_URL" | cut -d: -f1 | head -1)
 STEP_LINE=$(echo "$OUT" | grep -n "Running install.sh on the local machine" | cut -d: -f1 | head -1)
