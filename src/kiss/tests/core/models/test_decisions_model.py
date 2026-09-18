@@ -80,7 +80,7 @@ class _DecisionsHandler(BaseHTTPRequestHandler):
     auth_headers: list[str] = []
     headers_seen: list[dict[str, str]] = []
 
-    def log_message(self, *_args: Any) -> None:  # noqa: D102 — silence the test log
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, D102
         return
 
     def do_POST(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API

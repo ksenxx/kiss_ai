@@ -776,6 +776,1211 @@ async function main() {
     win.close();
   });
 
+  function firstRow(win) {
+    return win.document.querySelector('#history-list .sidebar-item');
+  }
+
+  await test('History: an identical refresh keeps the same DOM rows (no lost click, no lost focus)', async () => {
+    const {win, posted} = makeWebview();
+    const page1 = () => [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ];
+    sendHistory(win, posted, 0, page1());
+    const rowBefore = firstRow(win);
+    rowBefore.focus();
+    // A `tasks_updated` broadcast (ANY task on the daemon persisted a
+    // result, or the post-ready nudge) refetches the first page.  When
+    // it comes back identical, the rendered rows must be KEPT: wiping
+    // and rebuilding them swallows a click in flight (mousedown on the
+    // old row, mouseup on its replacement) and drops keyboard focus.
+    const asksBefore = ofType(posted, 'getHistory').length;
+    send(win, {type: 'tasks_updated'});
+    const asks = ofType(posted, 'getHistory');
+    assert.ok(
+      asks.length > asksBefore,
+      'tasks_updated refetches the open history panel',
+    );
+    sendHistory(win, posted, 0, page1());
+    assert.strictEqual(
+      firstRow(win),
+      rowBefore,
+      'identical refresh must keep the existing row node',
+    );
+    assert.strictEqual(
+      win.document.activeElement,
+      rowBefore,
+      'keyboard focus survives an identical refresh',
+    );
+    // The KEPT row's handler is alive: clicking it opens its task in a
+    // tab (this is the click the old wipe-and-rebuild used to swallow).
+    const tabsBefore = all(win, '.chat-tab').length;
+    click(win, rowBefore);
+    assert.strictEqual(all(win, '.chat-tab').length, tabsBefore + 1);
+    win.close();
+  });
+
+  await test('History: changed data still rebuilds the rows', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const rowBefore = firstRow(win);
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('B', 'b2', todayNoon + 60),
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    assert.notStrictEqual(
+      firstRow(win),
+      rowBefore,
+      'changed data must rebuild the rows',
+    );
+    assert.deepStrictEqual(listShape(win), [
+      'sep:Today',
+      'chat:B[task b2,task b1]',
+      'chat:A[task a1]',
+    ]);
+    win.close();
+  });
+
+  await test('History: an identical refresh retires every stale pagination loader', async () => {
+    const {win, posted} = makeWebview();
+    const page1 = () => [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ];
+    sendHistory(win, posted, 0, page1());
+    const rowBefore = firstRow(win);
+    // Loaders can pile up: the scroll handler appends one, then a
+    // broadcast-driven refresh resets historyLoading while it is still
+    // on screen, so a second scroll appends another (duplicate ids).
+    // The old offset-0 wipe cleared them as a side effect; the reply
+    // itself must now retire ALL of them even on the fast path.
+    const list = byId(win, 'history-list');
+    for (let i = 0; i < 2; i++) {
+      const loader = win.document.createElement('div');
+      loader.className = 'sidebar-loading';
+      loader.id = 'history-loader';
+      loader.textContent = 'Loading...';
+      list.appendChild(loader);
+    }
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, page1());
+    assert.strictEqual(
+      all(win, '#history-loader').length,
+      0,
+      'every loader row is removed by the identical refresh',
+    );
+    assert.strictEqual(firstRow(win), rowBefore, 'rows still kept');
+    win.close();
+  });
+
+  await test('History: a huge identical page is still kept (field comparison, no serialization)', async () => {
+    const {win, posted} = makeWebview();
+    // Rows are compared field by field (huge prompt strings directly),
+    // so even multi-megabyte pages take the fast path when unchanged.
+    const big = 'x'.repeat(600 * 1024);
+    const page1 = () => [
+      session('A', 'a1', todayNoon, {title: big, preview: big}),
+      session('B', 'b1', todayNoon - 600),
+    ];
+    sendHistory(win, posted, 0, page1());
+    const rowBefore = firstRow(win);
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, page1());
+    assert.strictEqual(
+      firstRow(win),
+      rowBefore,
+      'a huge identical page must still keep its row nodes',
+    );
+    win.close();
+  });
+
+  await test('History: a kept row with a ticking duration gets its metrics refreshed in place', async () => {
+    const {win, posted} = makeWebview();
+    // A running task's duration is `Date.now() - startTs`; the fast
+    // path must keep the node (so clicks/focus survive) but refresh the
+    // metrics text so the duration keeps ticking.  This is the shape of
+    // every running row and of completed rows lacking a recorded end.
+    const startTs = Date.now() - 59000;
+    const page1 = () => [
+      session('A', 'a1', todayNoon, {is_running: true, startTs}),
+      session('B', 'b1', todayNoon - 600),
+    ];
+    sendHistory(win, posted, 0, page1());
+    const rowBefore = firstRow(win);
+    const metricsEl = rowBefore.querySelector('.running-item-metrics');
+    const textBefore = metricsEl.textContent;
+    assert.ok(/00:00:59|00:01:0\d/.test(textBefore), textBefore);
+    const realNow = win.Date.now;
+    win.Date.now = () => realNow() + 60000;
+    try {
+      send(win, {type: 'tasks_updated'});
+      sendHistory(win, posted, 0, page1());
+      assert.strictEqual(
+        firstRow(win),
+        rowBefore,
+        'the ticking row node is kept',
+      );
+      const textAfter = rowBefore.querySelector(
+        '.running-item-metrics',
+      ).textContent;
+      assert.notStrictEqual(
+        textAfter,
+        textBefore,
+        'the duration must be recomputed in place',
+      );
+      assert.ok(/00:01:59|00:02:0\d/.test(textAfter), textAfter);
+    } finally {
+      win.Date.now = realNow;
+    }
+    win.close();
+  });
+
+  await test('History: a rebuild with CHANGED data is deferred while the mouse is pressed on a row', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const rowBefore = firstRow(win);
+    // Press the row, and let a refresh with DIFFERENT data land while
+    // the button is still down: rebuilding now would swallow the click.
+    rowBefore.dispatchEvent(
+      new win.MouseEvent('mousedown', {bubbles: true, cancelable: true}),
+    );
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('C', 'c1', todayNoon + 60),
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    assert.strictEqual(
+      firstRow(win),
+      rowBefore,
+      'the rebuild is deferred while the press is held',
+    );
+    rowBefore.dispatchEvent(
+      new win.MouseEvent('mouseup', {bubbles: true, cancelable: true}),
+    );
+    // The rebuild must not run synchronously inside the mouseup
+    // dispatch either: the browser synthesizes the click right after
+    // mouseup, so a rebuild there would still swallow it.
+    assert.strictEqual(
+      firstRow(win),
+      rowBefore,
+      'no rebuild during the mouseup dispatch',
+    );
+    const tabsBefore = all(win, '.chat-tab').length;
+    click(win, rowBefore);
+    assert.strictEqual(
+      all(win, '.chat-tab').length,
+      tabsBefore + 1,
+      'the click that was in flight still opens the task',
+    );
+    await sleep(20);
+    assert.notStrictEqual(
+      firstRow(win),
+      rowBefore,
+      'the deferred rebuild lands right after the click',
+    );
+    assert.deepStrictEqual(listShape(win), [
+      'sep:Today',
+      'chat:C[task c1]',
+      'chat:A[task a1]',
+      'chat:B[task b1]',
+    ]);
+    win.close();
+  });
+
+  await test('History: a rebuild is deferred during a TOUCH press (pointer events)', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const rowBefore = firstRow(win);
+    // Touch: only pointer events fire while the finger is down; the
+    // compatibility mouse events arrive after the finger lifts.
+    rowBefore.dispatchEvent(
+      new win.MouseEvent('pointerdown', {bubbles: true, cancelable: true}),
+    );
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('C', 'c1', todayNoon + 60),
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    assert.strictEqual(
+      firstRow(win),
+      rowBefore,
+      'the rebuild is deferred while the touch is held',
+    );
+    // On a tap, Chromium dispatches pointerup FIRST and the
+    // compatibility mousedown/mouseup/click AFTER it: the parked page
+    // must not land in that gap, or the click would hit whatever row
+    // the rebuild put under the finger.
+    const upEvent = new win.MouseEvent('pointerup', {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(upEvent, 'pointerType', {value: 'touch'});
+    rowBefore.dispatchEvent(upEvent);
+    await sleep(50);
+    assert.strictEqual(
+      firstRow(win),
+      rowBefore,
+      'the parked page must wait out the compatibility-event gap',
+    );
+    const tabsBefore = all(win, '.chat-tab').length;
+    click(win, rowBefore);
+    assert.strictEqual(
+      all(win, '.chat-tab').length,
+      tabsBefore + 1,
+      'the tap still opens the pressed task',
+    );
+    await sleep(400);
+    assert.notStrictEqual(
+      firstRow(win),
+      rowBefore,
+      'the deferred rebuild lands after the grace period',
+    );
+    win.close();
+  });
+
+  await test('History: a reused touch pointer ID does not release a newer touch', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const rowBefore = firstRow(win);
+    const pev = (type, id) => {
+      const e = new win.MouseEvent(type, {bubbles: true, cancelable: true});
+      Object.defineProperty(e, 'pointerId', {value: id});
+      Object.defineProperty(e, 'pointerType', {value: 'touch'});
+      return e;
+    };
+    // Touch 1 presses, a changed page lands and is parked, the finger
+    // lifts (arming the 300ms compatibility-event grace timer) ...
+    rowBefore.dispatchEvent(pev('pointerdown', 7));
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('C', 'c1', todayNoon + 60),
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    rowBefore.dispatchEvent(pev('pointerup', 7));
+    // ... and touch 2 begins INSIDE the grace period, with the browser
+    // reusing pointer ID 7 for the new contact.  Touch 1's grace timer
+    // must not release touch 2's press.
+    rowBefore.dispatchEvent(pev('pointerdown', 7));
+    await sleep(400);
+    assert.strictEqual(
+      firstRow(win),
+      rowBefore,
+      'a reused pointer ID must not release a newer touch',
+    );
+    // Touch 2 lifts; its own grace period ends; the parked page lands.
+    rowBefore.dispatchEvent(pev('pointerup', 7));
+    await sleep(400);
+    assert.notStrictEqual(
+      firstRow(win),
+      rowBefore,
+      'the parked page lands after the second touch releases',
+    );
+    win.close();
+  });
+
+  await test('History: a parked page stays parked when a second press begins before the deferred apply', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const rowBefore = firstRow(win);
+    rowBefore.dispatchEvent(
+      new win.MouseEvent('mousedown', {bubbles: true, cancelable: true}),
+    );
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('C', 'c1', todayNoon + 60),
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    // Release press 1 (queues the zero-delay apply), then start press 2
+    // synchronously, BEFORE that macrotask can run: the apply must find
+    // the new press held and re-park the page instead of rebuilding.
+    rowBefore.dispatchEvent(
+      new win.MouseEvent('mouseup', {bubbles: true, cancelable: true}),
+    );
+    rowBefore.dispatchEvent(
+      new win.MouseEvent('mousedown', {bubbles: true, cancelable: true}),
+    );
+    await sleep(30);
+    assert.strictEqual(
+      firstRow(win),
+      rowBefore,
+      'the deferred apply must re-park while a second press is held',
+    );
+    rowBefore.dispatchEvent(
+      new win.MouseEvent('mouseup', {bubbles: true, cancelable: true}),
+    );
+    await sleep(30);
+    assert.notStrictEqual(
+      firstRow(win),
+      rowBefore,
+      'the re-parked page lands after the second release',
+    );
+    assert.deepStrictEqual(listShape(win), [
+      'sep:Today',
+      'chat:C[task c1]',
+      'chat:A[task a1]',
+      'chat:B[task b1]',
+    ]);
+    win.close();
+  });
+
+  await test('History: a rebuild is deferred while a keyboard activation (Space) is held', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const rowBefore = firstRow(win);
+    const fav = rowBefore.querySelector('.sidebar-item-favorite');
+    fav.focus();
+    // A native button activates Space on KEYUP: a rebuild landing
+    // between keydown and keyup would detach the button and swallow
+    // the activation, exactly like a swallowed mouse click.
+    fav.dispatchEvent(
+      new win.KeyboardEvent('keydown', {
+        key: ' ',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('C', 'c1', todayNoon + 60),
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    assert.strictEqual(
+      firstRow(win),
+      rowBefore,
+      'the rebuild is deferred while Space is held on a list control',
+    );
+    // Overlapping activation keys: pressing and RELEASING Enter while
+    // Space is still held must not release the guard.
+    fav.dispatchEvent(
+      new win.KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    fav.dispatchEvent(
+      new win.KeyboardEvent('keyup', {
+        key: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await sleep(20);
+    assert.strictEqual(
+      firstRow(win),
+      rowBefore,
+      'releasing Enter must not release the still-held Space',
+    );
+    // Chromium dispatches the Space keyup FIRST and synthesizes the
+    // button's click right after it (before any queued macrotask): the
+    // guard's release must not rebuild synchronously inside the keyup
+    // dispatch, or the click would hit a detached button.
+    fav.dispatchEvent(
+      new win.KeyboardEvent('keyup', {
+        key: ' ',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    assert.ok(
+      fav.isConnected,
+      'no rebuild during the keyup dispatch (the activation click is next)',
+    );
+    click(win, fav);
+    await sleep(20);
+    assert.notStrictEqual(
+      firstRow(win),
+      rowBefore,
+      'the parked page lands after the keyboard activation',
+    );
+    const rebuiltA = all(win, '#history-list .sidebar-item')[1];
+    assert.ok(
+      rebuiltA
+        .querySelector('.sidebar-item-favorite')
+        .classList.contains('favorited'),
+      'the activation took effect (optimistic star on the rebuilt row)',
+    );
+    win.close();
+  });
+
+  await test('History: a press whose release never arrives cannot park the panel forever', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const rowBefore = firstRow(win);
+    const timers = [];
+    const origSetTimeout = win.setTimeout;
+    const realNow = win.Date.now;
+    const T = realNow();
+    win.setTimeout = (fn, ms) => {
+      if (ms >= 250 && ms <= 5500) {
+        timers.push({fn, ms});
+        return 1e9 + timers.length;
+      }
+      return origSetTimeout(fn, ms);
+    };
+    try {
+      win.Date.now = () => T;
+      // A press with no matching release (the release event was eaten:
+      // e.g. a drag released outside the webview's iframe).
+      rowBefore.dispatchEvent(
+        new win.MouseEvent('mousedown', {bubbles: true, cancelable: true}),
+      );
+      send(win, {type: 'tasks_updated'});
+      sendHistory(win, posted, 0, [
+        session('C', 'c1', todayNoon + 60),
+        session('A', 'a1', todayNoon),
+        session('B', 'b1', todayNoon - 600),
+      ]);
+      assert.strictEqual(
+        firstRow(win),
+        rowBefore,
+        'parked while the press appears held',
+      );
+      assert.strictEqual(
+        timers.length,
+        1,
+        'a stale-press safety timer is armed with the parked page',
+      );
+      // A NEW press begins two seconds in: when the old timer fires at
+      // the bound it must NOT clear the younger press's latches — it
+      // re-arms for that press's own remainder instead.
+      win.Date.now = () => T + 2000;
+      firstRow(win).dispatchEvent(
+        new win.MouseEvent('mousedown', {bubbles: true, cancelable: true}),
+      );
+      win.Date.now = () => T + 5000;
+      timers[0].fn();
+      await sleep(20);
+      assert.strictEqual(
+        firstRow(win),
+        rowBefore,
+        'the safety timer must not release a press younger than the bound',
+      );
+      assert.strictEqual(timers.length, 2, 're-armed for the remainder');
+      assert.ok(
+        timers[1].ms <= 2000,
+        `re-armed for the remainder, got ${timers[1].ms}ms`,
+      );
+      // The younger press too never releases: at ITS bound the latches
+      // are dropped and the parked page finally lands.
+      win.Date.now = () => T + 7100;
+      timers[1].fn();
+      await sleep(20);
+      assert.notStrictEqual(
+        firstRow(win),
+        rowBefore,
+        'the safety timer drops the stale latches and lands the page',
+      );
+    } finally {
+      win.setTimeout = origSetTimeout;
+      win.Date.now = realNow;
+    }
+    win.close();
+  });
+
+  await test('History: a favourite click alone arms the reconciliation refetch', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const timers = [];
+    const origSetTimeout = win.setTimeout;
+    const realNow = win.Date.now;
+    win.setTimeout = (fn, ms) => {
+      if (ms >= 9500 && ms <= 10500) {
+        timers.push(fn);
+        return 1e9 + timers.length;
+      }
+      return origSetTimeout(fn, ms);
+    };
+    try {
+      // The write has no acknowledgement and may FAIL: with no other
+      // refresh ever arriving, the click itself must plan the refetch
+      // that lets the daemon's value reappear at the bound.
+      click(win, firstRow(win).querySelector('.sidebar-item-favorite'));
+      assert.strictEqual(
+        timers.length,
+        1,
+        'the click armed the reconciliation refetch',
+      );
+      win.Date.now = () => realNow() + 10200;
+      const asked = ofType(posted, 'getHistory').length;
+      timers[0]();
+      assert.ok(
+        ofType(posted, 'getHistory').length > asked,
+        'the refetch was posted with no page ever delivered in between',
+      );
+      // The (failed) write never happened on the daemon: past the
+      // bound its contrary value rules again.
+      sendHistory(win, posted, 0, [
+        session('A', 'a1', todayNoon),
+        session('B', 'b1', todayNoon - 600),
+      ]);
+      assert.ok(
+        !firstRow(win)
+          .querySelector('.sidebar-item-favorite')
+          .classList.contains('favorited'),
+        'the daemon value shows once the overlay expired',
+      );
+    } finally {
+      win.setTimeout = origSetTimeout;
+      win.Date.now = realNow;
+    }
+    win.close();
+  });
+
+  await test('History: hiding the page mid-press releases the guard', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const rowBefore = firstRow(win);
+    const pev = (type, id) => {
+      const e = new win.MouseEvent(type, {bubbles: true, cancelable: true});
+      Object.defineProperty(e, 'pointerId', {value: id});
+      Object.defineProperty(e, 'pointerType', {value: 'touch'});
+      return e;
+    };
+    // A touch press, then the page is hidden before any release event.
+    rowBefore.dispatchEvent(pev('pointerdown', 3));
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('C', 'c1', todayNoon + 60),
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    assert.strictEqual(firstRow(win), rowBefore, 'parked during the press');
+    Object.defineProperty(win.document, 'hidden', {
+      value: true,
+      configurable: true,
+    });
+    win.document.dispatchEvent(new win.Event('visibilitychange'));
+    await sleep(20);
+    assert.notStrictEqual(
+      firstRow(win),
+      rowBefore,
+      'hiding the page drops the latches and lands the parked page',
+    );
+    win.close();
+  });
+
+  await test('History: a cancelled press (drag/scroll) releases the guard without a mouseup', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const rowBefore = firstRow(win);
+    // Chromium can emit pointerdown -> mousedown -> dragstart ->
+    // pointercancel with NO mouseup (dragging selected row text): the
+    // cancel must release both flags or rendering stays parked forever.
+    rowBefore.dispatchEvent(
+      new win.MouseEvent('pointerdown', {bubbles: true, cancelable: true}),
+    );
+    rowBefore.dispatchEvent(
+      new win.MouseEvent('mousedown', {bubbles: true, cancelable: true}),
+    );
+    rowBefore.dispatchEvent(
+      new win.MouseEvent('pointercancel', {bubbles: true, cancelable: true}),
+    );
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('C', 'c1', todayNoon + 60),
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    assert.notStrictEqual(
+      firstRow(win),
+      rowBefore,
+      'rendering is not latched after a cancelled press',
+    );
+    win.close();
+  });
+
+  await test('History: a duplicate later page is dropped instead of duplicating rows', async () => {
+    const {win, posted} = makeWebview();
+    const fullPage = (tag, base) =>
+      Array.from({length: 50}, (_, i) =>
+        session('C' + tag + i, 't' + tag + i, base - i * 60),
+      );
+    sendHistory(win, posted, 0, fullPage('x', todayNoon));
+    sendHistory(win, posted, 50, fullPage('y', todayNoon - 5000));
+    assert.strictEqual(all(win, '#history-list .sidebar-item').length, 100);
+    // A second offset-50 reply (an overlapped same-generation request)
+    // no longer extends at the cursor (now 100): it must be dropped.
+    sendHistory(win, posted, 50, fullPage('z', todayNoon - 9000));
+    assert.strictEqual(
+      all(win, '#history-list .sidebar-item').length,
+      100,
+      'the stale duplicate page is dropped',
+    );
+    byId(win, 'history-list').dispatchEvent(new win.Event('scroll'));
+    const asks = ofType(posted, 'getHistory');
+    assert.strictEqual(
+      asks[asks.length - 1].offset,
+      100,
+      'pagination continues at the rendered row count',
+    );
+    win.close();
+  });
+
+  await test('History: no second same-generation request can overlap a pending refresh', async () => {
+    const {win, posted} = makeWebview();
+    const fullPage = tag =>
+      Array.from({length: 50}, (_, i) =>
+        session('C' + tag + i, 't' + tag + i, todayNoon - i * 60),
+      );
+    sendHistory(win, posted, 0, fullPage('x'));
+    // A broadcast resets pagination and refetches; until that reply
+    // lands, a bottom-scroll must NOT fire an overlapping request of
+    // the same generation (its late reply would re-order pagination).
+    send(win, {type: 'tasks_updated'});
+    const asked = ofType(posted, 'getHistory').length;
+    byId(win, 'history-list').dispatchEvent(new win.Event('scroll'));
+    assert.strictEqual(
+      ofType(posted, 'getHistory').length,
+      asked,
+      'the scroll is parked while the refresh is in flight',
+    );
+    sendHistory(win, posted, 0, fullPage('x'));
+    byId(win, 'history-list').dispatchEvent(new win.Event('scroll'));
+    assert.strictEqual(
+      ofType(posted, 'getHistory').length,
+      asked + 1,
+      'after the reply, the scroll paginates again',
+    );
+    win.close();
+  });
+
+  await test('History: a same-day clock change alone does not rebuild, a day change does', async () => {
+    const {win, posted} = makeWebview();
+    const page1 = () => [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ];
+    sendHistory(win, posted, 0, page1());
+    const rowBefore = firstRow(win);
+    // A wall-clock correction across local midnight must relabel
+    // "Today"/"Yesterday", so the fast path is off on a new local day.
+    const origToDateString = win.Date.prototype.toDateString;
+    win.Date.prototype.toDateString = function () {
+      return 'Fri Jan 01 2100';
+    };
+    try {
+      send(win, {type: 'tasks_updated'});
+      sendHistory(win, posted, 0, page1());
+      assert.notStrictEqual(
+        firstRow(win),
+        rowBefore,
+        'a new local day must rebuild (separator labels changed)',
+      );
+    } finally {
+      win.Date.prototype.toDateString = origToDateString;
+    }
+    win.close();
+  });
+
+  await test('History: the favourite overlay plans a refetch so its expiry is visible without broadcasts', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    // Capture the expiry timer main.js arms at the toggle (and keeps
+    // serving while a page still disagrees inside the bound).
+    const longTimers = [];
+    const origSetTimeout = win.setTimeout;
+    win.setTimeout = (fn, ms) => {
+      if (ms > 5000) {
+        longTimers.push(fn);
+        return 1e9 + longTimers.length;
+      }
+      return origSetTimeout(fn, ms);
+    };
+    const realNow = win.Date.now;
+    try {
+      click(win, firstRow(win).querySelector('.sidebar-item-favorite'));
+      send(win, {type: 'tasks_updated'});
+      sendHistory(win, posted, 0, [
+        session('A', 'a1', todayNoon, {steps: 3}),
+        session('B', 'b1', todayNoon - 600),
+      ]);
+      // At least the expiry refetch is armed (the midnight-relabel
+      // timer is captured by the same >5s filter).
+      assert.ok(longTimers.length >= 1, 'an expiry refetch is armed');
+      // At the deadline the timer refetches; the daemon's (contrary)
+      // value now rules because the overlay has expired.
+      win.Date.now = () => realNow() + 11000;
+      const asked = ofType(posted, 'getHistory').length;
+      longTimers.forEach(fn => fn());
+      assert.ok(
+        ofType(posted, 'getHistory').length > asked,
+        'the expiry timer refetches the history',
+      );
+      sendHistory(win, posted, 0, [
+        session('A', 'a1', todayNoon, {steps: 3}),
+        session('B', 'b1', todayNoon - 600),
+      ]);
+      assert.ok(
+        !firstRow(win)
+          .querySelector('.sidebar-item-favorite')
+          .classList.contains('favorited'),
+        'the daemon value shows at the deadline without any broadcast',
+      );
+    } finally {
+      win.Date.now = realNow;
+      win.setTimeout = origSetTimeout;
+    }
+    win.close();
+  });
+
+  await test('History: the expiry refetch serves the EARLIEST pending favourite deadline', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const realNow = win.Date.now;
+    const origSetTimeout = win.setTimeout;
+    try {
+      const T = realNow();
+      const timers = [];
+      win.setTimeout = (fn, ms) => {
+        if (ms > 3000 && ms < 20000) {
+          timers.push({fn, ms});
+          // A truthy fake id: main.js keeps the armed timer's id, and 0
+          // would read as "no timer armed".
+          return 1e9 + timers.length;
+        }
+        return origSetTimeout(fn, ms);
+      };
+      const rows = all(win, '#history-list .sidebar-item');
+      // A is starred at T, B five seconds later: A's overlay expires at
+      // T+10s, B's at T+15s.  The first click arms the timer; the
+      // second has a LATER deadline and must not move it.
+      win.Date.now = () => T;
+      click(win, rows[0].querySelector('.sidebar-item-favorite'));
+      assert.strictEqual(timers.length, 1, "A's click armed the timer");
+      win.Date.now = () => T + 5000;
+      click(win, rows[1].querySelector('.sidebar-item-favorite'));
+      assert.strictEqual(
+        timers.length,
+        1,
+        "B's later deadline must not move the armed timer",
+      );
+      // The timer fires (both overlays still pending) and refetches; the
+      // reply's PAGE ORDER puts the later deadline (B) first: the next
+      // timer must be re-armed for A's earlier deadline (~4.1s away at
+      // T+6s), not left at B's (~9.1s away).
+      win.Date.now = () => T + 6000;
+      timers[0].fn();
+      sendHistory(win, posted, 0, [
+        session('B', 'b1', todayNoon - 600, {steps: 3}),
+        session('A', 'a1', todayNoon, {steps: 3}),
+      ]);
+      assert.strictEqual(timers.length, 3, 'armed for B, re-armed for A');
+      assert.ok(
+        timers[2].ms >= 4000 && timers[2].ms <= 4300,
+        `re-armed for the earliest pending deadline, got ${timers[2].ms}ms`,
+      );
+      // At A's deadline the timer refetches; A's overlay has expired
+      // (daemon value rules) while B's still holds.
+      win.Date.now = () => T + 10200;
+      const asked = ofType(posted, 'getHistory').length;
+      timers[2].fn();
+      assert.ok(
+        ofType(posted, 'getHistory').length > asked,
+        'the earliest-deadline timer refetches the history',
+      );
+      sendHistory(win, posted, 0, [
+        session('A', 'a1', todayNoon, {steps: 3}),
+        session('B', 'b1', todayNoon - 600, {steps: 3}),
+      ]);
+      const after = all(win, '#history-list .sidebar-item');
+      assert.ok(
+        !after[0]
+          .querySelector('.sidebar-item-favorite')
+          .classList.contains('favorited'),
+        "A's overlay expired at its own 10s bound",
+      );
+      assert.ok(
+        after[1]
+          .querySelector('.sidebar-item-favorite')
+          .classList.contains('favorited'),
+        "B's younger overlay still holds",
+      );
+    } finally {
+      win.Date.now = realNow;
+      win.setTimeout = origSetTimeout;
+    }
+    win.close();
+  });
+
+  await test('History: an agreeing page retires the overlay and cancels its refetch', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const origSetTimeout = win.setTimeout;
+    const origClearTimeout = win.clearTimeout;
+    const armed = [];
+    const cleared = [];
+    win.setTimeout = (fn, ms) => {
+      if (ms >= 9500 && ms <= 10500) {
+        armed.push(fn);
+        return 1e9 + armed.length;
+      }
+      return origSetTimeout(fn, ms);
+    };
+    win.clearTimeout = id => {
+      if (id >= 1e9) {
+        cleared.push(id);
+        return undefined;
+      }
+      return origClearTimeout(id);
+    };
+    try {
+      click(win, firstRow(win).querySelector('.sidebar-item-favorite'));
+      assert.strictEqual(armed.length, 1, 'the click armed the refetch');
+      // The daemon's own data AGREES with the toggle: the overlay is
+      // retired and the now-pointless reconciliation refetch cancelled.
+      send(win, {type: 'tasks_updated'});
+      sendHistory(win, posted, 0, [
+        session('A', 'a1', todayNoon, {is_favorite: true}),
+        session('B', 'b1', todayNoon - 600),
+      ]);
+      assert.deepStrictEqual(
+        cleared,
+        [1e9 + 1],
+        'the agreeing page cancelled the armed refetch',
+      );
+    } finally {
+      win.setTimeout = origSetTimeout;
+      win.clearTimeout = origClearTimeout;
+    }
+    win.close();
+  });
+
+  await test('History: a parked page cannot acknowledge its own favourite overlay', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const origSetTimeout = win.setTimeout;
+    const origClearTimeout = win.clearTimeout;
+    const realNow = win.Date.now;
+    const armed = [];
+    const cleared = [];
+    win.setTimeout = (fn, ms) => {
+      if (ms >= 9500 && ms <= 10500) {
+        armed.push(fn);
+        return 1e9 + armed.length;
+      }
+      return origSetTimeout(fn, ms);
+    };
+    win.clearTimeout = id => {
+      if (id >= 1e9) {
+        cleared.push(id);
+        return undefined;
+      }
+      return origClearTimeout(id);
+    };
+    try {
+      click(win, firstRow(win).querySelector('.sidebar-item-favorite'));
+      assert.strictEqual(armed.length, 1, 'the click armed the refetch');
+      // A CONTRARY page (the daemon never saw the write) arrives while
+      // the row is pressed: it is merged (overlay applied), parked, and
+      // merged AGAIN when it lands after the release.  The second merge
+      // must not mistake the overlay for daemon agreement.
+      const rowBefore = firstRow(win);
+      rowBefore.dispatchEvent(
+        new win.MouseEvent('mousedown', {bubbles: true, cancelable: true}),
+      );
+      send(win, {type: 'tasks_updated'});
+      sendHistory(win, posted, 0, [
+        session('A', 'a1', todayNoon, {steps: 3}),
+        session('B', 'b1', todayNoon - 600),
+      ]);
+      rowBefore.dispatchEvent(
+        new win.MouseEvent('mouseup', {bubbles: true, cancelable: true}),
+      );
+      await sleep(30);
+      assert.notStrictEqual(firstRow(win), rowBefore, 'parked page landed');
+      assert.ok(
+        firstRow(win)
+          .querySelector('.sidebar-item-favorite')
+          .classList.contains('favorited'),
+        'the optimistic star survives the parked page landing',
+      );
+      assert.strictEqual(
+        cleared.length,
+        0,
+        'landing the parked page must not cancel the reconciliation refetch',
+      );
+      // The write really failed: at the bound the refetch lets the
+      // daemon's contrary value rule again.
+      win.Date.now = () => realNow() + 10200;
+      const asked = ofType(posted, 'getHistory').length;
+      armed[0]();
+      assert.ok(
+        ofType(posted, 'getHistory').length > asked,
+        'the reconciliation refetch still fires at the bound',
+      );
+      sendHistory(win, posted, 0, [
+        session('A', 'a1', todayNoon, {steps: 3}),
+        session('B', 'b1', todayNoon - 600),
+      ]);
+      assert.ok(
+        !firstRow(win)
+          .querySelector('.sidebar-item-favorite')
+          .classList.contains('favorited'),
+        'the daemon value rules once the overlay expired',
+      );
+    } finally {
+      win.setTimeout = origSetTimeout;
+      win.clearTimeout = origClearTimeout;
+      win.Date.now = realNow;
+    }
+    win.close();
+  });
+
+  await test('History: the favourite overlay expires so the daemon becomes authoritative again', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    click(win, firstRow(win).querySelector('.sidebar-item-favorite'));
+    // Within the bound, a contrary (pre-write) page keeps the star.
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon, {steps: 3}),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    assert.ok(
+      firstRow(win)
+        .querySelector('.sidebar-item-favorite')
+        .classList.contains('favorited'),
+      'the optimistic star holds within the bound',
+    );
+    // Past the bound (another client may have toggled it back, or the
+    // write may have failed), the daemon's value rules.
+    const realNow = win.Date.now;
+    win.Date.now = () => realNow() + 11000;
+    try {
+      send(win, {type: 'tasks_updated'});
+      sendHistory(win, posted, 0, [
+        session('A', 'a1', todayNoon, {steps: 4}),
+        session('B', 'b1', todayNoon - 600),
+      ]);
+      assert.ok(
+        !firstRow(win)
+          .querySelector('.sidebar-item-favorite')
+          .classList.contains('favorited'),
+        'after the bound the server value rules',
+      );
+    } finally {
+      win.Date.now = realNow;
+    }
+    win.close();
+  });
+
+  await test('History: an optimistic favourite survives a page deferred across its own click', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const favBtn = firstRow(win).querySelector('.sidebar-item-favorite');
+    // Press the star; while the button is held, a refresh lands that
+    // predates the toggle (star still off) with an unrelated change.
+    favBtn.dispatchEvent(
+      new win.MouseEvent('mousedown', {bubbles: true, cancelable: true}),
+    );
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon, {steps: 9}),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    click(win, favBtn);
+    favBtn.dispatchEvent(
+      new win.MouseEvent('mouseup', {bubbles: true, cancelable: true}),
+    );
+    await sleep(20);
+    const favAfter = firstRow(win).querySelector('.sidebar-item-favorite');
+    assert.notStrictEqual(favAfter, favBtn, 'the row was rebuilt');
+    assert.ok(
+      favAfter.classList.contains('favorited'),
+      'the optimistic star is preserved over the stale page',
+    );
+    // Once the daemon's own data agrees, the overlay retires and the
+    // server value keeps ruling.
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon, {steps: 9, is_favorite: true}),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon, {steps: 9, is_favorite: false}),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    assert.ok(
+      !firstRow(win)
+        .querySelector('.sidebar-item-favorite')
+        .classList.contains('favorited'),
+      'after the daemon agreed once, later server data rules again',
+    );
+    win.close();
+  });
+
+  await test('History: a duplicate offset-0 reply in one generation does not corrupt pagination', async () => {
+    const {win, posted} = makeWebview();
+    const fullPage = tag =>
+      Array.from({length: 50}, (_, i) =>
+        session('C' + tag + i, 't' + tag + i, todayNoon - i * 60),
+      );
+    sendHistory(win, posted, 0, fullPage('x'));
+    // A second offset-0 reply in the SAME generation (a scroll's
+    // duplicate racing a deferred rebuild) must assign the cursor, not
+    // advance it past what is on screen.
+    sendHistory(win, posted, 0, fullPage('y'));
+    byId(win, 'history-list').dispatchEvent(new win.Event('scroll'));
+    const asks = ofType(posted, 'getHistory');
+    const last = asks[asks.length - 1];
+    assert.strictEqual(
+      last.offset,
+      50,
+      'the next page is requested at the rendered row count',
+    );
+    win.close();
+  });
+
+  await test('History: keyboard focus moves to the same task after a changed-data rebuild', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const rows = all(win, '#history-list .sidebar-item');
+    rows[1].focus();
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon, {steps: 7}),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const rowsAfter = all(win, '#history-list .sidebar-item');
+    assert.notStrictEqual(rowsAfter[1], rows[1], 'rows were rebuilt');
+    assert.strictEqual(
+      win.document.activeElement,
+      rowsAfter[1],
+      "focus lands on task b1's fresh row",
+    );
+    // Focus on an inline control (the favourite star) survives as the
+    // SAME control on the rebuilt row: the next Space/Enter must repeat
+    // the control's action, not open the task.
+    rowsAfter[0].querySelector('.sidebar-item-favorite').focus();
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon, {steps: 8}),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const rowsFinal = all(win, '#history-list .sidebar-item');
+    assert.strictEqual(
+      win.document.activeElement,
+      rowsFinal[0].querySelector('.sidebar-item-favorite'),
+      "focus lands on task a1's fresh favourite control",
+    );
+    win.close();
+  });
+
+  await test('History: a locale change makes the next refresh rebuild (row times are localized)', async () => {
+    const {win, posted} = makeWebview();
+    const page1 = () => [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ];
+    sendHistory(win, posted, 0, page1());
+    const rowBefore = firstRow(win);
+    const origDtf = win.Intl.DateTimeFormat;
+    win.Intl.DateTimeFormat = function () {
+      return {resolvedOptions: () => ({locale: 'de-DE', timeZone: 'UTC'})};
+    };
+    try {
+      send(win, {type: 'tasks_updated'});
+      sendHistory(win, posted, 0, page1());
+      assert.notStrictEqual(
+        firstRow(win),
+        rowBefore,
+        'a locale change must rebuild the rows',
+      );
+    } finally {
+      win.Intl.DateTimeFormat = origDtf;
+    }
+    win.close();
+  });
+
+  await test('History: a time-zone change makes the next refresh rebuild (row times are localized)', async () => {
+    const {win, posted} = makeWebview();
+    const page1 = () => [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ];
+    sendHistory(win, posted, 0, page1());
+    const rowBefore = firstRow(win);
+    // Same data, different clock localization: the rows' timestamps
+    // were rendered under the old zone, so the fast path must not keep
+    // them.
+    const origOffset = win.Date.prototype.getTimezoneOffset;
+    win.Date.prototype.getTimezoneOffset = function () {
+      return origOffset.call(this) + 60;
+    };
+    try {
+      send(win, {type: 'tasks_updated'});
+      sendHistory(win, posted, 0, page1());
+      assert.notStrictEqual(
+        firstRow(win),
+        rowBefore,
+        'a zone change must rebuild the rows',
+      );
+    } finally {
+      win.Date.prototype.getTimezoneOffset = origOffset;
+    }
+    win.close();
+  });
+
   await test('History: a later page adds older tasks to existing blocks and opens older ones after', async () => {
     const {win, posted} = makeWebview();
     sendHistory(win, posted, 0, [

@@ -1001,12 +1001,60 @@ def test_history_groups_tasks_by_chat_with_day_separators(browser, harness, work
         ]
         # Clicking a task inside a chat block still opens it in a tab
         # (no events were persisted, so the task shows read-only).
-        tabs_before = page.locator(".chat-tab").count()
-        page.locator(".sidebar-item", has_text="alpha one").click()
-        _wait_tab_count(page, tabs_before + 1)
-        page.wait_for_function(
-            "document.body.innerText.includes('alpha one')", timeout=15000,
+        # Capture inbound WebSocket frames over CDP first, so the test
+        # can prove the DAEMON registered the fresh tab (a canonical
+        # `tabs_state` snapshot naming it), not just that the page
+        # created one locally.
+        received: list[str] = []
+        cdp = context.new_cdp_session(page)
+        cdp.on(
+            "Network.webSocketFrameReceived",
+            lambda ev: received.append(
+                ev.get("response", {}).get("payloadData", ""),
+            ),
         )
+        cdp.send("Network.enable")
+        pre_tab_ids = page.evaluate(
+            "Array.from(document.querySelectorAll('.chat-tab'))"
+            ".map(t => t.dataset.tabId)"
+        )
+        page.locator(".sidebar-item", has_text="alpha one").click()
+        # Opening a history task creates a fresh REGISTERED tab; the
+        # daemon's canonical `tabs_state` snapshot prunes the blank
+        # never-registered placeholder while REGISTERED tabs (e.g. one
+        # left by an earlier test in this workspace) rightly survive, so
+        # neither the tab count nor "every old id vanished" is a stable
+        # outcome.  Assert the designed outcome instead: the surviving
+        # ACTIVE tab is fresh (an id the page did not have before the
+        # click), it shows the clicked task in its read-only task panel,
+        # and a canonical `tabs_state` snapshot names that fresh id.
+        page.wait_for_function(
+            "document.getElementById('task-panel-text')"
+            " && document.getElementById('task-panel-text').textContent"
+            "      === 'alpha one'",
+            timeout=15000,
+        )
+        page.wait_for_function(
+            "pre => { const act = document.querySelector('.chat-tab.active');"
+            " return !!act && !pre.includes(act.dataset.tabId); }",
+            arg=pre_tab_ids,
+            timeout=15000,
+        )
+        active_id = page.evaluate(
+            "document.querySelector('.chat-tab.active').dataset.tabId"
+        )
+        for _ in range(100):
+            if any(
+                '"tabs_state"' in frame and active_id in frame
+                for frame in received
+            ):
+                break
+            page.wait_for_timeout(50)
+        else:
+            raise AssertionError(
+                "no canonical tabs_state snapshot named the fresh tab "
+                f"{active_id!r}: registration never reached the daemon"
+            )
     finally:
         context.close()
         db = th._get_db()
@@ -1014,4 +1062,110 @@ def test_history_groups_tasks_by_chat_with_day_separators(browser, harness, work
             db.execute(
                 "DELETE FROM task_history WHERE chat_id IN (?, ?, ?, ?)",
                 (chat_a, chat_b, chat_c, chat_d),
+            )
+
+
+def test_history_click_survives_mid_press_refresh(browser, harness, worktree):
+    """A real mouse press held on a history row while a changed-data
+    refresh arrives over the WebSocket still opens the task: the
+    destructive rebuild is deferred past the browser-synthesized click."""
+    import datetime as _dt
+
+    import kiss.agents.sorcar.persistence as th
+
+    def _add(task: str, ts: float) -> str:
+        task_id, chat = th._add_task(task, "")
+        th._save_task_result("done", task_id=task_id)
+        db = th._get_db()
+        with th._rw_lock.write_lock():
+            db.execute(
+                "UPDATE task_history SET timestamp = ? WHERE id = ?",
+                (ts, task_id),
+            )
+        return chat
+
+    noon = _dt.datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    today = noon.timestamp()
+    chat_a = _add("hold target", today - 60)
+    chat_b = _add("other row", today - 120)
+    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    try:
+        # Capture INBOUND WebSocket frames over CDP so the test can
+        # prove the changed-data reply arrived while the mouse was still
+        # held (a fixed sleep could silently miss the race).
+        received: list[str] = []
+        cdp = context.new_cdp_session(page)
+        cdp.on(
+            "Network.webSocketFrameReceived",
+            lambda ev: received.append(
+                ev.get("response", {}).get("payloadData", ""),
+            ),
+        )
+        cdp.send("Network.enable")
+        page.click("#activity-tasks")
+        page.wait_for_selector("#history-list .history-chat-group", timeout=15000)
+        row = page.locator(".sidebar-item", has_text="hold target")
+        row.scroll_into_view_if_needed()
+        box = row.bounding_box()
+        assert box is not None
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.down()
+        # A real refetch with DIFFERENT data (the search narrows the
+        # page to one row) arrives while the button is held: the
+        # destructive rebuild must be parked, keeping both rows and the
+        # pressed node alive.
+        received.clear()
+        page.evaluate(
+            """() => {
+                 const s = document.getElementById('history-search');
+                 s.value = 'hold';
+                 s.dispatchEvent(new Event('input', {bubbles: true}));
+               }"""
+        )
+        for _ in range(100):
+            if any(
+                '"history"' in frame and "other row" not in frame
+                for frame in received
+                if '"sessions"' in frame
+            ):
+                break
+            page.wait_for_timeout(50)
+        else:
+            raise AssertionError("filtered history reply never arrived")
+        # The CDP event proves network receipt; the page's message task
+        # is queued behind it.  Drain the renderer's task queue (each
+        # evaluate is a full round-trip through the page's event loop)
+        # plus an idle beat, so renderHistory has DEMONSTRABLY processed
+        # the reply while the mouse is still held ...
+        page.evaluate("0")
+        page.evaluate("0")
+        page.wait_for_timeout(300)
+        # ... and the changed page was parked, keeping both rows AND the
+        # pressed row itself alive.
+        assert page.locator("#history-list .sidebar-item").count() == 2
+        assert row.count() == 1
+        page.mouse.up()
+        # The browser-synthesized click still opens the pressed task.
+        page.wait_for_function(
+            "document.getElementById('task-panel-text')"
+            " && document.getElementById('task-panel-text').textContent"
+            "      === 'hold target'",
+            timeout=15000,
+        )
+        # The parked filtered page lands right after the click, and the
+        # surviving row is the filtered one.
+        page.wait_for_function(
+            "() => { const rows = document.querySelectorAll("
+            "'#history-list .sidebar-item');"
+            " return rows.length === 1"
+            " && rows[0].textContent.includes('hold target'); }",
+            timeout=15000,
+        )
+    finally:
+        context.close()
+        db = th._get_db()
+        with th._rw_lock.write_lock():
+            db.execute(
+                "DELETE FROM task_history WHERE chat_id IN (?, ?)",
+                (chat_a, chat_b),
             )

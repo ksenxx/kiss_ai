@@ -86,7 +86,7 @@ class _ModelsListingHandler(BaseHTTPRequestHandler):
 
     text_listing: dict[str, Any] = TEXT_LISTING
 
-    def log_message(self, *_args: Any) -> None:  # noqa: D102 — silence the test log
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, D102
         return
 
     def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API

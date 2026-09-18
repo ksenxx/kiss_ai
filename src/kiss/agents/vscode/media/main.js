@@ -670,6 +670,43 @@
   let historyDateRangeUserSet = false;
   const historyLastRunningTaskIds = new Set();
   const historyJustCompletedTaskIds = new Set();
+  // Clock-localization identity (historyTzIdentity) the history rows
+  // were last built under: their timestamps are localized at build
+  // time, so a zone change invalidates the identical-refresh fast path
+  // in renderHistory.
+  let historyRenderedTz = '';
+  // Row elements in allHistSessions order, for the fast path's in-place
+  // refresh of time-derived metrics text.
+  let historyRenderedRows = [];
+  // A destructive history rebuild is deferred while a press (mouse
+  // button or touch contact) is held inside the list: replacing ANY row
+  // between press and release would swallow the resulting click (its
+  // targets diverge, so it fires on a handler-less ancestor).  Only the
+  // newest deferred page is kept; it is applied right after the click
+  // has dispatched.
+  let historyMouseHeld = false;
+  // Activation keys currently held on a list control (Space activates a
+  // native button on KEYUP, so Space and Enter can overlap): a set, so
+  // releasing one key cannot release the other's press.
+  const historyHeldKeys = new Set();
+  let historyParkSafetyTimer = null;
+  // When the latest press began: the stale-press safety release must
+  // never clear the latches of a press younger than its own bound.
+  let historyLastPressTs = 0;
+  // pointerId -> epoch token.  Browsers reuse pointer IDs, so a touch's
+  // 300ms release-grace timer must only release the contact it was
+  // armed for, never a newer contact that inherited the ID.
+  const historyActivePointers = new Map();
+  let historyPointerEpoch = 0;
+  let historyPendingRender = null;
+  // Optimistic favourite toggles awaiting the daemon (setFavorite has
+  // no acknowledgement): merged over every incoming history page until
+  // the daemon's data agrees, so a refetch that predates the write (or
+  // a page deferred across the very click that toggled the star)
+  // cannot flip the star back.
+  const historyPendingFavorites = new Map();
+  let historyFavExpiryTimer = null;
+  let historyFavExpiryDeadline = Infinity;
 
   let currentTaskName = '';
   let currentTaskId = null;
@@ -11068,7 +11105,11 @@
   function resetHistoryPagination() {
     historyOffset = 0;
     historyHasMore = true;
-    historyLoading = false;
+    // Every caller sends its offset-0 request right after this reset:
+    // marking the list as loading until that reply lands keeps a
+    // bottom-scroll from firing a second, overlapping request of the
+    // same generation (whose late reply would re-order pagination).
+    historyLoading = true;
     historyGeneration++;
   }
 
@@ -16428,14 +16469,429 @@
     if (!document.hidden) relabelHistoryDaySeparators();
   });
 
+  // Mouse events cover pointing devices in every environment; pointer
+  // events additionally cover touch, where the compatibility mouse
+  // events only arrive AFTER the finger lifts, i.e. too late to guard
+  // the press.  Both feed the same held flag.
+  historyList.addEventListener('mousedown', () => {
+    historyMouseHeld = true;
+    historyLastPressTs = Date.now();
+  });
+  historyList.addEventListener('pointerdown', e => {
+    historyActivePointers.set(e.pointerId, ++historyPointerEpoch);
+    historyLastPressTs = Date.now();
+  });
+  // Keyboard activation is a press too: a native button focused in the
+  // list activates on Space KEYUP (Enter clicks on keydown), so a
+  // rebuild landing between keydown and keyup would detach the button
+  // and swallow the activation exactly like a swallowed mouse click.
+  historyList.addEventListener('keydown', e => {
+    if (e.key === ' ' || e.key === 'Enter') {
+      historyHeldKeys.add(e.key);
+      historyLastPressTs = Date.now();
+    }
+  });
+  window.addEventListener('keyup', e => {
+    if (e.key === ' ' || e.key === 'Enter') {
+      historyHeldKeys.delete(e.key);
+      historyMaybeApplyPending();
+    }
+  });
+  // A hidden page cannot hold a press, but hiding it mid-press can eat
+  // the release event: drop the latches so the parked page can land.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      historyMouseHeld = false;
+      historyHeldKeys.clear();
+      historyActivePointers.clear();
+      historyMaybeApplyPending();
+    }
+  });
+
+  function historyPressHeld() {
+    return (
+      historyMouseHeld ||
+      historyHeldKeys.size > 0 ||
+      historyActivePointers.size > 0
+    );
+  }
+
+  /** Drop the parked page's stale-press safety timer. */
+  function clearHistoryParkSafety() {
+    if (historyParkSafetyTimer) clearTimeout(historyParkSafetyTimer);
+    historyParkSafetyTimer = null;
+  }
+
+  /**
+   * Stale-press safety release: a press whose release event never
+   * arrived must not park the panel forever.  Latches that have been
+   * held for the full bound are dropped and the parked page lands; a
+   * younger press (its release will do the applying) only re-arms the
+   * timer for its own remainder, so a real click is never swallowed by
+   * an older press's timer.
+   */
+  function historyParkSafetyFire() {
+    historyParkSafetyTimer = null;
+    if (!historyPendingRender) return;
+    const idle = Date.now() - historyLastPressTs;
+    if (idle < 5000) {
+      historyParkSafetyTimer = setTimeout(historyParkSafetyFire, 5000 - idle);
+      return;
+    }
+    historyMouseHeld = false;
+    historyHeldKeys.clear();
+    historyActivePointers.clear();
+    applyHistoryPendingRender();
+  }
+
+  /** Apply the newest deferred history page once the press's click is done. */
+  function applyHistoryPendingRender() {
+    const pending = historyPendingRender;
+    historyPendingRender = null;
+    clearHistoryParkSafety();
+    if (!pending) return;
+    renderHistory(pending.sessions, 0, pending.generation);
+  }
+
+  function historyMaybeApplyPending() {
+    // The browser dispatches `click` synchronously after `mouseup` /
+    // the tap's compatibility events; the deferred rebuild must land
+    // after it, hence the macrotask hop.
+    if (!historyPressHeld() && historyPendingRender) {
+      setTimeout(applyHistoryPendingRender, 0);
+    }
+  }
+
+  window.addEventListener('mouseup', () => {
+    historyMouseHeld = false;
+    historyMaybeApplyPending();
+  });
+  window.addEventListener('pointerup', e => {
+    if (e.pointerType === 'touch') {
+      // A tap's compatibility mousedown/mouseup/click are dispatched
+      // AFTER pointerup; applying the parked page in that gap would
+      // re-target them at whatever row lands under the finger.  Hold
+      // the press through a short grace period instead.
+      const id = e.pointerId;
+      const token = historyActivePointers.get(id);
+      setTimeout(() => {
+        // Only release the contact this timer was armed for: a newer
+        // touch that reused the pointer ID registered a fresh epoch
+        // and stays held until its own release.
+        if (historyActivePointers.get(id) !== token) return;
+        historyActivePointers.delete(id);
+        historyMaybeApplyPending();
+      }, 300);
+      return;
+    }
+    historyActivePointers.delete(e.pointerId);
+    historyMaybeApplyPending();
+  });
+  window.addEventListener('pointercancel', e => {
+    // A cancelled press (touch scroll took over, a drag started) will
+    // never produce a click — and a drag can swallow the mouseup, so
+    // the mouse flag must be released here too.
+    historyActivePointers.delete(e.pointerId);
+    historyMouseHeld = false;
+    historyMaybeApplyPending();
+  });
+  window.addEventListener('blur', () => {
+    historyMouseHeld = false;
+    historyHeldKeys.clear();
+    historyActivePointers.clear();
+    historyMaybeApplyPending();
+  });
+
+  /** Stable identity of a history row (its chat and task). */
+  function historySessionKey(s) {
+    const taskId =
+      s.task_id === undefined || s.task_id === null ? '' : String(s.task_id);
+    return String(s.id || '') + '\u241f' + taskId;
+  }
+
+  /**
+   * The metrics line of a history row: steps, tokens, cost, a duration
+   * (ticking while the task runs or lacks a recorded end), and the
+   * task's localized timestamp.  Shared by the row builder and the
+   * identical-refresh fast path, which refreshes this text in place so
+   * kept rows never show a stale duration.
+   */
+  function historyMetricsText(s) {
+    const tokens = Number(s.tokens || 0);
+    const cost = Number(s.cost || 0);
+    const steps = Number(s.steps || 0);
+    const ts = Number(s.timestamp || 0);
+    let when = '';
+    if (ts > 0) {
+      const d = new Date(ts * 1000);
+      if (!isNaN(d.getTime())) {
+        when =
+          ' • ' +
+          d.toLocaleString(undefined, {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+      }
+    }
+    const startTsMs = Number(s.startTs || 0);
+    const endTsMs = Number(s.endTs || 0);
+    let durMs = 0;
+    if (startTsMs > 0) {
+      if (endTsMs > startTsMs) {
+        durMs = endTsMs - startTsMs;
+      } else if (s.is_running || endTsMs === 0) {
+        durMs = Date.now() - startTsMs;
+      }
+    }
+    const dur = durMs > 0 ? ' • ' + formatDurationHms(durMs) : '';
+    return (
+      steps +
+      ' steps • ' +
+      fmtTokens(tokens) +
+      ' tok • ' +
+      fmtCost(cost) +
+      dur +
+      when
+    );
+  }
+
+  /**
+   * Identity of the environment's clock localization: the resolved
+   * locale options (locale, calendar, numbering system and IANA zone —
+   * two zones can share today's offset yet localize historical
+   * timestamps differently, and a locale change re-words them) plus the
+   * current UTC offset.
+   */
+  function historyTzIdentity() {
+    let resolved = '';
+    try {
+      resolved = JSON.stringify(Intl.DateTimeFormat().resolvedOptions());
+    } catch {
+      resolved = '';
+    }
+    // The local calendar day is part of the identity: a wall-clock
+    // correction across midnight must relabel "Today"/"Yesterday", so
+    // an identical refresh on a new local day rebuilds once.
+    const d = new Date();
+    return resolved + ':' + d.getTimezoneOffset() + ':' + d.toDateString();
+  }
+
+  /**
+   * Field-by-field equality of one history session (no serialization:
+   * huge prompt strings are compared directly, and a difference —
+   * typically in the newest row — is found without copying them).
+   */
+  function historySessionRowEqual(a, b) {
+    const ka = Object.keys(a);
+    const kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    for (const k of ka) {
+      const va = a[k];
+      const vb = b[k];
+      if (va === vb) continue;
+      if (
+        typeof va !== 'object' ||
+        typeof vb !== 'object' ||
+        va === null ||
+        vb === null
+      ) {
+        return false;
+      }
+      if (JSON.stringify(va) !== JSON.stringify(vb)) return false;
+    }
+    return true;
+  }
+
+  /** Whether two history pages carry identical data, row by row. */
+  function historySessionsEqual(a, b) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!historySessionRowEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Arm (or advance) the one-shot refetch that makes a pending
+   * favourite overlay's expiry visible even when no broadcast arrives
+   * in the meantime (setFavorite has no acknowledgement).  The timer
+   * always serves the EARLIEST pending deadline: with several toggles
+   * alive, a later row's deadline must not stretch an earlier bound.
+   */
+  function scheduleHistoryFavExpiry(deadline, now) {
+    if (historyFavExpiryTimer && deadline >= historyFavExpiryDeadline) return;
+    if (historyFavExpiryTimer) clearTimeout(historyFavExpiryTimer);
+    historyFavExpiryDeadline = deadline;
+    historyFavExpiryTimer = setTimeout(
+      () => {
+        historyFavExpiryTimer = null;
+        historyFavExpiryDeadline = Infinity;
+        refreshHistory();
+      },
+      Math.max(0, deadline - now),
+    );
+  }
+
+  /**
+   * Overlay optimistic favourite toggles on an incoming page.  An entry
+   * is retired once the daemon's own data agrees with it.
+   */
+  function mergePendingFavorites(sessions) {
+    if (historyPendingFavorites.size === 0) return;
+    const now = Date.now();
+    sessions.forEach(s => {
+      if (s.task_id === undefined || s.task_id === null) return;
+      const key = String(s.task_id);
+      const pending = historyPendingFavorites.get(key);
+      if (!pending) return;
+      // A parked page is merged AGAIN when it finally lands: judge
+      // agreement by the DAEMON's value, stashed before the first
+      // overlay, so the overlay can never acknowledge itself and retire
+      // the entry (cancelling the reconciliation refetch) for a write
+      // that may have failed.
+      const daemonValue = Object.prototype.hasOwnProperty.call(
+        s,
+        '_kissFavDaemon',
+      )
+        ? s._kissFavDaemon
+        : !!s.is_favorite;
+      // The overlay only shields against refetches that predate the
+      // write; setFavorite has no acknowledgement, so after this bound
+      // the daemon's data is authoritative again (it may legitimately
+      // disagree: another client toggled, or the write failed).
+      if (now - pending.ts > 10000 || daemonValue === pending.value) {
+        historyPendingFavorites.delete(key);
+        s.is_favorite = daemonValue;
+        delete s._kissFavDaemon;
+        // The last overlay retired: its reconciliation refetch has
+        // nothing left to show.
+        if (historyPendingFavorites.size === 0 && historyFavExpiryTimer) {
+          clearTimeout(historyFavExpiryTimer);
+          historyFavExpiryTimer = null;
+          historyFavExpiryDeadline = Infinity;
+        }
+        return;
+      }
+      s._kissFavDaemon = daemonValue;
+      s.is_favorite = pending.value;
+      scheduleHistoryFavExpiry(pending.ts + 10000 + 100, now);
+    });
+  }
+
   function renderHistory(sessions, offset, generation) {
     if (generation !== historyGeneration) return;
 
+    mergePendingFavorites(sessions);
     historyLoading = false;
-    const loader = document.getElementById('history-loader');
-    if (loader) loader.remove();
+    // Retire EVERY loader row: resetHistoryPagination() clears
+    // historyLoading while a previous loader is still appended, so a
+    // scroll during the in-flight refresh can add a second one.  The
+    // old offset-0 wipe removed the extras as a side effect; the
+    // identical-refresh fast path below keeps the DOM, so the reply
+    // itself must clear them all.
+    historyList.querySelectorAll('#history-loader').forEach(el => {
+      el.remove();
+    });
 
+    // A later page must extend exactly at the current cursor: a
+    // duplicate or out-of-date reply (two same-generation requests can
+    // overlap when a refresh reset the cursor while a page was in
+    // flight) would duplicate its rows and skip the next page.  The
+    // loading flag was cleared above, so a scroll simply refetches at
+    // the right offset.
+    if (offset !== 0 && offset !== historyOffset) return;
+
+    let focusKey = '';
+    let focusCtrlClass = '';
+    let focusCtrlNth = -1;
     if (offset === 0) {
+      // A refresh that returns exactly what is already on screen keeps
+      // the existing DOM.  `tasks_updated` broadcasts arrive whenever
+      // ANY task on the daemon persists a result (plus a one-shot nudge
+      // after the ready handshake), so identical refetches are routine;
+      // wiping and rebuilding identical rows would swallow an in-flight
+      // click (mousedown lands on the old row, mouseup on its
+      // replacement, so the click fires on a handler-less ancestor) and
+      // drop keyboard focus.  Kept rows still get their time-derived
+      // metrics text refreshed in place (a running task's duration keeps
+      // ticking).  The fast path only applies while a single page is on
+      // screen (a refetch cannot vouch for loaded later pages) and never
+      // across a time-zone change (row times are localized at build
+      // time).  Everything else rebuilds as before.
+      const tzNow = historyTzIdentity();
+      if (
+        allHistSessions.length === sessions.length &&
+        sessions.length > 0 &&
+        historyRenderedTz === tzNow &&
+        historySessionsEqual(allHistSessions, sessions)
+      ) {
+        allHistSessions.forEach((s, i) => {
+          const row = historyRenderedRows[i];
+          const el = row && row.querySelector('.running-item-metrics');
+          if (!el) return;
+          const text = historyMetricsText(s);
+          if (el.textContent !== text) el.textContent = text;
+        });
+        // This page supersedes any older parked one: the newest data
+        // says the screen is already right.
+        historyPendingRender = null;
+        clearHistoryParkSafety();
+        historyOffset = sessions.length;
+        historyHasMore = sessions.length >= 50;
+        applyHistoryFilterVisibility();
+        return;
+      }
+      if (historyPressHeld()) {
+        historyPendingRender = {sessions, generation};
+        // Keep pagination parked with the page: a scroll must not
+        // refetch (with the pre-refresh offset state) while the rebuild
+        // this reply asked for has not landed yet.
+        historyLoading = true;
+        // A press whose release event never arrives (the page hidden
+        // mid-press, a drag released outside the webview) must not park
+        // the panel forever: past any real click's duration, drop the
+        // latches and land the parked page.
+        if (!historyParkSafetyTimer) {
+          historyParkSafetyTimer = setTimeout(historyParkSafetyFire, 5000);
+        }
+        return;
+      }
+      historyPendingRender = null;
+      clearHistoryParkSafety();
+      // A keyboard user may sit on a row OR on one of its inline
+      // controls (favourite, copy, collapse, id chips): key the focus
+      // by the containing row, and remember WHICH control so the same
+      // action stays under Space/Enter after the rebuild (the control
+      // is identified by its first class among same-class siblings).
+      const active = document.activeElement;
+      const activeRow =
+        active && active.closest
+          ? active.closest('#history-list .sidebar-item')
+          : null;
+      const focusIdx = activeRow ? historyRenderedRows.indexOf(activeRow) : -1;
+      if (focusIdx >= 0 && focusIdx < allHistSessions.length) {
+        focusKey = historySessionKey(allHistSessions[focusIdx]);
+        if (active !== activeRow && activeRow.contains(active)) {
+          const cls = active.classList && active.classList[0];
+          if (cls) {
+            focusCtrlClass = cls;
+            focusCtrlNth = Array.prototype.indexOf.call(
+              activeRow.getElementsByClassName(cls),
+              active,
+            );
+          }
+        }
+      }
+      // Offset-0 renders assign the pagination cursor instead of
+      // trusting resetHistoryPagination(): a duplicate offset-0 reply
+      // in the same generation (a scroll racing a deferred rebuild)
+      // must not advance the cursor past what is on screen.
+      historyOffset = 0;
+      historyRenderedTz = tzNow;
+      historyRenderedRows = [];
       allHistSessions = [];
       historyChatGroups.clear();
       historyLastDay = '';
@@ -16539,6 +16995,20 @@
           e.preventDefault();
           const next = !s.is_favorite;
           s.is_favorite = next;
+          // setFavorite has no acknowledgement: shield the optimistic
+          // star from refetches that predate the write (including a
+          // page deferred across this very click), and plan the
+          // reconciliation refetch NOW — if the write fails and nothing
+          // else refreshes the panel, the daemon's value must still
+          // reappear at the bound.
+          if (s.task_id !== undefined && s.task_id !== null) {
+            const ts = Date.now();
+            historyPendingFavorites.set(String(s.task_id), {
+              value: next,
+              ts,
+            });
+            scheduleHistoryFavExpiry(ts + 10000 + 100, ts);
+          }
           applyFavState();
           div.dataset.favorite = next ? '1' : '0';
           applyHistoryFilterVisibility();
@@ -16558,44 +17028,7 @@
 
       const metrics = document.createElement('span');
       metrics.className = 'running-item-metrics';
-      const tokens = Number(s.tokens || 0);
-      const cost = Number(s.cost || 0);
-      const steps = Number(s.steps || 0);
-      const ts = Number(s.timestamp || 0);
-      let when = '';
-      if (ts > 0) {
-        const d = new Date(ts * 1000);
-        if (!isNaN(d.getTime())) {
-          when =
-            ' • ' +
-            d.toLocaleString(undefined, {
-              year: 'numeric',
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-            });
-        }
-      }
-      const startTsMs = Number(s.startTs || 0);
-      const endTsMs = Number(s.endTs || 0);
-      let durMs = 0;
-      if (startTsMs > 0) {
-        if (endTsMs > startTsMs) {
-          durMs = endTsMs - startTsMs;
-        } else if (s.is_running || endTsMs === 0) {
-          durMs = Date.now() - startTsMs;
-        }
-      }
-      const dur = durMs > 0 ? ' • ' + formatDurationHms(durMs) : '';
-      metrics.textContent =
-        steps +
-        ' steps • ' +
-        fmtTokens(tokens) +
-        ' tok • ' +
-        fmtCost(cost) +
-        dur +
-        when;
+      metrics.textContent = historyMetricsText(s);
       info.appendChild(metrics);
 
       const workDir = typeof s.work_dir === 'string' ? s.work_dir : '';
@@ -16720,6 +17153,7 @@
         closeSidebar();
       });
       historyGroupFor(s).appendChild(div);
+      historyRenderedRows.push(div);
     });
 
     historyOffset += sessions.length;
@@ -16727,6 +17161,20 @@
       historyHasMore = false;
     }
     applyHistoryFilterVisibility();
+    if (focusKey) {
+      // The rebuild detached the focused row; give the keyboard the
+      // fresh row of the same task — or the same inline control on it —
+      // so arrow/Enter navigation and a pending control action survive.
+      const idx = sessions.findIndex(s => historySessionKey(s) === focusKey);
+      if (idx >= 0 && historyRenderedRows[idx]) {
+        let target = historyRenderedRows[idx];
+        if (focusCtrlClass) {
+          const same = target.getElementsByClassName(focusCtrlClass);
+          if (same[focusCtrlNth]) target = same[focusCtrlNth];
+        }
+        target.focus({preventScroll: true});
+      }
+    }
   }
 
   function autofillHistoryDateRange(range) {
