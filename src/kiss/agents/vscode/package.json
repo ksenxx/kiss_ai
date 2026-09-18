@@ -72,7 +72,6 @@
         }
       ]
     },
-
     "commands": [
       {
         "command": "kissSorcar.openPanel",
