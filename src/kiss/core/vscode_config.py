@@ -86,11 +86,13 @@ DEFAULTS: dict[str, Any] = {
     # is_development (worktree on/off for that run only — this
     # persisted is_worktree value is not touched).
     "classify_tasks": True,
-    # Which classifier answers: True (default) tries OpenRouter's
+    # Which classifier answers (the settings panel's "Classify with
+    # Jev" checkbox): True (default) tries OpenRouter's
     # ~typesafe/jev-latest decisions model first (one typed question,
     # ~$0.00003, ~0.2 s) and falls back to the LLM classifier when no
     # OPENROUTER_API_KEY is configured or the call fails; False always
-    # uses the LLM classifier on the run's model.
+    # uses the LLM classifier (one non-agentic call on the run's model,
+    # skipped for cc/* and codex/* models).
     "classify_with_decisions": True,
     # Persistent agent memory (kiss.core.memoryfield), on by default:
     # SorcarAgent runs get the memory_* tools and the MEMORY_PROTOCOL
