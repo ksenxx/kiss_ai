@@ -99,6 +99,7 @@ const commitListeners = [];
 const FAKE_TIMEOUT_MS = 300;
 
 class FakeSidebarView {
+  postMetaState() {}
   constructor() {
     this.hasFocus = false;
   }

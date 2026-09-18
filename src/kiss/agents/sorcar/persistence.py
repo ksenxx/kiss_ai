@@ -1862,6 +1862,49 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
         return [_history_row_to_dict(r) for r in rows]
 
 
+def _chat_first_tasks(chat_ids: list[str]) -> dict[str, str]:
+    """Return each chat's first (oldest) listable task text. Thread-safe.
+
+    The History sidebar shows one collapsible panel per chat whose
+    header is the chat's FIRST task — which may lie beyond the rows the
+    current page carries, so it is looked up here over the same row set
+    the sidebar lists (sub-agent rows excluded).
+
+    Args:
+        chat_ids: Chat session ids to look up; empty ids are skipped.
+
+    Returns:
+        Mapping of chat id to the task text of its earliest listable
+        row — ties on ``timestamp`` break on ``rowid``, the project's
+        chronological order (coarse clocks and imported databases do
+        produce ties, and a bare column beside ``MIN()`` picks among
+        them plan-dependently). The text is truncated to 1000
+        characters: the header clamps to 3 lines and its tooltip needs
+        no more, while the text is stamped on EVERY row of the chat —
+        an unbounded prompt would multiply itself across the whole
+        page's JSON. Chats with no listable row are absent.
+    """
+    ids = sorted({c for c in chat_ids if c})
+    if not ids:
+        return {}
+    with _rw_lock.read_lock():
+        db = _get_db()
+        placeholders = ",".join("?" * len(ids))
+        # _HISTORY_NOT_SUBAGENT is unqualified, so it binds to t2
+        # inside the subquery (innermost scope) and to t outside.
+        rows = db.execute(
+            "SELECT chat_id, substr(task, 1, 1000) AS task "
+            "FROM task_history t "
+            f"WHERE chat_id IN ({placeholders}) AND {_HISTORY_NOT_SUBAGENT} "
+            "AND rowid = (SELECT t2.rowid FROM task_history t2 "
+            "WHERE t2.chat_id = t.chat_id "
+            f"AND {_HISTORY_NOT_SUBAGENT} "
+            "ORDER BY t2.timestamp ASC, t2.rowid ASC LIMIT 1)",
+            ids,
+        ).fetchall()
+    return {str(r["chat_id"]): str(r["task"] or "") for r in rows}
+
+
 def _history_date_range() -> tuple[float | None, float | None]:
     """Return the first and last task timestamps in the history.
 

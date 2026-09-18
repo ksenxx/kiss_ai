@@ -209,6 +209,96 @@ class SyncTaskDbPushTest(unittest.TestCase):
 
         self.assertNotEqual(self._push().returncode, 0)
         self.assertEqual(_count(remote_db), 7)
+        # The truncated file is not left beside the database it failed to
+        # replace, where it would take the room the next attempt needs.
+        self.assertFalse((self.remote_home / ".kiss" / "sorcar.db.incoming").exists())
+
+    def test_an_upload_that_dies_leaves_no_partial_file_behind(self) -> None:
+        """"No space left on device" half-way through the transfer.
+
+        The 4.4 GB ``sorcar.db.incoming`` such a failure left on a 10 GB
+        boot disk is what made every later step of the deploy fail too.
+        """
+        remote_db = self.remote_home / ".kiss" / "sorcar.db"
+        _make_db(remote_db, 7)
+        _make_db(self.local_home / "sorcar.db", 300)
+        failing = Path(self.tmp) / "bin" / "gzip"
+        failing.write_text(
+            "#!/bin/bash\n"
+            'if [ "$1" = "-dc" ]; then head -c 4096 > "$HOME/.kiss/sorcar.db.incoming"; '
+            'echo "gzip: stdout: No space left on device" >&2; exit 1; fi\n'
+            'exec /usr/bin/env -i PATH=/usr/bin:/bin gzip "$@"\n'
+        )
+        failing.chmod(0o755)
+
+        result = self._push()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Uploading the task database to user@example.com failed", result.stderr)
+        self.assertEqual(_count(remote_db), 7)
+        self.assertFalse((self.remote_home / ".kiss" / "sorcar.db.incoming").exists())
+        # The web app was stopped for the swap, and started again.
+        recorded = self.systemctl_log.read_text()
+        self.assertIn("stop kiss-web.service", recorded)
+        self.assertIn("start kiss-web.service", recorded)
+
+    def _fake_df(self, available_kib: str) -> None:
+        """Answer every ``df`` with one filesystem having *available_kib* free."""
+        df = Path(self.tmp) / "bin" / "df"
+        df.write_text(
+            "#!/bin/bash\n"
+            'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"\n'
+            f'echo "/dev/sda1 10000000 9000000 {available_kib} 90% /"\n'
+        )
+        df.chmod(0o755)
+
+    def test_a_remote_without_room_is_left_alone(self) -> None:
+        """No room for the upload: nothing is stopped and nothing is written."""
+        remote_db = self.remote_home / ".kiss" / "sorcar.db"
+        _make_db(remote_db, 7)
+        _make_db(self.local_home / "sorcar.db", 300)
+        self._fake_df("1")  # 1 KiB free; the snapshot is far larger
+
+        result = self._push()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Not enough room on user@example.com for the task database", result.stdout)
+        self.assertIn("0 MiB free in ~/.kiss, and the database is", result.stdout)
+        self.assertEqual(_count(remote_db), 7)
+        self.assertFalse((self.remote_home / ".kiss" / "sorcar.db.incoming").exists())
+        self.assertFalse(
+            self.systemctl_log.exists(),
+            "the web app was stopped although nothing could be uploaded",
+        )
+
+    def test_a_stale_partial_upload_counts_as_room(self) -> None:
+        """The prepare step removes it, so its bytes are available to the upload."""
+        remote_db = self.remote_home / ".kiss" / "sorcar.db"
+        _make_db(remote_db, 7)
+        _make_db(self.local_home / "sorcar.db", 300)
+        stale = self.remote_home / ".kiss" / "sorcar.db.incoming"
+        stale.write_bytes(b"\0" * 4_000_000)
+        self._fake_df("1")  # 1 KiB free by itself; 3.8 MiB once the stale file is gone
+
+        result = self._push()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(_count(remote_db), 300)
+        self.assertFalse(stale.exists())
+
+    def test_room_that_cannot_be_read_stops_the_upload(self) -> None:
+        """An answer that is not a number is not read as "plenty"."""
+        remote_db = self.remote_home / ".kiss" / "sorcar.db"
+        _make_db(remote_db, 7)
+        _make_db(self.local_home / "sorcar.db", 300)
+        df = Path(self.tmp) / "bin" / "df"
+        df.write_text(
+            "#!/bin/bash\necho 'df: cannot read table of mounted file systems' >&2\nexit 1\n"
+        )
+        df.chmod(0o755)
+
+        result = self._push()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not read how much room ~/.kiss has on user@example.com", result.stdout)
+        self.assertEqual(_count(remote_db), 7)
+        self.assertFalse(self.systemctl_log.exists())
 
     def test_work_dirs_are_relocated_to_the_remote_checkout(self) -> None:
         """Otherwise the panel's Workspace chip hides the whole import.

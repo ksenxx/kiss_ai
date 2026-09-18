@@ -703,9 +703,7 @@ function testOrphanContentTabKeepsOwnerScope() {
     'the orphaned foreign content tab must stay hidden here',
   );
   setWorkspace(win, '/ws/b');
-  const contentStrips = win.document.querySelectorAll(
-    '.chat-tab.content-tab',
-  );
+  const contentStrips = win.document.querySelectorAll('.chat-tab.content-tab');
   assert.strictEqual(
     contentStrips.length,
     1,
@@ -836,3 +834,6 @@ if (failures > 0) {
   process.exit(1);
 }
 console.log(`All ${tests.length} workspaceScopedTabs tests passed`);
+// main.js arms a timer that relabels the history's day separators at
+// midnight; the harness never closes its windows, so exit explicitly.
+process.exit(0);
