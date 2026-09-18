@@ -328,6 +328,14 @@
             <input type="checkbox" id="cfg-classify-tasks" checked>
             Classify tasks before running
           </label>
+          <!-- classify_with_decisions: the classifier asks OpenRouter's
+               ~typesafe/jev-latest decisions model first and falls back
+               to the run's own LLM; unchecked pins the LLM classifier.
+               Only consulted while "Classify tasks before running" is on. -->
+          <label class="config-label config-checkbox" title="Ask the ~typesafe/jev-latest decisions model first (needs an OpenRouter API key); unchecked pins the LLM classifier, which runs on the run's own model and is skipped for cc/* and codex/* models">
+            <input type="checkbox" id="cfg-classify-with-decisions" checked>
+            Classify with Jev
+          </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-memory" checked>
             Use persistent memory

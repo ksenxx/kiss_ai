@@ -4,12 +4,13 @@
 // add your name here
 
 // End-to-end (JSDOM) tests for the "Auto commit" / "Use worktree" /
-// "Use web tools", and "Classify tasks before running" settings
-// toggles: they must be INITIALIZED from the server's ``configData``
-// (keys ``auto_commit_mode`` / ``is_worktree`` / ``use_web_browser`` /
-// ``classify_tasks``) instead of the hardcoded ``checked`` state
-// shipped in chat.html, and their state must be PERSISTED back through
-// ``saveConfig`` when the settings panel closes.
+// "Use web tools", "Classify tasks before running" and "Classify with
+// Jev" settings toggles: they must be INITIALIZED from the server's
+// ``configData`` (keys ``auto_commit_mode`` / ``is_worktree`` /
+// ``use_web_browser`` / ``classify_tasks`` / ``classify_with_decisions``)
+// instead of the hardcoded ``checked`` state shipped in chat.html, and
+// their state must be PERSISTED back through ``saveConfig`` when the
+// settings panel closes.
 
 'use strict';
 
@@ -84,6 +85,7 @@ function testTogglesInitializedFalseFromConfigData() {
       is_worktree: false,
       use_web_browser: false,
       classify_tasks: false,
+      classify_with_decisions: false,
     },
     apiKeys: {},
   });
@@ -92,6 +94,7 @@ function testTogglesInitializedFalseFromConfigData() {
   const wt = win.document.getElementById('cfg-use-worktree');
   const web = win.document.getElementById('cfg-use-web-tools');
   const ct = win.document.getElementById('cfg-classify-tasks');
+  const cd = win.document.getElementById('cfg-classify-with-decisions');
   assert.strictEqual(
     ac.checked,
     false,
@@ -115,6 +118,13 @@ function testTogglesInitializedFalseFromConfigData() {
     false,
     'configData {classify_tasks:false} must uncheck #cfg-classify-tasks ' +
       '(was left at the hardcoded checked state from chat.html)',
+  );
+  assert.strictEqual(
+    cd.checked,
+    false,
+    'configData {classify_with_decisions:false} must uncheck ' +
+      '#cfg-classify-with-decisions (was left at the hardcoded checked ' +
+      'state from chat.html)',
   );
 
   // The initialized state must flow into the actual submit command.
@@ -147,6 +157,7 @@ function testTogglesInitializedTrueFromConfigData() {
   win.document.getElementById('cfg-use-worktree').checked = false;
   win.document.getElementById('cfg-use-web-tools').checked = false;
   win.document.getElementById('cfg-classify-tasks').checked = false;
+  win.document.getElementById('cfg-classify-with-decisions').checked = false;
 
   send(win, {
     type: 'configData',
@@ -155,6 +166,7 @@ function testTogglesInitializedTrueFromConfigData() {
       is_worktree: true,
       use_web_browser: true,
       classify_tasks: true,
+      classify_with_decisions: true,
     },
     apiKeys: {},
   });
@@ -179,6 +191,12 @@ function testTogglesInitializedTrueFromConfigData() {
     true,
     'configData {classify_tasks:true} must check #cfg-classify-tasks',
   );
+  assert.strictEqual(
+    win.document.getElementById('cfg-classify-with-decisions').checked,
+    true,
+    'configData {classify_with_decisions:true} must check ' +
+      '#cfg-classify-with-decisions',
+  );
   win.close();
   console.log('  ok - configData true values re-check the toggles');
 }
@@ -189,6 +207,7 @@ function testMissingKeysDefaultToChecked() {
   win.document.getElementById('cfg-use-worktree').checked = false;
   win.document.getElementById('cfg-use-web-tools').checked = false;
   win.document.getElementById('cfg-classify-tasks').checked = false;
+  win.document.getElementById('cfg-classify-with-decisions').checked = false;
 
   // Older servers / partial configs omit the keys: default is true,
   // matching vscode_config.DEFAULTS.
@@ -213,6 +232,12 @@ function testMissingKeysDefaultToChecked() {
     win.document.getElementById('cfg-classify-tasks').checked,
     true,
     'missing classify_tasks must default #cfg-classify-tasks to checked',
+  );
+  assert.strictEqual(
+    win.document.getElementById('cfg-classify-with-decisions').checked,
+    true,
+    'missing classify_with_decisions must default ' +
+      '#cfg-classify-with-decisions to checked',
   );
   win.close();
   console.log('  ok - missing config keys default the toggles to checked');
@@ -262,6 +287,7 @@ function testToggleStatePersistedOnSettingsClose() {
       is_worktree: true,
       use_web_browser: true,
       classify_tasks: true,
+      classify_with_decisions: true,
     },
     apiKeys: {},
   });
@@ -271,6 +297,7 @@ function testToggleStatePersistedOnSettingsClose() {
   const wt = win.document.getElementById('cfg-use-worktree');
   const web = win.document.getElementById('cfg-use-web-tools');
   const ct = win.document.getElementById('cfg-classify-tasks');
+  const cd = win.document.getElementById('cfg-classify-with-decisions');
   ac.checked = false;
   ac.dispatchEvent(new win.Event('change', {bubbles: true}));
   wt.checked = false;
@@ -279,6 +306,8 @@ function testToggleStatePersistedOnSettingsClose() {
   web.dispatchEvent(new win.Event('change', {bubbles: true}));
   ct.checked = false;
   ct.dispatchEvent(new win.Event('change', {bubbles: true}));
+  cd.checked = false;
+  cd.dispatchEvent(new win.Event('change', {bubbles: true}));
 
   win.document
     .getElementById('settings-panel-close')
@@ -306,6 +335,12 @@ function testToggleStatePersistedOnSettingsClose() {
     false,
     'saveConfig must persist classify_tasks from #cfg-classify-tasks',
   );
+  assert.strictEqual(
+    save.config.classify_with_decisions,
+    false,
+    'saveConfig must persist classify_with_decisions from ' +
+      '#cfg-classify-with-decisions',
+  );
 
   // Round-trip: the server echoes the saved config back; a fresh
   // populate must land on the persisted (unchecked) state.
@@ -313,6 +348,7 @@ function testToggleStatePersistedOnSettingsClose() {
   wt.checked = true;
   web.checked = true;
   ct.checked = true;
+  cd.checked = true;
   send(win, {
     type: 'configData',
     config: {
@@ -320,6 +356,7 @@ function testToggleStatePersistedOnSettingsClose() {
       is_worktree: false,
       use_web_browser: false,
       classify_tasks: false,
+      classify_with_decisions: false,
     },
     apiKeys: {},
   });
@@ -327,8 +364,86 @@ function testToggleStatePersistedOnSettingsClose() {
   assert.strictEqual(wt.checked, false, 'echoed configData must re-apply');
   assert.strictEqual(web.checked, false, 'echoed configData must re-apply');
   assert.strictEqual(ct.checked, false, 'echoed configData must re-apply');
+  assert.strictEqual(cd.checked, false, 'echoed configData must re-apply');
   win.close();
   console.log('  ok - settings close persists toggle state via saveConfig');
+}
+
+function testDecisionsToggleEditSurvivesPollAndFlushesAlone() {
+  const {win, posted} = makeWebview();
+  // Open the panel: no configData has arrived yet (configFormPopulated
+  // stays false), the user unticks "Classify with Jev" right away.
+  win.document
+    .getElementById('settings-btn')
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  const cd = win.document.getElementById('cfg-classify-with-decisions');
+  cd.checked = false;
+  cd.dispatchEvent(new win.Event('change', {bubbles: true}));
+
+  // The 2-second configData poll now lands with the stored (true)
+  // value: an edited box must NOT be repainted.
+  send(win, {
+    type: 'configData',
+    config: {classify_with_decisions: true, classify_tasks: true},
+    apiKeys: {},
+  });
+  assert.strictEqual(
+    cd.checked,
+    false,
+    'a configData poll must not overwrite the user\'s unticked ' +
+      '#cfg-classify-with-decisions',
+  );
+  // An untouched sibling still follows the poll.
+  assert.strictEqual(
+    win.document.getElementById('cfg-classify-tasks').checked,
+    true,
+    'the untouched #cfg-classify-tasks must still follow configData',
+  );
+
+  win.document
+    .getElementById('settings-panel-close')
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  const save = lastMsg(posted, 'saveConfig');
+  assert.ok(save, 'closing the settings panel must post saveConfig');
+  assert.strictEqual(
+    save.config.classify_with_decisions,
+    false,
+    'saveConfig must carry the user\'s classify_with_decisions:false',
+  );
+  assert.strictEqual(
+    save.config.classify_tasks,
+    true,
+    'the populated form saves classify_tasks alongside',
+  );
+  win.close();
+  console.log('  ok - an edited Classify-with-Jev box survives the poll and saves');
+}
+
+function testDecisionsToggleFlushedAloneWithoutConfigData() {
+  const {win, posted} = makeWebview();
+  // Panel opened and closed before ANY configData reply: only the
+  // edited field may be sent (the daemon merges), never a form full of
+  // chat.html's hardcoded defaults.
+  win.document
+    .getElementById('settings-btn')
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  const cd = win.document.getElementById('cfg-classify-with-decisions');
+  cd.checked = false;
+  cd.dispatchEvent(new win.Event('change', {bubbles: true}));
+  win.document
+    .getElementById('settings-panel-close')
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+
+  const save = lastMsg(posted, 'saveConfig');
+  assert.ok(save, 'closing the panel after an edit must post saveConfig');
+  assert.deepStrictEqual(
+    Object.keys(save.config),
+    ['classify_with_decisions'],
+    'a panel closed before configData must save ONLY the edited key',
+  );
+  assert.strictEqual(save.config.classify_with_decisions, false);
+  win.close();
+  console.log('  ok - Classify-with-Jev edit alone is flushed before configData');
 }
 
 function main() {
@@ -337,6 +452,8 @@ function main() {
   testMissingKeysDefaultToChecked();
   testSubmitBeforeConfigDataOmitsWebTools();
   testToggleStatePersistedOnSettingsClose();
+  testDecisionsToggleEditSurvivesPollAndFlushesAlone();
+  testDecisionsToggleFlushedAloneWithoutConfigData();
   console.log('configToggleInit.test.js: all tests passed');
 }
 

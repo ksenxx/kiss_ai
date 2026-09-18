@@ -377,7 +377,8 @@ def decisions_classification_enabled() -> bool:
 
     Returns:
         ``True`` when the ``classify_with_decisions`` config key (persisted
-        in ``~/.kiss/config.json``, default ``True``) is on AND the
+        in ``~/.kiss/config.json``, default ``True``; the settings panel's
+        "Classify with Jev" checkbox) is on AND the
         ``decide`` tool can work in this process — an ``OPENROUTER_API_KEY``
         is configured and :data:`DEFAULT_DECISIONS_MODEL` is in the catalog
         (see :func:`~kiss.agents.sorcar.decide_tool.decisions_tool_available`).

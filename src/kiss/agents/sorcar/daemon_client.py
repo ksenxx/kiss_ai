@@ -565,9 +565,11 @@ def run(
             classification (``kiss.agents.sorcar.task_classifier``),
             which runs one lightweight model call before the task — a
             typed question to a decisions model when an OpenRouter key
-            is configured, else a non-agentic call on the run's own
-            LLM — to pick the system prompt (lite vs. full) and decide
-            worktree isolation for the run (the verdict can only
+            is configured and the settings panel's "Classify with Jev"
+            checkbox (``classify_with_decisions``) is on, else a
+            non-agentic call on the run's own LLM — to pick the system
+            prompt (lite vs. full) and decide worktree isolation for
+            the run (the verdict can only
             demote a run that asked for a worktree to direct
             execution; a *use_worktree* of ``False`` passed here is
             never overridden).  ``True`` forces

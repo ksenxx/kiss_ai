@@ -3679,6 +3679,9 @@
   );
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
   const classifyTasksToggleBtn = document.getElementById('cfg-classify-tasks');
+  const classifyWithDecisionsToggleBtn = document.getElementById(
+    'cfg-classify-with-decisions',
+  );
   const memoryToggleBtn = document.getElementById('cfg-use-memory');
   const shareBtn = document.getElementById('share-btn');
   const taskPanel = document.getElementById('task-panel');
@@ -18167,6 +18170,10 @@
     // ``webTools`` override.
     webToolsStateKnown = true;
     setChecked(classifyTasksToggleBtn, cfg.classify_tasks !== false);
+    setChecked(
+      classifyWithDecisionsToggleBtn,
+      cfg.classify_with_decisions !== false,
+    );
     setChecked(memoryToggleBtn, cfg.use_memory !== false);
     setValue('cfg-memory-dir', cfg.memory_dir || '');
     // Recorded even while an edit is active (the boxes themselves are
@@ -18236,6 +18243,11 @@
     if (want('cfg-classify-tasks')) {
       cfg.classify_tasks = !!(
         classifyTasksToggleBtn && classifyTasksToggleBtn.checked
+      );
+    }
+    if (want('cfg-classify-with-decisions')) {
+      cfg.classify_with_decisions = !!(
+        classifyWithDecisionsToggleBtn && classifyWithDecisionsToggleBtn.checked
       );
     }
     if (want('cfg-use-memory')) {
