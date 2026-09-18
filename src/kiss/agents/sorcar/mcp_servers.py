@@ -1262,7 +1262,7 @@ _RESERVED_TOOL_NAMES = frozenset({
     "Bash", "Read", "Edit", "Write", "finish",
     "go_to_url", "click", "type_text", "press_key", "scroll",
     "screenshot", "get_page_content", "show_browser", "close_browser",
-    "skill", "ask_user_question", "talk", "set_model",
+    "skill", "ask_user_question", "talk", "set_model", "decide",
     "run_parallel", "number_of_cores", "summary",
     "cron_job", "run_agent",
 })

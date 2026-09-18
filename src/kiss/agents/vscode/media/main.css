@@ -1219,6 +1219,26 @@ body.remote-chat #welcome-config { display: none !important; }
   min-height: 12px;
   padding-top: 12px;
 }
+
+/* A tab showing a file or another non-chat webview keeps the
+   composer's BUTTON ROW: + (new chat) and ... (more actions) stay
+   reachable whatever the tab shows. The text box and the chat-only
+   controls — Inject promptlet, the model picker, Send/Stop — hide:
+   they act on a chat transcript that is not on screen. */
+body.content-tab-open #input-area > :not(#input-container) { display: none !important; }
+body.content-tab-open #input-container > :not(#input-footer) { display: none !important; }
+
+/* The row must survive an owner that hid its composer with an INLINE
+   display:none (a finished sub-agent tab, a worktree action bar): the
+   + and ... buttons are the point of keeping the footer here. */
+body.content-tab-open #input-container { display: block !important; }
+
+/* Chat-only controls hide; Stop stays reachable (its own inline
+   display already tracks whether the owning chat is running). */
+body.content-tab-open #tricks-btn,
+body.content-tab-open #model-picker,
+body.content-tab-open #wait-spinner,
+body.content-tab-open #send-btn { display: none !important; }
 #file-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 #file-chips:empty { display: none; margin-bottom: 0; }
 
@@ -1589,15 +1609,31 @@ body.remote-chat #theme-btn { display: flex; }
 
 #sidebar.open { transform: translateX(0); }
 
-/* The docked task-info panel exists only on the remote webapp's
-   desktop layout; remote-codex.css shows it there.  Everywhere else
-   (VS Code webview, mobile remote) it stays hidden and the meta
-   values keep rendering in #tab-status-bar. */
+/* The task-info panel is shown by remote-codex.css on the remote
+   webapp (docked on desktop, a right-hand drawer on mobile), by the
+   meta-panel-mode rules below in the extension's secondary sidebar
+   (editor-tabs mode), and by the sidebar-chat-mode rules below as a
+   right-hand drawer in the extension's sidebar chat view; in an
+   editor-tab chat webview it stays hidden and only mirrors values for
+   the host relay.  Its drawer affordances (the tab-bar toggle and the
+   close button) exist only on the drawer surfaces. */
 #meta-panel { display: none; }
 
-/* Editor-tabs mode: the burger is gone — the editor-title KS button
-   shows the real history panel in the primary sidebar instead. */
-body.editor-tab-mode #menu-btn { display: none; }
+#meta-drawer-btn,
+#meta-close { display: none; }
+
+/* Every VS Code webview drops the burger — the history panel lives in
+   the PRIMARY sidebar in both editor-tabs and sidebar mode. Only the
+   remote webapp keeps its own in-page history drawer. */
+body:not(.remote-chat) #menu-btn { display: none; }
+
+/* The top status bar goes wherever a task-info surface shows the same
+   values (time, tokens, cost, steps, machine): editor-tabs mode has
+   the secondary sidebar's Task Info view, and the sidebar chat view
+   has the right-hand task-info drawer — exactly like the remote
+   webapp's docked panel and mobile drawer. */
+body.editor-tab-mode #tab-status-bar,
+body.sidebar-chat-mode #tab-status-bar { display: none; }
 
 /* History-panel mode (the primary-sidebar history view): this webview
    IS the history sidebar. Everything else stays hidden, the sidebar
@@ -1618,9 +1654,204 @@ body.history-panel-mode #sidebar {
 body.history-panel-mode #sidebar-close,
 body.history-panel-mode #sidebar-resizer { display: none !important; }
 
+/* Meta-panel mode (the secondary-sidebar Task Info view of editor-tabs
+   mode): this webview IS the task-info panel — the remote webapp's
+   rightmost desktop panel.  Everything else stays hidden, the panel
+   fills the whole view, and the drawer/resize affordances go — the
+   hosting VS Code sidebar already provides them.  The list and info
+   subpanel mirror the remote desktop layout in remote-codex.css. */
+body.meta-panel-mode #app > :not(#meta-panel) { display: none !important; }
+
+body.meta-panel-mode #meta-panel {
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  inset: 0;
+  padding: 10px 12px;
+  overflow: hidden;
+}
+
+body.meta-panel-mode #meta-close,
+body.meta-panel-mode #meta-resizer { display: none !important; }
+
+body.meta-panel-mode #meta-list {
+  list-style: disc outside;
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  /* The list keeps its natural height (the info subpanel below takes
+     the rest) but may still shrink and scroll when it alone is taller
+     than the view. */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+body.meta-panel-mode .meta-item {
+  display: list-item;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+body.meta-panel-mode .meta-item .meta-label {
+  color: var(--dim);
+  margin-right: 6px;
+}
+
+body.meta-panel-mode .meta-item .meta-value {
+  color: var(--fg);
+}
+
+body.meta-panel-mode #meta-info {
+  display: none;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+body.meta-panel-mode #meta-info.visible { display: flex; }
+
+body.meta-panel-mode #meta-info-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+/* Sidebar-chat mode (the secondary-sidebar chat view, editor-tabs
+   mode OFF): the task-info panel is a DRAWER sliding in from the
+   right over the chat, toggled by #meta-drawer-btn at the tab bar's
+   right edge and dismissed by its close button, the backdrop or
+   Escape — the mobile remote webapp's drawer, restated with the
+   webview's own variables. The top status bar it replaces is hidden
+   above. */
+body.sidebar-chat-mode #meta-drawer-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  margin-left: 4px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
+  font-size: 16px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+body.sidebar-chat-mode #meta-drawer-btn:hover {
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+  color: var(--fg);
+}
+
+body.sidebar-chat-mode #meta-panel {
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(85vw, 360px);
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  transform: translateX(100%);
+  transition: transform 0.2s ease;
+  z-index: 200;
+  padding: 16px;
+  overflow: hidden;
+}
+
+body.sidebar-chat-mode #meta-panel.open { transform: translateX(0); }
+
+body.sidebar-chat-mode #meta-close {
+  display: block;
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: none;
+  border: none;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  font-size: var(--fs-2xl);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+body.sidebar-chat-mode #meta-close:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+
+/* The drawer is never resizable (like the mobile one). */
+body.sidebar-chat-mode #meta-resizer { display: none; }
+
+body.sidebar-chat-mode #meta-list {
+  list-style: disc outside;
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+body.sidebar-chat-mode .meta-item {
+  display: list-item;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+body.sidebar-chat-mode .meta-item .meta-label {
+  color: var(--dim);
+  margin-right: 6px;
+}
+
+body.sidebar-chat-mode .meta-item .meta-value {
+  color: var(--fg);
+}
+
+body.sidebar-chat-mode #meta-info {
+  display: none;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+body.sidebar-chat-mode #meta-info.visible { display: flex; }
+
+body.sidebar-chat-mode #meta-info-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
 /* The dimming backdrop behind every side panel -- history sidebar,
-   settings, frequent tasks, tricks: one rule, four ids. */
+   task info drawer, settings, frequent tasks, tricks: one rule, five
+   ids. */
 #sidebar-overlay,
+#meta-overlay,
 #settings-overlay,
 #frequent-overlay,
 #tricks-overlay {
@@ -1629,6 +1860,7 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
 }
 
 #sidebar-overlay.open,
+#meta-overlay.open,
 #settings-overlay.open,
 #frequent-overlay.open,
 #tricks-overlay.open { opacity: 1; pointer-events: auto; }
@@ -1988,6 +2220,53 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
 }
 
 .explorer-kids[hidden] { display: none; }
+
+/* Top-level folder rows: the working directory is bold and carries a
+   check mark; an added folder shows "Set as Working Directory" and
+   "Remove Folder from Explorer" buttons on hover / focus. */
+.explorer-row.is-root > .explorer-name { font-weight: 600; }
+
+.explorer-root-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.explorer-root-mark {
+  display: inline-flex;
+  align-items: center;
+  color: var(--green);
+}
+
+.explorer-root-btn {
+  background: none;
+  border: none;
+  padding: 1px;
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
+  visibility: hidden;
+}
+
+.explorer-row:hover > .explorer-root-actions > .explorer-root-btn,
+.explorer-row:focus-within > .explorer-root-actions > .explorer-root-btn,
+.explorer-row.ctx-active > .explorer-root-actions > .explorer-root-btn {
+  visibility: visible;
+}
+
+.explorer-root-btn:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+}
+
+/* No hover on a touch screen: the buttons stay visible. */
+@media (hover: none) {
+  .explorer-root-btn { visibility: visible; }
+}
 
 .explorer-row.loading > .explorer-name,
 .explorer-note {
@@ -2745,6 +3024,94 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
   background: color-mix(in srgb, var(--fg) 15%, transparent);
 }
 
+/* History: tasks are grouped by chat (newest chat first, by its latest
+   task), a day separator ahead of the first chat of each day. */
+.history-day-sep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 2px 4px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  white-space: nowrap;
+}
+
+.history-day-sep::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+}
+
+.history-chat-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 8px;
+  padding: 3px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
+}
+
+/* The chat panel's clickable header: a chevron and the chat's first
+   task, clamped to three lines. */
+.history-chat-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  padding: 4px 6px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: var(--fs-base);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.history-chat-header:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+.history-chat-chevron {
+  flex-shrink: 0;
+  margin-top: 0.175lh;
+  transition: transform 0.15s ease;
+}
+
+.history-chat-group:not(.collapsed) > .history-chat-header .history-chat-chevron {
+  transform: rotate(90deg);
+}
+
+.history-chat-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.history-chat-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.history-chat-group.collapsed > .history-chat-body { display: none; }
+
+.history-chat-body > .sidebar-item { margin-bottom: 0; }
+
 .sidebar-item {
   padding: 7px 10px 3.5px; background: color-mix(in srgb, var(--fg) 3%, transparent);
   border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent); border-radius: 8px;
@@ -2799,8 +3166,8 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
   align-items: center;
   row-gap: 8px;
   padding-left: 19px;
-  background-color: var(--task-color, color-mix(in srgb, var(--fg) 3%, transparent));
-  color: #1a1a1a;
+  background-color: color-mix(in srgb, var(--fg) 3%, transparent);
+  color: var(--fg);
 }
 
 .running-item > .sidebar-item-text {
@@ -2829,13 +3196,13 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
   flex-basis: 100%;
   font-size: var(--fs-sm);
   font-variant-numeric: tabular-nums;
-  color: color-mix(in srgb, #000 65%, transparent);
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
 }
 
 .running-item-workspace {
   flex-basis: 100%;
   font-size: var(--fs-sm);
-  color: color-mix(in srgb, #000 55%, transparent);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2844,7 +3211,7 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
 .running-item-ids {
   flex-basis: 100%;
   font-size: var(--fs-sm);
-  color: color-mix(in srgb, #000 50%, transparent);
+  color: color-mix(in srgb, var(--fg) 50%, transparent);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2861,7 +3228,7 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
   margin: 0 0 0 3px;
   border-radius: 3px;
   line-height: 1;
-  color: #000;
+  color: var(--fg);
   opacity: 0.45;
   transition: opacity 0.15s, background 0.15s, color 0.15s;
 }
@@ -2873,10 +3240,10 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
 
 .ids-copy-btn:hover {
   opacity: 0.9;
-  background: color-mix(in srgb, #000 10%, transparent);
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
 }
 
-.ids-copy-btn.copied { opacity: 0.9; color: #006400; }
+.ids-copy-btn.copied { opacity: 0.9; color: #2e7d32; }
 
 .sidebar-item-actions {
   display: flex;
@@ -2893,7 +3260,7 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
 .sidebar-item-favorite {
   flex-shrink: 0; border: none; cursor: pointer; padding: 2px 0; margin-left: 2px;
   border-radius: 3px; line-height: 1; display: flex; align-items: center;
-  color: #000; opacity: 0.45;
+  color: var(--fg); opacity: 0.45;
   background: none;
   transition: opacity 0.15s, background 0.15s, color 0.15s;
 }
@@ -2907,13 +3274,23 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
 .sidebar-item-delete:hover,
 .sidebar-item-copy:hover,
 .sidebar-item-collapse:hover,
-.sidebar-item-favorite:hover { opacity: 0.9; background: color-mix(in srgb, #000 10%, transparent); }
+.sidebar-item-favorite:hover { opacity: 0.9; background: color-mix(in srgb, var(--fg) 10%, transparent); }
 
 .sidebar-item-collapse svg { transition: transform 0.15s ease; }
 .running-item:not(.collapsed) .sidebar-item-collapse svg { transform: rotate(180deg); }
 .running-item.collapsed > .running-item-info { display: none; }
 
-.sidebar-item-copy.copied { opacity: 0.9; color: #006400; }
+.sidebar-item-copy.copied { opacity: 0.9; color: #2e7d32; }
+
+/* The frequent-tasks list keeps its pastel per-task backgrounds with
+   dark text, so its inline buttons stay dark too. */
+.frequent-item .sidebar-item-delete,
+.frequent-item .sidebar-item-copy { color: #000; }
+
+.frequent-item .sidebar-item-delete:hover,
+.frequent-item .sidebar-item-copy:hover {
+  background: color-mix(in srgb, #000 10%, transparent);
+}
 
 .sidebar-item-favorite.favorited { color: #f5b400; opacity: 1; }
 .sidebar-item-favorite.favorited:hover { color: #f5b400; opacity: 1; }

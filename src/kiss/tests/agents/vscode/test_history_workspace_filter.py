@@ -146,6 +146,13 @@ def _visible_titles(browser, work_dir: str, sessions: list) -> list[str]:
             "'#history-list .sidebar-item').length === n",
             arg=len(sessions), timeout=5000,
         )
+        # Chat panels without a running task start collapsed: open
+        # them all so the rows lay out for the offsetParent probe.
+        page.evaluate(
+            "() => document.querySelectorAll('#history-list "
+            ".history-chat-group.collapsed > .history-chat-header')"
+            ".forEach(h => h.click())"
+        )
         assert page.is_checked("#hf-workspace"), \
             "the Workspace chip must be ON by default"
         page.evaluate(

@@ -563,9 +563,13 @@ def run(
             ``use_web_browser``).
         classify_tasks: Per-task override of pre-run task
             classification (``kiss.agents.sorcar.task_classifier``),
-            which runs one lightweight non-agentic LLM call before the
-            task to pick the system prompt (lite vs. full) and decide
-            worktree isolation for the run (the verdict can only
+            which runs one lightweight model call before the task — a
+            typed question to a decisions model when an OpenRouter key
+            is configured and the settings panel's "Classify with Jev"
+            checkbox (``classify_with_decisions``) is on, else a
+            non-agentic call on the run's own LLM — to pick the system
+            prompt (lite vs. full) and decide worktree isolation for
+            the run (the verdict can only
             demote a run that asked for a worktree to direct
             execution; a *use_worktree* of ``False`` passed here is
             never overridden).  ``True`` forces
@@ -596,7 +600,7 @@ def run(
         append_basic_tools: Whether the agent gets the built-in basic
             toolset (``Bash``, ``Read``, ``Edit``, ``Write``, browser
             tools, ``run_agent``, ``ask_user_question``, ``talk``,
-            ``set_model``, ``summary``, ``run_parallel``, ...).
+            ``set_model``, ``decide``, ``summary``, ``run_parallel``, ...).
             Defaults to True.  When False the agent's ONLY tools are
             ``finish`` and the caller-supplied tools — the ones
             returned by the *tools* file's ``get_tools()`` — so the

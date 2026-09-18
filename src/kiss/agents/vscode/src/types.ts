@@ -16,6 +16,29 @@ export interface SessionInfo {
   timestamp: number;
   preview: string;
   has_events?: boolean;
+  /**
+   * The chat's FIRST task text (bounded by the daemon), naming the
+   * chat's collapsible panel in the history view.
+   */
+  chat_first_task?: string;
+}
+
+/**
+ * The task-info values a chat editor panel mirrors to the secondary
+ * sidebar's Task Info view (editor-tabs mode): the display strings of
+ * the panel's own #meta-list items in media/chat.html. All values are
+ * ready-to-render text ('—' when unknown); timeColor is the inline
+ * color of the Time value (red while running, green when done).
+ */
+export interface MetaPanelValues {
+  tokens: string;
+  cost: string;
+  steps: string;
+  time: string;
+  timeColor: string;
+  machine: string;
+  workdir: string;
+  maxBudget: string;
 }
 
 export type FromWebviewMessage =
@@ -265,7 +288,22 @@ export type FromWebviewMessage =
   // registry).
   | {type: 'closePanel'; retire?: boolean}
   // The settings UI's editor-tabs toggle (both modes).
-  | {type: 'setEditorTabsMode'; enabled: boolean};
+  | {type: 'setEditorTabsMode'; enabled: boolean}
+  // The tmp/PROGRESS.md poll of the visible tab's RUNNING task
+  // (metainfo block in main.js): forwarded whole to the daemon, which
+  // answers with a direct `infoFile` reply.
+  | {
+      type: 'getInfoFile';
+      workDir?: string;
+      tabId?: string;
+      knownSig?: string;
+      token?: string;
+    }
+  // Editor-tabs mode (host-only): this panel's live task-info values —
+  // the mirror the secondary sidebar's Task Info view renders for the
+  // ACTIVE panel. progressMd is the raw markdown of the running task's
+  // tmp/PROGRESS.md ('' when there is nothing to show).
+  | {type: 'metaUpdate'; values: MetaPanelValues; progressMd: string};
 
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
 
@@ -744,6 +782,15 @@ type ToWebviewMessageBody =
   // tab is already open. The webview scrolls to the task's transcript
   // region, or replays the task when it is not rendered.
   | {type: 'showTask'; taskId: string}
+  // Host (sidebar mode): a primary-sidebar history panel click — open
+  // the chat in THIS sidebar chat view, mirroring the webview's own
+  // in-page history rows (switch tab / resume / read-only fallback).
+  | {
+      type: 'openChatFromHistory';
+      chatId: string;
+      taskId: string | number | null;
+      title: string;
+    }
   // Daemon: answer to a `complete` command (the input-box ghost /
   // autocomplete list), scoped to the requesting connection and tab.
   | {
@@ -831,7 +878,24 @@ type ToWebviewMessageBody =
       task_id: string | number;
       parent_tab_id?: string;
       taskId?: string;
-    };
+    }
+  // The daemon's direct reply to `getInfoFile`: the polled task's
+  // tmp/PROGRESS.md. `unchanged` short-circuits a poll whose knownSig
+  // still matches; `token` echoes the request's generation token.
+  | {
+      type: 'infoFile';
+      exists?: boolean;
+      unchanged?: boolean;
+      content?: string;
+      sig?: string;
+      workDir?: string;
+      token?: string;
+    }
+  // Editor-tabs mode (host relay): the ACTIVE chat panel's task-info
+  // values for the secondary sidebar's Task Info view. `values` is
+  // null when no chat panel has reported yet (render the placeholder
+  // dashes).
+  | {type: 'metaState'; values: MetaPanelValues | null; progressMd: string};
 
 export interface AgentCommand {
   type:
@@ -870,7 +934,8 @@ export interface AgentCommand {
     | 'serverReset'
     | 'shareChat'
     | 'shareChatTasks'
-    | 'snoozeUpdate';
+    | 'snoozeUpdate'
+    | 'getInfoFile';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -910,6 +975,10 @@ export interface AgentCommand {
   headers?: string;
   /** saveMyModel: the entry's name before an edit-and-rename. */
   originalName?: string;
+  /** getInfoFile: fingerprint of the file version the client holds. */
+  knownSig?: string;
+  /** getInfoFile: generation token echoed on the `infoFile` reply. */
+  token?: string;
   restoredTabs?: Array<{
     tabId: string;
     chatId: string;

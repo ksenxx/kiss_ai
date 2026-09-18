@@ -969,6 +969,52 @@ test('speech started and finished in the same tab still submits', () => {
   win.close();
 });
 
+test('voice dictation while a content tab is in front submits under the owning chat', () => {
+  const {win, posted} = makeWebview({voice: true});
+  const api = win._testApi;
+  const chatId = api.getActiveTabId();
+
+  // A file view in front: voice still belongs to the conversation that
+  // produced it, so the submit must land on the OWNING chat tab — and
+  // the dictated text must survive the switch back to it (the switch
+  // restores the chat's own saved composer text).
+  send(win, {
+    type: 'fileContent',
+    tabId: chatId,
+    name: 'leak_voice_ct_QK80.txt',
+    path: '/tmp/leak_voice_ct_QK80.txt',
+    content: 'content tab body QK80',
+  });
+  assert.notStrictEqual(
+    api.getActiveTabId(),
+    chatId,
+    'the file tab is in front',
+  );
+  send(win, {type: 'voiceWake'});
+  posted.length = 0;
+  send(win, {type: 'voiceSpeech', text: 'voice on file tab QK80', speaker: 1});
+
+  const submits = posted.filter(m => m.type === 'submit');
+  assert.strictEqual(
+    submits.length,
+    1,
+    'dictation on a file tab must still submit: ' + JSON.stringify(posted),
+  );
+  assert.strictEqual(
+    submits[0].tabId,
+    chatId,
+    'the submit lands on the owning chat, never on the file view id',
+  );
+  assert.ok(submits[0].prompt.includes('voice on file tab QK80'));
+  assert.strictEqual(
+    api.getActiveTabId(),
+    chatId,
+    'the conversation is back on screen',
+  );
+
+  win.close();
+});
+
 test('a spoken answer started in one tab never answers another tab question', () => {
   const {win, posted} = makeWebview({voice: true});
   const {first, second} = twoTabs(win);

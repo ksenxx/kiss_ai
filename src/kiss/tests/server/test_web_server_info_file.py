@@ -4,13 +4,14 @@
 # add your name here
 """End-to-end tests for the ``getInfoFile`` command.
 
-The remote webapp's docked task-info panel (desktop mode) polls
-``getInfoFile`` so its info subpanel can mirror ``tmp/PROGRESS.md`` under
-the active tab's work dir.  These tests drive the REAL production
-paths: a live :class:`RemoteAccessServer` over WSS for the read /
-signature / fallback behaviors, and a real Unix-domain-socket
-connection for the UDS drop-gate (VS Code windows never show that
-panel, so the daemon must ignore a UDS-delivered ``getInfoFile``).
+The remote webapp's task-info panel (docked on desktop, a drawer on
+mobile) and the VS Code extension's editor-tab chat panels poll
+``getInfoFile`` so the info subpanel / Task Info view can mirror
+``tmp/PROGRESS.md`` under the active tab's work dir.  These tests
+drive the REAL production paths: a live :class:`RemoteAccessServer`
+over WSS for the read / signature / fallback behaviors, and a real
+Unix-domain-socket connection for the direct reply the VS Code
+extension's forwarded polls receive on the same UDS connection.
 """
 
 from __future__ import annotations
@@ -676,7 +677,13 @@ class TestGetInfoFileOverWss(IsolatedAsyncioTestCase):
 
 
 class TestGetInfoFileOverUds(unittest.TestCase):
-    """A UDS-delivered ``getInfoFile`` is dropped, not answered."""
+    """A UDS-delivered ``getInfoFile`` gets a direct ``infoFile`` reply.
+
+    Editor-tab chat panels of the VS Code extension (UDS clients) poll
+    ``getInfoFile`` to fill the secondary sidebar's Task Info view, so
+    the command is served on both transports and the reply must come
+    back on the requesting UDS connection.
+    """
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -712,15 +719,18 @@ class TestGetInfoFileOverUds(unittest.TestCase):
         self.loop.close()
         self.tmp.cleanup()
 
-    def test_uds_get_info_file_is_dropped(self) -> None:
-        """The next event after a UDS getInfoFile is the follow-up's.
+    def test_uds_get_info_file_gets_direct_reply(self) -> None:
+        """A UDS getInfoFile is answered with a direct ``infoFile``.
 
-        VS Code windows (UDS clients) never show the remote webapp's
-        docked task-info panel, so the daemon drops their
-        ``getInfoFile`` without a reply — the first event this
-        connection receives is the ``activeTasksQuery`` follow-up's
-        response, never an ``infoFile``.
+        A chat editor panel polls under its root tab id — a tab the
+        registry may not know (no task ran yet) — so the reply resolves
+        through the workDir fallback and must land on the REQUESTING
+        UDS connection, echoing the poll's tab id and token.
         """
+        work_dir = os.path.join(self.tmp.name, "wd")
+        info = Path(work_dir) / "tmp" / "PROGRESS.md"
+        info.parent.mkdir(parents=True)
+        info.write_text("editor panel progress\n")
 
         async def _talk() -> dict[str, Any]:
             reader, writer = await asyncio.open_unix_connection(
@@ -728,10 +738,16 @@ class TestGetInfoFileOverUds(unittest.TestCase):
             )
             try:
                 writer.write(
-                    json.dumps({"type": "getInfoFile"}).encode() + b"\n"
-                )
-                writer.write(
-                    json.dumps({"type": "activeTasksQuery"}).encode() + b"\n"
+                    json.dumps(
+                        {
+                            "type": "getInfoFile",
+                            "workDir": work_dir,
+                            "tabId": "editor-panel-tab",
+                            "knownSig": "",
+                            "token": "9",
+                        }
+                    ).encode()
+                    + b"\n"
                 )
                 await writer.drain()
                 line = await asyncio.wait_for(reader.readline(), timeout=10)
@@ -744,7 +760,11 @@ class TestGetInfoFileOverUds(unittest.TestCase):
         event = asyncio.run_coroutine_threadsafe(_talk(), self.loop).result(
             timeout=15
         )
-        self.assertEqual(event.get("type"), "activeTasksResponse")
+        self.assertEqual(event.get("type"), "infoFile")
+        self.assertIs(event.get("exists"), True)
+        self.assertEqual(event.get("content"), "editor panel progress\n")
+        self.assertEqual(event.get("tabId"), "editor-panel-tab")
+        self.assertEqual(event.get("token"), "9")
 
 
 if __name__ == "__main__":

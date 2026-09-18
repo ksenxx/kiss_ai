@@ -15,7 +15,7 @@ import {
   clearWebviewNotificationPoster,
   setWebviewNotificationPoster,
 } from './WebviewNotifications';
-import {ToWebviewMessage} from './types';
+import {MetaPanelValues, ToWebviewMessage} from './types';
 
 /** The webview panel viewType of an editor-tab chat. */
 export const CHAT_PANEL_VIEW_TYPE = 'kissSorcar.chatTab';
@@ -73,6 +73,14 @@ interface ChatPanel {
    * sidebar strip's createNewTab focuses the fresh composer.
    */
   userClosed: boolean;
+  /**
+   * The panel's last reported task-info values (metaUpdate), cached so
+   * a panel switch can repaint the secondary sidebar's Task Info view
+   * without waiting for the panel's next report.
+   */
+  metaValues?: MetaPanelValues;
+  /** The tmp/PROGRESS.md markdown that came with metaValues. */
+  metaProgressMd?: string;
 }
 
 /** True when *tab* is an editor tab hosting a chat webview (live or a
@@ -126,6 +134,12 @@ export class SorcarPanelManager {
     {entry: RegistryTabEntry; workspaceDir: string}
   > = new Map();
   private _poster: ((message: NotificationMessage) => void) | undefined;
+  // Where the ACTIVE panel's task-info values go: the secondary
+  // sidebar's Task Info view (see extension.ts setMetaSink wiring).
+  private _metaSink?: (
+    values: MetaPanelValues | null,
+    progressMd: string,
+  ) => void;
   // Shared pulse clock for every running panel's title circle; live
   // only while at least one panel is in the 'running' state.
   private _pulseTimer: ReturnType<typeof setInterval> | undefined;
@@ -314,6 +328,31 @@ export class SorcarPanelManager {
   /** The controller of the most recently active chat panel, if any. */
   public activeController(): SorcarSidebarView | undefined {
     return this._activePanel()?.controller;
+  }
+
+  /**
+   * Adopt *sink* as the destination of the active panel's task-info
+   * values and push the current state right away, so a Task Info view
+   * registered after the panels never starts stale.
+   */
+  public setMetaSink(
+    sink: (values: MetaPanelValues | null, progressMd: string) => void,
+  ): void {
+    this._metaSink = sink;
+    this._pushActiveMeta();
+  }
+
+  /**
+   * Relay the ACTIVE panel's cached task-info values to the meta sink
+   * (placeholder state when no panel exists or none reported yet).
+   * Called on every metaUpdate of the active panel, on panel
+   * activations and on panel closes, so the Task Info view always
+   * describes the chat editor tab the user is on.
+   */
+  private _pushActiveMeta(): void {
+    if (!this._metaSink) return;
+    const cp = this._activePanel();
+    this._metaSink(cp?.metaValues ?? null, cp?.metaProgressMd ?? '');
   }
 
   /** Open a fresh conversation in a new editor tab and focus it. */
@@ -579,9 +618,17 @@ export class SorcarPanelManager {
     if (this._recordPanelTab) this._recordPanelTab(cp.tabId, true);
     // A revived background panel must not steal the "active" slot from
     // the panel the user is actually on.
-    if (panel.active !== false) this._active = cp;
+    if (panel.active !== false) {
+      this._active = cp;
+      this._pushActiveMeta();
+    }
     panel.onDidChangeViewState(e => {
-      if (e.webviewPanel.active) this._active = cp;
+      if (e.webviewPanel.active) {
+        this._active = cp;
+        // Repaint the Task Info view from the newly active panel's
+        // cached values instead of waiting for its next report.
+        this._pushActiveMeta();
+      }
     });
     panel.onDidDispose(() => {
       this._panels.delete(cp.tabId);
@@ -592,6 +639,8 @@ export class SorcarPanelManager {
       }
       this._syncPulseTimer();
       if (this._active === cp) this._active = undefined;
+      // The Task Info view must not keep describing a closed panel.
+      this._pushActiveMeta();
       // A user close retires the chat (the sidebar webview does the
       // same for its internal tabs); a mode switch, a closeSelf echo
       // or extension teardown must not.
@@ -700,6 +749,11 @@ export class SorcarPanelManager {
         // sidebar mode switches its internal tab — without stealing
         // the user's keyboard focus.
         cp.panel.reveal(undefined, true);
+        break;
+      case 'metaUpdate':
+        cp.metaValues = event.values;
+        cp.metaProgressMd = event.progressMd;
+        if (this._activePanel() === cp) this._pushActiveMeta();
         break;
       case 'chatBound':
         cp.chatId = event.chatId;

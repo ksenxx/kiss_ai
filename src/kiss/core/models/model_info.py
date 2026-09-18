@@ -51,6 +51,7 @@ class ModelInfo:
         audio_output_price_per_million: float | None = None,
         alias_of: str | None = None,
         use_responses_api: bool | None = None,
+        is_decisions_supported: bool = False,
     ):
         self.context_length = context_length
         self.input_price_per_1M = input_price_per_million
@@ -58,6 +59,9 @@ class ModelInfo:
         self.is_function_calling_supported = is_function_calling_supported
         self.is_embedding_supported = is_embedding_supported
         self.is_generation_supported = is_generation_supported
+        # Typed-decision model (OpenRouter /api/alpha/decisions): answers
+        # noul/choice/score questions instead of generating text.
+        self.is_decisions_supported = is_decisions_supported
         self.cache_read_price_per_1M = cache_read_price_per_million
         self.cache_write_price_per_1M = cache_write_price_per_million
         self.cache_write_1h_price_per_1M = cache_write_1h_price_per_million
@@ -176,6 +180,8 @@ MY_MODELS_DEFAULT_CONTENT = json.dumps(
             "  fc       (bool, default true)  function-calling supported",
             "  emb      (bool, default false) embedding model",
             "  gen      (bool, default true)  text generation supported",
+            "  dec      (bool, default false) OpenRouter decisions model answering",
+            "      noul/choice/score questions via /api/alpha/decisions",
             "  thinking (str,  optional)      reasoning_effort cap, e.g. 'xhigh'",
             "  use_responses_api (bool, optional) route via the OpenAI v2",
             "      Responses API (/v1/responses) instead of Chat Completions",
@@ -574,6 +580,12 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
     * ``fc`` — function-calling support (default ``True``).
     * ``emb`` — embedding model (default ``False``).
     * ``gen`` — generation support (default ``True``).
+    * ``dec`` — decisions model (default ``False``): answers typed
+      ``noul`` / ``choice`` / ``score`` questions through OpenRouter's
+      ``/api/alpha/decisions`` endpoint and is built as
+      :class:`~kiss.core.models.decisions_model.DecisionsModel` by the
+      :func:`model` factory.  Such entries have ``gen``/``fc``/``emb``
+      false, so they never appear in the agent model picker.
     * ``thinking`` — highest accepted ``reasoning_effort`` (default ``None``).
     * ``cache_read_price_per_1M`` / ``cache_write_price_per_1M`` /
       ``cache_write_1h_price_per_1M`` — explicit cache pricing
@@ -620,6 +632,7 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
         audio_output_price_per_million=entry.get("audio_output_price_per_1M"),
         alias_of=entry.get("alias_of"),
         use_responses_api=entry.get("use_responses_api"),
+        is_decisions_supported=entry.get("dec", False),
     )
 
 
@@ -1022,6 +1035,44 @@ def _openai_compatible(
     )
 
 
+def _decisions_model(
+    model_name: str,
+    model_config: dict[str, Any] | None,
+    token_callback: TokenCallback | None,
+    thinking_callback: ThinkingCallback | None,
+) -> Model:
+    """Build the OpenRouter decisions adapter for a ``"dec": true`` catalog entry.
+
+    ``model_config["base_url"]`` (the API root; requests go to
+    ``{base_url}/alpha/decisions``) and ``model_config["api_key"]`` override
+    the OpenRouter defaults, mirroring the override contract of the
+    OpenAI-compatible branch; both keys are consumed here and not forwarded.
+
+    Args:
+        model_name: The catalog name (``openrouter/~typesafe/jev-latest``).
+        model_config: Optional settings; see
+            :class:`~kiss.core.models.decisions_model.DecisionsModel`.
+        token_callback: Called with the JSON answers text by ``generate()``.
+        thinking_callback: Accepted for interface parity.
+
+    Returns:
+        The constructed :class:`~kiss.core.models.decisions_model.DecisionsModel`.
+    """
+    from kiss.core.models.decisions_model import OPENROUTER_DECISIONS_BASE_URL, DecisionsModel
+
+    config = dict(model_config or {})
+    base_url = config.pop("base_url", OPENROUTER_DECISIONS_BASE_URL)
+    api_key = config.pop("api_key", "") or config_module.DEFAULT_CONFIG.OPENROUTER_API_KEY
+    return DecisionsModel(
+        model_name=model_name,
+        base_url=base_url,
+        api_key=api_key,
+        model_config=config or None,
+        token_callback=token_callback,
+        thinking_callback=thinking_callback,
+    )
+
+
 MODEL_INFO: dict[str, ModelInfo] = _load_model_info()
 
 _ANTHROPIC_CACHE_PREFIXES = (
@@ -1410,6 +1461,12 @@ def model(
             decides — for a "base_url" override the catalog flag is honored
             only when the URL is exactly a registered vendor's default
             endpoint (custom gateways stay on v1).
+            For a catalog entry flagged ``"dec": true`` (OpenRouter
+            decisions models such as ``openrouter/~typesafe/jev-latest``)
+            a :class:`~kiss.core.models.decisions_model.DecisionsModel` is
+            built instead; "base_url" then names the API root whose
+            ``/alpha/decisions`` endpoint is called, and "questions" is the
+            question set its ``generate()`` asks.
         token_callback: Optional callback invoked with each streamed text token.
         thinking_callback: Optional callback invoked with ``True`` when a
             thinking block starts and ``False`` when it ends.
@@ -1421,6 +1478,12 @@ def model(
         KISSError: If the model name is not recognized.
     """
     model_name = _strip_provider_prefix(model_name)
+    info = _lookup_model_info(model_name)
+    if info is not None and info.is_decisions_supported:
+        # Typed-decision models (``"dec": true``) speak a different
+        # protocol from every text transport below, so the catalog flag
+        # decides before any prefix routing or base_url override.
+        return _decisions_model(model_name, model_config, token_callback, thinking_callback)
     if model_config and "base_url" in model_config:
         base_url = model_config["base_url"]
         api_key = model_config.get("api_key", "")

@@ -7,12 +7,32 @@
 # Deploy *this* KISS Sorcar checkout to a remote Linux machine and publish its
 # web app (``kiss-web``) so it is reachable from any machine in the world.
 #
-# Usage:  ./sorcar-cloud user@ip-address
+# Usage:  ./rsorcar user@ip-address
 #
 # Flow:
-#   1. Check SSH connectivity to user@ip-address, and that no task is running
-#      there: this deploy restarts the remote web app, which would kill one
-#      mid-step (SORCAR_FORCE_RESTART=1 says go ahead anyway).
+#   1. Check SSH connectivity to user@ip-address.
+#   1a. Install the tools the rest of the deploy needs on the remote before
+#      the checkout is there — git, curl, tar, python3, the ssh client —
+#      through the host's package manager (scripts/install-remote-prereqs.sh,
+#      ``sudo -n``, so it never waits for a password).  A fresh cloud image
+#      ships without git, and step 3 is git from its first command; install.sh
+#      would install it, but install.sh runs out of the checkout step 3
+#      creates.  It is the first thing done on the remote because every later
+#      step needs one of the five (1b runs python3, 2 runs tar).  A host that
+#      already has every tool is left alone.
+#   1b. Check that no task is running there: this deploy restarts the remote
+#      web app, which would kill one mid-step (SORCAR_FORCE_RESTART=1 says go
+#      ahead anyway).
+#   1c. Check that the remote has room under $HOME for the deploy: this
+#      machine's task database (step 4b ships it whole the first time) plus
+#      SORCAR_DISK_HEADROOM_GB (3) for the checkout, its Python environment
+#      and the tools.  scripts/check-remote-disk-space.sh removes the scratch
+#      file an interrupted upload leaves behind, and, when the room is not
+#      there, names what fills the disk, which other filesystem on the remote
+#      has enough (a cloud VM's data disk, typically), and the command that
+#      moves the home directory onto it (scripts/move-home-to-disk.sh, a bind
+#      mount recorded in /etc/fstab, so $HOME keeps its path).  A deploy that
+#      ran out of room half-way used to fail in a different place each time.
 #   2. Copy ~/.ssh/ so the remote can fetch and push git as you, and hop to
 #      other hosts as you.  It comes before the sync because the deployment
 #      pulls its own history from GitHub over that key.  ``authorized_keys``
@@ -73,7 +93,12 @@
 #   7. Publish it worldwide: a remote password is required (kiss-web only opens
 #      a Cloudflare tunnel when one is set), ``cloudflared`` is installed when
 #      missing, and the resulting public https URL is verified from this
-#      machine and opened in your browser.  The stable https://ntfy.sh/<topic>
+#      machine and opened in your browser.  The remote checks its own URL
+#      first (scripts/wait-for-public-url.sh) but only as a courtesy: a stub
+#      resolver asked for a quick tunnel's name in the seconds before the
+#      name exists caches "no such name" for half an hour, so a URL the
+#      remote cannot reach itself is a warning there, and the verdict is this
+#      machine's.  The stable https://ntfy.sh/<topic>
 #      URL the web app displays is made machine-unique first: a
 #      ~/.kiss/ntfy_topic equal to this machine's (copied by an old deploy) is
 #      dropped so the remote regenerates its own topic — otherwise both
@@ -117,6 +142,9 @@
 #   SORCAR_NO_BROWSER   set to 1 to skip opening the browser
 #   SORCAR_SKIP_GITHUB_AUTH  set to 1 to leave this machine's GitHub.com
 #                       credentials here (step 8 is skipped)
+#   SORCAR_DISK_HEADROOM_GB  room asked for on the remote beyond the task
+#                       database (default: 3)
+#   SORCAR_SKIP_DISK_CHECK  set to 1 to deploy without checking the room
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -152,14 +180,17 @@ WEB_PORT="${SORCAR_WEB_PORT:-8787}"
 [[ "$WEB_PORT" =~ ^[0-9]+$ ]] && ((WEB_PORT >= 1 && WEB_PORT <= 65535)) \
     || die "SORCAR_WEB_PORT must be a port number, got '$WEB_PORT'."
 
-for tool in git ssh scp rsync curl; do
+for tool in git ssh scp tar curl; do
     command -v "$tool" &>/dev/null || die "$tool is not installed."
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$SCRIPT_DIR/install.sh" ]] || die "No install.sh next to $0 — is this a KISS Sorcar checkout?"
 [[ -f "$SCRIPT_DIR/scripts/sync-repo.sh" ]] || die "No scripts/sync-repo.sh next to $0 — step 3 needs it."
-for helper in scripts/install-api-keys.sh scripts/sync-task-db.sh \
+for helper in scripts/install-ssh-identity.sh scripts/install-remote-prereqs.sh \
+              scripts/check-remote-disk-space.sh scripts/move-home-to-disk.sh \
+              scripts/wait-for-public-url.sh \
+              scripts/install-api-keys.sh scripts/sync-task-db.sh \
               scripts/collect-github-auth.sh scripts/install-github-auth.sh \
               src/kiss/scripts/sync_db.py src/kiss/scripts/relocate_work_dir.py \
               src/kiss/scripts/carry_over_tables.py \
@@ -197,15 +228,35 @@ REMOTE_DIR="$REMOTE_HOME/$PROJECT"
 info "SSH OK — deploying $MAIN_REPO -> $TARGET:$REMOTE_DIR"
 
 # ---------------------------------------------------------------------------
+# 1a. The tools the deploy needs on the remote, before the checkout is there
+#
+# Step 3 is git from its first command, and a fresh cloud image (Debian's on
+# Google Compute Engine, for one) has no git.  install.sh would install it,
+# but install.sh runs out of the checkout that step 3 creates — so the host's
+# package manager is asked first.  First of everything on the remote, in
+# fact: the running-task check below runs python3 there and the ~/.ssh copy
+# runs tar, so a host missing one of those could not get it installed later.
+# scripts/install-remote-prereqs.sh travels on standard input like
+# install-api-keys.sh does: the checkout is not on the remote yet.  It
+# installs only what is missing (nothing, on every deploy after the first),
+# as root or through ``sudo -n``, and names the exact command to run by hand
+# when it has neither.  Installing a package restarts nothing, so a task
+# running there is not disturbed.
+# ---------------------------------------------------------------------------
+step "Checking that git, curl, tar, python3 and ssh are installed on $TARGET ..."
+ssh "$TARGET" 'bash -s' < "$SCRIPT_DIR/scripts/install-remote-prereqs.sh" \
+    || die "Could not install the tools the deploy needs on $TARGET (see above)."
+
+# ---------------------------------------------------------------------------
 # 1b. Do not deploy on top of a task that is still running there
 #
 # A deploy rebuilds the Python environment under the running web app and then
 # restarts it (step 7c), which kills whatever it is doing: the agent stops
 # mid-step and the steps it had left are gone.  So this is checked before
-# anything on the remote is touched — and by asking the remote's own history,
-# because a running task writes events continuously.  The thousands of rows
-# an old database holds with no end time and no recent event are not running
-# tasks; see src/kiss/scripts/running_tasks.py.
+# anything else on the remote is touched — and by asking the remote's own
+# history, because a running task writes events continuously.  The thousands
+# of rows an old database holds with no end time and no recent event are not
+# running tasks; see src/kiss/scripts/running_tasks.py.
 # ---------------------------------------------------------------------------
 LIVE_TASK_WINDOW="${SORCAR_LIVE_TASK_WINDOW:-300}"
 [[ "$LIVE_TASK_WINDOW" =~ ^[0-9]+$ ]] \
@@ -235,6 +286,41 @@ if [[ "${SORCAR_FORCE_RESTART:-}" != "1" && "$LIVE_TASK_WINDOW" != "0" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 1c. Room for the deploy on the remote's disk
+#
+# Everything a deploy writes lands under the remote's $HOME: the whole task
+# database (step 4b, as large as this machine's ~/.kiss/sorcar.db), the
+# checkout, its .venv and uv's cache, code-server.  A cloud VM is often a
+# 10 GB boot disk with a large data disk mounted beside it, and none of that
+# fits on the boot disk: the upload died with "gzip: stdout: No space left
+# on device", the deploy went on, and every later step failed on a full
+# disk in its own words.  So the remote is asked first whether it has room
+# for the database plus a margin for the rest (SORCAR_DISK_HEADROOM_GB,
+# 3 GB by default), and scripts/check-remote-disk-space.sh explains, when it
+# has not, what is taking the room, which other filesystem there has enough,
+# and the command that moves the home directory onto it
+# (scripts/move-home-to-disk.sh).  It also removes the scratch file an
+# interrupted upload leaves in ~/.kiss, which is what filled the disk here.
+# ---------------------------------------------------------------------------
+DISK_HEADROOM_GB="${SORCAR_DISK_HEADROOM_GB:-3}"
+[[ "$DISK_HEADROOM_GB" =~ ^[0-9]+$ ]] \
+    || die "SORCAR_DISK_HEADROOM_GB must be a whole number of gigabytes, got '$DISK_HEADROOM_GB'."
+LOCAL_DB="${KISS_HOME:-$HOME/.kiss}/sorcar.db"
+DB_BYTES=0
+# The -wal holds committed pages the main file does not have yet; the
+# snapshot that travels contains both.
+for db_part in "$LOCAL_DB" "$LOCAL_DB-wal"; do
+    [[ -f "$db_part" ]] && DB_BYTES=$((DB_BYTES + $(wc -c < "$db_part")))
+done
+NEED_BYTES=$((DB_BYTES + DISK_HEADROOM_GB * 1024 * 1024 * 1024))
+if [[ "${SORCAR_SKIP_DISK_CHECK:-}" != "1" ]]; then
+    step "Checking that $TARGET has room for the deploy ($((NEED_BYTES / 1024 / 1024)) MiB) ..."
+    ssh "$TARGET" "NEED_BYTES=$NEED_BYTES DB_BYTES=$DB_BYTES TARGET=$(shquote "$TARGET") bash -s" \
+        < "$SCRIPT_DIR/scripts/check-remote-disk-space.sh" \
+        || die "$TARGET does not have room for the deploy (see above)."
+fi
+
+# ---------------------------------------------------------------------------
 # 2. Copy ~/.ssh/ — identity only, never authorized_keys
 #
 # Before the sync, not after it: the deployment fetches and pushes its own
@@ -242,31 +328,41 @@ fi
 # ---------------------------------------------------------------------------
 if [[ -d "$HOME/.ssh" ]]; then
     step "Copying ~/.ssh/ to $TARGET (keeping the remote's authorized_keys) ..."
+    # The files travel as a tar stream over the ssh connection itself, and
+    # scripts/install-ssh-identity.sh unpacks them on the other side: a fresh
+    # cloud image has no rsync, and this step runs before the checkout (and
+    # its helpers) is on the remote, so the helper is shipped by itself first.
     # A private key cannot be reconstructed, and the remote may well have one
     # of its own under a name this machine also uses (id_ed25519, config,
-    # known_hosts).  --backup moves every file this copy would overwrite into
-    # a directory of its own instead of destroying it; the directory is
-    # outside ~/.ssh so ssh never reads what is in it, and rsync only creates
-    # it if there was something to put there.
+    # known_hosts): the helper moves every file this copy would replace into a
+    # directory of its own instead of destroying it — outside ~/.ssh so ssh
+    # never reads what is in it, and only created if there was something to
+    # put there.  authorized_keys never travels: on the remote it is what lets
+    # this machine in.
     SSH_BACKUP="$REMOTE_HOME/.kiss/ssh-replaced-$(date -u +%Y%m%dT%H%M%SZ)"
     ssh "$TARGET" 'mkdir -p "$HOME/.ssh" "$HOME/.kiss" && chmod 700 "$HOME/.ssh" "$HOME/.kiss"'
-    rsync -aHz -e ssh --backup --backup-dir="$SSH_BACKUP" \
-        --exclude='authorized_keys' --exclude='authorized_keys2' \
-        --exclude='environment' --exclude='*.sock' --exclude='.DS_Store' \
-        "$HOME/.ssh/" "$TARGET:.ssh/"
-    # ssh refuses to use a key whose permissions are group/world readable.
-    ssh "$TARGET" "SSH_BACKUP=$(shquote "$SSH_BACKUP") bash -s" <<'FIXSSH'
-set -e
-chmod 700 "$HOME/.ssh"
-find "$HOME/.ssh" -type f -exec chmod 600 {} +
-find "$HOME/.ssh" -type f \( -name '*.pub' -o -name 'known_hosts*' \) -exec chmod 644 {} +
-if [ -d "$SSH_BACKUP" ]; then
-    chmod -R go-rwx "$SSH_BACKUP"
-    echo "[$(hostname -s)] kept the ssh files this copy replaced in ${SSH_BACKUP/#$HOME/~}:"
-    find "$SSH_BACKUP" -type f | sed "s|^$SSH_BACKUP/|         |"
-fi
-FIXSSH
-    info "SSH identity copied to $REMOTE_HOME/.ssh."
+    scp -q "$SCRIPT_DIR/scripts/install-ssh-identity.sh" "$TARGET:.kiss/"
+    # Only regular files and symlinks are listed: a socket (an ssh agent's,
+    # say) cannot go into an archive, and a directory named here would be
+    # archived with everything in it, excluded or not.
+    SSH_FILES=()
+    while IFS= read -r -d '' f; do SSH_FILES+=("$f"); done < <(
+        cd "$HOME/.ssh" && find . -mindepth 1 \
+            \( -name authorized_keys -o -name authorized_keys2 -o -name environment \
+               -o -name '*.sock' -o -name .DS_Store \) -prune \
+            -o \( -type f -o -type l \) -print0)
+    if ((${#SSH_FILES[@]} > 0)); then
+        # COPYFILE_DISABLE keeps macOS's tar from adding a ._file of extended
+        # attributes beside every file, and --no-xattrs from writing the
+        # attributes themselves into headers GNU tar warns about on the remote.
+        COPYFILE_DISABLE=1 tar -cf - --no-xattrs -C "$HOME/.ssh" -- "${SSH_FILES[@]}" \
+            | ssh "$TARGET" "SSH_BACKUP=$(shquote "$SSH_BACKUP") \
+                bash \"\$HOME/.kiss/install-ssh-identity.sh\"" \
+            || die "Could not copy ~/.ssh/ to $TARGET."
+        info "SSH identity copied to $REMOTE_HOME/.ssh (${#SSH_FILES[@]} files)."
+    else
+        warn "Nothing in ~/.ssh to copy (authorized_keys never travels) — skipping."
+    fi
 else
     warn "No local ~/.ssh directory — skipping."
 fi
@@ -371,12 +467,14 @@ if [[ -n "$RC_FILE" ]]; then
     ssh "$TARGET" "chmod 600 \"\$HOME/.kiss/$(basename "$RC_FILE")\""
 fi
 scp -q "$TMP_DIR/api_keys.env" "$TARGET:.kiss/"
-# Steps 7a and 7c run these two on the remote.  They are shipped rather than
-# run out of the synced checkout, so that deploying a branch older than they
-# are still gets the version that keeps the rest of ~/.kiss/config.json, and
-# the one that looks for a running task before the web app is restarted.
+# Steps 7a, 7c and 7d run these three on the remote.  They are shipped rather
+# than run out of the synced checkout, so that deploying a branch older than
+# they are still gets the version that keeps the rest of ~/.kiss/config.json,
+# the one that looks for a running task before the web app is restarted, and
+# the one that does not fail the deploy over the remote's own DNS cache.
 scp -q "$SCRIPT_DIR/src/kiss/scripts/remote_config.py" \
-       "$SCRIPT_DIR/src/kiss/scripts/running_tasks.py" "$TARGET:.kiss/"
+       "$SCRIPT_DIR/src/kiss/scripts/running_tasks.py" \
+       "$SCRIPT_DIR/scripts/wait-for-public-url.sh" "$TARGET:.kiss/"
 # Make interactive and non-interactive bash sessions (which is what the agent
 # and its tools run under) see the keys; see scripts/install-api-keys.sh for
 # how ~/.bashrc is edited without damaging what is in it.
@@ -651,38 +749,15 @@ rm -f "$HOME/.kiss/cloudflared.pid" "$HOME/.kiss/remote-url.json"
 systemctl --user restart kiss-web.service
 
 # --- 7d. Wait for the local endpoint, then for the public URL --------------
-for _ in $(seq 1 90); do
-    code=$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$WEB_PORT/" || true)
-    [ "$code" = "200" ] && break
-    sleep 1
-done
-[ "${code:-}" = "200" ] || {
-    echo "ERROR: kiss-web did not answer on https://127.0.0.1:$WEB_PORT" >&2
-    tail -20 "$HOME/.kiss/kiss-web-stderr.log" >&2 || true
-    exit 1
-}
-rinfo "kiss-web answers on https://127.0.0.1:$WEB_PORT"
-# Wait for a tunnel URL that actually answers: Cloudflare needs a few seconds
-# to route a fresh quick tunnel, and the file is rewritten if the tunnel is
-# replaced, so re-read it on every attempt instead of trusting the first value.
-url=""
-for _ in $(seq 1 60); do
-    candidate=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("tunnel",""))' \
-                "$HOME/.kiss/remote-url.json" 2>/dev/null || true)
-    if [ -n "$candidate" ] \
-       && [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$candidate/")" = "200" ]; then
-        url="$candidate"
-        break
-    fi
-    sleep 3
-done
-[ -n "$url" ] || {
-    echo "ERROR: no reachable public tunnel URL appeared (last: ${candidate:-none})" >&2
-    tail -20 "$HOME/.kiss/kiss-web-stderr.log" >&2 || true
-    exit 1
-}
-rinfo "Public tunnel is live: $url"
-echo "SORCAR_PUBLIC_URL=$url"
+# scripts/wait-for-public-url.sh (shipped into ~/.kiss in step 4, so that
+# deploying an older branch still gets this version).  It fails only when
+# kiss-web does not come up or publishes no URL at all.  A URL that does not
+# answer from this host is a warning: a quick tunnel's fresh hostname takes
+# seconds to reach DNS, and a stub resolver asked too early (systemd-resolved
+# on Debian and Ubuntu images) keeps the "no such name" answer for half an
+# hour -- the deploying machine, which never asked too early, verifies the
+# URL in step 9.  Its last line is the SORCAR_PUBLIC_URL= line.
+bash "$HOME/.kiss/wait-for-public-url.sh" "$WEB_PORT"
 REMOTE
 
 # ---------------------------------------------------------------------------

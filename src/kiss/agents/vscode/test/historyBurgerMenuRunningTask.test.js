@@ -62,8 +62,7 @@ function makeWebview() {
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -300,7 +299,6 @@ function testRunningTaskAppearsWhenBurgerOpened() {
 }
 
 function testRunningTaskVisibleUnderDefaultWorkspaceFilter() {
-
   {
     const {win, posted} = makeWebview();
     configureClientWorkDir(win, '/Users/me/repo');
@@ -409,3 +407,6 @@ function main() {
 }
 
 main();
+// main.js arms a timer that relabels the history's day separators at
+// midnight; the harness never closes its windows, so exit explicitly.
+process.exit(0);

@@ -23,6 +23,7 @@ from typing import Any, NamedTuple, cast
 import yaml
 
 from kiss.agents.sorcar._concurrency import _race_delay
+from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide_tool
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.agents.sorcar.skills import make_skill_tool
@@ -1909,6 +1910,14 @@ class SorcarAgent(RelentlessAgent):
         tools.append(ask_user_question)
         tools.append(talk)
         tools.append(set_model)
+        # Typed classification / routing / scoring through OpenRouter's
+        # decisions endpoint (Jev).  Offered only when it can actually
+        # run: an OpenRouter key is configured and the catalog has the
+        # model, otherwise every call would fail and the tool would
+        # only cost prompt tokens.  Its spend folds into this task's
+        # accounting like ``talk``'s synthesis.
+        if decisions_tool_available():
+            tools.append(make_decide_tool(self))
         # No-op tool letting the model periodically condense its recent
         # activity.  Chat-webview runs react to the persisted
         # ``tool_call`` event by nesting and collapsing the preceding
@@ -2293,8 +2302,9 @@ class SorcarAgent(RelentlessAgent):
             append_basic_tools: Whether :meth:`perform_task` prepends the
                 built-in basic toolset (:meth:`_get_tools`: Bash, Read,
                 Edit, Write, browser tools, run_agent,
-                ask_user_question, talk, set_model, run_parallel, ...)
-                to the caller's *tools*.  Defaults to True.  When False
+                ask_user_question, talk, set_model, decide,
+                run_parallel, ...) to the caller's *tools*.  Defaults
+                to True.  When False
                 the agent runs with ONLY the ``finish`` tool (added by
                 ``RelentlessAgent.perform_task``) and the caller's
                 *tools* — *web_tools* and *is_parallel* then have no

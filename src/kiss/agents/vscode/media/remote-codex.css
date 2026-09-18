@@ -176,20 +176,12 @@ body.remote-chat #tab-bar .chat-tab.active {
 
 body.remote-chat #tab-bar .chat-tab-close { border-radius: 999px; }
 
+/* The top status bar goes on the whole remote page: the task-info
+   panel — docked on desktop, the right-hand drawer on mobile — shows
+   the same values (time, tokens, cost, steps, machine).  The bar's
+   spans keep updating unseen; the panel mirrors them from the DOM. */
 body.remote-chat #tab-status-bar {
-  background: var(--bg);
-  border-bottom: none;
-  padding: 2px 16px 6px;
-}
-
-body.remote-chat #tab-status-bar .status {
-  font-size: 12px;
-  color: var(--faint);
-}
-
-body.remote-chat #tab-status-bar .status-metric {
-  font-size: 12px;
-  color: var(--dim);
+  display: none;
 }
 
 body.remote-chat #input-drawer-btn {
@@ -529,7 +521,6 @@ body.remote-chat.sidebar-resizing {
 body.remote-chat .running-item {
   background-color: var(--hover-faint);
   color: var(--fg);
-  border-left: 4px solid var(--task-color, transparent);
 }
 
 body.remote-chat .running-item-metrics {
@@ -581,6 +572,147 @@ body.remote-chat .running-item-ids::before {
   content: " • ";
 }
 
+/* The task-info panel's INNER layout, shared by the desktop docking
+   below and the mobile drawer: the live-metadata bullet list on top,
+   the tmp/PROGRESS.md subpanel filling the rest. */
+body.remote-chat #meta-list {
+  list-style: disc outside;
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  /* The list keeps its natural height so every row stays visible —
+     the info subpanel below takes ALL the remaining space — but it
+     may still shrink and scroll (here, not on #meta-panel, whose own
+     scrolling would carry the resizer away) when the list ALONE is
+     taller than the window. */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+body.remote-chat .meta-item {
+  display: list-item;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+body.remote-chat .meta-item .meta-label {
+  color: var(--faint);
+  margin-right: 6px;
+}
+
+body.remote-chat .meta-item .meta-value {
+  color: var(--dim);
+}
+
+/* The info subpanel below the task-info list mirrors the active
+   workdir's tmp/PROGRESS.md (getInfoFile poll in main.js).  Its flex
+   basis is 0 so its own content never squeezes the list above:
+   it grows into exactly the space the list leaves free — the rest
+   of the panel — and scrolls inside.  While there is nothing to
+   show (no running task, or the file is missing or empty) main.js
+   drops the `visible` class and the WHOLE subpanel disappears,
+   header included. */
+body.remote-chat #meta-info {
+  display: none;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-8);
+}
+
+body.remote-chat #meta-info.visible {
+  display: flex;
+}
+
+body.remote-chat #meta-info-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Mobile mode: the task-info panel is a DRAWER sliding in from the
+ * RIGHT over the chat — the mirror image of the history drawer on the
+ * left — toggled by #meta-drawer-btn at the tab bar's right edge and
+ * dismissed by its close button or the backdrop.  Desktop (>= 900px)
+ * docks the panel permanently instead, so both the toggle and the
+ * close button exist only here.
+ */
+@media (width < 900px) {
+  body.remote-chat #meta-drawer-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    margin-left: 4px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 50%;
+    color: var(--icon);
+    font-size: 16px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+
+  body.remote-chat #meta-drawer-btn:hover {
+    background: var(--hover-strong);
+    color: var(--fg);
+  }
+
+  body.remote-chat #meta-panel {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(85vw, 360px);
+    background: var(--surface);
+    border-left: 1px solid var(--border-8);
+    transform: translateX(100%);
+    transition: transform 0.2s ease;
+    z-index: 200;
+    padding: 16px;
+    overflow: hidden;
+  }
+
+  body.remote-chat #meta-panel.open {
+    transform: translateX(0);
+  }
+
+  body.remote-chat #meta-close {
+    display: block;
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    background: none;
+    border: none;
+    color: var(--dim);
+    font-size: var(--fs-2xl);
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+  }
+
+  body.remote-chat #meta-close:hover {
+    color: var(--fg);
+    background: var(--hover);
+  }
+}
+
 /*
  * Desktop mode: the history panel is DOCKED beside the chat instead of
  * overlaying it as a drawer.  Every docked rule is scoped to
@@ -622,7 +754,8 @@ body.remote-chat .running-item-ids::before {
     --sidebar-pad-x: min(16px, calc(var(--sidebar-w, var(--sidebar-default-w)) / 4));
   }
 
-  body.remote-chat.remote-desktop #sidebar-overlay {
+  body.remote-chat.remote-desktop #sidebar-overlay,
+  body.remote-chat.remote-desktop #meta-overlay {
     display: none;
   }
 
@@ -671,74 +804,6 @@ body.remote-chat .running-item-ids::before {
        could no longer reach it. */
     overflow: hidden;
     z-index: 150;
-  }
-
-  body.remote-chat.remote-desktop #tab-status-bar {
-    display: none;
-  }
-
-  body.remote-chat.remote-desktop #meta-list {
-    list-style: disc outside;
-    margin: 0;
-    padding-left: 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-
-    /* The list keeps its natural height so every row stays visible —
-       the info subpanel below takes ALL the remaining space — but it
-       may still shrink and scroll (here, not on #meta-panel, see
-       above) when the list ALONE is taller than the window. */
-    flex: 0 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
-  body.remote-chat.remote-desktop .meta-item {
-    display: list-item;
-    font-size: var(--fs-sm);
-    color: var(--fg);
-    overflow-wrap: anywhere;
-  }
-
-  body.remote-chat.remote-desktop .meta-item .meta-label {
-    color: var(--faint);
-    margin-right: 6px;
-  }
-
-  body.remote-chat.remote-desktop .meta-item .meta-value {
-    color: var(--dim);
-  }
-
-  /* The info subpanel below the task-info list mirrors the active
-     workdir's tmp/PROGRESS.md (getInfoFile poll in main.js).  Its flex
-     basis is 0 so its own content never squeezes the list above:
-     it grows into exactly the space the list leaves free — the rest
-     of the panel — and scrolls inside.  While there is nothing to
-     show (no running task, or the file is missing or empty) main.js
-     drops the `visible` class and the WHOLE subpanel disappears,
-     header included. */
-  body.remote-chat.remote-desktop #meta-info {
-    display: none;
-    flex-direction: column;
-    flex: 1 1 0;
-    min-height: 0;
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border-8);
-  }
-
-  body.remote-chat.remote-desktop #meta-info.visible {
-    display: flex;
-  }
-
-  body.remote-chat.remote-desktop #meta-info-content {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-    font-size: var(--fs-sm);
-    color: var(--dim);
-    overflow-wrap: anywhere;
   }
 
   body.remote-chat.remote-desktop #sidebar.open #sidebar-resizer {

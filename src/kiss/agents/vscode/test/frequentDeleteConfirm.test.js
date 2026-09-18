@@ -37,7 +37,10 @@ function loadLists(win) {
       },
     ],
   });
-  send(win, {type: 'frequentTasks', tasks: [{task: 'run the tests', count: 4}]});
+  send(win, {
+    type: 'frequentTasks',
+    tasks: [{task: 'run the tests', count: 4}],
+  });
 }
 
 function checkDeleteWidget(row, expectedAria) {
@@ -108,7 +111,11 @@ function main() {
   assert.ok(cnt, 'frequent count rendered');
   const fDel = fRow.querySelector('.sidebar-item-delete');
   fDel.click();
-  assert.strictEqual(cnt.style.display, 'none', 'count hidden while confirming');
+  assert.strictEqual(
+    cnt.style.display,
+    'none',
+    'count hidden while confirming',
+  );
   fRow.querySelector('.sidebar-confirm-no').click();
   assert.strictEqual(cnt.style.display, '', 'count restored on cancel');
   checkDeleteWidget(fRow, 'Delete frequent task');
@@ -130,3 +137,6 @@ function main() {
 
 main();
 console.log('All frequentDeleteConfirm tests passed');
+// main.js arms a timer that relabels the history's day separators at
+// midnight; the harness never closes its windows, so exit explicitly.
+process.exit(0);

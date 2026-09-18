@@ -312,17 +312,18 @@ function testBurgerAndChromeHiddenByCss() {
   );
   win.close();
 
-  // A plain sidebar-mode webview keeps its burger.
+  // A plain sidebar-mode webview drops the burger too: its history
+  // lives in the PRIMARY sidebar now, exactly like editor-tabs mode.
   const plain = makeWebview(' class=""');
   const plainStyle = plain.win.document.createElement('style');
   plainStyle.textContent = mainCss;
   plain.win.document.head.appendChild(plainStyle);
-  assert.notStrictEqual(
+  assert.strictEqual(
     plain.win
       .getComputedStyle(plain.win.document.getElementById('menu-btn'))
       .display,
     'none',
-    'the secondary-sidebar webview keeps its burger',
+    'the secondary-sidebar webview has no burger either',
   );
   plain.win.close();
 

@@ -27,8 +27,11 @@ Covered behavior:
 * Whatever the app writes into the status-bar spans (tokens, cost,
   steps, the running timer text and its color, the machine name) is
   mirrored live into the panel.
-* The top status bar is hidden on desktop; below the 900px breakpoint
-  the panel disappears and the status bar comes back.
+* The top status bar is hidden at EVERY width — below the 900px
+  breakpoint the panel becomes a right-slide drawer toggled by a
+  button at the tab bar's right edge (so it steals no chat space and
+  stays clear of the composer's button row), dismissed by its close
+  button, the backdrop or Escape.
 
 No mocks, patches or fakes: a real HTTP server serves the real assets
 to a real browser.
@@ -279,19 +282,158 @@ def test_status_values_mirror_live_into_the_panel(
         page.close()
 
 
-def test_mobile_keeps_the_status_bar_and_hides_the_panel(
+_MOBILE_WIDTH = 420
+
+_MOBILE_LAYOUT_JS = """
+() => {
+  const vw = window.innerWidth;
+  const panel = document.getElementById('meta-panel');
+  const rect = panel.getBoundingClientRect();
+  const btn = document.getElementById('meta-drawer-btn');
+  const btnRect = btn.getBoundingClientRect();
+  const tabBar = document.getElementById('tab-bar').getBoundingClientRect();
+  const inputArea = document
+    .getElementById('input-area')
+    .getBoundingClientRect();
+  const app = document.getElementById('app').getBoundingClientRect();
+  return {
+    open: panel.classList.contains('open'),
+    inert: panel.hasAttribute('inert'),
+    position: getComputedStyle(panel).position,
+    panelLeft: rect.left,
+    panelRight: rect.right,
+    panelWidth: rect.width,
+    viewport: vw,
+    statusBarHidden:
+      document.getElementById('tab-status-bar').offsetParent === null,
+    btnVisible: btn.offsetParent !== null,
+    btnExpanded: btn.getAttribute('aria-expanded'),
+    btnInTabBar:
+      btnRect.top >= tabBar.top - 1 && btnRect.bottom <= tabBar.bottom + 1,
+    btnAboveComposer: btnRect.bottom <= inputArea.top,
+    appWidth: app.width,
+    overlayOpen: document
+      .getElementById('meta-overlay')
+      .classList.contains('open'),
+    focusedId: document.activeElement && document.activeElement.id,
+  };
+}
+"""
+
+
+def _open_mobile_page(browser: Browser, url: str) -> Page:
+    """Open the remote page below the 900px desktop breakpoint."""
+    page = browser.new_page(
+        viewport={"width": _MOBILE_WIDTH, "height": 900},
+    )
+    page.goto(url)
+    page.wait_for_selector("body.remote-chat", state="attached")
+    page.evaluate(_PREPARE_JS)
+    page.wait_for_function(
+        "() => !document.body.classList.contains('remote-desktop')"
+    )
+    return page
+
+
+def test_mobile_hides_status_bar_and_parks_the_drawer_offscreen(
     browser: Browser,
     remote_url: str,
 ) -> None:
-    """Below the 900px breakpoint the panel is gone and the status bar
-    at the top of the chat comes back."""
-    page = _open_desktop_page(browser, remote_url, 1280)
+    """Below the 900px breakpoint the status bar STAYS hidden (the
+    drawer carries its values) and the panel waits off-screen right,
+    inert, behind a toggle that lives in the tab-bar row — above the
+    chat transcript and clear of the composer's button row — so it
+    never shrinks the chat area."""
+    page = _open_mobile_page(browser, remote_url)
     try:
-        page.set_viewport_size({"width": 420, "height": 900})
-        page.wait_for_function(
-            "() => !document.body.classList.contains('remote-desktop')"
+        layout = page.evaluate(_MOBILE_LAYOUT_JS)
+        assert layout["statusBarHidden"] is True, (
+            "the top status bar must stay hidden on mobile; the drawer "
+            f"shows those values instead: {layout}"
         )
-        assert page.locator("#meta-panel").is_hidden()
-        assert page.locator("#tab-status-bar").is_visible()
+        assert layout["position"] == "fixed", layout
+        assert layout["panelLeft"] >= layout["viewport"] - 1, (
+            f"the closed drawer must sit off-screen right: {layout}"
+        )
+        assert layout["open"] is False and layout["inert"] is True, (
+            f"the closed drawer must be inert (out of tab order): {layout}"
+        )
+        assert layout["btnVisible"] is True, layout
+        assert layout["btnExpanded"] == "false", layout
+        assert layout["btnInTabBar"] is True, (
+            f"the toggle must ride the existing tab-bar row: {layout}"
+        )
+        assert layout["btnAboveComposer"] is True, (
+            f"the toggle must not crowd the composer buttons: {layout}"
+        )
+        assert layout["appWidth"] == pytest.approx(
+            layout["viewport"], abs=1,
+        ), f"the chat column must keep the full width: {layout}"
+    finally:
+        page.close()
+
+
+def test_mobile_drawer_slides_in_from_the_right_and_dismisses(
+    browser: Browser,
+    remote_url: str,
+) -> None:
+    """The tab-bar button slides the drawer in over the chat (backdrop
+    up, focus on the close button); close button, Escape and backdrop
+    each dismiss it, handing focus back to the toggle."""
+    page = _open_mobile_page(browser, remote_url)
+    try:
+        page.click("#meta-drawer-btn")
+        page.wait_for_function(
+            "() => document.getElementById('meta-panel')"
+            f".getBoundingClientRect().right <= {_MOBILE_WIDTH} + 1"
+        )
+        layout = page.evaluate(_MOBILE_LAYOUT_JS)
+        assert layout["open"] is True and layout["inert"] is False, layout
+        assert layout["panelRight"] == pytest.approx(
+            _MOBILE_WIDTH, abs=1,
+        ), f"the open drawer must hug the right edge: {layout}"
+        assert layout["panelWidth"] < _MOBILE_WIDTH, (
+            f"the drawer overlays, not replaces, the chat: {layout}"
+        )
+        assert layout["btnExpanded"] == "true", layout
+        assert layout["overlayOpen"] is True, layout
+        assert layout["focusedId"] == "meta-close", layout
+
+        # Dismissal 1: the drawer's own close button.
+        page.click("#meta-close")
+        page.wait_for_function(
+            "() => !document.getElementById('meta-panel')"
+            ".classList.contains('open')"
+        )
+        layout = page.evaluate(_MOBILE_LAYOUT_JS)
+        assert layout["inert"] is True, layout
+        assert layout["overlayOpen"] is False, layout
+        assert layout["focusedId"] == "meta-drawer-btn", (
+            f"closing must hand focus back to the toggle: {layout}"
+        )
+
+        # Dismissal 2: Escape.
+        page.click("#meta-drawer-btn")
+        page.wait_for_function(
+            "() => document.getElementById('meta-panel')"
+            ".classList.contains('open')"
+        )
+        page.keyboard.press("Escape")
+        page.wait_for_function(
+            "() => !document.getElementById('meta-panel')"
+            ".classList.contains('open')"
+        )
+
+        # Dismissal 3: the backdrop.
+        page.click("#meta-drawer-btn")
+        page.wait_for_function(
+            "() => document.getElementById('meta-panel')"
+            ".classList.contains('open')"
+        )
+        page.click("#meta-overlay", position={"x": 5, "y": 450})
+        page.wait_for_function(
+            "() => !document.getElementById('meta-panel')"
+            ".classList.contains('open')"
+        )
     finally:
         page.close()
