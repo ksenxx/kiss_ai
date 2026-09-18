@@ -17,13 +17,24 @@ the local machine, after the summary box and before "Done." — and that a
 failing local install fails the deploy without hiding the remote URL and
 password.  The same run copies a fake ``~/.ssh`` as a tar stream through the
 ssh stub into the real ``scripts/install-ssh-identity.sh``: the deploy must
-not need rsync on the remote (a fresh Debian image has none).
+not need rsync on the remote (a fresh Debian image has none).  The same run
+also feeds the real ``scripts/install-remote-prereqs.sh`` to the stub's
+``bash -s`` before the git sync, and checks that a remote where git cannot be
+installed stops the deploy there.
 
 Runs ``scripts/test_install_ssh_identity.sh``, which exercises that remote
 half on its own: files land under their relative paths, replaced files with
 different content are kept in ``$SSH_BACKUP``, ``authorized_keys`` is never
 touched, permissions are fixed, and a missing ``SSH_BACKUP`` or ``tar`` fails
 with a clear message.
+
+Runs ``scripts/test_install_remote_prereqs.sh``, which exercises the
+prerequisite installer on its own: a complete host is left alone, a real
+``debian:13`` container (when docker is usable) gets git, curl, python3 and
+the ssh client installed as root, a non-root host goes through ``sudo -n``
+and a non-interactive apt-get, and the failure modes (install fails, tool
+still missing, sudo wants a password, no package manager) each stop with a
+clear message; dnf, pacman and apk get their own package names.
 """
 
 import subprocess
@@ -59,3 +70,8 @@ def test_rsorcar_runs_local_install_before_finishing() -> None:
 def test_install_ssh_identity_receives_the_ssh_copy() -> None:
     """install-ssh-identity.sh must install a tar stream into ~/.ssh, keeping replaced files."""
     run_suite("test_install_ssh_identity.sh")
+
+
+def test_install_remote_prereqs_installs_git_before_the_sync() -> None:
+    """install-remote-prereqs.sh must install the missing tools (git above all) or stop clearly."""
+    run_suite("test_install_remote_prereqs.sh")

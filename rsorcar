@@ -10,9 +10,19 @@
 # Usage:  ./rsorcar user@ip-address
 #
 # Flow:
-#   1. Check SSH connectivity to user@ip-address, and that no task is running
-#      there: this deploy restarts the remote web app, which would kill one
-#      mid-step (SORCAR_FORCE_RESTART=1 says go ahead anyway).
+#   1. Check SSH connectivity to user@ip-address.
+#   1a. Install the tools the rest of the deploy needs on the remote before
+#      the checkout is there — git, curl, tar, python3, the ssh client —
+#      through the host's package manager (scripts/install-remote-prereqs.sh,
+#      ``sudo -n``, so it never waits for a password).  A fresh cloud image
+#      ships without git, and step 3 is git from its first command; install.sh
+#      would install it, but install.sh runs out of the checkout step 3
+#      creates.  It is the first thing done on the remote because every later
+#      step needs one of the five (1b runs python3, 2 runs tar).  A host that
+#      already has every tool is left alone.
+#   1b. Check that no task is running there: this deploy restarts the remote
+#      web app, which would kill one mid-step (SORCAR_FORCE_RESTART=1 says go
+#      ahead anyway).
 #   2. Copy ~/.ssh/ so the remote can fetch and push git as you, and hop to
 #      other hosts as you.  It comes before the sync because the deployment
 #      pulls its own history from GitHub over that key.  ``authorized_keys``
@@ -159,7 +169,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$SCRIPT_DIR/install.sh" ]] || die "No install.sh next to $0 — is this a KISS Sorcar checkout?"
 [[ -f "$SCRIPT_DIR/scripts/sync-repo.sh" ]] || die "No scripts/sync-repo.sh next to $0 — step 3 needs it."
-for helper in scripts/install-ssh-identity.sh \
+for helper in scripts/install-ssh-identity.sh scripts/install-remote-prereqs.sh \
               scripts/install-api-keys.sh scripts/sync-task-db.sh \
               scripts/collect-github-auth.sh scripts/install-github-auth.sh \
               src/kiss/scripts/sync_db.py src/kiss/scripts/relocate_work_dir.py \
@@ -198,15 +208,35 @@ REMOTE_DIR="$REMOTE_HOME/$PROJECT"
 info "SSH OK — deploying $MAIN_REPO -> $TARGET:$REMOTE_DIR"
 
 # ---------------------------------------------------------------------------
+# 1a. The tools the deploy needs on the remote, before the checkout is there
+#
+# Step 3 is git from its first command, and a fresh cloud image (Debian's on
+# Google Compute Engine, for one) has no git.  install.sh would install it,
+# but install.sh runs out of the checkout that step 3 creates — so the host's
+# package manager is asked first.  First of everything on the remote, in
+# fact: the running-task check below runs python3 there and the ~/.ssh copy
+# runs tar, so a host missing one of those could not get it installed later.
+# scripts/install-remote-prereqs.sh travels on standard input like
+# install-api-keys.sh does: the checkout is not on the remote yet.  It
+# installs only what is missing (nothing, on every deploy after the first),
+# as root or through ``sudo -n``, and names the exact command to run by hand
+# when it has neither.  Installing a package restarts nothing, so a task
+# running there is not disturbed.
+# ---------------------------------------------------------------------------
+step "Checking that git, curl, tar, python3 and ssh are installed on $TARGET ..."
+ssh "$TARGET" 'bash -s' < "$SCRIPT_DIR/scripts/install-remote-prereqs.sh" \
+    || die "Could not install the tools the deploy needs on $TARGET (see above)."
+
+# ---------------------------------------------------------------------------
 # 1b. Do not deploy on top of a task that is still running there
 #
 # A deploy rebuilds the Python environment under the running web app and then
 # restarts it (step 7c), which kills whatever it is doing: the agent stops
 # mid-step and the steps it had left are gone.  So this is checked before
-# anything on the remote is touched — and by asking the remote's own history,
-# because a running task writes events continuously.  The thousands of rows
-# an old database holds with no end time and no recent event are not running
-# tasks; see src/kiss/scripts/running_tasks.py.
+# anything else on the remote is touched — and by asking the remote's own
+# history, because a running task writes events continuously.  The thousands
+# of rows an old database holds with no end time and no recent event are not
+# running tasks; see src/kiss/scripts/running_tasks.py.
 # ---------------------------------------------------------------------------
 LIVE_TASK_WINDOW="${SORCAR_LIVE_TASK_WINDOW:-300}"
 [[ "$LIVE_TASK_WINDOW" =~ ^[0-9]+$ ]] \

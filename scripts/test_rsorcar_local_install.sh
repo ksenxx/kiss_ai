@@ -21,6 +21,11 @@
 # the test sees the key arrive, the excluded files stay behind, and the
 # remote's authorized_keys survive.  No rsync anywhere: the remote may not
 # have it.
+# Step 1a runs for real too: the stub runs the scripts/install-remote-prereqs.sh
+# it is fed on ``bash -s`` (against this machine, which has every tool), and
+# the test checks that it runs before the git sync — a fresh image has no git
+# — and before the running-task probe and the ~/.ssh copy, and that a remote where the tools cannot be installed stops the deploy
+# there (FAKE_PREREQS_FAIL=1 makes the stub fail that one script).
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -59,6 +64,10 @@ EOF
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/sync-repo.sh"
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/sync-task-db.sh"
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/install-api-keys.sh"
+    # Step 1a feeds this one to the remote's ``bash -s``; the ssh stub runs
+    # what it is fed, so the real script runs (against this machine, which
+    # has every tool it looks for).
+    cp "$REPO_ROOT/scripts/install-remote-prereqs.sh" "$dir/scripts/"
     local helper
     for helper in scripts/collect-github-auth.sh scripts/install-github-auth.sh \
                   scripts/install-ssh-identity.sh \
@@ -111,6 +120,13 @@ case "\$cmd" in
     *remote_password*) echo "$FAKE_PW" ;;
     *'git log -1'*) printf 'abc123 fake commit\n0\n' ;;
     *install-ssh-identity.sh*) HOME="$fix/rhome" bash -c "\$cmd" ;;   # the real remote half, fed the tar stream
+    'bash -s')                                  # a helper fed on standard input (steps 1a and 4): run it
+        script="\$(cat)"
+        printf '%s\n' "\$script" >> "$fix/bash-s-stdin.txt"
+        if [[ -n "\${FAKE_PREREQS_FAIL:-}" ]] && grep -q install-remote-prereqs.sh <<< "\$script"; then
+            echo "[ERR]  fakehost is missing git (fake failure)" >&2; exit 1
+        fi
+        bash -s <<< "\$script" ;;
     *) [ -t 0 ] || cat >/dev/null; exit 0 ;;
 esac
 EOF
@@ -152,6 +168,23 @@ echo "$OUT" | grep -q "SSH identity copied to $WORK/ok/rhome/.ssh (2 files)" \
     || fail "the ssh copy was not reported with its file count:
 $OUT"
 pass "the ssh identity travels as a tar stream: key arrives, authorized_keys and excluded files stay put"
+
+grep -q "install-remote-prereqs.sh" "$WORK/ok/bash-s-stdin.txt" \
+    || fail "scripts/install-remote-prereqs.sh was never fed to the remote's bash -s"
+echo "$OUT" | grep -q "The tools the deploy needs are all installed" \
+    || fail "the prerequisite check did not run (or did not report) on the remote:
+$OUT"
+PREREQ_LINE=$(echo "$OUT" | grep -n "Checking that git, curl, tar, python3 and ssh are installed" | cut -d: -f1 | head -1)
+TASK_LINE=$(echo "$OUT" | grep -n "Checking whether a task is running" | cut -d: -f1 | head -1)
+SSH_LINE=$(echo "$OUT" | grep -n "Copying ~/.ssh/ to" | cut -d: -f1 | head -1)
+SYNC_LINE=$(echo "$OUT" | grep -n "through origin (branch" | cut -d: -f1 | head -1)
+[[ -n "$PREREQ_LINE" && -n "$TASK_LINE" && -n "$SSH_LINE" && -n "$SYNC_LINE" ]] \
+    || fail "a step is missing from the output (lines $PREREQ_LINE / $TASK_LINE / $SSH_LINE / $SYNC_LINE)"
+# The running-task probe runs python3 on the remote and the ~/.ssh copy runs
+# tar there, so the install must come before both, not only before the sync.
+[[ "$PREREQ_LINE" -lt "$TASK_LINE" && "$PREREQ_LINE" -lt "$SSH_LINE" && "$PREREQ_LINE" -lt "$SYNC_LINE" ]] \
+    || fail "the prerequisite install does not run first on the remote (lines $PREREQ_LINE / $TASK_LINE / $SSH_LINE / $SYNC_LINE)"
+pass "git and the other tools are checked/installed first on the remote: before the task probe, the ssh copy and the git sync"
 
 URL_LINE=$(echo "$OUT" | grep -n "URL:.*$FAKE_URL" | cut -d: -f1 | head -1)
 STEP_LINE=$(echo "$OUT" | grep -n "Running install.sh on the local machine" | cut -d: -f1 | head -1)
@@ -195,6 +228,22 @@ echo "$OUT" | grep -q "URL:.*$FAKE_URL" \
 echo "$OUT" | grep -q "Password:.*$FAKE_PW" \
     || fail "the failed local install hid the remote password"
 pass "a failing local install fails the deploy without hiding URL and password"
+
+# --- Test 4: a remote where git cannot be installed stops the deploy ---------
+# Before the sync, which is git from its first command, and before anything
+# else is shipped.
+make_env "$WORK/nogit"
+populate_checkout "$WORK/nogit/checkout" 0 "$WORK/nogit"
+if OUT=$(FAKE_PREREQS_FAIL=1 run_rsorcar "$WORK/nogit" "$WORK/nogit/checkout/rsorcar"); then
+    fail "rsorcar went on although git could not be installed on the remote"
+fi
+echo "$OUT" | grep -q "Could not install the tools the deploy needs on user@fakehost" \
+    || fail "no clear error message when the remote's tools cannot be installed:
+$OUT"
+echo "$OUT" | grep -q "through origin (branch" \
+    && fail "the git sync was attempted although git could not be installed"
+[[ ! -f "$WORK/nogit/install-marker.txt" ]] || fail "install.sh ran although the deploy had stopped"
+pass "a remote where git cannot be installed stops the deploy before the git sync"
 
 echo
 echo "ALL TESTS PASSED"
