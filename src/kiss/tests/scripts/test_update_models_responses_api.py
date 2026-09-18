@@ -171,7 +171,7 @@ def test_main_test_existing_flips_the_flag_from_probe_verdict(
     monkeypatch.setattr(mod, "fetch_codex_supported_slugs", lambda verbose=False: set())
     monkeypatch.setattr(mod, "get_current_model_info", lambda: dict(initial))
 
-    def probe(name: str, verbose: bool = False) -> dict[str, object]:
+    def probe(name: str, verbose: bool = False, decisions: bool = False) -> dict[str, object]:
         return {
             "gen": True,
             "emb": False,
@@ -314,7 +314,7 @@ class TestInconclusiveVerdicts:
         monkeypatch.setattr(
             mod,
             "test_model_capabilities",
-            lambda name, verbose=False: {
+            lambda name, verbose=False, decisions=False: {
                 "gen": True,
                 "emb": False,
                 "fc": True,

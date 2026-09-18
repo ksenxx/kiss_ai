@@ -1069,26 +1069,25 @@ class ServerApi:
         await self._backend._handle_check_paths(cmd, ctx.endpoint)
 
     async def get_info_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Report the contents of ``tmp/PROGRESS.md`` to a remote-web client.
+        """Report the contents of ``tmp/PROGRESS.md`` to a task-info panel.
 
-        The remote webapp's docked task-info panel (desktop mode only)
-        polls this command so its info subpanel can mirror the
-        ``tmp/PROGRESS.md`` of the task running in the active tab: the
-        file is read from that task's own work dir (its worktree for a
-        worktree-mode run), a copy left behind by a previous task
-        (older than the run's start) counts as missing, and the panel
-        is empty when there is nothing to show.  UDS clients (VS Code
-        windows) never show that panel, so a UDS-delivered
-        ``getInfoFile`` is dropped as a defensive no-op, exactly like
-        ``checkPaths``.
+        The remote webapp's task-info panel (docked on desktop, a
+        drawer on mobile) and the VS Code extension's chat editor
+        panels (editor-tabs mode, whose reports fill the secondary
+        sidebar's Task Info view) poll this command so the info
+        subpanel can mirror the ``tmp/PROGRESS.md`` of the task running
+        in the active tab: the file is read from that task's own work
+        dir (its worktree for a worktree-mode run), a copy left behind
+        by a previous task (older than the run's start) counts as
+        missing, and the panel is empty when there is nothing to show.
+        Served on BOTH transports — the direct ``infoFile`` reply goes
+        back to whichever endpoint (WSS or UDS) asked.
 
         Args:
             cmd: The ``getInfoFile`` command (optional ``workDir``,
                 ``tabId``, ``knownSig``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_uds:
-            return
         await self._backend._handle_get_info_file(cmd, ctx.endpoint)
 
     async def list_dir(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
@@ -1101,7 +1100,7 @@ class ServerApi:
         reply is a ``dirListing`` event sent to the requester only.
         UDS clients (VS Code windows) have a real Explorer, so a
         UDS-delivered ``listDir`` is dropped as a defensive no-op,
-        exactly like ``getInfoFile``.
+        exactly like ``checkPaths``.
 
         Args:
             cmd: The ``listDir`` command (optional ``path``,
@@ -1119,7 +1118,7 @@ class ServerApi:
         staged, unstaged and untracked changes (VS Code's "Changes"
         section) from this command's ``gitStatus`` reply, sent to the
         requester only.  A UDS-delivered ``gitStatus`` is dropped as a
-        defensive no-op, exactly like ``getInfoFile``.
+        defensive no-op, exactly like ``checkPaths``.
 
         Args:
             cmd: The ``gitStatus`` command (optional ``workDir``,
@@ -1137,7 +1136,7 @@ class ServerApi:
         (VS Code's "Graph" section) with each commit's modified files
         from this command's ``gitLog`` reply, sent to the requester
         only.  A UDS-delivered ``gitLog`` is dropped as a defensive
-        no-op, exactly like ``getInfoFile``.
+        no-op, exactly like ``checkPaths``.
 
         Args:
             cmd: The ``gitLog`` command (optional ``workDir``,

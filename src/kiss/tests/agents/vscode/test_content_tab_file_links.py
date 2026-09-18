@@ -125,7 +125,17 @@ class TestContentTabFileLinks:
                 "#content-tab-area .content-tab-view", timeout=30000,
             )
             assert page.locator("#output").is_hidden()
-            assert page.locator("#input-area").is_hidden()
+            # The composer's BUTTON ROW stays: + and ... remain
+            # reachable on a content tab; the text box and the
+            # chat-only controls (Inject promptlet, model picker,
+            # Send) hide with it.
+            assert page.locator("#input-area").is_visible()
+            assert page.locator("#new-chat-btn").is_visible()
+            assert page.locator("#more-btn").is_visible()
+            assert page.locator("#task-input").is_hidden()
+            assert page.locator("#tricks-btn").is_hidden()
+            assert page.locator("#model-picker").is_hidden()
+            assert page.locator("#send-btn").is_hidden()
             page.wait_for_function(
                 """() => {
                      const area = document.getElementById('content-tab-area');

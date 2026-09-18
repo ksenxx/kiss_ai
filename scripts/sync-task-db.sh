@@ -87,7 +87,10 @@
 #   * A multi-gigabyte upload can be cut short.  The file therefore arrives
 #     under a temporary name and is promoted only once it proves to hold
 #     exactly the tasks that were sent, so a failed transfer keeps the previous
-#     database instead of replacing it with a truncated one.
+#     database instead of replacing it with a truncated one -- and the
+#     partial file is removed, not left taking the room the next attempt
+#     needs.  The room for the upload (it lands beside the database it
+#     replaces) is checked before the web app is stopped for it.
 #   * Every task remembers the directory it ran in, and the History panel hides
 #     tasks from other workspaces by default.  The deployment is this project
 #     at a different path, so the recorded directories are re-pointed at it —
@@ -137,6 +140,11 @@ SNAPSHOT="$TMP_DIR/sorcar.db"
 # happens: an ssh connection can drop after the remote has already acted.
 REMOTE_SNAPSHOT_MADE=0
 REMOTE_WEB_APP_STOPPED=0
+# Set while an upload may have left ~/.kiss/sorcar.db.incoming on the remote
+# without the swap having taken it: a transfer cut short -- by the connection,
+# or by the disk filling up -- must not leave a file the size of the database
+# behind, taking the room the next attempt needs.
+REMOTE_INCOMING_MADE=0
 
 # Set when the remote's tasks are known to be here now.  Replacing the
 # remote's database is only safe once that has happened, so a pass 1 that
@@ -167,6 +175,10 @@ cleanup() {
     if (( REMOTE_SNAPSHOT_MADE )); then
         ssh "$TARGET" "rm -f \"$REMOTE_SNAPSHOT\"" >/dev/null 2>&1 \
             || warn "Could not remove $TARGET:$REMOTE_SNAPSHOT — delete it by hand."
+    fi
+    if (( REMOTE_INCOMING_MADE )); then
+        ssh "$TARGET" 'rm -f "$HOME/.kiss/sorcar.db.incoming"' >/dev/null 2>&1 \
+            || warn "Could not remove $TARGET:~/.kiss/sorcar.db.incoming — delete it by hand."
     fi
     if (( REMOTE_WEB_APP_STOPPED )); then
         ssh "$TARGET" 'systemctl --user start kiss-web.service >/dev/null 2>&1 || true' \
@@ -560,6 +572,31 @@ upload_whole_db() {
             return 0
         fi
     fi
+    # The upload lands as a second file beside the database it replaces, so
+    # the room for it has to be there before anything is stopped: a
+    # transfer that dies half-way with "No space left on device" leaves the
+    # remote without a web app for nothing, and (until this check) with a
+    # partial file the size of the disk's remaining room.
+    # A partial upload an earlier run left behind counts as room: the prepare
+    # step below removes it before the upload, and it may be exactly the room
+    # that is missing.
+    local snapshot_bytes free_bytes
+    snapshot_bytes="$(wc -c < "$SNAPSHOT" | tr -d ' ')"
+    free_bytes="$(ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && stale=0
+                                  [ -f "$HOME/.kiss/sorcar.db.incoming" ] && stale=$(wc -c < "$HOME/.kiss/sorcar.db.incoming")
+                                  df -Pk "$HOME/.kiss" | awk -v stale="$stale" "NR == 2 { print \$4 * 1024 + stale }"' \
+        2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ ! "$free_bytes" =~ ^[0-9]+$ ]]; then
+        incomplete "Could not read how much room ~/.kiss has on $TARGET, so its" \
+                   "database was left as it is."
+        return 0
+    fi
+    if (( free_bytes < snapshot_bytes )); then
+        incomplete "Not enough room on $TARGET for the task database: $((free_bytes / 1048576)) MiB" \
+                   "free in ~/.kiss, and the database is $((snapshot_bytes / 1048576)) MiB." \
+                   "Nothing was changed there; make room (./rsorcar explains how) and sync again."
+        return 0
+    fi
     step "Stopping the remote web app so nothing holds its database open ..."
     REMOTE_WEB_APP_STOPPED=1
     ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && chmod 700 "$HOME/.kiss"
@@ -581,6 +618,7 @@ upload_whole_db() {
 
     # gzip shrinks the database ~4x, so the upload takes a quarter as long.
     step "Uploading $tasks tasks to $TARGET ..."
+    REMOTE_INCOMING_MADE=1
     gzip -1 -c "$SNAPSHOT" \
         | ssh "$TARGET" 'gzip -dc > "$HOME/.kiss/sorcar.db.incoming"' \
         || die "Uploading the task database to $TARGET failed."
@@ -662,6 +700,9 @@ SWAP
     then
         die "The upload did not verify on $TARGET — its previous database was kept."
     fi
+    # The swap's last step renamed the file into place; there is nothing to
+    # remove any more.
+    REMOTE_INCOMING_MADE=0
     backup="$(sed -n 's/^SORCAR_DB_BACKUP=//p' "$TMP_DIR/swap.out" | tail -1)"
     info "Task database replaced on $TARGET ($tasks tasks)."
     if [[ -n "$backup" ]]; then

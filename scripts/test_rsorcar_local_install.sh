@@ -2,11 +2,11 @@
 # End-to-end test for the local install step at the end of ./rsorcar.
 # Run: bash scripts/test_rsorcar_local_install.sh
 #
-# Runs the real rsorcar against a fake remote: ssh/scp/rsync/curl are PATH
-# stubs that answer exactly what a healthy deploy would see (a reachable host,
-# no running task, a live tunnel URL), and the checkout-local helpers that do
-# the heavy lifting (sync-repo.sh, sync-task-db.sh) are no-ops.  install.sh in
-# the checkout is a recorder, so the test observes the new final step:
+# Runs the real rsorcar against a fake remote: ssh/scp/curl are PATH stubs
+# that answer exactly what a healthy deploy would see (a reachable host, no
+# running task, a live tunnel URL), and the checkout-local helpers that do the
+# heavy lifting (sync-repo.sh, sync-task-db.sh) are no-ops.  install.sh in the
+# checkout is a recorder, so the test observes the final step:
 #   * rsorcar runs install.sh on the LOCAL machine, non-interactively and
 #     without launching an editor, after printing the deploy summary,
 #   * when started from a linked git worktree, it runs the MAIN repository's
@@ -14,10 +14,30 @@
 #     points the persistent launchers at its own directory),
 #   * and a failing local install fails the script without hiding the
 #     remote URL and password printed just before it.
+# The ~/.ssh/ copy of step 2 runs for real through the ssh stub: the fake
+# HOME has an ~/.ssh with a key, an authorized_keys and an agent socket, and
+# the stub hands the tar stream rsorcar sends to the real
+# scripts/install-ssh-identity.sh with HOME set to the fake remote home — so
+# the test sees the key arrive, the excluded files stay behind, and the
+# remote's authorized_keys survive.  No rsync anywhere: the remote may not
+# have it.
+# Step 1a runs for real too: the stub runs the scripts/install-remote-prereqs.sh
+# it is fed on ``bash -s`` (against this machine, which has every tool), and
+# the test checks that it runs before the git sync — a fresh image has no git
+# — and before the running-task probe and the ~/.ssh copy, and that a remote where the tools cannot be installed stops the deploy
+# there (FAKE_PREREQS_FAIL=1 makes the stub fail that one script).
+# Step 1c runs for real as well: the stub runs scripts/check-remote-disk-space.sh
+# fed on ``NEED_BYTES=... bash -s`` against this machine's disk, and the test
+# checks that it runs after the task probe and before the ~/.ssh copy and the
+# sync, that it removes a stale ~/.kiss/sorcar.db.incoming on the remote, and
+# that a remote without room stops the deploy there (SORCAR_DISK_HEADROOM_GB
+# set to more than any disk holds), while SORCAR_SKIP_DISK_CHECK=1 skips it.
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WORK="$(mktemp -d)"
+# The physical path: rsorcar resolves the main repository with cd && pwd, and
+# on macOS mktemp answers under /var, a symlink to /private/var.
+WORK="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 
 fail() { echo "FAIL: $1"; exit 1; }
@@ -50,8 +70,15 @@ EOF
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/sync-repo.sh"
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/sync-task-db.sh"
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/install-api-keys.sh"
+    # Steps 1a and 1c feed these two to the remote's ``bash -s``; the ssh stub
+    # runs what it is fed, so the real scripts run (against this machine,
+    # which has every tool the first looks for and room for the second).
+    cp "$REPO_ROOT/scripts/install-remote-prereqs.sh" \
+       "$REPO_ROOT/scripts/check-remote-disk-space.sh" "$dir/scripts/"
     local helper
     for helper in scripts/collect-github-auth.sh scripts/install-github-auth.sh \
+                  scripts/install-ssh-identity.sh scripts/move-home-to-disk.sh \
+                  scripts/wait-for-public-url.sh \
                   src/kiss/scripts/sync_db.py src/kiss/scripts/relocate_work_dir.py \
                   src/kiss/scripts/carry_over_tables.py \
                   src/kiss/scripts/db_fingerprint.py \
@@ -61,13 +88,30 @@ EOF
     done
 }
 
-# --- Fixture: fake HOME, fake remote HOME and the ssh/scp/rsync/curl stubs ---
+# --- Fixture: fake HOME, fake remote HOME and the ssh/scp/curl stubs ---------
 # $1: fixture dir
 make_env() {
     local fix="$1"
-    mkdir -p "$fix/home/.kiss" "$fix/rhome" "$fix/bin"
+    mkdir -p "$fix/home/.kiss" "$fix/home/.ssh/agent" "$fix/rhome/.ssh" "$fix/rhome/.kiss" "$fix/bin"
     # The key store the deploy ships (no ~/*rc file in the fake HOME).
     echo 'export FAKE_API_KEY=x' > "$fix/home/.kiss/api_keys.env"
+    # The ssh identity the deploy copies (step 2), with the files it must
+    # leave behind: authorized_keys, a socket, a .DS_Store.
+    echo 'local private key' > "$fix/home/.ssh/id_test"
+    echo 'local public key' > "$fix/home/.ssh/id_test.pub"
+    echo 'local authorized_keys' > "$fix/home/.ssh/authorized_keys"
+    : > "$fix/home/.ssh/.DS_Store"
+    # Bound by a relative name: a Unix socket path is limited to about 100
+    # bytes, and a long TMPDIR would push the absolute path past that.
+    (cd "$fix/home/.ssh/agent" \
+        && python3 -c 'import socket; socket.socket(socket.AF_UNIX).bind("x.sock")')
+    # The remote's own authorized_keys: the file that lets the deploy in.
+    echo 'remote authorized_keys' > "$fix/rhome/.ssh/authorized_keys"
+    # What an upload that ran out of disk left behind on the remote.
+    head -c 3072 /dev/zero > "$fix/rhome/.kiss/sorcar.db.incoming"
+    # The scp stub copies nothing, so the remote half of the copy is put where
+    # rsorcar's scp would have put it.
+    cp "$REPO_ROOT/scripts/install-ssh-identity.sh" "$fix/rhome/.kiss/"
 
     # ssh stub: answers each probe rsorcar sends a healthy deploy's answer.
     cat > "$fix/bin/ssh" <<EOF
@@ -85,11 +129,20 @@ case "\$cmd" in
     *remote-url.json*) echo "$FAKE_URL" ;;
     *remote_password*) echo "$FAKE_PW" ;;
     *'git log -1'*) printf 'abc123 fake commit\n0\n' ;;
+    *install-ssh-identity.sh*) HOME="$fix/rhome" bash -c "\$cmd" ;;   # the real remote half, fed the tar stream
+    'bash -s'|*' bash -s')                      # a helper fed on standard input (steps 1a, 1c and 4): run it
+        script="\$(cat)"
+        printf '%s\n' "\$script" >> "$fix/bash-s-stdin.txt"
+        if [[ -n "\${FAKE_PREREQS_FAIL:-}" ]] && grep -q install-remote-prereqs.sh <<< "\$script"; then
+            echo "[ERR]  fakehost is missing git (fake failure)" >&2; exit 1
+        fi
+        # The variables rsorcar puts before ``bash -s`` (NEED_BYTES=...) are
+        # assignments for the remote shell; HOME is the fake remote's.
+        HOME="$fix/rhome" bash -c "\$cmd" <<< "\$script" ;;
     *) [ -t 0 ] || cat >/dev/null; exit 0 ;;
 esac
 EOF
     printf '#!/bin/bash\nexit 0\n' > "$fix/bin/scp"
-    printf '#!/bin/bash\nexit 0\n' > "$fix/bin/rsync"
     printf '#!/bin/bash\nprintf 200\n' > "$fix/bin/curl"
     chmod +x "$fix/bin/"*
 }
@@ -97,7 +150,7 @@ EOF
 # $1: fixture dir, $2: the rsorcar to run
 run_rsorcar() {
     local fix="$1" rsorcar="$2"
-    HOME="$fix/home" KISS_HOME= PATH="$fix/bin:$PATH" \
+    HOME="$fix/home" KISS_HOME='' PATH="$fix/bin:$PATH" \
     SORCAR_NO_BROWSER=1 SORCAR_SKIP_GITHUB_AUTH=1 \
         bash "$rsorcar" user@fakehost 2>&1
 }
@@ -113,6 +166,51 @@ grep -qx 'args=--non-interactive' "$WORK/ok/install-marker.txt" \
 grep -qx 'skip_launch=1' "$WORK/ok/install-marker.txt" \
     || fail "local install.sh not run with KISS_SKIP_LAUNCH=1"
 pass "rsorcar runs install.sh locally, non-interactively, no editor launch"
+
+RSSH="$WORK/ok/rhome/.ssh"
+[[ "$(cat "$RSSH/id_test")" == "local private key" ]] || fail "the ssh key did not reach the remote ~/.ssh"
+[[ "$(cat "$RSSH/id_test.pub")" == "local public key" ]] || fail "the public key did not reach the remote ~/.ssh"
+[[ "$(cat "$RSSH/authorized_keys")" == "remote authorized_keys" ]] \
+    || fail "the remote's authorized_keys was overwritten: $(cat "$RSSH/authorized_keys")"
+[[ ! -e "$RSSH/.DS_Store" && ! -e "$RSSH/agent" ]] \
+    || fail "excluded files were copied: $(ls -A "$RSSH")"
+[[ -z "$(find "$WORK/ok/rhome/.kiss" -maxdepth 1 -name 'ssh-replaced-*')" ]] \
+    || fail "a backup directory was created although nothing was replaced"
+echo "$OUT" | grep -q "SSH identity copied to $WORK/ok/rhome/.ssh (2 files)" \
+    || fail "the ssh copy was not reported with its file count:
+$OUT"
+pass "the ssh identity travels as a tar stream: key arrives, authorized_keys and excluded files stay put"
+
+grep -q "install-remote-prereqs.sh" "$WORK/ok/bash-s-stdin.txt" \
+    || fail "scripts/install-remote-prereqs.sh was never fed to the remote's bash -s"
+echo "$OUT" | grep -q "The tools the deploy needs are all installed" \
+    || fail "the prerequisite check did not run (or did not report) on the remote:
+$OUT"
+PREREQ_LINE=$(echo "$OUT" | grep -n "Checking that git, curl, tar, python3 and ssh are installed" | cut -d: -f1 | head -1)
+TASK_LINE=$(echo "$OUT" | grep -n "Checking whether a task is running" | cut -d: -f1 | head -1)
+SSH_LINE=$(echo "$OUT" | grep -n "Copying ~/.ssh/ to" | cut -d: -f1 | head -1)
+SYNC_LINE=$(echo "$OUT" | grep -n "through origin (branch" | cut -d: -f1 | head -1)
+[[ -n "$PREREQ_LINE" && -n "$TASK_LINE" && -n "$SSH_LINE" && -n "$SYNC_LINE" ]] \
+    || fail "a step is missing from the output (lines $PREREQ_LINE / $TASK_LINE / $SSH_LINE / $SYNC_LINE)"
+# The running-task probe runs python3 on the remote and the ~/.ssh copy runs
+# tar there, so the install must come before both, not only before the sync.
+[[ "$PREREQ_LINE" -lt "$TASK_LINE" && "$PREREQ_LINE" -lt "$SSH_LINE" && "$PREREQ_LINE" -lt "$SYNC_LINE" ]] \
+    || fail "the prerequisite install does not run first on the remote (lines $PREREQ_LINE / $TASK_LINE / $SSH_LINE / $SYNC_LINE)"
+pass "git and the other tools are checked/installed first on the remote: before the task probe, the ssh copy and the git sync"
+
+grep -q "check-remote-disk-space.sh" "$WORK/ok/bash-s-stdin.txt" \
+    || fail "scripts/check-remote-disk-space.sh was never fed to the remote's bash -s"
+echo "$OUT" | grep -q "INFO.*free in $WORK/ok/rhome on .*the deploy needs about" \
+    || fail "the room check did not run (or did not report) on the remote:
+$OUT"
+DISK_LINE=$(echo "$OUT" | grep -n "Checking that user@fakehost has room for the deploy" | cut -d: -f1 | head -1)
+[[ -n "$DISK_LINE" && "$TASK_LINE" -lt "$DISK_LINE" && "$DISK_LINE" -lt "$SSH_LINE" && "$DISK_LINE" -lt "$SYNC_LINE" ]] \
+    || fail "the room check does not run after the task probe and before the ssh copy and the sync (lines $TASK_LINE / $DISK_LINE / $SSH_LINE / $SYNC_LINE)"
+echo "$OUT" | grep -q "Removed ~/.kiss/sorcar.db.incoming (3.0 KiB)" \
+    || fail "the stale sorcar.db.incoming on the remote was not removed (or not reported):
+$OUT"
+[[ ! -e "$WORK/ok/rhome/.kiss/sorcar.db.incoming" ]] || fail "the stale sorcar.db.incoming is still on the remote"
+pass "the room check runs on the remote before anything of size travels, and removes a stale upload"
 
 URL_LINE=$(echo "$OUT" | grep -n "URL:.*$FAKE_URL" | cut -d: -f1 | head -1)
 STEP_LINE=$(echo "$OUT" | grep -n "Running install.sh on the local machine" | cut -d: -f1 | head -1)
@@ -156,6 +254,61 @@ echo "$OUT" | grep -q "URL:.*$FAKE_URL" \
 echo "$OUT" | grep -q "Password:.*$FAKE_PW" \
     || fail "the failed local install hid the remote password"
 pass "a failing local install fails the deploy without hiding URL and password"
+
+# --- Test 4: a remote where git cannot be installed stops the deploy ---------
+# Before the sync, which is git from its first command, and before anything
+# else is shipped.
+make_env "$WORK/nogit"
+populate_checkout "$WORK/nogit/checkout" 0 "$WORK/nogit"
+if OUT=$(FAKE_PREREQS_FAIL=1 run_rsorcar "$WORK/nogit" "$WORK/nogit/checkout/rsorcar"); then
+    fail "rsorcar went on although git could not be installed on the remote"
+fi
+echo "$OUT" | grep -q "Could not install the tools the deploy needs on user@fakehost" \
+    || fail "no clear error message when the remote's tools cannot be installed:
+$OUT"
+echo "$OUT" | grep -q "through origin (branch" \
+    && fail "the git sync was attempted although git could not be installed"
+[[ ! -f "$WORK/nogit/install-marker.txt" ]] || fail "install.sh ran although the deploy had stopped"
+pass "a remote where git cannot be installed stops the deploy before the git sync"
+
+# --- Test 5: a remote without room stops the deploy ---------------------------
+# No disk holds a million gigabytes, so the real check fails against this
+# machine's own filesystem; the deploy must stop before the ~/.ssh copy, the
+# sync and the install.
+make_env "$WORK/full"
+populate_checkout "$WORK/full/checkout" 0 "$WORK/full"
+if OUT=$(SORCAR_DISK_HEADROOM_GB=1000000 run_rsorcar "$WORK/full" "$WORK/full/checkout/rsorcar"); then
+    fail "rsorcar went on although the remote has no room for the deploy"
+fi
+echo "$OUT" | grep -q "Not enough room on .*the deploy needs about 976.6 TiB" \
+    || fail "the room check did not explain the shortfall:
+$OUT"
+echo "$OUT" | grep -q "user@fakehost does not have room for the deploy" \
+    || fail "no clear error message when the remote has no room:
+$OUT"
+echo "$OUT" | grep -q "Copying ~/.ssh/ to" && fail "the ssh copy ran although the remote has no room"
+echo "$OUT" | grep -q "through origin (branch" && fail "the git sync was attempted although the remote has no room"
+[[ ! -f "$WORK/full/install-marker.txt" ]] || fail "install.sh ran although the deploy had stopped"
+pass "a remote without room for the deploy stops it before anything of size travels"
+
+# --- Test 6: SORCAR_SKIP_DISK_CHECK=1 deploys anyway ----------------------------
+make_env "$WORK/skip"
+populate_checkout "$WORK/skip/checkout" 0 "$WORK/skip"
+OUT=$(SORCAR_DISK_HEADROOM_GB=1000000 SORCAR_SKIP_DISK_CHECK=1 \
+      run_rsorcar "$WORK/skip" "$WORK/skip/checkout/rsorcar") || fail "rsorcar failed with the room check skipped:
+$OUT"
+echo "$OUT" | grep -q "has room for the deploy" && fail "the room check ran although SORCAR_SKIP_DISK_CHECK=1"
+[[ -f "$WORK/skip/install-marker.txt" ]] || fail "the deploy did not finish with the room check skipped"
+pass "SORCAR_SKIP_DISK_CHECK=1 skips the room check"
+
+# --- Test 7: a headroom that is not a number is refused -------------------------
+if OUT=$(SORCAR_DISK_HEADROOM_GB=lots run_rsorcar "$WORK/skip" "$WORK/skip/checkout/rsorcar"); then
+    fail "SORCAR_DISK_HEADROOM_GB=lots was accepted"
+fi
+echo "$OUT" | grep -q "SORCAR_DISK_HEADROOM_GB must be a whole number of gigabytes, got 'lots'" \
+    || fail "no clear error for a bad SORCAR_DISK_HEADROOM_GB:
+$OUT"
+pass "a SORCAR_DISK_HEADROOM_GB that is not a number is refused"
 
 echo
 echo "ALL TESTS PASSED"

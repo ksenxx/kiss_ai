@@ -108,6 +108,7 @@ Module._resolveFilename = function (request, parent, ...rest) {
 };
 
 class FakeSidebarView {
+  postMetaState() {}
   syncWorkDir() {}
   focusChatInput() {
     return Promise.resolve();

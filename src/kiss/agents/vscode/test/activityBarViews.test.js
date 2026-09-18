@@ -135,7 +135,13 @@ async function main() {
     assert.strictEqual(list[0].path, WD);
     assert.strictEqual(list[0].workDir, WD);
     const token = list[0].token;
-    assert.ok(/^\d+:\/ws\/repo$/.test(token), 'token = generation:path');
+    // The node key after the generation is "<top-level folder>\0<path>",
+    // so the same folder listed under two nested top-level folders
+    // (a repository and one of its worktrees) stays two nodes.
+    assert.ok(
+      /^\d+:\/ws\/repo\0\/ws\/repo$/.test(token),
+      'token = generation:root\\0path',
+    );
     // A reply for an older tree generation is dropped.
     send(win, {
       type: 'dirListing',

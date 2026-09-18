@@ -125,15 +125,19 @@ class _RaisingPrinter(CapturePrinter):
 
 @pytest.fixture
 def env() -> Iterator[IsolatedKissHome]:
-    """Isolated KISS_HOME + scratch repo, with the classifier enabled.
+    """Isolated KISS_HOME + scratch repo, with the LLM classifier enabled.
 
     The root conftest disables the classifier suite-wide via
     ``KISS_DISABLE_TASK_CLASSIFIER=1``; these are the classifier's own
-    tests, so the kill switch is lifted and restored afterwards.
+    tests, so the kill switch is lifted and restored afterwards.  The
+    decisions classifier is pinned off (``classify_with_decisions``) so
+    every test here exercises the LLM path whatever keys the developer
+    has; ``test_task_classifier_decisions.py`` covers the other route.
     """
     saved = os.environ.get(_DISABLE_ENV)
     os.environ[_DISABLE_ENV] = "0"
     isolated = IsolatedKissHome("kiss-task-classifier-")
+    isolated.write_config(classify_with_decisions=False)
     # The verdict cache lives in KISS_HOME; drop the in-process mirror
     # so a memo from an earlier test's home never serves this one.
     clear_classification_cache()
@@ -221,7 +225,7 @@ def test_classify_adaptive_thinking_model_takes_one_attempt(
     assert outcome.steps == 1
 
 
-def test_classify_task_bad_model_fails_soft() -> None:
+def test_classify_task_bad_model_fails_soft(env: IsolatedKissHome) -> None:
     """An unknown model yields classification=None, not an exception."""
     outcome = classify_task(
         task="anything", model_name="no-such-model-xyz",
@@ -1181,9 +1185,11 @@ def test_disabled_classifier_keeps_callers_worktree_choice(
 # ---------------------------------------------------------------------------
 
 
-def test_classify_task_skips_run_to_completion_models() -> None:
+def test_classify_task_skips_run_to_completion_models(env: IsolatedKissHome) -> None:
     """cc/* models could execute the embedded task with native tools,
-    so classification is skipped for them without any spend."""
+    so the LLM classifier is skipped for them without any spend (the
+    decisions classifier, pinned off by ``env``, has no such risk and
+    does classify them — see ``test_task_classifier_decisions.py``)."""
     outcome = classify_task(task=_DEV_TASK, model_name="cc/claude-opus-4-6")
     assert outcome.classification is None
     assert outcome.budget_used == 0.0

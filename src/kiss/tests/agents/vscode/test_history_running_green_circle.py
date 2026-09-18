@@ -250,6 +250,15 @@ def _post_history(
         arg=expected_total,
         timeout=5000,
     )
+    # Chat panels without a running task start collapsed: open them
+    # all, as a user inspecting the rows would, so the rows and their
+    # status dots lay out. The explicit expands are remembered per
+    # chat across the later re-renders.
+    page.evaluate(
+        "() => document.querySelectorAll('#history-list "
+        ".history-chat-group.collapsed > .history-chat-header')"
+        ".forEach(h => h.click())"
+    )
 
 
 def test_running_session_renders_green_circle(_browser) -> None:

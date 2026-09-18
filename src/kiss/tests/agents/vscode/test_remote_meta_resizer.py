@@ -384,7 +384,9 @@ def test_mobile_hides_the_resizer(
     browser: Browser,
     remote_url: str,
 ) -> None:
-    """Below the 900px breakpoint the panel and its handle are gone."""
+    """Below the 900px breakpoint the drag handle is gone: the panel
+    becomes a fixed-width drawer parked off-screen right (see
+    test_remote_meta_panel.py), which is never resizable."""
     page = _open_desktop_page(browser, remote_url, 1280)
     try:
         page.set_viewport_size({"width": 420, "height": 900})
@@ -392,6 +394,10 @@ def test_mobile_hides_the_resizer(
             "() => !document.body.classList.contains('remote-desktop')"
         )
         assert page.locator("#meta-resizer").is_hidden()
-        assert page.locator("#meta-panel").is_hidden()
+        # The drawer's 0.2s slide-out must end off-screen right.
+        page.wait_for_function(
+            "() => document.getElementById('meta-panel')"
+            ".getBoundingClientRect().left >= window.innerWidth - 1"
+        )
     finally:
         page.close()
