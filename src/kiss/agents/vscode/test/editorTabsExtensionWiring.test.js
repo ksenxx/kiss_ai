@@ -11,8 +11,9 @@
 //    insertSelectionToChat go to the panel manager's controllers when
 //    the mode is ON and to the sidebar view when OFF;
 //  - flipping kissSorcar.editorTabsMode ON migrates the registry's
-//    tabs into panels (enterMode) and closes the secondary sidebar
-//    (workbench.action.closeAuxiliaryBar); OFF closes all panels and
+//    tabs into panels (enterMode) and keeps the secondary sidebar
+//    open on the Task Info view (kissSorcar.metaViewSecondary.focus)
+//    instead of closing the bar; OFF closes all panels and
 //    opens the secondary sidebar on the KISS Sorcar chat view, focusing
 //    its composer (sidebarView.focusChatInput);
 //  - the KS activity-bar button's dummy tree (non-editor mode): on
@@ -182,7 +183,11 @@ class FakeSidebarView {
     this.hasFocus = false;
     this.panelHooks = panelHooks;
     this.resolvedViews = [];
+    this.metaStates = [];
     sidebarInstances.push(this);
+  }
+  postMetaState(values, progressMd) {
+    this.metaStates.push({values, progressMd});
   }
   resolveWebviewView(view) {
     this.resolvedViews.push(view);
@@ -347,6 +352,9 @@ class FakePanelManager {
     calls.manager.closeAll += 1;
     fakePanelCount = 0;
   }
+  setMetaSink(sink) {
+    calls.manager.metaSink = sink;
+  }
   markShutdown() {}
   dispose() {}
 }
@@ -394,6 +402,10 @@ stubModule(path.join(OUT_DIR, 'SorcarTab.js'), {
   historyPanelBodyAttrs: () =>
     ' class="editor-tab-mode history-panel-mode"' +
     ' data-kiss-tab-id="history-panel"',
+  META_PANEL_TAB_ID: 'meta-panel',
+  metaPanelBodyAttrs: () =>
+    ' class="editor-tab-mode meta-panel-mode"' +
+    ' data-kiss-tab-id="meta-panel"',
 });
 
 delete require.cache[require.resolve(extensionPath)];
@@ -436,6 +448,29 @@ async function runTest() {
     'activation checks the invariant without stealing focus',
   );
   assert.strictEqual(calls.manager.openNewChat, 0, 'mode off: no chat tab');
+
+  // --- the Task Info view: registered as the secondary sidebar's
+  // second view, wired as the panel manager's meta sink ------------------
+  assert.ok(
+    viewProviders.has('kissSorcar.metaViewSecondary'),
+    'the Task Info webview view is registered',
+  );
+  const metaViewInstance = sidebarInstances.find(
+    v => v.panelHooks && v.panelHooks.rootTabId === 'meta-panel',
+  );
+  assert.ok(metaViewInstance, 'a meta-panel controller was created');
+  assert.strictEqual(
+    typeof calls.manager.metaSink,
+    'function',
+    'the manager received a meta sink',
+  );
+  const relayValues = {tokens: '1.00K'};
+  calls.manager.metaSink(relayValues, '# progress');
+  assert.deepStrictEqual(
+    metaViewInstance.metaStates[metaViewInstance.metaStates.length - 1],
+    {values: relayValues, progressMd: '# progress'},
+    'the sink forwards the active panel state into the Task Info view',
+  );
 
   // --- sidebar mode (default) -----------------------------------------
   await commands.get('kissSorcar.openSettings')();
@@ -525,7 +560,8 @@ async function runTest() {
   );
 
   // --- flip the mode ON: registry tabs migrate to panels and the
-  // secondary sidebar (which hosted the sidebar chat) closes ------------
+  // secondary sidebar (which hosted the sidebar chat) stays open,
+  // showing the Task Info view ------------------------------------------
   editorTabsMode = true;
   executedCommands.length = 0;
   await fireConfigChange();
@@ -534,9 +570,16 @@ async function runTest() {
   assert.strictEqual(calls.manager.enterMode[0].workspaceDir, '/ws/project');
   assert.ok(
     executedCommands.some(
+      e => e.cmd === 'kissSorcar.metaViewSecondary.focus',
+    ),
+    'mode on shows the Task Info view in the secondary sidebar',
+  );
+  assert.ok(
+    !executedCommands.some(
       e => e.cmd === 'workbench.action.closeAuxiliaryBar',
     ),
-    'mode on closes the secondary sidebar',
+    'mode on must NOT close the secondary sidebar — the Task Info view ' +
+      'takes the chat view\'s place',
   );
 
   fireDelta(false);

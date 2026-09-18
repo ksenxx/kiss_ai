@@ -69,6 +69,12 @@
           "id": "kissSorcar.chatViewSecondary",
           "name": "Chat",
           "when": "!config.kissSorcar.editorTabsMode"
+        },
+        {
+          "type": "webview",
+          "id": "kissSorcar.metaViewSecondary",
+          "name": "Task Info",
+          "when": "config.kissSorcar.editorTabsMode"
         }
       ]
     },

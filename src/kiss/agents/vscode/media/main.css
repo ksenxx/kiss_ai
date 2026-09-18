@@ -1589,15 +1589,26 @@ body.remote-chat #theme-btn { display: flex; }
 
 #sidebar.open { transform: translateX(0); }
 
-/* The docked task-info panel exists only on the remote webapp's
-   desktop layout; remote-codex.css shows it there.  Everywhere else
-   (VS Code webview, mobile remote) it stays hidden and the meta
-   values keep rendering in #tab-status-bar. */
+/* The task-info panel is shown by remote-codex.css on the remote
+   webapp (docked on desktop, a right-hand drawer on mobile) and by
+   the meta-panel-mode rules below in the extension's secondary
+   sidebar; in an ordinary VS Code chat webview it stays hidden and
+   only mirrors values for the host relay.  Its drawer affordances
+   (the tab-bar toggle and the close button) exist only on the mobile
+   remote page. */
 #meta-panel { display: none; }
+
+#meta-drawer-btn,
+#meta-close { display: none; }
 
 /* Editor-tabs mode: the burger is gone — the editor-title KS button
    shows the real history panel in the primary sidebar instead. */
 body.editor-tab-mode #menu-btn { display: none; }
+
+/* Editor-tabs mode: the top status bar goes — the secondary sidebar's
+   Task Info view shows the same values (time, tokens, cost, steps,
+   machine), exactly like the remote webapp's right-hand panel does. */
+body.editor-tab-mode #tab-status-bar { display: none; }
 
 /* History-panel mode (the primary-sidebar history view): this webview
    IS the history sidebar. Everything else stays hidden, the sidebar
@@ -1618,9 +1629,84 @@ body.history-panel-mode #sidebar {
 body.history-panel-mode #sidebar-close,
 body.history-panel-mode #sidebar-resizer { display: none !important; }
 
+/* Meta-panel mode (the secondary-sidebar Task Info view of editor-tabs
+   mode): this webview IS the task-info panel — the remote webapp's
+   rightmost desktop panel.  Everything else stays hidden, the panel
+   fills the whole view, and the drawer/resize affordances go — the
+   hosting VS Code sidebar already provides them.  The list and info
+   subpanel mirror the remote desktop layout in remote-codex.css. */
+body.meta-panel-mode #app > :not(#meta-panel) { display: none !important; }
+
+body.meta-panel-mode #meta-panel {
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  inset: 0;
+  padding: 10px 12px;
+  overflow: hidden;
+}
+
+body.meta-panel-mode #meta-close,
+body.meta-panel-mode #meta-resizer { display: none !important; }
+
+body.meta-panel-mode #meta-list {
+  list-style: disc outside;
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  /* The list keeps its natural height (the info subpanel below takes
+     the rest) but may still shrink and scroll when it alone is taller
+     than the view. */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+body.meta-panel-mode .meta-item {
+  display: list-item;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+body.meta-panel-mode .meta-item .meta-label {
+  color: var(--dim);
+  margin-right: 6px;
+}
+
+body.meta-panel-mode .meta-item .meta-value {
+  color: var(--fg);
+}
+
+body.meta-panel-mode #meta-info {
+  display: none;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+body.meta-panel-mode #meta-info.visible { display: flex; }
+
+body.meta-panel-mode #meta-info-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
 /* The dimming backdrop behind every side panel -- history sidebar,
-   settings, frequent tasks, tricks: one rule, four ids. */
+   task info drawer, settings, frequent tasks, tricks: one rule, five
+   ids. */
 #sidebar-overlay,
+#meta-overlay,
 #settings-overlay,
 #frequent-overlay,
 #tricks-overlay {
@@ -1629,6 +1715,7 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
 }
 
 #sidebar-overlay.open,
+#meta-overlay.open,
 #settings-overlay.open,
 #frequent-overlay.open,
 #tricks-overlay.open { opacity: 1; pointer-events: auto; }

@@ -317,6 +317,31 @@ export function historyPanelBodyAttrs(): string {
 }
 
 /**
+ * Root chat tab id of the secondary-sidebar Task Info panel's webview.
+ *
+ * Fixed like {@link HISTORY_PANEL_TAB_ID} and for the same reasons:
+ * the tab never runs a task, never binds to a chat and is never
+ * announced to the daemon's registry.
+ */
+export const META_PANEL_TAB_ID = 'meta-panel';
+
+/**
+ * The `<body>` attribute string for the SECONDARY-sidebar Task Info
+ * panel (editor-tabs mode). The webview reuses the chat surface but
+ * `meta-panel-mode` (main.js / main.css) shows only the task-info
+ * panel (#meta-panel) — the remote webapp's rightmost desktop panel —
+ * which renders the `metaState` relays of the active chat editor tab.
+ *
+ * @returns An attribute string ready for `<body{{BODY_CLASS_ATTR}}>`.
+ */
+export function metaPanelBodyAttrs(): string {
+  return (
+    ' class="editor-tab-mode meta-panel-mode"' +
+    ` data-kiss-tab-id="${META_PANEL_TAB_ID}"`
+  );
+}
+
+/**
  * Public URL of the browser wake-word model archive.
  *
  * Documented twin of ``VOICE_MODEL_URL`` in

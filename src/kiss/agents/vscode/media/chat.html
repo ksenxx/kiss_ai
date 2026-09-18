@@ -17,7 +17,13 @@
     </div>
   </div>
   <div id="app" style="display:none;">
-    <div id="tab-bar"><div id="tab-list"></div></div>
+    <!-- The mobile remote webapp's Task Info toggle: slides the
+         #meta-panel drawer in from the right.  It rides the tab bar's
+         right edge — a row that is always there — so it neither eats
+         chat space nor crowds the composer's button row.  Hidden
+         everywhere else (VS Code webviews, desktop remote, which docks
+         the panel permanently). -->
+    <div id="tab-bar"><div id="tab-list"></div><button id="meta-drawer-btn" type="button" aria-label="Task info" aria-controls="meta-panel" aria-expanded="false" title="Task info"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="15" y1="4" x2="15" y2="20"/></svg></button></div>
 
     <div id="tab-status-bar">
       <div class="status">
@@ -236,6 +242,7 @@
          #tab-status-bar values into this bulleted list, which
          replaces the status bar at the top of the chat. -->
     <div id="meta-panel" aria-label="Task info">
+      <button id="meta-close" aria-label="Close task info">&times;</button>
       <div class="sidebar-hdr">Task Info</div>
       <ul id="meta-list">
         <li class="meta-item"><span class="meta-label">Tokens:</span><span id="meta-tokens" class="meta-value">&mdash;</span></li>
@@ -260,6 +267,7 @@
       </div>
       <div id="meta-resizer" role="separator" aria-orientation="vertical" aria-label="Resize task info panel" aria-controls="meta-panel" tabindex="0"></div>
     </div>
+    <div id="meta-overlay"></div>
 
     <div id="frequent-panel">
       <button id="frequent-panel-close">&times;</button>

@@ -23,6 +23,21 @@
   const HISTORY_PANEL_MODE =
     document.body.classList.contains('history-panel-mode');
 
+  // Meta-panel mode: this webview is the SECONDARY-sidebar Task Info
+  // panel of editor-tabs mode — the remote webapp's rightmost desktop
+  // panel. It shows ONLY #meta-panel (see body.meta-panel-mode in
+  // main.css) and renders the `metaState` relays of the active chat
+  // editor tab instead of mirroring its own (idle) status spans.
+  const META_PANEL_MODE = document.body.classList.contains('meta-panel-mode');
+
+  // Chat panels of editor-tabs mode report their task-info values to
+  // the host (metaUpdate), which relays the ACTIVE panel's into the
+  // Task Info view. The two panel-shaped surfaces (history, task info)
+  // never report: they run no tasks, and a report from them would
+  // blank the view.
+  const POST_META_UPDATES =
+    EDITOR_TAB_MODE && !HISTORY_PANEL_MODE && !META_PANEL_MODE;
+
   // Host-only messages (never daemon commands, so not in api.js's
   // whitelist): everything the webview asks of its hosting editor tab.
   function postToHost(msg) {
@@ -3672,11 +3687,16 @@
       attributeFilter: ['style'],
     });
   }
-  mirrorStatusIntoMetaPanel('status-tokens', 'meta-tokens', true);
-  mirrorStatusIntoMetaPanel('status-budget', 'meta-cost', true);
-  mirrorStatusIntoMetaPanel('status-steps', 'meta-steps', true);
-  mirrorStatusIntoMetaPanel('status-text', 'meta-time', false);
-  mirrorStatusIntoMetaPanel('status-machine', 'meta-machine', false);
+  // The Task Info view renders ONLY relayed metaState values: its own
+  // status spans never run a task, and mirroring them would overwrite
+  // the active panel's relayed values with idle placeholders.
+  if (!META_PANEL_MODE) {
+    mirrorStatusIntoMetaPanel('status-tokens', 'meta-tokens', true);
+    mirrorStatusIntoMetaPanel('status-budget', 'meta-cost', true);
+    mirrorStatusIntoMetaPanel('status-steps', 'meta-steps', true);
+    mirrorStatusIntoMetaPanel('status-text', 'meta-time', false);
+    mirrorStatusIntoMetaPanel('status-machine', 'meta-machine', false);
+  }
 
   // metainfo-coverage:start
   // The info subpanel of the docked task-info panel (#meta-info,
@@ -3690,7 +3710,17 @@
   // a missing file renders as an empty subpanel.
   const metaInfoEl = document.getElementById('meta-info');
   const metaInfoContent = document.getElementById('meta-info-content');
+  // The task-info panel and its mobile-drawer controls (the toggle at
+  // the tab bar's right edge, the in-panel close button, the dimming
+  // backdrop — all remote mobile only, see remote-codex.css).
+  const metaPanel = document.getElementById('meta-panel');
+  const metaOverlay = document.getElementById('meta-overlay');
+  const metaDrawerBtn = document.getElementById('meta-drawer-btn');
+  const metaCloseBtn = document.getElementById('meta-close');
   let metaInfoSig = '';
+  // The raw markdown behind the info subpanel ('' when hidden): what a
+  // chat editor panel relays to the Task Info view (postMetaUpdate).
+  let metaInfoMd = '';
   // The poll target: the visible tab and the workdir its panel shows.
   let metaInfoWorkDir = '';
   let metaInfoTabId = '';
@@ -3732,13 +3762,41 @@
     return activeTabId;
   }
 
+  /**
+   * Whether this surface currently mirrors tmp/PROGRESS.md at all:
+   * the docked desktop panel (always), the mobile drawer (only while
+   * it is open — a hidden drawer must not poll the phone's network
+   * every second), or an editor-tab chat panel (only while its task
+   * runs, so an idle panel holds no live timer). The two panel-shaped
+   * webviews (history, Task Info) never poll — the Task Info view gets
+   * the file relayed from the active chat panel.
+   */
+  function metaInfoPollWanted() {
+    if (document.body.classList.contains('remote-desktop')) return true;
+    if (
+      document.body.classList.contains('remote-chat') &&
+      metaPanel &&
+      metaPanel.classList.contains('open')
+    ) {
+      return true;
+    }
+    return POST_META_UPDATES && isRunning;
+  }
+
   /** Ask the daemon for the visible tab's task's tmp/PROGRESS.md. */
   function requestInfoFile() {
     if (!metaInfoContent) return;
     // Only a RUNNING task has a live tmp/PROGRESS.md worth mirroring; an
     // idle tab's subpanel stays empty and costs the daemon nothing.
-    if (!isRunning) return;
-    if (!document.body.classList.contains('remote-desktop')) return;
+    // The POLLED tab's own flag decides, not the module-level
+    // isRunning: that one lags around tab switches (restoreTab
+    // retargets before the switch applies the destination's running
+    // state, which would fire one poll for an idle tab) and, while a
+    // CONTENT tab is visible, never learns that the owner chat's task
+    // ended (its `status running:false` is not the active tab's).
+    const pollTab = getTab(metaInfoChatTabId());
+    if (pollTab ? !pollTab.isRunning : !isRunning) return;
+    if (!metaInfoPollWanted()) return;
     if (document.visibilityState === 'hidden') return;
     // A tab switch that reached neither updateMetaTaskDetails nor a
     // running-state flip (two running tabs in one workdir) is caught
@@ -3779,7 +3837,9 @@
     metaInfoTabId = tabId;
     metaInfoSig = '';
     metaInfoGen++;
+    metaInfoMd = '';
     setMetaInfoHTML('');
+    postMetaUpdateSoon();
     requestInfoFile();
   }
 
@@ -3802,11 +3862,20 @@
     if (running === metaInfoSawRunning) return;
     metaInfoSawRunning = running;
     if (running) {
-      requestInfoFile();
+      // An editor-tab chat panel's poll timer lives exactly while its
+      // task does (see metaInfoPollWanted). Starting the timer fires
+      // its own immediate poll; only a timer that was ALREADY running
+      // (remote desktop, an open drawer) needs the explicit one here.
+      const hadTimer = metaInfoTimer !== null;
+      syncMetaInfoPolling();
+      if (hadTimer) requestInfoFile();
     } else {
+      syncMetaInfoPolling();
       metaInfoSig = '';
       metaInfoGen++;
+      metaInfoMd = '';
       setMetaInfoHTML('');
+      postMetaUpdateSoon();
     }
   }
 
@@ -3822,32 +3891,37 @@
     metaInfoSig = typeof ev.sig === 'string' ? ev.sig : '';
     const text = ev.exists && typeof ev.content === 'string' ? ev.content : '';
     if (!text.trim()) {
+      metaInfoMd = '';
       setMetaInfoHTML('');
+      postMetaUpdateSoon();
       return;
     }
+    metaInfoMd = text;
     if (typeof marked !== 'undefined') {
       setMetaInfoHTML(kissSanitize(marked.parse(text)));
     } else {
       metaInfoContent.textContent = text;
       if (metaInfoEl) metaInfoEl.classList.add('visible');
     }
+    postMetaUpdateSoon();
   }
 
   let metaInfoTimer = null;
 
   /**
-   * Start or stop the 1s info-file poll to match remote desktop mode.
-   * The short interval keeps the mirrored tmp/PROGRESS.md fresh — the
-   * panel repaints within a second of the file changing, and the sig
-   * check keeps an unchanged file at one stat per poll.  Called by
-   * applyRemoteDesktop whenever the mode is (re)applied.  A timer that
-   * ran unconditionally would tick forever in webviews that can never
-   * show the panel (the VS Code extension, phone-sized remote windows)
-   * — and would keep every jsdom-hosted webview's node process alive
-   * after its tests finish.
+   * Start or stop the 1s info-file poll to match metaInfoPollWanted:
+   * remote desktop mode, an open mobile task-info drawer, or a chat
+   * editor panel with a running task.  The short interval keeps the
+   * mirrored tmp/PROGRESS.md fresh — the panel repaints within a
+   * second of the file changing, and the sig check keeps an unchanged
+   * file at one stat per poll.  Called by applyRemoteDesktop, the
+   * drawer toggle and syncMetaInfoRunning whenever the answer may have
+   * changed.  A timer that ran unconditionally would tick forever in
+   * webviews that can never show the panel — and would keep every
+   * jsdom-hosted webview's node process alive after its tests finish.
    */
   function syncMetaInfoPolling() {
-    const want = document.body.classList.contains('remote-desktop');
+    const want = metaInfoPollWanted();
     if (want && metaInfoTimer === null) {
       metaInfoTimer = setInterval(requestInfoFile, 1000);
       requestInfoFile();
@@ -3856,7 +3930,167 @@
       metaInfoTimer = null;
     }
   }
+
+  /**
+   * Open or close the mobile task-info drawer (remote < 900px): the
+   * right-hand twin of the history drawer, showing the same task-info
+   * panel desktop mode docks. Opening starts the tmp/PROGRESS.md poll
+   * and repolls immediately so the drawer never shows stale contents.
+   *
+   * @param {boolean} open Whether the drawer should be open.
+   */
+  function setMetaDrawerOpen(open) {
+    open = !!open;
+    if (!metaPanel) return;
+    const wasOpen = metaPanel.classList.contains('open');
+    metaPanel.classList.toggle('open', open);
+    if (metaOverlay) metaOverlay.classList.toggle('open', open);
+    if (metaDrawerBtn) {
+      metaDrawerBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    // A closed MOBILE drawer sits translated off-screen but keeps
+    // rendering (the slide-in animation needs it), so `inert` takes
+    // its close button out of the keyboard tab order.  The docked
+    // desktop panel and the VS Code Task Info view are never drawers
+    // and must never go inert (applyRemoteDesktop flips the body class
+    // before calling here, so entering desktop lifts the attribute).
+    const inertDrawer =
+      !open &&
+      document.body.classList.contains('remote-chat') &&
+      !document.body.classList.contains('remote-desktop');
+    if (typeof metaPanel.toggleAttribute === 'function') {
+      metaPanel.toggleAttribute('inert', inertDrawer);
+    }
+    // Focus follows the drawer: opening lands on its close button,
+    // closing hands focus back to the toggle instead of stranding it
+    // on an off-screen control.
+    try {
+      if (open && !wasOpen) {
+        if (metaCloseBtn) metaCloseBtn.focus();
+      } else if (!open && wasOpen) {
+        if (
+          metaDrawerBtn &&
+          document.activeElement &&
+          metaPanel.contains(document.activeElement)
+        ) {
+          metaDrawerBtn.focus();
+        }
+      }
+    } catch (_e) {
+      // Focus is best-effort (detached nodes, jsdom quirks).
+    }
+    syncMetaInfoPolling();
+  }
   // metainfo-coverage:end
+
+  // metarelay-coverage:start
+  // ---- Editor-tabs mode: task-info relay to the Task Info view ----
+  //
+  // A chat editor panel keeps its (hidden) #meta-list current in every
+  // mode — mirrorStatusIntoMetaPanel and updateMetaTaskDetails write it
+  // unconditionally — so the panel simply reports those display strings
+  // (plus the raw tmp/PROGRESS.md) to the host whenever they change.
+  // The host caches per panel and forwards the ACTIVE panel's report to
+  // the secondary sidebar's Task Info view (see SorcarPanelManager).
+  let metaPostTimer = null;
+
+  /** Read one #meta-* value's display text ('' when absent). */
+  function metaValueText(id) {
+    const el = document.getElementById(id);
+    return el ? (el.textContent || '').trim() : '';
+  }
+
+  /** Post this panel's task-info values to the host right now. */
+  function postMetaUpdateNow() {
+    const timeEl = document.getElementById('meta-time');
+    postToHost({
+      type: 'metaUpdate',
+      values: {
+        tokens: metaValueText('meta-tokens'),
+        cost: metaValueText('meta-cost'),
+        steps: metaValueText('meta-steps'),
+        time: metaValueText('meta-time'),
+        timeColor: timeEl ? timeEl.style.color || '' : '',
+        machine: metaValueText('meta-machine'),
+        workdir: metaValueText('meta-workdir'),
+        maxBudget: metaValueText('meta-max-budget'),
+      },
+      progressMd: metaInfoMd,
+    });
+  }
+
+  /**
+   * Post this panel's task-info values to the host, coalescing the
+   * bursts a single event produces (several status spans and both
+   * task-detail rows may repaint in one tick) into one report.
+   */
+  function postMetaUpdateSoon() {
+    if (!POST_META_UPDATES) return;
+    if (metaPostTimer !== null) return;
+    metaPostTimer = setTimeout(() => {
+      metaPostTimer = null;
+      postMetaUpdateNow();
+    }, 150);
+  }
+
+  if (POST_META_UPDATES) {
+    // One observer on the whole list catches every writer — the five
+    // status mirrors and updateMetaTaskDetails — without patching any
+    // of them; the initial report seeds the host cache so a panel
+    // switch right after opening never shows another panel's values.
+    const metaListEl = document.getElementById('meta-list');
+    if (metaListEl && typeof MutationObserver === 'function') {
+      new MutationObserver(postMetaUpdateSoon).observe(metaListEl, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['style'],
+      });
+    }
+    postMetaUpdateSoon();
+  }
+
+  /**
+   * Paint one relayed metaState into the Task Info view (meta-panel
+   * mode only): the active chat panel's display strings land in the
+   * bullet list, and its tmp/PROGRESS.md markdown renders in the info
+   * subpanel exactly like the remote desktop panel renders its own.
+   *
+   * @param {object} ev The metaState message (values may be null: no
+   *   chat panel is reporting — show the placeholder dashes).
+   */
+  function renderMetaState(ev) {
+    const values =
+      ev && ev.values && typeof ev.values === 'object' ? ev.values : null;
+    const put = (id, text, color) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = text || '\u2014';
+      el.style.color = color || '';
+    };
+    put('meta-tokens', values && values.tokens);
+    put('meta-cost', values && values.cost);
+    put('meta-steps', values && values.steps);
+    put(
+      'meta-time',
+      (values && values.time) || 'Ready',
+      values && values.timeColor,
+    );
+    put('meta-machine', values && values.machine);
+    put('meta-workdir', values && values.workdir);
+    put('meta-max-budget', values && values.maxBudget);
+    const md = ev && typeof ev.progressMd === 'string' ? ev.progressMd : '';
+    if (!md.trim()) {
+      setMetaInfoHTML('');
+    } else if (typeof marked !== 'undefined') {
+      setMetaInfoHTML(kissSanitize(marked.parse(md)));
+    } else if (metaInfoContent) {
+      metaInfoContent.textContent = md;
+      if (metaInfoEl) metaInfoEl.classList.add('visible');
+    }
+  }
+  // metarelay-coverage:end
 
   // activitybar-coverage:start
   // ---- Activity bar: Tasks / Explorer / Source Control views ----
@@ -7009,6 +7243,10 @@
   function updateMetaTaskDetails(s) {
     metaShownSettings = s && typeof s === 'object' ? s : null;
     s = metaShownSettings;
+    // The Task Info view's rows show the ACTIVE chat panel's relayed
+    // values; its own (idle, taskless) settings must not overwrite
+    // them — e.g. a configData repaint landing between two relays.
+    if (META_PANEL_MODE) return;
     if (!metaWorkdirEl && !metaMaxBudgetEl) return;
     // A filesystem root is never a real workspace (replayed historical
     // tasks are a known source of poisoned root paths — see
@@ -11314,12 +11552,33 @@
           if (!ev.running) clearAgentModel(evTab.id);
           // modelpick-coverage:end
         }
+        // A visible CONTENT tab has no task of its own: the timer, the
+        // spinner and the task-info panel keep describing the chat tab
+        // the panel was lent to (metaInfoChatTabId). A status flip of
+        // THAT tab therefore applies here as if it were the active one
+        // — otherwise a task ending behind a file view would leave the
+        // clock ticking and the mirrored tmp/PROGRESS.md stale until
+        // the user switched back.
+        const activeIsContent = (() => {
+          const act = getTab(activeTabId);
+          return Boolean(act && act.isContentTab);
+        })();
+        const mirrorsActive =
+          ev.tabId !== undefined &&
+          ev.tabId !== activeTabId &&
+          activeIsContent &&
+          evTab !== null &&
+          metaInfoChatTabId() === evTab.id;
         if (ev.running && typeof ev.startTs === 'number' && ev.startTs > 0) {
           if (evTab) {
             evTab.t0 = ev.startTs;
             evTab.endTs = 0;
           }
-          if (ev.tabId === undefined || ev.tabId === activeTabId) {
+          if (
+            ev.tabId === undefined ||
+            ev.tabId === activeTabId ||
+            mirrorsActive
+          ) {
             t0 = ev.startTs;
             endTs = 0;
           }
@@ -11332,6 +11591,11 @@
               inputContainer.style.display = 'none';
           }
           if (ev.running) applyChevronState(currentTaskName);
+        } else if (mirrorsActive) {
+          // Only the shared surface state (timer, spinner, buttons,
+          // task-info sync); the transcript-shaped work (chevrons,
+          // sub-agent composer) waits for the real tab switch.
+          setRunningState(ev.running);
         }
         renderTabBar();
         refreshHistory();
@@ -11421,6 +11685,11 @@
         break;
       case 'infoFile':
         renderInfoFileEvent(ev);
+        break;
+      case 'metaState':
+        // The host relays the ACTIVE chat editor panel's task-info
+        // values; only the Task Info view renders them.
+        if (META_PANEL_MODE) renderMetaState(ev);
         break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
@@ -12560,6 +12829,18 @@
     if (!running) flushStreamTailSweep();
     // streamtail-coverage:end
     isRunning = running;
+    // The module-level flag IS the active tab's running state (every
+    // caller passes the active tab's), so keep the tab's own record in
+    // step: a `status` event without a tabId (single-chat flows) would
+    // otherwise flip only this flag and leave the tab marked idle —
+    // and the info-file poll, which trusts the POLLED tab's flag
+    // (requestInfoFile), silenced for the whole task.
+    {
+      const activeTab = getTab(activeTabId);
+      if (activeTab && !activeTab.isContentTab) {
+        setTabRunning(activeTab, running);
+      }
+    }
     syncMetaInfoRunning(running);
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
@@ -14524,6 +14805,31 @@
     }
     sidebarClose.addEventListener('click', () => closeSidebar(true));
     sidebarOverlay.addEventListener('click', closeSidebar);
+    // The mobile task-info drawer (remote < 900px): toggled from the
+    // tab bar, dismissed by its close button or the backdrop.
+    if (metaDrawerBtn) {
+      metaDrawerBtn.addEventListener('click', () => {
+        setMetaDrawerOpen(!(metaPanel && metaPanel.classList.contains('open')));
+      });
+    }
+    if (metaCloseBtn) {
+      metaCloseBtn.addEventListener('click', () => setMetaDrawerOpen(false));
+    }
+    if (metaOverlay) {
+      metaOverlay.addEventListener('click', () => setMetaDrawerOpen(false));
+    }
+    if (metaPanel && metaDrawerBtn) {
+      // Escape dismisses the open mobile drawer like any dialog; the
+      // docked desktop panel never carries `open`, so this never fires
+      // there.
+      document.addEventListener('keydown', e => {
+        if (e.key !== 'Escape') return;
+        if (!metaPanel.classList.contains('open')) return;
+        if (document.body.classList.contains('remote-desktop')) return;
+        e.preventDefault();
+        setMetaDrawerOpen(false);
+      });
+    }
     setupActivityBar();
     applyRemoteTheme(getSavedRemoteTheme());
     if (
@@ -14534,6 +14840,9 @@
       const applyRemoteDesktop = () => {
         if (desktopMq.matches) {
           document.body.classList.add('remote-desktop');
+          // Desktop docks the task-info panel permanently; the mobile
+          // drawer state (and its backdrop) must not linger under it.
+          setMetaDrawerOpen(false);
           if (!sidebar.classList.contains('open')) {
             sidebar.classList.add('open');
             resetHistoryPagination();
@@ -14548,6 +14857,10 @@
           document.body.classList.remove('remote-desktop');
           sidebar.classList.remove('open');
           sidebarOverlay.classList.remove('open');
+          // The task-info panel is a drawer again: it starts closed
+          // (and inert, so its off-screen close button leaves the tab
+          // order — setMetaDrawerOpen re-checks the body class).
+          setMetaDrawerOpen(false);
         }
         syncMetaInfoPolling();
       };
