@@ -563,8 +563,10 @@ def run(
             ``use_web_browser``).
         classify_tasks: Per-task override of pre-run task
             classification (``kiss.agents.sorcar.task_classifier``),
-            which runs one lightweight non-agentic LLM call before the
-            task to pick the system prompt (lite vs. full) and decide
+            which runs one lightweight model call before the task — a
+            typed question to a decisions model when an OpenRouter key
+            is configured, else a non-agentic call on the run's own
+            LLM — to pick the system prompt (lite vs. full) and decide
             worktree isolation for the run (the verdict can only
             demote a run that asked for a worktree to direct
             execution; a *use_worktree* of ``False`` passed here is

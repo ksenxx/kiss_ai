@@ -81,10 +81,17 @@ DEFAULTS: dict[str, Any] = {
     "auto_commit_mode": True,
     "is_worktree": True,
     # Pre-run task classification (kiss.agents.sorcar.task_classifier):
-    # a single-call KISSAgent on the run's model decides is_simple
-    # (lite system prompt) and is_development (worktree on/off for
-    # that run only — this persisted is_worktree value is not touched).
+    # one model call (a decisions model, or a single-call KISSAgent on
+    # the run's model) decides is_simple (lite system prompt) and
+    # is_development (worktree on/off for that run only — this
+    # persisted is_worktree value is not touched).
     "classify_tasks": True,
+    # Which classifier answers: True (default) tries OpenRouter's
+    # ~typesafe/jev-latest decisions model first (one typed question,
+    # ~$0.00003, ~0.2 s) and falls back to the LLM classifier when no
+    # OPENROUTER_API_KEY is configured or the call fails; False always
+    # uses the LLM classifier on the run's model.
+    "classify_with_decisions": True,
     # Persistent agent memory (kiss.core.memoryfield), on by default:
     # SorcarAgent runs get the memory_* tools and the MEMORY_PROTOCOL
     # system-prompt block.  Pages live in ``memory_dir`` when set, else
