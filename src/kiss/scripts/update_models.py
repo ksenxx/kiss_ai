@@ -164,6 +164,18 @@ def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
     """Fetch all models from OpenRouter (public API, no auth).
 
     Models with an expiration_date in the past are filtered out.
+
+    The unfiltered ``/api/v1/models`` listing only contains models whose
+    output modality includes ``text`` (i.e. everything callable through
+    ``/api/v1/chat/completions``).  Models with other output modalities
+    are omitted by OpenRouter and are deliberately not fetched here: for
+    example ``typesafe/jev-1.13`` / ``~typesafe/jev-latest`` are
+    ``text->decisions`` models that only appear under
+    ``/api/v1/models?output_modalities=decisions`` and can only be called
+    via ``POST /api/alpha/decisions`` (chat/completions rejects them with
+    HTTP 400 "is a decisions model").  KISS has no client for that API, so
+    such models would fail both ``test_generate`` and ``test_embedding``
+    and be dropped anyway.
     """
     if verbose:  # pragma: no branch
         print("  Fetching OpenRouter models...")
