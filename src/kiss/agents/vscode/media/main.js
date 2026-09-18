@@ -3551,6 +3551,8 @@
   const O = document.getElementById('output');
   const welcome = document.getElementById('welcome');
   const inp = document.getElementById('task-input');
+  // Pending deferred composer focus retries (focusInputWithRetry).
+  let inputFocusRetryTimers = [];
   const sendBtn = document.getElementById('send-btn');
   const stopBtn = document.getElementById('stop-btn');
   const uploadBtn = document.getElementById('upload-btn');
@@ -3991,16 +3993,30 @@
 
   /** Last path segment of a file system path ('' for a bare root). */
   function pathBaseName(p) {
-    const s = String(p || '').replace(/[\\/]+$/, '');
-    const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    const s = String(p || '').replace(
+      isWindowsPath(p) ? /[\\/]+$/ : /\/+$/,
+      '',
+    );
+    const i = lastSeparatorIndex(s);
     return i >= 0 ? s.slice(i + 1) : s;
   }
 
   /** Directory part of a relative path ('' when there is none). */
   function pathDirName(p) {
     const s = String(p || '');
-    const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    const i = lastSeparatorIndex(s);
     return i >= 0 ? s.slice(0, i) : '';
+  }
+
+  /**
+   * Index of the last path separator in *s*: `/` or `\` on a Windows
+   * path, only `/` otherwise (a backslash is a plain character in a
+   * POSIX name).
+   */
+  function lastSeparatorIndex(s) {
+    return isWindowsPath(s)
+      ? Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'))
+      : s.lastIndexOf('/');
   }
 
   /**
@@ -4061,52 +4077,395 @@
   // `explorerDirs` maps a folder's request path to its node so a
   // dirListing reply (token = generation + ':' + path) finds it; the
   // generation lets a rebuilt tree ignore replies meant for the old one.
+  // The working directory shown as the first top-level folder.  Extra
+  // top-level folders the user added with "Add Folder to Explorer..."
+  // (explorerExtraRoots, kept in localStorage) follow it; every row and
+  // node remembers the top-level folder it belongs to (`root`), which
+  // is the workDir its daemon requests are confined to.
   let explorerRoot = '';
+  let explorerRootsKey = '';
   let explorerGeneration = 0;
   const explorerDirs = new Map();
+  const EXPLORER_ROOTS_KEY = 'kiss-explorer-roots';
+  let explorerExtraRoots = loadExplorerExtraRoots();
+
+  function loadExplorerExtraRoots() {
+    try {
+      const raw = window.localStorage.getItem(EXPLORER_ROOTS_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      return dedupeRoots(
+        Array.isArray(list)
+          ? list.filter(p => typeof p === 'string' && p && !isRootDir(p))
+          : [],
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /** *roots* without a second spelling of a folder already in it. */
+  function dedupeRoots(roots) {
+    const out = [];
+    roots.forEach(p => {
+      if (!out.some(q => samePath(p, q))) out.push(p);
+    });
+    return out;
+  }
+
+  function saveExplorerExtraRoots() {
+    try {
+      window.localStorage.setItem(
+        EXPLORER_ROOTS_KEY,
+        JSON.stringify(explorerExtraRoots),
+      );
+    } catch {}
+  }
+
+  /** Whether *p* is spelled as a Windows path (drive letter or UNC share). */
+  function isWindowsPath(p) {
+    return /^[A-Za-z]:/.test(String(p)) || /^\\\\/.test(String(p));
+  }
+
+  /**
+   * Strip trailing separators so a folder keeps one spelling: `/` on
+   * POSIX (where a backslash is an ordinary name character), either
+   * separator on Windows.
+   */
+  function normalizeRootPath(p) {
+    const s = String(p || '');
+    const trimmed = s.replace(isWindowsPath(s) ? /[\\/]+$/ : /\/+$/, '');
+    return trimmed || s;
+  }
+
+  /**
+   * The identity two spellings of one folder share: trailing separators
+   * dropped; on Windows also `/` folded to `\` and case ignored.
+   */
+  function rootIdentity(p) {
+    const s = normalizeRootPath(p);
+    return isWindowsPath(s) ? s.replace(/\//g, '\\').toLowerCase() : s;
+  }
+
+  function samePath(a, b) {
+    return rootIdentity(a) === rootIdentity(b);
+  }
+
+  /** Whether *p* is *dir* itself or lies inside it (lexically). */
+  function pathWithin(p, dir) {
+    const win = isWindowsPath(dir);
+    const sepChar = win ? '\\' : '/';
+    const d = rootIdentity(dir);
+    const q = win ? String(p).replace(/\//g, '\\').toLowerCase() : String(p);
+    return q === d || q.indexOf(d + sepChar) === 0;
+  }
+
+  /**
+   * The top-level folders the Explorer shows: the working directory
+   * first, then the added folders (an added folder that IS the working
+   * directory is shown once, as the working directory).
+   */
+  function explorerRoots(wd) {
+    const roots = [];
+    if (wd) roots.push(wd);
+    return dedupeRoots(roots.concat(explorerExtraRoots));
+  }
 
   function explorerToken(path) {
     return explorerGeneration + ':' + path;
   }
 
   /**
-   * Make sure the Explorer shows the current workspace.  An unchanged
-   * workspace is left alone unless `force`, in which case every folder
-   * already listed is re-listed in place (expansion state kept).
+   * Make sure the Explorer shows the current workspace and the added
+   * folders.  An unchanged set of top-level folders is left alone
+   * unless `force`, in which case every folder already listed is
+   * re-listed in place (expansion state kept).
    */
   function refreshExplorer(force) {
     if (!explorerTree) return;
     const wd = sidebarWorkDir();
-    if (wd === explorerRoot && explorerDirs.size) {
+    const roots = explorerRoots(wd);
+    const key = JSON.stringify(roots);
+    if (wd === explorerRoot && key === explorerRootsKey && explorerDirs.size) {
       if (force) reloadExplorerDirs();
       return;
     }
-    buildExplorerRoot(wd);
+    buildExplorerRoot(wd, roots);
   }
 
-  function buildExplorerRoot(wd) {
+  /**
+   * Rebuild the tree: one top-level row per folder in *roots*.  The
+   * working directory (*wd*) starts expanded; a folder named in
+   * *expandRoot* (one just added) opens too.
+   */
+  function buildExplorerRoot(wd, roots, expandRoot) {
     explorerRoot = wd;
+    roots = roots || explorerRoots(wd);
+    explorerRootsKey = JSON.stringify(roots);
     explorerGeneration++;
     explorerDirs.clear();
     explorerTree.textContent = '';
-    if (!wd) {
+    if (!roots.length) {
       const empty = document.createElement('div');
       empty.className = 'sidebar-empty';
       empty.textContent = 'No workspace folder';
       explorerTree.appendChild(empty);
       return;
     }
-    const rootRow = createExplorerRow(
+    roots.forEach(dir => {
+      appendExplorerRootRow(dir, dir === wd, dir === wd || dir === expandRoot);
+    });
+    rovingFocus(explorerTree, '.explorer-row', null);
+  }
+
+  /** Append the row (and children container) of top-level folder *dir*. */
+  function appendExplorerRootRow(dir, isWorkDir, expand) {
+    const row = createExplorerRow(
       explorerTree,
-      {name: pathBaseName(wd) || wd, path: wd, isDir: true},
+      {name: pathBaseName(dir) || dir, path: dir, isDir: true, root: dir},
       0,
     );
-    toggleExplorerDir(rootRow, true);
+    row.classList.add('is-root');
+    row.classList.toggle('is-workdir', isWorkDir);
+    row.title = dir + (isWorkDir ? ' (working directory)' : '');
+    row.appendChild(explorerRootActions(dir, isWorkDir));
+    if (expand) toggleExplorerDir(row, true);
+    return row;
+  }
+
+  const ICON_CHECK = ['M3 8.5l3.2 3.2L13 4.5'];
+  const ICON_CLOSE = ['M4 4l8 8M12 4l-8 8'];
+
+  /**
+   * The buttons at the right of a top-level folder row: the working
+   * directory carries a check mark; any other folder can be made the
+   * working directory or removed from the Explorer.
+   */
+  function explorerRootActions(dir, isWorkDir) {
+    const actions = document.createElement('span');
+    actions.className = 'explorer-root-actions';
+    if (isWorkDir) {
+      const mark = document.createElement('span');
+      mark.className = 'explorer-root-mark';
+      mark.title = 'Current working directory';
+      mark.setAttribute('aria-label', 'Current working directory');
+      mark.appendChild(svgIcon('', ICON_CHECK));
+      actions.appendChild(mark);
+      return actions;
+    }
+    const setBtn = document.createElement('button');
+    setBtn.type = 'button';
+    setBtn.className = 'explorer-root-btn explorer-root-set';
+    setBtn.title = 'Set as Working Directory';
+    setBtn.setAttribute('aria-label', 'Set ' + dir + ' as working directory');
+    setBtn.tabIndex = -1;
+    setBtn.appendChild(svgIcon('', ICON_CHECK));
+    setBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      setExplorerWorkDir(dir);
+    });
+    actions.appendChild(setBtn);
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'explorer-root-btn explorer-root-remove';
+    removeBtn.title = 'Remove Folder from Explorer';
+    removeBtn.setAttribute('aria-label', 'Remove ' + dir + ' from Explorer');
+    removeBtn.tabIndex = -1;
+    removeBtn.appendChild(svgIcon('', ICON_CLOSE));
+    removeBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      removeExplorerRoot(dir);
+    });
+    actions.appendChild(removeBtn);
+    return actions;
+  }
+
+  /** Whether the tree on screen shows exactly the current top-level folders. */
+  function explorerTreeInSync() {
+    const wd = sidebarWorkDir();
+    return (
+      wd === explorerRoot &&
+      JSON.stringify(explorerRoots(wd)) === explorerRootsKey &&
+      !!explorerTree.querySelector(':scope > .explorer-row.is-root')
+    );
+  }
+
+  /**
+   * "Add Folder to Explorer...": show *dir* as an extra top-level
+   * folder (expanded) and remember it across reloads.  The working
+   * directory itself is already the first folder.  A tree that is up
+   * to date just grows a row, keeping the other folders as they are.
+   */
+  function addExplorerRoot(dir) {
+    dir = normalizeRootPath(dir);
+    if (!dir || isRootDir(dir)) return;
+    const wd = sidebarWorkDir();
+    const known = explorerRoots(wd).some(p => samePath(p, dir));
+    if (known) {
+      const node = explorerDirs.get(explorerKey(dir, dir));
+      if (node && !node.row.classList.contains('expanded'))
+        toggleExplorerDir(node.row, true);
+      return;
+    }
+    const inSync = explorerTree && explorerTreeInSync();
+    explorerExtraRoots.push(dir);
+    saveExplorerExtraRoots();
+    if (!explorerTree) return;
+    if (!inSync) {
+      buildExplorerRoot(wd, explorerRoots(wd), dir);
+      return;
+    }
+    appendExplorerRootRow(dir, false, true);
+    explorerRootsKey = JSON.stringify(explorerRoots(wd));
+    rovingFocus(explorerTree, '.explorer-row', null);
+  }
+
+  /** "Remove Folder from Explorer": forget an added top-level folder. */
+  function removeExplorerRoot(dir) {
+    const before = explorerExtraRoots.length;
+    const inSync = explorerTree && explorerTreeInSync();
+    explorerExtraRoots = explorerExtraRoots.filter(p => !samePath(p, dir));
+    if (explorerExtraRoots.length === before) return;
+    saveExplorerExtraRoots();
+    if (!explorerTree) return;
+    const node = explorerDirs.get(explorerKey(dir, dir));
+    const roots = explorerRoots(explorerRoot);
+    if (
+      !inSync ||
+      !node ||
+      node.row.parentNode !== explorerTree ||
+      !roots.length
+    ) {
+      buildExplorerRoot(explorerRoot, roots);
+      return;
+    }
+    // Drop just that folder's rows and nodes; the others stay as they are.
+    const hadFocus = explorerHasFocus();
+    dropExplorerSubtree(dir, dir);
+    node.kids.remove();
+    node.row.remove();
+    explorerRootsKey = JSON.stringify(roots);
+    rovingFocus(explorerTree, '.explorer-row', null);
+    if (hadFocus) focusExplorerStop();
+  }
+
+  /**
+   * Whether keyboard focus is in the Explorer -- or nowhere (on the
+   * body), as it is right after the context menu that ran the action
+   * closed itself and took the focused menu item away.
+   */
+  function explorerHasFocus() {
+    const focused = document.activeElement;
+    return (
+      !focused ||
+      focused === document.body ||
+      (!!explorerTree && explorerTree.contains(focused))
+    );
+  }
+
+  /** Put focus on the tree's single tab stop (its roving row). */
+  function focusExplorerStop() {
+    const stop = explorerTree
+      ? explorerTree.querySelector('.explorer-row[tabindex="0"]')
+      : null;
+    if (!stop) return;
+    // A workspace switch may have activated another tab, whose deferred
+    // composer focus would take the keyboard back a moment later.
+    cancelInputFocusRetry();
+    stop.focus({preventScroll: true});
+  }
+
+  /**
+   * "Set as Working Directory" on a top-level folder: the folder
+   * becomes the workspace exactly as the folder picker's "Select
+   * Folder" makes it (applyPickedWorkDir).  The folder that was the
+   * working directory stays in the Explorer as an added folder, so
+   * switching never makes a tree disappear.
+   */
+  function setExplorerWorkDir(dir) {
+    if (!dir || isRootDir(dir)) return;
+    const hadFocus = explorerHasFocus();
+    const previous = explorerRoot;
+    if (
+      previous &&
+      !isRootDir(previous) &&
+      !samePath(previous, dir) &&
+      !explorerExtraRoots.some(p => samePath(p, previous))
+    ) {
+      explorerExtraRoots.push(previous);
+      saveExplorerExtraRoots();
+    }
+    applyPickedWorkDir(dir);
+    // The rebuilt tree keeps the keyboard: focus lands on its tab stop
+    // (the new working directory's row).
+    if (hadFocus) focusExplorerStop();
+  }
+
+  /** The top-level folder an Explorer row belongs to. */
+  function explorerRowRoot(row) {
+    return (row && row.dataset.explorerRoot) || explorerRoot;
+  }
+
+  /**
+   * The explorerDirs key of a folder: its top-level folder plus its
+   * path.  Two top-level folders may nest (a repository and one of its
+   * worktrees, say), so the same folder path can be listed under both;
+   * keying by root keeps the two nodes apart.
+   */
+  function explorerKey(root, path) {
+    return root + '\0' + path;
+  }
+
+  function explorerRowKey(row) {
+    return explorerKey(explorerRowRoot(row), row.dataset.explorerPath);
+  }
+
+  /**
+   * The deepest folder containing both *a* and *b* ('' when they share
+   * only the file-system root, which the daemon never accepts as a
+   * workspace).  Used as the workDir of an action spanning two
+   * top-level folders (a paste or a comparison across them).
+   */
+  function commonParentDir(a, b) {
+    const win = isWindowsPath(a) || isWindowsPath(b);
+    // POSIX names may contain backslashes: only `/` separates there.
+    const pa = String(a || '').split(win ? /[\\/]+/ : '/');
+    const pb = String(b || '').split(win ? /[\\/]+/ : '/');
+    const shared = [];
+    for (let i = 0; i < pa.length && i < pb.length; i++) {
+      const same = win
+        ? pa[i].toLowerCase() === pb[i].toLowerCase()
+        : pa[i] === pb[i];
+      if (!same) break;
+      shared.push(pa[i]);
+    }
+    // One path inside the other: the shared prefix is the outer FOLDER
+    // (a folder is the only entry another path can lie inside).
+    let common;
+    if (win) {
+      // A UNC path's two leading backslashes split as one empty part.
+      const unc = /^\\\\/.test(String(a)) && /^\\\\/.test(String(b));
+      common = shared.join('\\');
+      if (unc && common) common = '\\' + common;
+    } else {
+      common = shared.join('/') || (shared.length ? '/' : '');
+    }
+    return !common || isRootDir(common) ? '' : common;
+  }
+
+  /**
+   * The workDir for an action on *path* (in top-level folder *root*)
+   * that also touches *other*: the root itself when *other* lies inside
+   * it, else the deepest common folder.
+   */
+  function actionWorkDir(root, other) {
+    if (!other) return root;
+    if (pathWithin(other, root)) return root;
+    return commonParentDir(root, other);
   }
 
   /** Re-list every folder that has been listed so far. */
   function reloadExplorerDirs() {
-    explorerDirs.forEach((node, path) => {
+    explorerDirs.forEach((node, key) => {
       // A listing for this folder is already in flight.  Re-sending the
       // identical request now would double the daemon work and the DOM
       // refill, but the in-flight reply may have read the disk BEFORE
@@ -4120,10 +4479,10 @@
       if (!node.loaded) return;
       node.loading = true;
       api.listDir({
-        path: path,
-        workDir: explorerRoot,
+        path: node.path,
+        workDir: node.root,
         tabId: activeTabId,
-        token: explorerToken(path),
+        token: explorerToken(key),
       });
     });
   }
@@ -4143,6 +4502,7 @@
     // Roving tabindex: the tree is ONE tab stop (see rovingFocus).
     row.tabIndex = -1;
     row.dataset.explorerPath = entry.path;
+    row.dataset.explorerRoot = entry.root || explorerRoot;
     row.title = entry.path;
     const chevron = document.createElement('span');
     chevron.className = 'explorer-chevron';
@@ -4164,13 +4524,17 @@
       kids.setAttribute('role', 'group');
       kids.hidden = true;
       container.appendChild(kids);
-      explorerDirs.set(entry.path, {
+      const root = entry.root || explorerRoot;
+      explorerDirs.set(explorerKey(root, entry.path), {
         row: row,
         kids: kids,
         depth: depth,
         loaded: false,
         loading: false,
+        root: root,
+        path: entry.path,
         parent: entry.parent || '',
+        parentKey: entry.parent ? explorerKey(root, entry.parent) : '',
         // The folder's real location (a symlink's target), known from
         // the listing that produced it; the daemon fills it in for the
         // folder itself once it is listed.
@@ -4187,9 +4551,9 @@
   function explorerIsCycle(node) {
     if (!node.realPath) return false;
     for (
-      let up = explorerDirs.get(node.parent);
+      let up = explorerDirs.get(node.parentKey);
       up;
-      up = explorerDirs.get(up.parent)
+      up = explorerDirs.get(up.parentKey)
     ) {
       if (up.realPath && up.realPath === node.realPath) return true;
     }
@@ -4213,7 +4577,8 @@
    */
   function toggleExplorerDir(row, expand) {
     const path = row.dataset.explorerPath;
-    const node = explorerDirs.get(path);
+    const key = explorerRowKey(row);
+    const node = explorerDirs.get(key);
     if (!node) return;
     const open =
       expand === undefined ? !row.classList.contains('expanded') : expand;
@@ -4238,9 +4603,9 @@
       explorerNote(node.kids, node.depth + 1, 'Loading...');
       api.listDir({
         path: path,
-        workDir: explorerRoot,
+        workDir: node.root,
         tabId: activeTabId,
-        token: explorerToken(path),
+        token: explorerToken(key),
       });
     }
   }
@@ -4265,8 +4630,8 @@
       node.refreshAfterLoad = false;
       node.loading = true;
       api.listDir({
-        path: token.slice(sep + 1),
-        workDir: explorerRoot,
+        path: node.path,
+        workDir: node.root,
         tabId: activeTabId,
         token: token,
       });
@@ -4288,7 +4653,9 @@
     // right after it), so a Rename... box on an expanded folder keeps
     // the folder's listed contents through an error re-listing.
     const editingNode =
-      editing && explorerDirs.get(editing.dataset.explorerPath);
+      editing && editing.dataset.explorerPath
+        ? explorerDirs.get(explorerRowKey(editing))
+        : null;
     const editingKids = editingNode ? editingNode.kids : null;
     const focused = document.activeElement;
     const focusedInKids = focused && kids.contains(focused) ? focused : null;
@@ -4300,7 +4667,7 @@
       return;
     }
     const entries = Array.isArray(ev.entries) ? ev.entries : [];
-    const parentPath = token.slice(sep + 1);
+    const parentPath = node.path;
     // Existing rows by path, so a re-listing keeps expanded folders.
     const keep = new Map();
     kids
@@ -4319,7 +4686,7 @@
       const old = keep.get(childPath);
       if (old) {
         keep.delete(childPath);
-        const oldNode = explorerDirs.get(childPath);
+        const oldNode = explorerDirs.get(explorerKey(node.root, childPath));
         if (!!oldNode === !!entry.isDir) {
           fresh.appendChild(old);
           if (oldNode) fresh.appendChild(oldNode.kids);
@@ -4327,7 +4694,7 @@
         }
         // The entry changed kind (file <-> folder): the old row and
         // whatever it registered go before the replacement is made.
-        dropExplorerSubtree(childPath);
+        dropExplorerSubtree(node.root, childPath);
         old.remove();
       }
       createExplorerRow(
@@ -4336,6 +4703,7 @@
           name: entry.name,
           path: childPath,
           isDir: !!entry.isDir,
+          root: node.root,
           parent: parentPath,
           // A plain sub-folder of a resolved folder is at its parent's
           // real path + name; a symlinked one is wherever it points.
@@ -4351,7 +4719,7 @@
     });
     // Rows for entries that disappeared take their sub-trees with them.
     keep.forEach((r, p) => {
-      dropExplorerSubtree(p);
+      dropExplorerSubtree(node.root, p);
       r.remove();
     });
     Array.from(kids.childNodes).forEach(n => {
@@ -4391,19 +4759,20 @@
     return p.endsWith(sepChar) ? p + name : p + sepChar + name;
   }
 
-  /** Forget a folder and every listed folder beneath it. */
-  function dropExplorerSubtree(path) {
-    const node = explorerDirs.get(path);
+  /** Forget a folder (under top-level folder *root*) and every listed folder beneath it. */
+  function dropExplorerSubtree(root, path) {
+    const key = explorerKey(root, path);
+    const node = explorerDirs.get(key);
     if (!node) return;
     node.kids.querySelectorAll('.explorer-row.is-dir').forEach(r => {
-      explorerDirs.delete(r.dataset.explorerPath);
+      explorerDirs.delete(explorerRowKey(r));
     });
-    explorerDirs.delete(path);
+    explorerDirs.delete(key);
   }
 
   function onExplorerActivate(row) {
     if (row.classList.contains('is-dir')) toggleExplorerDir(row);
-    else openWorkspaceFile(row.dataset.explorerPath, explorerRoot);
+    else openWorkspaceFile(row.dataset.explorerPath, explorerRowRoot(row));
   }
 
   // ---- Source Control ----
@@ -5264,22 +5633,20 @@
     });
   }
 
-  /** *abs* relative to the Explorer root ('' for the root itself). */
-  function explorerRelativePath(abs) {
-    const root = explorerRoot.replace(/[\\/]+$/, '');
+  /** *abs* relative to its top-level folder *rootDir* ('' for the folder itself). */
+  function explorerRelativePath(abs, rootDir) {
+    const root = normalizeRootPath(rootDir || explorerRoot);
     if (!root) return abs;
     if (abs === root) return '';
-    const sepChar =
-      root.indexOf('\\') >= 0 && root.indexOf('/') < 0 ? '\\' : '/';
-    return abs.indexOf(root + sepChar) === 0 ? abs.slice(root.length + 1) : abs;
+    return pathWithin(abs, root) ? abs.slice(root.length + 1) : abs;
   }
 
   /** The folder an Explorer row lives in (the row's parent node path). */
   function explorerParentPath(row) {
-    const node = explorerDirs.get(row.dataset.explorerPath);
+    const node = explorerDirs.get(explorerRowKey(row));
     if (node && node.parent) return node.parent;
     const parent = explorerParentRow(row);
-    return parent ? parent.dataset.explorerPath : explorerRoot;
+    return parent ? parent.dataset.explorerPath : explorerRowRoot(row);
   }
 
   /**
@@ -5301,7 +5668,30 @@
     );
   }
 
+  /**
+   * Send an fsAction.  `request.root` is the top-level Explorer folder
+   * the action belongs to; an action whose `dest` lies in another
+   * top-level folder (a paste or a comparison across two of them) is
+   * confined to the deepest folder containing both, and refused when
+   * that is the file-system root.
+   */
   function sendFsAction(request) {
+    const root = request.root || explorerRoot || sidebarWorkDir();
+    let workDir = root;
+    if (
+      request.action === 'copy' ||
+      request.action === 'move' ||
+      request.action === 'compare'
+    ) {
+      workDir = actionWorkDir(root, request.dest);
+      if (workDir) workDir = actionWorkDir(workDir, request.path);
+    }
+    if (!workDir) {
+      sidebarError(
+        'These folders share only the file-system root; the action cannot span them.',
+      );
+      return;
+    }
     const token = nextSidebarToken('fs');
     pendingSidebarRequests.set(token, request);
     api.fsAction({
@@ -5311,7 +5701,7 @@
       name: request.name || '',
       query: request.query || '',
       overwrite: request.overwrite === true,
-      workDir: explorerRoot || sidebarWorkDir(),
+      workDir: workDir,
       tabId: activeTabId,
       token: token,
     });
@@ -5392,13 +5782,15 @@
         : request.action === 'newFile' || request.action === 'newFolder'
           ? request.path
           : '';
-    const targetNode = target ? explorerDirs.get(target) : null;
+    const targetNode = target
+      ? explorerDirs.get(explorerKey(request.root || explorerRoot, target))
+      : null;
     if (targetNode && !targetNode.row.classList.contains('expanded')) {
       toggleExplorerDir(targetNode.row, true);
     }
     if (request.action === 'newFile' && ev.path) {
       // Like VS Code, a new file opens in an editor right away.
-      openWorkspaceFile(ev.path, explorerRoot);
+      openWorkspaceFile(ev.path, request.root || explorerRoot);
     }
     if (request.action === 'rename' && ev.path) {
       // An editor showing the renamed file (or one inside a renamed
@@ -5410,7 +5802,7 @@
         if (t.contentPath === from) {
           t.contentPath = to;
           t.title = pathBaseName(to);
-        } else if (t.contentPath.indexOf(from + '/') === 0) {
+        } else if (pathWithin(t.contentPath, from)) {
           t.contentPath = to + t.contentPath.slice(from.length);
         }
       });
@@ -5423,7 +5815,7 @@
           return (
             t.isContentTab &&
             typeof t.contentPath === 'string' &&
-            (t.contentPath === gone || t.contentPath.indexOf(gone + '/') === 0)
+            pathWithin(t.contentPath, gone)
           );
         })
         .forEach(t => {
@@ -5480,13 +5872,14 @@
         input.setSelectionRange(0, dot > 0 ? dot : oldName.length);
       }, 0);
     } else {
-      const node = explorerDirs.get(row.dataset.explorerPath);
+      const node = explorerDirs.get(explorerRowKey(row));
       if (!node) return;
       if (!row.classList.contains('expanded')) toggleExplorerDir(row, true);
       const isDir = kind === 'newFolder';
       host = document.createElement('div');
       host.className =
         'explorer-row is-editing ' + (isDir ? 'is-dir' : 'is-file');
+      host.dataset.explorerRoot = node.root;
       host.style.setProperty('--depth', String(node.depth + 1));
       const chevron = document.createElement('span');
       chevron.className = 'explorer-chevron';
@@ -5538,11 +5931,11 @@
   // ---- Explorer context menu ----
 
   /** Open a file as a content tab without leaving the current tab. */
-  function openWorkspaceFileToSide(path) {
+  function openWorkspaceFileToSide(path, root) {
     api.send({
       type: 'openFile',
       path: path,
-      workDir: explorerRoot || sidebarWorkDir(),
+      workDir: root || explorerRoot || sidebarWorkDir(),
       tabId: activeTabId,
       background: true,
     });
@@ -5550,8 +5943,10 @@
 
   function explorerMenuItems(row) {
     const path = row.dataset.explorerPath;
+    const root = explorerRowRoot(row);
     const isDir = row.classList.contains('is-dir');
-    const isRoot = path === explorerRoot;
+    const isRoot = row.classList.contains('is-root') || path === root;
+    const isWorkDir = isRoot && path === explorerRoot;
     const parent = isDir ? path : explorerParentPath(row);
     const name = pathBaseName(path) || path;
     const items = [];
@@ -5561,7 +5956,12 @@
         label: 'New File...',
         run: () => {
           startExplorerInput('newFile', row, value => {
-            sendFsAction({action: 'newFile', path: path, name: value});
+            sendFsAction({
+              action: 'newFile',
+              path: path,
+              name: value,
+              root: root,
+            });
           });
         },
       });
@@ -5570,7 +5970,12 @@
         label: 'New Folder...',
         run: () => {
           startExplorerInput('newFolder', row, value => {
-            sendFsAction({action: 'newFolder', path: path, name: value});
+            sendFsAction({
+              action: 'newFolder',
+              path: path,
+              name: value,
+              root: root,
+            });
           });
         },
       });
@@ -5579,7 +5984,7 @@
         id: 'open-to-side',
         label: 'Open to the Side',
         key: keyLabel('Ctrl+Enter', '\u2303Enter'),
-        run: () => openWorkspaceFileToSide(path),
+        run: () => openWorkspaceFileToSide(path, root),
       });
     }
     items.push({separator: true});
@@ -5600,6 +6005,7 @@
               action: 'compare',
               path: explorerCompareWith,
               dest: path,
+              root: root,
             });
           },
         });
@@ -5614,7 +6020,12 @@
         run: () => {
           const query = window.prompt('Find in ' + name, '');
           if (query)
-            sendFsAction({action: 'findInFolder', path: path, query: query});
+            sendFsAction({
+              action: 'findInFolder',
+              path: path,
+              query: query,
+              root: root,
+            });
         },
       });
       items.push({separator: true});
@@ -5648,6 +6059,7 @@
           action: explorerClipboard.cut ? 'move' : 'copy',
           path: explorerClipboard.path,
           dest: parent,
+          root: root,
         });
       },
     });
@@ -5662,14 +6074,36 @@
       id: 'copy-relative-path',
       label: 'Copy Relative Path',
       key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
-      run: () => copyTextToClipboard(explorerRelativePath(path) || '.'),
+      run: () => copyTextToClipboard(explorerRelativePath(path, root) || '.'),
     });
     items.push({separator: true});
+    if (isRoot) {
+      // The top-level folder items VS Code's root menu ends with (Add
+      // Folder to Workspace... / Remove Folder from Workspace), plus
+      // the working-directory switch this Explorer adds.
+      items.push({
+        id: 'add-folder',
+        label: 'Add Folder to Explorer...',
+        run: () => openFolderPicker('add'),
+      });
+      items.push({
+        id: 'set-work-dir',
+        label: 'Set as Working Directory',
+        enabled: !isWorkDir,
+        run: () => setExplorerWorkDir(path),
+      });
+      items.push({
+        id: 'remove-folder',
+        label: 'Remove Folder from Explorer',
+        enabled: !isWorkDir,
+        run: () => removeExplorerRoot(path),
+      });
+      return items;
+    }
     items.push({
       id: 'rename',
       label: 'Rename...',
       key: 'F2',
-      enabled: !isRoot,
       run: () => {
         startExplorerInput('rename', row, value => {
           if (value === name) return;
@@ -5677,6 +6111,7 @@
             action: 'rename',
             path: path,
             dest: joinPath(parent, value),
+            root: root,
           });
         });
       },
@@ -5685,7 +6120,6 @@
       id: 'delete',
       label: 'Delete',
       key: keyLabel('Delete', '\u2318\u232B'),
-      enabled: !isRoot,
       run: () => {
         if (
           window.confirm(
@@ -5694,7 +6128,7 @@
               "'?\nThis action is irreversible!",
           )
         ) {
-          sendFsAction({action: 'delete', path: path});
+          sendFsAction({action: 'delete', path: path, root: root});
         }
       },
     });
@@ -5714,7 +6148,9 @@
     let id = '';
     if (key === 'f2') id = 'rename';
     else if (key === 'delete' || (IS_MAC && key === 'backspace' && e.metaKey))
-      id = 'delete';
+      // On a top-level folder, Delete removes it from the Explorer (VS
+      // Code's "Remove Folder from Workspace" binding).
+      id = row.classList.contains('is-root') ? 'remove-folder' : 'delete';
     else if (key === 'c' && e.altKey && e.shiftKey && mod)
       id = 'copy-relative-path';
     else if (key === 'c' && e.altKey && e.shiftKey && !IS_MAC && !e.ctrlKey)
@@ -6020,6 +6456,10 @@
   let folderPickerEl = null;
   let folderPickerDir = '';
   let folderPickerSeq = 0;
+  // What "Select Folder" does with the pick: make it the working
+  // directory ('workdir', the default) or add it to the Explorer as
+  // another top-level folder ('add').
+  let folderPickerMode = 'workdir';
   // The folder the last successful listing showed, and the folder a
   // "Select Folder" click is waiting to have listed first: only a
   // folder the daemon has actually listed can be picked, so a typo in
@@ -6054,7 +6494,7 @@
     overlay
       .querySelector('.folder-picker-select')
       .addEventListener('click', () => {
-        selectPickedFolder(input.value.trim() || folderPickerDir);
+        selectPickedFolder(pickerPathValue(input) || folderPickerDir);
       });
     overlay.querySelector('.folder-picker-up').addEventListener('click', () => {
       folderPickerNavigate(parentFolderPath(folderPickerDir));
@@ -6062,7 +6502,7 @@
     input.addEventListener('keydown', e => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        folderPickerNavigate(input.value.trim());
+        folderPickerNavigate(pickerPathValue(input));
       }
     });
     // Like a file dialog: a click highlights a folder (and puts its
@@ -6106,17 +6546,27 @@
   }
 
   /**
+   * The path typed into the picker's box: '' when blank, otherwise as
+   * typed -- a folder name may legally end (or start) with a space, so
+   * whitespace is only used to tell an empty box from a filled one.
+   */
+  function pickerPathValue(input) {
+    const raw = input.value;
+    return raw.trim() ? raw : '';
+  }
+
+  /**
    * The parent of folder *path* ('/' stays '/', a Windows drive root
    * such as 'C:\\' stays itself rather than becoming the drive-relative
    * 'C').
    */
   function parentFolderPath(path) {
-    const cur = String(path || '').replace(/[\\/]+$/, '');
-    if (!cur) return '/';
+    const cur = normalizeRootPath(path);
+    if (!cur || cur === '/') return '/';
     if (/^[A-Za-z]:$/.test(cur)) return cur + '\\';
     // A UNC share (two leading backslashes, server, share) is a root.
     if (/^\\\\[^\\/]+[\\/][^\\/]+$/.test(cur)) return cur + '\\';
-    const i = Math.max(cur.lastIndexOf('/'), cur.lastIndexOf('\\'));
+    const i = lastSeparatorIndex(cur);
     const parent = i > 0 ? cur.slice(0, i) : cur.slice(0, 1);
     return /^[A-Za-z]:$/.test(parent) ? parent + '\\' : parent;
   }
@@ -6141,11 +6591,21 @@
       '.folder-picker-item[data-path="' + cssEscape(dir) + '"]',
     );
     if (dir === folderPickerListed || listedChild) {
-      applyPickedWorkDir(dir);
+      applyPickedFolder(dir);
       return;
     }
     folderPickerNavigate(dir);
     folderPickerSelectPending = folderPickerSeq;
+  }
+
+  /** Hand a verified pick to the action the dialog was opened for. */
+  function applyPickedFolder(dir) {
+    if (folderPickerMode === 'add') {
+      closeFolderPicker();
+      addExplorerRoot(dir);
+      return;
+    }
+    applyPickedWorkDir(dir);
   }
 
   function cssEscape(value) {
@@ -6154,13 +6614,28 @@
     return String(value).replace(/["\\]/g, '\\$&');
   }
 
-  function openFolderPicker() {
+  /**
+   * Open the folder dialog.  *mode* is 'add' for "Add Folder to
+   * Explorer..." (the pick becomes an extra top-level folder), anything
+   * else for "Open Folder" (the pick becomes the working directory).
+   */
+  function openFolderPicker(mode) {
     const el = ensureFolderPicker();
+    folderPickerMode = mode === 'add' ? 'add' : 'workdir';
+    el.querySelector('#folder-picker-title').textContent =
+      folderPickerMode === 'add'
+        ? 'Add Folder to Explorer'
+        : 'Open Folder as Working Directory';
+    el.querySelector('.folder-picker-select').textContent =
+      folderPickerMode === 'add' ? 'Add Folder' : 'Select Folder';
     el.hidden = false;
     folderPickerListed = '';
     folderPickerNavigate(sidebarWorkDir() || explorerRoot || '/');
     const input = el.querySelector('.folder-picker-input');
-    window.setTimeout(() => input.focus(), 0);
+    window.setTimeout(() => {
+      // The dialog may already be gone (a pick made at once).
+      if (!el.hidden) input.focus();
+    }, 0);
   }
 
   function closeFolderPicker() {
@@ -6196,7 +6671,7 @@
     list.textContent = '';
     // The path box follows the listing (git's canonical spelling of
     // the folder) unless the user has typed something else meanwhile.
-    const untouched = input.value.trim() === folderPickerDir;
+    const untouched = pickerPathValue(input) === folderPickerDir;
     if (ev.error) {
       note.textContent = String(ev.error);
       folderPickerSelectPending = 0;
@@ -6210,7 +6685,7 @@
       // path, so it is a real folder -- pick it (its canonical
       // spelling) now.
       folderPickerSelectPending = 0;
-      applyPickedWorkDir(folderPickerDir);
+      applyPickedFolder(folderPickerDir);
       return;
     }
     const dirs = (Array.isArray(ev.entries) ? ev.entries : []).filter(en => {
@@ -6291,7 +6766,11 @@
     }
     const explorerPick = document.getElementById('explorer-pick-folder');
     if (explorerPick) {
-      explorerPick.addEventListener('click', openFolderPicker);
+      explorerPick.addEventListener('click', () => openFolderPicker('workdir'));
+    }
+    const explorerAdd = document.getElementById('explorer-add-folder');
+    if (explorerAdd) {
+      explorerAdd.addEventListener('click', () => openFolderPicker('add'));
     }
     const scmRefresh = document.getElementById('scm-refresh');
     if (scmRefresh) {
@@ -6305,6 +6784,8 @@
     }
     if (explorerTree) {
       explorerTree.addEventListener('click', e => {
+        // The buttons on a top-level folder row act on their own.
+        if (e.target.closest('.explorer-root-actions')) return;
         const row = e.target.closest('.explorer-row');
         if (row && !row.classList.contains('is-editing'))
           onExplorerActivate(row);
@@ -10327,14 +10808,23 @@
     currentTaskMetrics = {tokens: '', budget: '', steps: ''};
   }
 
+  // The composer's deferred focus retries (a tab activation focuses
+  // the input again at 100 and 300 ms, when host-side focus churn has
+  // settled).  They are dropped when something else claims the
+  // keyboard meanwhile (the Explorer after a top-level folder action).
   function focusInputWithRetry() {
+    cancelInputFocusRetry();
     inp.focus();
-    setTimeout(() => {
-      inp.focus();
-    }, 100);
-    setTimeout(() => {
-      inp.focus();
-    }, 300);
+    inputFocusRetryTimers = [100, 300].map(ms =>
+      setTimeout(() => {
+        inp.focus();
+      }, ms),
+    );
+  }
+
+  function cancelInputFocusRetry() {
+    inputFocusRetryTimers.forEach(clearTimeout);
+    inputFocusRetryTimers = [];
   }
 
   function resetHistoryPagination() {
@@ -15488,6 +15978,143 @@
     return 'hsl(' + hue + ', 55%, 75%)';
   }
 
+  // ---- History grouping: one block per chat, day separators ----
+  //
+  // The daemon lists tasks newest first, so the first task seen for a
+  // chat is its latest one and the chats come out ordered by their
+  // latest task; later pages only add older tasks to existing blocks or
+  // open blocks for older chats.  A separator ("Today", "Yesterday", or
+  // the date) precedes the first chat of each day, by local time.
+  const historyChatGroups = new Map(); // chat id -> .history-chat-group
+  let historyLastDay = '';
+  let historyMidnightTimer = null;
+
+  function historyDayKey(d) {
+    return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+  }
+
+  /**
+   * A task's timestamp (epoch seconds) as a finite number, or NaN when
+   * the row has none.  Zero is a real instant (1970), as the date
+   * filter also treats it, not a missing value.
+   */
+  function historyTimestamp(session) {
+    const raw = session.timestamp;
+    if (raw === undefined || raw === null || raw === '') return NaN;
+    const ts = Number(raw);
+    // A number beyond what Date can represent is no date either.
+    return isFinite(ts) && !isNaN(new Date(ts * 1000).getTime()) ? ts : NaN;
+  }
+
+  /** The local-day bucket of *tsSec*: a date key, or 'undated'. */
+  function historyDayBucket(tsSec) {
+    return isFinite(tsSec) ? historyDayKey(new Date(tsSec * 1000)) : 'undated';
+  }
+
+  /** "Today", "Yesterday" or the date of the local day *tsSec* falls on. */
+  function historyDayLabel(tsSec) {
+    const d = new Date(tsSec * 1000);
+    if (!isFinite(tsSec) || isNaN(d.getTime())) return 'Undated';
+    const now = new Date();
+    const key = historyDayKey(d);
+    if (key === historyDayKey(now)) return 'Today';
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (key === historyDayKey(yesterday)) return 'Yesterday';
+    const opts = {weekday: 'short', month: 'short', day: 'numeric'};
+    if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString(undefined, opts);
+  }
+
+  /**
+   * The block a history row belongs to: the existing block of its chat,
+   * else a new one appended at the end (after a new day separator when
+   * the chat's latest task falls on an earlier day than the last block).
+   */
+  function historyGroupFor(session) {
+    const chatId = typeof session.id === 'string' ? session.id : '';
+    const existing = chatId ? historyChatGroups.get(chatId) : null;
+    if (existing) return existing;
+    const ts = historyTimestamp(session);
+    const dayKey = historyDayBucket(ts);
+    if (dayKey !== historyLastDay) {
+      historyLastDay = dayKey;
+      historyList.appendChild(historyDaySeparator(ts));
+      if (!historyMidnightTimer) scheduleHistoryMidnightRelabel(true);
+    }
+    const group = document.createElement('div');
+    group.className = 'history-chat-group';
+    group.setAttribute('role', 'group');
+    group.dataset.chatId = chatId;
+    // The chat's latest task time decides its day bucket.
+    group.dataset.ts = String(ts);
+    group.style.setProperty('--task-color', chatIdBgColor(chatId));
+    historyList.appendChild(group);
+    if (chatId) historyChatGroups.set(chatId, group);
+    return group;
+  }
+
+  function historyDaySeparator(ts) {
+    const sep = document.createElement('div');
+    sep.className = 'history-day-sep';
+    sep.setAttribute('role', 'separator');
+    sep.dataset.day = historyDayBucket(ts);
+    sep.dataset.ts = String(ts);
+    sep.textContent = historyDayLabel(ts);
+    return sep;
+  }
+
+  /**
+   * Recompute every separator's label: "Today" turns into "Yesterday"
+   * at local midnight, and a machine woken after a sleep may find the
+   * day (or the time zone) changed.  Runs at each midnight while
+   * separators are on screen, and whenever the page becomes visible
+   * again.
+   */
+  function relabelHistoryDaySeparators() {
+    // Separators are rebuilt from the chat blocks' own timestamps: a
+    // time-zone change can move a block to another local day, so the
+    // partition may change, not just the words.
+    historyList.querySelectorAll('.history-day-sep').forEach(sep => {
+      sep.remove();
+    });
+    const groups = historyList.querySelectorAll(':scope > .history-chat-group');
+    let lastDay = '';
+    groups.forEach(group => {
+      const ts = Number(group.dataset.ts);
+      const dayKey = historyDayBucket(ts);
+      if (dayKey !== lastDay) {
+        lastDay = dayKey;
+        historyList.insertBefore(historyDaySeparator(ts), group);
+      }
+    });
+    historyLastDay = lastDay;
+    if (groups.length) applyHistoryFilterVisibility();
+    scheduleHistoryMidnightRelabel(groups.length > 0);
+  }
+
+  /**
+   * Arm (or, with *armed* false, drop) the timer that relabels the
+   * separators one second past the coming local midnight.  It only
+   * runs while there are separators to relabel.
+   */
+  function scheduleHistoryMidnightRelabel(armed) {
+    if (historyMidnightTimer) clearTimeout(historyMidnightTimer);
+    historyMidnightTimer = null;
+    if (!armed) return;
+    const now = new Date();
+    const next = new Date(now);
+    next.setHours(24, 0, 1, 0);
+    historyMidnightTimer = setTimeout(
+      relabelHistoryDaySeparators,
+      Math.max(1000, next.getTime() - now.getTime()),
+    );
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) relabelHistoryDaySeparators();
+  });
+
   function renderHistory(sessions, offset, generation) {
     if (generation !== historyGeneration) return;
 
@@ -15497,6 +16124,9 @@
 
     if (offset === 0) {
       allHistSessions = [];
+      historyChatGroups.clear();
+      historyLastDay = '';
+      scheduleHistoryMidnightRelabel(false);
       if (sessions.length === 0) {
         historyList.innerHTML =
           '<div class="sidebar-empty">No conversations yet</div>';
@@ -15776,7 +16406,7 @@
         }
         closeSidebar();
       });
-      historyList.appendChild(div);
+      historyGroupFor(s).appendChild(div);
     });
 
     historyOffset += sessions.length;
@@ -16081,6 +16711,29 @@
         row.style.display = 'none';
       }
     });
+    // A chat block with no visible task goes, and so does a day
+    // separator with no visible chat below it (before the next one).
+    historyList.querySelectorAll('.history-chat-group').forEach(group => {
+      const shown = Array.from(group.querySelectorAll('.sidebar-item')).some(
+        r => r.style.display !== 'none',
+      );
+      group.style.display = shown ? '' : 'none';
+    });
+    let daySep = null;
+    let dayShown = false;
+    Array.from(historyList.children).forEach(el => {
+      if (el.classList.contains('history-day-sep')) {
+        if (daySep) daySep.style.display = dayShown ? '' : 'none';
+        daySep = el;
+        dayShown = false;
+      } else if (
+        el.classList.contains('history-chat-group') &&
+        el.style.display !== 'none'
+      ) {
+        dayShown = true;
+      }
+    });
+    if (daySep) daySep.style.display = dayShown ? '' : 'none';
     let placeholder = historyList.querySelector('.sidebar-empty-filter');
     if (rows.length > 0 && visible === 0) {
       if (!placeholder) {
