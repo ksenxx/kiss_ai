@@ -292,7 +292,7 @@ KISS Sorcar ships a catalog of **661 models** across **9 provider categories**, 
 Current catalog capability totals:
 
 - **641** generation-capable models
-- **483** function-calling-capable models
+- **484** function-calling-capable models
 - **11** embedding models
 
 Full model list:
@@ -715,7 +715,6 @@ Full model list:
 - `openrouter/mistralai/ministral-8b-2512`
 - `openrouter/mistralai/mistral-large`
 - `openrouter/mistralai/mistral-large-2407`
-- `openrouter/mistralai/mistral-large-2512`
 - `openrouter/mistralai/mistral-medium-3`
 - `openrouter/mistralai/mistral-medium-3-5`
 - `openrouter/mistralai/mistral-medium-3.1`
@@ -907,6 +906,7 @@ Full model list:
 - `openrouter/thedrummer/unslopnemo-12b`
 - `openrouter/thinkingmachines/inkling`
 - `openrouter/thinkingmachines/inkling-small`
+- `openrouter/unbiased/pareto`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-pro-3`
 - `openrouter/upstage/solar-pro4`
