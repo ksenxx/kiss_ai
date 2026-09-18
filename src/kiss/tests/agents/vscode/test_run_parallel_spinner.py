@@ -105,6 +105,15 @@ function flushStreamTailSweep() { calls.push('flushStreamTailSweep'); }
 // Collaborator added when the docked task-info panel gained a live
 // running/idle mirror; spied like the others.
 function syncMetaInfoRunning(running) { calls.push('syncMetaInfoRunning'); }
+// Collaborator added when setRunningState began keeping the active
+// tab's own running flag in step with the module-level one (the
+// info-file poll trusts the polled tab's flag); spied like the
+// others, with the real flag effects the callers rely on.
+function setTabRunning(tab, running) {
+    calls.push('setTabRunning');
+    tab.isRunning = running;
+    if (!running) tab.isStopping = false;
+}
 
 """
         + set_running_state_src

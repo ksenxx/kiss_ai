@@ -261,10 +261,19 @@ def test_explorer_folder_menu_and_root_guards(browser, harness, worktree):
             "Delete",
         ]
         page.keyboard.press("Escape")
-        # The workspace root cannot be cut, copied, renamed or deleted.
+        # The workspace root cannot be cut or copied and, like VS Code's
+        # root folder menu, offers no Rename / Delete: it ends with the
+        # top-level folder items instead (the working directory itself
+        # cannot be switched to or removed).
         page.locator(".explorer-row[aria-level='1']").click(button="right")
-        _menu_labels(page)
-        for label in ("Cut", "Copy", "Rename...", "Delete"):
+        root_labels = _menu_labels(page)
+        assert "Rename..." not in root_labels and "Delete" not in root_labels
+        assert root_labels[-3:] == [
+            "Add Folder to Explorer...",
+            "Set as Working Directory",
+            "Remove Folder from Explorer",
+        ]
+        for label in ("Cut", "Copy", "Set as Working Directory", "Remove Folder from Explorer"):
             assert "disabled" in (_menu_item(page, label).get_attribute("class") or ""), label
         # Keyboard: Down moves through enabled items, Enter runs one.
         page.keyboard.press("ArrowDown")
@@ -802,3 +811,374 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
         assert revoked is True
     finally:
         context.close()
+
+
+def _root_paths(page) -> list[str]:
+    return [
+        str(p)
+        for p in page.eval_on_selector_all(
+            "#explorer-tree > .explorer-row.is-root",
+            "els => els.map(e => e.dataset.explorerPath)",
+        )
+    ]
+
+
+def _wait_first_root(page, path: str) -> None:
+    """Wait until the first top-level Explorer folder is *path*."""
+    page.wait_for_function(
+        """p => {
+             const row = document.querySelector('#explorer-tree > .explorer-row.is-root');
+             return !!row && row.dataset.explorerPath === p;
+           }""",
+        arg=path,
+        timeout=15000,
+    )
+
+
+def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
+    """Add Folder to Explorer / Set as Working Directory / Remove Folder.
+
+    The added folder is listed from the REAL file system, actions on it
+    are confined to it (a New File... lands on disk inside it), the
+    switch of the working directory reaches the daemon and the removed
+    folder leaves nothing behind but the files on disk.
+    """
+    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    plain = str(harness.plain_dir)
+    repo = str(harness.work_dir)
+    try:
+        _open_explorer(page)
+        assert _root_paths(page) == [repo]
+        # The working directory carries a check mark, no buttons.
+        assert page.locator(".explorer-row.is-workdir .explorer-root-mark").count() == 1
+        assert page.locator(".explorer-row.is-root .explorer-root-btn").count() == 0
+        # Add the plain folder through the picker in "add" mode.
+        page.click("#explorer-add-folder")
+        page.wait_for_selector("#folder-picker:not([hidden])", timeout=5000)
+        assert page.locator("#folder-picker-title").inner_text() == "Add Folder to Explorer"
+        assert page.locator("#folder-picker .folder-picker-select").inner_text() == "Add Folder"
+        inp = page.locator("#folder-picker .folder-picker-input")
+        inp.fill(plain)
+        inp.press("Enter")
+        page.wait_for_selector(
+            "#folder-picker .explorer-note:text-is('(no subfolders)')", timeout=15000,
+        )
+        saves_before = len(_sent(frames, "saveConfig"))
+        page.click("#folder-picker .folder-picker-select")
+        page.wait_for_selector("#folder-picker", state="hidden")
+        page.wait_for_function(
+            "document.querySelectorAll('#explorer-tree > .explorer-row.is-root').length === 2",
+            timeout=15000,
+        )
+        assert _root_paths(page) == [repo, plain]
+        # Listed from disk, confined to itself; the work dir is untouched.
+        only = page.locator(f".explorer-row[data-explorer-path='{plain}/only.txt']")
+        only.wait_for(timeout=15000)
+        assert only.get_attribute("data-explorer-root") == plain
+        listed = [f for f in _sent(frames, "listDir") if f.get("path") == plain]
+        assert listed and listed[-1]["workDir"] == plain
+        assert len(_sent(frames, "saveConfig")) == saves_before
+        assert page.evaluate("JSON.parse(localStorage.getItem('kiss-explorer-roots'))") == [plain]
+        # A file of the added folder opens as a content tab.
+        tabs_before = page.locator(".chat-tab").count()
+        only.click()
+        _wait_tab_count(page, tabs_before + 1)
+        assert "only" in page.locator(".content-tab-view").last.inner_text()
+        # New File... on the added folder lands on disk inside it (the
+        # daemon accepted the folder as the action's workDir).
+        plain_root = page.locator(f".explorer-row.is-root[data-explorer-path='{plain}']")
+        plain_root.click(button="right")
+        labels = _menu_labels(page)
+        assert "Add Folder to Explorer..." in labels
+        assert "Set as Working Directory" in labels
+        assert "Remove Folder from Explorer" in labels
+        assert "Rename..." not in labels and "Delete" not in labels
+        _menu_item(page, "New File...").click()
+        box = page.locator("#explorer-tree .explorer-input")
+        box.wait_for(timeout=5000)
+        box.fill("added.txt")
+        box.press("Enter")
+        page.wait_for_selector(
+            f".explorer-row[data-explorer-path='{plain}/added.txt']", timeout=15000,
+        )
+        assert (harness.plain_dir / "added.txt").is_file()
+        (harness.plain_dir / "added.txt").unlink()
+        # Set as Working Directory (the buttons show on hover): the daemon
+        # and the saved config follow, the old working directory stays
+        # listed as an added folder.
+        plain_root.hover()
+        page.locator(".explorer-root-set").first.click()
+        _wait_first_root(page, plain)
+        assert _root_paths(page) == [plain, repo]
+        assert _sent(frames, "setWorkDir")[-1]["workDir"] == plain
+        assert _sent(frames, "saveConfig")[-1]["config"]["work_dir"] == plain
+        assert page.locator("#cfg-work-dir").input_value() == plain
+        assert page.locator(".explorer-row.is-workdir").get_attribute("data-explorer-path") == plain
+        page.wait_for_selector(
+            f".explorer-row[data-explorer-path='{plain}/only.txt']", timeout=15000,
+        )
+        # Switch back through the repo row's context menu.
+        page.locator(f".explorer-row.is-root[data-explorer-path='{repo}']").click(button="right")
+        _menu_item(page, "Set as Working Directory").click()
+        _wait_first_root(page, repo)
+        assert _root_paths(page) == [repo, plain]
+        assert _sent(frames, "saveConfig")[-1]["config"]["work_dir"] == repo
+        # Remove the plain folder with its button: gone from the tree and
+        # from storage, still on disk.
+        fs_before = len(_sent(frames, "fsAction"))
+        page.locator(f".explorer-row.is-root[data-explorer-path='{plain}']").hover()
+        page.locator(".explorer-root-remove").first.click()
+        page.wait_for_function(
+            "document.querySelectorAll('#explorer-tree > .explorer-row.is-root').length === 1",
+            timeout=15000,
+        )
+        assert _root_paths(page) == [repo]
+        # The repo stayed remembered from the switch (it is shown once,
+        # as the working directory); the plain folder is forgotten.
+        assert page.evaluate("JSON.parse(localStorage.getItem('kiss-explorer-roots'))") == [repo]
+        assert len(_sent(frames, "fsAction")) == fs_before
+        assert (harness.plain_dir / "only.txt").is_file()
+        # The Explorer keeps its working directory's tree through all this.
+        page.wait_for_selector(".explorer-row.is-file", timeout=15000)
+        _wait_explorer_root(page, "repo")
+    finally:
+        context.close()
+
+
+def test_history_groups_tasks_by_chat_with_day_separators(browser, harness, worktree):
+    """The Tasks view groups the daemon's history by chat, newest chat
+    first, under "Today" / "Yesterday" / date separators."""
+    import datetime as _dt
+
+    import kiss.agents.sorcar.persistence as th
+
+    def _add(task: str, chat_id: str, ts: float) -> str:
+        task_id, chat = th._add_task(task, chat_id)
+        th._save_task_result("done", task_id=task_id)
+        db = th._get_db()
+        with th._rw_lock.write_lock():
+            db.execute("UPDATE task_history SET timestamp = ? WHERE id = ?", (ts, task_id))
+        return chat
+
+    noon = _dt.datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    today = noon.timestamp()
+    day = 86400.0
+    chat_a = _add("alpha one", "", today - 600)
+    _add("alpha two", chat_a, today)
+    chat_b = _add("beta one", "", today - 300)
+    chat_c = _add("gamma one", "", today - day)
+    _add("beta zero", chat_b, today - day - 60)
+    chat_d = _add("delta one", "", today - 3 * day)
+    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    try:
+        page.click("#activity-tasks")
+        page.wait_for_selector("#history-list .history-chat-group", timeout=15000)
+        shape = page.evaluate(
+            """() => Array.from(document.getElementById('history-list').children)
+                 .filter(el => el.style.display !== 'none')
+                 .map(el => el.classList.contains('history-day-sep')
+                   ? 'sep:' + el.textContent
+                   : el.classList.contains('history-chat-group')
+                     ? 'chat:' + el.dataset.chatId + '[' +
+                       Array.from(el.querySelectorAll('.sidebar-item-text'))
+                         .map(t => t.textContent).join(',') + ']'
+                     : el.className)"""
+        )
+        three_days = noon - _dt.timedelta(days=3)
+        label = page.evaluate(
+            "ts => new Date(ts * 1000).toLocaleDateString(undefined, "
+            "{weekday: 'short', month: 'short', day: 'numeric'})",
+            three_days.timestamp(),
+        )
+        assert shape == [
+            "sep:Today",
+            f"chat:{chat_a}[alpha two,alpha one]",
+            f"chat:{chat_b}[beta one,beta zero]",
+            "sep:Yesterday",
+            f"chat:{chat_c}[gamma one]",
+            f"sep:{label}",
+            f"chat:{chat_d}[delta one]",
+        ]
+        # Clicking a task inside a chat block still opens it in a tab
+        # (no events were persisted, so the task shows read-only).
+        # Capture inbound WebSocket frames over CDP first, so the test
+        # can prove the DAEMON registered the fresh tab (a canonical
+        # `tabs_state` snapshot naming it), not just that the page
+        # created one locally.
+        received: list[str] = []
+        cdp = context.new_cdp_session(page)
+        cdp.on(
+            "Network.webSocketFrameReceived",
+            lambda ev: received.append(
+                ev.get("response", {}).get("payloadData", ""),
+            ),
+        )
+        cdp.send("Network.enable")
+        pre_tab_ids = page.evaluate(
+            "Array.from(document.querySelectorAll('.chat-tab'))"
+            ".map(t => t.dataset.tabId)"
+        )
+        # Chat panels are collapsed by default (nothing is running):
+        # the header shows the chat's FIRST task and opens the panel.
+        group_a = page.locator(f".history-chat-group[data-chat-id='{chat_a}']")
+        assert "collapsed" in (group_a.get_attribute("class") or "")
+        header_a = group_a.locator(".history-chat-header")
+        assert header_a.locator(".history-chat-title").inner_text() == "alpha one"
+        header_a.click()
+        assert "collapsed" not in (group_a.get_attribute("class") or "")
+        page.locator(".sidebar-item", has_text="alpha one").click()
+        # Opening a history task creates a fresh REGISTERED tab; the
+        # daemon's canonical `tabs_state` snapshot prunes the blank
+        # never-registered placeholder while REGISTERED tabs (e.g. one
+        # left by an earlier test in this workspace) rightly survive, so
+        # neither the tab count nor "every old id vanished" is a stable
+        # outcome.  Assert the designed outcome instead: the surviving
+        # ACTIVE tab is fresh (an id the page did not have before the
+        # click), it shows the clicked task in its read-only task panel,
+        # and a canonical `tabs_state` snapshot names that fresh id.
+        page.wait_for_function(
+            "document.getElementById('task-panel-text')"
+            " && document.getElementById('task-panel-text').textContent"
+            "      === 'alpha one'",
+            timeout=15000,
+        )
+        page.wait_for_function(
+            "pre => { const act = document.querySelector('.chat-tab.active');"
+            " return !!act && !pre.includes(act.dataset.tabId); }",
+            arg=pre_tab_ids,
+            timeout=15000,
+        )
+        active_id = page.evaluate(
+            "document.querySelector('.chat-tab.active').dataset.tabId"
+        )
+        for _ in range(100):
+            if any(
+                '"tabs_state"' in frame and active_id in frame
+                for frame in received
+            ):
+                break
+            page.wait_for_timeout(50)
+        else:
+            raise AssertionError(
+                "no canonical tabs_state snapshot named the fresh tab "
+                f"{active_id!r}: registration never reached the daemon"
+            )
+    finally:
+        context.close()
+        db = th._get_db()
+        with th._rw_lock.write_lock():
+            db.execute(
+                "DELETE FROM task_history WHERE chat_id IN (?, ?, ?, ?)",
+                (chat_a, chat_b, chat_c, chat_d),
+            )
+
+
+def test_history_click_survives_mid_press_refresh(browser, harness, worktree):
+    """A real mouse press held on a history row while a changed-data
+    refresh arrives over the WebSocket still opens the task: the
+    destructive rebuild is deferred past the browser-synthesized click."""
+    import datetime as _dt
+
+    import kiss.agents.sorcar.persistence as th
+
+    def _add(task: str, ts: float) -> str:
+        task_id, chat = th._add_task(task, "")
+        th._save_task_result("done", task_id=task_id)
+        db = th._get_db()
+        with th._rw_lock.write_lock():
+            db.execute(
+                "UPDATE task_history SET timestamp = ? WHERE id = ?",
+                (ts, task_id),
+            )
+        return chat
+
+    noon = _dt.datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    today = noon.timestamp()
+    chat_a = _add("hold target", today - 60)
+    chat_b = _add("other row", today - 120)
+    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    try:
+        # Capture INBOUND WebSocket frames over CDP so the test can
+        # prove the changed-data reply arrived while the mouse was still
+        # held (a fixed sleep could silently miss the race).
+        received: list[str] = []
+        cdp = context.new_cdp_session(page)
+        cdp.on(
+            "Network.webSocketFrameReceived",
+            lambda ev: received.append(
+                ev.get("response", {}).get("payloadData", ""),
+            ),
+        )
+        cdp.send("Network.enable")
+        page.click("#activity-tasks")
+        page.wait_for_selector("#history-list .history-chat-group", timeout=15000)
+        # Open the collapsed chat panel so its row can be pressed; the
+        # explicit expand survives the parked rebuild below.
+        page.locator(
+            f".history-chat-group[data-chat-id='{chat_a}'] .history-chat-header"
+        ).click()
+        row = page.locator(".sidebar-item", has_text="hold target")
+        row.scroll_into_view_if_needed()
+        box = row.bounding_box()
+        assert box is not None
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.down()
+        # A real refetch with DIFFERENT data (the search narrows the
+        # page to one row) arrives while the button is held: the
+        # destructive rebuild must be parked, keeping both rows and the
+        # pressed node alive.
+        received.clear()
+        page.evaluate(
+            """() => {
+                 const s = document.getElementById('history-search');
+                 s.value = 'hold';
+                 s.dispatchEvent(new Event('input', {bubbles: true}));
+               }"""
+        )
+        for _ in range(100):
+            if any(
+                '"history"' in frame and "other row" not in frame
+                for frame in received
+                if '"sessions"' in frame
+            ):
+                break
+            page.wait_for_timeout(50)
+        else:
+            raise AssertionError("filtered history reply never arrived")
+        # The CDP event proves network receipt; the page's message task
+        # is queued behind it.  Drain the renderer's task queue (each
+        # evaluate is a full round-trip through the page's event loop)
+        # plus an idle beat, so renderHistory has DEMONSTRABLY processed
+        # the reply while the mouse is still held ...
+        page.evaluate("0")
+        page.evaluate("0")
+        page.wait_for_timeout(300)
+        # ... and the changed page was parked, keeping both rows AND the
+        # pressed row itself alive.
+        assert page.locator("#history-list .sidebar-item").count() == 2
+        assert row.count() == 1
+        page.mouse.up()
+        # The browser-synthesized click still opens the pressed task.
+        page.wait_for_function(
+            "document.getElementById('task-panel-text')"
+            " && document.getElementById('task-panel-text').textContent"
+            "      === 'hold target'",
+            timeout=15000,
+        )
+        # The parked filtered page lands right after the click, and the
+        # surviving row is the filtered one.
+        page.wait_for_function(
+            "() => { const rows = document.querySelectorAll("
+            "'#history-list .sidebar-item');"
+            " return rows.length === 1"
+            " && rows[0].textContent.includes('hold target'); }",
+            timeout=15000,
+        )
+    finally:
+        context.close()
+        db = th._get_db()
+        with th._rw_lock.write_lock():
+            db.execute(
+                "DELETE FROM task_history WHERE chat_id IN (?, ?)",
+                (chat_a, chat_b),
+            )

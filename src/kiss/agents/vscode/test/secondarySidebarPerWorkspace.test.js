@@ -92,6 +92,7 @@ const calls = {
 };
 
 class FakeSidebarView {
+  postMetaState() {}
   constructor() {
     this.hasFocus = false;
     this._onCommitListeners = [];

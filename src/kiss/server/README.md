@@ -362,9 +362,10 @@ def search_database(query: str, max_results: int = 10) -> str:
 
 By default (`append_basic_tools=True`) the agent gets the built-in
 KISS Sorcar toolset — `Bash`, `Read`, `Edit`, `Write`,
-`ask_user_question`, `talk`, `set_model`, `summary`, and (depending
-on `use_web_tools` and `is_parallel`) browser tools, `run_agent`,
-`run_parallel`, `number_of_cores` — **plus** your extension tools.
+`ask_user_question`, `talk`, `set_model`, `summary`, `run_agent`,
+browser tools (when `use_web_tools`), `run_parallel` and
+`number_of_cores` (when `is_parallel`), and `decide` (when
+`OPENROUTER_API_KEY` is configured) — **plus** your extension tools.
 
 When `append_basic_tools=False`, the agent's **only** tools are
 `finish` and the tools from `tools()`.  This is useful for

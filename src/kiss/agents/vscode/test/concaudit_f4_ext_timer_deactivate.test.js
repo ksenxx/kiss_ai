@@ -207,6 +207,7 @@ class FakePanelManager {
   adoptRegistryTabs() {}
   enterMode() {}
   closeAll() {}
+  setMetaSink() {}
   markShutdown() {}
   dispose() {}
 }
@@ -252,6 +253,8 @@ stubModule(path.join(OUT_DIR, 'SorcarTab.js'), {
   resetTipsOnExtensionUpdate: () => {},
   HISTORY_PANEL_TAB_ID: 'history-panel',
   historyPanelBodyAttrs: () => '',
+  META_PANEL_TAB_ID: 'meta-panel',
+  metaPanelBodyAttrs: () => '',
 });
 
 delete require.cache[require.resolve(extensionPath)];

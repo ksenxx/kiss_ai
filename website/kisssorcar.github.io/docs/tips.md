@@ -16,7 +16,7 @@ In VS Code, you can run KISS Sorcar in two modes: full editor mode, where the ch
 
 ## Task Classifier
 
-KISS Sorcar now uses a quick task classifier to determine whether the task should run with git worktree mode and whether the task is complex or simple. You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running".
+KISS Sorcar now uses a quick task classifier to determine whether the task should run with git worktree mode and whether the task is complex or simple. You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running". With an OpenRouter API key the classifier asks the `~typesafe/jev-latest` decisions model (about 0.2 s and $0.00003 per task); deselect "Classify with Jev" to pin the LLM classifier, one non-agentic call on the run's own model (skipped for `cc/*` and `codex/*` models).
 
 ## Sorcar Extension Agents (SEAs)
 

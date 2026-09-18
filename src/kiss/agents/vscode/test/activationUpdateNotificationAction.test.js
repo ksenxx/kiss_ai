@@ -99,6 +99,7 @@ Module._load = function (request, parent, isMain) {
 };
 
 class FakeSidebarView {
+  postMetaState() {}
   constructor() {
     this.hasFocus = false;
   }

@@ -517,7 +517,9 @@ def test_main_test_existing_skips_marked_level_aliases(
     monkeypatch.setattr(mod, "get_current_model_info", lambda: dict(initial))
     calls: list[str] = []
 
-    def record_probe(name: str, verbose: bool = False) -> dict[str, object]:
+    def record_probe(
+        name: str, verbose: bool = False, decisions: bool = False
+    ) -> dict[str, object]:
         calls.append(name)
         return {"gen": True, "emb": False, "fc": True, "thinking": "xhigh"}
 
@@ -602,7 +604,7 @@ def test_main_discovers_new_model_and_writes_level_aliases(
     monkeypatch.setattr(mod, "fetch_codex_supported_slugs", lambda verbose=False: set())
     monkeypatch.setattr(mod, "get_current_model_info", lambda: {})
 
-    def probe(name: str, verbose: bool = False) -> dict[str, object]:
+    def probe(name: str, verbose: bool = False, decisions: bool = False) -> dict[str, object]:
         return {"gen": True, "emb": False, "fc": True, "thinking": "high"}
 
     monkeypatch.setattr(mod, "test_model_capabilities", probe)

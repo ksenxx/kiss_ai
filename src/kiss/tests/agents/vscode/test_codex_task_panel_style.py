@@ -14,12 +14,11 @@ Features on the remote webapp (served by ``RemoteAccessServer``):
    the extension's main.css typography — that extension-parity
    contract is pinned end to end by
    ``test_remote_panels_match_extension.py``.
-2. History rows (``.running-item``) drop their per-chat pastel
-   BACKGROUND color; the per-chat color moves to a thick LEFT border.
-   The VS Code webview keeps its pastel look via an equivalent
-   ``main.css`` rule driven by the same ``--task-color`` custom
-   property (main.js must stop writing inline colors, which no
-   stylesheet can override).
+2. History rows (``.running-item``) carry NO per-chat color at all any
+   more — no pastel background, no colored left border, no
+   ``--task-color`` custom property: task panels are neutral on every
+   surface (the remote page and the VS Code webview), and main.js
+   writes no inline colors on them.
 3. ALL task metadata (steps, tok, cost, duration, time, work dir,
    model, wt, parallel, auto-commit, chat id, task id) renders as ONE
    wrapping line instead of three separately-clipped lines.  Field
@@ -105,9 +104,9 @@ def _find_rule(css: str, selector: str) -> str:
     return _resolve_palette_vars("\n".join(bodies), _dark_palette(css))
 
 
-def test_main_js_history_rows_use_task_color_var_not_inline() -> None:
-    """renderHistory must expose the per-chat color as a --task-color
-    custom property instead of unoverridable inline styles.  (The
+def test_main_js_history_rows_carry_no_colors() -> None:
+    """renderHistory must write NO per-chat colors on history rows —
+    neither inline styles nor the --task-color custom property.  (The
     Frequent tab's renderer is out of scope and keeps its own inline
     colors.)"""
     js = MAIN_JS.read_text(encoding="utf-8")
@@ -121,39 +120,53 @@ def test_main_js_history_rows_use_task_color_var_not_inline() -> None:
     assert "style.color = '#1a1a1a'" not in body, (
         "renderHistory must not set an inline text color on history rows"
     )
-    assert "setProperty('--task-color', chatIdBgColor(String(s.id)))" in body, (
-        "renderHistory must set the --task-color custom property per row"
+    assert "--task-color" not in body, (
+        "renderHistory must not set the per-chat --task-color property: "
+        "task panels are colorless now"
+    )
+    assert "chatIdBgColor" not in body, (
+        "renderHistory must not derive per-chat colors at all"
     )
 
 
-def test_main_css_keeps_webview_pastel_look_via_task_color() -> None:
-    """The VS Code webview must look exactly as before: main.css drives
-    the old inline pastel background/dark text from --task-color."""
+def test_main_css_webview_rows_are_neutral() -> None:
+    """The VS Code webview's task panels are neutral: no pastel
+    background, theme foreground text, no --task-color anywhere in
+    main.css."""
     css = MAIN_CSS.read_text(encoding="utf-8")
     m = re.search(r"\n\.running-item\s*\{([^}]*)\}", css)
     assert m, ".running-item rule missing from main.css"
     rule = m.group(1)
-    assert "background-color: var(--task-color" in rule, (
-        ".running-item must paint the per-chat pastel background from "
-        f"var(--task-color) in the webview; got: {rule!r}"
+    assert "--task-color" not in rule, (
+        f".running-item must not read var(--task-color) any more; got: {rule!r}"
     )
-    assert "color: #1a1a1a" in rule, (
-        f".running-item must keep the webview's dark text on the pastel background; got: {rule!r}"
+    assert "background-color: color-mix(in srgb, var(--fg) 3%, transparent)" in rule, (
+        f".running-item must paint a neutral background; got: {rule!r}"
+    )
+    assert "color: var(--fg)" in rule, (
+        f".running-item must use the theme foreground; got: {rule!r}"
+    )
+    assert "--task-color" not in css, (
+        "main.css must not reference --task-color anywhere"
     )
 
 
-def test_remote_history_row_color_moves_to_left_border() -> None:
-    """On the remote page the row background is neutral and the
-    per-chat color paints a thick left border instead."""
-    rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), ".running-item")
-    assert "border-left: 4px solid var(--task-color" in rule, (
-        f"the per-chat color must move to the row's left border; got: {rule!r}"
+def test_remote_history_row_is_neutral() -> None:
+    """On the remote page the row is neutral too: no per-chat left
+    border, a neutral dark background, light text."""
+    codex_css = CODEX_CSS.read_text(encoding="utf-8")
+    rule = _find_rule(codex_css, ".running-item")
+    assert "border-left" not in rule, (
+        f"the per-chat left border is gone; got: {rule!r}"
     )
     assert "background-color: rgb(255 255 255 / 4%)" in rule, (
         f"the row background must be a neutral dark tint; got: {rule!r}"
     )
     assert "color: #ececec" in rule, (
         f"the row text must be light on the dark background; got: {rule!r}"
+    )
+    assert "--task-color" not in codex_css, (
+        "remote-codex.css must not reference --task-color anywhere"
     )
 
 
@@ -379,6 +392,18 @@ _SHIELD_HISTORY_JS = r"""
 })()
 """
 
+_EXPAND_GROUP_JS = r"""
+(() => {
+  // Chat panels are collapsed by default (the injected task is not
+  // running): open the injected chat's panel so its row lays out.
+  const g = document.querySelector('#history-list .history-chat-group');
+  if (g && g.classList.contains('collapsed')) {
+    g.querySelector('.history-chat-header').click();
+  }
+  return g ? !g.classList.contains('collapsed') : false;
+})()
+"""
+
 _PROBE_STYLES_JS = r"""(() => {
   const tp = getComputedStyle(document.getElementById('task-panel'));
 
@@ -396,8 +421,8 @@ _PROBE_STYLES_JS = r"""(() => {
   const cyanColor = getComputedStyle(cyanProbe).color;
   cyanProbe.remove();
 
-  // Expected per-chat accent: same djb2 hash as chatIdBgColor,
-  // resolved to an rgb() string via a probe element.
+  // The old per-chat accent (djb2 hash of the chat id), resolved to an
+  // rgb() string: nothing on the row may carry it any more.
   const id = 'chat-abc123';
   let hash = 5381;
   for (let i = 0; i < id.length; i++) {
@@ -408,7 +433,7 @@ _PROBE_STYLES_JS = r"""(() => {
   const probe = document.createElement('div');
   probe.style.color = hsl;
   document.body.appendChild(probe);
-  const expectedAccent = getComputedStyle(probe).color;
+  const oldAccent = getComputedStyle(probe).color;
   probe.remove();
 
   const row = document.querySelector('#history-list .running-item');
@@ -443,7 +468,7 @@ _PROBE_STYLES_JS = r"""(() => {
     cyanColor,
     infoLineRects,
     infoClipped,
-    expectedAccent,
+    oldAccent,
     row: rowCs ? {
       borderLeftWidth: rowCs.borderLeftWidth,
       borderLeftColor: rowCs.borderLeftColor,
@@ -563,13 +588,56 @@ def test_live_task_panel_typography_and_history_rows(
                     try:
                         page.wait_for_selector(
                             "#history-list .running-item",
-                            state="visible",
+                            state="attached",
                             timeout=10000,
                         )
                         break
                     except PlaywrightTimeoutError:
                         if attempt == 2:
                             raise
+                # The idle chat's panel starts collapsed: the row is
+                # hidden under its chat header until the header opens
+                # the panel.
+                group_probe = page.evaluate(
+                    """() => {
+                        const g = document.querySelector(
+                            '#history-list .history-chat-group'
+                        );
+                        const row = document.querySelector(
+                            '#history-list .running-item'
+                        );
+                        return {
+                            collapsed: g.classList.contains(
+                                'collapsed'
+                            ),
+                            headerText: g.querySelector(
+                                '.history-chat-title'
+                            ).textContent,
+                            lineClamp: getComputedStyle(
+                                g.querySelector('.history-chat-title')
+                            ).webkitLineClamp,
+                            rowHidden: row.offsetParent === null,
+                        };
+                    }"""
+                )
+                assert group_probe["collapsed"] is True, (
+                    "an idle chat's panel must start collapsed: " + repr(group_probe)
+                )
+                assert group_probe["rowHidden"] is True, (
+                    "a collapsed chat panel must hide its task rows: " + repr(group_probe)
+                )
+                assert group_probe["headerText"] == "Test task preview", (
+                    "the chat header shows the chat's first task text: " + repr(group_probe)
+                )
+                assert group_probe["lineClamp"] == "3", (
+                    "the chat header clamps to 3 lines: " + repr(group_probe)
+                )
+                page.evaluate(_EXPAND_GROUP_JS)
+                page.wait_for_selector(
+                    "#history-list .running-item",
+                    state="visible",
+                    timeout=10000,
+                )
                 # The shield must hold: replay the exact dispatch the
                 # server shim uses for a pushed history refresh (empty
                 # real DB ⇒ empty sessions) across every plausible
@@ -786,10 +854,12 @@ def test_live_task_panel_typography_and_history_rows(
 
     row = probes["row"]
     assert row != "MISSING", "history row was not rendered"
-    accent = probes["expectedAccent"]
-    assert row["borderLeftWidth"] == "4px", row
-    assert row["borderLeftColor"] == accent, (
-        f"left border must carry the per-chat color {accent}; row: {row}"
+    accent = probes["oldAccent"]
+    assert row["borderLeftWidth"] != "4px", (
+        f"the per-chat left border is gone; row: {row}"
+    )
+    assert row["borderLeftColor"] != accent, (
+        f"nothing on the row may carry the old per-chat color {accent}; row: {row}"
     )
     assert row["backgroundColor"] != accent, (
         f"row background must not be the per-chat pastel; row: {row}"
@@ -893,13 +963,21 @@ def _measure_history_action_row(page: Page) -> ActionRowGeometry:
         try:
             page.wait_for_selector(
                 "#history-list .running-item .sidebar-item-actions button",
-                state="visible",
+                state="attached",
                 timeout=10000,
             )
             break
         except PlaywrightTimeoutError:
             if attempt == 2:
                 raise
+    # The idle chat's panel starts collapsed; open it so the action
+    # strip lays out for the geometry probes.
+    page.evaluate(_EXPAND_GROUP_JS)
+    page.wait_for_selector(
+        "#history-list .running-item .sidebar-item-actions button",
+        state="visible",
+        timeout=10000,
+    )
     geometry: ActionRowGeometry = page.evaluate(_PROBE_ACTION_ROW_JS)
     return geometry
 

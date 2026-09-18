@@ -4,9 +4,10 @@
 # add your name here
 """Pre-run task classification for Sorcar agents.
 
-Before a Sorcar agent starts a task, :func:`classify_task` runs a
-lightweight NON-AGENTIC :class:`~kiss.core.kiss_agent.KISSAgent` on the
-SAME model to answer two questions about the task:
+Before a Sorcar agent starts a task, :func:`classify_task` answers two
+questions about the task — with one typed question to a decisions model
+when it can, else with one lightweight NON-AGENTIC
+:class:`~kiss.core.kiss_agent.KISSAgent` call on the run's own model:
 
 - ``is_simple``: the task involves neither software development nor
   Internet search.  A simple task runs with the lite system prompt
@@ -22,7 +23,33 @@ SAME model to answer two questions about the task:
   dispatch classifies for its system prompt while running in a
   scratch directory that must never get a worktree).
 
-The classification is a single non-agentic ``generate()`` call — no
+Two classifiers implement the verdict; :func:`classify_task` picks one
+per call:
+
+- The **decisions classifier** (default whenever it can run) asks
+  OpenRouter's ``~typesafe/jev-latest`` decisions model ONE typed
+  ``choice`` question — which of five kinds of task this is
+  (:data:`_DECISIONS_KIND_CRITERIA`) — through the same ``decide`` tool
+  the agents use (:mod:`kiss.agents.sorcar.decide_tool`), and maps the
+  chosen kind to the verdict (:data:`_KIND_VERDICTS`).  It is a
+  non-generative call: ~0.2 s, ~$0.00003 per task, and it cannot execute
+  the task, so it also classifies for the run-to-completion CLI models
+  (``cc/*``, ``codex/*``) the LLM classifier must skip.  Measured on
+  ``benchmarkings/task_classifier/`` (415 real and synthetic prompts)
+  its verdicts agreed with the hand labels more often than any of the
+  four LLM classifiers measured (88% against 80% for the best), at
+  about 1/200 of that LLM's cost and 1/15 of its latency.  It runs only
+  when
+  :func:`decisions_classification_enabled` says so: the
+  ``classify_with_decisions`` config key (default on) and an
+  ``OPENROUTER_API_KEY`` with the model in the catalog.  When it is off,
+  unavailable, or its call fails, the LLM classifier below runs
+  instead, so a missing key or an OpenRouter outage never changes the
+  classification path's behaviour from what it was before.
+- The **LLM classifier** runs a lightweight NON-AGENTIC
+  :class:`~kiss.core.kiss_agent.KISSAgent` on the run's own model.
+
+The LLM classification is a single non-agentic ``generate()`` call — no
 tool loop, no tools — that returns the STRUCTURED verdict
 ``{"is_simple": <bool>, "is_development": <bool>}``.  The structure is
 enforced twice over: the provider's own structured-output mechanism
@@ -48,10 +75,11 @@ output cap keeps a fixed-budget model's thinking off.
 The call is kept fast on purpose: one generation, a hard
 :data:`CLASSIFIER_MAX_TOKENS` output cap (which also keeps extended
 thinking off on models where a thinking budget would not fit), and a
-terse JSON-only answer.  Verdicts are also memoised per
-``(model, endpoint, task text)`` in a small JSON file under the KISS
-home (:func:`_cache_path`): a re-submitted prompt — a retry, a
-template, a "hi" — skips the LLM call and launches immediately.
+terse JSON-only answer.  Verdicts of both classifiers are also
+memoised per ``(criteria, model, endpoint, task text)`` in a small JSON
+file under the KISS home (:func:`_cache_path`): a re-submitted prompt
+— a retry, a template, a "hi" — skips the model call and launches
+immediately.
 
 Classification is best-effort and optional.  It runs only when
 :func:`classification_enabled` says so (the ``classify_tasks`` config
@@ -74,12 +102,107 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.decide_tool import (
+    DEFAULT_DECISIONS_MODEL,
+    decisions_tool_available,
+    make_decide_tool,
+)
 from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
+from kiss.core.models.decisions_model import choice
 
 logger = logging.getLogger(__name__)
 
 _DISABLE_ENV = "KISS_DISABLE_TASK_CLASSIFIER"
+
+# Overrides the API root the decisions classifier posts to (the tests
+# point it at a local replay of ``/alpha/decisions``); unset means
+# OpenRouter.
+_DECISIONS_BASE_URL_ENV = "KISS_DECISIONS_BASE_URL"
+
+# The decisions classifier waits at most this long for Jev.  On the
+# benchmark a live call took 0.22 s at the median and never more than
+# 1.2 s when it answered at all, while about 1% of requests hung until
+# the timeout; anything past this bound is treated as an outage and the
+# LLM classifier takes over, so the worst case adds these seconds to
+# the LLM classifier's own latency rather than replacing it.
+CLASSIFIER_DECISIONS_TIMEOUT_SECONDS = 5.0
+
+_GIT_OPERATIONS = (
+    "status, diff, log, add, commit, push, pull, fetch, checkout, branch, "
+    "merge, squash, rebase, cherry-pick, tag, stash, resolving merge "
+    "conflicts, rewriting commit messages, worktree management"
+)
+
+# The five kinds of task the decisions classifier chooses between.  The
+# descriptions are contrastive on purpose: Jev reads them literally and
+# picks the best-matching option.  Selected on
+# ``benchmarkings/task_classifier/`` against four-``noul`` and hybrid
+# designs (see ``run_benchmark.py`` there).
+_DECISIONS_KIND_CRITERIA: dict[str, str] = {
+    "development": (
+        "software development that requires creating or editing files in a "
+        "project: implementing or changing features, fixing bugs or reported "
+        "errors, refactoring, writing tests, updating documentation, README "
+        "files or scripts; includes requests phrased as required behaviour "
+        "of the software ('when X happens, the app must do Y')"
+    ),
+    "git_only": (
+        f"only git version-control operations ({_GIT_OPERATIONS}) with no "
+        "code or file changes"
+    ),
+    "internet": (
+        "answering a question or producing a report that requires searching "
+        "or browsing the Internet or reading a web page, without editing "
+        "project files"
+    ),
+    "simple": (
+        "a question, explanation, shell command or chore that needs neither "
+        "software development nor Internet search: explaining or reading "
+        "code, running a command or tests, reading messages or email, "
+        "authenticating a service, managing servers or databases"
+    ),
+    "ambiguous": (
+        "a fragment or follow-up that continues earlier work not shown here, "
+        "such as 'continue', 'fix it', or a bare path"
+    ),
+}
+
+_DECISIONS_QUESTIONS: dict[str, dict[str, Any]] = {
+    "kind": choice("Which kind of task is this?", _DECISIONS_KIND_CRITERIA),
+}
+# The question set as the ``decide`` tool takes it.
+_DECISIONS_QUESTIONS_JSON = json.dumps(_DECISIONS_QUESTIONS, sort_keys=True)
+
+# A chosen kind whose probability is below this floor is treated as
+# ``ambiguous`` — the conservative verdict — rather than trusted.  On
+# the benchmark's held-out half this halves the harmful errors (a
+# non-simple task on the lite prompt, a development task without a
+# worktree) at unchanged accuracy.
+CLASSIFIER_DECISIONS_MIN_PROBABILITY = 0.6
+
+# Kind -> (is_simple, is_development).  ``ambiguous`` gets the same
+# conservative verdict the LLM prompt demands for follow-ups it cannot
+# see the context of.
+_KIND_VERDICTS: dict[str, tuple[bool, bool]] = {
+    "development": (False, True),
+    "ambiguous": (False, True),
+    "git_only": (True, False),
+    "simple": (True, False),
+    "internet": (False, False),
+}
+
+# The decisions classifier's memo criteria: everything that turns a task
+# into its verdict — the questions, the kind -> verdict mapping and the
+# probability floor — so changing any of them retires the old memos.
+_DECISIONS_CRITERIA = json.dumps(
+    {
+        "questions": _DECISIONS_QUESTIONS,
+        "verdicts": _KIND_VERDICTS,
+        "min_probability": CLASSIFIER_DECISIONS_MIN_PROBABILITY,
+    },
+    sort_keys=True,
+)
 
 # Verdict cache: file name under the KISS home and the maximum number
 # of entries kept (oldest dropped first).  Each entry is ~100 bytes.
@@ -207,7 +330,9 @@ class ClassifierRun:
         tokens_used: Total tokens consumed by the classification
             call(s).
         steps: LLM steps the classification took (1, or 2 when the
-            structured-output attempt needed the plain fallback).
+            structured-output attempt needed the plain fallback; 0 for
+            a decisions verdict, which is not an LLM step, and for a
+            memo hit).
     """
 
     classification: TaskClassification | None
@@ -244,6 +369,29 @@ def classification_enabled(override: bool | None = None) -> bool:
         return bool(load_config().get("classify_tasks", True))
     except Exception:  # pragma: no cover — unreadable config
         logger.debug("Could not read classify_tasks", exc_info=True)
+        return True
+
+
+def decisions_classification_enabled() -> bool:
+    """Whether :func:`classify_task` should try the decisions classifier first.
+
+    Returns:
+        ``True`` when the ``classify_with_decisions`` config key (persisted
+        in ``~/.kiss/config.json``, default ``True``; the settings panel's
+        "Classify with Jev" checkbox) is on AND the
+        ``decide`` tool can work in this process — an ``OPENROUTER_API_KEY``
+        is configured and :data:`DEFAULT_DECISIONS_MODEL` is in the catalog
+        (see :func:`~kiss.agents.sorcar.decide_tool.decisions_tool_available`).
+        ``False`` sends every classification to the LLM classifier.
+    """
+    if not decisions_tool_available():
+        return False
+    from kiss.core.vscode_config import load_config
+
+    try:
+        return bool(load_config().get("classify_with_decisions", True))
+    except Exception:  # pragma: no cover — unreadable config
+        logger.debug("Could not read classify_with_decisions", exc_info=True)
         return True
 
 
@@ -406,7 +554,12 @@ def _cache_path() -> Path:
     return kiss_home() / CLASSIFIER_CACHE_FILENAME
 
 
-def _cache_key(task: str, model_name: str, model_config: dict[str, Any] | None) -> str:
+def _cache_key(
+    task: str,
+    model_name: str,
+    model_config: dict[str, Any] | None,
+    criteria: str = _CLASSIFIER_PROMPT_PREFIX,
+) -> str:
     """Return the cache key for one classification request.
 
     Args:
@@ -419,16 +572,21 @@ def _cache_key(task: str, model_name: str, model_config: dict[str, Any] | None) 
             backend, and two requests that may be answered differently
             must never share a memo.  Only the digest is stored, never
             the values.
+        criteria: The classification criteria that turn the model's
+            answer into a verdict: the LLM classifier's prompt prefix
+            (the default) or the decisions classifier's questions,
+            verdict mapping and probability floor
+            (:data:`_DECISIONS_CRITERIA`).  The two classifiers therefore
+            never share a memo.
 
     Returns:
-        A hex SHA-256 digest of the classifier prompt, model name,
-        model configuration and task text.  Including the prompt prefix
-        retires every memo automatically when the classification
-        criteria change in a later release.
+        A hex SHA-256 digest of the criteria, model name, model
+        configuration and task text.  Including the criteria retires
+        every memo automatically when they change in a later release.
     """
     config_json = json.dumps(model_config or {}, sort_keys=True, default=str)
     digest = hashlib.sha256()
-    for part in (_CLASSIFIER_PROMPT_PREFIX, model_name, config_json):
+    for part in (criteria, model_name, config_json):
         digest.update(part.encode("utf-8"))
         digest.update(b"\0")
     digest.update(task.encode("utf-8"))
@@ -485,7 +643,10 @@ def _load_cache_locked() -> dict[str, dict[str, Any]]:
 
 
 def cached_classification(
-    task: str, model_name: str, model_config: dict[str, Any] | None = None
+    task: str,
+    model_name: str,
+    model_config: dict[str, Any] | None = None,
+    criteria: str = _CLASSIFIER_PROMPT_PREFIX,
 ) -> TaskClassification | None:
     """Return the memoised verdict for *task* on *model_name*, if any.
 
@@ -494,12 +655,13 @@ def cached_classification(
             it (after truncation).
         model_name: The classifying model.
         model_config: The run's model configuration, or ``None``.
+        criteria: The classifier's criteria text, see :func:`_cache_key`.
 
     Returns:
         The cached :class:`TaskClassification`, or ``None`` on a miss
         or when the memo is older than :data:`CLASSIFIER_CACHE_TTL_SECONDS`.
     """
-    key = _cache_key(task, model_name, model_config)
+    key = _cache_key(task, model_name, model_config, criteria)
     with _cache_lock:
         entry = _load_cache_locked().get(key)
     if entry is None or entry["ts"] < time.time() - CLASSIFIER_CACHE_TTL_SECONDS:
@@ -514,6 +676,7 @@ def remember_classification(
     model_name: str,
     model_config: dict[str, Any] | None,
     classification: TaskClassification,
+    criteria: str = _CLASSIFIER_PROMPT_PREFIX,
 ) -> None:
     """Memoise *classification* for *task* on *model_name* and persist it.
 
@@ -529,8 +692,9 @@ def remember_classification(
         model_name: The classifying model.
         model_config: The run's model configuration, or ``None``.
         classification: The verdict to remember.
+        criteria: The classifier's criteria text, see :func:`_cache_key`.
     """
-    key = _cache_key(task, model_name, model_config)
+    key = _cache_key(task, model_name, model_config, criteria)
     with _cache_lock:
         cache = _load_cache_locked()
         path = _cache_path()
@@ -617,6 +781,82 @@ def _attempt_classification(
     )
 
 
+def _verdict_from_decision(answers: Any) -> TaskClassification | None:
+    """Map the decisions classifier's answers to a verdict.
+
+    Args:
+        answers: The ``answers`` object of a ``decide`` tool result.
+
+    Returns:
+        The :class:`TaskClassification` for the chosen kind
+        (:data:`_KIND_VERDICTS`) — or the conservative ``ambiguous``
+        verdict when the chosen kind's probability is below
+        :data:`CLASSIFIER_DECISIONS_MIN_PROBABILITY` — or ``None`` when
+        the ``kind`` answer is missing or names an option that was not
+        asked for.
+    """
+    if not isinstance(answers, dict) or not isinstance(answers.get("kind"), dict):
+        return None
+    kind = answers["kind"].get("choice")
+    if not isinstance(kind, str) or kind not in _KIND_VERDICTS:
+        return None
+    verdict = _KIND_VERDICTS[kind]
+    probabilities = answers["kind"].get("probabilities")
+    probability = probabilities.get(kind) if isinstance(probabilities, dict) else None
+    if isinstance(probability, (int, float)) and probability < CLASSIFIER_DECISIONS_MIN_PROBABILITY:
+        verdict = _KIND_VERDICTS["ambiguous"]
+    return TaskClassification(is_simple=verdict[0], is_development=verdict[1])
+
+
+def _decisions_model_config() -> dict[str, Any]:
+    """Return the ``decide`` tool's model settings for the classifier.
+
+    The HTTP timeout is :data:`CLASSIFIER_DECISIONS_TIMEOUT_SECONDS`; the
+    API root is OpenRouter unless ``KISS_DECISIONS_BASE_URL`` is set.
+    """
+    config: dict[str, Any] = {"timeout": CLASSIFIER_DECISIONS_TIMEOUT_SECONDS}
+    base_url = os.environ.get(_DECISIONS_BASE_URL_ENV, "")
+    if base_url:
+        config["base_url"] = base_url
+    return config
+
+
+def _attempt_decisions_classification(
+    task: str,
+) -> tuple[TaskClassification | None, float, int]:
+    """Classify *task* once with the ``decide`` tool on the decisions model.
+
+    Args:
+        task: The (truncated) task prompt to classify; it is the
+            ``state`` the single ``kind`` question is asked about.
+
+    Returns:
+        Tuple of the verdict (or ``None`` when the tool reported an
+        error, the endpoint was unreachable, or the answer did not name
+        one of the asked-for kinds) and the attempt's spend in USD and
+        tokens, as the tool priced them from the catalog.
+    """
+    try:
+        decide = make_decide_tool(None, DEFAULT_DECISIONS_MODEL, _decisions_model_config())
+        result = decide(task, _DECISIONS_QUESTIONS_JSON)
+        if result.startswith("Error:"):
+            logger.warning("Decisions task classification failed: %.300s", result)
+            return None, 0.0, 0
+        parsed = json.loads(result)
+        usage = parsed.get("usage") or {}
+        budget = float(usage.get("cost_usd") or 0.0)
+        tokens = int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
+        classification = _verdict_from_decision(parsed.get("answers"))
+    except Exception:
+        # The classifier is best-effort: nothing here may raise into the
+        # agent's launch path, whatever the endpoint or the tool returns.
+        logger.warning("Decisions task classification attempt failed", exc_info=True)
+        return None, 0.0, 0
+    if classification is None:
+        logger.warning("Decisions task classifier returned no usable kind: %.300s", result)
+    return classification, budget, tokens
+
+
 def _model_runs_task_to_completion(model_name: str) -> bool:
     """Whether *model_name* is a run-to-completion CLI model (cc/codex).
 
@@ -660,16 +900,17 @@ def classification_will_call_model(
     model_config: dict[str, Any] | None = None,
     enabled_override: bool | None = None,
 ) -> bool:
-    """Whether :func:`classify_task` would make an LLM round trip now.
+    """Whether :func:`classify_task` would make a model round trip now.
 
     Lets callers overlap other launch work (e.g. preparing a spare git
     worktree) with the classifier's wait — and skip that overlap when
     there is nothing to wait for.  Applies exactly the gates
-    :func:`classify_task` applies before generating: the classifier
-    must be enabled (see :func:`classification_enabled`), the model must
-    not be a run-to-completion CLI model, and the verdict must not be
-    memoised already.  Best-effort by nature: the answer is a snapshot,
-    and a concurrent memo write or settings change between this call
+    :func:`classify_task` applies before calling a model: the classifier
+    must be enabled (see :func:`classification_enabled`), the verdict
+    must not be memoised already, and — on the LLM route only — the
+    model must not be a run-to-completion CLI model.  Best-effort by
+    nature: the answer is a snapshot, and a concurrent memo write or
+    settings change between this call
     and :func:`classify_task` can make the two disagree.  Callers must
     only use it to schedule work that is harmless either way.
 
@@ -683,13 +924,31 @@ def classification_will_call_model(
             :func:`classification_enabled`.
 
     Returns:
-        ``True`` when a classification LLM call is imminent.
+        ``True`` when a classification model call is imminent — the
+        decisions classifier's, or the LLM classifier's when the
+        decisions classifier is off (see
+        :func:`decisions_classification_enabled`).
     """
     if not classification_enabled(enabled_override):
         return False
+    task = _truncate_task(task)
+    if decisions_classification_enabled():
+        return _cached_decision(task) is None
     if _model_runs_task_to_completion(model_name):
         return False
-    return cached_classification(_truncate_task(task), model_name, model_config) is None
+    return cached_classification(task, model_name, model_config) is None
+
+
+def _cached_decision(task: str) -> TaskClassification | None:
+    """Return the memoised decisions-classifier verdict for *task*, if any.
+
+    Keyed by :data:`_DECISIONS_CRITERIA`, the decisions model and its
+    endpoint settings (:func:`_decisions_model_config`), so a verdict
+    from one endpoint is never served for another.
+    """
+    return cached_classification(
+        task, DEFAULT_DECISIONS_MODEL, _decisions_model_config(), _DECISIONS_CRITERIA,
+    )
 
 
 def classify_task(
@@ -697,7 +956,90 @@ def classify_task(
     model_name: str,
     model_config: dict[str, Any] | None = None,
 ) -> ClassifierRun:
-    """Classify *task* with one non-agentic KISSAgent call on *model_name*.
+    """Classify *task*: with the decisions classifier when it can run, else the LLM.
+
+    When :func:`decisions_classification_enabled` allows it, one
+    ``decide`` tool call on :data:`DEFAULT_DECISIONS_MODEL` produces the
+    verdict.  If that classifier is off, unavailable (no
+    ``OPENROUTER_API_KEY``), or its call fails for any reason, the LLM
+    classifier on *model_name* runs instead — the classification path's
+    behaviour without a key is exactly what it was before the decisions
+    classifier existed — and a failed decisions attempt's spend is
+    included in the returned usage.
+
+    Args:
+        task: The task prompt about to be handed to the Sorcar agent.
+        model_name: The model the Sorcar agent will run with; the LLM
+            classifier uses the same one.
+        model_config: The model configuration the Sorcar agent will run
+            with (custom endpoint, headers), forwarded to the LLM
+            classifier on a copy that imposes its own output cap.
+
+    Returns:
+        A :class:`ClassifierRun` whose ``classification`` is ``None``
+        on any failure, and whose usage fields always report what the
+        attempt(s) actually spent so callers can fold it into the
+        task's totals.  A verdict served from the cache reports zero
+        usage and zero steps; a decisions verdict reports its cost and
+        tokens and zero steps (it is not an LLM step).
+    """
+    task = _truncate_task(task)
+    if not decisions_classification_enabled():
+        return _classify_with_llm(task, model_name, model_config)
+    decided = _classify_with_decisions(task)
+    if decided.classification is not None:
+        return decided
+    llm = _classify_with_llm(task, model_name, model_config)
+    return ClassifierRun(
+        classification=llm.classification,
+        budget_used=llm.budget_used + decided.budget_used,
+        tokens_used=llm.tokens_used + decided.tokens_used,
+        steps=llm.steps,
+    )
+
+
+def _classify_with_decisions(task: str) -> ClassifierRun:
+    """Classify the (truncated) *task* with the decisions classifier.
+
+    Args:
+        task: The task text, already cut by :func:`_truncate_task`.
+
+    Returns:
+        The memoised verdict at zero usage when there is one, else the
+        outcome of one :func:`_attempt_decisions_classification`; a
+        fresh verdict is memoised under the decisions criteria.
+    """
+    cached = _cached_decision(task)
+    if cached is not None:
+        logger.info(
+            "Task classification served from cache: is_simple=%s "
+            "is_development=%s",
+            cached.is_simple,
+            cached.is_development,
+        )
+        return ClassifierRun(
+            classification=cached, budget_used=0.0, tokens_used=0, steps=0,
+        )
+    classification, budget, tokens = _attempt_decisions_classification(task)
+    if classification is not None:
+        remember_classification(
+            task,
+            DEFAULT_DECISIONS_MODEL,
+            _decisions_model_config(),
+            classification,
+            _DECISIONS_CRITERIA,
+        )
+    return ClassifierRun(
+        classification=classification, budget_used=budget, tokens_used=tokens, steps=0,
+    )
+
+
+def _classify_with_llm(
+    task: str,
+    model_name: str,
+    model_config: dict[str, Any] | None,
+) -> ClassifierRun:
+    """Classify the (truncated) *task* with one non-agentic KISSAgent call.
 
     The first (and normally only) generation carries the provider's
     structured-output enforcement of :data:`_VERDICT_JSON_SCHEMA`; if
@@ -706,19 +1048,12 @@ def classify_task(
     with the prompt alone recovers.
 
     Args:
-        task: The task prompt about to be handed to the Sorcar agent.
-        model_name: The model the Sorcar agent will run with; the
-            classifier uses the same one.
-        model_config: The model configuration the Sorcar agent will run
-            with (custom endpoint, headers), forwarded on a copy that
-            imposes the classifier's own output cap.
+        task: The task text, already cut by :func:`_truncate_task`.
+        model_name: The classifying model (the run's own).
+        model_config: The run's model configuration, or ``None``.
 
     Returns:
-        A :class:`ClassifierRun` whose ``classification`` is ``None``
-        on any failure, and whose usage fields always report what the
-        attempt(s) actually spent so callers can fold it into the
-        task's totals.  A verdict served from the cache reports zero
-        usage and zero steps.
+        The :class:`ClassifierRun`; see :func:`classify_task`.
     """
     if _model_runs_task_to_completion(model_name):
         # cc/* and codex/* models are full coding agents with native
@@ -733,7 +1068,6 @@ def classify_task(
         return ClassifierRun(
             classification=None, budget_used=0.0, tokens_used=0, steps=0,
         )
-    task = _truncate_task(task)
     cached = cached_classification(task, model_name, model_config)
     if cached is not None:
         logger.info(

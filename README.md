@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.9.17-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.9.18-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -62,7 +62,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 661 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 664 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -131,7 +131,7 @@ Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and
 
 - `@` file/folder mentions with ranked project-file completion.
 - Per-task **git worktree isolation** — worktrees are pre-warmed in the background for fast task start, with auto-commit and merge on success, or an interactive merge/discard prompt — toggle both in the Settings panel.
-- A pre-run **task classifier** (normally one fast non-agentic model call — structured output, with one plain-text retry if that fails; skipped for `cc/*` and `codex/*` models) that detects whether the task is a development task that requires creating or editing files — non-development tasks (questions, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. Toggleable in the Settings panel.
+- A pre-run **task classifier** that detects whether the task is a development task that requires creating or editing files — non-development tasks (questions, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. With an `OPENROUTER_API_KEY` it asks the `~typesafe/jev-latest` decisions model one typed question (about 0.2 s and $0.00003 per task; on a 415-prompt benchmark it matched hand labels more often than the LLM classifiers, see `benchmarkings/task_classifier/`); otherwise, or if that call fails, it falls back to one fast non-agentic call on the run's own model (structured output, with one plain-text retry if that fails; skipped for `cc/*` and `codex/*` models). Both are Settings-panel checkboxes: "Classify tasks before running" (`classify_tasks`) and "Classify with Jev" (`classify_with_decisions`; unticked pins the LLM classifier).
 - A model picker, per-task budget caps, chat history with resume (filtered to the current workspace by default), an agent dashboard (burger menu, bottom-left), and inline rendering of tool-generated images in the chat panels.
 - **Image and PDF attachments**: attach files to a task via the picker, paste, or drag-and-drop — images (HEIC/HEIF converted, oversized ones re-encoded) and PDFs are sent to the model along with the prompt.
 - **Persistent agent memory** (on by default): standard Sorcar runs get seven `memory_*` tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks (not for Docker runs, `cc/*`/`codex/*` models, runs that drop the built-in toolset, or runs whose `model_config` supplies its own `system_instruction`). Pages are Markdown files under `~/.kiss/memories` with a SQLite vector index (OpenAI embeddings when an `OPENAI_API_KEY` is available, otherwise a fully offline hashed embedder). Toggle it — or point it at a custom directory — in the Settings panel, or set `KISS_USE_MEMORY=0`.
@@ -275,7 +275,7 @@ These agents live in `src/kiss/agents/third_party_agents/`; a prompt-oriented us
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **661 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
+KISS Sorcar ships a catalog of **664 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -285,15 +285,16 @@ KISS Sorcar ships a catalog of **661 models** across **9 provider categories**, 
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 378 |
+| OpenRouter | 381 |
 | Claude Code CLI (`cc/*`) | 14 |
 | Codex CLI (`codex/*`) | 8 |
 
 Current catalog capability totals:
 
-- **641** generation-capable models
-- **483** function-calling-capable models
+- **642** generation-capable models
+- **485** function-calling-capable models
 - **11** embedding models
+- **2** decision models
 
 Full model list:
 
@@ -595,7 +596,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (378)</strong></summary>
+<summary><strong>OpenRouter (381)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -715,7 +716,6 @@ Full model list:
 - `openrouter/mistralai/ministral-8b-2512`
 - `openrouter/mistralai/mistral-large`
 - `openrouter/mistralai/mistral-large-2407`
-- `openrouter/mistralai/mistral-large-2512`
 - `openrouter/mistralai/mistral-medium-3`
 - `openrouter/mistralai/mistral-medium-3-5`
 - `openrouter/mistralai/mistral-medium-3.1`
@@ -831,6 +831,7 @@ Full model list:
 - `openrouter/perplexity/sonar-reasoning-pro`
 - `openrouter/poolside/laguna-s-2.1`
 - `openrouter/poolside/laguna-xs-2.1`
+- `openrouter/prism-ml/ternary-bonsai-2-27b`
 - `openrouter/qwen/qwen-2.5-72b-instruct`
 - `openrouter/qwen/qwen-2.5-7b-instruct`
 - `openrouter/qwen/qwen-2.5-coder-32b-instruct`
@@ -907,6 +908,8 @@ Full model list:
 - `openrouter/thedrummer/unslopnemo-12b`
 - `openrouter/thinkingmachines/inkling`
 - `openrouter/thinkingmachines/inkling-small`
+- `openrouter/typesafe/jev-1.13`
+- `openrouter/unbiased/pareto`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-pro-3`
 - `openrouter/upstage/solar-pro4`
@@ -972,6 +975,7 @@ Full model list:
 - `openrouter/~openai/gpt-terra-latest-low`
 - `openrouter/~openai/gpt-terra-latest-medium`
 - `openrouter/~openai/gpt-terra-latest-xhigh`
+- `openrouter/~typesafe/jev-latest`
 - `openrouter/~x-ai/grok-latest`
 - `openrouter/~z-ai/glm-flash-latest`
 - `openrouter/~z-ai/glm-latest`

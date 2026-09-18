@@ -294,6 +294,15 @@ def _post_history_event(
         arg=expected_total,
         timeout=5000,
     )
+    # Chat panels are collapsed by default (no chat here is running):
+    # open them all, as a user inspecting the rows would, so the rows
+    # and their status dots lay out. The explicit expands are
+    # remembered per chat across the later re-renders.
+    page.evaluate(
+        "() => document.querySelectorAll('#history-list "
+        ".history-chat-group.collapsed > .history-chat-header')"
+        ".forEach(h => h.click())"
+    )
 
 
 def _history_event_for_persisted_result(result: str) -> dict[str, Any]:
