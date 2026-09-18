@@ -2906,8 +2906,8 @@
   },
   "openrouter/deepseek/deepseek-v4-pro": {
     "context_length": 500000,
-    "input_price_per_1M": 0.943,
-    "output_price_per_1M": 1.887,
+    "input_price_per_1M": 1.6,
+    "output_price_per_1M": 3.2,
     "fc": false,
     "emb": false,
     "gen": true,

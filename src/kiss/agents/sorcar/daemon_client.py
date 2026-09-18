@@ -596,7 +596,7 @@ def run(
         append_basic_tools: Whether the agent gets the built-in basic
             toolset (``Bash``, ``Read``, ``Edit``, ``Write``, browser
             tools, ``run_agent``, ``ask_user_question``, ``talk``,
-            ``set_model``, ``summary``, ``run_parallel``, ...).
+            ``set_model``, ``decide``, ``summary``, ``run_parallel``, ...).
             Defaults to True.  When False the agent's ONLY tools are
             ``finish`` and the caller-supplied tools — the ones
             returned by the *tools* file's ``get_tools()`` — so the
