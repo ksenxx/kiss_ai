@@ -1989,6 +1989,53 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
 
 .explorer-kids[hidden] { display: none; }
 
+/* Top-level folder rows: the working directory is bold and carries a
+   check mark; an added folder shows "Set as Working Directory" and
+   "Remove Folder from Explorer" buttons on hover / focus. */
+.explorer-row.is-root > .explorer-name { font-weight: 600; }
+
+.explorer-root-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.explorer-root-mark {
+  display: inline-flex;
+  align-items: center;
+  color: var(--green);
+}
+
+.explorer-root-btn {
+  background: none;
+  border: none;
+  padding: 1px;
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
+  visibility: hidden;
+}
+
+.explorer-row:hover > .explorer-root-actions > .explorer-root-btn,
+.explorer-row:focus-within > .explorer-root-actions > .explorer-root-btn,
+.explorer-row.ctx-active > .explorer-root-actions > .explorer-root-btn {
+  visibility: visible;
+}
+
+.explorer-root-btn:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+}
+
+/* No hover on a touch screen: the buttons stay visible. */
+@media (hover: none) {
+  .explorer-root-btn { visibility: visible; }
+}
+
 .explorer-row.loading > .explorer-name,
 .explorer-note {
   color: var(--dim);
@@ -2744,6 +2791,40 @@ body.history-panel-mode #sidebar-resizer { display: none !important; }
 .kiss-datepicker .dp-foot button:hover {
   background: color-mix(in srgb, var(--fg) 15%, transparent);
 }
+
+/* History: tasks are grouped by chat (newest chat first, by its latest
+   task), a day separator ahead of the first chat of each day. */
+.history-day-sep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 2px 4px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  white-space: nowrap;
+}
+
+.history-day-sep::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+}
+
+.history-chat-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 8px;
+  padding: 3px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--task-color, var(--fg)) 70%, transparent);
+}
+
+.history-chat-group > .sidebar-item { margin-bottom: 0; }
 
 .sidebar-item {
   padding: 7px 10px 3.5px; background: color-mix(in srgb, var(--fg) 3%, transparent);
