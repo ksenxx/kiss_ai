@@ -521,7 +521,6 @@ body.remote-chat.sidebar-resizing {
 body.remote-chat .running-item {
   background-color: var(--hover-faint);
   color: var(--fg);
-  border-left: 4px solid var(--task-color, transparent);
 }
 
 body.remote-chat .running-item-metrics {

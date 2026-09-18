@@ -2068,6 +2068,43 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._sendToWebview({type: 'showTask', taskId});
   }
 
+  /**
+   * Open a chat in the sidebar chat view — a primary-sidebar history
+   * panel click while editor-tabs mode is OFF. Reveals the view,
+   * waits briefly for a freshly created webview to report `ready`,
+   * then relays the click; the webview mirrors its own in-page
+   * history rows (switch to the chat's tab, resume it in a fresh tab,
+   * or show the task text read-only when there is nothing to resume).
+   *
+   * @param event The clicked chat/task: backend chat id ('' or absent
+   *     when the task has nothing to resume), the task's id, and the
+   *     task text for the read-only fallback.
+   */
+  public async openChatFromHistory(event: {
+    chatId?: string;
+    taskId?: string | number | null;
+    title?: string;
+  }): Promise<void> {
+    await this.focusChatInput();
+    for (let i = 0; i < 15 && this._view && !this._webviewReady; i++) {
+      await new Promise(r => setTimeout(r, 200));
+    }
+    // The reveal above can outlive the routing decision that chose
+    // this surface: editor-tabs mode flipped ON mid-wait hides this
+    // view (its `when` clause), and posting now would resume the chat
+    // invisibly. The user's next click routes to the panel manager.
+    const modeNow = vscode.workspace
+      .getConfiguration('kissSorcar')
+      .get<boolean>('editorTabsMode', false);
+    if (modeNow) return;
+    this._sendToWebview({
+      type: 'openChatFromHistory',
+      chatId: event.chatId ? String(event.chatId) : '',
+      taskId: event.taskId === undefined ? null : event.taskId,
+      title: event.title || '',
+    });
+  }
+
   public stopTask(): void {
     if (this._view && this._webviewReady) {
       this._sendToWebview({type: 'triggerStop'});

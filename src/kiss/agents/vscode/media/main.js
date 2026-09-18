@@ -30,6 +30,17 @@
   // editor tab instead of mirroring its own (idle) status spans.
   const META_PANEL_MODE = document.body.classList.contains('meta-panel-mode');
 
+  // Sidebar-chat mode: this webview is the extension's SECONDARY-
+  // sidebar chat view (editor-tabs mode OFF) — the surface with the
+  // internal tab strip. It shows the task-info panel as a right-hand
+  // drawer toggled from the tab bar, exactly like the mobile remote
+  // webapp, and hides the top status bar the drawer replaces. The
+  // class is set here (the host passes no body attrs for this view)
+  // so main.css can scope those rules.
+  const SIDEBAR_CHAT_MODE =
+    !EDITOR_TAB_MODE && !document.body.classList.contains('remote-chat');
+  if (SIDEBAR_CHAT_MODE) document.body.classList.add('sidebar-chat-mode');
+
   // Chat panels of editor-tabs mode report their task-info values to
   // the host (metaUpdate), which relays the ACTIVE panel's into the
   // Task Info view. The two panel-shaped surfaces (history, task info)
@@ -1115,6 +1126,29 @@
   }
   // readychat-coverage:end
 
+  /**
+   * The tab a chat-scoped composer action (Stop, Share chat, voice)
+   * must target: the active tab, or — when a content tab is on
+   * screen — the chat tab whose work produced it (same resolution Git
+   * Commit uses). Falls back to the active tab id when the owner is
+   * gone, where the action lands on a tab with no conversation and
+   * stays a harmless no-op.
+   *
+   * @returns {string} The id of the chat tab the action belongs to.
+   */
+  function chatTargetTabId() {
+    let tab = getTab(activeTabId);
+    // A file opened FROM a file view names that view as its owner, so
+    // the chain is walked to the chat at its root (like
+    // tabScopeWorkDir does); the visited set fails closed on a cycle.
+    const visited = new Set();
+    while (tab && tab.isContentTab && !visited.has(tab.id)) {
+      visited.add(tab.id);
+      tab = getTab(tab.ownerTabId);
+    }
+    return tab && !tab.isContentTab ? tab.id : activeTabId;
+  }
+
   function restoreTab(tab) {
     hideContentArea();
     activeTabId = tab.id;
@@ -1670,10 +1704,18 @@
   }
 
   function setChatSurfaceVisible(visible) {
-    ['output', 'task-panel', 'input-area'].forEach(id => {
+    ['output', 'task-panel'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.style.display = visible ? '' : 'none';
     });
+    // The composer's button row stays on screen on every surface: a
+    // file/webview tab still offers + (new chat) and ... (more
+    // actions). CSS scoped by `content-tab-open` hides the text box
+    // and the chat-only controls (Inject promptlet, model picker,
+    // Send) instead — they act on a transcript that is not on screen.
+    const inputArea = document.getElementById('input-area');
+    if (inputArea) inputArea.style.display = '';
+    document.body.classList.toggle('content-tab-open', !visible);
   }
 
   function showContentTab(tab) {
@@ -1696,6 +1738,14 @@
     // A content tab browses the workspace of the chat it was opened
     // from (sidebarWorkDir), which may differ from the previous tab's.
     refreshSidebarDataViews(false);
+    // The composer's button row stays on screen here. Stop mirrors the
+    // OWNING chat's run — it targets that chat (see chatTargetTabId) —
+    // instead of keeping whatever the previously shown tab left behind.
+    const stopOwner = getTab(chatTargetTabId());
+    stopBtn.style.display =
+      stopOwner && !stopOwner.isContentTab && stopOwner.isRunning
+        ? 'flex'
+        : 'none';
   }
 
   function hideContentArea() {
@@ -3813,8 +3863,11 @@
    */
   function metaInfoPollWanted() {
     if (document.body.classList.contains('remote-desktop')) return true;
+    // An OPEN task-info drawer polls; a hidden one must not poll the
+    // network every second. Both drawer surfaces behave alike: the
+    // mobile remote page and the extension's sidebar chat view.
     if (
-      document.body.classList.contains('remote-chat') &&
+      (document.body.classList.contains('remote-chat') || SIDEBAR_CHAT_MODE) &&
       metaPanel &&
       metaPanel.classList.contains('open')
     ) {
@@ -3988,16 +4041,19 @@
     if (metaDrawerBtn) {
       metaDrawerBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
     }
-    // A closed MOBILE drawer sits translated off-screen but keeps
-    // rendering (the slide-in animation needs it), so `inert` takes
-    // its close button out of the keyboard tab order.  The docked
-    // desktop panel and the VS Code Task Info view are never drawers
-    // and must never go inert (applyRemoteDesktop flips the body class
-    // before calling here, so entering desktop lifts the attribute).
+    // A closed DRAWER sits translated off-screen but keeps rendering
+    // (the slide-in animation needs it), so `inert` takes its close
+    // button out of the keyboard tab order. The panel is a drawer on
+    // the mobile remote page and in the extension's sidebar chat view;
+    // the docked desktop panel and the VS Code Task Info view are
+    // never drawers and must never go inert (applyRemoteDesktop flips
+    // the body class before calling here, so entering desktop lifts
+    // the attribute).
     const inertDrawer =
       !open &&
-      document.body.classList.contains('remote-chat') &&
-      !document.body.classList.contains('remote-desktop');
+      (SIDEBAR_CHAT_MODE ||
+        (document.body.classList.contains('remote-chat') &&
+          !document.body.classList.contains('remote-desktop')));
     if (typeof metaPanel.toggleAttribute === 'function') {
       metaPanel.toggleAttribute('inert', inertDrawer);
     }
@@ -11380,6 +11436,10 @@
     const detail = event ? event.detail : null;
     const tabId = detail ? detail.tabId : null;
     if (tabId === undefined || tabId === null || tabId === '') return true;
+    // An utterance recorded while a content tab was on screen names
+    // the owning CHAT tab (kissVoiceOwner resolves the owner), so the
+    // owner's id counts as "this screen" too while its file is up.
+    if (String(tabId) === String(chatTargetTabId())) return true;
     return isForActiveTab({tabId: tabId});
   }
 
@@ -11392,7 +11452,10 @@
    * isForActiveTab() applies.
    */
   window.kissVoiceOwner = function () {
-    return {tabId: activeTabId, taskId: tabTaskId(getTab(activeTabId))};
+    // Voice acts on the conversation, so a content tab hands the
+    // utterance to the chat tab whose work produced it.
+    const id = chatTargetTabId();
+    return {tabId: id, taskId: tabTaskId(getTab(id))};
   };
   // Retained for callers that only need the visible tab id.
   window.kissActiveTabId = function () {
@@ -11916,6 +11979,46 @@
         }
         break;
       }
+      // The primary-sidebar history panel clicked a task while the
+      // extension runs in SIDEBAR mode: open the chat here, exactly
+      // like the in-webview history rows do — switch to the chat's
+      // tab, resume the chat in a fresh tab, or (no chat id) show the
+      // task text read-only in a fresh tab.
+      case 'openChatFromHistory': {
+        if (EDITOR_TAB_MODE) break;
+        const chatId = typeof ev.chatId === 'string' ? ev.chatId : '';
+        const taskText = typeof ev.title === 'string' ? ev.title : '';
+        const hasTaskId =
+          ev.taskId !== undefined && ev.taskId !== null && ev.taskId !== '';
+        const ocTab = chatId ? getTabByBackendChatId(chatId) : null;
+        if (ocTab && !isTabHidden(ocTab)) {
+          switchToTab(ocTab.id);
+          if (
+            !ocTab.isContentTab &&
+            !scrollChatToTask(ev.taskId) &&
+            hasTaskId
+          ) {
+            api.resumeSession({
+              id: chatId,
+              taskId: ev.taskId,
+              tabId: ocTab.id,
+            });
+          }
+        } else if (chatId) {
+          createNewTab();
+          setTaskText(taskText);
+          api.resumeSession({
+            id: chatId,
+            taskId: ev.taskId,
+            tabId: activeTabId,
+          });
+        } else {
+          createNewTab();
+          setTaskText(taskText);
+          focusInputWithRetry();
+        }
+        break;
+      }
       case 'clearChat': {
         const ccTab = getTab(activeTabId);
         const ccWelcome =
@@ -12257,10 +12360,14 @@
         }
         break;
 
-      case 'triggerStop':
-        markStopping(activeTabId, true);
-        api.stop({tabId: activeTabId});
+      case 'triggerStop': {
+        // The host command stops the conversation on screen; on a
+        // content tab that is the owning chat, same as the button.
+        const stopTarget = chatTargetTabId();
+        markStopping(stopTarget, true);
+        api.stop({tabId: stopTarget});
         break;
+      }
       case 'appendToInput':
         if (ev.text) {
           inp.value = inp.value ? inp.value + '\n' + ev.text : ev.text;
@@ -12826,8 +12933,12 @@
    * minutes in the post-mortem `stop_button_delay_2026-08-05.html`.
    */
   function renderStopButton() {
-    const tab = getTab(activeTabId);
-    const stopping = !!(tab && tab.isStopping) && isRunning;
+    // On a content tab the button acts on (and pulses for) the OWNING
+    // chat; on a chat tab the target IS the active tab, whose running
+    // state the module flag mirrors.
+    const tab = getTab(chatTargetTabId());
+    const running = tab && tab.id !== activeTabId ? !!tab.isRunning : isRunning;
+    const stopping = !!(tab && tab.isStopping) && running;
     stopBtn.classList.toggle('stopping', stopping);
     stopBtn.setAttribute(
       'data-tooltip',
@@ -12844,7 +12955,12 @@
   function markStopping(tabId, stopping) {
     const tab = getTab(tabId);
     if (tab) tab.isStopping = stopping;
-    if (tabId === activeTabId) renderStopButton();
+    // chatTargetTabId is the active tab itself on a chat tab, and the
+    // owning chat on a content tab — whose pending stop the visible
+    // button is showing.
+    if (tabId === activeTabId || tabId === chatTargetTabId()) {
+      renderStopButton();
+    }
   }
 
   /**
@@ -14485,12 +14601,33 @@
       e.preventDefault();
     });
     stopBtn.addEventListener('click', () => {
-      markStopping(activeTabId, true);
-      api.stop({tabId: activeTabId});
+      // On a content tab the stop must land on the owning chat's run,
+      // not on the file view's id.
+      const target = chatTargetTabId();
+      markStopping(target, true);
+      api.stop({tabId: target});
     });
     // share-coverage:start
     if (shareBtn) {
       shareBtn.addEventListener('click', () => {
+        // A content tab shares the chat that produced it — never the
+        // file view's own id, whose transcript is empty. The export
+        // splices the LIVE screen into the chat's persisted tasks, so
+        // the owner chat comes back on screen first and the whole
+        // existing flow (reply routing included) applies to it.
+        const activeNow = getTab(activeTabId);
+        if (activeNow && activeNow.isContentTab) {
+          const target = chatTargetTabId();
+          if (target !== activeTabId) switchToTab(target);
+          const after = getTab(activeTabId);
+          if (after && after.isContentTab) {
+            // The owner is gone (or hidden in another workspace):
+            // there is no chat here to export.
+            addError('Share failed: this tab has no chat to share');
+            flashShareBtn(false);
+            return;
+          }
+        }
         const tab = getTab(activeTabId);
         if (tab && tab.isSubagentTab) {
           // A sub-agent tab shows one fan-out worker's transcript,
@@ -14876,6 +15013,13 @@
     }
     setupActivityBar();
     applyRemoteTheme(getSavedRemoteTheme());
+    if (SIDEBAR_CHAT_MODE) {
+      // The sidebar chat's task-info drawer starts closed AND inert:
+      // its off-screen close button must not sit in the keyboard tab
+      // order before the drawer was ever opened. (The remote page does
+      // the same below, in applyRemoteDesktop.)
+      setMetaDrawerOpen(false);
+    }
     if (
       document.body.classList.contains('remote-chat') &&
       typeof window.matchMedia === 'function'
@@ -15199,6 +15343,11 @@
     }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
+      // A changed query is a fresh search view: collapse choices made
+      // inside the previous one no longer apply, and the panels flip
+      // to the right default NOW (the refetch below may be answered by
+      // the identical-refresh fast path, which rebuilds nothing).
+      reapplyAllHistoryGroupCollapse(true);
       api.getHistory({
         query: historySearch.value,
         generation: historyGeneration,
@@ -15211,6 +15360,7 @@
         historySearch.value = '';
         if (historySearchClear) historySearchClear.style.display = 'none';
         resetHistoryPagination();
+        reapplyAllHistoryGroupCollapse(true);
         api.getHistory({query: '', generation: historyGeneration});
         historySearch.focus();
       });
@@ -15411,12 +15561,26 @@
     // tableak-coverage:start
     window.addEventListener('kiss-voice-submit', event => {
       if (!isFromSpeechTab(event)) return;
+      // A voice submit landing while a content tab is up belongs to
+      // the owning chat: bring it back on screen so sendMessage()
+      // posts under the conversation, never under the file view. The
+      // dictated composer text rides along — the switch would restore
+      // the chat's own saved input over it.
+      const active = getTab(activeTabId);
+      if (active && active.isContentTab) {
+        const spoken = inp.value;
+        const target = chatTargetTabId();
+        if (target !== activeTabId) switchToTab(target);
+        const after = getTab(activeTabId);
+        if (after && after.isContentTab) return;
+        if (spoken.trim()) inp.value = spoken;
+      }
       sendMessage();
     });
 
     window.addEventListener('kiss-voice-answer', event => {
       if (!isFromSpeechTab(event)) return;
-      const tab = getTab(activeTabId);
+      const tab = getTab(chatTargetTabId());
       if (tab && tab.askPendingQuestion !== null) submitAskForTab(tab);
     });
     // tableak-coverage:end
@@ -16388,10 +16552,129 @@
    * else a new one appended at the end (after a new day separator when
    * the chat's latest task falls on an earlier day than the last block).
    */
+  // A user's explicit expand/collapse choices, by chat id, so the
+  // choice survives the constant backend-driven re-renders. Groups of
+  // rows WITHOUT a chat id remember their choice on the element only.
+  const historyChatCollapseOverrides = new Map(); // chat id -> collapsed
+  // Folds made INSIDE the current search, by chat id: they survive the
+  // constant changed-data rebuilds while the query stands, and are
+  // dropped as one when the search text changes.
+  const historySearchCollapseOverrides = new Map(); // chat id -> collapsed
+
+  /**
+   * Whether *group* renders collapsed: the user's explicit choice when
+   * there is one, otherwise collapsed unless a task of the chat is
+   * running — or a history search is active, whose matches must not
+   * hide behind closed headers.
+   */
+  function historyGroupCollapsed(group) {
+    // An active search overrides even the user's saved choice: its
+    // matches must not hide behind a header collapsed BEFORE the
+    // search. A collapse made DURING the search is honoured (kept on
+    // the element only, dropped when the search text changes).
+    if (historySearchActive()) return group._kissSearchCollapsed === true;
+    if (group._kissCollapsed !== undefined) return group._kissCollapsed;
+    return group.dataset.hasRunning !== '1';
+  }
+
+  /** Whether a history search is being shown right now. */
+  function historySearchActive() {
+    return !!(historySearch && historySearch.value.trim());
+  }
+
+  /**
+   * Repaint every chat panel's collapsed state. The rebuild paths do
+   * this per group as they create it; the identical-refresh fast path
+   * and the search listeners (whose results may equal what is already
+   * on screen) call this so entering or leaving a search still swaps
+   * between search-expanded and default-collapsed states.
+   */
+  function reapplyAllHistoryGroupCollapse(dropSearchChoices) {
+    if (dropSearchChoices) historySearchCollapseOverrides.clear();
+    historyList
+      .querySelectorAll(':scope > .history-chat-group')
+      .forEach(group => {
+        if (dropSearchChoices) delete group._kissSearchCollapsed;
+        applyHistoryGroupCollapsed(group);
+      });
+  }
+
+  /** Repaint *group*'s collapsed class and its header's ARIA state. */
+  function applyHistoryGroupCollapsed(group) {
+    const collapsed = historyGroupCollapsed(group);
+    group.classList.toggle('collapsed', collapsed);
+    const btn = group.querySelector(':scope > .history-chat-header');
+    if (btn) {
+      btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      btn.dataset.tooltip = collapsed ? 'Expand chat' : 'Collapse chat';
+    }
+  }
+
+  /**
+   * Keep *group*'s header naming the chat's FIRST task. The daemon
+   * stamps every row with `chat_first_task`; without it (an older
+   * daemon) the header follows the oldest row loaded so far — rows
+   * arrive newest first, so each of the chat's rows is older than the
+   * one before.
+   */
+  function updateHistoryGroupHeader(group, session) {
+    const titleEl = group.querySelector(
+      ':scope > .history-chat-header .history-chat-title',
+    );
+    if (!titleEl) return;
+    const first =
+      typeof session.chat_first_task === 'string'
+        ? session.chat_first_task
+        : '';
+    if (first) {
+      group.dataset.firstFromServer = '1';
+    } else if (group.dataset.firstFromServer === '1') {
+      return;
+    }
+    const text = first || session.preview || session.title || 'Untitled';
+    if (titleEl.textContent !== text) titleEl.textContent = text;
+    const btn = group.querySelector(':scope > .history-chat-header');
+    if (btn && btn.title !== text) btn.title = text;
+  }
+
+  /** Build the collapsible chat panel's clickable header. */
+  function historyGroupHeader(group, chatId) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'history-chat-header';
+    // No fixed aria-label: the first-task title span IS the button's
+    // accessible name, so screen readers can tell the chats apart
+    // (aria-expanded carries the toggle state).
+    btn.innerHTML =
+      '<svg class="history-chat-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
+    const titleEl = document.createElement('span');
+    titleEl.className = 'history-chat-title';
+    btn.appendChild(titleEl);
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      const collapsed = !historyGroupCollapsed(group);
+      if (historySearchActive()) {
+        // A toggle inside a search is about the search view only; the
+        // chat's remembered choice is what the user set outside it.
+        group._kissSearchCollapsed = collapsed;
+        if (chatId) historySearchCollapseOverrides.set(chatId, collapsed);
+      } else {
+        group._kissCollapsed = collapsed;
+        if (chatId) historyChatCollapseOverrides.set(chatId, collapsed);
+      }
+      applyHistoryGroupCollapsed(group);
+    });
+    return btn;
+  }
+
   function historyGroupFor(session) {
     const chatId = typeof session.id === 'string' ? session.id : '';
     const existing = chatId ? historyChatGroups.get(chatId) : null;
-    if (existing) return existing;
+    if (existing) {
+      updateHistoryGroupHeader(existing, session);
+      return existing;
+    }
     const ts = historyTimestamp(session);
     const dayKey = historyDayBucket(ts);
     if (dayKey !== historyLastDay) {
@@ -16405,10 +16688,28 @@
     group.dataset.chatId = chatId;
     // The chat's latest task time decides its day bucket.
     group.dataset.ts = String(ts);
-    group.style.setProperty('--task-color', chatIdBgColor(chatId));
+    group.appendChild(historyGroupHeader(group, chatId));
+    const body = document.createElement('div');
+    body.className = 'history-chat-body';
+    group.appendChild(body);
+    if (chatId && historyChatCollapseOverrides.has(chatId)) {
+      group._kissCollapsed = historyChatCollapseOverrides.get(chatId);
+    }
+    // A fold made inside the CURRENT search comes back after the
+    // changed-data rebuilds a search keeps triggering (tasks_updated).
+    if (chatId && historySearchCollapseOverrides.has(chatId)) {
+      group._kissSearchCollapsed = historySearchCollapseOverrides.get(chatId);
+    }
+    updateHistoryGroupHeader(group, session);
+    applyHistoryGroupCollapsed(group);
     historyList.appendChild(group);
     if (chatId) historyChatGroups.set(chatId, group);
     return group;
+  }
+
+  /** Where a chat panel's task rows live: its body container. */
+  function historyGroupBody(group) {
+    return group.querySelector(':scope > .history-chat-body') || group;
   }
 
   function historyDaySeparator(ts) {
@@ -16810,6 +17111,7 @@
     let focusKey = '';
     let focusCtrlClass = '';
     let focusCtrlNth = -1;
+    let focusHeaderChatId = '';
     if (offset === 0) {
       // A refresh that returns exactly what is already on screen keeps
       // the existing DOM.  `tasks_updated` broadcasts arrive whenever
@@ -16845,6 +17147,11 @@
         historyOffset = sessions.length;
         historyHasMore = sessions.length >= 50;
         applyHistoryFilterVisibility();
+        // The rows did not change, but the collapse DEFAULT may have:
+        // a search whose results equal the loaded page (and the later
+        // clearing of that search) lands here, and its matches must
+        // still expand — or fold back — accordingly.
+        reapplyAllHistoryGroupCollapse(false);
         return;
       }
       if (historyPressHeld()) {
@@ -16870,6 +17177,16 @@
       // action stays under Space/Enter after the rebuild (the control
       // is identified by its first class among same-class siblings).
       const active = document.activeElement;
+      // A focused chat-panel header survives the rebuild too: its
+      // group is found again by chat id after the fresh render.
+      const activeHeader =
+        active && active.closest
+          ? active.closest('#history-list .history-chat-header')
+          : null;
+      if (activeHeader) {
+        const headerGroup = activeHeader.closest('.history-chat-group');
+        focusHeaderChatId = (headerGroup && headerGroup.dataset.chatId) || '';
+      }
       const activeRow =
         active && active.closest
           ? active.closest('#history-list .sidebar-item')
@@ -16941,7 +17258,6 @@
       div.dataset.workDir = s.work_dir || '';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
-      div.style.setProperty('--task-color', chatIdBgColor(String(s.id)));
 
       if (s.is_running) {
         const runningDot = document.createElement('span');
@@ -17155,7 +17471,13 @@
         }
         closeSidebar();
       });
-      historyGroupFor(s).appendChild(div);
+      const group = historyGroupFor(s);
+      historyGroupBody(group).appendChild(div);
+      if (s.is_running && group.dataset.hasRunning !== '1') {
+        // A running task keeps its chat's panel open by default.
+        group.dataset.hasRunning = '1';
+        applyHistoryGroupCollapsed(group);
+      }
       historyRenderedRows.push(div);
     });
 
@@ -17177,6 +17499,14 @@
         }
         target.focus({preventScroll: true});
       }
+    } else if (focusHeaderChatId) {
+      // Likewise for a focused chat-panel header: focus the fresh
+      // header of the same chat so Space/Enter keeps toggling it.
+      const headerGroup = historyChatGroups.get(focusHeaderChatId);
+      const headerBtn =
+        headerGroup &&
+        headerGroup.querySelector(':scope > .history-chat-header');
+      if (headerBtn) headerBtn.focus({preventScroll: true});
     }
   }
 

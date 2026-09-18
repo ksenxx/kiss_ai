@@ -16,11 +16,13 @@
 //    instead of closing the bar; OFF closes all panels and
 //    opens the secondary sidebar on the KISS Sorcar chat view, focusing
 //    its composer (sidebarView.focusChatInput);
-//  - the KS activity-bar button's dummy tree (non-editor mode): on
-//    becoming visible it closes the primary sidebar and reveals the
-//    chat in the secondary sidebar without creating a chat — except
-//    right after an editorTabsMode flip, whose config handler already
-//    revealed the chat (no second, competing reveal).
+//  - a window ACTIVATING with the mode ON also reveals the secondary
+//    sidebar (Task Info) and hands focus back to the chat/editor;
+//  - kissSorcar.showHistory focuses the primary-sidebar history view
+//    in BOTH modes (editor-tabs mode also ensures a chat tab);
+//  - the history view's openChat events route to the panel manager in
+//    editor-tabs mode and to sidebarView.openChatFromHistory in
+//    sidebar mode.
 //
 // The panel manager and sidebar view are replaced by instrumented
 // fakes (the real ones have their own end-to-end suites:
@@ -63,21 +65,12 @@ const commands = new Map();
 const executedCommands = [];
 const configListeners = [];
 const viewProviders = new Map();
-const treeVisibilityListeners = [];
-
 const vscodeStub = {
   window: {
     registerWebviewViewProvider: (id, provider) => {
       viewProviders.set(id, provider);
       return makeDisposable();
     },
-    createTreeView: () => ({
-      onDidChangeVisibility: cb => {
-        treeVisibilityListeners.push(cb);
-        return makeDisposable();
-      },
-      dispose: () => {},
-    }),
     showInformationMessage: () => Promise.resolve(undefined),
     showErrorMessage: () => Promise.resolve(undefined),
     showWarningMessage: () => Promise.resolve(undefined),
@@ -146,6 +139,7 @@ const calls = {
     openSettingsUI: 0,
     gitCommit: 0,
     widenToOneThird: 0,
+    openChatFromHistory: [],
   },
   manager: {
     openNewChat: 0,
@@ -217,6 +211,10 @@ class FakeSidebarView {
   }
   gitCommit() {
     calls.sidebar.gitCommit += 1;
+    return Promise.resolve();
+  }
+  openChatFromHistory(event) {
+    calls.sidebar.openChatFromHistory.push(event);
     return Promise.resolve();
   }
   getRegistryTabEntries() {
@@ -488,43 +486,23 @@ async function runTest() {
   assert.strictEqual(calls.sidebar.gitCommit, 1);
   assert.strictEqual(calls.controller.gitCommit, 0);
 
-  // The KS button's command in sidebar mode: just focus the chat.
+  // The KS button's command in sidebar mode: focus the history view —
+  // the SAME primary-sidebar surface editor-tabs mode shows — and
+  // neither create a chat nor steal the composer's focus.
   const sidebarFocusBefore = calls.sidebar.focusChatInput;
-  await commands.get('kissSorcar.showHistory')();
-  assert.strictEqual(
-    calls.sidebar.focusChatInput,
-    sidebarFocusBefore + 1,
-    'sidebar mode: showHistory focuses the chat',
-  );
-  assert.strictEqual(calls.manager.openNewChat, 0);
-
-  // --- the KS activity-bar button (sidebar mode): its dummy tree -------
-  // Becoming visible closes the primary sidebar (nothing — history
-  // panel included — may stay open there) and reveals the chat in the
-  // secondary sidebar, creating no chat.
-  assert.strictEqual(treeVisibilityListeners.length, 1, 'tree handler');
-  const treeFocusBefore = calls.sidebar.focusChatInput;
   executedCommands.length = 0;
-  for (const cb of treeVisibilityListeners) cb({visible: true});
-  await new Promise(r => setTimeout(r, 120));
+  await commands.get('kissSorcar.showHistory')();
   assert.deepStrictEqual(
     executedCommands.map(e => e.cmd),
-    ['workbench.action.closeSidebar'],
-    'KS activity-bar click: the primary sidebar closes',
+    ['kissSorcar.historyView.focus'],
+    'sidebar mode: showHistory focuses the primary-sidebar history view',
   );
+  assert.strictEqual(calls.manager.openNewChat, 0);
   assert.strictEqual(
     calls.sidebar.focusChatInput,
-    treeFocusBefore + 1,
-    'KS activity-bar click: the secondary-sidebar chat is revealed',
+    sidebarFocusBefore,
+    'sidebar mode: showHistory leaves the chat focus alone',
   );
-  assert.strictEqual(calls.manager.openNewChat, 0, 'no chat created');
-
-  // A hidden tree does nothing.
-  executedCommands.length = 0;
-  for (const cb of treeVisibilityListeners) cb({visible: false});
-  await new Promise(r => setTimeout(r, 120));
-  assert.deepStrictEqual(executedCommands, []);
-  assert.strictEqual(calls.sidebar.focusChatInput, treeFocusBefore + 1);
 
   // --- registry tabs other clients create: sidebar mode ignores them
   // (its webview adopts them itself), editor-tabs mode materializes
@@ -845,23 +823,24 @@ async function runTest() {
     'mode off must NOT close the secondary sidebar it just revealed',
   );
 
-  // The flip pops the dummy tree up in the still-open primary sidebar
-  // (the history panel hides, the tree takes its spot): the handler
-  // closes the primary sidebar but must not issue a second, competing
-  // reveal of the secondary-sidebar chat — the config handler already
-  // did that; this is a mode flip, not a KS click.
-  executedCommands.length = 0;
-  for (const cb of treeVisibilityListeners) cb({visible: true});
-  await new Promise(r => setTimeout(r, 120));
-  assert.deepStrictEqual(
-    executedCommands.map(e => e.cmd),
-    ['workbench.action.closeSidebar'],
-    'tree shown by the mode flip: primary sidebar closes',
-  );
+  // Sidebar mode: a history-view click routes to the sidebar chat
+  // view (openChatFromHistory), never to the panel manager.
+  const openChatCallsBefore = calls.manager.openChat.length;
+  historyController.panelHooks.onEvent({
+    kind: 'openChat',
+    chatId: 'c10',
+    taskId: 3,
+    title: 'sidebar resume',
+  });
   assert.strictEqual(
-    calls.sidebar.focusChatInput,
-    focusBeforeModeOff + 1,
-    'tree shown by the mode flip: no second reveal of the sidebar chat',
+    calls.manager.openChat.length,
+    openChatCallsBefore,
+    'sidebar mode: the panel manager opens no editor tab',
+  );
+  assert.deepStrictEqual(
+    calls.sidebar.openChatFromHistory,
+    [{kind: 'openChat', chatId: 'c10', taskId: 3, title: 'sidebar resume'}],
+    'sidebar mode: the click reaches the sidebar chat view',
   );
 
   // --- a session with NO persisted panel-id record (pre-upgrade
@@ -886,7 +865,12 @@ async function runTest() {
   vscodeStub.window.tabGroups = {all: []};
   const openBeforeActivate2 = calls.manager.openNewChat;
   const ensureBeforeActivate2 = calls.manager.ensureChatOpen.length;
+  executedCommands.length = 0;
   extension.activate(ctx2);
+  assert.ok(
+    executedCommands.some(e => e.cmd === 'kissSorcar.metaViewSecondary.focus'),
+    'activation with the mode ON shows the secondary sidebar (Task Info)',
+  );
   assert.strictEqual(calls.manager.watchEditorTabs, 2, 'backstop re-wired');
   assert.deepStrictEqual(
     calls.manager.ensureChatOpen.slice(ensureBeforeActivate2),
@@ -958,7 +942,6 @@ async function runTest() {
   // The earlier activations' config listeners must not fire here (the
   // stub's disposables are no-ops), so start from clean listener sets.
   configListeners.length = 0;
-  treeVisibilityListeners.length = 0;
   registryTabsAddedListeners.length = 0;
   firstResolveCb = null;
   editorTabsMode = true;
@@ -997,7 +980,6 @@ async function runTest() {
   const ctx3 = await activateUnwidened();
   const focusBeforeOff3 = calls.sidebar.focusChatInput;
   const widenBefore3 = calls.sidebar.widenToOneThird;
-  executedCommands.length = 0;
   editorTabsMode = false;
   await fireConfigChange();
   assert.strictEqual(
@@ -1005,6 +987,10 @@ async function runTest() {
     focusBeforeOff3 + 1,
     'mode off (never widened): the reveal focuses the chat',
   );
+  // The activation reveal (the window started with the mode ON) has
+  // flushed during the flip's wait; only the WIDENING's own commands
+  // are under test below.
+  executedCommands.length = 0;
   // The reveal resolved the view: the widening runs, then hands focus
   // back to the chat composer instead of the editor group.
   await runWidening();
@@ -1039,7 +1025,6 @@ async function runTest() {
   // the sidebar chat in a window that was in sidebar mode all along)
   // keeps the widening's original handoff to the editor group.
   configListeners.length = 0;
-  treeVisibilityListeners.length = 0;
   registryTabsAddedListeners.length = 0;
   editorTabsMode = false;
   const ctx4 = await activateUnwidened();
@@ -1059,6 +1044,85 @@ async function runTest() {
   );
   assert.strictEqual(ctx4.workspaceState.get('sidebarWidened'), true);
   disposeCtx(ctx4);
+
+  // --- the activation reveal's focus continuation -----------------------
+  // With the mode ON and only a restored chat PLACEHOLDER (no revived
+  // panel), the reveal's focus handoff returns to the editor group the
+  // user was in — focusActiveEditorGroup, never focusFirstEditorGroup,
+  // which would drag a user working in group 2/3 over to group 1.
+  configListeners.length = 0;
+  registryTabsAddedListeners.length = 0;
+  editorTabsMode = true;
+  const makeRevealCtx = async () => {
+    const c = {
+      extensionUri: vscodeStub.Uri.file(tmpExtPath),
+      extensionPath: tmpExtPath,
+      subscriptions: [],
+      workspaceState: makeMemento(),
+      globalState: makeMemento(),
+    };
+    await c.workspaceState.update('firstLaunchDone', true);
+    await c.workspaceState.update('sidebarWidened', true);
+    fakePanelCount = 0;
+    // A restored placeholder counts as a chat tab, so activation does
+    // not open (and later focus) a fresh background chat.
+    vscodeStub.window.tabGroups = {
+      all: [
+        {tabs: [{input: {viewType: 'mainThreadWebview-kissSorcar.chatTab'}}]},
+      ],
+    };
+    return c;
+  };
+  const flushReveal = () => new Promise(r => setTimeout(r, 20));
+
+  const ctx5 = await makeRevealCtx();
+  executedCommands.length = 0;
+  const ctrlFocusBefore5 = calls.controller.focusChatInput;
+  extension.activate(ctx5);
+  await flushReveal();
+  assert.ok(
+    executedCommands.some(
+      e => e.cmd === 'workbench.action.focusActiveEditorGroup',
+    ),
+    'no revived panel: the reveal hands focus back to the ACTIVE ' +
+      'editor group',
+  );
+  assert.ok(
+    !executedCommands.some(
+      e => e.cmd === 'workbench.action.focusFirstEditorGroup',
+    ),
+    'the handoff must not drag the user to editor group 1',
+  );
+  assert.strictEqual(
+    calls.controller.focusChatInput,
+    ctrlFocusBefore5,
+    'no revived panel: no composer to focus',
+  );
+  disposeCtx(ctx5);
+
+  // The continuation is stale once the mode flips OFF while the reveal
+  // is in flight: the OFF branch owns the focus then, and the stale
+  // continuation must not touch it.
+  configListeners.length = 0;
+  registryTabsAddedListeners.length = 0;
+  editorTabsMode = true;
+  const ctx6 = await makeRevealCtx();
+  executedCommands.length = 0;
+  const ctrlFocusBefore6 = calls.controller.focusChatInput;
+  extension.activate(ctx6);
+  // The reveal's promise has not resolved yet (microtask): the mode
+  // turning off now must void the pending focus handoff.
+  editorTabsMode = false;
+  await flushReveal();
+  assert.ok(
+    !executedCommands.some(
+      e => e.cmd === 'workbench.action.focusActiveEditorGroup',
+    ),
+    'a mode flipped off mid-reveal keeps the focus where the OFF ' +
+      'branch put it',
+  );
+  assert.strictEqual(calls.controller.focusChatInput, ctrlFocusBefore6);
+  disposeCtx(ctx6);
 
   fs.rmSync(tmpExtPath, {recursive: true, force: true});
   console.log('editorTabsExtensionWiring: all tests passed');

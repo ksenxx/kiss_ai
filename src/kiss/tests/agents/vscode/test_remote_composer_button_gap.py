@@ -70,6 +70,11 @@ _ALL_IDS = _LEFT_GROUP_IDS + ["model-btn", "send-btn"]
 # (setRunningState: sendBtn stays flex, stopBtn becomes flex, spinner
 # turns active), so the running footer holds two more controls.
 _RUNNING_IDS = _ALL_IDS + ["wait-spinner", "stop-btn"]
+# The VS Code webview surface has NO burger: its task history lives in
+# the primary sidebar (both modes), so main.css hides #menu-btn there.
+_EXT_LEFT_GROUP_IDS = [i for i in _LEFT_GROUP_IDS if i != "menu-btn"]
+_EXT_ALL_IDS = _EXT_LEFT_GROUP_IDS + ["model-btn", "send-btn"]
+_EXT_RUNNING_IDS = _EXT_ALL_IDS + ["wait-spinner", "stop-btn"]
 
 _ENTER_RUNNING_STATE_JS = """
 () => {
@@ -118,12 +123,25 @@ _GEOMETRY_JS = """
 """
 
 
-def _assert_buttons_spread_out(geometry: dict, min_gap: float) -> None:
+def _assert_buttons_spread_out(
+    geometry: dict, min_gap: float, left_ids: list[str] | None = None
+) -> None:
     """Assert every adjacent pair of visible composer controls keeps
     at least *min_gap* px between their bounding boxes and that all
-    controls sit on one row (equal vertical centers)."""
+    controls sit on one row (equal vertical centers).
+
+    Args:
+        geometry: The ``_GEOMETRY_JS`` probe result.
+        min_gap: Minimum horizontal gap between adjacent boxes.
+        left_ids: The left button group actually on this surface; the
+            VS Code webview has no burger (its history lives in the
+            primary sidebar), so it passes the list without
+            ``menu-btn``.  Defaults to the remote page's full group.
+    """
+    if left_ids is None:
+        left_ids = _LEFT_GROUP_IDS
     boxes = geometry["boxes"]
-    for a, b in zip(_LEFT_GROUP_IDS, _LEFT_GROUP_IDS[1:]):
+    for a, b in zip(left_ids, left_ids[1:]):
         gap = boxes[b]["left"] - boxes[a]["right"]
         assert gap >= min_gap, (
             f"gap {a} -> {b} is {gap:.2f}px; the buttons below the "
@@ -141,7 +159,8 @@ def _assert_buttons_spread_out(geometry: dict, min_gap: float) -> None:
         "and the send button must not overlap"
     )
     centers = [
-        (boxes[i]["top"] + boxes[i]["bottom"]) / 2 for i in _ALL_IDS
+        (boxes[i]["top"] + boxes[i]["bottom"]) / 2
+        for i in left_ids + ["model-btn", "send-btn"]
     ]
     assert max(centers) - min(centers) <= 1.0, (
         f"composer controls must share one row, got centers {centers}"
@@ -342,7 +361,10 @@ def test_extension_composer_buttons_spread_out() -> None:
             assert codex_css not in html
             page.set_content(html, wait_until="load")
             page.wait_for_selector("#input-footer", state="attached")
-            geometry = page.evaluate(_GEOMETRY_JS, _ALL_IDS)
+            # No burger on this surface: the primary sidebar owns the
+            # history panel in both extension modes.
+            assert page.locator("#menu-btn").is_hidden()
+            geometry = page.evaluate(_GEOMETRY_JS, _EXT_ALL_IDS)
 
             # Cramped production state: narrow VS Code sidebar while a
             # task runs (spinner active, send AND stop visible). The
@@ -355,11 +377,13 @@ def test_extension_composer_buttons_spread_out() -> None:
             narrow_page.wait_for_selector("#input-footer", state="attached")
             narrow_page.evaluate(_ENTER_RUNNING_STATE_JS)
             narrow_page.wait_for_timeout(100)
-            running = narrow_page.evaluate(_GEOMETRY_JS, _RUNNING_IDS)
+            running = narrow_page.evaluate(_GEOMETRY_JS, _EXT_RUNNING_IDS)
             narrow.close()
         finally:
             browser.close()
 
-    _assert_buttons_spread_out(geometry, min_gap=4.0)
+    _assert_buttons_spread_out(
+        geometry, min_gap=4.0, left_ids=_EXT_LEFT_GROUP_IDS
+    )
     _assert_no_separator(geometry)
     _assert_no_overlap(running["boxes"])

@@ -769,9 +769,179 @@ async function main() {
     assert.strictEqual(all(win, '#history-list .sidebar-item').length, 7);
     const sep = all(win, '.history-day-sep')[0];
     assert.strictEqual(sep.getAttribute('role'), 'separator');
-    assert.ok(
+    // Task panels carry NO per-chat colour any more.
+    assert.strictEqual(
       groups(win)[0].style.getPropertyValue('--task-color'),
-      'block coloured by chat',
+      '',
+      'no per-chat colour on the block',
+    );
+    assert.strictEqual(
+      all(win, '#history-list .sidebar-item')[0].style.getPropertyValue(
+        '--task-color',
+      ),
+      '',
+      'no per-chat colour on the rows',
+    );
+    // Every chat block is a collapsible panel: a header (the chat's
+    // first task) above a body holding the task rows.
+    const groupA = groups(win)[0];
+    const headerA = groupA.querySelector(':scope > .history-chat-header');
+    assert.ok(headerA, 'chat block has a clickable header');
+    assert.strictEqual(
+      headerA.querySelector('.history-chat-title').textContent,
+      'task a1',
+      "the header follows the chat's oldest loaded task when the daemon " +
+        'sends no chat_first_task',
+    );
+    assert.ok(
+      groupA.querySelector(':scope > .history-chat-body .sidebar-item'),
+      'task rows live in the body container',
+    );
+    win.close();
+  });
+
+  await test('History: chat panels collapse by default, stay open while running, remember the user toggle', async () => {
+    const {win, posted} = makeWebview();
+    const collapsed = g => g.classList.contains('collapsed');
+    sendHistory(win, posted, 0, [
+      Object.assign(session('A', 'a2', todayNoon), {
+        chat_first_task: 'first task of A',
+      }),
+      Object.assign(session('B', 'b1', todayNoon - 600), {is_running: true}),
+      Object.assign(session('A', 'a1', todayNoon - 1200), {
+        chat_first_task: 'first task of A',
+      }),
+    ]);
+    let [gA, gB] = groups(win);
+    // The daemon names the chat's FIRST task (which may be beyond the
+    // loaded page); the header shows it, clamped by CSS to 3 lines.
+    assert.strictEqual(
+      gA.querySelector('.history-chat-title').textContent,
+      'first task of A',
+    );
+    assert.ok(collapsed(gA), 'an idle chat starts collapsed');
+    assert.ok(!collapsed(gB), 'a chat with a running task starts open');
+    assert.strictEqual(
+      gA.querySelector('.history-chat-header').getAttribute('aria-expanded'),
+      'false',
+    );
+    // The user opens A: the choice survives a re-render.
+    gA.querySelector('.history-chat-header').click();
+    assert.ok(!collapsed(gA), 'header click expands the panel');
+    sendHistory(win, posted, 0, [
+      Object.assign(session('A', 'a2', todayNoon), {
+        chat_first_task: 'first task of A',
+      }),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    [gA, gB] = groups(win);
+    assert.ok(!collapsed(gA), 'the explicit expand survives the rebuild');
+    assert.ok(
+      collapsed(gB),
+      "B's task finished and the user never toggled it: collapsed again",
+    );
+    // Collapsing hides the body, not the block.
+    gA.querySelector('.history-chat-header').click();
+    assert.ok(collapsed(gA), 'header click collapses the panel again');
+    assert.ok(
+      gA.querySelector(':scope > .history-chat-body .sidebar-item'),
+      'the rows stay in the DOM under the collapsed header',
+    );
+    win.close();
+  });
+
+  await test('History: a search expands every chat — past saved collapses and through the identical-refresh fast path — and clearing it restores the defaults', async () => {
+    const {win, posted} = makeWebview();
+    const collapsed = g => g.classList.contains('collapsed');
+    const searchBox = byId(win, 'history-search');
+    const setSearch = value => {
+      searchBox.value = value;
+      searchBox.dispatchEvent(new win.Event('input', {bubbles: true}));
+    };
+    const page = () => [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ];
+    sendHistory(win, posted, 0, page());
+    let [gA, gB] = groups(win);
+    // The user explicitly collapses A (expand + collapse stores the
+    // choice), which must NOT hide A's matches inside a later search.
+    gA.querySelector('.history-chat-header').click();
+    gA.querySelector('.history-chat-header').click();
+    assert.ok(collapsed(gA));
+    setSearch('task');
+    // The search's results equal the loaded page, so the reply lands
+    // in the identical-refresh fast path: no rebuild, same nodes.
+    sendHistory(win, posted, 0, page());
+    [gA, gB] = groups(win);
+    assert.ok(
+      !collapsed(gA),
+      "a search expands A even though the user collapsed it before",
+    );
+    assert.ok(!collapsed(gB), 'B expands for the search too');
+    // A collapse DURING the search applies to the search view only.
+    gA.querySelector('.history-chat-header').click();
+    assert.ok(collapsed(gA), 'the panel can still be folded mid-search');
+    // A changed-data rebuild while the SAME query stands (any task on
+    // the daemon persisted a result) keeps the in-search fold.
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('A', 'a2', todayNoon + 60),
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    [gA, gB] = groups(win);
+    assert.ok(
+      collapsed(gA),
+      'the in-search fold survives a changed-data rebuild',
+    );
+    assert.ok(!collapsed(gB), 'unfolded chats stay expanded for the search');
+    setSearch('');
+    sendHistory(win, posted, 0, page());
+    [gA, gB] = groups(win);
+    assert.ok(
+      collapsed(gA),
+      "clearing the search restores A's saved collapse",
+    );
+    assert.ok(collapsed(gB), 'clearing the search restores the default');
+    // A NEW search starts from expanded matches again: the fold made
+    // inside the previous search does not carry over.
+    setSearch('task');
+    sendHistory(win, posted, 0, page());
+    [gA, gB] = groups(win);
+    assert.ok(!collapsed(gA), 'a fresh search drops the old in-search fold');
+    assert.ok(!collapsed(gB));
+    win.close();
+  });
+
+  await test('History: keyboard focus on a chat header survives a changed-data rebuild', async () => {
+    const {win, posted} = makeWebview();
+    sendHistory(win, posted, 0, [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const header = groups(win)[0].querySelector('.history-chat-header');
+    header.focus();
+    assert.strictEqual(win.document.activeElement, header);
+    // Changed data (a new task appears) wipes and rebuilds the list;
+    // the fresh header of the SAME chat must take the focus over.
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('A', 'a2', todayNoon + 60),
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ]);
+    const headerAfter = groups(win)[0].querySelector('.history-chat-header');
+    assert.notStrictEqual(headerAfter, header, 'the list was rebuilt');
+    assert.strictEqual(
+      groups(win)[0].dataset.chatId,
+      'A',
+      "A still leads (its newest task is the youngest)",
+    );
+    assert.strictEqual(
+      win.document.activeElement,
+      headerAfter,
+      'focus lands on the rebuilt header of the same chat',
     );
     win.close();
   });

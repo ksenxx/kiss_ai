@@ -16,6 +16,11 @@ export interface SessionInfo {
   timestamp: number;
   preview: string;
   has_events?: boolean;
+  /**
+   * The chat's FIRST task text (bounded by the daemon), naming the
+   * chat's collapsible panel in the history view.
+   */
+  chat_first_task?: string;
 }
 
 /**
@@ -777,6 +782,15 @@ type ToWebviewMessageBody =
   // tab is already open. The webview scrolls to the task's transcript
   // region, or replays the task when it is not rendered.
   | {type: 'showTask'; taskId: string}
+  // Host (sidebar mode): a primary-sidebar history panel click — open
+  // the chat in THIS sidebar chat view, mirroring the webview's own
+  // in-page history rows (switch tab / resume / read-only fallback).
+  | {
+      type: 'openChatFromHistory';
+      chatId: string;
+      taskId: string | number | null;
+      title: string;
+    }
   // Daemon: answer to a `complete` command (the input-box ghost /
   // autocomplete list), scoped to the requesting connection and tab.
   | {
