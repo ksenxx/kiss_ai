@@ -23,6 +23,16 @@
 #   1b. Check that no task is running there: this deploy restarts the remote
 #      web app, which would kill one mid-step (SORCAR_FORCE_RESTART=1 says go
 #      ahead anyway).
+#   1c. Check that the remote has room under $HOME for the deploy: this
+#      machine's task database (step 4b ships it whole the first time) plus
+#      SORCAR_DISK_HEADROOM_GB (3) for the checkout, its Python environment
+#      and the tools.  scripts/check-remote-disk-space.sh removes the scratch
+#      file an interrupted upload leaves behind, and, when the room is not
+#      there, names what fills the disk, which other filesystem on the remote
+#      has enough (a cloud VM's data disk, typically), and the command that
+#      moves the home directory onto it (scripts/move-home-to-disk.sh, a bind
+#      mount recorded in /etc/fstab, so $HOME keeps its path).  A deploy that
+#      ran out of room half-way used to fail in a different place each time.
 #   2. Copy ~/.ssh/ so the remote can fetch and push git as you, and hop to
 #      other hosts as you.  It comes before the sync because the deployment
 #      pulls its own history from GitHub over that key.  ``authorized_keys``
@@ -83,7 +93,12 @@
 #   7. Publish it worldwide: a remote password is required (kiss-web only opens
 #      a Cloudflare tunnel when one is set), ``cloudflared`` is installed when
 #      missing, and the resulting public https URL is verified from this
-#      machine and opened in your browser.  The stable https://ntfy.sh/<topic>
+#      machine and opened in your browser.  The remote checks its own URL
+#      first (scripts/wait-for-public-url.sh) but only as a courtesy: a stub
+#      resolver asked for a quick tunnel's name in the seconds before the
+#      name exists caches "no such name" for half an hour, so a URL the
+#      remote cannot reach itself is a warning there, and the verdict is this
+#      machine's.  The stable https://ntfy.sh/<topic>
 #      URL the web app displays is made machine-unique first: a
 #      ~/.kiss/ntfy_topic equal to this machine's (copied by an old deploy) is
 #      dropped so the remote regenerates its own topic — otherwise both
@@ -127,6 +142,9 @@
 #   SORCAR_NO_BROWSER   set to 1 to skip opening the browser
 #   SORCAR_SKIP_GITHUB_AUTH  set to 1 to leave this machine's GitHub.com
 #                       credentials here (step 8 is skipped)
+#   SORCAR_DISK_HEADROOM_GB  room asked for on the remote beyond the task
+#                       database (default: 3)
+#   SORCAR_SKIP_DISK_CHECK  set to 1 to deploy without checking the room
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -170,6 +188,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$SCRIPT_DIR/install.sh" ]] || die "No install.sh next to $0 — is this a KISS Sorcar checkout?"
 [[ -f "$SCRIPT_DIR/scripts/sync-repo.sh" ]] || die "No scripts/sync-repo.sh next to $0 — step 3 needs it."
 for helper in scripts/install-ssh-identity.sh scripts/install-remote-prereqs.sh \
+              scripts/check-remote-disk-space.sh scripts/move-home-to-disk.sh \
+              scripts/wait-for-public-url.sh \
               scripts/install-api-keys.sh scripts/sync-task-db.sh \
               scripts/collect-github-auth.sh scripts/install-github-auth.sh \
               src/kiss/scripts/sync_db.py src/kiss/scripts/relocate_work_dir.py \
@@ -263,6 +283,41 @@ if [[ "${SORCAR_FORCE_RESTART:-}" != "1" && "$LIVE_TASK_WINDOW" != "0" ]]; then
                 "or set SORCAR_FORCE_RESTART=1 to deploy anyway."
             ;;
     esac
+fi
+
+# ---------------------------------------------------------------------------
+# 1c. Room for the deploy on the remote's disk
+#
+# Everything a deploy writes lands under the remote's $HOME: the whole task
+# database (step 4b, as large as this machine's ~/.kiss/sorcar.db), the
+# checkout, its .venv and uv's cache, code-server.  A cloud VM is often a
+# 10 GB boot disk with a large data disk mounted beside it, and none of that
+# fits on the boot disk: the upload died with "gzip: stdout: No space left
+# on device", the deploy went on, and every later step failed on a full
+# disk in its own words.  So the remote is asked first whether it has room
+# for the database plus a margin for the rest (SORCAR_DISK_HEADROOM_GB,
+# 3 GB by default), and scripts/check-remote-disk-space.sh explains, when it
+# has not, what is taking the room, which other filesystem there has enough,
+# and the command that moves the home directory onto it
+# (scripts/move-home-to-disk.sh).  It also removes the scratch file an
+# interrupted upload leaves in ~/.kiss, which is what filled the disk here.
+# ---------------------------------------------------------------------------
+DISK_HEADROOM_GB="${SORCAR_DISK_HEADROOM_GB:-3}"
+[[ "$DISK_HEADROOM_GB" =~ ^[0-9]+$ ]] \
+    || die "SORCAR_DISK_HEADROOM_GB must be a whole number of gigabytes, got '$DISK_HEADROOM_GB'."
+LOCAL_DB="${KISS_HOME:-$HOME/.kiss}/sorcar.db"
+DB_BYTES=0
+# The -wal holds committed pages the main file does not have yet; the
+# snapshot that travels contains both.
+for db_part in "$LOCAL_DB" "$LOCAL_DB-wal"; do
+    [[ -f "$db_part" ]] && DB_BYTES=$((DB_BYTES + $(wc -c < "$db_part")))
+done
+NEED_BYTES=$((DB_BYTES + DISK_HEADROOM_GB * 1024 * 1024 * 1024))
+if [[ "${SORCAR_SKIP_DISK_CHECK:-}" != "1" ]]; then
+    step "Checking that $TARGET has room for the deploy ($((NEED_BYTES / 1024 / 1024)) MiB) ..."
+    ssh "$TARGET" "NEED_BYTES=$NEED_BYTES DB_BYTES=$DB_BYTES TARGET=$(shquote "$TARGET") bash -s" \
+        < "$SCRIPT_DIR/scripts/check-remote-disk-space.sh" \
+        || die "$TARGET does not have room for the deploy (see above)."
 fi
 
 # ---------------------------------------------------------------------------
@@ -412,12 +467,14 @@ if [[ -n "$RC_FILE" ]]; then
     ssh "$TARGET" "chmod 600 \"\$HOME/.kiss/$(basename "$RC_FILE")\""
 fi
 scp -q "$TMP_DIR/api_keys.env" "$TARGET:.kiss/"
-# Steps 7a and 7c run these two on the remote.  They are shipped rather than
-# run out of the synced checkout, so that deploying a branch older than they
-# are still gets the version that keeps the rest of ~/.kiss/config.json, and
-# the one that looks for a running task before the web app is restarted.
+# Steps 7a, 7c and 7d run these three on the remote.  They are shipped rather
+# than run out of the synced checkout, so that deploying a branch older than
+# they are still gets the version that keeps the rest of ~/.kiss/config.json,
+# the one that looks for a running task before the web app is restarted, and
+# the one that does not fail the deploy over the remote's own DNS cache.
 scp -q "$SCRIPT_DIR/src/kiss/scripts/remote_config.py" \
-       "$SCRIPT_DIR/src/kiss/scripts/running_tasks.py" "$TARGET:.kiss/"
+       "$SCRIPT_DIR/src/kiss/scripts/running_tasks.py" \
+       "$SCRIPT_DIR/scripts/wait-for-public-url.sh" "$TARGET:.kiss/"
 # Make interactive and non-interactive bash sessions (which is what the agent
 # and its tools run under) see the keys; see scripts/install-api-keys.sh for
 # how ~/.bashrc is edited without damaging what is in it.
@@ -692,38 +749,15 @@ rm -f "$HOME/.kiss/cloudflared.pid" "$HOME/.kiss/remote-url.json"
 systemctl --user restart kiss-web.service
 
 # --- 7d. Wait for the local endpoint, then for the public URL --------------
-for _ in $(seq 1 90); do
-    code=$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$WEB_PORT/" || true)
-    [ "$code" = "200" ] && break
-    sleep 1
-done
-[ "${code:-}" = "200" ] || {
-    echo "ERROR: kiss-web did not answer on https://127.0.0.1:$WEB_PORT" >&2
-    tail -20 "$HOME/.kiss/kiss-web-stderr.log" >&2 || true
-    exit 1
-}
-rinfo "kiss-web answers on https://127.0.0.1:$WEB_PORT"
-# Wait for a tunnel URL that actually answers: Cloudflare needs a few seconds
-# to route a fresh quick tunnel, and the file is rewritten if the tunnel is
-# replaced, so re-read it on every attempt instead of trusting the first value.
-url=""
-for _ in $(seq 1 60); do
-    candidate=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("tunnel",""))' \
-                "$HOME/.kiss/remote-url.json" 2>/dev/null || true)
-    if [ -n "$candidate" ] \
-       && [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$candidate/")" = "200" ]; then
-        url="$candidate"
-        break
-    fi
-    sleep 3
-done
-[ -n "$url" ] || {
-    echo "ERROR: no reachable public tunnel URL appeared (last: ${candidate:-none})" >&2
-    tail -20 "$HOME/.kiss/kiss-web-stderr.log" >&2 || true
-    exit 1
-}
-rinfo "Public tunnel is live: $url"
-echo "SORCAR_PUBLIC_URL=$url"
+# scripts/wait-for-public-url.sh (shipped into ~/.kiss in step 4, so that
+# deploying an older branch still gets this version).  It fails only when
+# kiss-web does not come up or publishes no URL at all.  A URL that does not
+# answer from this host is a warning: a quick tunnel's fresh hostname takes
+# seconds to reach DNS, and a stub resolver asked too early (systemd-resolved
+# on Debian and Ubuntu images) keeps the "no such name" answer for half an
+# hour -- the deploying machine, which never asked too early, verifies the
+# URL in step 9.  Its last line is the SORCAR_PUBLIC_URL= line.
+bash "$HOME/.kiss/wait-for-public-url.sh" "$WEB_PORT"
 REMOTE
 
 # ---------------------------------------------------------------------------
