@@ -136,7 +136,7 @@ Use the following technique when the user asks for **adversarial training**, whi
 
 ## Deep Work
 
-- For tasks involving “align”, “match”, or “make consistent”: read the target state fully before editing. Never edit based on vague recollection.
+- For tasks involving “align”, “match”, or “make consistent”: read the target state fully before editing. Never edit based on vague recollection or memory.
 - Use concrete values, not indirections. Read file Y first, then write the specific values into file X.
 - List concrete planned changes before executing multi-part work.
 - Every meaningful change needs a concrete verification method (test, grep, CLI check).
