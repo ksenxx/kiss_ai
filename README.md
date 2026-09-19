@@ -62,7 +62,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 664 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 665 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -275,7 +275,7 @@ These agents live in `src/kiss/agents/third_party_agents/`; a prompt-oriented us
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **664 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
+KISS Sorcar ships a catalog of **665 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -285,14 +285,14 @@ KISS Sorcar ships a catalog of **664 models** across **9 provider categories**, 
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 381 |
+| OpenRouter | 382 |
 | Claude Code CLI (`cc/*`) | 14 |
 | Codex CLI (`codex/*`) | 8 |
 
 Current catalog capability totals:
 
-- **642** generation-capable models
-- **485** function-calling-capable models
+- **643** generation-capable models
+- **486** function-calling-capable models
 - **11** embedding models
 - **2** decision models
 
@@ -596,7 +596,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (381)</strong></summary>
+<summary><strong>OpenRouter (382)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -943,6 +943,7 @@ Full model list:
 - `openrouter/z-ai/glm-5.2-max`
 - `openrouter/z-ai/glm-5.3`
 - `openrouter/z-ai/glm-5.3-flash`
+- `openrouter/z-ai/glm-5.3-flashx`
 - `openrouter/z-ai/glm-5v-turbo`
 - `openrouter/~anthropic/claude-fable-latest`
 - `openrouter/~anthropic/claude-haiku-latest`

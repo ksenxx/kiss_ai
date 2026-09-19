@@ -5967,6 +5967,17 @@
     "use_responses_api": true,
     "cache_read_price_per_1M": 0.018
   },
+  "openrouter/z-ai/glm-5.3-flashx": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.37,
+    "output_price_per_1M": 1.25,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.075
+  },
   "openrouter/z-ai/glm-5v-turbo": {
     "context_length": 202752,
     "input_price_per_1M": 1.2,
@@ -6407,14 +6418,14 @@
   },
   "openrouter/~z-ai/glm-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.892,
-    "output_price_per_1M": 2.803,
+    "input_price_per_1M": 0.845,
+    "output_price_per_1M": 2.86,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.16562
+    "cache_read_price_per_1M": 0.169
   },
   "text-embedding-3-large": {
     "context_length": 8191,
