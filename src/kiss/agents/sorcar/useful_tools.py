@@ -830,6 +830,11 @@ class UsefulTools:
         # Read dedupe: (path, start_line, max_lines) -> sha of the file text
         # the model was last shown for that window (see :meth:`Read`).
         self._reads_shown: dict[tuple[str, int, int], str] = {}
+        # Files this instance has shown the model (Read) or written itself
+        # (Write, Edit).  Edit and Write refuse an existing file that is not
+        # in this set, so the read-before-modify rule of SYSTEM.md is
+        # enforced by the tools and not only requested by the prompt.
+        self.read_files: set[Path] = set()
 
     def forget_reads(self) -> None:
         """Forget which file windows the model has already been shown.
@@ -837,8 +842,17 @@ class UsefulTools:
         Called by the agent when earlier tool outputs left the model's
         context (compaction, a new session), so the next ``Read`` of an
         unchanged file returns its content instead of the dedupe stub.
+        ``read_files`` is kept: the model has still seen the file once in
+        this task, so Edit and Write stay permitted on it.
         """
         self._reads_shown.clear()
+
+    def _unread_error(self, file_path: str, verb: str) -> str:
+        """Return the error text for modifying a file the model has not read."""
+        return (
+            f"Error: {file_path} has not been read in this session. "
+            f"Call Read on it before {verb} it."
+        )
 
     def _spawn(self, command: str) -> subprocess.Popen:
         """Launch *command* with the shared Popen configuration.
@@ -988,11 +1002,15 @@ class UsefulTools:
                 text = resolved.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 logger.debug("Binary file detected", exc_info=True)
-                return self._read_binary(file_path, resolved)
+                shown = self._read_binary(file_path, resolved)
+                if not shown.startswith("Error:"):
+                    self.read_files.add(resolved)
+                return shown
             except FileNotFoundError:
                 suggestion = _suggest_close_path(resolved)
                 return f"Error: File not found: {file_path}.{suggestion}"
 
+            self.read_files.add(resolved)
             if text == "":
                 return "(file is empty)"
 
@@ -1109,8 +1127,11 @@ class UsefulTools:
                     f"Error: {file_path} exists and is not a regular file "
                     f"(directory/FIFO/device/socket); refusing to write to it."
                 )
+            if resolved.is_file() and resolved not in self.read_files:
+                return self._unread_error(file_path, "overwriting")
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding="utf-8", newline="")
+            self.read_files.add(resolved)
             return f"Successfully wrote {len(content)} characters to {file_path}"
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
@@ -1146,6 +1167,8 @@ class UsefulTools:
                     resolved = fallback.resolve()
             if not resolved.is_file():
                 return f"Error: File not found: {file_path}"
+            if resolved not in self.read_files:
+                return self._unread_error(file_path, "editing")
             if old_string == new_string:
                 return "Error: new_string must be different from old_string"
             if old_string == "":

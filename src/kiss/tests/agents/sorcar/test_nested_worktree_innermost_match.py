@@ -58,6 +58,7 @@ def test_write_and_edit_land_in_innermost_worktree(nested: tuple[Path, Path]) ->
     assert "Successfully wrote" in tools.Write(str(proj / "notes.md"), "n\n")
     assert (inner_wt / "notes.md").read_text() == "n\n"
     assert not (proj / "notes.md").exists()
+    tools.Read(str(proj / "src" / "app.py"))
     assert "Successfully replaced" in tools.Edit(
         str(proj / "src" / "app.py"), "worktree", "patched"
     )

@@ -60,8 +60,10 @@ def http_server():
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             pages = {
-                "/": form_html, "/second": second_html,
-                "/empty": empty_html, "/multi": multi_html,
+                "/": form_html,
+                "/second": second_html,
+                "/empty": empty_html,
+                "/multi": multi_html,
             }
             content = pages.get(self.path, form_html)
             self.send_response(200)
@@ -112,6 +114,7 @@ class TestUsefulToolsBranches:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("content")
             f.flush()
+            ut.Read(f.name)
             result = ut.Edit(f.name, "content", "content")
             assert "must be different" in result
             os.unlink(f.name)
@@ -121,6 +124,7 @@ class TestUsefulToolsBranches:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("content")
             f.flush()
+            ut.Read(f.name)
             result = ut.Edit(f.name, "xyz", "abc")
             assert "not found" in result
             os.unlink(f.name)
@@ -130,6 +134,7 @@ class TestUsefulToolsBranches:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("aaaa")
             f.flush()
+            ut.Read(f.name)
             result = ut.Edit(f.name, "a", "b")
             assert "appears 4 times" in result
             os.unlink(f.name)
@@ -139,6 +144,7 @@ class TestUsefulToolsBranches:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("aXaXa")
             f.flush()
+            ut.Read(f.name)
             result = ut.Edit(f.name, "X", "Y", replace_all=True)
             assert "2 occurrence(s)" in result
             assert Path(f.name).read_text() == "aYaYa"
@@ -174,12 +180,10 @@ class TestTaskHistoryBranches:
 
 
 class TestWebUseToolIntegration:
-
     def test_tab_list(self, http_server, browser_tool):
         browser_tool.go_to_url(http_server + "/")
         result = browser_tool.go_to_url("tab:list")
         assert "Open tabs" in result
-
 
     def test_tab_switch_invalid(self, http_server, browser_tool):
         result = browser_tool.go_to_url("tab:999")
@@ -264,7 +268,9 @@ finally:
 """)
             result = subprocess.run(
                 ["uv", "run", "python", str(script)],
-                capture_output=True, text=True, timeout=180,
+                capture_output=True,
+                text=True,
+                timeout=180,
                 cwd=os.getcwd(),
             )
             assert "PASS" in result.stdout, f"stdout={result.stdout}\nstderr={result.stderr}"
