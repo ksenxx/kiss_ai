@@ -1690,6 +1690,13 @@ body.meta-panel-mode #meta-list {
   overflow-y: auto;
 }
 
+/* Every surface's task-info list: a hidden row (the Parent task row
+   of a non-subagent task) stays hidden despite the per-mode
+   `display: list-item`, and a label ("Chat id:") never wraps — the
+   long id value after it breaks instead (overflow-wrap: anywhere). */
+.meta-item[hidden] { display: none !important; }
+.meta-item .meta-label { white-space: nowrap; }
+
 body.meta-panel-mode .meta-item {
   display: list-item;
   font-size: var(--fs-sm);
@@ -2773,6 +2780,25 @@ body.sidebar-chat-mode #meta-info-content {
 .sidebar-section .search-wrap { margin-bottom: 10px; }
 #history-search:focus { border-color: var(--accent); }
 
+/* The search box with the flat-list / chat-panels switch on its right. */
+.history-search-row { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+.history-search-row .search-wrap { flex: 1; min-width: 0; margin-bottom: 0; }
+
+#history-view-toggle {
+  flex: none; display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0;
+  background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border);
+  border-radius: 6px; color: color-mix(in srgb, var(--fg) 70%, transparent);
+  font-size: 14px; cursor: pointer; transition: color 0.15s, background 0.15s;
+}
+#history-view-toggle:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 10%, transparent); }
+
+#history-view-toggle.active {
+  color: var(--accent); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+#history-view-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+
 .history-filters-panel { margin-bottom: 4px; }
 
 .history-filters-toggle {
@@ -3057,13 +3083,15 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 /* The chat panel's clickable header: a chevron and the chat's first
-   task, clamped to three lines. */
+   task on ONE line (ellipsized), over a sky-blue (hue 197) tint that
+   reads on both dark and light themes.  No tooltip: the line is all
+   there is. */
 .history-chat-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 6px;
   width: 100%;
-  background: none;
+  background: hsl(197deg 70% 55% / 30%);
   border: none;
   border-radius: 7px;
   padding: 4px 6px;
@@ -3077,12 +3105,11 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 .history-chat-header:hover {
-  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  background: hsl(197deg 70% 55% / 45%);
 }
 
 .history-chat-chevron {
   flex-shrink: 0;
-  margin-top: 0.175lh;
   transition: transform 0.15s ease;
 }
 
@@ -3092,14 +3119,16 @@ body.sidebar-chat-mode #meta-info-content {
 
 .history-chat-title {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: normal;
-  word-break: break-word;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
+}
+
+/* The legacy flat list: a narrow bar on each row's right edge in its
+   chat's color (--task-color, stamped per row by renderHistory). */
+#history-list.legacy-view > .running-item {
+  border-right: 4px solid var(--task-color, transparent);
 }
 
 .history-chat-body {

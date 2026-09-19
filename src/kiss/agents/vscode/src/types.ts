@@ -39,6 +39,19 @@ export interface MetaPanelValues {
   machine: string;
   workdir: string;
   maxBudget: string;
+  /** The task's start time, localized. */
+  date: string;
+  /** The task's base model name. */
+  model: string;
+  /** 'worktree' or 'no worktree'. */
+  worktree: string;
+  /** 'parallel' or 'sequential'. */
+  parallel: string;
+  chatId: string;
+  /** The task id, suffixed ' (subagent)' for a subagent's task. */
+  taskId: string;
+  /** The parent task id ('—' when the task has none). */
+  parentTask: string;
 }
 
 export type FromWebviewMessage =

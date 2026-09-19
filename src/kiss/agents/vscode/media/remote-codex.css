@@ -419,6 +419,12 @@ body.remote-chat .search-wrap input {
   color: var(--fg);
 }
 
+/* The flat-list switch beside the search box: a pill like the box. */
+body.remote-chat #history-view-toggle {
+  background: var(--surface2);
+  border-radius: 999px;
+}
+
 body.remote-chat .config-label input[type="text"],
 body.remote-chat .config-label input[type="password"],
 body.remote-chat .config-label input[type="number"],
