@@ -39,6 +39,7 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.codex_model import CodexModel
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
+from kiss.tests.conftest import IS_WINDOWS
 from kiss.tests.core.models.test_cli_subprocess_lifecycle import (  # noqa: F401
     _ONE_EVENT_THEN_QUIET_CLAUDE,
     _ONE_EVENT_THEN_QUIET_CODEX,
@@ -47,10 +48,30 @@ from kiss.tests.core.models.test_cli_subprocess_lifecycle import (  # noqa: F401
     install_cli,
 )
 
+# Upper bound of the Windows C runtime's descriptor table (``_setmaxstdio``).
+_CRT_MAX_FDS = 8192
+
 
 def open_fd_count() -> int:
-    """Return the number of descriptors this process currently holds."""
-    return len(os.listdir("/dev/fd"))
+    """Return the number of descriptors this process currently holds.
+
+    Windows has no ``/dev/fd``, but ``subprocess.Popen`` wraps each pipe
+    handle in a C-runtime descriptor there too, so probing the CRT table
+    with ``msvcrt.get_osfhandle`` counts exactly the descriptors a leaked
+    pipe would occupy.
+    """
+    if not IS_WINDOWS:
+        return len(os.listdir("/dev/fd"))
+    import msvcrt
+
+    count = 0
+    for fd in range(_CRT_MAX_FDS):
+        try:
+            msvcrt.get_osfhandle(fd)  # type: ignore[attr-defined,unused-ignore]
+        except OSError:
+            continue
+        count += 1
+    return count
 
 
 def generate_on_a_worker_thread(

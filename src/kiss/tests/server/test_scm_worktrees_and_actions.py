@@ -34,6 +34,7 @@ import pytest
 
 from kiss.server.explorer import git_worktrees
 from kiss.server.fs_actions import FIND_MAX_MATCHES, fs_action
+from kiss.tests.conftest import IS_WINDOWS, is_root, posix_only, requires_unix_sockets
 from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
     _git,
@@ -623,7 +624,8 @@ class TestFsAction:
         ro.mkdir(exist_ok=True)
         os.chmod(ro, 0o500)
         try:
-            if os.geteuid() != 0:
+            if not IS_WINDOWS and not is_root():
+                # chmod bits are advisory on Windows: no denial to test.
                 denied = fs_action("newFile", str(ro), name="x.txt")
                 assert denied["error"].startswith("newFile failed")
         finally:
@@ -689,6 +691,7 @@ class TestOpenBinaryFiles:
         assert "background" not in plain
 
 
+@requires_unix_sockets
 class TestUdsDrop:
     """VS Code windows (UDS peers) never get the remote-only replies."""
 
@@ -815,6 +818,7 @@ class TestReviewRegressions:
         finally:
             outside.unlink()
 
+    @posix_only("os.mkfifo")
     def test_failed_overwrite_keeps_the_old_destination(self, harness) -> None:
         root = harness.plain_dir
         src = root / "srcdir"
@@ -857,13 +861,15 @@ class TestReviewRegressions:
         from kiss.server.explorer import parse_porcelain_status
 
         rows = parse_porcelain_status("RM new.txt\0old.txt\0", "/repo")
+        abs_path = str(Path("/repo") / "new.txt")  # native separators
         assert rows == [
-            {"path": "new.txt", "absPath": "/repo/new.txt", "status": "R",
+            {"path": "new.txt", "absPath": abs_path, "status": "R",
              "group": "staged", "origPath": "old.txt"},
-            {"path": "new.txt", "absPath": "/repo/new.txt", "status": "M",
+            {"path": "new.txt", "absPath": abs_path, "status": "M",
              "group": "changes"},
         ]
 
+    @posix_only("a newline is not a valid NTFS file-name character")
     def test_worktree_paths_with_newlines_and_locked_worktrees(
         self, harness, worktree,
     ) -> None:
@@ -961,6 +967,7 @@ class TestReviewRegressions:
         assert "error" not in reply, reply
         assert "+++ b/feature.txt" in reply["text"], reply["text"]
 
+    @posix_only("the file name is not valid on NTFS")
     def test_pathspec_magic_in_a_file_name_is_literal(self, harness) -> None:
         with _scratch_worktree(harness) as repo:
             magic = repo / ":(glob)*.txt"

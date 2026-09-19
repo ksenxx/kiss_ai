@@ -131,7 +131,7 @@ def test_authenticate_persists_check_and_clear() -> None:
     )
     assert json.loads(result)["ok"] is True
     assert _config.path.exists()
-    assert "third_party_agents/a2a" in str(_config.path)
+    assert _config.path.parent.parts[-2:] == ("third_party_agents", "a2a")
     if sys.platform != "win32":
         assert _config.path.stat().st_mode & 0o777 == 0o600
     saved = json.loads(_config.path.read_text(encoding="utf-8"))

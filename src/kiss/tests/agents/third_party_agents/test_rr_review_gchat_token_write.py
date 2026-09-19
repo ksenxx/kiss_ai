@@ -31,6 +31,8 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.conftest import TRANSIENT_REPLACE_READ_ERRORS
+
 _IS_POSIX = sys.platform != "win32"
 
 
@@ -98,6 +100,8 @@ class TestGoogleChatSaveToken:
             while not stop.is_set():
                 try:
                     data = json.loads(token_file.read_text(encoding="utf-8"))
+                except TRANSIENT_REPLACE_READ_ERRORS:
+                    continue
                 except (json.JSONDecodeError, OSError) as e:  # pragma: no cover
                     errors.append(f"torn read: {e}")
                     return
@@ -110,7 +114,14 @@ class TestGoogleChatSaveToken:
 
         def writer(idx: int) -> None:
             for i in range(100):
-                _save_token(_make_creds(f"token-{idx}-{i}"))
+                try:
+                    _save_token(_make_creds(f"token-{idx}-{i}"))
+                except OSError as e:  # pragma: no cover
+                    # A bare os.replace under a Windows reader raises
+                    # PermissionError; recorded so the test fails
+                    # instead of merely warning about a dead thread.
+                    errors.append(f"writer {idx} failed: {e}")
+                    return
 
         observer = threading.Thread(target=reader, daemon=True)
         writers = [threading.Thread(target=writer, args=(i,), daemon=True) for i in range(4)]

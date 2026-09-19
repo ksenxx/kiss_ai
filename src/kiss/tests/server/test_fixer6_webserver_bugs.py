@@ -45,6 +45,7 @@ import kiss.server.web_server as ws_mod
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Any, Any, Any]:
@@ -61,6 +62,7 @@ def _restore_persistence(saved: tuple[Any, Any, Any]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
 
+@requires_unix_sockets
 class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
     """E2E tests over a real running RemoteAccessServer (UDS)."""
 

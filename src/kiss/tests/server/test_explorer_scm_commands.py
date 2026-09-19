@@ -25,6 +25,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Coroutine
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ from kiss.server.explorer import (
     parse_porcelain_status,
 )
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
 
 
 def _find_free_port() -> int:
@@ -370,8 +372,9 @@ class TestListDir:
         assert reply["token"] == ""
         assert Path(reply["path"]) == harness.work_dir.resolve()
 
+    @posix_only("chmod permission bits")
     def test_unreadable_directory_replies_error(self, harness) -> None:
-        if os.geteuid() == 0:
+        if is_root():
             pytest.skip("root ignores directory permissions")
         locked = harness.work_dir / "locked"
         locked.mkdir()
@@ -503,7 +506,10 @@ class TestGitLog:
         # A merge lists its changes against its FIRST parent (main),
         # i.e. what the feature branch brought in.
         assert merge["files"] == [{"status": "A", "path": "feature.txt"}]
-        assert merge["date"] == "2026-01-02T03:04:05+00:00"
+        # git prints %aI as "+00:00" or, in newer releases, "Z".
+        assert datetime.fromisoformat(merge["date"]) == datetime.fromisoformat(
+            "2026-01-02T03:04:05+00:00",
+        )
         second = by_sha[harness.shas["second"]]
         files = {f["path"]: f for f in second["files"]}
         assert files["b.txt"]["status"] == "R"
@@ -575,6 +581,7 @@ class TestGitLog:
         merge = next(c for c in legacy["commits"] if c["sha"] == harness.shas["merge"])
         assert merge["files"] == [{"status": "A", "path": "feature.txt"}]
 
+    @posix_only("a tab is not a valid NTFS file-name character")
     def test_unusual_names_come_through_verbatim(self, harness) -> None:
         """Tabs and quotes in file names, a comma in a branch name and a
         control character in a subject all survive the wire."""
@@ -611,6 +618,7 @@ class TestGitLog:
         )
         assert "tab\tname.txt" in [e["name"] for e in listing["entries"]]
 
+    @posix_only("Windows strips trailing spaces from directory names")
     def test_repo_named_with_trailing_space_is_not_confused(self, harness) -> None:
         """``repo `` (trailing space) beside ``repo`` must report ITS own
         history, not its sibling's."""
@@ -679,6 +687,7 @@ class TestGitLog:
         assert status["branch"] == "main"
 
 
+@requires_unix_sockets
 class TestUdsDropGate:
     """A VS Code window (UDS) never gets a reply to these commands."""
 
@@ -745,12 +754,12 @@ class TestParsers:
             ("both.txt", "changes", "M", None),
             ("added.txt", "staged", "A", None),
         ]
-        assert rows[0]["absPath"] == "/repo/new.txt"
+        assert rows[0]["absPath"] == str(Path("/repo") / "new.txt")
 
     def test_porcelain_rename_missing_orig_token_at_end(self) -> None:
         rows = parse_porcelain_status("R  new.txt", "/repo")
         assert rows == [
-            {"path": "new.txt", "absPath": "/repo/new.txt", "status": "R",
+            {"path": "new.txt", "absPath": str(Path("/repo") / "new.txt"), "status": "R",
              "group": "staged"},
         ]
 

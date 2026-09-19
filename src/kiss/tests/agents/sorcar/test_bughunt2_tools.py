@@ -95,7 +95,7 @@ class TestVanishedWorktreeFallback:
         the model to use the (nonexistent) worktree path is a dead end.
         """
         repo, _stale_wt, tools = stale_worktree_setup
-        result = tools.Bash(f"cat {repo}/f.txt", "read file")
+        result = tools.Bash(f"cat {repo.as_posix()}/f.txt", "read file")
         assert "hello parent" in result, result
 
     def test_live_worktree_still_remaps_and_guards(self, tmp_path):
@@ -111,7 +111,7 @@ class TestVanishedWorktreeFallback:
         tools.Write(str(repo / "n.txt"), "x")
         assert (wt / "n.txt").exists()
         assert not (repo / "n.txt").exists()
-        out = tools.Bash(f"echo hi > {repo}/f.txt", "write file")
+        out = tools.Bash(f"echo hi > {repo.as_posix()}/f.txt", "write file")
         assert "parent-repo path" in out, out
         assert (repo / "f.txt").read_text() == "main content\n"
 

@@ -39,7 +39,13 @@ print(json.dumps({
 
 def _import_in_fresh_process(home: Path) -> dict[str, Any]:
     """Import ``kiss.core.models.model_info`` in a subprocess with ``HOME=home``."""
-    env = {**os.environ, "HOME": str(home), "KISS_HOME": str(home / ".kiss")}
+    # USERPROFILE is what Path.home() reads on Windows.
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "KISS_HOME": str(home / ".kiss"),
+    }
     proc = subprocess.run(
         [sys.executable, "-c", _IMPORT_SCRIPT],
         capture_output=True,

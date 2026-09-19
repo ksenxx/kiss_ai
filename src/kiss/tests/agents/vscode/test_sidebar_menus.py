@@ -26,12 +26,17 @@ with a REAL linked worktree — no mocks.
 from __future__ import annotations
 
 import json
+import os
 import re
 
 import pytest
 from playwright.sync_api import sync_playwright
 
-from kiss.tests.agents.vscode.test_activity_bar import _explorer_row, _sent
+from kiss.tests.agents.vscode.test_activity_bar import (
+    _explorer_row,
+    _explorer_row_sel,
+    _sent,
+)
 from kiss.tests.server.test_scm_worktrees_and_actions import (
     harness,  # noqa: F401  (module fixture used by param name)
     worktree,  # noqa: F401
@@ -45,6 +50,17 @@ def browser():
         b = p.chromium.launch(headless=True)
         yield b
         b.close()
+
+
+def _css(value: str) -> str:
+    """Escape *value* for a quoted CSS attribute selector (Windows paths
+    carry backslashes, which CSS would read as escapes)."""
+    return value.replace("\\", "\\\\")
+
+
+def _row_at(path: str, cls: str = "") -> str:
+    """Selector for the Explorer row whose path is exactly *path*."""
+    return f".explorer-row{cls}[data-explorer-path='{_css(path)}']"
 
 
 def _open_page(browser, harness):
@@ -229,7 +245,7 @@ def test_explorer_file_menu_matches_vscode(browser, harness, worktree):
             "navigator.clipboard.readText().then(t => window.__clip = t) && true",
         )
         page.wait_for_function(
-            f"window.__clip === {json.dumps(str(harness.work_dir) + '/feature.txt')}",
+            f"window.__clip === {json.dumps(str(harness.work_dir / 'feature.txt'))}",
             timeout=5000,
         )
         _explorer_row(page, "feature.txt").click(button="right")
@@ -296,7 +312,7 @@ def test_new_file_rename_and_delete_act_on_disk(browser, harness, worktree):
         inp.fill("fresh.py")
         inp.press("Enter")
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/dir/fresh.py']", timeout=15000,
+            _explorer_row_sel("/dir/fresh.py"), timeout=15000,
         )
         assert (harness.work_dir / "dir" / "fresh.py").is_file()
         # Like VS Code, the new file opened in an editor.
@@ -321,7 +337,7 @@ def test_new_file_rename_and_delete_act_on_disk(browser, harness, worktree):
         inp.fill("made")
         inp.press("Enter")
         page.wait_for_selector(
-            ".explorer-row.is-dir[data-explorer-path$='/dir/made']", timeout=15000,
+            _explorer_row_sel("/dir/made", ".is-dir"), timeout=15000,
         )
         assert (harness.work_dir / "dir" / "made").is_dir()
 
@@ -337,7 +353,7 @@ def test_new_file_rename_and_delete_act_on_disk(browser, harness, worktree):
         inp.fill("renamed.py")
         inp.press("Enter")
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/dir/renamed.py']", timeout=15000,
+            _explorer_row_sel("/dir/renamed.py"), timeout=15000,
         )
         assert (harness.work_dir / "dir" / "renamed.py").is_file()
         assert not (harness.work_dir / "dir" / "fresh.py").exists()
@@ -368,7 +384,7 @@ def test_new_file_rename_and_delete_act_on_disk(browser, harness, worktree):
         _explorer_row(page, "renamed.py").click(button="right")
         _menu_item(page, "Delete").click()
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/dir/renamed.py']",
+            _explorer_row_sel("/dir/renamed.py"),
             state="detached",
             timeout=15000,
         )
@@ -378,7 +394,7 @@ def test_new_file_rename_and_delete_act_on_disk(browser, harness, worktree):
         _explorer_row(page, "made").click(button="right")
         _menu_item(page, "Delete").click()
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/dir/made']",
+            _explorer_row_sel("/dir/made"),
             state="detached",
             timeout=15000,
         )
@@ -398,7 +414,7 @@ def test_copy_paste_cut_and_conflict_prompt(browser, harness, worktree):
         assert "disabled" not in (_menu_item(page, "Paste").get_attribute("class") or "")
         _menu_item(page, "Paste").click()
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/main-only copy.txt']", timeout=15000,
+            _explorer_row_sel("/main-only copy.txt"), timeout=15000,
         )
         assert (harness.work_dir / "main-only copy.txt").read_text() == "m\n"
         # Paste into dir/, then again: the second paste collides and the
@@ -406,7 +422,7 @@ def test_copy_paste_cut_and_conflict_prompt(browser, harness, worktree):
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/dir/main-only.txt']", timeout=15000,
+            _explorer_row_sel("/dir/main-only.txt"), timeout=15000,
         )
         (harness.work_dir / "dir" / "main-only.txt").write_text("keep\n")
         answers["confirm"] = False
@@ -427,14 +443,14 @@ def test_copy_paste_cut_and_conflict_prompt(browser, harness, worktree):
             page.wait_for_timeout(100)
         assert (harness.work_dir / "dir" / "main-only.txt").read_text() == "m\n"
         # Cut + Paste moves.
-        page.locator(".explorer-row[data-explorer-path$='/main-only copy.txt']").click(
+        page.locator(_explorer_row_sel("/main-only copy.txt")).click(
             button="right",
         )
         _menu_item(page, "Cut").click()
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/dir/main-only copy.txt']", timeout=15000,
+            _explorer_row_sel("/dir/main-only copy.txt"), timeout=15000,
         )
         assert not (harness.work_dir / "main-only copy.txt").exists()
         assert (harness.work_dir / "dir" / "main-only copy.txt").exists()
@@ -494,7 +510,7 @@ def test_open_to_the_side_keeps_the_current_tab(browser, harness, worktree):
             "document.querySelector('.chat-tab.active').textContent",
         ) == active_before
         opened = [f for f in _sent(frames, "openFile") if f.get("background")]
-        assert opened and opened[0]["path"].endswith("/feature.txt")
+        assert opened and opened[0]["path"].endswith(os.sep + "feature.txt")
     finally:
         context.close()
 
@@ -516,7 +532,7 @@ def test_source_control_lists_every_worktree(browser, harness, worktree):
         assert branches == ["main", "kiss/wt-task"]
         # The worktree's rows point at ITS copy of the files.
         wt_rows = page.locator(
-            f"#scm-changes .scm-row[data-scm-worktree='{worktree}']",
+            f"#scm-changes .scm-row[data-scm-worktree='{_css(str(worktree))}']",
         )
         assert wt_rows.count() >= 2
         paths = wt_rows.evaluate_all("els => els.map(e => e.dataset.scmPath)")
@@ -684,10 +700,11 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
         dir_item = page.locator("#folder-picker .folder-picker-item", has_text="dir")
         dir_item.click()
         assert dir_item.get_attribute("aria-selected") == "true"
-        assert inp.input_value().endswith("/dir")
+        assert inp.input_value() == str(harness.work_dir.resolve() / "dir")
         dir_item.dblclick()
         page.wait_for_function(
-            "document.querySelector('.folder-picker-input').value.endsWith('/dir')",
+            f"document.querySelector('.folder-picker-input').value === "
+            f"{json.dumps(str(harness.work_dir.resolve() / 'dir'))}",
             timeout=15000,
         )
         subdirs = sorted(
@@ -705,7 +722,8 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
         # Up goes to the parent; typing a path + Enter navigates too.
         page.click("#folder-picker .folder-picker-up")
         page.wait_for_function(
-            "document.querySelector('.folder-picker-input').value.endsWith('/repo')",
+            f"document.querySelector('.folder-picker-input').value === "
+            f"{json.dumps(str(harness.work_dir.resolve()))}",
             timeout=15000,
         )
         inp.fill(str(harness.plain_dir))
@@ -734,7 +752,7 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
         # The Explorer now shows the picked folder as its root.
         _wait_explorer_root(page, "plain")
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/plain/only.txt']", timeout=15000,
+            _explorer_row_sel("/plain/only.txt"), timeout=15000,
         )
         # The daemon was told: setWorkDir + saved config; the settings
         # box follows; the Source Control view reports no repository.
@@ -872,7 +890,7 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         )
         assert _root_paths(page) == [repo, plain]
         # Listed from disk, confined to itself; the work dir is untouched.
-        only = page.locator(f".explorer-row[data-explorer-path='{plain}/only.txt']")
+        only = page.locator(_row_at(os.path.join(plain, "only.txt")))
         only.wait_for(timeout=15000)
         assert only.get_attribute("data-explorer-root") == plain
         listed = [f for f in _sent(frames, "listDir") if f.get("path") == plain]
@@ -886,7 +904,7 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         assert "only" in page.locator(".content-tab-view").last.inner_text()
         # New File... on the added folder lands on disk inside it (the
         # daemon accepted the folder as the action's workDir).
-        plain_root = page.locator(f".explorer-row.is-root[data-explorer-path='{plain}']")
+        plain_root = page.locator(_row_at(plain, ".is-root"))
         plain_root.click(button="right")
         labels = _menu_labels(page)
         assert "Add Folder to Explorer..." in labels
@@ -899,7 +917,7 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         box.fill("added.txt")
         box.press("Enter")
         page.wait_for_selector(
-            f".explorer-row[data-explorer-path='{plain}/added.txt']", timeout=15000,
+            _row_at(os.path.join(plain, "added.txt")), timeout=15000,
         )
         assert (harness.plain_dir / "added.txt").is_file()
         (harness.plain_dir / "added.txt").unlink()
@@ -915,10 +933,10 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         assert page.locator("#cfg-work-dir").input_value() == plain
         assert page.locator(".explorer-row.is-workdir").get_attribute("data-explorer-path") == plain
         page.wait_for_selector(
-            f".explorer-row[data-explorer-path='{plain}/only.txt']", timeout=15000,
+            _row_at(os.path.join(plain, "only.txt")), timeout=15000,
         )
         # Switch back through the repo row's context menu.
-        page.locator(f".explorer-row.is-root[data-explorer-path='{repo}']").click(button="right")
+        page.locator(_row_at(repo, ".is-root")).click(button="right")
         _menu_item(page, "Set as Working Directory").click()
         _wait_first_root(page, repo)
         assert _root_paths(page) == [repo, plain]
@@ -926,7 +944,7 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         # Remove the plain folder with its button: gone from the tree and
         # from storage, still on disk.
         fs_before = len(_sent(frames, "fsAction"))
-        page.locator(f".explorer-row.is-root[data-explorer-path='{plain}']").hover()
+        page.locator(_row_at(plain, ".is-root")).hover()
         page.locator(".explorer-root-remove").first.click()
         page.wait_for_function(
             "document.querySelectorAll('#explorer-tree > .explorer-row.is-root').length === 1",

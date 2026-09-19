@@ -31,7 +31,6 @@ from __future__ import annotations
 import os
 import signal
 import stat
-import subprocess
 import time
 from pathlib import Path
 
@@ -39,7 +38,10 @@ from kiss.agents.sorcar.useful_tools import (
     UsefulTools,
     _file_lock,
     _kill_process_group,
+    _popen_kwargs,
 )
+from kiss.core.processes import popen_process_group
+from kiss.tests.conftest import IS_WINDOWS
 
 
 class TestKillProcessGroupReapedGuard:
@@ -48,9 +50,7 @@ class TestKillProcessGroupReapedGuard:
     def test_reaped_process_is_left_alone(self) -> None:
         # After wait() the PID/PGID may already belong to an unrelated
         # process; _kill_process_group must not signal it.
-        process = subprocess.Popen(
-            ["/bin/sh", "-c", "exit 0"], start_new_session=True,
-        )
+        process = popen_process_group(**_popen_kwargs("exit 0"))
         assert process.wait(timeout=10) == 0
         returncode = process.returncode
         start = time.monotonic()
@@ -61,12 +61,13 @@ class TestKillProcessGroupReapedGuard:
         )
 
     def test_live_process_group_is_still_killed(self) -> None:
-        process = subprocess.Popen(
-            ["/bin/sh", "-c", "sleep 300"], start_new_session=True,
-        )
+        process = popen_process_group(**_popen_kwargs("sleep 300"))
         assert process.poll() is None
         _kill_process_group(process)
-        assert process.wait(timeout=10) == -signal.SIGKILL
+        if IS_WINDOWS:  # taskkill /F reports no signal, only a non-zero exit
+            assert process.wait(timeout=10) != 0
+        else:
+            assert process.wait(timeout=10) == -signal.SIGKILL
 
 
 class TestBashUniformErrorContract:
@@ -98,7 +99,8 @@ class TestFileLockNonBlocking:
         lock_path = tmp_path / "locks" / "probe.lock"
         with _file_lock(lock_path) as held:
             assert held
-        assert stat.S_IMODE(os.stat(lock_path).st_mode) == 0o600
+        if not IS_WINDOWS:  # Windows has no POSIX mode bits to tighten
+            assert stat.S_IMODE(os.stat(lock_path).st_mode) == 0o600
 
     def test_nonblocking_yields_none_while_held_elsewhere(
         self, tmp_path: Path,

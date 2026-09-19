@@ -393,7 +393,7 @@ def _list_resources(skill_dir: Path) -> tuple[list[str], bool]:
             if len(resources) >= _MAX_RESOURCE_LISTING:
                 truncated = True
                 break
-            resources.append(str(rel))
+            resources.append(rel.as_posix())  # skill docs name files with '/'
     except OSError:
         logger.debug("could not list resources in %s", skill_dir, exc_info=True)
     return resources, truncated

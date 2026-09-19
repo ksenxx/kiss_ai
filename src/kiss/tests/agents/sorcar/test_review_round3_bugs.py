@@ -152,7 +152,7 @@ def test_recover_orphaned_tasks_uses_placeholders() -> None:
     """Structural check: SQL is built with ``?`` placeholders, not f-strings."""
     src = Path(
         "src/kiss/agents/sorcar/persistence.py"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     assert "'\" + str(t).replace(\"'\", \"''\") + \"'\"" not in src
     assert "WHERE rowid IN ({placeholders}) AND result = ?" in src
 
@@ -181,7 +181,7 @@ def test_migration_reprobes_inside_transaction() -> None:
     """Structural: the migration body contains a second ``PRAGMA table_info`` call after BEGIN IMMEDIATE."""
     src = Path(
         "src/kiss/agents/sorcar/persistence.py"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     begin_idx = src.find("BEGIN IMMEDIATE")
     assert begin_idx != -1
     after_begin = src[begin_idx:]
@@ -193,7 +193,7 @@ def test_migration_reprobes_inside_transaction() -> None:
 def test_migration_drop_table_inside_transaction() -> None:
     src = Path(
         "src/kiss/agents/sorcar/persistence.py"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     begin_idx = src.find("BEGIN IMMEDIATE")
     drop_idx = src.find("DROP TABLE IF EXISTS task_history__new")
     assert begin_idx != -1 and drop_idx != -1

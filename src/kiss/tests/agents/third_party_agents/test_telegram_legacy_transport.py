@@ -36,6 +36,7 @@ from kiss.agents.third_party_agents.telegram_agent import (
     _make_backend,
     _TelegramBot,
 )
+from kiss.tests.conftest import IS_WINDOWS
 
 VALID_TOKEN = "123456:VALID-TOKEN"
 SEEN_REQUESTS: list[dict[str, Any]] = []
@@ -143,7 +144,8 @@ def test_authenticate_then_check_and_persist(legacy_env: Any, api_base: str) -> 
     config_path = legacy_env / "third_party_agents" / "telegram" / "config.json"
     assert _config.path == config_path
     assert json.loads(config_path.read_text()) == {"bot_token": VALID_TOKEN}
-    assert (config_path.stat().st_mode & 0o777) == 0o600
+    # NTFS has no POSIX mode bits: chmod(0o600) is a no-op there.
+    assert IS_WINDOWS or (config_path.stat().st_mode & 0o777) == 0o600
 
     # Legacy mode puts the real token in the URL and sends no bearer header.
     get_me = SEEN_REQUESTS[0]

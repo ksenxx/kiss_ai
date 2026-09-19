@@ -69,6 +69,7 @@ from kiss.server.voice_wake_control import (
     _TERM_GRACE_SECONDS,
     VoiceWakeController,
 )
+from kiss.tests.conftest import posix_only
 
 _SLEEP_SCRIPT = """\
 print("READY", flush=True)
@@ -252,6 +253,7 @@ class VoiceLifecycleShutdownTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    @posix_only("process groups, SIGTERM-immune children and -SIGKILL exit codes")
     def test_cancelled_stop_cannot_orphan_the_child(self) -> None:
         """Finding 3: the reviewer's schedule with a SIGTERM-proof child.
 
@@ -302,6 +304,7 @@ class VoiceLifecycleShutdownTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    @posix_only("process groups, SIGTERM-immune children and -SIGKILL exit codes")
     def test_post_sigkill_reap_wait_is_bounded(self) -> None:
         """Finding 4: the reviewer's escaped-pipe-holder schedule.
 
@@ -538,6 +541,7 @@ class VoiceRound6ShutdownTest(unittest.TestCase):
             [sys.executable, "-u", path, *extra],
         )
 
+    @posix_only("process groups, SIGTERM-immune children and -SIGKILL exit codes")
     def test_stop_all_drains_a_start_queued_behind_its_own_stop(
         self,
     ) -> None:
@@ -596,6 +600,7 @@ class VoiceRound6ShutdownTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    @posix_only("process groups, SIGTERM-immune children and -SIGKILL exit codes")
     def test_stop_all_settles_pumps_of_a_cancelled_stop(self) -> None:
         """Finding 3: the reviewer's blocked-duplicate-report schedule.
 
@@ -657,6 +662,7 @@ class VoiceRound6ShutdownTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    @posix_only("process groups, SIGTERM-immune children and -SIGKILL exit codes")
     def test_stop_all_settles_escaped_pipe_pumps_of_a_cancelled_stop(
         self,
     ) -> None:
@@ -717,6 +723,7 @@ class VoiceRound6ShutdownTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    @posix_only("process groups, SIGTERM-immune children and -SIGKILL exit codes")
     def test_cancelled_restart_spawn_frees_generation_and_child(
         self,
     ) -> None:

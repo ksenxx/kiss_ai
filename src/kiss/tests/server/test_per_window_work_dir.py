@@ -37,6 +37,9 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
+
+pytestmark = requires_unix_sockets
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:

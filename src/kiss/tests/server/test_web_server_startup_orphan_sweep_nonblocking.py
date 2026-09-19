@@ -52,6 +52,7 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 
 _SENTINEL = "Agent Failed Abruptly"
 _RECOVERED = "Task terminated unexpectedly (process killed)"
@@ -133,6 +134,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
             _persistence._KISS_DIR,
         ) = self._saved
 
+    @requires_unix_sockets
     async def test_startup_binds_uds_while_db_write_locked(self) -> None:
         """End-to-end reproduction of the slow install-restart.
 

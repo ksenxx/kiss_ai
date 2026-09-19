@@ -10,6 +10,7 @@ analyzer correctly identifies redundant tests at the method level.
 
 import os
 import subprocess
+import sys
 import tempfile
 
 from kiss.scripts.redundancy_analyzer import _method_name, analyze_redundancy
@@ -33,7 +34,7 @@ def _create_coverage_db(test_code: str, source_code: str) -> str:
 
     result = subprocess.run(
         [
-            "python",
+            sys.executable,  # the venv interpreter; a bare "python" has no pytest on Windows
             "-m",
             "pytest",
             test_file,

@@ -40,6 +40,7 @@ from kiss.agents.sorcar import web_use_tool
 from kiss.agents.sorcar._concurrency import pid_alive
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.server import web_server
+from kiss.tests.conftest import IS_WINDOWS, is_root, posix_only
 
 
 def test_live_child_is_alive() -> None:
@@ -55,7 +56,7 @@ def test_live_child_is_alive() -> None:
 
 def test_reaped_child_is_dead() -> None:
     """A child that exited and was waited on is a ``ProcessLookupError``."""
-    proc = subprocess.Popen(["true"])
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
     proc.wait()
     assert pid_alive(proc.pid) is False
 
@@ -71,8 +72,9 @@ def test_non_positive_pids_are_dead() -> None:
     assert pid_alive(-1) is False
 
 
+@posix_only("pid 1 PermissionError probe via os.kill(1, 0)")
 @pytest.mark.skipif(
-    os.geteuid() == 0,
+    is_root(),
     reason="root may signal pid 1, so no PermissionError branch to exercise",
 )
 def test_foreign_owned_process_is_alive() -> None:
@@ -109,7 +111,7 @@ def test_call_sites_share_the_helper() -> None:
         web_server._is_pid_alive,
     ):
         assert probe(proc.pid) is False
-    if os.geteuid() != 0:
+    if not IS_WINDOWS and not is_root():
         for probe in (
             GitWorktreeOps._pid_alive,
             web_use_tool._pid_alive,

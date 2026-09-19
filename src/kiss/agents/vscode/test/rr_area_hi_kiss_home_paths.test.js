@@ -27,8 +27,9 @@ const {spawnSync} = require('child_process');
 const OUT = path.join(__dirname, '..', 'out');
 
 function runNode(code, env) {
+  // os.homedir() reads USERPROFILE on Windows and HOME elsewhere.
   const res = spawnSync(process.execPath, ['-e', code], {
-    env: {...process.env, ...env},
+    env: {...process.env, ...env, USERPROFILE: env.HOME},
     encoding: 'utf-8',
   });
   if (res.status !== 0) {

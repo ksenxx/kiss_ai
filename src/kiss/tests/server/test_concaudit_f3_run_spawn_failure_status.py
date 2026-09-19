@@ -19,7 +19,6 @@ non-root uid).  No mocks or patches.
 
 from __future__ import annotations
 
-import resource
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +31,9 @@ from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.test_concaudit_w6_commit_msg_claim import (
     _thread_start_can_be_starved,
 )
+
+# The resource module (RLIMIT_*) only exists on POSIX; Windows skips.
+resource = pytest.importorskip("resource")
 
 
 class TestRunSpawnFailureEndsRun(unittest.TestCase):

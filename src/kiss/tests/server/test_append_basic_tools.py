@@ -41,7 +41,10 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_agent_path import _init_repo
+
+pytestmark = requires_unix_sockets
 
 
 class DaemonRunApiHarness(unittest.TestCase):

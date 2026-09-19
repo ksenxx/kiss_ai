@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -52,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import requests
 
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents._google_workspace_utils import (
@@ -476,8 +478,6 @@ def test_legacy_mode_untouched(isolated_kiss_home: Path,
     """With KISS_MUSE_AUTH=0, the legacy paths are fully preserved."""
     monkeypatch.setenv("KISS_MUSE_AUTH", "0")
     assert not muse_auth_enabled()
-    import requests
-
     assert google_api_session("google_drive") is requests
     backend = GoogleDriveChannelBackend()
     assert backend._http is requests
@@ -487,20 +487,38 @@ def test_legacy_mode_untouched(isolated_kiss_home: Path,
 
 def test_muse_auth_enabled_by_default(isolated_kiss_home: Path,
                                       monkeypatch: pytest.MonkeyPatch) -> None:
-    """Muse-auth is on unless KISS_MUSE_AUTH is an explicit falsy string."""
+    """Muse-auth defaults on where the daemon can run, unless explicitly off.
+
+    The platform default is ``platform_supports_muse_daemon()``: True on
+    Linux (``SO_PEERCRED`` exists), False on Windows and macOS, so both
+    branches are exercised for real by running the suite on each OS.
+    """
+    from kiss.agents.third_party_agents.muse_auth._common import platform_supports_muse_daemon
     from kiss.agents.third_party_agents.muse_auth.client import MuseBoundarySession
+
+    default_on = platform_supports_muse_daemon()
+    assert default_on == hasattr(socket, "SO_PEERCRED")
 
     # Unset (the production default when nobody exports the var).
     monkeypatch.delenv("KISS_MUSE_AUTH", raising=False)
-    assert muse_auth_enabled()
+    assert muse_auth_enabled() == default_on
     session = google_api_session("google_drive")
-    assert isinstance(session, MuseBoundarySession)
-    assert session.service == "google_drive"
     backend = GoogleDriveChannelBackend()
-    assert isinstance(backend._http, MuseBoundarySession)
+    if default_on:
+        assert isinstance(session, MuseBoundarySession)
+        assert session.service == "google_drive"
+        assert isinstance(backend._http, MuseBoundarySession)
+    else:
+        assert session is requests
+        assert backend._http is requests
 
-    # Empty, truthy, and unrecognized values all keep the secure default.
-    for value in ("", "1", "true", " YES ", "on", "definitely"):
+    # Empty and unrecognized values keep the platform default.
+    for value in ("", "definitely"):
+        monkeypatch.setenv("KISS_MUSE_AUTH", value)
+        assert muse_auth_enabled() == default_on, value
+
+    # Explicit truthy strings force Muse-auth on everywhere.
+    for value in ("1", "true", " YES ", "on"):
         monkeypatch.setenv("KISS_MUSE_AUTH", value)
         assert muse_auth_enabled(), value
 
@@ -508,14 +526,6 @@ def test_muse_auth_enabled_by_default(isolated_kiss_home: Path,
     for value in ("0", "false", "no", " OFF ", "No"):
         monkeypatch.setenv("KISS_MUSE_AUTH", value)
         assert not muse_auth_enabled(), value
-
-    # This suite runs on Linux, where the daemon's prerequisites
-    # (fcntl + SO_PEERCRED) exist; the False branches of
-    # platform_supports_muse_daemon need Windows/macOS and are
-    # documented rather than faked.
-    from kiss.agents.third_party_agents.muse_auth._common import platform_supports_muse_daemon
-
-    assert platform_supports_muse_daemon()
 
 
 def test_default_on_migrates_google_token_json(
@@ -731,7 +741,7 @@ def test_govee_cli_loads_api_keys_env_first(
     # model keys from the store are not silently blanked.
     from kiss.core import config as core_config
 
-    monkeypatch.setenv("KISS_MUSE_AUTH", "")  # empty means enabled
+    monkeypatch.setenv("KISS_MUSE_AUTH", "1")  # forced on, so the file must switch it off
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(core_config.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "")
     assert muse_auth_enabled()
@@ -753,17 +763,12 @@ def test_govee_cli_loads_api_keys_env_first(
 def test_cli_entrypoints_survive_missing_fcntl(isolated_kiss_home: Path) -> None:
     """The govee CLI keeps working where fcntl is unavailable (Windows).
 
-    ``vscode_config`` imports POSIX-only ``fcntl`` at module level, so
-    the new canonical-env import in the CLI entry points must degrade
-    gracefully instead of dying with ModuleNotFoundError before
-    argument parsing.  Emulated by halting the ``fcntl`` import in a
-    fresh interpreter (the standard platform-equivalence probe).
-
-    ``channel_main()`` carries the same guard, but it cannot be probed
-    this way: its pre-existing ``_channel_cli`` import pulls in
-    ``kiss.core.models.model_info``, which imports ``fcntl`` at module
-    level at HEAD — a limitation that predates (and is untouched by)
-    the Muse-auth default flip.
+    Every file lock goes through ``kiss.core.file_lock``, which falls
+    back from ``fcntl`` to ``msvcrt`` (or to a no-op), so the
+    canonical-env import in the CLI entry points must not die with
+    ModuleNotFoundError before argument parsing.  Emulated by halting
+    the ``fcntl`` import in a fresh interpreter (the standard
+    platform-equivalence probe).
     """
     import subprocess
 

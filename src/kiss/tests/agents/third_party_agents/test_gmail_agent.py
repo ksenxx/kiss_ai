@@ -36,6 +36,7 @@ from kiss.agents.third_party_agents.gmail_agent import (
     _token_path,
     main,
 )
+from kiss.tests.conftest import IS_WINDOWS
 
 
 def _backup_and_clear() -> tuple[str | None, str | None]:
@@ -84,9 +85,11 @@ class TestTokenPersistence:
         creds = Credentials(token="fake-perm-test")
         _save_credentials(creds)
         path = _token_path()
+        assert path.exists()
+        # NTFS has no POSIX mode bits: chmod(0o600) is a no-op there.
         mode = path.stat().st_mode
-        assert mode & stat.S_IRWXG == 0
-        assert mode & stat.S_IRWXO == 0
+        assert IS_WINDOWS or mode & stat.S_IRWXG == 0
+        assert IS_WINDOWS or mode & stat.S_IRWXO == 0
 
 
 class TestBodyExtraction:

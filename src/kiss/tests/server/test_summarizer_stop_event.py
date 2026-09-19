@@ -16,12 +16,11 @@ shell command the summarizer happened to be running.
 This test drives the real recovery path: a real agent, a real
 executor session that really exceeds its step budget, a real
 summarizer, and a real ``Bash`` child process whose PID is checked
-with ``os.kill(pid, 0)``.
+with :func:`kiss.core.processes.pid_alive`.
 """
 
 from __future__ import annotations
 
-import os
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -30,6 +29,8 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.processes import pid_alive
+from kiss.tests.conftest import posix_only
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -51,6 +52,7 @@ def env() -> Iterator[IsolatedKissHome]:
         isolated.cleanup()
 
 
+@posix_only("bash's $$ is an MSYS pid, not a Windows pid")
 def test_summarizer_bash_is_killed_by_the_thread_stop_event(
     env: IsolatedKissHome,
 ) -> None:
@@ -106,11 +108,11 @@ def test_summarizer_bash_is_killed_by_the_thread_stop_event(
             "the summarizer never started its shell command"
         )
         pid = int(pid_file.read_text().strip())
-        assert _process_alive(pid), "the shell exited before the stop"
+        assert pid_alive(pid), "the shell exited before the stop"
 
         stop_event.set()
 
-        assert wait_for(lambda: not _process_alive(pid), timeout=10.0), (
+        assert wait_for(lambda: not pid_alive(pid), timeout=10.0), (
             "the summarizer's shell survived the stop: UsefulTools was "
             "built with stop_event=None, so nothing polls the stop"
         )
@@ -123,12 +125,3 @@ def test_summarizer_bash_is_killed_by_the_thread_stop_event(
 def _pid_recorded(pid_file: Path) -> bool:
     """Return whether the shell has written its pid yet."""
     return pid_file.exists() and bool(pid_file.read_text().strip())
-
-
-def _process_alive(pid: int) -> bool:
-    """Return whether *pid* still exists (signal 0 probe)."""
-    try:
-        os.kill(pid, 0)
-    except (OSError, ProcessLookupError):
-        return False
-    return True

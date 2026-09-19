@@ -47,7 +47,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools, _popen_kwargs
 
 
 def _run(*args: str, cwd: Path) -> None:
@@ -234,7 +234,7 @@ def test_bash_output_redirection_to_main_repo_is_refused(
     tools = UsefulTools(work_dir=str(wt_dir))
 
     tools.Bash(
-        f"echo PWNED > {target}",
+        f"echo PWNED > {target.as_posix()}",
         description="evil",
     )
 
@@ -250,10 +250,11 @@ def test_bash_sed_inplace_against_main_repo_is_refused(
     before = target.read_text()
     tools = UsefulTools(work_dir=str(wt_dir))
 
-    if subprocess.run(["sed", "--version"], capture_output=True).returncode == 0:
-        cmd = f"sed -i 's/MAIN/PWNED/' {target}"
+    gnu_sed = subprocess.run(**_popen_kwargs("sed --version"), capture_output=True)
+    if gnu_sed.returncode == 0:
+        cmd = f"sed -i 's/MAIN/PWNED/' {target.as_posix()}"
     else:
-        cmd = f"sed -i '' 's/MAIN/PWNED/' {target}"
+        cmd = f"sed -i '' 's/MAIN/PWNED/' {target.as_posix()}"
     tools.Bash(cmd, description="evil")
 
     assert target.read_text() == before
@@ -268,7 +269,7 @@ def test_bash_rm_against_main_repo_is_refused(
     assert sentinel.exists()
     tools = UsefulTools(work_dir=str(wt_dir))
 
-    tools.Bash(f"rm -f {sentinel}", description="evil")
+    tools.Bash(f"rm -f {sentinel.as_posix()}", description="evil")
 
     assert sentinel.exists()
 
@@ -284,7 +285,7 @@ def test_bash_inside_worktree_still_works(repo_with_worktree) -> None:
     tools = UsefulTools(work_dir=str(wt_dir))
 
     out = tools.Bash(
-        f"echo WT_OK > {wt_dir / 'notes.md'}",
+        f"echo WT_OK > {(wt_dir / 'notes.md').as_posix()}",
         description="legit",
     )
 
@@ -301,7 +302,7 @@ def test_bash_on_paths_outside_repo_still_works(
     scratch = tmp_path / "scratch.txt"
     tools = UsefulTools(work_dir=str(wt_dir))
 
-    tools.Bash(f"echo HELLO > {scratch}", description="scratch")
+    tools.Bash(f"echo HELLO > {scratch.as_posix()}", description="scratch")
 
     assert scratch.read_text() == "HELLO\n"
 

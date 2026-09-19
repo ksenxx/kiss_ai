@@ -49,6 +49,12 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.conftest import posix_only
+
+# The guard is a bash function of install.sh, which refuses every OS but
+# Darwin/Linux; it is exercised here through ``bash -c``.
+pytestmark = posix_only("install.sh bash function run through bash -c")
+
 REPO = Path(__file__).resolve().parents[5]
 INSTALL_SCRIPT = REPO / "install.sh"
 VSIX_REL = "src/kiss/agents/vscode/kiss-sorcar.vsix"

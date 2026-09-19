@@ -57,6 +57,7 @@ from kiss.agents.third_party_agents._kiss_web_launcher import (
 from kiss.core import vscode_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 
 STUB_SUMMARY = "stub summary done"
 
@@ -77,8 +78,13 @@ def _init_repo(repo: str) -> None:
     git("commit", "-q", "-m", "seed")
 
 
+@requires_unix_sockets
 class _ApiLaunchBase(unittest.TestCase):
-    """Real daemon over a temp UDS; only the LLM boundary is stubbed."""
+    """Real daemon over a temp UDS; only the LLM boundary is stubbed.
+
+    The daemon's local API is a Unix-domain socket, so every subclass
+    (which inherits this mark) skips on Windows.
+    """
 
     def setUp(self) -> None:
         # Every global mutation registers its restoration with
@@ -1306,7 +1312,7 @@ class TestNoDirectRunCallSites(unittest.TestCase):
         for py in sorted(tp_dir.glob("*.py")):
             if py.name == "_kiss_web_launcher.py":
                 continue
-            source = py.read_text()
+            source = py.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(py))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):

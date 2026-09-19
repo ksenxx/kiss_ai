@@ -24,6 +24,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -40,6 +42,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     write_private_file,
 )
 from kiss.agents.third_party_agents._device_auth import ConsentSession
+from kiss.core.processes import kill_process_group, popen_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +157,24 @@ def _write_link_page(uri: str) -> Path:
     return path
 
 
+def _cli_executable(signal_cli: str) -> str:
+    """Resolve the signal-cli command the way a shell would.
+
+    Windows distributes signal-cli as a ``signal-cli.bat`` launcher, and
+    ``subprocess`` alone only ever appends ``.exe`` to a bare name, so the
+    launcher is found through ``shutil.which`` (which honours ``PATHEXT``).
+    A name that resolves nowhere is returned unchanged so the caller's
+    error still names exactly what the user configured.
+
+    Args:
+        signal_cli: Bare command name or path of the signal-cli binary.
+
+    Returns:
+        The path to run, or *signal_cli* itself when nothing resolves.
+    """
+    return shutil.which(signal_cli) or signal_cli
+
+
 class SignalLinkSession(ConsentSession):
     """A pending ``signal-cli link`` waiting for the phone to scan the QR."""
 
@@ -170,9 +191,11 @@ class SignalLinkSession(ConsentSession):
         try:
             # stderr is merged into stdout: both are drained by one reader
             # thread, so a chatty signal-cli can never fill a pipe and
-            # stall (its log output goes to stderr).
-            self._process = subprocess.Popen(
-                [signal_cli, "link", "-n", _LINK_DEVICE_NAME],
+            # stall (its log output goes to stderr).  signal-cli is a
+            # launcher script in front of java, so it runs in its own
+            # process group and is ended as a group (see _terminate).
+            self._process = popen_process_group(
+                [_cli_executable(signal_cli), "link", "-n", _LINK_DEVICE_NAME],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
@@ -221,14 +244,33 @@ class SignalLinkSession(ConsentSession):
         lines = [ln.strip() for ln in self._output if ln.strip() and not _LINK_URI_RE.search(ln)]
         return (lines[-1] if lines else default)[:300]
 
+    def _terminate(self, sig: int = signal.SIGTERM) -> None:
+        """Signal the whole ``signal-cli link`` process group, if still alive.
+
+        Signalling only the launcher would leave the java process it
+        started running (and holding the output pipe open); on Windows
+        that is the only way to end ``signal-cli.bat`` at all.
+
+        Args:
+            sig: POSIX signal to send; Windows always ends the tree.
+        """
+        if self._process.poll() is None:
+            try:
+                kill_process_group(self._process.pid, sig)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                self._process.kill()
+
     def _reap(self) -> None:
         """End the process if still running, wait for it, and release its pipe."""
         if self._process.poll() is None:
-            self._process.terminate()
+            self._terminate()
             try:
                 self._process.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
-                self._process.kill()
+                # Windows has no SIGKILL; there the group is force-ended anyway.
+                self._terminate(getattr(signal, "SIGKILL", signal.SIGTERM))
                 self._process.wait(timeout=5.0)
         self._reader.join(timeout=5.0)
         if self._process.stdout is not None:
@@ -268,8 +310,7 @@ class SignalLinkSession(ConsentSession):
         The poll thread reaps the process on its way out.
         """
         super().cancel()
-        if self._process.poll() is None:
-            self._process.terminate()
+        self._terminate()
 
 
 def _single_account(signal_cli: str) -> str:
@@ -283,7 +324,7 @@ def _single_account(signal_cli: str) -> str:
     """
     try:
         result = subprocess.run(
-            [signal_cli, "listAccounts"],
+            [_cli_executable(signal_cli), "listAccounts"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -358,7 +399,7 @@ class SignalChannelBackend(ToolMethodBackend):
 
     def _run_cli(self, *args: str, timeout: int = 30) -> tuple[str, str, int]:
         """Run signal-cli command and return (stdout, stderr, returncode)."""
-        cmd = [self._signal_cli, "-u", self._phone_number, *args]
+        cmd = [_cli_executable(self._signal_cli), "-u", self._phone_number, *args]
         result = subprocess.run(
             cmd, capture_output=True, text=True, encoding="utf-8", timeout=timeout
         )
@@ -619,7 +660,7 @@ class SignalAgent(BaseChannelAgent):
                 )
             try:
                 result = subprocess.run(
-                    [agent._backend._signal_cli, "--version"],
+                    [_cli_executable(agent._backend._signal_cli), "--version"],
                     capture_output=True,
                     text=True,
                     encoding="utf-8",

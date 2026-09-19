@@ -12,8 +12,12 @@ with real bare "public" remotes, publishes unfiltered history into them, runs
 import subprocess
 from pathlib import Path
 
+from kiss.tests.conftest import posix_only
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 PURGE_TEST_SCRIPT = REPO_ROOT / "scripts" / "test_release_purge.sh"
+
+pytestmark = posix_only("runs the bash purge suite from scripts/release.sh")
 
 
 def test_release_purges_excluded_paths_from_public_history() -> None:

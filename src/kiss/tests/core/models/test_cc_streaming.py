@@ -498,6 +498,10 @@ class TestThinkingInToolMode:
         class FakePopen:
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 self.returncode = 0
+                # No OS process backs this fake; pid 0 never names one, so
+                # _CLIProcess.close() on Windows gets ProcessLookupError from
+                # kill_process_group instead of taskkill-ing a stranger.
+                self.pid = 0
                 self.stdin = open(os.devnull, "wb")
                 self.stdout = _FakeStdout(stream_data)
                 self.stderr = _FakeStdout("")

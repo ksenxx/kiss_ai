@@ -357,7 +357,7 @@ class TestRed9RestorePendingMergeDeadCode:
             for py in src_root.rglob("*.py"):
                 if "test" in py.name.lower():
                     continue
-                text = py.read_text()
+                text = py.read_text(encoding="utf-8")
                 for match in re.finditer(r"\b_restore_pending_merge\b", text):
                     line_start = text.rfind("\n", 0, match.start()) + 1
                     line = text[line_start : text.find("\n", match.end())]

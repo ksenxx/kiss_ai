@@ -33,6 +33,9 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
+from kiss.tests.conftest import requires_unix_sockets
+
+pytestmark = requires_unix_sockets
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:

@@ -108,7 +108,7 @@ def test_auth_trio_roundtrip_and_persistence() -> None:
     assert result["ok"]
     path = _config.path
     assert path.exists()
-    assert "third_party_agents/webhook" in str(path)
+    assert path.parent.parts[-2:] == ("third_party_agents", "webhook")
     if sys.platform != "win32":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
     saved = json.loads(path.read_text())

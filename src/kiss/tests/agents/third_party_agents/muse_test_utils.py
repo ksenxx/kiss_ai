@@ -16,6 +16,7 @@ next daemon in the same test) starts from a clean slate.
 from __future__ import annotations
 
 import json
+import socket
 import time
 from typing import Any
 
@@ -34,10 +35,17 @@ def setup_muse_env(monkeypatch: pytest.MonkeyPatch, policy: dict[str, Any]) -> N
     pointed ``KISS_HOME`` at an isolated location (the
     ``isolated_kiss_home`` fixture).
 
+    The daemon's only transport is a Unix-domain socket (authenticated
+    with ``SO_PEERCRED``), so on platforms without ``AF_UNIX`` (Windows)
+    every daemon-backed test is skipped here, in the one place all six
+    ``muse_env`` fixtures pass through.
+
     Args:
         monkeypatch: The test's monkeypatch, used for the env var.
         policy: The Muse-auth policy document to write.
     """
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("POSIX-only: the Muse-auth daemon listens on a Unix-domain socket")
     monkeypatch.setenv("KISS_MUSE_AUTH", "1")
     directory = muse_auth_dir()
     directory.mkdir(parents=True, exist_ok=True)

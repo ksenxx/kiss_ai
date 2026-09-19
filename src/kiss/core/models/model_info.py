@@ -10,7 +10,6 @@ non-agentic tasks only).
 """
 
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -23,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.core import config as config_module
+from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Model, ThinkingCallback, TokenCallback
 
@@ -306,7 +306,7 @@ must never flock the sidecar through two descriptors at once.
 def _my_models_flock() -> Iterator[None]:
     """Hold the cross-process flock guarding ``MY_MODELS.json`` edits.
 
-    An ``fcntl`` flock on a sidecar ``.MY_MODELS.json.kiss.lock`` next
+    A :mod:`kiss.core.file_lock` lock on a sidecar ``.MY_MODELS.json.kiss.lock`` next
     to the registry, so two *processes* sharing one home directory
     cannot both read the same snapshot and silently drop each other's
     model.  The sidecar is flocked rather than the registry itself
@@ -320,11 +320,11 @@ def _my_models_flock() -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name("." + path.name + ".kiss.lock")
     with open(lock_path, "w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        lock_exclusive(lock_file)
         try:
             yield
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            unlock(lock_file)
 
 _CUSTOM_MODEL_DEFAULTS: dict[str, Any] = {
     "context_length": 128000,

@@ -42,6 +42,7 @@ from kiss.core.models.heif import (
     is_heif,
 )
 from kiss.core.models.stream_abort import DEFAULT_STREAM_STALL_TIMEOUT
+from kiss.core.processes import IS_WINDOWS, kill_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -1897,10 +1898,24 @@ class _CLIProcess:
         """
         proc = self._proc
         if proc.poll() is None:
-            proc.terminate()
-            if self._reap(_REAP_GRACE_SECONDS) is None:
-                proc.kill()
+            if IS_WINDOWS:  # pragma: no cover — Windows-only branch
+                # ``claude`` / ``codex`` on PATH are the ``.cmd`` shims npm
+                # installs, so the child is a ``cmd.exe`` whose grandchild
+                # is the real CLI.  ``terminate()`` would kill only the
+                # shim, leaving the CLI running and holding every pipe:
+                # take the whole tree down instead.
+                try:
+                    kill_process_group(proc.pid)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    proc.kill()
                 self._reap(_REAP_GRACE_SECONDS)
+            else:
+                proc.terminate()
+                if self._reap(_REAP_GRACE_SECONDS) is None:
+                    proc.kill()
+                    self._reap(_REAP_GRACE_SECONDS)
         self._writer_cancel.set()
         if self._writer is not None:
             self._writer.join()

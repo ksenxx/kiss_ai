@@ -16,6 +16,7 @@ raising on a vanished work_dir, so it needs a fault injection.
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -30,6 +31,13 @@ from kiss.core.tool_interrupt import (
     interrupt_tool_call,
     unregister_tool_call,
 )
+from kiss.tests.conftest import IS_WINDOWS
+
+# Git bash prints MSYS paths (``/tmp/...``) for ``pwd``; ``-W`` asks for the
+# Windows spelling so the output can be compared with ``Path``.  A killed
+# shell reports a signal on POSIX; ``taskkill /F`` only yields exit code 1.
+_PWD = "pwd -W" if IS_WINDOWS else "pwd"
+_KILLED = "exit 1" if IS_WINDOWS else "killed by signal 9"
 
 
 class TestReport:
@@ -52,9 +60,11 @@ class TestReport:
 
     def test_commands_run_in_the_work_dir_with_kiss_workdir(self, tmp_path: Path) -> None:
         tools = UsefulTools(work_dir=str(tmp_path))
-        out = tools.run_commands_parallel('["pwd", "echo $KISS_WORKDIR"]')
-        real = os.path.realpath(tmp_path)
-        assert out.count(real) == 2 or out.count(str(tmp_path)) == 2, out
+        out = tools.run_commands_parallel(f'["{_PWD}", "echo $KISS_WORKDIR"]')
+        printed = re.findall(r"^\$ .*\n(.*)$", out, re.M)
+        assert len(printed) == 2, out
+        real = Path(os.path.realpath(tmp_path))
+        assert all(Path(line).resolve() == real for line in printed), out
 
     def test_output_truncated_per_command(self, tmp_path: Path) -> None:
         tools = UsefulTools(work_dir=str(tmp_path))
@@ -128,7 +138,7 @@ class TestWorktreeGuard:
         (repo / "f.txt").write_text("main content\n")
         tools = UsefulTools(work_dir=str(wt))
         out = tools.run_commands_parallel(
-            f'["echo hi > {repo}/f.txt", "echo inside-worktree"]'
+            f'["echo hi > {repo.as_posix()}/f.txt", "echo inside-worktree"]'
         )
         assert out.startswith("2 commands: 1 succeeded, 1 failed, 0 timed out.")
         assert "[1/2] exit -1" in out
@@ -149,7 +159,7 @@ class TestStop:
         elapsed = time.monotonic() - started
         assert elapsed < 10, elapsed
         assert out.startswith("2 commands: 0 succeeded, 2 failed, 0 timed out.")
-        assert out.count("killed by signal 9") == 2, out
+        assert out.count(_KILLED) == 2, out
 
     def test_task_stop_does_not_start_queued_commands(self, tmp_path: Path) -> None:
         stop = threading.Event()
@@ -157,10 +167,11 @@ class TestStop:
         marker = tmp_path / "queued-ran"
         threading.Timer(0.7, stop.set).start()
         out = tools.run_commands_parallel(
-            f'["sleep 30", "touch {marker}", "touch {marker}"]', max_workers=1,
+            f'["sleep 30", "touch {marker.as_posix()}", "touch {marker.as_posix()}"]',
+            max_workers=1,
         )
         assert out.startswith("3 commands: 0 succeeded, 3 failed, 0 timed out.")
-        assert out.count("killed by signal 9") == 1, out
+        assert out.count(_KILLED) == 1, out
         assert out.count("Not started: the task was stopped.") == 2, out
         assert not marker.exists()
 
@@ -174,7 +185,8 @@ class TestStop:
             try:
                 try:
                     outcome["result"] = tools.run_commands_parallel(
-                        f'["sleep 30; touch {marker}", "sleep 30; touch {marker}"]'
+                        f'["sleep 30; touch {marker.as_posix()}",'
+                        f' "sleep 30; touch {marker.as_posix()}"]'
                     )
                     end_tool_call(token)
                 except ToolCallInterrupted:

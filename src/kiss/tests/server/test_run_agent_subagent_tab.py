@@ -43,6 +43,9 @@ from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import vscode_config
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
+
+pytestmark = requires_unix_sockets
 
 PARENT_TAB_ID = "webtab-parent-1"
 VIEWER_SUB_TAB_ID = "webtab-parent-1__sub_child"

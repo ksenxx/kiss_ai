@@ -17,7 +17,6 @@ import asyncio
 import inspect
 import json
 import os
-import pty
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -38,6 +37,7 @@ from kiss.agents.sorcar.mcp_servers import (
     remove_mcp_server,
     save_mcp_server,
 )
+from kiss.tests.conftest import IS_WINDOWS
 
 _SERVER_SCRIPT = '''
 from mcp.server.fastmcp import FastMCP
@@ -128,11 +128,11 @@ def real_stdin(
     ``io.UnsupportedOperation: fileno``, so the transport fails to start
     and the server is reported unavailable.
 
-    This fixture opens a pseudo-terminal with :func:`pty.openpty` and
-    points ``sys.stdin`` at its slave end, giving stdin a real OS file
-    descriptor.  The server's stderr (the ``errlog``) is sent to a plain
-    file: a regular file always has a real ``fileno`` and, unlike a pipe
-    or pty, never blocks the child no matter how much it logs.
+    This fixture points ``sys.stdin`` at ``os.devnull``, giving stdin a
+    real OS file descriptor on every platform.  The server's stderr (the
+    ``errlog``) is sent to a plain file: a regular file always has a real
+    ``fileno`` and, unlike a pipe, never blocks the child no matter how
+    much it logs.
 
     ``mcp.client.stdio.stdio_client`` binds ``errlog=sys.stderr`` as a
     *default argument* at import time, so monkeypatching ``sys.stderr``
@@ -141,8 +141,9 @@ def real_stdin(
     left untouched so ``capsys`` still captures the command's output.
     Everything is restored and every descriptor closed afterwards.
     """
-    master_fd, slave_fd = pty.openpty()
-    stdin_stream = os.fdopen(slave_fd, "r", closefd=True)
+    # ``os.devnull`` has a real descriptor on every platform (Windows has
+    # no pty) and nothing reads stdin while the client talks to the child.
+    stdin_stream = open(os.devnull, encoding="utf-8")
     errlog = (tmp_path / "mcp_errlog.txt").open("w", encoding="utf-8")
     monkeypatch.setattr(sys, "stdin", stdin_stream)
     monkeypatch.setattr(sys, "stderr", errlog)
@@ -156,7 +157,6 @@ def real_stdin(
     finally:
         errlog.close()
         stdin_stream.close()
-        os.close(master_fd)
 
 
 
@@ -390,7 +390,8 @@ def test_file_token_storage_roundtrip(isolated_homes: Path) -> None:
     assert storage.path.name.endswith(".json")
     assert storage.path.name != "my_server.json"
     assert FileTokenStorage("my server").path != storage.path
-    assert (storage.path.stat().st_mode & 0o777) == 0o600
+    if not IS_WINDOWS:  # Windows has no POSIX mode bits to tighten
+        assert (storage.path.stat().st_mode & 0o777) == 0o600
     back = asyncio.run(storage.get_tokens())
     assert back is not None and back.access_token == "at-1"
     back_info = asyncio.run(storage.get_client_info())

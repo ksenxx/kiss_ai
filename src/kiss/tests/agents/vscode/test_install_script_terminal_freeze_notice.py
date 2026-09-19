@@ -44,13 +44,21 @@ from __future__ import annotations
 
 import errno
 import os
-import pty
 import re
 import select
 import subprocess
 import textwrap
 import time
 from pathlib import Path
+
+import pytest
+
+from kiss.tests.conftest import posix_only
+
+# install.sh is a bash script driven through a real PTY: neither exists
+# on Windows (the Windows install path is the extension's own installer).
+pty = pytest.importorskip("pty", reason="POSIX-only: pty")
+pytestmark = posix_only("bash install.sh under a pty")
 
 REPO = Path(__file__).resolve().parents[5]
 INSTALL_SCRIPT = REPO / "install.sh"

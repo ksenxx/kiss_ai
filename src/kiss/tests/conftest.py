@@ -45,6 +45,8 @@ body runs.
 import functools
 import os
 import shutil
+import socket
+import sys
 import tempfile
 import threading
 import unittest
@@ -83,6 +85,143 @@ _th._KISS_DIR = Path(_test_kiss_home)
 _th._DB_PATH = _th._KISS_DIR / "sorcar.db"
 
 DEFAULT_MODEL = "claude-opus-4-6"
+
+# Platform gates.  A test that exercises a POSIX-only mechanism (pty,
+# fcntl semantics, rlimits, signals, Unix-domain sockets, systemd,
+# ``chmod``-based permission denial, ``bash`` scripts) skips on Windows
+# with a reason naming the mechanism.  Use ``posix_only(...)`` for the
+# mechanism itself, ``requires_unix_sockets`` for the daemon's UDS
+# channel, and ``is_root()`` instead of ``os.geteuid() == 0``.
+IS_WINDOWS = sys.platform == "win32"
+
+
+def posix_only(reason: str) -> pytest.MarkDecorator:
+    """Skip the decorated test or module on Windows.
+
+    Args:
+        reason: The POSIX-only mechanism the test depends on.
+
+    Returns:
+        A ``skipif`` mark that fires on Windows.
+    """
+    return pytest.mark.skipif(IS_WINDOWS, reason=f"POSIX-only: {reason}")
+
+
+requires_unix_sockets = pytest.mark.skipif(
+    not hasattr(socket, "AF_UNIX"),
+    reason="Unix-domain sockets are unavailable on this platform",
+)
+
+
+def is_root() -> bool:
+    """Return whether the test process runs as root (never on Windows)."""
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+# Errors a hot reader polling a file that writers atomically replace
+# must retry rather than report as a torn read.  Windows refuses to open
+# the target for the instant ``os.replace`` swaps it in (sharing
+# violation -> ``PermissionError``); the next read sees one complete
+# file.  POSIX renames never do this, so there nothing is tolerated.
+TRANSIENT_REPLACE_READ_ERRORS: tuple[type[OSError], ...] = (
+    (PermissionError,) if IS_WINDOWS else ()
+)
+
+
+def install_cli_script(script: Path, source: str) -> None:
+    """Write the Python program *source* to *script* as a stand-in CLI.
+
+    The stand-in must be found by ``shutil.which(script.name)`` and start
+    from ``subprocess.Popen([path, ...])`` exactly like the real CLI.  On
+    POSIX that is the shebang line in *source* plus the executable bit.
+    Windows cannot execute a shebang script (``WinError 193``) and
+    ``shutil.which`` never returns an extensionless file there, so a
+    ``<name>.cmd`` shim that runs the script through this interpreter is
+    written beside it -- the same shape as the ``claude.cmd`` /
+    ``codex.cmd`` shims npm installs.
+
+    Args:
+        script: Where to write the program (its directory goes on PATH).
+        source: The program text, starting with a shebang line.
+    """
+    script.write_text(source, encoding="utf-8")
+    script.chmod(0o755)
+    if IS_WINDOWS:
+        script.with_name(script.name + ".cmd").write_text(
+            f'@"{sys.executable}" "%~dp0{script.name}" %*\n', encoding="utf-8"
+        )
+
+
+_FAKE_CLOUDFLARED_WINDOWS_WRAPPER = """\
+import os
+import runpy
+import sys
+
+# A bare ``cloudflared`` start gives ``['']``; ``run_path`` fills argv[0].
+sys.argv = [sys.executable, *(sys.argv if sys.argv != [""] else [])]
+try:
+    runpy.run_path({body_path!r}, run_name="__main__")
+except SystemExit as exc:
+    code = exc.code
+    code = code if isinstance(code, int) else (0 if code is None else 1)
+else:
+    code = 0
+sys.stdout.flush()
+sys.stderr.flush()
+os._exit(code)
+"""
+
+
+def install_fake_cloudflared(directory: Path, body: str) -> Path:
+    """Install a fake ``cloudflared`` executable running the Python *body*.
+
+    The product spawns ``cloudflared`` by bare name from ``PATH`` and
+    verifies pidfile processes by executable basename
+    (``web_server._looks_like_cloudflared``), so the fake must be a
+    single process that *is* named ``cloudflared``.  On POSIX that is a
+    ``#!{sys.executable}`` script.  Windows cannot execute shebang
+    scripts, a ``.cmd`` shim would make the visible process ``cmd.exe``
+    and orphan the real worker on ``terminate()``, and the kernel
+    reports a symlink's *target* as the image path -- so the base
+    interpreter is copied to ``cloudflared.exe`` beside its runtime
+    DLLs plus a ``cloudflared._pth`` file (the embeddable-distribution
+    mechanism: it lists the real installation's ``Lib``/``DLLs`` and
+    this directory as ``sys.path`` and turns on ``import site``), and
+    *body* runs from a ``sitecustomize`` module beside the copy, which
+    ``site`` imports at startup.  With both shapes ``sys.argv`` is
+    ``[<script path>, <cloudflared args>...]``.
+
+    Callers add *directory* to ``PATH`` themselves, exactly as they
+    would for a shebang fake.
+
+    Args:
+        directory: Existing directory that receives the fake.
+        body: Python source to run; it may call ``sys.exit(code)``.
+
+    Returns:
+        Path of the executable (``cloudflared`` or ``cloudflared.exe``).
+    """
+    if not IS_WINDOWS:
+        fake = directory / "cloudflared"
+        fake.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
+        fake.chmod(0o755)
+        return fake
+    base = Path(getattr(sys, "_base_executable", sys.executable))
+    fake = directory / "cloudflared.exe"
+    shutil.copy2(base, fake)
+    for dll in [*base.parent.glob("python3*.dll"), *base.parent.glob("vcruntime*.dll")]:
+        shutil.copy2(dll, directory / dll.name)
+    (directory / "cloudflared._pth").write_text(
+        f"{base.parent / 'Lib'}\n{base.parent / 'DLLs'}\n.\nimport site\n",
+        encoding="utf-8",
+    )
+    body_path = directory / "fake_cloudflared_body.py"
+    body_path.write_text(body, encoding="utf-8")
+    (directory / "sitecustomize.py").write_text(
+        _FAKE_CLOUDFLARED_WINDOWS_WRAPPER.format(body_path=str(body_path)),
+        encoding="utf-8",
+    )
+    return fake
 
 
 def pytest_addoption(parser):

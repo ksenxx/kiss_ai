@@ -379,6 +379,33 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   voiceTranscribe: ['audio', 'wakePrefixed', 'wakeSamples'],
 };
 
+/**
+ * The bash that runs the Update terminal: `/bin/bash` on POSIX; on Windows
+ * the Git for Windows bash (`Git\\bin\\bash.exe` under Program Files, the
+ * per-user Git install, or the MinGit the extension installed), never
+ * `System32\\bash.exe`, which is the WSL launcher and would run install.sh
+ * inside a different filesystem.  Returns null when no bash exists.
+ */
+export function updateShellPath(): string | null {
+  if (process.platform !== 'win32') return '/bin/bash';
+  const homeDir = process.env.USERPROFILE || os.homedir();
+  const roots = [
+    process.env.ProgramFiles,
+    process.env['ProgramFiles(x86)'],
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs'),
+  ];
+  const candidates = roots
+    .filter((r): r is string => !!r)
+    .map(r => path.join(r, 'Git', 'bin', 'bash.exe'));
+  candidates.push(path.join(homeDir, '.local', 'git', 'bin', 'bash.exe'));
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (dir && !/\\System32$/i.test(dir)) {
+      candidates.push(path.join(dir, 'bash.exe'));
+    }
+  }
+  return candidates.find(c => fs.existsSync(c)) ?? null;
+}
+
 export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _view?: ChatWebviewHost;
   private _panelHooks?: PanelHooks;
@@ -1863,7 +1890,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   /**
    * Open a visible "KISS Sorcar Update" terminal whose terminal PROCESS is
-   * `/bin/bash -c <command>` (plus a signal guard and a hold-open tail),
+   * `bash -c <command>` (see {@link updateShellPath}; plus a signal guard
+   * and a hold-open tail),
    * instead of typing the command into an interactive shell with
    * `sendText`.
    *
@@ -1900,6 +1928,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * .extension-updated marker and the window reloads anyway.
    */
   private _openUpdateTerminal(cwd: string, command: string): void {
+    const shellPath = updateShellPath();
+    if (shellPath === null) {
+      vscode.window.showErrorMessage(
+        'Updating KISS Sorcar runs install.sh under bash, which was not found. ' +
+          'Install Git for Windows (it ships bash.exe) and try again.',
+      );
+      return;
+    }
     // audit0902-coverage:start
     const guarded =
       "trap '' INT TERM HUP; " +
@@ -1915,7 +1951,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     const terminal = vscode.window.createTerminal({
       name: 'KISS Sorcar Update',
       cwd,
-      shellPath: '/bin/bash',
+      shellPath,
       shellArgs: ['-c', guarded],
     });
     terminal.show();

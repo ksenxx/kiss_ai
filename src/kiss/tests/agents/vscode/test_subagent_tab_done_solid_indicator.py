@@ -231,6 +231,7 @@ def _node_render(tabs: list[dict[str, Any]], active_id: str) -> dict[str, Any]:
         ["node", "-e", script],
         capture_output=True,
         text=True,
+        encoding="utf-8",  # node prints UTF-8; the Windows default is cp1252
         timeout=15,
     )
     if r.returncode != 0:

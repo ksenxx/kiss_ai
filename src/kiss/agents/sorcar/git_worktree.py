@@ -11,6 +11,7 @@ Provides :class:`GitWorktree` (frozen dataclass for worktree state),
 
 from __future__ import annotations
 
+import contextlib
 import enum
 import logging
 import os
@@ -25,7 +26,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
-from kiss.agents.sorcar._concurrency import _fcntl, _race_delay, pid_alive
+from kiss.agents.sorcar._concurrency import _race_delay
+from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.core.processes import (
+    SIGKILL,
+    kill_process_group,
+    pid_alive,
+    popen_process_group,
+    process_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,20 +50,14 @@ def _file_lock(handle: IO[Any]) -> Iterator[None]:
     open file description, so it serialises across processes and is
     released automatically if the holder dies.
 
-    On platforms without ``fcntl`` (Windows) this degrades to a no-op,
-    matching the previous in-process-only behaviour.
-
     Args:
         handle: An open file object to lock.
     """
-    if _fcntl is None:  # pragma: no cover — Windows has no fcntl
-        yield
-        return
-    _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+    lock_exclusive(handle)
     try:
         yield
     finally:
-        _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+        unlock(handle)
 
 
 _reclaim_lock_reentry = threading.local()
@@ -134,9 +137,8 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     dirty-state copy) while still calling the reclaim / sweep / create
     helpers that take the flock internally.
 
-    Degrades to the previous in-process-only behaviour when ``fcntl``
-    is unavailable (Windows), the common dir cannot be resolved, or
-    the lock file cannot be opened.
+    Degrades to the previous in-process-only behaviour when the common
+    dir cannot be resolved or the lock file cannot be opened.
 
     Args:
         repo: Git repo root path.
@@ -144,9 +146,6 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     Yields:
         Nothing; the lock is held for the duration of the block.
     """
-    if _fcntl is None:  # pragma: no cover — Windows has no fcntl
-        yield
-        return
     result = _git("rev-parse", "--git-common-dir", cwd=repo)
     if result.returncode != 0:  # pragma: no cover — not a git repo
         yield
@@ -167,12 +166,6 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     except OSError:  # pragma: no cover — unwritable git dir
         yield
         return
-    if _fcntl is None:  # pragma: no cover — Windows has no fcntl
-        try:
-            yield
-        finally:
-            handle.close()
-        return
     # Marker registration and flock lifetime are fused into ONE frame:
     # the re-entry marker is valid exactly while `token` (the handle's
     # only owner besides this frame) is alive.  Whatever bytecode
@@ -182,13 +175,13 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     # both together; running the finally withdraws both in order.
     token = _ReclaimLockToken(handle)
     try:
-        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+        lock_exclusive(handle)
         held[lock_path] = weakref.ref(token)
         yield
     finally:
         held.pop(lock_path, None)
         try:
-            _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+            unlock(handle)
         finally:
             token.handle = None
             handle.close()
@@ -345,7 +338,7 @@ def _git(
         *args,
     ]
     env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
-    proc = subprocess.Popen(
+    proc = popen_process_group(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -353,27 +346,16 @@ def _git(
         encoding="utf-8",
         errors="surrogateescape",
         env=env,
-        start_new_session=os.name != "nt",
     )
     try:
         stdout, stderr = proc.communicate(timeout=_GIT_TIMEOUT_SECONDS)
         return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
         logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
-        if os.name != "nt":
-            try:
-                os.killpg(proc.pid, 9)
-            except ProcessLookupError:
-                pass
-        else:  # pragma: no cover - Windows CI is not available here
-            subprocess.run(  # noqa: S603, S607
-                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                capture_output=True,
-                timeout=5,
-                check=False,
-            )
-            if proc.poll() is None:
-                proc.kill()
+        with contextlib.suppress(OSError):  # group already gone
+            kill_process_group(proc.pid, SIGKILL)
+        if proc.poll() is None:
+            proc.kill()
         try:
             stdout, stderr = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:  # pragma: no cover - defensive
@@ -1545,6 +1527,12 @@ class GitWorktreeOps:
         owner pid lets :meth:`reclaim_orphaned_worktrees` in any
         process skip worktrees whose owner is still alive.
 
+        The pid alone is ambiguous once the owner has exited and the OS
+        has handed its pid to a stranger (routine on Windows, where pids
+        are recycled within seconds), so the owner's
+        :func:`process_identity` (start time + executable) is stored
+        beside it when available and :meth:`_owner_alive` compares both.
+
         Args:
             repo: Git repo root path.
             branch: The worktree branch name.
@@ -1552,6 +1540,12 @@ class GitWorktreeOps:
         Returns:
             True if the config was saved successfully.
         """
+        identity = process_identity(os.getpid())
+        if identity is not None and not GitWorktreeOps._save_branch_config(
+            repo, branch, "kiss-owner-identity", f"{os.getpid()}:{identity}",
+            "owner identity",
+        ):
+            return False
         return GitWorktreeOps._save_branch_config(
             repo, branch, "kiss-owner-pid", str(os.getpid()), "owner pid",
         )
@@ -1587,6 +1581,33 @@ class GitWorktreeOps:
             True when the process exists, False when it is gone.
         """
         return pid_alive(pid)
+
+    @staticmethod
+    def _owner_alive(repo: Path, branch: str, owner_pid: int) -> bool:
+        """Whether the process that stamped *branch* (:meth:`save_owner_pid`) still runs.
+
+        A live pid is not enough: the owner may have exited and the OS
+        may have recycled its pid.  When the stamp also recorded the
+        owner's :func:`process_identity` (prefixed with the pid it
+        describes), the current holder of the pid must match it; a stamp
+        without a matching identity (legacy, ``ps`` unavailable, or the
+        pid re-stamped by hand) falls back to the pid probe alone.
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch name.
+            owner_pid: The stamped owner pid.
+
+        Returns:
+            True when the stamping process is still alive.
+        """
+        if not GitWorktreeOps._pid_alive(owner_pid):
+            return False
+        stamped = GitWorktreeOps._load_branch_config(repo, branch, "kiss-owner-identity")
+        prefix = f"{owner_pid}:"
+        if stamped is None or not stamped.startswith(prefix):
+            return True
+        return process_identity(owner_pid) == stamped[len(prefix):]
 
     @staticmethod
     def save_spare_marker(repo: Path, branch: str) -> bool:
@@ -2637,7 +2658,7 @@ class GitWorktreeOps:
                 if (
                     owner_pid is not None
                     and owner_pid != os.getpid()
-                    and GitWorktreeOps._pid_alive(owner_pid)
+                    and GitWorktreeOps._owner_alive(repo, branch, owner_pid)
                 ):
                     # Another Sorcar process (daemon vs. CLI) owns this
                     # worktree and is still alive: its task may be

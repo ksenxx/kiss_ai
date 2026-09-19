@@ -11,11 +11,9 @@ import hashlib
 import json
 import logging
 import math
-import os
 import re
 import secrets
 import sys
-import tempfile
 import time as _time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -24,6 +22,8 @@ from typing import Any
 import yaml
 
 from kiss.core.config import kiss_home
+from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +206,7 @@ def load_json_config(path: Path, required_keys: tuple[str, ...]) -> dict[str, st
 def config_file_lock(path: Path) -> Iterator[None]:
     """Serialize read-modify-write cycles on a config file.
 
-    Acquires an exclusive ``fcntl.flock`` on a ``<name>.lock`` sibling
+    Acquires an exclusive file lock on a ``<name>.lock`` sibling
     of *path*, shared by every config writer across threads AND
     processes: :func:`save_json_config` and :func:`clear_json_config`
     take it around each write, and read-modify-write helpers (the
@@ -216,7 +216,7 @@ def config_file_lock(path: Path) -> Iterator[None]:
     the cycle's read (so the comparison sees it) or after its write
     (so it survives), never in between.
 
-    ``flock`` is NOT reentrant across separate opens, even in one
+    The lock is NOT reentrant across separate opens, even in one
     thread: code already holding this lock must write with the raw
     primitives (:func:`write_private_file`, ``Path.unlink``), never via
     :func:`save_json_config`/:func:`clear_json_config`.
@@ -227,40 +227,32 @@ def config_file_lock(path: Path) -> Iterator[None]:
     Yields:
         None while the lock is held.
     """
-    import fcntl
-
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.parent / (path.name + ".lock"), "a+b") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        lock_exclusive(lock_file)
         try:
             yield
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            unlock(lock_file)
 
 
 def write_private_file(path: Path, content: str) -> None:
     """Write *content* to *path* atomically with owner-only permissions.
 
-    Writes to a uniquely named temporary sibling file (created
-    ``0o600`` by :func:`tempfile.mkstemp`), then renames it over
-    *path*, so concurrent readers never observe a torn file, concurrent
-    writers never clobber each other's temp file, and secret content is
-    never even briefly world-readable.
+    Delegates to :func:`kiss.core.utils.atomic_write_text` with
+    ``mode=0o600``: the content is staged in a uniquely named sibling
+    file (created ``0o600`` by :func:`tempfile.mkstemp`) and renamed
+    over *path*, so concurrent readers never observe a torn file,
+    concurrent writers never clobber each other's temp file, and secret
+    content is never even briefly world-readable.  On Windows the
+    rename waits out a concurrent reader holding *path* open, where a
+    bare ``os.replace`` raises ``PermissionError``.
 
     Args:
         path: Destination file path.
         content: Full text content to persist.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fp:
-            fp.write(content)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    atomic_write_text(path, content, mode=0o600)
 
 
 def save_json_config(path: Path, data: dict[str, str]) -> None:
@@ -598,13 +590,12 @@ def save_channel_state(path: Path, state: dict[str, Any]) -> None:
 
 @contextlib.contextmanager
 def channel_state_lock(state_path: Path, blocking: bool) -> Iterator[Any | None]:
-    """Acquire the per-channel ``flock`` guarding a state file.
+    """Acquire the per-channel file lock guarding a state file.
 
     The same lock serializes the runner's tick (non-blocking: an
     overlapping tick skips) and the pairing admin's read-modify-write
     (blocking: the admin waits for a running tick to finish), so an
-    approval can never be overwritten by a stale in-memory save.  On
-    platforms without ``fcntl`` the lock file is opened but not locked.
+    approval can never be overwritten by a stale in-memory save.
 
     Args:
         state_path: The state file whose sibling ``.lock`` file to lock.
@@ -619,15 +610,7 @@ def channel_state_lock(state_path: Path, blocking: bool) -> Iterator[Any | None]
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fp = lock_path.open("a+", encoding="utf-8")
     try:
-        try:
-            import fcntl
-        except ImportError:  # pragma: no cover - non-Unix platforms
-            yield fp
-            return
-        flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-        try:
-            fcntl.flock(fp.fileno(), flags)
-        except BlockingIOError:
+        if not lock_exclusive(fp, blocking=blocking):
             yield None
             return
         yield fp
@@ -1847,28 +1830,22 @@ def channel_main(
         _build_run_kwargs,
         _print_run_stats,
     )
+    from kiss.core.vscode_config import load_api_keys, load_api_keys_readonly
+
     # Import the canonical key store before any backend or connector
     # code runs: a direct CLI invocation does not inherit the kiss-web
     # daemon's environment, so ``KISS_MUSE_AUTH`` (the Muse-auth
     # opt-out) and channel tokens in ``$KISS_HOME/api_keys.env`` must
     # reach ``os.environ`` before the first ``muse_auth_enabled()``
     # check or credential migration — not when the API server happens
-    # to start later.  ``vscode_config`` needs POSIX file locking; on
-    # platforms without ``fcntl`` (Windows) there is no daemon-written
-    # canonical store to import, so the CLI must keep working without it.
+    # to start later.  A read-only $KISS_HOME (the store's lock file cannot be
+    # created) must neither stop the CLI nor drop a canonical
+    # KISS_MUSE_AUTH=0 opt-out: fall back to the lock-free,
+    # write-free import.
     try:
-        from kiss.core.vscode_config import load_api_keys, load_api_keys_readonly
-    except ImportError:
-        pass
-    else:
-        # A read-only $KISS_HOME (the store's lock file cannot be
-        # created) must neither stop the CLI nor drop a canonical
-        # KISS_MUSE_AUTH=0 opt-out: fall back to the lock-free,
-        # write-free import.
-        try:
-            load_api_keys()
-        except OSError:
-            load_api_keys_readonly()
+        load_api_keys()
+    except OSError:
+        load_api_keys_readonly()
 
     if len(sys.argv) <= 1:  # pragma: no branch
         parts = [f"Usage: {cli_name} [-m MODEL] [-e ENDPOINT] [-b BUDGET]"]

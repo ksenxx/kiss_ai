@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import cron_agent
+from kiss.tests.conftest import IS_WINDOWS
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +40,8 @@ def test_blocking_lock_yields_truthy_and_creates_0600_file(
         assert held
     lock_path = cron_agent._jobs_path().with_suffix(".lock")
     assert lock_path.is_file()
-    assert stat.S_IMODE(os.stat(lock_path).st_mode) == 0o600
+    if not IS_WINDOWS:  # Windows has no POSIX mode bits to tighten
+        assert stat.S_IMODE(os.stat(lock_path).st_mode) == 0o600
 
 
 def test_nonblocking_lock_yields_none_while_held() -> None:

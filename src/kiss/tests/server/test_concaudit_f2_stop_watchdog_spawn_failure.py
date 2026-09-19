@@ -24,8 +24,6 @@ enforced inline: the worker receives the interrupt and exits.
 
 from __future__ import annotations
 
-import os
-import resource
 import threading
 import time
 from collections.abc import Iterator
@@ -35,12 +33,16 @@ import pytest
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
+from kiss.tests.conftest import is_root
 from kiss.tests.server._memory_printer import MemoryPrinter
+
+# The resource module (RLIMIT_*) only exists on POSIX; Windows skips.
+resource = pytest.importorskip("resource")
 
 
 def _thread_start_can_be_starved() -> bool:
     """True when lowering RLIMIT_NPROC actually makes Thread.start fail here."""
-    if os.getuid() == 0:
+    if is_root():
         return False
     soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
     try:

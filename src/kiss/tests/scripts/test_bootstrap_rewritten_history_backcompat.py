@@ -35,8 +35,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from kiss.tests.conftest import posix_only
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "install.sh"
+
+pytestmark = posix_only("runs the real bash bootstrap scripts/install.sh")
 VSIX_REL = "src/kiss/agents/vscode/kiss-sorcar.vsix"
 RELEASE_V2 = b"released-vsix-bytes-v2"
 LOCAL_BUILD = b"locally-built-vsix-bytes"
