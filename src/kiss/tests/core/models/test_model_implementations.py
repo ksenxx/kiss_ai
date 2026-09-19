@@ -59,7 +59,6 @@ MODEL_CONFIGS = [
 
 @requires_anthropic_api_key
 class TestAnthropicModel:
-
     @pytest.mark.timeout(60)
     def test_normalize_content_blocks(self):
         m = model("claude-haiku-4-5")
@@ -152,7 +151,6 @@ class TestOpenAIModel:
 
 
 class TestModelInfo:
-
     def test_all_models_have_valid_context_and_pricing(self):
         for name, info in MODEL_INFO.items():
             assert info.context_length > 0, f"{name}: invalid context_length"
@@ -220,7 +218,6 @@ class TestModelInfo:
 
 
 class TestCachePricing:
-
     def test_anthropic_model_has_cache_pricing(self):
         info = MODEL_INFO["claude-sonnet-4-5"]
         assert info.cache_read_price_per_1M == pytest.approx(0.30)
@@ -231,9 +228,31 @@ class TestCachePricing:
         for name, info in MODEL_INFO.items():
             if not name.startswith("claude-"):
                 continue
-            assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.1)
+            read_mult = 0.025 if name.startswith(("claude-fable-5-1", "claude-mythos-5-1")) else 0.1
+            assert info.cache_read_price_per_1M == pytest.approx(
+                info.input_price_per_1M * read_mult
+            ), name
             assert info.cache_write_price_per_1M == pytest.approx(info.input_price_per_1M * 1.25)
             assert info.cache_write_1h_price_per_1M == pytest.approx(info.input_price_per_1M * 2.0)
+
+    def test_fable_51_cache_read_is_quarter_of_a_tenth(self):
+        """platform.claude.com pricing: Fable 5.1 cache hits are $0.25/MTok on a $10 base."""
+        info = MODEL_INFO["claude-fable-5-1"]
+        assert info.input_price_per_1M == pytest.approx(10.0)
+        assert info.cache_read_price_per_1M == pytest.approx(0.25)
+        assert info.cache_write_price_per_1M == pytest.approx(12.5)
+        assert info.cache_write_1h_price_per_1M == pytest.approx(20.0)
+        assert MODEL_INFO["claude-fable-5"].cache_read_price_per_1M == pytest.approx(1.0)
+        cost = calculate_cost("claude-fable-5-1", 1_000, 500, 400_000, 2_000)
+        assert cost == pytest.approx(
+            (1_000 * 10.0 + 500 * 50.0 + 400_000 * 0.25 + 2_000 * 12.5) / 1e6
+        )
+        for name in (
+            "openrouter/anthropic/claude-fable-5.1",
+            "openrouter/~anthropic/claude-fable-latest",
+        ):
+            assert MODEL_INFO[name].cache_read_price_per_1M == pytest.approx(0.25), name
+            assert MODEL_INFO[name].cache_write_price_per_1M == pytest.approx(12.5), name
 
     def test_openai_model_has_cache_read_pricing(self):
         info = MODEL_INFO["gpt-4.1-mini"]
@@ -272,24 +291,64 @@ class TestCachePricing:
             assert info.cache_write_price_per_1M == 0.0
 
     def test_openrouter_provider_cache_pricing(self):
+        """openrouter.ai/api/v1/models ``pricing.input_cache_read`` / ``input_cache_write``
+        (2026-09) are stored verbatim in the catalog for every gateway model."""
         g = MODEL_INFO["openrouter/google/gemini-2.5-pro"]
-        assert g.cache_read_price_per_1M == pytest.approx(g.input_price_per_1M * 0.25)
+        assert g.cache_read_price_per_1M == pytest.approx(0.125)
+        assert g.cache_read_price_per_1M == pytest.approx(g.input_price_per_1M * 0.1)
         assert MODEL_INFO["openrouter/openai/gpt-5.5"].cache_read_price_per_1M == pytest.approx(
             MODEL_INFO["openrouter/openai/gpt-5.5"].input_price_per_1M * 0.1
         )
         assert MODEL_INFO["openrouter/openai/gpt-4o"].cache_read_price_per_1M == pytest.approx(
             MODEL_INFO["openrouter/openai/gpt-4o"].input_price_per_1M * 0.5
         )
+        # DeepSeek's OpenRouter price is a floating provider average: check the 0.2x ratio.
         d = MODEL_INFO["openrouter/deepseek/deepseek-v4-flash"]
-        assert d.cache_read_price_per_1M == pytest.approx(d.input_price_per_1M * 0.02)
-        assert d.cache_write_price_per_1M == pytest.approx(d.input_price_per_1M)
-        q = MODEL_INFO["openrouter/qwen/qwen3-max"]
-        assert q.cache_read_price_per_1M == pytest.approx(q.input_price_per_1M * 0.2)
-        assert q.cache_write_price_per_1M == pytest.approx(q.input_price_per_1M * 1.25)
-        for name in ("openrouter/moonshotai/kimi-k2.5", "openrouter/x-ai/grok-4.3"):
-            info = MODEL_INFO[name]
-            assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.25)
-            assert info.cache_write_price_per_1M == 0.0
+        assert d.input_price_per_1M == pytest.approx(0.041, rel=0.05)
+        assert d.cache_read_price_per_1M == pytest.approx(d.input_price_per_1M * 0.2, rel=0.05)
+        assert d.cache_write_price_per_1M is None
+        p = MODEL_INFO["openrouter/deepseek/deepseek-v4-pro"]
+        assert p.input_price_per_1M == pytest.approx(0.422, rel=0.05)
+        assert p.cache_read_price_per_1M == pytest.approx(p.input_price_per_1M / 12, rel=0.05)
+        q = MODEL_INFO["openrouter/qwen/qwen3.8-max-0902"]
+        assert q.cache_read_price_per_1M == pytest.approx(0.25)
+        assert q.cache_write_price_per_1M == pytest.approx(2.5)
+        assert MODEL_INFO["openrouter/qwen/qwen3.7-plus"].cache_read_price_per_1M == pytest.approx(
+            0.064
+        )
+        assert MODEL_INFO[
+            "openrouter/moonshotai/kimi-k2.5"
+        ].cache_read_price_per_1M == pytest.approx(0.07)
+        assert MODEL_INFO["openrouter/x-ai/grok-4.3"].cache_read_price_per_1M == pytest.approx(0.2)
+        assert MODEL_INFO["openrouter/x-ai/grok-4.5"].cache_read_price_per_1M == pytest.approx(0.3)
+        assert MODEL_INFO["openrouter/x-ai/grok-4.5-high"].cache_read_price_per_1M == pytest.approx(
+            0.3
+        )
+        # A vendor OpenRouter lists without a cache-read price bills cache reads at input price.
+        m = MODEL_INFO["openrouter/cohere/command-r7b-12-2024"]
+        assert m.cache_read_price_per_1M is None
+        assert calculate_cost("openrouter/cohere/command-r7b-12-2024", 0, 0, 1_000_000, 0) == (
+            pytest.approx(m.input_price_per_1M)
+        )
+
+    def test_openrouter_google_prefix_fallback_is_a_tenth(self):
+        """A gateway Gemini entry without catalog cache prices gets Google's 0.1x rate."""
+        info = _mi_for_test(1_000_000, 2.0, 12.0)
+        _apply_cache_pricing("openrouter/google/gemini-9-pro", info)
+        assert info.cache_read_price_per_1M == pytest.approx(0.2)
+        assert info.cache_write_price_per_1M == 0.0
+
+    def test_openrouter_unknown_vendor_has_no_cache_discount(self):
+        """No prefix rule and no catalog price: the entry keeps ``None`` (full input price)."""
+        for name in (
+            "openrouter/deepseek/deepseek-v9",
+            "openrouter/qwen/qwen9",
+            "openrouter/x-ai/grok-9",
+        ):
+            info = _mi_for_test(100_000, 1.0, 2.0)
+            _apply_cache_pricing(name, info)
+            assert info.cache_read_price_per_1M is None, name
+            assert info.cache_write_price_per_1M is None, name
 
     def test_openrouter_anthropic_cache_pricing(self):
         info = MODEL_INFO["openrouter/anthropic/claude-opus-4.8"]
@@ -297,9 +356,10 @@ class TestCachePricing:
         assert info.cache_write_price_per_1M == pytest.approx(info.input_price_per_1M * 1.25)
         assert info.cache_write_1h_price_per_1M == pytest.approx(info.input_price_per_1M * 2.0)
 
-    def test_gpt_oss_openrouter_has_no_cache_pricing(self):
+    def test_gpt_oss_openrouter_uses_openrouter_cache_read_price(self):
+        """gpt-oss has no OpenAI-native cache rule; OpenRouter lists $0.075 read on $0.15 input."""
         info = MODEL_INFO["openrouter/openai/gpt-oss-120b"]
-        assert info.cache_read_price_per_1M is None
+        assert info.cache_read_price_per_1M == pytest.approx(0.075)
         assert info.cache_write_price_per_1M is None
 
     def test_undocumented_providers_have_no_cache_pricing(self):
@@ -357,7 +417,6 @@ class TestCachePricing:
 
 @requires_anthropic_api_key
 class TestAnthropicCacheControl:
-
     @pytest.mark.timeout(60)
     def test_cache_control_disabled_via_model_config(self):
         m = model("claude-haiku-4-5", model_config={"enable_cache": False})
