@@ -5,6 +5,7 @@
 """Useful tools for agents: file editing and bash execution."""
 
 import difflib
+import functools
 import logging
 import mimetypes
 import os
@@ -17,6 +18,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,7 @@ except ImportError:  # POSIX has no msvcrt
     msvcrt = None  # type: ignore[assignment]
 
 from kiss.agents.sorcar._concurrency import _fcntl as fcntl
+from kiss.agents.sorcar.fanout_guard import parse_tasks_json
 from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SLUG_PREFIX,
     _WORKTREE_SUBDIR,
@@ -497,6 +500,128 @@ def _format_bash_result(returncode: int, output: str, max_output_chars: int) -> 
     return _truncate_output(output, max_output_chars)
 
 
+def _run_one_command(
+    command: str, cancel: threading.Event, work_dir: str | None, timeout_seconds: float,
+) -> tuple[int | None, str, float]:
+    """Run one host ``run_commands_parallel`` command on a worker thread.
+
+    Args:
+        command: The shell command.
+        cancel: The fan-out's stop event; setting it kills the shell.
+        work_dir: The agent's working directory (worktree guard + cwd).
+        timeout_seconds: Deadline for the shell.
+
+    Returns:
+        ``(returncode, output, seconds)``: the exit code (``None`` on
+        timeout, ``-1`` when the command was refused or failed to
+        launch), the combined output, and the wall time spent.
+    """
+    guard = _bash_parent_repo_guard(command, work_dir)
+    if guard is not None:
+        return -1, guard, 0.0
+    started = time.monotonic()
+    try:
+        # Stream-less: printers attribute output by thread-local task
+        # id, so a callback from this worker thread would detach the
+        # output from the task.
+        runner = UsefulTools(stop_event=cancel, work_dir=work_dir)
+        returncode, output = runner._bash_streaming(command, timeout_seconds)
+    except Exception as e:
+        logger.debug("Exception caught", exc_info=True)
+        returncode, output = -1, f"Error: {e}"
+    return returncode, output, time.monotonic() - started
+
+
+CommandRunner = Callable[[str, threading.Event], tuple[int | None, str, float]]
+
+NOT_STARTED = "Not started: the task was stopped."
+
+
+def run_commands_pool(
+    commands: list[str],
+    run_one: CommandRunner,
+    max_workers: int,
+    stop_event: threading.Event | None,
+    max_output_chars: int,
+) -> str:
+    """Run *commands* concurrently through *run_one* and render the report.
+
+    The one engine behind both ``run_commands_parallel`` tools (host
+    shell and Docker container).  The workers watch ONE cancel event,
+    set here when the task's *stop_event* or the tool panel's Stop
+    (:func:`kiss.core.tool_interrupt.current_tool_interrupt_event`,
+    thread-local and therefore invisible to workers) fires; queued
+    commands are cancelled at the same time so a stop never starts
+    work.  An exception injected into the waiting thread (a task Stop's
+    ``KeyboardInterrupt``, a forced ``ToolCallInterrupted``) also
+    cancels everything before propagating.
+
+    Args:
+        commands: The shell commands, already validated.
+        run_one: ``run_one(command, cancel) -> (exit_code, output,
+            seconds)``; must not raise.
+        max_workers: Concurrency bound; ``0`` runs all commands at once.
+        stop_event: The task's stop event, or ``None``.
+        max_output_chars: Per-command output cap in the report.
+
+    Returns:
+        The report (see :func:`_format_parallel_report`).
+
+    Raises:
+        ToolCallInterrupted: When the tool panel's Stop was pressed.
+    """
+    cancel = threading.Event()
+    interrupt = tool_interrupt.current_tool_interrupt_event()
+    watched = [e for e in (stop_event, interrupt) if e is not None]
+    pool = ThreadPoolExecutor(max_workers=max_workers or len(commands))
+    try:
+        futures = [pool.submit(run_one, command, cancel) for command in commands]
+        while not all(f.done() for f in futures):
+            if any(e.is_set() for e in watched):
+                cancel.set()
+                for f in futures:
+                    f.cancel()
+            # Short slices keep this loop in Python, where an injected
+            # KeyboardInterrupt / ToolCallInterrupted lands.
+            wait(futures, timeout=0.2)
+    except BaseException:
+        cancel.set()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
+    tool_interrupt.raise_if_interrupted()
+    results = [(-1, NOT_STARTED, 0.0) if f.cancelled() else f.result() for f in futures]
+    return _format_parallel_report(commands, results, max_output_chars)
+
+
+def _format_parallel_report(
+    commands: list[str],
+    results: list[tuple[int | None, str, float]],
+    max_output_chars: int,
+) -> str:
+    """Render the ``run_commands_parallel`` report: a tally, then one section per command."""
+    codes = [code for code, _, _ in results]
+    succeeded = sum(1 for code in codes if code == 0)
+    timed_out = sum(1 for code in codes if code is None)
+    failed = len(codes) - succeeded - timed_out
+    lines = [
+        f"{len(commands)} commands: {succeeded} succeeded, {failed} failed, "
+        f"{timed_out} timed out."
+    ]
+    for index, (command, (code, output, seconds)) in enumerate(
+        zip(commands, results, strict=True), start=1
+    ):
+        if code is None:
+            status = f"TIMED OUT after {seconds:.1f}s"
+        elif code < -1:
+            status = f"killed by signal {-code} in {seconds:.1f}s"
+        else:
+            status = f"exit {code} in {seconds:.1f}s"
+        lines.append(f"\n### [{index}/{len(commands)}] {status}\n$ {command}")
+        lines.append(_truncate_output(output.rstrip("\n"), max_output_chars) or "(no output)")
+    return "\n".join(lines)
+
+
 def _kill_process_group(process: subprocess.Popen) -> None:
     """Kill a subprocess and all its children.
 
@@ -931,12 +1056,64 @@ class UsefulTools:
             # raised by the caller-supplied stream callback must PROPAGATE
             # out of Bash (after the process group is killed), not be
             # swallowed into an "Error:" string like internal failures are.
-            return self._bash_streaming(command, timeout_seconds, max_output_chars)
+            returncode, output = self._bash_streaming(command, timeout_seconds)
+        else:
+            try:
+                returncode, output = self._bash_streaming(command, timeout_seconds)
+            except Exception as e:  # pragma: no cover
+                logger.debug("Exception caught", exc_info=True)
+                return f"Error: {e}"
+        if returncode is None:
+            return "Error: Command execution timeout"
+        return _format_bash_result(returncode, output, max_output_chars)
+
+    def run_commands_parallel(
+        self,
+        commands: str,
+        max_workers: int = 0,
+        timeout_seconds: float = 1800,
+        max_output_chars: int = 5000,
+    ) -> str:
+        """Run several independent shell commands concurrently, with no LLM sub-agents.
+
+        Use this instead of ``run_parallel`` whenever the parallel work is
+        just shell commands whose output you read once they finish: test
+        splits (one ``pytest`` invocation per split), builds, linters,
+        benchmarks, batch conversions.  Each command runs in its own
+        thread under the same rules as ``Bash`` (working directory,
+        environment, worktree guard, Stop button); output is not streamed
+        live, the combined report is returned when the last command ends.
+
+        Args:
+            commands: A JSON-encoded list of shell command strings, e.g.
+                ``'["uv run pytest tests/a.py", "uv run pytest tests/b.py"]'``.
+                Shell substitutions such as ``"$(cat cmds.json)"`` are not
+                expanded and are rejected.
+            max_workers: Maximum number of commands running at once.  ``0``
+                (default) runs all of them at once.
+            timeout_seconds: Timeout in seconds applied to EACH command.
+            max_output_chars: Maximum characters of each command's output
+                kept in the report (head and tail are kept when truncating).
+
+        Returns:
+            A report starting with a tally line
+            (``N commands: K succeeded, F failed, T timed out``) followed by
+            one section per command, in input order, giving its exit code,
+            wall time and (truncated) output.  A string starting with
+            ``Error:`` when the arguments were invalid.
+        """
         try:
-            return self._bash_streaming(command, timeout_seconds, max_output_chars)
-        except Exception as e:  # pragma: no cover
-            logger.debug("Exception caught", exc_info=True)
-            return f"Error: {e}"
+            command_list = parse_tasks_json(commands, name="commands")
+        except ValueError as e:
+            return f"Error: {e.args[0]}"
+        if max_workers < 0:
+            return f"Error: max_workers must be 0 or a positive integer, got {max_workers}."
+        run_one = functools.partial(
+            _run_one_command, work_dir=self.work_dir, timeout_seconds=timeout_seconds,
+        )
+        return run_commands_pool(
+            command_list, run_one, max_workers, self.stop_event, max_output_chars,
+        )
 
     def _consume_stream(
         self,
@@ -998,12 +1175,17 @@ class UsefulTools:
             if self.stream_callback is not None:
                 self.stream_callback(line)
 
-    def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:
+    def _bash_streaming(
+        self, command: str, timeout_seconds: float,
+    ) -> tuple[int | None, str]:
         """Run *command* through a reader thread, bounded by *timeout_seconds*.
 
-        Single engine behind :meth:`Bash` for both the streaming and the
-        non-streaming case (``stream_callback`` may be ``None``).  The
-        timeout is a deadline on the SHELL, not on its descendants:
+        Single engine behind :meth:`Bash` and :meth:`run_commands_parallel`
+        for both the streaming and the non-streaming case
+        (``stream_callback`` may be ``None``).  Returns the shell's exit
+        code — ``None`` for a genuine timeout — and its combined
+        stdout/stderr, untruncated.  The timeout is a deadline on the
+        SHELL, not on its descendants:
 
         * Shell still running at the deadline — genuine timeout.  The
           whole process group is killed and the timeout error returned.
@@ -1108,7 +1290,5 @@ class UsefulTools:
         tool_interrupt.raise_if_interrupted()
 
         if timed_out:
-            return "Error: Command execution timeout"
-
-        output = "".join(chunks)
-        return _format_bash_result(process.returncode, output, max_output_chars)
+            return None, ""
+        return process.returncode, "".join(chunks)

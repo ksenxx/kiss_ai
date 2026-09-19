@@ -1757,6 +1757,14 @@ class _TaskRunnerMixin:
                         (_run_parsed or {}).get("suggested_next_task") or "",
                     ).strip()
                     task_end_event = {"type": "task_done"}
+                    if _run_parsed and isinstance(_run_parsed.get("success"), bool):
+                        # The agent's own verdict rides on the terminal
+                        # event too (the frontend's markTabDone reads
+                        # ``success === false``), so a run that ended
+                        # with finish(success=False) — a sub-agent's
+                        # partial result on budget exhaustion, say — is
+                        # not shown as a plain success.
+                        task_end_event["success"] = _run_parsed["success"]
                     logger.info(
                         "Agent returned: tab_id=%s task_id=%s summary=%r",
                         tab_id,

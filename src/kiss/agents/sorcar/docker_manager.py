@@ -6,6 +6,7 @@
 """Docker library for managing Docker containers and executing commands."""
 
 import codecs
+import functools
 import logging
 import os
 import queue
@@ -22,7 +23,8 @@ import docker
 from docker.models.containers import Container  # type: ignore[assignment]
 
 from kiss.agents.sorcar._concurrency import _race_delay
-from kiss.agents.sorcar.useful_tools import _truncate_output
+from kiss.agents.sorcar.fanout_guard import parse_tasks_json
+from kiss.agents.sorcar.useful_tools import _truncate_output, run_commands_pool
 from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
@@ -159,6 +161,9 @@ class DockerManager:
         self.client_shared_path = "/testbed"
         self.host_shared_path: str | None = None
         self.stream_callback: Callable[[str], None] | None = None
+        # The task's stop event, when the owning agent has one:
+        # ``run_commands_parallel`` kills its running execs on it.
+        self.stop_event: threading.Event | None = None
 
         if ":" in image_name:  # pragma: no branch
             self.image, self.tag = image_name.rsplit(":", 1)
@@ -274,7 +279,117 @@ class DockerManager:
             return self._bash_streaming(
                 container, command, timeout_seconds, max_output_chars,
             )
+        exit_code, output = self._exec(container, command, timeout_seconds)
+        if exit_code is None:
+            return f"Error: command timed out after {timeout_seconds}s"
+        return _truncate_output(
+            _with_exit_code(output, exit_code), max_output_chars,
+        )
 
+    def run_commands_parallel(
+        self,
+        commands: str,
+        max_workers: int = 0,
+        timeout_seconds: float = 1800,
+        max_output_chars: int = 5000,
+    ) -> str:
+        """Run several independent shell commands concurrently in the container, with no LLM.
+
+        Use this instead of ``run_parallel`` whenever the parallel work is
+        just shell commands whose output you read once they finish: test
+        splits (one ``pytest`` invocation per split), builds, linters,
+        benchmarks.  Each command runs as its own ``docker exec`` in the
+        task's container; output is not streamed live, the combined
+        report is returned when the last command ends.
+
+        Args:
+            commands: A JSON-encoded list of shell command strings, e.g.
+                ``'["pytest tests/a.py", "pytest tests/b.py"]'``.  Shell
+                substitutions such as ``"$(cat cmds.json)"`` are not
+                expanded and are rejected.
+            max_workers: Maximum number of commands running at once.  ``0``
+                (default) runs all of them at once.
+            timeout_seconds: Timeout in seconds applied to EACH command.
+            max_output_chars: Maximum characters of each command's output
+                kept in the report (head and tail are kept when truncating).
+
+        Returns:
+            A report starting with a tally line
+            (``N commands: K succeeded, F failed, T timed out``) followed by
+            one section per command, in input order, giving its exit code,
+            wall time and (truncated) output.  A string starting with
+            ``Error:`` when the arguments were invalid.
+
+        Raises:
+            KISSError: If no container is open.
+        """
+        container = self.container
+        if container is None:
+            raise KISSError("No container is open. Please call open() first.")
+        try:
+            command_list = parse_tasks_json(commands, name="commands")
+        except ValueError as e:
+            return f"Error: {e.args[0]}"
+        if max_workers < 0:
+            return f"Error: max_workers must be 0 or a positive integer, got {max_workers}."
+
+        run_one = functools.partial(
+            self._timed_exec, container, timeout_seconds=timeout_seconds,
+        )
+        return run_commands_pool(
+            command_list, run_one, max_workers, self.stop_event, max_output_chars,
+        )
+
+    def _timed_exec(
+        self,
+        container: Container,
+        command: str,
+        cancel: threading.Event,
+        timeout_seconds: float,
+    ) -> tuple[int | None, str, float]:
+        """Run one ``run_commands_parallel`` command; never raises.
+
+        Args:
+            container: The caller's snapshot of the open container.
+            command: The bash command to execute.
+            cancel: The fan-out's stop event; setting it kills the exec.
+            timeout_seconds: Deadline for the command.
+
+        Returns:
+            ``(exit_code, output, seconds)``: the exit code (``None`` on
+            timeout, ``-1`` when the exec failed to run or was stopped),
+            the output and the wall time spent.
+        """
+        started = time.monotonic()
+        try:
+            exit_code, output = self._exec(container, command, timeout_seconds, cancel)
+        except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
+            exit_code, output = -1, f"Error: {e}"
+        return exit_code, output, time.monotonic() - started
+
+    def _exec(
+        self,
+        container: Container,
+        command: str,
+        timeout_seconds: float,
+        cancel: threading.Event | None = None,
+    ) -> tuple[int | None, str]:
+        """Run *command* in *container* without streaming, bounded by *timeout_seconds*.
+
+        Args:
+            container: The caller's snapshot of the open container.
+            command: The bash command to execute.
+            timeout_seconds: Maximum time to wait before treating the
+                command as hung; the container-side process is killed.
+            cancel: Optional event that ends the wait early; the
+                container-side process is killed the same way.
+
+        Returns:
+            ``(exit_code, output)`` — the exit code is ``None`` on
+            timeout and ``-1`` when *cancel* fired; the output is stdout
+            followed by stderr, untruncated.
+        """
         result_holder: dict[str, Any] = {}
         error_holder: dict[str, BaseException] = {}
 
@@ -316,7 +431,12 @@ class DockerManager:
 
         thread = threading.Thread(target=run_exec, daemon=True)
         thread.start()
-        thread.join(timeout_seconds)
+        deadline = time.monotonic() + timeout_seconds
+        while thread.is_alive() and (cancel is None or not cancel.is_set()):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(min(remaining, 0.2))
         if thread.is_alive():
             with state_lock:
                 state["cancelled"] = True
@@ -325,7 +445,9 @@ class DockerManager:
                 # ``exec_id`` is guaranteed set: the worker stores it
                 # before committing, and the shared lock publishes it.
                 self._reap_timed_out_exec(result_holder["exec_id"], token)
-            return f"Error: command timed out after {timeout_seconds}s"
+            if cancel is not None and cancel.is_set():
+                return -1, "Killed: the task was stopped."
+            return None, ""
         if error_holder:  # pragma: no branch
             raise error_holder["error"]
 
@@ -341,9 +463,7 @@ class DockerManager:
         exit_code = self.client.api.exec_inspect(
             result_holder["exec_id"],
         ).get("ExitCode", 0)
-        return _truncate_output(
-            _with_exit_code(output, exit_code), max_output_chars,
-        )
+        return int(exit_code), output
 
     def _tagged_exec_create(
         self, container_id: str | None, command: str, token: str,

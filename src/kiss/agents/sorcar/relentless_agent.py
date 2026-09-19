@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import getpass
+import html
 import logging
 import os
 import platform
+import re
 import socket
 import threading
 from collections.abc import Callable
@@ -497,6 +499,78 @@ def _build_exhaustion_summary(summaries: list[str], banner: str) -> str:
     if not summaries:
         return banner
     return f"{_prior_sessions_section(summaries)}\n\n---\n\n{banner}"
+
+
+# The usage-info block ``KISSAgent._execute_step`` appends to every
+# model-role trajectory message; noise in a partial result.  Only the
+# LAST fenced block is the framework's: the model's own narration may
+# contain ```text fences too.
+_USAGE_BLOCK_RE = re.compile(r"\n```text\n(?:(?!```text\n).)*```\n?$", re.DOTALL)
+
+# How much of the executor's trajectory a partial result quotes.
+PARTIAL_RESULT_MAX_STEPS = 8
+PARTIAL_RESULT_MAX_CHARS_PER_STEP = 600
+
+
+def _partial_result_html(
+    executor: KISSAgent | None,
+    exc: BaseException,
+    budget_used: float,
+    max_budget: float,
+    total_steps: int,
+) -> str:
+    """Describe the work *executor* did before *exc* ended its run, as HTML.
+
+    Used when a sub-agent runs out of budget: instead of the bare
+    ``Task failed`` the parent used to get — losing every step the
+    child took — the parent receives the child's own account of its
+    progress: the model's most recent trajectory messages (its
+    narration plus the tool calls it made), oldest first.
+
+    Args:
+        executor: The session that was running when the budget ran out,
+            or ``None`` when it ran out between sessions.
+        exc: The budget error that ended the run.
+        budget_used: The sub-agent's cumulative spend in USD (all
+            sessions, nested sub-agents included).
+        max_budget: The sub-agent's budget cap in USD.
+        total_steps: The sub-agent's cumulative step count.
+
+    Returns:
+        An HTML fragment: a heading, a one-paragraph explanation, and
+        the quoted trajectory tail (when there is one).
+    """
+    heading = f"<h3>Partial result: {html.escape(str(exc))}</h3>"
+    if executor is None:
+        return heading + (
+            "<p>The sub-agent's budget ran out between sessions, before "
+            "the next session could start.  Only the previous sessions' "
+            "summaries above exist; the task is incomplete.</p>"
+        )
+    steps = [
+        _USAGE_BLOCK_RE.sub("", str(m["content"])).strip()
+        for m in executor.messages
+        if m.get("role") == "model"
+    ]
+    tail = steps[-PARTIAL_RESULT_MAX_STEPS:]
+    items = []
+    for text in tail:
+        if len(text) > PARTIAL_RESULT_MAX_CHARS_PER_STEP:
+            text = text[:PARTIAL_RESULT_MAX_CHARS_PER_STEP] + " …"
+        items.append(f"<li><pre>{html.escape(text)}</pre></li>")
+    omitted = len(steps) - len(tail)
+    parts = [
+        heading,
+        f"<p>The sub-agent spent ${budget_used:.4f} of its "
+        f"${max_budget:.4f} budget in {total_steps} steps "
+        "and was stopped before it called finish.  Below is its own account "
+        "of the work so far, oldest first; it is incomplete and unverified.</p>",
+    ]
+    if items:
+        if omitted > 0:
+            parts.append(f"<p>({omitted} earlier steps omitted.)</p>")
+        parts.append("<ol>" + "".join(items) + "</ol>")
+    return "".join(parts)
 
 
 class RelentlessAgent(Base):
@@ -1081,10 +1155,14 @@ class RelentlessAgent(Base):
             budget_banked, tokens_banked, steps_banked = self.usage_snapshot()
             remaining_budget = self.max_budget - budget_banked
             if remaining_budget <= 0:
-                raise BudgetExceededError(
+                exhausted = BudgetExceededError(
                     f"Agent {self.name} budget exhausted "
                     f"(${budget_banked:.4f} / ${self.max_budget:.2f})."
                 )
+                partial = self._budget_exhausted_result(None, summaries, exhausted)
+                if partial is None:
+                    raise exhausted
+                return partial
             if self.printer:
                 self.printer.tokens_offset = tokens_banked  # type: ignore[attr-defined]
                 self.printer.budget_offset = budget_banked  # type: ignore[attr-defined]
@@ -1126,10 +1204,13 @@ class RelentlessAgent(Base):
                 )
                 self._current_executor = None
                 self._accumulate_usage(executor)
-            except BudgetExceededError:
+            except BudgetExceededError as exc:
                 self._current_executor = None
                 self._accumulate_usage(executor)
-                raise
+                partial = self._budget_exhausted_result(executor, summaries, exc)
+                if partial is None:
+                    raise
+                return partial
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
                 # Bank the failed session's spend BEFORE any recovery
@@ -1235,6 +1316,55 @@ class RelentlessAgent(Base):
         err = KISSError(banner)
         err.terminal_result_broadcast = True  # type: ignore[attr-defined]
         raise err
+
+    def _budget_exhausted_result(
+        self,
+        executor: KISSAgent | None,
+        summaries: list[str],
+        exc: BudgetExceededError,
+    ) -> str | None:
+        """Turn a sub-agent's budget exhaustion into a partial result.
+
+        A top-level task keeps raising *exc*: the server, the CLI and
+        the result panel all report "budget exceeded" from it.  A
+        sub-agent (a ``run_parallel`` child or a ``run_agent``
+        dispatch, marked by ``_subagent_info``) instead returns a
+        ``finish(success=False, is_continue=False, ...)`` result whose
+        summary quotes what it did (:func:`_partial_result_html`),
+        preceded by any prior sessions' summaries — so the parent can
+        use the work instead of receiving a bare "Task failed".  The
+        merged result event is emitted here because the executor
+        raised before it could emit its own.
+
+        Args:
+            executor: The session that ran out of budget, or ``None``
+                when the budget ran out between sessions.
+            summaries: Prior sessions' summaries, oldest first.
+            exc: The budget error.
+
+        Returns:
+            The partial result string for a sub-agent, ``None`` for a
+            top-level task (the caller re-raises *exc*).
+        """
+        if getattr(self, "_subagent_info", None) is None:
+            return None
+        # Cumulative figures (the executor's spend is already banked,
+        # and nested sub-agents' spend is attributed here, not to the
+        # executor).
+        budget_used, _tokens, total_steps = self.usage_snapshot()
+        payload = {
+            "success": False,
+            "is_continue": False,
+            "summary": _build_exhaustion_summary(
+                summaries,
+                _partial_result_html(
+                    executor, exc, budget_used, self.max_budget, total_steps,
+                ),
+            ),
+        }
+        self._emit_merged_result_event(payload)
+        result: str = yaml.dump(payload, sort_keys=False)
+        return result
 
     def _summarize_failed_session(
         self,

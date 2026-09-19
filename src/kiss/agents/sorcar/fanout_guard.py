@@ -107,14 +107,18 @@ def is_review_task(task: str) -> bool:
     return _REVIEW_WORDS.search(task) is not None
 
 
-def parse_tasks_json(tasks: str) -> list[str]:
-    """Parse the ``tasks`` argument of ``run_parallel`` strictly.
+def parse_tasks_json(tasks: str, name: str = "tasks") -> list[str]:
+    """Parse a JSON-array-of-strings tool argument strictly.
+
+    Used for the ``tasks`` argument of ``run_parallel`` and the
+    ``commands`` argument of ``run_commands_parallel``.
 
     Args:
         tasks: The raw string the model passed.
+        name: The argument's name, used in the error messages.
 
     Returns:
-        The decoded, non-empty list of task strings.
+        The decoded, non-empty list of strings.
 
     Raises:
         ValueError: If *tasks* is not valid JSON, is not an array, is
@@ -134,19 +138,18 @@ def parse_tasks_json(tasks: str) -> list[str]:
                 "Read the file first and paste its JSON array here."
             )
         raise ValueError(
-            f"tasks must be a JSON array of task strings, got {stripped[:80]!r}."
+            f"{name} must be a JSON array of strings, got {stripped[:80]!r}."
             + hint
         ) from None
     if not isinstance(parsed, list):
         raise ValueError(
-            f"tasks must be a JSON array of task strings, got a JSON "
+            f"{name} must be a JSON array of strings, got a JSON "
             f"{type(parsed).__name__}."
         )
     if not parsed:
-        raise ValueError("tasks is an empty array; nothing to run.")
+        raise ValueError(f"{name} is an empty array; nothing to run.")
     if not all(isinstance(t, str) and t.strip() for t in parsed):
         raise ValueError(
-            "tasks must be a JSON array of non-empty strings; every element "
-            "must be a task description."
+            f"{name} must be a JSON array of non-empty strings."
         )
     return parsed

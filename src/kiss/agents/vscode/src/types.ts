@@ -598,7 +598,9 @@ type ToWebviewMessageBody =
   // The four task-end events are one Python broadcast
   // (task_runner.py: {**task_end_event, tabId, startTs, endTs}); the
   // webview derives the per-tab "Done in …" label from the timestamps.
-  | {type: 'task_done'; startTs?: number; endTs?: number}
+  // `success` is the agent's own verdict from its result YAML (absent
+  // when the result did not parse); `false` flags the tab as failed.
+  | {type: 'task_done'; success?: boolean; startTs?: number; endTs?: number}
   | {type: 'task_error'; text: string; startTs?: number; endTs?: number}
   | {type: 'task_stopped'; startTs?: number; endTs?: number}
   | {type: 'task_interrupted'; startTs?: number; endTs?: number}

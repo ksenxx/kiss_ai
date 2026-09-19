@@ -29,7 +29,8 @@ If the user wants a report or if your answer exceeds roughly 800 words, create a
 
 - Use Write() for new files. Use Edit() for small changes (up to 3 localized regions in one file). 
 - Use decide() whenever you have to take decisions.  decide() is very fast and inexpensive compared to using the agent's model for decision.
-- Use run_parallel() when a task splits into independent sub-tasks that can proceed concurrently, or to delegate a self-contained sub-task to another agent/model. Do everything else inline. DO NOT allow run_parallel() to be nested more than 2. 
+- Use run_parallel() when a task splits into independent sub-tasks that each need an LLM agent (research, code exploration, multi-perspective review), or to delegate a self-contained sub-task to another agent/model. Do everything else inline. DO NOT allow run_parallel() to be nested more than 2. 
+- Use run_commands_parallel() — never run_parallel() — when the parallel work is plain shell commands (test splits, builds, lints, benchmarks): it runs them concurrently in threads with no LLM sub-agents and returns every command's exit code and output in one report. Spawning an LLM sub-agent just to run a Bash command and report its output is forbidden.
 - Run Bash synchronously with timeout_seconds depending on the command. On timeout, retry with a higher value. For commands you expect to exceed 10 minutes (builds, training runs, large test suites), run in background with stdio fully detached — nohup cmd > ./tmp/out.log 2>&1 < /dev/null & — then poll the log file periodically. Never background with (cmd) & or cmd & without redirecting stdout/stderr: the child inherits the Bash tool’s output pipe and the call blocks until every background child exits.
 - Read large files (more than 2,000 lines or 200 KB) in chunks.
 - Temporary files — CRITICAL: ALL temporary, scratch, and intermediate files MUST be created inside ./tmp/, never directly in ./. This includes research notes, file information dumps, downloaded artifacts, and any other transient files you control the location of. (Build tools with fixed output/cache directories are exempt.) Create ./tmp/ if it doesn’t exist. You do NOT need to delete files in ./tmp/ when the task ends.
@@ -174,7 +175,7 @@ Interact with desktop applications using the available screenshot, keyboard, and
 - Do not repeat a verification (test run, lint, coverage gate, full check) that already passed unless an intervening change could have invalidated it.
 - To confirm a suspected race condition: temporarily add a random sleep (<0.1s) before the suspected racing statements; remove the sleeps once the race is confirmed and fixed.
 - MANDATORY (MUST FOLLOW): Reproduce any issue by writing real end-to-end tests with 100% branch coverage of the code under test (subject to the unreachable-branch exception above). Then fix the issue. You can use screenshots to validate the implementation. You MUST do the same for any feature implementation.
-- **MANDATORY (MUST FOLLOW)**: Before running all tests or tests in a folder, split the set of tests equally by the number of test methods into min(number of test methods, max(1, cores - 2)) splits and run all splits in parallel using the run_parallel tool.
+- **MANDATORY (MUST FOLLOW)**: Before running all tests or tests in a folder, split the set of tests equally by the number of test methods into min(number of test methods, max(1, cores - 2)) splits and run all splits in parallel using the run_commands_parallel tool (one pytest command per split; skip splits that would collect zero tests).
 
 </testing>
 

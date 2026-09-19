@@ -361,7 +361,8 @@ def search_database(query: str, max_results: int = 10) -> str:
 ## The `append_basic_tools` parameter
 
 By default (`append_basic_tools=True`) the agent gets the built-in
-KISS Sorcar toolset — `Bash`, `Read`, `Edit`, `Write`,
+KISS Sorcar toolset — `Bash`, `run_commands_parallel` (several shell
+commands at once, no LLM sub-agents), `Read`, `Edit`, `Write`,
 `ask_user_question`, `talk`, `set_model`, `summary`, `run_agent`,
 browser tools (when `use_web_tools`), `run_parallel` and
 `number_of_cores` (when `is_parallel`), and `decide` (when

@@ -1672,6 +1672,7 @@ class SorcarAgent(RelentlessAgent):
             from kiss.agents.sorcar.docker_tools import DockerTools
 
             docker_tools = DockerTools(self._docker_bash)
+            self.docker_manager.stop_event = getattr(self, "_stop_event", None)
 
             def Bash(  # noqa: N802
                 command: str,
@@ -1695,7 +1696,8 @@ class SorcarAgent(RelentlessAgent):
                 )
 
             tools: list = [
-                Bash, docker_tools.Read, docker_tools.Edit, docker_tools.Write,
+                Bash, self.docker_manager.run_commands_parallel,
+                docker_tools.Read, docker_tools.Edit, docker_tools.Write,
             ]
         else:
             useful_tools = UsefulTools(
@@ -1704,7 +1706,7 @@ class SorcarAgent(RelentlessAgent):
                 work_dir=self.work_dir,
             )
             tools = [
-                useful_tools.Bash,
+                useful_tools.Bash, useful_tools.run_commands_parallel,
                 useful_tools.Read, useful_tools.Edit, useful_tools.Write,
             ]
         if self._use_web_tools and self.web_use_tool is None:
@@ -1736,6 +1738,11 @@ class SorcarAgent(RelentlessAgent):
             - Bulk file generation when each file is independent and the
               API contract between them is already pinned down in a
               spec.
+
+            **When NOT to call run_parallel:** when each task is just a
+            shell command whose output you need (test splits, builds,
+            lints).  Use ``run_commands_parallel`` for those: it runs the
+            commands concurrently without spawning LLM sub-agents.
 
             **Hard limits (enforced, not advisory):**
             - ``tasks`` must be a literal JSON array; shell substitutions

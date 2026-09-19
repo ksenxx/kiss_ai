@@ -792,6 +792,11 @@ class KISSAgent(Base):
         call_reprs = []
         function_results: list[tuple[str, dict[str, Any]]] = []
         finish_result: str | None = None
+        # A budget/context limit hit after a tool ran is raised only
+        # AFTER the step is recorded in ``messages``: the tool DID run
+        # (a Write landed, a command executed), and a partial result
+        # built from the trajectory must not omit the last step.
+        limit_error: KISSError | None = None
 
         for fc in function_calls:
             blocked: str | None = None
@@ -812,7 +817,11 @@ class KISSAgent(Base):
             if name == "finish" and blocked is None:
                 finish_result = response_str
             else:
-                self._check_limits()
+                try:
+                    self._check_limits()
+                except KISSError as e:
+                    limit_error = e
+                    break
 
         model_content = (
             response_text + "\n" + "\n".join(call_reprs) + "\n```text\n" + usage_info + "\n```\n"
@@ -824,6 +833,8 @@ class KISSAgent(Base):
             "\n\n".join(f"[{name}]: {result['result']}" for name, result in function_results),
             tool_call_timestamp,
         )
+        if limit_error is not None:
+            raise limit_error
 
         if finish_result is not None:
             logger.info(
