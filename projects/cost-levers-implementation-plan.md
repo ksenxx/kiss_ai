@@ -9,7 +9,7 @@ Edit this file freely; the condensed version lives in memory page
 
 | Already exists | Gap the task must close |
 |---|---|
-| `~/.kiss/SORCAR.md` is inlined into the system prompt (`RelentlessAgent.perform_task`, `src/kiss/agents/relentless_agent.py` ≈L1142) | The project `./SORCAR.md` (83 bytes) is not; `src/kiss/SYSTEM.md:105` still mandates `Read("./SORCAR.md")` as the first tool call → 1,967 wasted first steps/week |
+| `~/.kiss/SORCAR.md` (user memory / preferences) is already inlined into the system prompt (`RelentlessAgent.perform_task`, `src/kiss/agents/relentless_agent.py` ≈L1142) | `src/kiss/SYSTEM.md:105` ("Mandatory First Actions") still mandates `Read("./SORCAR.md")` as the first tool call of every task → 1,967 wasted first steps/week. The requirement is simply removed; the project `./SORCAR.md` is **not** appended to the system prompt (`SYSTEM_LITE.md` has no such mandate) |
 | `src/kiss/SYSTEM_LITE.md` (4.1 KB vs 20.7 KB for `SYSTEM.md`) is selected by `SorcarAgent.run` when the Jev classifier says `is_simple` | Sub-agents always receive the full ~30-tool schema set; there are no tool profiles |
 | Prompt caching is applied (`anthropic_model.py:795`, `openai_compatible_model.py:573`); usage tuples carry `cache_read`/`cache_write` (`kiss_agent.py` L1071+) | Never verified end-to-end that the static prefix hits the cache on every step |
 | Cron `command` jobs (no LLM) exist in `cron_agent.py` | No one-shot / self-disable flag; polls are still written as LLM jobs |
@@ -48,12 +48,17 @@ Edit this file freely; the condensed version lives in memory page
 
 ### WP1 — Fixed per-step overhead (≈ $300–500/week)
 
-- **1a Inline `./SORCAR.md`.** Append `{work_dir}/SORCAR.md` next to the existing
-  `~/.kiss/SORCAR.md` append in `perform_task`. Rewrite `SYSTEM.md:105` / `SYSTEM_LITE.md` to
-  "its contents appear in the section below; do not Read it". Update docstrings in
-  `daemon_client.py:440/619`, `server/README.md:376`, and the tests that assume the first Read
-  (`test_system_prompt_internet_search`, stream-stall tests). Worktrees are fine: the file is in
-  the git tree.
+- **1a Drop the mandatory `Read("./SORCAR.md")`.** Delete the "Mandatory First Actions" block
+  at `SYSTEM.md:105` (both sentences: the first-tool-call mandate and the "if spoken, still Read
+  it first" clause); it is the only `SORCAR.md` reference in `SYSTEM.md`. Do **not** append `./SORCAR.md` to the system prompt: `~/.kiss/SORCAR.md`
+  already covers user memory and preferences, and the project file is only read when a task
+  actually needs it. `SYSTEM_LITE.md` has no such mandate and needs no change. Update the
+  docstrings that describe the first step (`daemon_client.py:440/619`, `server/README.md:376`)
+  and the tests that assume it (`test_system_prompt_internet_search`, the two
+  `test_anthropic_stream_stall_timeout` files, `test_read_tool_robustness`; the
+  `test_audit0902_…_sorcar_md_encoding` test covers `~/.kiss/SORCAR.md` and stays as is).
+  Verification: `grep -rn 'SORCAR.md' src/kiss/SYSTEM*.md` returns nothing, and the WP0 script
+  reports zero `Read ./SORCAR.md` calls in new tasks.
 - **1b Tool profiles** in `SorcarAgent._get_tools(profile)`:
   - `full` — today's set (default).
   - `review` — Bash, Read, memory-read, decide, summary, finish. No Edit/Write/browser/talk/
@@ -165,6 +170,7 @@ reporting baseline vs. current KPIs.
 | Dedupe / outline hides text the model needs | Stubs always state the one-call way to get it back; the last 20 steps are never touched |
 | Cheap-model routing hurts quality | Restricted to machine-generated work and crons; the user's chosen model is never overridden |
 | Tests assuming the first `Read("./SORCAR.md")` | Enumerated in WP1a and updated in the same WP |
+| A project `./SORCAR.md` with task-relevant instructions is no longer read automatically | Accepted by design: user preferences live in `~/.kiss/SORCAR.md` (already inlined); a project file is read on demand like any other repo file |
 | Task size (≈ 10 files, ≈ 1.5k LOC + tests, est. $60–120 and 3–5 h with the new guardrails) | Payoff-ordered WPs, progress file, flags: a hand-off or stop still leaves usable, tested increments |
 
 ## 6. Expected payoff
