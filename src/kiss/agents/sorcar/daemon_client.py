@@ -239,10 +239,12 @@ def _resolve_py_file(
             type_error.format(type=type(value).__name__, value=repr(value))
         )
     path = Path(value).expanduser().resolve()
+    # Quote the path literally rather than via repr(): repr doubles every
+    # backslash of a Windows path, which misleads the reader.
     if path.suffix != ".py":
-        raise ValueError(f"{what} {str(path)!r} is not a Python (.py) file")
+        raise ValueError(f"{what} '{path}' is not a Python (.py) file")
     if not path.is_file():
-        raise ValueError(f"{what} {str(path)!r} does not exist")
+        raise ValueError(f"{what} '{path}' does not exist")
     return str(path)
 
 
@@ -726,6 +728,14 @@ def run(
     # a late stop must never kill a newer run that reused the tab.
     run_token = uuid.uuid4().hex
     deadline = None if timeout is None else time.monotonic() + timeout
+    if not hasattr(socket, "AF_UNIX"):
+        # CPython on Windows has no Unix-domain sockets, and the daemon's
+        # local API is served only over one: report it as the same kind
+        # of connection failure callers already handle, naming the path.
+        raise ConnectionError(
+            f"Cannot connect to the sorcar daemon at {path}: Unix-domain "
+            f"sockets are unavailable on this platform."
+        )
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     aborted: BaseException | None = None
     try:

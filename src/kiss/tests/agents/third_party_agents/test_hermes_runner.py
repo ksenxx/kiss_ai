@@ -20,7 +20,6 @@ exercised through the factored helpers instead.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import stat
@@ -52,7 +51,9 @@ from kiss.agents.third_party_agents._channel_cli import (
 from kiss.agents.third_party_agents.telegram_agent import TelegramAgent
 from kiss.agents.third_party_agents.telegram_agent import main as telegram_main
 from kiss.core import config as config_module
+from kiss.core.file_lock import lock_exclusive
 from kiss.core.models.model_info import get_default_model
+from kiss.tests.conftest import IS_WINDOWS
 
 
 class RecordingBackend(ToolMethodBackend):
@@ -219,8 +220,8 @@ class TestChannelState:
         save_channel_state(path, state)
         assert path.exists()
         assert not path.with_suffix(".tmp").exists()
-        mode = stat.S_IMODE(path.stat().st_mode)
-        assert mode == 0o600
+        # NTFS has no POSIX mode bits: the 0600 of mkstemp is a no-op there.
+        assert IS_WINDOWS or stat.S_IMODE(path.stat().st_mode) == 0o600
         assert load_channel_state(path)["failures"] == 3
 
     def test_load_missing_returns_default_schema(self, tmp_path: Path) -> None:
@@ -307,7 +308,7 @@ class TestTickLock:
         backend = RecordingBackend()
         runner = _make_runner(backend, state_path)
         with lock_path.open("a+", encoding="utf-8") as held:
-            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert lock_exclusive(held, blocking=False)
             assert runner.run_once() == 0
         assert backend.connect_calls == 0
 

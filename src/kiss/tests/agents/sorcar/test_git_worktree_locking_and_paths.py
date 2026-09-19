@@ -44,6 +44,7 @@ from kiss.agents.sorcar.git_worktree import (
     _race_delay,
     repo_lock,
 )
+from kiss.tests.conftest import posix_only
 
 _RACE_DELAY_ENV = "KISS_RACE_DELAY"
 
@@ -225,6 +226,7 @@ class GitOutputParsingTest(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    @posix_only("Windows strips trailing spaces from directory names")
     def test_worktree_paths_with_a_trailing_space_survive(self) -> None:
         """A repo whose directory name ends in a space stays resolvable."""
         repo = _make_repo(self.tmp / "proj ")
@@ -405,6 +407,7 @@ class FailedCherryPickCleanupTest(unittest.TestCase):
         self.assertEqual((self.repo / "g.txt").read_text(), "g-agent\n")
 
 
+@posix_only("shebang git shim on PATH cannot shadow git.exe on Windows")
 class ReclaimEfficiencyTest(unittest.TestCase):
     """D1: reclaim must stage once and reuse ``cleanup_partial``."""
 

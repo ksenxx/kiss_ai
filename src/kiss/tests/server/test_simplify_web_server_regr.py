@@ -41,6 +41,7 @@ from kiss.server.web_server import (
     _get_local_ips,
     _version_tuple,
 )
+from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
 
 
 class TestPureHelpers(unittest.TestCase):
@@ -190,6 +191,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
                 return msg
         raise AssertionError(f"no {wanted_type!r} event observed")
 
+    @posix_only("bash install.sh update script")
     async def test_run_update_without_install_script_bootstraps(self) -> None:
         """runUpdate with no install.sh runs the curl bootstrap fallback."""
         marker = Path(self.tmpdir) / "bootstrap-ran.marker"
@@ -217,6 +219,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
         self.assertTrue(marker.exists(), "curl bootstrap was not executed")
 
+    @posix_only("bash install.sh update script")
     async def test_run_update_with_install_script_notices_and_runs(self) -> None:
         """runUpdate with a real install.sh emits notice and spawns it."""
         root = self.server._install_root
@@ -235,6 +238,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
         self.assertTrue(marker.exists(), "install.sh was not executed")
 
+    @posix_only("bash install.sh update script")
     async def test_run_update_prefers_clone_bootstrap_over_root_script(
         self,
     ) -> None:
@@ -280,6 +284,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
             root_marker.exists(), "root install.sh ran despite the bootstrap",
         )
 
+    @posix_only("bash install.sh update script")
     async def test_run_update_unreadable_scripts_dir_falls_back(
         self,
     ) -> None:
@@ -292,7 +297,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         root ``install.sh`` directly rather than erroring out or leaving
         ``_update_starting`` wedged.
         """
-        if os.geteuid() == 0:
+        if is_root():
             self.skipTest("permission bits do not bind root")
         root = self.server._install_root
         scripts = root / "scripts"
@@ -330,6 +335,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(version.cancelled() or version.done())
 
 
+    @requires_unix_sockets
     async def test_broadcast_reaches_uds_and_stops_after_removal(self) -> None:
         """Tab-stamped broadcasts fan out to UDS writers until removed."""
         reader, writer = await self._connect_uds()

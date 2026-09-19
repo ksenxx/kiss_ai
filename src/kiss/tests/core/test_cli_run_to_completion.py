@@ -24,7 +24,6 @@ that record their argv and stdin and emit valid event streams — no mocks.
 
 import json
 import os
-import stat
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -36,6 +35,7 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model import CLI_SYSTEM_PROMPT_HEADER
 from kiss.core.models.model_info import model as model_factory
 from kiss.core.utils import finish as structured_finish
+from kiss.tests.conftest import install_cli_script
 
 TASK = "Say COMPLETED-TASK and stop."
 SYSTEM_PROMPT = "Always answer in exactly three words."
@@ -108,16 +108,15 @@ def _install_fake_cli(
     record_dir = tmp_path / "records"
     bin_dir.mkdir(exist_ok=True)
     record_dir.mkdir(exist_ok=True)
-    cli = bin_dir / name
-    cli.write_text(
+    install_cli_script(
+        bin_dir / name,
         _FAKE_CLI_TEMPLATE.format(
             record_dir=str(record_dir),
             events=events,
             delay=delay,
             final_sleep=final_sleep,
-        )
+        ),
     )
-    cli.chmod(cli.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return record_dir
 

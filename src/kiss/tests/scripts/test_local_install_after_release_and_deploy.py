@@ -49,7 +49,11 @@ cache flushed, not a failed deploy) and ``scripts/test_move_home_to_disk.sh``
 import subprocess
 from pathlib import Path
 
+from kiss.tests.conftest import posix_only
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
+
+pytestmark = posix_only("runs the bash test suites under scripts/")
 
 
 def run_suite(script_name: str) -> None:

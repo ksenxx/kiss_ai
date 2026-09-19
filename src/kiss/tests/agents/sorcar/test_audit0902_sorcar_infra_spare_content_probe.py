@@ -28,6 +28,7 @@ import pytest
 
 from kiss.agents.sorcar import worktree_pool
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+from kiss.tests.conftest import is_root, posix_only
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -105,10 +106,11 @@ class TestSpareHasContent:
         assert GitWorktreeOps.spare_has_content(self.repo, self.branch, self.wt_dir)
         self._all_consumers_preserve()
 
+    @posix_only("chmod 000 permission denial")
     def test_unenumerable_ignored_files_are_content(self) -> None:
         """A worktree git can no longer inspect (directory unreadable)
         must be treated as holding content, never destroyed."""
-        if os.geteuid() == 0:  # pragma: no cover — root ignores mode bits
+        if is_root():  # pragma: no cover — root ignores mode bits
             pytest.skip("permission-based git failure needs a non-root user")
         os.chmod(self.wt_dir, 0)
         try:

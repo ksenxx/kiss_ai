@@ -94,6 +94,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     teardown_muse_env,
     wait_daemon_stopped,
 )
+from kiss.tests.conftest import requires_unix_sockets
 
 _REAL_DISCORD_TOKEN = "discord-real-secret"
 _REAL_HA_TOKEN = "ha-real-secret"
@@ -1044,6 +1045,7 @@ def test_failed_enrollment_is_transactional(
     assert api_server.header("Authorization") == "Bearer tk-good"
 
 
+@requires_unix_sockets
 def test_boundary_ignores_ambient_proxy_env(
     isolated_kiss_home: Path,
     api_server: _DeviceApiServer,

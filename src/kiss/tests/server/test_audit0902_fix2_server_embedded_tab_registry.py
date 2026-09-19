@@ -38,6 +38,9 @@ from unittest import TestCase
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
+
+pytestmark = requires_unix_sockets
 
 _TABS_PER_SIDE = 12
 

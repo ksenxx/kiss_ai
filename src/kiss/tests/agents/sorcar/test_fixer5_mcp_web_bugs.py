@@ -28,7 +28,6 @@ and real skill directories are used throughout.
 from __future__ import annotations
 
 import os
-import pty
 import sys
 import threading
 import time
@@ -44,6 +43,7 @@ from kiss.agents.sorcar.mcp_servers import (
 )
 from kiss.agents.sorcar.skills import discover_skills, load_skill_content
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.tests.conftest import posix_only
 
 _SERVER_SCRIPT = '''
 from mcp.server.fastmcp import FastMCP
@@ -83,12 +83,13 @@ def real_stdin(
     The MCP stdio transport passes ``sys.stderr`` as the spawned
     server's stderr and calls ``.fileno()`` on it; under pytest the std
     streams are capture objects without a real descriptor, so the
-    transport cannot start.  Point stdin at a pty slave and the
+    transport cannot start.  Point stdin at ``os.devnull`` and the
     transport's bound ``errlog`` default at a plain file (same
     technique as ``test_sorcar_mcp.py``).
     """
-    master_fd, slave_fd = pty.openpty()
-    stdin_stream = os.fdopen(slave_fd, "r", closefd=True)
+    # ``os.devnull`` has a real descriptor on every platform (Windows has
+    # no pty) and nothing reads stdin while the client talks to the child.
+    stdin_stream = open(os.devnull, encoding="utf-8")
     errlog = (tmp_path / "mcp_errlog.txt").open("w", encoding="utf-8")
     monkeypatch.setattr(sys, "stdin", stdin_stream)
     monkeypatch.setattr(sys, "stderr", errlog)
@@ -102,7 +103,6 @@ def real_stdin(
     finally:
         errlog.close()
         stdin_stream.close()
-        os.close(master_fd)
 
 
 
@@ -234,6 +234,7 @@ def test_renderer_crash_on_tab_switched_page_recovers() -> None:
 
 
 
+@posix_only("'\"' and '<' are illegal in Windows file names")
 def test_skill_name_xml_escaped_in_content(tmp_path: Path) -> None:
     """A skill whose directory name needs escaping renders valid XML."""
     weird = 'a"b<c&d'

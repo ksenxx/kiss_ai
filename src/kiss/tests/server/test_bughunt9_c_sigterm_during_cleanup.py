@@ -33,6 +33,7 @@ import unittest
 from pathlib import Path
 
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import posix_only
 
 
 def _free_port() -> int:
@@ -53,6 +54,7 @@ def _sigint_when_listening(port: int, pid: int) -> None:
     os.kill(pid, signal.SIGINT)
 
 
+@posix_only("SIGHUP and a real SIGINT delivered with os.kill")
 class TestSigtermDuringSigintCleanup(unittest.TestCase):
     """A SIGTERM landing after a SIGINT-initiated shutdown must not raise."""
 

@@ -54,6 +54,8 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
 )
 from kiss.core.config import kiss_home
+from kiss.core.processes import kill_process_group, popen_process_group
+from kiss.core.processes import pid_alive as _pid_alive
 
 logger = logging.getLogger(__name__)
 
@@ -984,17 +986,6 @@ def _bridge_pid() -> int:
         return 0
 
 
-def _pid_alive(pid: int) -> bool:
-    """Return True if *pid* refers to a live process."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
 def _is_qr_line(line: str) -> bool:
     """Return True if *line* looks like a qrterminal half-block QR row.
 
@@ -1304,13 +1295,12 @@ class WhatsAppAgent(BaseChannelAgent):
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text("", encoding="utf-8")
             with open(log_path, "ab") as log_fp:
-                proc = subprocess.Popen(
+                proc = popen_process_group(
                     [str(binary)],
                     cwd=str(backend.bridge_dir),
                     stdout=log_fp,
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,
-                    start_new_session=True,
                 )
             _bridge_pid_path().write_text(str(proc.pid), encoding="utf-8")
             deadline = time.time() + 60
@@ -1338,7 +1328,7 @@ class WhatsAppAgent(BaseChannelAgent):
                     )
                 if "Client outdated" in text:
                     with contextlib.suppress(OSError):
-                        os.killpg(proc.pid, signal.SIGTERM)
+                        kill_process_group(proc.pid, signal.SIGTERM)
                     _bridge_pid_path().unlink(missing_ok=True)
                     return json.dumps(
                         {
@@ -1476,11 +1466,11 @@ class WhatsAppAgent(BaseChannelAgent):
             if pid <= 0:
                 return json.dumps({"ok": False, "error": "No recorded bridge PID."})
             try:
-                os.killpg(pid, signal.SIGTERM)
+                kill_process_group(pid, signal.SIGTERM)
             except ProcessLookupError:
                 _bridge_pid_path().unlink(missing_ok=True)
                 return json.dumps({"ok": True, "message": "Bridge was not running."})
-            except PermissionError as e:
+            except OSError as e:
                 return json.dumps({"ok": False, "error": f"Could not stop bridge: {e}"})
             _bridge_pid_path().unlink(missing_ok=True)
             return json.dumps({"ok": True, "message": f"Bridge (pid {pid}) stopped."})
@@ -1507,7 +1497,7 @@ class WhatsAppAgent(BaseChannelAgent):
                 )
             if pid > 0:
                 with contextlib.suppress(OSError):
-                    os.killpg(pid, signal.SIGTERM)
+                    kill_process_group(pid, signal.SIGTERM)
                 deadline = time.time() + 5
                 while _pid_alive(pid) and time.time() < deadline:
                     time.sleep(0.2)

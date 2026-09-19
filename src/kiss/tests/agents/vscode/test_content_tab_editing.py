@@ -48,7 +48,10 @@ _DIRTY_TAB = ".chat-tab.content-tab.content-dirty"
 
 def _fresh_file(harness, name: str, text: str = _SOURCE) -> Path:
     path = Path(harness.work_dir) / name
-    path.write_text(text)
+    # Byte-exact fixture: the daemon saves the editor text without
+    # newline translation, and the assertions count LF bytes, so the
+    # file must not pick up CRLF from Windows text-mode writes.
+    path.write_text(text, encoding="utf-8", newline="\n")
     return path
 
 
@@ -106,8 +109,13 @@ def _click_save(page) -> None:
 def _wait_for_disk(path: Path, needle: str, timeout: float = 20) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if needle in path.read_text():
-            return
+        try:
+            if needle in path.read_text():
+                return
+        except PermissionError:
+            # Windows refuses to open a file for the instant the daemon's
+            # atomic ``Path.replace`` swaps it in; poll again.
+            pass
         time.sleep(0.05)
     raise AssertionError(f"{needle!r} never reached {path}")
 

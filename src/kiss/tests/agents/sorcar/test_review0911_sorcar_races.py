@@ -502,21 +502,22 @@ def _make_repo(path: Path) -> Path:
 
 
 _FLOCK_HOLDER_SCRIPT = """
-import fcntl
+import os
 import sys
 import time
 
+from kiss.core.file_lock import lock_exclusive, unlock
+
 lock_path, held_marker, release_marker = sys.argv[1], sys.argv[2], sys.argv[3]
 handle = open(lock_path, "a+")
-fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+lock_exclusive(handle)
 open(held_marker, "w").close()
 deadline = time.monotonic() + 60
-import os
 while time.monotonic() < deadline:
     if os.path.exists(release_marker):
         break
     time.sleep(0.02)
-fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+unlock(handle)
 handle.close()
 """
 

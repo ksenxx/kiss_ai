@@ -14,8 +14,8 @@ Covers:
   overflow past ``limit`` plus foreign senders) or, without bound state,
   foreign envelopes are dropped with a log and ``limit`` is ignored;
   ``send_message`` must raise ``RuntimeError`` on CLI failure. Tested
-  end-to-end against a REAL executable ``signal-cli`` shell script placed
-  on PATH (no mock libraries).
+  end-to-end against a REAL executable ``signal-cli`` stand-in program
+  placed on PATH (no mock libraries).
 - sms_agent.py: ``from_number`` is a required config key (a config without it is
   invalid and ``connect()`` reports "No Twilio config found."); ``is_from_bot``
   keys on the bot's number. Runtime Twilio API behavior is skipif-guarded because
@@ -36,34 +36,36 @@ from pathlib import Path
 
 from kiss.agents.third_party_agents.signal_agent import _config as _signal_config
 from kiss.agents.third_party_agents.sms_agent import _config as _sms_config
+from kiss.tests.conftest import install_cli_script
 
 _SIGNAL_CONFIG = _signal_config.path
 _SIGNAL_BACKUP = _SIGNAL_CONFIG.with_suffix(".json.bughunt2-bak")
 _SMS_CONFIG = _sms_config.path
 _SMS_BACKUP = _SMS_CONFIG.with_suffix(".json.bughunt2-bak")
 
-_FAKE_SIGNAL_CLI = """#!/bin/sh
-if [ "$1" = "-u" ]; then shift 2; fi
-cmd="$1"
-shift
-if [ "$cmd" = "receive" ]; then
-cat <<'EOF'
-{"envelope": {"source": "+1AAA", "timestamp": 111, "dataMessage": {"message": "hello A1"}}}
-{"envelope": {"source": "+1BBB", "timestamp": 112, "dataMessage": {"message": "hello B"}}}
-{"envelope": {"source": "+1AAA", "timestamp": 113, "dataMessage": {"message": "hello A2"}}}
-EOF
-exit 0
-fi
-if [ "$cmd" = "send" ]; then
-  last=""
-  for arg in "$@"; do last="$arg"; done
-  if [ "$last" = "+FAIL" ]; then
-    echo "Failed to send message: ERROR unregistered recipient" >&2
-    exit 1
-  fi
-  exit 0
-fi
-exit 0
+# A Python program (not a shell script) so the same stand-in runs on
+# Windows, where ``install_cli_script`` adds the ``.cmd`` shim.
+_FAKE_SIGNAL_CLI = """#!/usr/bin/env python3
+import json
+import sys
+args = sys.argv[1:]
+if args[:1] == ["-u"]:
+    args = args[2:]
+cmd = args[0] if args else ""
+if cmd == "receive":
+    for source, ts, text in (
+        ("+1AAA", 111, "hello A1"),
+        ("+1BBB", 112, "hello B"),
+        ("+1AAA", 113, "hello A2"),
+    ):
+        print(json.dumps({"envelope": {
+            "source": source, "timestamp": ts, "dataMessage": {"message": text},
+        }}))
+    sys.exit(0)
+if cmd == "send" and args[-1] == "+FAIL":
+    print("Failed to send message: ERROR unregistered recipient", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
 """
 
 
@@ -93,9 +95,7 @@ class TestSignalBackend(unittest.TestCase):
         """
         self._tmpdir = tempfile.mkdtemp(prefix="bughunt-signal-")
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        cli = Path(self._tmpdir) / "signal-cli"
-        cli.write_text(_FAKE_SIGNAL_CLI, encoding="utf-8")
-        cli.chmod(0o755)
+        install_cli_script(Path(self._tmpdir) / "signal-cli", _FAKE_SIGNAL_CLI)
         self._old_path = os.environ["PATH"]
         os.environ["PATH"] = self._tmpdir + os.pathsep + self._old_path
         self.addCleanup(os.environ.__setitem__, "PATH", self._old_path)

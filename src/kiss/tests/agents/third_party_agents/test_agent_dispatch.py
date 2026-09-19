@@ -590,7 +590,7 @@ def test_get_tools_and_sorcar_wiring() -> None:
     # The module lives in the sorcar package and never imports from
     # kiss.agents.third_party_agents at module scope (soft plugin).
     source_text = Path(agent_dispatch.__file__).read_text(encoding="utf-8")
-    assert "/agents/sorcar/" in agent_dispatch.__file__
+    assert Path(agent_dispatch.__file__).parent.parts[-2:] == ("agents", "sorcar")
     for line in source_text.splitlines():
         assert not line.startswith("from kiss.agents.third_party_agents")
         assert not line.startswith("import kiss.agents.third_party_agents")

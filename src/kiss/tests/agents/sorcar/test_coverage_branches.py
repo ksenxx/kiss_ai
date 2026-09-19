@@ -89,15 +89,12 @@ def browser_tool():
 
 
 class TestUsefulToolsBranches:
-    def test_read_truncates_large_file(self):
+    def test_read_truncates_large_file(self, tmp_path):
         ut = UsefulTools()
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            for i in range(3000):
-                f.write(f"line {i}\n")
-            f.flush()
-            result = ut.Read(f.name, max_lines=100)
-            assert "[truncated:" in result
-            os.unlink(f.name)
+        path = tmp_path / "big.txt"
+        path.write_text("".join(f"line {i}\n" for i in range(3000)))
+        result = ut.Read(str(path), max_lines=100)
+        assert "[truncated:" in result
 
     def test_read_error(self):
         ut = UsefulTools()
@@ -109,46 +106,38 @@ class TestUsefulToolsBranches:
         result = ut.Edit("/nonexistent_file_xyz", "old", "new")
         assert "Error:" in result
 
-    def test_edit_same_string(self):
+    def test_edit_same_string(self, tmp_path):
         ut = UsefulTools()
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("content")
-            f.flush()
-            ut.Read(f.name)
-            result = ut.Edit(f.name, "content", "content")
-            assert "must be different" in result
-            os.unlink(f.name)
+        path = tmp_path / "f.txt"
+        path.write_text("content")
+        ut.Read(str(path))
+        result = ut.Edit(str(path), "content", "content")
+        assert "must be different" in result
 
-    def test_edit_string_not_found(self):
+    def test_edit_string_not_found(self, tmp_path):
         ut = UsefulTools()
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("content")
-            f.flush()
-            ut.Read(f.name)
-            result = ut.Edit(f.name, "xyz", "abc")
-            assert "not found" in result
-            os.unlink(f.name)
+        path = tmp_path / "f.txt"
+        path.write_text("content")
+        ut.Read(str(path))
+        result = ut.Edit(str(path), "xyz", "abc")
+        assert "not found" in result
 
-    def test_edit_multiple_occurrences_no_replace_all(self):
+    def test_edit_multiple_occurrences_no_replace_all(self, tmp_path):
         ut = UsefulTools()
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("aaaa")
-            f.flush()
-            ut.Read(f.name)
-            result = ut.Edit(f.name, "a", "b")
-            assert "appears 4 times" in result
-            os.unlink(f.name)
+        path = tmp_path / "f.txt"
+        path.write_text("aaaa")
+        ut.Read(str(path))
+        result = ut.Edit(str(path), "a", "b")
+        assert "appears 4 times" in result
 
-    def test_edit_replace_all(self):
+    def test_edit_replace_all(self, tmp_path):
         ut = UsefulTools()
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("aXaXa")
-            f.flush()
-            ut.Read(f.name)
-            result = ut.Edit(f.name, "X", "Y", replace_all=True)
-            assert "2 occurrence(s)" in result
-            assert Path(f.name).read_text() == "aYaYa"
-            os.unlink(f.name)
+        path = tmp_path / "f.txt"
+        path.write_text("aXaXa")
+        ut.Read(str(path))
+        result = ut.Edit(str(path), "X", "Y", replace_all=True)
+        assert "2 occurrence(s)" in result
+        assert path.read_text() == "aYaYa"
 
     def test_bash_timeout_nonstreaming(self):
         ut = UsefulTools()
@@ -254,7 +243,7 @@ class TestWebUseToolPersistentContext:
 import sys, os
 sys.path.insert(0, os.path.abspath("src"))
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-udd = os.path.join("{d}", "user_data")
+udd = os.path.join({d!r}, "user_data")
 tool = WebUseTool(user_data_dir=udd, headless=True)
 try:
     result = tool.go_to_url("{http_server}/")

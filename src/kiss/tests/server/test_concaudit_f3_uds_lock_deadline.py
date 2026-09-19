@@ -34,12 +34,14 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
+from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_web_server_uds_owner_wait import (
     _redirect_persistence,
     _restore_persistence,
 )
 
 
+@requires_unix_sockets
 class TestUdsLockDeadline(IsolatedAsyncioTestCase):
     """A held sidecar lock costs the UDS, not the whole daemon."""
 

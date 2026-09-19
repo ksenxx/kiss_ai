@@ -26,6 +26,7 @@ git repository (see ``build_repo``) — no mocks.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -88,8 +89,29 @@ def _open_page(browser, harness, width: int = 1400):
     return context, page, sent_frames
 
 
+def _explorer_row_sel(suffix: str, cls: str = "") -> str:
+    """Selector for the Explorer row whose path ends with *suffix*.
+
+    *suffix* is written with ``/``; the daemon reports native paths, so
+    on Windows the separators become ``\\`` (escaped for the CSS
+    attribute string).  *cls* is an optional extra class such as
+    ``.is-dir``.
+    """
+    native = suffix.replace("/", os.sep).replace("\\", "\\\\")
+    return f".explorer-row{cls}[data-explorer-path$='{native}']"
+
+
+def _focus_ends_with(suffix: str) -> str:
+    """JS expression: the focused Explorer row's path ends with *suffix*
+    (written with ``/``; the daemon reports native separators)."""
+    return (
+        "document.activeElement.dataset.explorerPath.endsWith("
+        f"{json.dumps(suffix.replace('/', os.sep))})"
+    )
+
+
 def _explorer_row(page, name: str):
-    return page.locator(f".explorer-row[data-explorer-path$='/{name}']")
+    return page.locator(_explorer_row_sel("/" + name))
 
 
 def _sent(frames: list[dict], kind: str) -> list[dict]:
@@ -193,7 +215,7 @@ def test_explorer_lists_the_workspace_and_expands_folders(browser, harness):
         assert _explorer_row(page, "dir/nested.py").count() == 0
         _explorer_row(page, "dir").click()
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/dir/nested.py']",
+            _explorer_row_sel("/dir/nested.py"),
             timeout=15000,
         )
         nested = _explorer_row(page, "dir/nested.py")
@@ -423,12 +445,12 @@ def test_refresh_relists_folders_keeping_them_expanded(browser, harness):
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
         _explorer_row(page, "dir").click()
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/dir/nested.py']", timeout=15000,
+            _explorer_row_sel("/dir/nested.py"), timeout=15000,
         )
         extra.write_text("later\n")
         page.click("#explorer-refresh")
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/dir/later.txt']", timeout=15000,
+            _explorer_row_sel("/dir/later.txt"), timeout=15000,
         )
         assert _explorer_row(page, "dir").get_attribute("aria-expanded") == "true"
         assert _explorer_row(page, "dir/nested.py").is_visible()
@@ -448,8 +470,8 @@ def test_refresh_relists_folders_keeping_them_expanded(browser, harness):
         page.click("#activity-explorer")
         page.click("#explorer-refresh")
         page.wait_for_function(
-            "!document.querySelector(\".explorer-row[data-explorer-path$='/dir/later.txt']\")",
-            timeout=15000,
+            "sel => !document.querySelector(sel)",
+            arg=_explorer_row_sel("/dir/later.txt"), timeout=15000,
         )
         assert _explorer_row(page, "dir/nested.py").is_visible()
     finally:
@@ -469,7 +491,7 @@ def test_symlink_cycle_is_not_expandable(browser, harness):
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
         _explorer_row(page, "dir").click()
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/dir/up']", timeout=15000,
+            _explorer_row_sel("/dir/up"), timeout=15000,
         )
         up = _explorer_row(page, "dir/up")
         assert "is-dir" in (up.get_attribute("class") or "")
@@ -477,13 +499,13 @@ def test_symlink_cycle_is_not_expandable(browser, harness):
         up.click()
         page.wait_for_selector(".explorer-note", timeout=15000)
         note = page.locator(
-            ".explorer-row[data-explorer-path$='/dir/up'] + .explorer-kids .explorer-note"
+            _explorer_row_sel("/dir/up") + " + .explorer-kids .explorer-note"
         )
         assert note.inner_text() == "(symbolic link cycle)"
         page.wait_for_timeout(300)
         assert len(_sent(frames, "listDir")) == n_list
         assert page.locator(
-            ".explorer-row[data-explorer-path$='/dir/up/dir']"
+            _explorer_row_sel("/dir/up/dir")
         ).count() == 0
     finally:
         link.unlink()
@@ -521,20 +543,20 @@ def test_keyboard_model_roving_tabindex_and_arrows(browser, harness):
         page.focus(".explorer-row[aria-level='1']")
         page.keyboard.press("ArrowDown")  # -> dir
         assert page.evaluate(
-            "document.activeElement.dataset.explorerPath.endsWith('/dir')"
+            _focus_ends_with("/dir")
         )
         page.keyboard.press("ArrowRight")  # open dir
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/dir/nested.py']", timeout=15000,
+            _explorer_row_sel("/dir/nested.py"), timeout=15000,
         )
         assert _explorer_row(page, "dir").get_attribute("aria-expanded") == "true"
         page.keyboard.press("ArrowRight")  # step into first child
         assert page.evaluate(
-            "document.activeElement.dataset.explorerPath.endsWith('/dir/nested.py')"
+            _focus_ends_with("/dir/nested.py")
         )
         page.keyboard.press("ArrowLeft")  # back to the parent folder
         assert page.evaluate(
-            "document.activeElement.dataset.explorerPath.endsWith('/dir')"
+            _focus_ends_with("/dir")
         )
         row_stops = page.eval_on_selector_all(
             ".explorer-row", "els => els.map(e => e.tabIndex)",
@@ -544,7 +566,7 @@ def test_keyboard_model_roving_tabindex_and_arrows(browser, harness):
         assert _explorer_row(page, "dir").get_attribute("aria-expanded") == "false"
         page.keyboard.press("End")
         assert page.evaluate(
-            "document.activeElement.dataset.explorerPath.endsWith('/untracked.txt')"
+            _focus_ends_with("/untracked.txt")
         )
         n_open = len(_sent(frames, "openFile"))
         page.keyboard.press("Enter")
@@ -622,7 +644,7 @@ def test_hidden_views_catch_up_when_shown(browser, harness):
         # ...but each view reloads as soon as it is shown.
         page.click("#activity-explorer")
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/arrived-later.txt']", timeout=15000,
+            _explorer_row_sel("/arrived-later.txt"), timeout=15000,
         )
         page.click("#activity-scm")
         page.wait_for_function(
@@ -722,7 +744,7 @@ def test_views_report_a_plain_folder_without_git(browser, harness):
         _set_work_dir(page, str(harness.plain_dir))
         page.click("#activity-explorer")
         page.wait_for_selector(
-            ".explorer-row[data-explorer-path$='/plain/only.txt']", timeout=15000,
+            _explorer_row_sel("/plain/only.txt"), timeout=15000,
         )
         assert page.locator(".explorer-row[aria-level='1']").inner_text().strip() == "plain"
         page.click("#activity-scm")
@@ -733,8 +755,14 @@ def test_views_report_a_plain_folder_without_git(browser, harness):
             timeout=15000,
         )
         assert page.locator("#scm-branch").inner_text() == ""
-        assert page.locator("#scm-graph .sidebar-empty").inner_text().startswith(
-            "Not a git repository"
+        # The graph is filled by the separate gitLog reply, which may land
+        # after gitStatus (each runs its own git subprocess); until then
+        # the pane reads "Loading...".
+        page.wait_for_function(
+            "document.querySelector('#scm-graph .sidebar-empty') && "
+            "document.querySelector('#scm-graph .sidebar-empty').textContent"
+            ".startsWith('Not a git repository')",
+            timeout=15000,
         )
         # Back to the repository: both views follow the workspace.
         _set_work_dir(page, str(harness.work_dir))

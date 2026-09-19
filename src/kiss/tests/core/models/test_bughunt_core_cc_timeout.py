@@ -13,8 +13,9 @@ parsing in a reader thread joined with the timeout; this test pins the
 same behavior for ``ClaudeCodeModel``.
 
 The test uses a real subprocess: a fake ``claude`` executable on PATH
-that emits one valid stream-json event and then stalls far longer than
-the configured timeout.
+(installed with the shared ``install_cli`` helper, so it also starts on
+Windows) that emits one valid stream-json event and then stalls far
+longer than the configured timeout.
 """
 
 import time
@@ -23,28 +24,28 @@ from pathlib import Path
 import pytest
 
 from kiss.core.models.claude_code_model import ClaudeCodeModel
+from kiss.tests.core.models.test_cli_subprocess_lifecycle import install_cli
 
-_FAKE_CLAUDE = """#!/bin/bash
-# Ignore the prompt on stdin; emit one event, then stall well past the
-# configured timeout while keeping stdout open.
-/bin/cat > /dev/null
-echo '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"partial"}]}}'
-exec /bin/sleep 30
+# Python, not bash: the stand-in must start on Windows too, where
+# ``install_cli`` wraps it in a ``claude.cmd`` shim.  Ignore the prompt
+# on stdin; emit one event, then stall well past the configured timeout
+# while keeping stdout open.
+_FAKE_CLAUDE = """
+    import json
+    import sys
+    import time
+
+    sys.stdin.read()
+    print(json.dumps({"type": "assistant",
+                      "message": {"id": "m1",
+                                  "content": [{"type": "text", "text": "partial"}]}}),
+          flush=True)
+    time.sleep(30)
 """
 
 
 def _install_fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    cli = tmp_path / "claude"
-    cli.write_text(_FAKE_CLAUDE)
-    cli.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tmp_path))
-    # The directory-level conftest stubs _find_claude_cli with a fake
-    # /usr/bin path; point it at the stand-in above so the adapter
-    # actually spawns it (same pattern as install_cli in
-    # kiss.tests.core.models.test_cli_subprocess_lifecycle).
-    import kiss.core.models.claude_code_model as cc_mod
-
-    monkeypatch.setattr(cc_mod, "_find_claude_cli", lambda: str(cli), raising=False)
+    install_cli(tmp_path, monkeypatch, "claude", _FAKE_CLAUDE)
 
 
 def test_generate_times_out_on_stalled_stream(

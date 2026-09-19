@@ -13,6 +13,7 @@ const path = require('path');
 
 const {verifyDaemonStartup} = require('../src/daemonRestartVerify');
 const {probeDaemonHealth} = require('../src/daemonHealth');
+const {fakeSockPath, SOCK_FILE_OPS, SOCK_FILE_SKIP} = require('./fakeSock');
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-install-stuck-'));
 
@@ -128,7 +129,7 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('repro-timeout');
-      const sockPath = path.join(tmpRoot, 'repro-timeout.sock');
+      const sockPath = fakeSockPath(tmpRoot, 'repro-timeout.sock');
       assert.strictEqual(await probeDaemonHealth(port, 500), 'dead');
       assert.strictEqual(fs.existsSync(sockPath), false);
       const res = await verifyDaemonStartup({
@@ -153,7 +154,7 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('bootstrap-race');
-      const sockPath = path.join(tmpRoot, 'bootstrap-race.sock');
+      const sockPath = fakeSockPath(tmpRoot, 'bootstrap-race.sock');
       let daemon = null;
       let calls = 0;
       let spawned = false;
@@ -198,7 +199,7 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('async-restart');
-      const sockPath = path.join(tmpRoot, 'async-restart.sock');
+      const sockPath = fakeSockPath(tmpRoot, 'async-restart.sock');
       let daemon = null;
       let calls = 0;
       let spawned = false;
@@ -245,7 +246,7 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('venv-wipe');
-      const sockPath = path.join(tmpRoot, 'venv-wipe.sock');
+      const sockPath = fakeSockPath(tmpRoot, 'venv-wipe.sock');
       fs.rmSync(bin);
       let daemon = null;
       let restartsWhileBinMissing = 0;
@@ -294,7 +295,7 @@ async function main() {
       const port = await freeTcpPort();
       const bin = path.join(tmpRoot, 'never-reinstalled', '.venv', 'bin',
         'kiss-web');
-      const sockPath = path.join(tmpRoot, 'never-reinstalled.sock');
+      const sockPath = fakeSockPath(tmpRoot, 'never-reinstalled.sock');
       let calls = 0;
       const res = await verifyDaemonStartup({
         binPath: bin,
@@ -316,7 +317,10 @@ async function main() {
     },
   );
 
-  await test(
+  // The next two cases rm / pre-create the socket FILE independently of
+  // a listener; a Windows pipe exists exactly while it is served.
+  if (!SOCK_FILE_OPS) console.log(`  sock-missing / stale UDS file: ${SOCK_FILE_SKIP}`);
+  if (SOCK_FILE_OPS) await test(
     'alive TCP + missing UDS file reports sock-missing without restarts',
     async () => {
       const port = await freeTcpPort();
@@ -349,7 +353,7 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('happy');
-      const sockPath = path.join(tmpRoot, 'happy.sock');
+      const sockPath = fakeSockPath(tmpRoot, 'happy.sock');
       const daemon = await startFakeDaemon(port, sockPath);
       let calls = 0;
       const res = await verifyDaemonStartup({
@@ -377,7 +381,7 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('slow');
-      const sockPath = path.join(tmpRoot, 'slow.sock');
+      const sockPath = fakeSockPath(tmpRoot, 'slow.sock');
       let daemon = null;
       const spawnTimer = setTimeout(() => {
         startFakeDaemon(port, sockPath).then(d => {
@@ -411,7 +415,7 @@ async function main() {
 
   await test('defaults: minimal options against a live daemon', async () => {
     const port = await freeTcpPort();
-    const sockPath = path.join(tmpRoot, 'defaults.sock');
+    const sockPath = fakeSockPath(tmpRoot, 'defaults.sock');
     const bin = makeKissWebBin('defaults');
     const daemon = await startFakeDaemon(port, sockPath);
     const res = await verifyDaemonStartup({binPath: bin, sockPath, port});
@@ -425,7 +429,7 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('mid-boot');
-      const sockPath = path.join(tmpRoot, 'mid-boot.sock');
+      const sockPath = fakeSockPath(tmpRoot, 'mid-boot.sock');
       const uds = await startUdsHalf(sockPath, 0);
       let tcp = null;
       const tcpTimer = setTimeout(() => {
@@ -463,7 +467,7 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('active-veto');
-      const sockPath = path.join(tmpRoot, 'active-veto.sock');
+      const sockPath = fakeSockPath(tmpRoot, 'active-veto.sock');
       const uds = await startUdsHalf(sockPath, 2);
       let calls = 0;
       const res = await verifyDaemonStartup({
@@ -485,7 +489,7 @@ async function main() {
       await uds.close();
     });
 
-  await test('stale UDS file does not fake success; restart still fires',
+  if (SOCK_FILE_OPS) await test('stale UDS file does not fake success; restart still fires',
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('stale-sock');

@@ -5112,12 +5112,17 @@
     if (ev.truncated) explorerNote(kids, depth, '(more entries not shown)');
   }
 
-  /** `parent/name`, without doubling the separator after a `/` root. */
+  /**
+   * `parent/name` in the parent's separator convention, without doubling
+   * the separator after a `/` root.  Under a Windows parent a git-style
+   * `dir/file` name becomes `dir\file`.
+   */
   function joinPath(parent, name) {
     const p = String(parent || '');
     if (!p) return name;
     const sepChar = p.indexOf('\\') >= 0 && p.indexOf('/') < 0 ? '\\' : '/';
-    return p.endsWith(sepChar) ? p + name : p + sepChar + name;
+    const child = sepChar === '\\' ? String(name).replace(/\//g, '\\') : name;
+    return (p.endsWith(sepChar) ? p : p + sepChar) + child;
   }
 
   /** Forget a folder (under top-level folder *root*) and every listed folder beneath it. */
@@ -5272,8 +5277,7 @@
     row.setAttribute('role', 'treeitem');
     row.tabIndex = -1;
     const abs =
-      change.absPath ||
-      (repo ? repo.replace(/[\\/]+$/, '') + '/' + change.path : change.path);
+      change.absPath || (repo ? joinPath(repo, change.path) : change.path);
     row.dataset.scmPath = abs;
     row.dataset.scmRelPath = change.path;
     row.dataset.scmStatus = status;
@@ -8126,8 +8130,15 @@
   // The lookbehind also rejects "$": "$HOME/kiss" is a shell expansion,
   // not a path named HOME/kiss, and matching it would make
   // mergeSplitPathText() pull "HOME" out of its hljs-variable span.
+  // The first alternative is a Windows drive path ("C:\Users\me\a.py"
+  // or "C:/Users/me/a.py"): a daemon on Windows reports its files that
+  // way, and they must be as clickable as POSIX paths.
   const _LINK_FILEPATH_RE =
-    /(?<![\w@:%/.~$-])((?:(?:~|\.{1,2})?\/|[A-Za-z0-9_+-]+\/)[A-Za-z0-9_./+-]*[A-Za-z0-9_+/-](?::\d+)?)/g;
+    /(?<![\w@:%/.~$-])((?:[A-Za-z]:[\\/][A-Za-z0-9_.\\/+-]*[A-Za-z0-9_+\\/-]|(?:(?:~|\.{1,2})?\/|[A-Za-z0-9_+-]+\/)[A-Za-z0-9_./+-]*[A-Za-z0-9_+/-])(?::\d+)?)/g;
+  // Cheap pre-check before running _LINK_FILEPATH_RE over a text node.
+  function _mayHoldPath(text) {
+    return !!text && (text.indexOf('/') >= 0 || text.indexOf(':\\') >= 0);
+  }
   const _LINK_SKIP_TAGS = new Set([
     'A',
     'SCRIPT',
@@ -8180,7 +8191,7 @@
     let n;
     while ((n = walker.nextNode())) {
       const text = n.nodeValue;
-      if (!text || text.indexOf('/') < 0) continue;
+      if (!_mayHoldPath(text)) continue;
       _LINK_FILEPATH_RE.lastIndex = 0;
       if (_LINK_FILEPATH_RE.test(text)) {
         matches.push(n);
@@ -8535,7 +8546,7 @@
    */
   function mergeSplitPathText(bl) {
     const text = bl.textContent;
-    if (!text || text.indexOf('/') < 0) return;
+    if (!_mayHoldPath(text)) return;
     const doc = bl.ownerDocument;
     const nodes = [];
     const walker = doc.createTreeWalker(bl, NodeFilter.SHOW_TEXT);

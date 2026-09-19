@@ -43,6 +43,7 @@ import uuid
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.conftest import posix_only
 
 _RACE_DELAY_ENV = "KISS_RACE_DELAY"
 
@@ -413,6 +414,7 @@ class FailedEventReplayTest(_PersistenceTestCase):
         self.assertEqual(self._event_count(task_id), 1)
         self.assertFalse(sidecar.exists())
 
+    @posix_only("renaming a SQLite file another connection holds open")
     def test_reconnect_failure_does_not_cache_a_closed_connection(self) -> None:
         """A temporarily unopenable database recovers on the next call."""
         th._get_db()
@@ -745,6 +747,7 @@ class ModuleInternalsTest(_PersistenceTestCase):
         )
         self.assertFalse(th._owner_is_alive(token))
 
+    @posix_only("chmod 500 directory write denial")
     def test_owner_token_is_empty_when_the_marker_cannot_be_written(
         self,
     ) -> None:

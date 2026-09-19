@@ -13,7 +13,6 @@ import os
 import queue
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -24,12 +23,6 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
-try:
-    import msvcrt  # type: ignore[import-not-found]
-except ImportError:  # POSIX has no msvcrt
-    msvcrt = None  # type: ignore[assignment]
-
-from kiss.agents.sorcar._concurrency import _fcntl as fcntl
 from kiss.agents.sorcar.fanout_guard import parse_tasks_json
 from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SLUG_PREFIX,
@@ -37,10 +30,12 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.core import tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.models.model import (
     READ_TOOL_BINARY_MIME_TYPES,
     encode_binary_attachment,
 )
+from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +65,8 @@ def _file_lock(lock_path: Path, blocking: bool = True) -> Any:
     daemons, CLI runs, channel-agent processes, and event loops.  A
     ``threading`` lock cannot do this: the resources live on disk, not
     in one process.  The lock file itself is created mode ``0600``.
-
-    Cross-platform: ``fcntl.flock`` on POSIX, ``msvcrt.locking`` on
-    Windows (where ``fcntl`` does not exist — an unconditional import
-    would make every dependent feature unavailable there).  When
-    neither primitive exists the lock degrades to a best-effort no-op
-    rather than breaking the caller entirely.
+    The locking primitive is :mod:`kiss.core.file_lock` (``fcntl`` on
+    POSIX, ``msvcrt`` on Windows).
 
     Args:
         lock_path: The lock file to hold; parent directories are created.
@@ -84,60 +75,19 @@ def _file_lock(lock_path: Path, blocking: bool = True) -> Any:
             scheduler's overlapping-tick skip) instead of waiting.
 
     Yields:
-        ``True`` while the lock is held (including the degraded no-op
-        case), or ``None`` when *blocking* is ``False`` and another
-        process holds the lock.
+        ``True`` while the lock is held, or ``None`` when *blocking* is
+        ``False`` and another process holds the lock.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     locked = False
     try:
-        if fcntl is not None:
-            flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-            try:
-                fcntl.flock(descriptor, flags)
-                locked = True
-            except BlockingIOError:
-                pass
-        elif msvcrt is not None:  # pragma: no cover — Windows-only branch
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            if blocking:
-                while True:
-                    try:
-                        msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
-                            descriptor,
-                            msvcrt.LK_LOCK,  # pyright: ignore[reportAttributeAccessIssue]
-                            1,
-                        )
-                        locked = True
-                        break
-                    except OSError:
-                        time.sleep(0.05)
-            else:
-                try:
-                    msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
-                        descriptor,
-                        msvcrt.LK_NBLCK,  # pyright: ignore[reportAttributeAccessIssue]
-                        1,
-                    )
-                    locked = True
-                except OSError:
-                    pass
-        else:  # pragma: no cover — platform without either primitive
-            locked = True
+        locked = lock_exclusive(descriptor, blocking=blocking)
         yield True if locked else None
     finally:
         try:
-            if locked and fcntl is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            elif locked and msvcrt is not None:  # pragma: no cover — Windows-only branch
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                with suppress(OSError):
-                    msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
-                        descriptor,
-                        msvcrt.LK_UNLCK,  # pyright: ignore[reportAttributeAccessIssue]
-                        1,
-                    )
+            if locked:
+                unlock(descriptor)
         finally:
             os.close(descriptor)
 
@@ -355,10 +305,27 @@ def _worktree_roots(work_dir: str | None) -> list[tuple[str, str]]:
         i = _worktree_index(wd_parts)
         if i is None:
             continue
-        pair = (str(Path(*wd_parts[:i])), str(Path(*wd_parts[: i + 2])))
-        if pair not in roots and os.path.isdir(pair[1]):
-            roots.append(pair)
+        main_repo, wt_root = str(Path(*wd_parts[:i])), str(Path(*wd_parts[: i + 2]))
+        if not os.path.isdir(wt_root):
+            continue
+        # Git bash on Windows accepts ``C:/repo`` as well as ``C:\repo``,
+        # so both separator spellings are returned there (one on POSIX).
+        for pair in (
+            (main_repo, wt_root),
+            (main_repo.replace(os.sep, "/"), wt_root.replace(os.sep, "/")),
+        ):
+            if pair not in roots:
+                roots.append(pair)
     return roots
+
+
+# Windows paths are case-insensitive, so the parent-repo guard must not be
+# bypassable by re-casing ``C:\Repo`` as ``c:\repo`` (or ``C:\Répo`` as
+# ``c:\répo``: NTFS folds non-ASCII letters too, so the folding is the
+# full Unicode one — a guard may refuse too much, never too little).
+# POSIX stays exact.  Likewise only Windows treats ``\`` as a separator.
+_PATH_RE_FLAGS = re.IGNORECASE if sys.platform == "win32" else 0
+_PATH_SEPARATOR_CLASS = r"[/\\]" if sys.platform == "win32" else "/"
 
 
 def rewrite_parent_repo_paths(text: str, work_dir: str | None) -> str:
@@ -385,15 +352,19 @@ def rewrite_parent_repo_paths(text: str, work_dir: str | None) -> str:
         is not inside a live worktree.
     """
     for main_repo, wt_root in _worktree_roots(work_dir):
-        pattern = re.escape(main_repo) + r"(?=[/\\]|[\s'\";|&<>()`,:]|$)"
-        text = re.sub(pattern, functools.partial(_swap_root, wt_root=wt_root), text)
+        pattern = re.escape(main_repo) + rf"(?={_PATH_SEPARATOR_CLASS}|[\s'\";|&<>()`,:]|$)"
+        text = re.sub(
+            pattern, functools.partial(_swap_root, wt_root=wt_root), text, flags=_PATH_RE_FLAGS
+        )
     return text
 
 
 def _swap_root(match: re.Match[str], wt_root: str) -> str:
     """Replace one matched repo root unless it already names a worktree."""
     rest = match.string[match.end():]
-    if rest[:1] in ("/", "\\") and rest[1:].startswith(".kiss-worktrees"):
+    if rest[:1] in ("/", "\\") and re.match(
+        re.escape(_WORKTREE_SUBDIR), rest[1:], flags=_PATH_RE_FLAGS
+    ):
         return match.group(0)
     return wt_root
 
@@ -418,25 +389,28 @@ def _parent_repo_guard_for_parts(
     wt_root = str(Path(*wd_parts[: i + 2]))
     if not os.path.isdir(wt_root):
         return None
-    pattern = re.escape(main_repo) + r"(?=/|[\s'\";|&<>()`]|$)"
-    for m in re.finditer(pattern, command):
-        tail_start = m.start()
-        end = tail_start + len(main_repo)
-        while end < len(command) and command[end] not in " \t\n'\";|&<>()`":
-            end += 1
-        hit = command[tail_start:end]
-        if hit == wt_root or hit.startswith(wt_root + os.sep):
-            continue
-        suggested = rewrite_parent_repo_paths(command, wt_root)
-        return (
-            f"Error: command references the parent-repo path "
-            f"{hit!r}, which is outside the active worktree "
-            f"{wt_root!r}.  Rewrite the command to use the "
-            f"worktree path (or a path relative to it) so the "
-            f"change is captured by the framework's auto-commit "
-            f"and does not mutate the user's main checkout. "
-            f"Suggested command: {suggested[:2000]}"
-        )
+    # Git bash on Windows accepts ``C:/repo`` as well as ``C:\repo``, so
+    # the guard matches both separator spellings there (one on POSIX).
+    for spelled in dict.fromkeys((main_repo, main_repo.replace(os.sep, "/"))):
+        pattern = re.escape(spelled) + rf"(?={_PATH_SEPARATOR_CLASS}|[\s'\";|&<>()`]|$)"
+        for m in re.finditer(pattern, command, flags=_PATH_RE_FLAGS):
+            tail_start = m.start()
+            end = tail_start + len(spelled)
+            while end < len(command) and command[end] not in " \t\n'\";|&<>()`":
+                end += 1
+            hit = command[tail_start:end]
+            if Path(hit) == Path(wt_root) or Path(hit).is_relative_to(wt_root):
+                continue
+            suggested = rewrite_parent_repo_paths(command, wt_root)
+            return (
+                f"Error: command references the parent-repo path "
+                f"{hit!r}, which is outside the active worktree "
+                f"{wt_root!r}.  Rewrite the command to use the "
+                f"worktree path (or a path relative to it) so the "
+                f"change is captured by the framework's auto-commit "
+                f"and does not mutate the user's main checkout. "
+                f"Suggested command: {suggested[:2000]}"
+            )
     return None
 
 
@@ -529,9 +503,11 @@ _WINDOWS_BASH: str | None = _find_windows_bash() if sys.platform == "win32" else
 def _popen_kwargs(command: str) -> dict[str, Any]:
     """Return Popen kwargs appropriate for the current platform.
 
-    On Unix, uses ``shell=True`` with ``start_new_session=True``.
-    On Windows with bash available, invokes bash directly.
-    On Windows without bash, falls back to PowerShell.
+    On Unix, uses ``shell=True``; on Windows with Git bash available,
+    invokes bash directly; on Windows without bash, falls back to
+    PowerShell.  Spawn with :func:`popen_process_group` so
+    :func:`kill_process_group` can stop the child together with
+    everything it spawned.
 
     Args:
         command: The command string to execute.
@@ -540,22 +516,11 @@ def _popen_kwargs(command: str) -> dict[str, Any]:
         Dict of keyword arguments for ``subprocess.Popen``.
     """
     if sys.platform != "win32":
-        return {
-            "args": command,
-            "shell": True,
-            "start_new_session": True,
-        }
-    else:  # pragma: no cover — Windows only
-        if _WINDOWS_BASH:
-            return {
-                "args": [_WINDOWS_BASH, "-c", command],
-                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
-            }
-        ps = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
-        return {
-            "args": [ps, "-NoProfile", "-Command", command],
-            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
-        }
+        return {"args": command, "shell": True}
+    if _WINDOWS_BASH:  # pragma: no cover — Windows only
+        return {"args": [_WINDOWS_BASH, "-c", command]}
+    ps = shutil.which("pwsh") or shutil.which("powershell") or "powershell"  # pragma: no cover
+    return {"args": [ps, "-NoProfile", "-Command", command]}
 
 
 def _truncate_output(output: str, max_chars: int) -> str:
@@ -770,7 +735,7 @@ def _kill_process_group(process: subprocess.Popen) -> None:
             # ``_process_identity``.
             return
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            kill_process_group(process.pid, SIGKILL)
         except OSError:
             try:
                 process.kill()
@@ -907,7 +872,7 @@ class UsefulTools:
                 )
                 cwd = None
                 env_work_dir = None
-        return subprocess.Popen(
+        return popen_process_group(
             **_popen_kwargs(command),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

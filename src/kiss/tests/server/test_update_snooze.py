@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 import kiss.server.web_server as ws
+from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_update_available_check import _UpdateCheckTestBase
 
 _DAY_MS = 24 * 60 * 60 * 1000
@@ -103,6 +104,7 @@ class _SnoozeTestBase(_UpdateCheckTestBase):
                 return ev
 
 
+@requires_unix_sockets
 class TestSnoozeUpdateCommand(_SnoozeTestBase):
     """The ``snoozeUpdate`` command records and rebroadcasts the snooze."""
 
@@ -189,6 +191,7 @@ class TestSnoozeUpdateCommand(_SnoozeTestBase):
         self.assertEqual(cache["snoozedLatest"], "2099.1.1")
 
 
+@requires_unix_sockets
 class TestSnoozedStateFromExtensionFile(_SnoozeTestBase):
     """A snooze written by the extension host silences the daemon toast."""
 

@@ -22,25 +22,14 @@ from __future__ import annotations
 
 import asyncio
 import os
-import stat
-import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
+from kiss.core.processes import pid_alive
 from kiss.server.web_server import RemoteAccessServer
-
-
-def _pid_alive(pid: int) -> bool:
-    """Return True while *pid* exists (zombies count as alive)."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+from kiss.tests.conftest import install_fake_cloudflared
 
 
 class TestStopAsyncKillsInFlightTunnelStart(unittest.IsolatedAsyncioTestCase):
@@ -51,16 +40,14 @@ class TestStopAsyncKillsInFlightTunnelStart(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(tmp.cleanup)
         tmp_dir = Path(tmp.name)
         pid_marker = tmp_dir / "fake-cloudflared.pid"
-        fake = tmp_dir / "cloudflared"
-        fake.write_text(
-            f"#!{sys.executable}\n"
+        install_fake_cloudflared(
+            tmp_dir,
             "import os, pathlib, sys, time\n"
             f"pathlib.Path({str(pid_marker)!r}).write_text(str(os.getpid()))\n"
             "sys.stderr.write('INF registering, no url yet\\n')\n"
             "sys.stderr.flush()\n"
             "time.sleep(300)\n",
         )
-        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
         old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{tmp_dir}{os.pathsep}{old_path}"
         self.addCleanup(os.environ.__setitem__, "PATH", old_path)
@@ -100,14 +87,14 @@ class TestStopAsyncKillsInFlightTunnelStart(unittest.IsolatedAsyncioTestCase):
         # Give the still-running executor start time to finish its
         # fail-fast window and reach the publish point.
         deadline = time.monotonic() + 5
-        while _pid_alive(child_pid) and time.monotonic() < deadline:
+        while pid_alive(child_pid) and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
         self.assertIsNone(
             server._tunnel_proc,
             "a cloudflared started before stop_async was published after it",
         )
         self.assertFalse(
-            _pid_alive(child_pid),
+            pid_alive(child_pid),
             "cloudflared spawned during shutdown must be killed, not leaked",
         )
 
@@ -115,7 +102,7 @@ class TestStopAsyncKillsInFlightTunnelStart(unittest.IsolatedAsyncioTestCase):
     def _kill(pid: int) -> None:
         try:
             os.kill(pid, 9)
-        except ProcessLookupError:
+        except OSError:  # already gone (Windows raises a plain OSError)
             pass
 
 

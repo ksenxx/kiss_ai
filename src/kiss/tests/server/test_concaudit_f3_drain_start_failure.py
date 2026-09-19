@@ -21,7 +21,6 @@ a non-root uid).  No mocks or patches.
 
 from __future__ import annotations
 
-import resource
 import subprocess
 import sys
 import unittest
@@ -35,6 +34,9 @@ from kiss.server.web_server import (
 from kiss.tests.server.test_concaudit_w6_commit_msg_claim import (
     _thread_start_can_be_starved,
 )
+
+# The resource module (RLIMIT_*) only exists on POSIX; Windows skips.
+resource = pytest.importorskip("resource")
 
 
 def _spawn_long_lived_child() -> subprocess.Popen[str]:

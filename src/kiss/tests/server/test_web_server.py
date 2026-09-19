@@ -49,6 +49,7 @@ from kiss.server.web_server import (
     _save_url_file,
     _translate_webview_command,
 )
+from kiss.tests.conftest import posix_only
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
 
 
@@ -997,7 +998,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         wt_dir = Path(work_dir) / ".kiss-worktrees" / "kiss_wt-1"
         (wt_dir / "reports").mkdir(parents=True)
         report = wt_dir / "reports" / "analysis.html"
-        report.write_text("<h1>report</h1>\n")
+        report.write_text("<h1>report</h1>\n", newline="\n")
 
         # The daemon announces the finished task's pending worktree
         # with the tab already stamped (merge_flow's worktree_done).
@@ -1094,7 +1095,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         wt_work_dir = wt_root / "packages" / "app"
         report = wt_work_dir / "reports" / "analysis.html"
         report.parent.mkdir(parents=True)
-        report.write_text("<h1>nested report</h1>\n")
+        report.write_text("<h1>nested report</h1>\n", newline="\n")
 
         self.server._printer.broadcast(
             {
@@ -1961,7 +1962,7 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
         # The class teardown restores the original config.
         save_config({"remote_password": "test-secret-tunnel"})
         proc = subprocess.Popen(
-            ["sleep", "60"],
+            [sys.executable, "-c", "import time; time.sleep(60)"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -1977,7 +1978,7 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
     async def test_watchdog_restarts_dead_process(self) -> None:
         """A dead tunnel process triggers restart (which fails without cloudflared)."""
         proc = subprocess.Popen(
-            ["true"],
+            [sys.executable, "-c", "pass"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -3075,7 +3076,7 @@ class TestCheckAndRestartTunnel(IsolatedAsyncioTestCase):
     async def test_restart_dead_tunnel_updates_url(self) -> None:
         """When tunnel dies, _check_and_restart_tunnel updates URL file."""
         proc = subprocess.Popen(
-            ["true"],
+            [sys.executable, "-c", "pass"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -3240,7 +3241,7 @@ class TestStopTunnel(IsolatedAsyncioTestCase):
     async def test_stop_tunnel_terminates_process(self) -> None:
         """_stop_tunnel terminates a running tunnel process."""
         proc = subprocess.Popen(
-            ["sleep", "60"],
+            [sys.executable, "-c", "import time; time.sleep(60)"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -3275,6 +3276,12 @@ class TestStopTunnel(IsolatedAsyncioTestCase):
         self.assertIsNone(self.server._tunnel_proc)
 
 
+# Fake ``cloudflared``/``pgrep`` executables are shebang scripts dropped on
+# PATH; Windows' CreateProcess only resolves ``.exe`` files there.
+_FAKE_SCRIPT_ON_PATH = posix_only("fake cloudflared on PATH is a shebang script")
+
+
+@_FAKE_SCRIPT_ON_PATH
 class TestStartNamedTunnel(IsolatedAsyncioTestCase):
     """Test _start_named_tunnel with a fake cloudflared on PATH."""
 
@@ -3706,7 +3713,7 @@ class TestCheckAndRestartTunnelFailedRestart(IsolatedAsyncioTestCase):
     async def test_restart_fails_logs_warning(self) -> None:
         """When restart fails, logs warning and updates URL to local."""
         proc = subprocess.Popen(
-            ["true"],
+            [sys.executable, "-c", "pass"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -4636,6 +4643,7 @@ class TestStartTunnelGenericException(IsolatedAsyncioTestCase):
         self.assertIsNone(result)
 
 
+@_FAKE_SCRIPT_ON_PATH
 class TestQuickTunnelUrlFromStderr(IsolatedAsyncioTestCase):
     """Test _start_quick_tunnel finds URL in stderr output."""
 
@@ -4729,6 +4737,7 @@ class TestNamedTunnelProcessDies(IsolatedAsyncioTestCase):
         self.assertIsNone(result)
 
 
+@_FAKE_SCRIPT_ON_PATH
 class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
     """Test tunnel restart when _start_tunnel succeeds."""
 
@@ -4771,7 +4780,7 @@ class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
 
         dead: subprocess.Popen[str] = subprocess.Popen(
-            ["true"], text=True,
+            [sys.executable, "-c", "pass"], text=True,
         )
         dead.wait()
         self.server._tunnel_proc = dead
@@ -4924,6 +4933,7 @@ class TestStartWithTunnel(unittest.TestCase):
     """Test start() with tunnel enabled using fake cloudflared."""
 
     @pytest.mark.slow
+    @_FAKE_SCRIPT_ON_PATH
     def test_start_with_tunnel_success(self) -> None:
         """start() with tunnel prints tunnel URL (lines 1715, 1730)."""
         tmpdir = tempfile.mkdtemp()
@@ -5054,6 +5064,7 @@ class TestStopAsyncWaitClosedTimeout(IsolatedAsyncioTestCase):
             pass
 
 
+@_FAKE_SCRIPT_ON_PATH
 class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
     """Test _start_quick_tunnel fallback that discovers URL from metrics."""
 
@@ -5196,6 +5207,7 @@ class TestQuickTunnelProcessPoll(IsolatedAsyncioTestCase):
 class TestRemoveUrlFileReadOnly(unittest.TestCase):
     """Test _remove_url_file OSError path (lines 364-365)."""
 
+    @posix_only("chmod-based directory permission denial")
     def test_remove_oserror_from_readonly_dir(self) -> None:
         """_remove_url_file swallows OSError from read-only directory."""
         import kiss.server.web_server as ws_mod
@@ -5399,7 +5411,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
         await self.server.start_async()
         self.server.use_tunnel = True
         self.fake_proc = subprocess.Popen(
-            ["sleep", "120"],
+            [sys.executable, "-c", "import time; time.sleep(120)"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -5513,7 +5525,7 @@ class TestDeadProcessClearsMetricsState(IsolatedAsyncioTestCase):
         invariants we care about.
         """
         proc = subprocess.Popen(
-            ["true"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            [sys.executable, "-c", "pass"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         proc.wait()
         sentinel_port = 65530

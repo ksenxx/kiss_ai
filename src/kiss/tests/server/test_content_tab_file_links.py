@@ -79,9 +79,11 @@ class _ServerHarness:
 
         self.work_dir = tmp / "repo"
         self.work_dir.mkdir()
-        (self.work_dir / "sample.py").write_text(_PY_SOURCE)
-        (self.work_dir / "page.html").write_text(_HTML_SOURCE)
-        (self.work_dir / "notes.md").write_text(_MD_SOURCE)
+        # newline="\n": openFile echoes the bytes on disk, so the fixtures
+        # must not let Windows text mode rewrite "\n" as "\r\n".
+        (self.work_dir / "sample.py").write_text(_PY_SOURCE, newline="\n")
+        (self.work_dir / "page.html").write_text(_HTML_SOURCE, newline="\n")
+        (self.work_dir / "notes.md").write_text(_MD_SOURCE, newline="\n")
         (self.work_dir / "binary.bin").write_bytes(b"\x00\x01\x02\x03")
 
         certfile = tmp / "cert.pem"

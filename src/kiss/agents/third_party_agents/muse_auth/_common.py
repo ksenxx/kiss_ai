@@ -335,23 +335,16 @@ READ_METHODS = ("GET", "HEAD", "OPTIONS")
 def platform_supports_muse_daemon() -> bool:
     """Return whether this platform can run the Muse-auth daemon.
 
-    The daemon needs POSIX file locking (``fcntl``, absent on Windows)
-    and ``SO_PEERCRED`` peer authentication on Unix sockets (Linux;
-    macOS exposes ``LOCAL_PEERCRED`` instead).  On unsupported
-    platforms the daemon dies at import or cannot authenticate its
-    first client, so defaulting Muse-auth on there would break every
-    connector instead of protecting it.
+    The daemon needs ``SO_PEERCRED`` peer authentication on Unix
+    sockets (Linux; macOS exposes ``LOCAL_PEERCRED`` instead and
+    Windows has neither).  On unsupported platforms the daemon cannot
+    authenticate its first client, so defaulting Muse-auth on there
+    would break every connector instead of protecting it.
 
     Returns:
-        True when both ``fcntl`` and ``socket.SO_PEERCRED`` exist.
+        True when ``socket.SO_PEERCRED`` exists.
     """
-    if not hasattr(socket, "SO_PEERCRED"):
-        return False
-    try:
-        import fcntl  # noqa: F401
-    except ImportError:  # pragma: no cover - non-POSIX interpreter
-        return False
-    return True
+    return hasattr(socket, "SO_PEERCRED")
 
 
 def muse_auth_enabled() -> bool:
@@ -404,7 +397,10 @@ def socket_path() -> Path:
     if len(str(natural)) <= 90:
         return natural
     digest = hashlib.sha256(str(kiss_home()).encode()).hexdigest()[:12]
-    return Path(f"/tmp/kiss-muse-{os.getuid()}-{digest}.sock")
+    # Windows has no os.getuid (and no Unix sockets): there the path is
+    # only ever probed for existence, never bound.
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    return Path(f"/tmp/kiss-muse-{uid}-{digest}.sock")
 
 
 def canonical_host(host: str) -> str:

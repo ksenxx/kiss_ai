@@ -27,13 +27,17 @@ import re
 import subprocess
 from pathlib import Path
 
+from kiss.tests.conftest import posix_only
+
 _REPO = Path(__file__).resolve().parents[3]
+
+pytestmark = posix_only("runs the MODEL_INFO copy block of install.sh under bash")
 
 
 def _install_sh_text() -> str:
     install_sh = _REPO / "install.sh"
     assert install_sh.exists(), f"install.sh not found at {install_sh}"
-    return install_sh.read_text()
+    return install_sh.read_text(encoding="utf-8")
 
 
 def _model_info_copy_block(text: str) -> str:

@@ -33,6 +33,7 @@ message), so the tests also pin down the dictation semantics:
 
 from __future__ import annotations
 
+import io
 import json
 import math
 import os
@@ -402,14 +403,13 @@ class TestSpeechCapture(unittest.TestCase):
     def test_pcm_to_wav_bytes_roundtrip(self) -> None:
         pcm = _loud_block()
         wav_bytes = pcm_to_wav_bytes(pcm)
-        with tempfile.NamedTemporaryFile(suffix=".wav") as f:
-            f.write(wav_bytes)
-            f.flush()
-            with wave.open(f.name, "rb") as wf:
-                self.assertEqual(wf.getnchannels(), 1)
-                self.assertEqual(wf.getsampwidth(), 2)
-                self.assertEqual(wf.getframerate(), SAMPLE_RATE)
-                self.assertEqual(wf.readframes(wf.getnframes()), pcm)
+        # Read back through memory: reopening a still-open
+        # NamedTemporaryFile by name is refused on Windows.
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            self.assertEqual(wf.getnchannels(), 1)
+            self.assertEqual(wf.getsampwidth(), 2)
+            self.assertEqual(wf.getframerate(), SAMPLE_RATE)
+            self.assertEqual(wf.readframes(wf.getnframes()), pcm)
 
 
 if __name__ == "__main__":

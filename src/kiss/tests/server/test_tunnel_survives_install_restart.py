@@ -42,19 +42,11 @@ import time
 import unittest
 from pathlib import Path
 
+from kiss.core.processes import pid_alive
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws
 from kiss.server.web_server import RemoteAccessServer
-
-
-def _pid_alive(pid: int) -> bool:
-    """Return True iff *pid* is a live process."""
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
-        return False
-    return True
-
+from kiss.tests.conftest import posix_only
 
 # Driver process: stands in for a kiss-web daemon whose event loop is
 # wedged (a callback blocking the loop thread — the exact scenario the
@@ -121,6 +113,7 @@ while True:
 class TestEarlyDetachOnSigterm(unittest.TestCase):
     """cloudflared survives SIGTERM->SIGKILL even with a wedged loop."""
 
+    @posix_only("SIGTERM handler, start_new_session and SIGPIPE detach shim")
     def test_child_survives_sigterm_then_sigkill(self) -> None:
         """The drain shim must exist BEFORE slow cleanup, not after."""
         child_pid: int | None = None
@@ -145,7 +138,7 @@ class TestEarlyDetachOnSigterm(unittest.TestCase):
                 while not pid_file.exists() and time.monotonic() < deadline:
                     time.sleep(0.02)
                 child_pid = int(pid_file.read_text().strip())
-                self.assertTrue(_pid_alive(child_pid))
+                self.assertTrue(pid_alive(child_pid))
 
                 # The extension's escalation, compressed: SIGTERM, a
                 # short grace (far below the 30s loop-unwind failsafe),
@@ -160,7 +153,7 @@ class TestEarlyDetachOnSigterm(unittest.TestCase):
                 # the driver's death.  Give it ample time to prove it.
                 time.sleep(3.0)
                 self.assertTrue(
-                    _pid_alive(child_pid),
+                    pid_alive(child_pid),
                     "cloudflared stand-in died after SIGTERM->SIGKILL: "
                     "the tunnel was NOT detached before slow cleanup",
                 )
@@ -168,7 +161,7 @@ class TestEarlyDetachOnSigterm(unittest.TestCase):
                 if proc.poll() is None:
                     proc.kill()
                     proc.wait()
-                if child_pid is not None and _pid_alive(child_pid):
+                if child_pid is not None and pid_alive(child_pid):
                     try:
                         os.kill(child_pid, signal.SIGKILL)
                     except (ProcessLookupError, PermissionError, OSError):

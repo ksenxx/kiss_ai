@@ -36,6 +36,7 @@ from kiss.agents.sorcar.git_worktree import (
     MergeResult,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.tests.conftest import posix_only
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -68,6 +69,7 @@ def _make_repo(path: Path) -> Path:
 class TestB1ArrowFilenameNotARename:
     """A dirty file literally named ``x -> y`` is NOT a rename entry."""
 
+    @posix_only("'>' and tab are illegal in Windows file names")
     def test_untracked_arrow_file_is_copied_and_nothing_unlinked(
         self, tmp_path: Path
     ) -> None:
@@ -99,6 +101,7 @@ class TestB1ArrowFilenameNotARename:
         finally:
             GitWorktreeOps.cleanup_partial(repo, "kiss/wt-b1", wt_dir)
 
+    @posix_only("'>' and tab are illegal in Windows file names")
     def test_modified_arrow_file_is_copied(self, tmp_path: Path) -> None:
         """A tracked, modified file named 'a -> b' is mirrored verbatim."""
         repo = _make_repo(tmp_path / "repo")
@@ -139,6 +142,7 @@ class TestB1ArrowFilenameNotARename:
             GitWorktreeOps.cleanup_partial(repo, "kiss/wt-b1c", wt_dir)
 
 
+@posix_only("'>' and tab are illegal in Windows file names")
 class TestB2QuotedRenameSplit:
     """Quoted rename tails are split first, then unquoted exactly once."""
 

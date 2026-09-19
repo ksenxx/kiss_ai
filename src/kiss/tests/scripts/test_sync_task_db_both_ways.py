@@ -24,12 +24,14 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.conftest import posix_only
 
 _ROOT = Path(__file__).resolve().parents[4]
 _SCRIPT = _ROOT / "scripts" / "sync-task-db.sh"
@@ -137,6 +139,7 @@ def _event_seqs(path: Path, task_id: str) -> list[int]:
         con.close()
 
 
+@posix_only("drives the bash sync-task-db.sh with a bash ssh stand-in")
 class SyncTaskDbBothWaysTest(unittest.TestCase):
     """A deploy must leave both machines holding both machines' tasks."""
 
@@ -610,7 +613,7 @@ class RelocateWorkDirTest(unittest.TestCase):
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         """Run the relocation script as the sync script runs it."""
         return subprocess.run(
-            ["python3", str(_RELOCATE), *args],
+            [sys.executable, str(_RELOCATE), *args],
             capture_output=True, text=True, timeout=120,
         )
 

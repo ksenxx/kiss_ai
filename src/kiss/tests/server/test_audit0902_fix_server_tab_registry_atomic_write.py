@@ -54,7 +54,9 @@ def test_two_registry_instances_never_publish_a_torn_file(tmp_path: Path) -> Non
         while not stop.is_set():
             try:
                 raw = path.read_text(encoding="utf-8")
-            except FileNotFoundError:
+            except (FileNotFoundError, PermissionError):
+                # Not written yet — or, on Windows, opened in the few
+                # milliseconds the writer's os.replace holds the name.
                 continue
             reads[0] += 1
             try:

@@ -42,6 +42,7 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
+from kiss.tests.conftest import requires_unix_sockets
 
 _SCRIPT_PATH = (
     Path(__file__).resolve().parents[4]
@@ -78,8 +79,13 @@ def _run_helper(sock_path: Path, timeout: float = 5.0) -> subprocess.CompletedPr
     )
 
 
+@requires_unix_sockets
 class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
-    """End-to-end coverage for the bash-callable active-tasks probe."""
+    """End-to-end coverage for the bash-callable active-tasks probe.
+
+    The probe talks to the daemon over its Unix-domain socket on behalf of
+    the POSIX shell scripts, so the whole class needs ``AF_UNIX``.
+    """
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()

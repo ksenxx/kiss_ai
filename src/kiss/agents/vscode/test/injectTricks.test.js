@@ -223,7 +223,14 @@ test('returns only bundled tricks when ~/.kiss/ is unwritable', () => {
   }
   withSandbox(({kissHome, setBundled}) => {
     setBundled('## Trick\n\nbundled survives\n');
-    fs.chmodSync(kissHome, 0o500);
+    // Windows ignores mode bits, so there a plain file squats on the
+    // ~/.kiss/ path instead; both make the seed's mkdir/write fail.
+    if (process.platform === 'win32') {
+      fs.rmSync(kissHome, {recursive: true, force: true});
+      fs.writeFileSync(kissHome, '');
+    } else {
+      fs.chmodSync(kissHome, 0o500);
+    }
     try {
       assert.deepStrictEqual(getTricks(), ['bundled survives']);
       assert.ok(
@@ -231,7 +238,7 @@ test('returns only bundled tricks when ~/.kiss/ is unwritable', () => {
         'seed file must not be created on read-only ~/.kiss/',
       );
     } finally {
-      fs.chmodSync(kissHome, 0o700);
+      if (process.platform !== 'win32') fs.chmodSync(kissHome, 0o700);
     }
   });
 });

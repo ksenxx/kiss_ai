@@ -24,7 +24,6 @@ around the handler call.  The handler is invoked directly, exactly as
 from __future__ import annotations
 
 import asyncio
-import resource
 import signal
 import tempfile
 import threading
@@ -38,6 +37,9 @@ from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.test_concaudit_w6_commit_msg_claim import (
     _thread_start_can_be_starved,
 )
+
+# The resource module (RLIMIT_*) only exists on POSIX; Windows skips.
+resource = pytest.importorskip("resource")
 
 
 class TestSigtermFallbackWithoutThreads(unittest.TestCase):

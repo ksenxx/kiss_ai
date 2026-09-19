@@ -45,6 +45,7 @@ import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.conftest import posix_only
 
 
 def _redirect(tmpdir: str):
@@ -81,6 +82,7 @@ def _external_count(db_path: Path) -> int:
     return int(out.stdout.strip())
 
 
+@posix_only("unlinking WAL sidecars another connection holds open")
 class TestWalSidecarOrphanRecovery:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()

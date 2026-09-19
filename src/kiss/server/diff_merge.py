@@ -84,7 +84,8 @@ def _scan_files(work_dir: str) -> list[str]:
                 for d in dirs
                 if d not in skip_names
                 and not d.startswith(".")
-                and str(rel_root / d) not in skip_paths
+                # .gitignore paths are slash-separated on every platform.
+                and (rel_root / d).as_posix() not in skip_paths
             )
             for name in sorted(files):
                 paths.append(str(rel_root / name).replace(os.sep, "/"))

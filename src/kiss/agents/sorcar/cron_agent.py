@@ -69,7 +69,9 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.config import kiss_home
+from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -609,28 +611,25 @@ def _kill_command_tree(proc: subprocess.Popen) -> None:
     double-detaches faster than the bounded rescan, or any descendant
     on a POSIX system without ``/proc``, can still escape.
 
-    Windows: best-effort ``taskkill /T /F`` on the shell's pid (kills
-    the process tree Windows tracks), then ``proc.kill()`` as a
-    fallback; a descendant that detached from the tree (or a system
-    without ``taskkill``) is not covered.
+    Windows: :func:`kill_process_group` runs ``taskkill /T /F`` on the
+    shell's pid (kills the process tree Windows tracks), then
+    ``proc.kill()`` as a fallback; a descendant that detached from the
+    tree is not covered.
 
     Args:
         proc: The timed-out command's shell process (session leader on
             POSIX, direct child on Windows).
     """
     if os.name == "nt":  # pragma: no cover — Windows CI is not available here
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(
-                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                capture_output=True, timeout=15, check=False,
-            )
+        with contextlib.suppress(OSError):  # group already gone
+            kill_process_group(proc.pid, SIGKILL)
         proc.kill()
         return
     own_pgid = os.getpgrp()
     for _ in range(3):
         survivors = _proc_descendants(proc.pid)
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(proc.pid, 9)
+        with contextlib.suppress(OSError):  # group already gone
+            kill_process_group(proc.pid, SIGKILL)
         escaped = False
         for pid in survivors:
             if pid == os.getpid():  # pragma: no cover — defensive
@@ -659,8 +658,11 @@ def _run_command_job(
 ) -> tuple[str, str | None]:
     """Run a no-LLM command job (Hermes "no_agent" mode).
 
-    The command runs in its own session (process group), and a timeout
-    kills the WHOLE process tree — not just the shell.
+    The command runs under the same shell as the agent's ``Bash`` tool
+    (``sh`` on POSIX, Git bash on Windows; see
+    :func:`~kiss.agents.sorcar.useful_tools._popen_kwargs`) in its own
+    process group, and a timeout kills the WHOLE process tree — not
+    just the shell.
     ``subprocess.run(..., shell=True, timeout=...)`` kills only the
     shell on expiry, so every descendant the command spawned survived
     the timeout and kept running (and writing) forever, with a
@@ -681,13 +683,13 @@ def _run_command_job(
         ``("error", output)`` on non-zero exit or timeout.
     """
     timeout = COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    proc = subprocess.Popen(
-        str(job["command"]),
-        shell=True,
+    proc = popen_process_group(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        start_new_session=os.name != "nt",
+        encoding="utf-8",
+        errors="replace",
+        **_popen_kwargs(str(job["command"])),
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)

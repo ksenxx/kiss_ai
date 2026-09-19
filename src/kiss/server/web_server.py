@@ -92,8 +92,10 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
+from kiss.core.file_lock import lock_exclusive
 from kiss.core.models.model_info import get_default_model
-from kiss.core.utils import is_root_dir
+from kiss.core.processes import process_identity as _process_identity
+from kiss.core.utils import is_root_dir, replace_waiting_for_readers
 from kiss.core.vscode_config import (
     apply_config_to_env,
     load_api_keys,
@@ -179,7 +181,7 @@ def _atomic_publish(target: Path, write_tmp: Callable[[Path], object]) -> None:
     )
     try:
         write_tmp(tmp)
-        tmp.replace(target)
+        replace_waiting_for_readers(tmp, target)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
@@ -312,6 +314,14 @@ _EXTENSION_DIR_PREFIX = "ksenxx.kiss-sorcar-"
 _PYPI_FETCH_TIMEOUT = 5.0
 
 _WS_PING_TIMEOUT = 10
+# Catchable termination signals routed through
+# ``RemoteAccessServer._handle_shutdown_signal``.  SIGHUP (terminal
+# closed) does not exist on Windows, where only SIGTERM is available.
+_SHUTDOWN_SIGNALS: tuple[int, ...] = tuple(
+    sig
+    for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None))
+    if sig is not None
+)
 _UDS_DRAIN_TIMEOUT = 30.0
 """Seconds a UDS peer may leave its socket unread before it is dropped.
 
@@ -573,6 +583,17 @@ def _default_uds_path() -> Path:
     socket file.
     """
     return _kiss_home_dir() / "sorcar.sock"
+
+
+def _unix_sockets_supported() -> bool:
+    """Return whether this Python can bind Unix-domain sockets.
+
+    CPython on Windows has neither ``socket.AF_UNIX`` nor the asyncio
+    ``start_unix_server`` / ``open_unix_connection`` helpers, so the
+    daemon's local UDS channel cannot exist there and every UDS code
+    path is skipped (the daemon serves WSS only).
+    """
+    return hasattr(socket, "AF_UNIX")
 
 
 def _tunnel_backoff_delay(failure_count: int) -> int:
@@ -1180,9 +1201,10 @@ def _looks_like_cloudflared(pid: int) -> bool:
     kiss-web shutdown the OS may have recycled that PID for an
     UNRELATED process.  Any code about to *signal* the recorded PID
     must therefore confirm the process identity first.  Uses
-    ``ps -o comm=`` (portable across macOS and Linux) and matches the
-    executable basename against ``cloudflared`` — the name of the
-    binary both the spawn path and the adoption path launch.
+    ``ps -o comm=`` (portable across macOS and Linux) or, on Windows,
+    the image path from :func:`kiss.core.processes.process_identity`,
+    and matches the executable basename against ``cloudflared`` — the
+    name of the binary both the spawn path and the adoption path launch.
 
     Returns:
         True when the command basename is exactly ``cloudflared`` (or
@@ -1192,17 +1214,22 @@ def _looks_like_cloudflared(pid: int) -> bool:
         also kill an unrelated ``cloudflared-helper``-style process
         that inherited a recycled PID.
     """
-    try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "comm="],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=5,
-        )
-    except Exception:
-        return False
-    comm = result.stdout.strip()
+    if sys.platform == "win32":  # pragma: no cover — Windows only
+        # "<creation-time> <image path>"; the time carries no spaces.
+        identity = _process_identity(pid) or ""
+        comm = identity.split(" ", 1)[1] if " " in identity else ""
+    else:
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "comm="],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=5,
+            )
+        except Exception:
+            return False
+        comm = result.stdout.strip()
     if not comm:
         return False
     return Path(comm).name.lower() in ("cloudflared", "cloudflared.exe")
@@ -1242,7 +1269,9 @@ def _terminate_declined_cloudflared(pid: int) -> None:
         time.sleep(0.1)
     if _is_pid_alive(pid) and _looks_like_cloudflared(pid):
         try:
-            os.kill(pid, signal.SIGKILL)
+            # Windows has no SIGKILL; ``os.kill`` there terminates the
+            # process outright for any signal number.
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         except (ProcessLookupError, PermissionError, OSError):
             pass
     _unlink_cloudflared_pidfile()
@@ -2149,10 +2178,10 @@ def _generate_self_signed_cert(
 
 
 def _flock_with_deadline(lock_file: Any, timeout: float) -> None:
-    """Take an exclusive ``flock`` on *lock_file*, giving up after *timeout*.
+    """Take an exclusive file lock on *lock_file*, giving up after *timeout*.
 
-    Polls ``LOCK_EX | LOCK_NB`` with short sleeps instead of blocking
-    in ``LOCK_EX``: the blocking call cannot be interrupted by
+    Polls the non-blocking lock with short sleeps instead of blocking:
+    the blocking call cannot be interrupted by
     cancelling the coroutine that offloaded it to the executor, so a
     sibling process that wedged while holding the lock would stall
     startup forever.
@@ -2165,20 +2194,14 @@ def _flock_with_deadline(lock_file: Any, timeout: float) -> None:
         TimeoutError: The lock was still held by another process when
             *timeout* elapsed.
     """
-    import fcntl
-
     deadline = time.monotonic() + timeout
-    while True:
-        try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"{lock_file.name} still locked by another process "
-                    f"after {timeout:.0f}s",
-                ) from None
-            time.sleep(0.05)
+    while not lock_exclusive(lock_file, blocking=False):
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"{lock_file.name} still locked by another process "
+                f"after {timeout:.0f}s",
+            )
+        time.sleep(0.05)
 
 
 def _create_ssl_context(
@@ -2209,12 +2232,10 @@ def _create_ssl_context(
         # check-then-generate sequence and the pair publication are
         # not atomic, so two concurrent processes could otherwise
         # publish (or load) a mismatched cert/key pair (F4-10).
-        import fcntl
-
         tls_dir.mkdir(parents=True, exist_ok=True)
         lock_path = tls_dir / ".tls.lock"
         with open(lock_path, "w", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            lock_exclusive(lock_file)
             if not cert_path.is_file() or not key_path.is_file():
                 logger.info(
                     "Generating self-signed TLS certificate in %s", tls_dir,
@@ -7763,7 +7784,10 @@ class RemoteAccessServer:
                     else:
                         if _looks_like_cloudflared(adopted_pid):
                             try:
-                                os.kill(adopted_pid, signal.SIGKILL)
+                                os.kill(
+                                    adopted_pid,
+                                    getattr(signal, "SIGKILL", signal.SIGTERM),
+                                )
                             except (
                                 ProcessLookupError,
                                 PermissionError,
@@ -8167,6 +8191,38 @@ class RemoteAccessServer:
         self._loop = asyncio.get_running_loop()
         self._printer._loop = self._loop
 
+        if not _unix_sockets_supported():
+            # CPython on Windows has no AF_UNIX, so the daemon's local
+            # channel cannot exist there: serve WSS only.  This is the
+            # expected shape of the platform, not a failure, so it is
+            # logged once at INFO without a traceback.
+            logger.info(
+                "Unix-domain sockets are unavailable on %s; the daemon "
+                "serves WebSocket clients only (no UDS at %s)",
+                sys.platform, self._uds_path,
+            )
+            self._uds_server = None
+        else:
+            await self._bind_uds()
+
+        try:
+            await self._setup_server_after_uds()
+        except BaseException:
+            # Rollback (F4-04): a TLS/WSS/tunnel failure or a
+            # cancellation must not leave the already-bound UDS
+            # listener (or a half-bound WSS listener) live in an
+            # embedder that catches the exception.
+            self._close_partial_setup()
+            raise
+
+    async def _bind_uds(self) -> None:
+        """Bind the Unix-domain-socket listener at ``self._uds_path``.
+
+        Any failure is logged with its traceback and leaves
+        ``self._uds_server`` as ``None``; the daemon then serves WSS
+        only and local extension clients fall back to it.  Only called
+        on platforms with ``AF_UNIX`` (see :func:`_unix_sockets_supported`).
+        """
         try:
             self._uds_path.parent.mkdir(parents=True, exist_ok=True)
             # Serialise the probe → unlink → bind sequence across
@@ -8186,7 +8242,7 @@ class RemoteAccessServer:
                 # Bounded: a blocking ``LOCK_EX`` would wait forever
                 # behind a wedged sibling, and cancelling this
                 # coroutine does not interrupt the executor syscall.
-                await self._loop.run_in_executor(
+                await asyncio.get_running_loop().run_in_executor(
                     None, _flock_with_deadline, uds_lock,
                     self._uds_lock_timeout_s,
                 )
@@ -8223,16 +8279,6 @@ class RemoteAccessServer:
                 self._uds_path, exc_info=True,
             )
             self._uds_server = None
-
-        try:
-            await self._setup_server_after_uds()
-        except BaseException:
-            # Rollback (F4-04): a TLS/WSS/tunnel failure or a
-            # cancellation must not leave the already-bound UDS
-            # listener (or a half-bound WSS listener) live in an
-            # embedder that catches the exception.
-            self._close_partial_setup()
-            raise
 
     async def _wait_for_uds_release(self) -> None:
         """Wait for a live predecessor daemon to release the UDS pathname.
@@ -8282,6 +8328,8 @@ class RemoteAccessServer:
         (F4-03) so one daemon cannot silently strand another live
         daemon's listener.
         """
+        if not _unix_sockets_supported():
+            return False
         try:
             _reader, writer = await asyncio.wait_for(
                 asyncio.open_unix_connection(str(self._uds_path)),
@@ -8336,12 +8384,11 @@ class RemoteAccessServer:
         never ours — a sync liveness probe under the lock therefore
         disambiguates inode reuse.
         """
-        if self._uds_inode is None:
-            # No ownership witness — fail CLOSED: never unlink a
-            # pathname a successor daemon may have rebound.
+        if self._uds_inode is None or not _unix_sockets_supported():
+            # No ownership witness (or no UDS on this platform at
+            # all) — fail CLOSED: never unlink a pathname a successor
+            # daemon may have rebound.
             return
-        import fcntl
-
         lock_path = self._uds_path.with_name(self._uds_path.name + ".lock")
         try:
             uds_lock = open(lock_path, "w", encoding="utf-8")
@@ -8349,9 +8396,7 @@ class RemoteAccessServer:
             # Cannot participate in the lock protocol — fail CLOSED.
             return
         try:
-            try:
-                fcntl.flock(uds_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
+            if not lock_exclusive(uds_lock, blocking=False):
                 # A concurrent daemon is inside probe → unlink → bind;
                 # it owns stale-pathname cleanup for the duration.
                 return
@@ -8607,7 +8652,7 @@ class RemoteAccessServer:
             ", ".join(active_tabs) if active_tabs else "none",
             _rss_mb(),
         )
-        if signum in (signal.SIGTERM, signal.SIGHUP):
+        if signum in _SHUTDOWN_SIGNALS:
             if self._shutdown_initiated:
                 logger.info(
                     "%s during shutdown ignored: pid=%d "
@@ -8956,7 +9001,7 @@ class RemoteAccessServer:
         it silently no-ops when not on the main thread or when the
         signal is unsupported on the current platform.
         """
-        for sig in (signal.SIGTERM, signal.SIGHUP):
+        for sig in _SHUTDOWN_SIGNALS:
             try:
                 signal.signal(sig, self._handle_shutdown_signal)
             except (OSError, ValueError):

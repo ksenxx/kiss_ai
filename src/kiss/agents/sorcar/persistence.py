@@ -36,8 +36,9 @@ from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import IO, Any
 
-from kiss.agents.sorcar._concurrency import _fcntl, _race_delay
+from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.core.config import kiss_home
+from kiss.core.file_lock import lock_exclusive, unlock
 
 logger = logging.getLogger(__name__)
 
@@ -480,19 +481,12 @@ def _process_owner_token() -> str:
     some *other* process happens to test a sentinel row of the dead
     owner.
 
-    Without ``fcntl`` there is no way to test whether the owning
-    process is still alive — file existence would make every crashed
-    process's rows look live forever — so no token is minted at all
-    and liveness degrades to the timestamp-only heuristic.
-
     Returns:
         The token to store in ``task_history.owner``, or ``""`` when
         the marker could not be created (liveness then degrades to the
         previous timestamp-only heuristic).
     """
     global _owner_state
-    if _fcntl is None:  # pragma: no cover — Windows has no flock
-        return ""
     current_dir = str(_owner_dir())
     with _owner_state_lock:
         if _owner_state is not None and _owner_state[0] == current_dir:
@@ -505,7 +499,8 @@ def _process_owner_token() -> str:
             handle = open(
                 Path(current_dir) / f"{token}.lock", "w", encoding="utf-8",
             )
-            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            if not lock_exclusive(handle, blocking=False):  # pragma: no cover
+                raise BlockingIOError(f"{token}.lock is already held")
             handle.write(f"{os.getpid()}\n")
             handle.flush()
         except OSError:
@@ -565,25 +560,14 @@ def _owner_is_alive(token: str) -> bool:
     """
     if not token:
         return False
-    if _fcntl is None:  # pragma: no cover — Windows has no flock
-        # No token is stamped without a usable cross-process lock, so
-        # any token seen here was written by a process on another
-        # platform.  Its marker's mere existence proves nothing (a
-        # crashed owner leaves it behind forever), so treat the owner
-        # as gone and let the timestamp heuristic decide.
-        return False
     if _owner_state is not None and _owner_state[1] == token:
         return True
     marker = _owner_dir() / f"{token}.lock"
     try:
         with open(marker, "r+", encoding="utf-8") as handle:
-            try:
-                _fcntl.flock(
-                    handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB,
-                )
-            except OSError:
+            if not lock_exclusive(handle, blocking=False):
                 return True
-            _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+            unlock(handle)
     except OSError:
         return False
     try:
@@ -2849,18 +2833,11 @@ def _prune_final_results_journal(sidecar: str) -> None:
     forever.  The rewrite happens under :func:`_journal_file_lock` and
     lands via an atomic rename, so a concurrent append in another
     process is either retained or ordered after the prune — never
-    torn.  That guarantee needs the inter-process flock, so on
-    platforms without ``fcntl`` (Windows) the prune is skipped
-    entirely: a rename replacing the journal with a pre-append
-    snapshot would silently drop the record a peer just appended,
-    and an unbounded-but-intact journal is the lesser harm.  All
-    failures are logged and swallowed.
+    torn.  All failures are logged and swallowed.
 
     Args:
         sidecar: Path returned by :func:`_final_results_path`.
     """
-    if _fcntl is None:  # pragma: no cover — Windows has no flock
-        return
     cutoff = time.time() - _FINAL_RESULTS_MAX_AGE_S
     with _journal_lock:
         try:
@@ -2928,21 +2905,18 @@ def _journal_file_lock(sidecar: str) -> Iterator[None]:
         sidecar: Path of the journal file being appended or replayed.
 
     Yields:
-        Nothing; the lock is held for the duration of the block.  On
-        platforms without ``fcntl`` the block runs unserialised (the
+        Nothing; the lock is held for the duration of the block.  When
+        the lock file cannot be opened the block runs unserialised (the
         in-process lock still applies), which is why replay also
         consumes by rename.
     """
-    if _fcntl is None:  # pragma: no cover — Windows has no flock
-        yield
-        return
     try:
         handle = open(sidecar + ".lock", "a+", encoding="utf-8")
     except OSError:  # pragma: no cover — unwritable journal directory
         yield
         return
     try:
-        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+        lock_exclusive(handle)
         yield
     finally:
         handle.close()

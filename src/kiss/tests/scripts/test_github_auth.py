@@ -32,9 +32,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from kiss.tests.conftest import posix_only
+
 _ROOT = Path(__file__).resolve().parents[4]
 _COLLECT = _ROOT / "scripts" / "collect-github-auth.sh"
 _INSTALL = _ROOT / "scripts" / "install-github-auth.sh"
+
+pytestmark = posix_only("runs the bash collect/install-github-auth.sh scripts")
 
 # A PATH without the machine's own gh or git: a test must never read the
 # developer's real credentials, nor reach the real GitHub.

@@ -60,7 +60,7 @@ def test_get_tools_and_sorcar_wiring() -> None:
     # The module lives in the sorcar package and never imports from
     # kiss.agents.third_party_agents at module scope.
     source_text = Path(cron_agent.__file__).read_text(encoding="utf-8")
-    assert "/agents/sorcar/" in cron_agent.__file__
+    assert Path(cron_agent.__file__).parent.parts[-2:] == ("agents", "sorcar")
     assert "from kiss.agents.third_party_agents" not in source_text
     assert "import kiss.agents.third_party_agents" not in source_text
     # cron_job is NOT a built-in tool of the default Sorcar toolset:

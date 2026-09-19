@@ -13,8 +13,18 @@ gone; ``_ensure_browser`` re-registers when the tool is revived.
 """
 
 import atexit
+import sys
+
+import pytest
 
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+
+# Before 3.14 ``atexit.unregister`` only blanks the slot and ``_ncallbacks``
+# keeps counting it, so the table size cannot show the unregistration.
+pytestmark = pytest.mark.skipif(
+    sys.version_info < (3, 14),
+    reason="atexit._ncallbacks counts unregistered slots before Python 3.14",
+)
 
 
 def test_close_unregisters_atexit_hook() -> None:

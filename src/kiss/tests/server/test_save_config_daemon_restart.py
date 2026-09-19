@@ -33,6 +33,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from kiss.tests.conftest import posix_only
+
 
 class _FakePrinter:
     """Collects broadcast events emitted by the command handler."""
@@ -127,6 +129,7 @@ class TestSaveConfigDaemonRestart(unittest.TestCase):
             "daemon was restarted although remote_password did not change"
         )
 
+    @posix_only("the daemon is restarted through launchctl/systemctl")
     def test_changed_password_restarts_daemon(self) -> None:
         """A genuinely new password must still restart the daemon."""
         from kiss.core.vscode_config import save_config
@@ -138,6 +141,7 @@ class TestSaveConfigDaemonRestart(unittest.TestCase):
             "daemon was not restarted although remote_password changed"
         )
 
+    @posix_only("the daemon is restarted through launchctl/systemctl")
     def test_first_password_set_restarts_daemon(self) -> None:
         """Setting a password for the first time restarts the daemon."""
         server = self._make_server()

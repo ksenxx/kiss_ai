@@ -77,6 +77,7 @@ import pytest
 from kiss.core.models import claude_code_model as cc_module
 from kiss.core.models.claude_code_model import ClaudeCodeModel, _find_claude_cli
 from kiss.core.models.model import _CLIProcess
+from kiss.tests.conftest import IS_WINDOWS, install_cli_script
 
 # How high the occupied descriptors reach; comfortably past FD_SETSIZE
 # (1024) so every pipe subprocess.Popen creates lands above it.
@@ -121,11 +122,14 @@ def _descriptors_above_fd_setsize() -> Iterator[None]:
 
 
 def _install_script(tmp_path: Path, name: str, body: str) -> str:
-    """Write an executable Python stand-in CLI and return its path."""
+    """Write an executable Python stand-in CLI and return its path.
+
+    On Windows the returned path is the ``.cmd`` shim, which is what
+    ``shutil.which`` hands the adapters there.
+    """
     script = tmp_path / name
-    script.write_text(f"#!{sys.executable}\n" + textwrap.dedent(body))
-    script.chmod(0o755)
-    return str(script)
+    install_cli_script(script, f"#!{sys.executable}\n" + textwrap.dedent(body))
+    return str(script) + (".cmd" if IS_WINDOWS else "")
 
 
 def _echo_length_cli(tmp_path: Path, sleep_first: float = 0.0) -> str:

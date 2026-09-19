@@ -84,9 +84,15 @@ class TestParseBinaryAttachments:
         opener = "<<KISS_BINARY_ATTACHMENT mime_type=image/png>>"
         text = opener * 20_000 + "A" * 100_000 + BINARY_ATTACHMENT_CLOSE
         plain, atts = _timed(parse_binary_attachments, text)
-        # One block: the first opener through the single closer.
-        assert len(atts) == 1
-        assert plain.startswith("[attached image/png")
+        # One block spans the first opener through the single closer;
+        # the 19,999 quoted openers inside it are never re-paired with
+        # that closer.  Whether the garbage payload decodes to a single
+        # attachment or is dropped depends on the interpreter's lenient
+        # base64 decoder (3.13 raises on the padding, 3.14 stops at it),
+        # so only the block accounting is asserted here.
+        assert len(atts) <= 1
+        assert plain.count("[attached") == len(atts)
+        assert opener not in plain
 
     def test_no_sentinel_returns_input_unchanged(self):
         text = "x" * 300_000

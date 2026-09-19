@@ -30,6 +30,7 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.tests.conftest import posix_only, requires_unix_sockets
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -85,6 +86,7 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
         writer.write((json.dumps(cmd) + "\n").encode("utf-8"))
         await writer.drain()
 
+    @requires_unix_sockets
     async def test_f402_stop_async_closes_established_uds_clients(
         self,
     ) -> None:
@@ -104,6 +106,7 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
                 break
         writer.close()
 
+    @requires_unix_sockets
     async def test_f4_stop_async_drains_uds_handlers(self) -> None:
         """stop_async must JOIN in-flight UDS handler coroutines.
 
@@ -214,6 +217,7 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
             str(tls_dir / "cert.pem"), str(tls_dir / "key.pem"),
         )
 
+    @posix_only("the updater is a bash script (install.sh)")
     async def test_f413_concurrent_run_update_single_flight(self) -> None:
         """Two concurrent runUpdate requests spawn ONE installer."""
         install_root = Path(self.tmpdir) / "kiss_ai"
@@ -240,6 +244,7 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
             "update must be single-flight",
         )
 
+    @posix_only("SIGHUP")
     async def test_f414_sighup_triggers_shutdown_path(self) -> None:
         """SIGHUP must route through shutdown, not be swallowed."""
         srv = RemoteAccessServer(

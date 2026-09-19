@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -42,24 +41,22 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _resolve_tunnel_settings,
 )
+from kiss.tests.conftest import install_fake_cloudflared
 
 
 def _write_fake_cloudflared(tmpdir: Path, stderr_lines: list[str],
                             exit_code: int = 0) -> Path:
-    """Write a fake ``cloudflared`` shell script to *tmpdir*.
+    """Install a fake ``cloudflared`` executable in *tmpdir*.
 
-    The script writes *stderr_lines* to stderr (one per line) and exits
+    The fake writes *stderr_lines* to stderr (one per line) and exits
     with *exit_code*.  Used to drive ``_start_named_tunnel`` without a
     real cloudflared binary.
     """
-    body = "#!/bin/sh\n"
+    body = "import sys\n"
     for line in stderr_lines:
-        body += f"printf '%s\\n' {json.dumps(line)} >&2\n"
-    body += f"exit {exit_code}\n"
-    script = tmpdir / "cloudflared"
-    script.write_text(body)
-    script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return script
+        body += f"sys.stderr.write({json.dumps(line)} + '\\n')\n"
+    body += f"sys.stderr.flush()\nsys.exit({exit_code})\n"
+    return install_fake_cloudflared(tmpdir, body)
 
 
 class TestNamedTunnelUrlConstructor(unittest.TestCase):

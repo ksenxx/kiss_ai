@@ -38,6 +38,8 @@ from kiss.agents.sorcar.useful_tools import (
     _file_lock,
     _stale_worktree_fallback,
 )
+from kiss.core.processes import SIGKILL
+from kiss.core.processes import process_identity as _process_identity
 
 logger = logging.getLogger(__name__)
 
@@ -141,32 +143,6 @@ _LAUNCH_LOCK = threading.RLock()
 _BROWSER_CMD_MARKERS = ("chrom", "playwright", "headless")
 
 
-def _process_identity(pid: int) -> str | None:
-    """Return a stable identity string (start time + command) for *pid*.
-
-    Used to detect PID reuse before sending kill signals: two different
-    processes can never share both a start timestamp and a command line.
-
-    Args:
-        pid: Process id to fingerprint.
-
-    Returns:
-        The ``ps`` ``lstart``+``command`` line, or ``None`` when the
-        process is gone or ``ps`` failed.
-    """
-    try:
-        r = subprocess.run(
-            ["ps", "-ww", "-p", str(pid), "-o", "lstart=", "-o", "command="],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return r.stdout.strip() or None
-    except Exception:  # pragma: no cover — ps missing/unresponsive
-        logger.debug("Exception caught", exc_info=True)
-        return None
-
-
 def _wait_pid_exit(pid: int, timeout: float) -> bool:
     """Poll until *pid* exits, returning True if it died within *timeout*.
 
@@ -199,8 +175,7 @@ def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
         pid: Process id to terminate.
         identity: Identity string recorded when the PID was captured.
     """
-    sig_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
-    for sig in (signal.SIGTERM, sig_kill):
+    for sig in (signal.SIGTERM, SIGKILL):
         if not _pid_alive(pid):
             return
         current = _process_identity(pid)
@@ -215,7 +190,7 @@ def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
                 current,
             )
             return
-        logger.warning("Killing leaked Chromium (pid %d) with %s", pid, sig.name)
+        logger.warning("Killing leaked Chromium (pid %d) with signal %d", pid, sig)
         try:
             os.kill(pid, sig)
         except OSError:  # pragma: no cover — died between checks
@@ -343,9 +318,12 @@ def _read_lock_pid(
 def _is_profile_in_use(profile_dir: str) -> bool:
     """Check whether a Chromium profile directory is locked by a running process.
 
-    Chromium creates a ``SingletonLock`` symlink whose target is
+    On POSIX Chromium creates a ``SingletonLock`` symlink whose target is
     ``hostname-pid`` when a profile is opened.  If the symlink exists and
-    the referenced PID is alive, the profile is considered in use.
+    the referenced PID is alive, the profile is considered in use.  On
+    Windows Chromium instead holds ``lockfile`` open without write
+    sharing (delete-on-close, so a crash leaves nothing behind); the
+    profile is in use while that file cannot be opened for writing.
 
     Args:
         profile_dir: Path to the Chromium user-data directory.
@@ -353,6 +331,16 @@ def _is_profile_in_use(profile_dir: str) -> bool:
     Returns:
         True if the profile is currently locked by a live process.
     """
+    if sys.platform == "win32":  # pragma: no cover — Windows-only branch
+        try:
+            # ``r+`` never creates the file, so a probe that races the
+            # browser's delete-on-close cannot leave a stale lockfile.
+            with open(Path(profile_dir) / "lockfile", "r+"):
+                return False
+        except FileNotFoundError:
+            return False
+        except PermissionError:
+            return True
     try:
         pid = _read_lock_pid(profile_dir, propagate_permission_error=True)
     except PermissionError:

@@ -34,6 +34,7 @@ from unittest import IsolatedAsyncioTestCase, skipIf
 import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as web_server_mod
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
 
 _VALID_MARKER = json.dumps({"requested_at": 0.0, "conn_id": ""})
 
@@ -44,6 +45,7 @@ def _find_free_port() -> int:
         return int(s.getsockname()[1])
 
 
+@requires_unix_sockets
 class TestResetMarkerClaim(IsolatedAsyncioTestCase):
     """Only a claimed, valid marker produces the restart-complete toast."""
 
@@ -163,7 +165,8 @@ class TestResetMarkerClaim(IsolatedAsyncioTestCase):
         self.assertFalse(await self._saw_complete_toast())
         self.assertEqual(self._url_dir_entries(), [])
 
-    @skipIf(os.geteuid() == 0, "root bypasses directory write permission")
+    @posix_only("chmod permission bits")
+    @skipIf(is_root(), "root bypasses directory write permission")
     async def test_unclaimable_marker_is_not_announced(self) -> None:
         # The url file shares the marker's directory and is written at
         # startup, so the directory is made read-only AFTER the daemon

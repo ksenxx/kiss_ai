@@ -199,13 +199,23 @@ def _restart_kiss_web_daemon() -> bool:
 
     Returns:
         True when a restart was dispatched; False when skipped because
-        ``KISS_HOME`` points at a non-default location.
+        ``KISS_HOME`` points at a non-default location or because the
+        platform has no managed kiss-web daemon (Windows: the VS Code
+        extension installs no service there, so there is nothing to
+        kick).
     """
     if not _kiss_home_is_default():
         logger.warning(
             "Skipping kiss-web daemon restart: KISS_HOME=%r is not the "
             "default ~/.kiss — the system daemon serves a different home",
             os.environ.get("KISS_HOME", ""),
+        )
+        return False
+    if sys.platform not in ("darwin", "linux"):
+        logger.info(
+            "Skipping kiss-web daemon restart: no launchd/systemd-managed "
+            "kiss-web daemon on %s",
+            sys.platform,
         )
         return False
 

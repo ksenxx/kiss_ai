@@ -562,15 +562,17 @@ class TestF13ShellQuoting(_TempDbTestBase):
     """Recovery command blocks must be executable for paths with spaces."""
 
     def test_recovery_block_quotes_paths_and_branches(self) -> None:
+        repo_root = Path("/tmp/my repo")
         wt = GitWorktree(
-            repo_root=Path("/tmp/my repo"),
+            repo_root=repo_root,
             branch="kiss/wt-1",
             original_branch="feat branch",
-            wt_dir=Path("/tmp/my repo/.kiss-worktrees/x"),
+            wt_dir=repo_root / ".kiss-worktrees" / "x",
             baseline_commit=None,
         )
         block = _merge_fix_steps(wt, "    git commit\n")
-        assert "cd '/tmp/my repo'" in block
+        # str(Path) uses native separators; the quoting is what matters.
+        assert f"cd '{repo_root}'" in block
         assert "git checkout 'feat branch'" in block
         assert "git branch -D kiss/wt-1" in block
 

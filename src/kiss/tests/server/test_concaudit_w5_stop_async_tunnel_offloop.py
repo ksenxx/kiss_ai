@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -43,15 +44,21 @@ class TestStopAsyncTunnelStopOffLoop(unittest.IsolatedAsyncioTestCase):
         )
         server._vscode_server.use_private_tab_registry(tmp_dir / "tabs.json")
         server._loop = asyncio.get_running_loop()
-        # The child prints "ready" only AFTER installing the TERM trap,
-        # so stop_async's SIGTERM is guaranteed to hit a child that
+        # The child prints "ready" only AFTER ignoring SIGTERM, so
+        # stop_async's terminate() is guaranteed to hit a child that
         # ignores it (otherwise the 5 s blocking wait under test may
-        # never be exercised and the test passes vacuously).
+        # never be exercised and the test passes vacuously).  Windows
+        # cannot ignore terminate(); there the test still checks that
+        # the tunnel child is reaped without the loop stalling.  The
+        # base interpreter is used because a venv's python.exe is a
+        # launcher whose pid is not the interpreter's.
         proc = subprocess.Popen(
             [
-                "bash", "-c",
-                "trap '' TERM; echo ready; exec >/dev/null; "
-                "while true; do sleep 0.1; done",
+                getattr(sys, "_base_executable", sys.executable), "-c",
+                "import signal, sys, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "print('ready', flush=True)\n"
+                "time.sleep(120)\n",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

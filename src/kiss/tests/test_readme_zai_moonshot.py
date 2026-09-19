@@ -20,11 +20,13 @@ _MODEL_INFO = _REPO_ROOT / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json
 
 
 def _readme_text() -> str:
-    return _README.read_text()
+    # UTF-8 explicitly: the README has non-cp1252 characters and Windows'
+    # default text encoding is cp1252.
+    return _README.read_text(encoding="utf-8")
 
 
 def _model_info() -> dict[str, dict[str, object]]:
-    data: dict[str, dict[str, object]] = json.loads(_MODEL_INFO.read_text())
+    data: dict[str, dict[str, object]] = json.loads(_MODEL_INFO.read_text(encoding="utf-8"))
     return data
 
 

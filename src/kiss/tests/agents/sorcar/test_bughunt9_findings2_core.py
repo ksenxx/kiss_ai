@@ -36,6 +36,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.persistence import _add_task, _prefix_match_tasks
 from kiss.agents.sorcar.skills import parse_frontmatter
+from kiss.tests.conftest import posix_only
 
 
 def _run_git(*args: str, cwd: Path) -> None:
@@ -99,6 +100,7 @@ class _TempDbTestBase:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
+@posix_only("shebang git shim on PATH cannot shadow git.exe on Windows")
 class TestGitStatusFailureIsNeverClean:
     """S2-04 / S2-05: a failing ``git status`` must never look clean."""
 

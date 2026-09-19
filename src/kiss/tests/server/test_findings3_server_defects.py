@@ -68,6 +68,7 @@ from kiss.server.sorcar import ServerApi
 from kiss.server.sorcar import run as sorcar_run
 from kiss.server.task_runner import coerce_budget_override
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 
 _PASSWORD = "findings3-auth-test-password"
 
@@ -246,6 +247,7 @@ class _UdsResultServer:
             pass
 
 
+@requires_unix_sockets
 class TestUdsOversizedResultFraming(unittest.TestCase):
     """S3-11/S3-12: an oversized terminal ``result`` frame must survive."""
 

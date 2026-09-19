@@ -56,7 +56,9 @@ class TestCommandFieldSanitizing(IsolatedAsyncioTestCase):
         vc.CONFIG_PATH = vc.CONFIG_DIR / "config.json"
         self.work_dir = self.tmpdir / "repo"
         self.work_dir.mkdir()
-        (self.work_dir / "hello.txt").write_text("hi\n", encoding="utf-8")
+        # newline="\n": the server returns the file's bytes verbatim and the
+        # tests compare against "hi\n"; text mode would write CRLF on Windows.
+        (self.work_dir / "hello.txt").write_text("hi\n", encoding="utf-8", newline="\n")
         certfile, keyfile = self.tmpdir / "cert.pem", self.tmpdir / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
         self.port = _free_port()

@@ -50,12 +50,18 @@ from kiss.agents.third_party_agents._kiss_web_launcher import (
 from kiss.core import vscode_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 
 STUB_SUMMARY = "remote webview stub done"
 
 
+@requires_unix_sockets
 class TestRemoteWebviewInteraction(unittest.TestCase):
-    """Third-party agent tasks are open/interactable via remote webview."""
+    """Third-party agent tasks are open/interactable via remote webview.
+
+    The daemon under test is reached over its Unix-domain socket (the
+    launcher's private UDS), which Windows does not have.
+    """
 
     def setUp(self) -> None:
         # Every global mutation registers its restoration with

@@ -227,6 +227,8 @@ def test_memory_dir_page_names_skips_non_pages(tmp_path: Path) -> None:
 
 
 def test_memory_dir_reads_pages_without_frontmatter(tmp_path: Path) -> None:
-    (tmp_path / "plain.md").write_text("Just prose.\n")
+    # newline="" so Windows does not turn the LF into CRLF: read() keeps
+    # the raw bytes, so the body would otherwise come back as "Just prose.\r\n".
+    (tmp_path / "plain.md").write_text("Just prose.\n", encoding="utf-8", newline="")
     page = MemoryDir(tmp_path).read("plain")
     assert page.frontmatter == {} and page.title == "plain" and page.body == "Just prose.\n"

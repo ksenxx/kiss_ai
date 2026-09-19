@@ -54,7 +54,6 @@ import os
 import re
 import ssl
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -1959,17 +1958,12 @@ def _write_model_info_json(path: Path, data: dict[str, dict]) -> None:
         path: The catalog file to publish.
         data: The catalog contents, mutated in place by the context cap.
     """
+    from kiss.core.utils import atomic_write_text
+
     _normalize_context_caps(data)
     sorted_data = dict(sorted(data.items()))
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, staged = tempfile.mkstemp(prefix=f".{path.name}-", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(sorted_data, indent=2) + "\n")
-        os.replace(staged, path)
-    except BaseException:
-        Path(staged).unlink(missing_ok=True)
-        raise
+    atomic_write_text(path, json.dumps(sorted_data, indent=2) + "\n")
 
 
 def apply_updates_to_file(

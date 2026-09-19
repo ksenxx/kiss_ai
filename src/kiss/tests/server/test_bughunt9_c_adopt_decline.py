@@ -27,9 +27,7 @@ from __future__ import annotations
 
 import http.server
 import json
-import os
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -37,6 +35,7 @@ import unittest
 from pathlib import Path
 
 from kiss.server import web_server as ws
+from kiss.tests.conftest import install_fake_cloudflared
 
 
 class _MetricsHandler(http.server.BaseHTTPRequestHandler):
@@ -97,16 +96,16 @@ class TestAdoptDecline(unittest.TestCase):
     def _spawn_fake_cloudflared(self) -> subprocess.Popen[bytes]:
         """Spawn a real long-lived subprocess standing in for cloudflared.
 
-        Exec'd through a symlink named ``cloudflared`` so the process
-        presents the same ``ps -o comm=`` identity a real cloudflared
-        binary does — the decline path verifies identity before
-        signalling (stale-pidfile PID-reuse protection).
+        Run through an interpreter *named* ``cloudflared`` so the process
+        presents the same identity a real cloudflared binary does — the
+        decline path verifies identity before signalling (stale-pidfile
+        PID-reuse protection).
         """
-        link = Path(self._tmp.name) / "cloudflared"
-        if not link.exists():
-            os.symlink(sys.executable, link)
+        fake = install_fake_cloudflared(
+            Path(self._tmp.name), "import time; time.sleep(60)\n",
+        )
         proc = subprocess.Popen(
-            [str(link), "-c", "import time; time.sleep(60)"],
+            [str(fake)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

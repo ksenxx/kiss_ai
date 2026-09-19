@@ -28,6 +28,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from kiss.tests.conftest import posix_only
+
 
 class TestH9AutocompleteNonBlocking(unittest.TestCase):
     """``_get_files`` must return promptly without running a synchronous scan."""
@@ -93,6 +95,7 @@ class TestM1GitHasTimeout(unittest.TestCase):
         stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         return bin_dir
 
+    @posix_only("the hanging git stub on PATH is a /bin/sh script")
     def test_hanging_git_is_abandoned_within_the_timeout(self) -> None:
         """A hung git yields returncode 124 well before it exits."""
         from kiss.agents.sorcar import git_worktree

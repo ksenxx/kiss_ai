@@ -59,6 +59,8 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.conftest import IS_WINDOWS
+
 # Runs main() exactly as the installed `sorcar` console script does.
 _BOOTSTRAP = "from kiss.agents.sorcar.sorcar_agent import main; main()"
 
@@ -112,6 +114,7 @@ def _base_env(tmp: Path) -> dict[str, str]:
     """
     env = dict(os.environ)
     env["HOME"] = str(tmp)
+    env["USERPROFILE"] = str(tmp)  # Windows ``expanduser`` reads this, not HOME
     env["KISS_HOME"] = str(tmp / ".kiss")
     env.pop("KISS_WORKDIR", None)
     return env
@@ -125,7 +128,7 @@ class TestConsoleScriptWiring:
         # The environment's own `sorcar` script (generated from the
         # pyproject entry point at sync time) must exist next to the
         # interpreter and answer --help without recursing into uv.
-        script = Path(sys.executable).parent / "sorcar"
+        script = Path(sys.executable).with_name("sorcar.exe" if IS_WINDOWS else "sorcar")
         assert script.exists(), (
             "console script 'sorcar' missing from the venv — the "
             "[project.scripts] entry in pyproject.toml is gone"

@@ -22,10 +22,14 @@ from kiss.agents.sorcar.useful_tools import UsefulTools
 
 @pytest.fixture()
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point ``$HOME`` at a throwaway directory for the test process."""
+    """Point the home directory at a throwaway directory for the test process.
+
+    ``expanduser`` reads ``HOME`` on POSIX and ``USERPROFILE`` on Windows.
+    """
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     return home
 
 

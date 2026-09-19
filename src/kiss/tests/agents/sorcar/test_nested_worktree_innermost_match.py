@@ -31,6 +31,11 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.tests.conftest import IS_WINDOWS
+
+# Git bash prints MSYS paths (``/tmp/...``) for ``pwd``; ``-W`` asks for the
+# Windows spelling so the output can be compared with ``Path``.
+_PWD = "pwd -W" if IS_WINDOWS else "pwd"
 
 
 @pytest.fixture()
@@ -69,11 +74,11 @@ def test_write_and_edit_land_in_innermost_worktree(nested: tuple[Path, Path]) ->
 def test_bash_guard_refuses_innermost_parent_repo_path(nested: tuple[Path, Path]) -> None:
     proj, inner_wt = nested
     tools = UsefulTools(work_dir=str(inner_wt))
-    out = tools.Bash(f"echo PWNED > {proj}/src/app.py", "evil")
+    out = tools.Bash(f"echo PWNED > {proj.as_posix()}/src/app.py", "evil")
     assert "parent-repo path" in out, out
     assert (proj / "src" / "app.py").read_text() == "main\n"
     # Paths inside the inner worktree itself are still allowed.
-    out = tools.Bash(f"cat {inner_wt}/src/app.py", "read")
+    out = tools.Bash(f"cat {inner_wt.as_posix()}/src/app.py", "read")
     assert out.strip() == "worktree", out
 
 
@@ -94,7 +99,7 @@ def test_stale_innermost_worktree_falls_back_to_its_own_parent(
     assert (proj / "new.txt").read_text() == "x\n"
     assert not inner_wt.exists()
     # Bash falls back to running from ``proj``.
-    out = tools.Bash("pwd", "probe")
+    out = tools.Bash(_PWD, "probe")
     assert Path(out.strip()).resolve() == proj.resolve(), out
 
 

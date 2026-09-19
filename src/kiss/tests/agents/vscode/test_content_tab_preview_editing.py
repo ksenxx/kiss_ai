@@ -65,7 +65,10 @@ _DIRTY_TAB = ".chat-tab.content-tab.content-dirty"
 
 def _fresh_file(harness, name: str, text: str) -> Path:
     path = Path(harness.work_dir) / name
-    path.write_text(text)
+    # Byte-exact fixture: the daemon saves the editor text without
+    # newline translation, and the assertions count LF bytes, so the
+    # file must not pick up CRLF from Windows text-mode writes.
+    path.write_text(text, encoding="utf-8", newline="\n")
     return path
 
 

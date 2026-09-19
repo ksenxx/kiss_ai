@@ -34,6 +34,7 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.tests.conftest import requires_unix_sockets
 
 SUCCEEDING_UPDATER = """
 import sys
@@ -169,6 +170,7 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
             await asyncio.sleep(0.025)
         raise AssertionError("updater never spawned")
 
+    @requires_unix_sockets
     async def test_success_notifies_the_clicking_window_only(self) -> None:
         self._updater_stub(SUCCEEDING_UPDATER)
         reader_a, writer_a = await self._connect()
@@ -188,6 +190,7 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         # The other window saw none of it.
         self.assertEqual(await self._banners_before_probe(reader_b, writer_b), [])
 
+    @requires_unix_sockets
     async def test_failure_reports_the_exit_code_and_log_path(self) -> None:
         self._updater_stub(FAILING_UPDATER)
         reader_a, writer_a = await self._connect()
@@ -200,6 +203,7 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         self.assertIn(str(self.log_path), text)
         self.assertIn("boom", self.log_path.read_text())
 
+    @requires_unix_sockets
     async def test_second_click_while_running_is_refused(self) -> None:
         self._updater_stub(HELD_UPDATER.format(release=str(self.release)))
         reader_a, writer_a = await self._connect()
@@ -220,6 +224,7 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         done = await self._drain_until(reader_a, _has_type("notice"))
         self.assertIn("complete", str(done.get("text", "")))
 
+    @requires_unix_sockets
     async def test_spawn_failure_is_reported_and_starts_no_watcher(self) -> None:
         self._updater_stub(SUCCEEDING_UPDATER)
         blocker = Path(self.tmpdir) / "not-a-dir"
@@ -236,6 +241,7 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         self.assertIsNone(self.server._update_models_watch_task)
         self.assertFalse(self.server._update_models_starting)
 
+    @requires_unix_sockets
     async def test_stop_cancels_a_pending_watcher(self) -> None:
         self._updater_stub(HELD_UPDATER.format(release=str(self.release)))
         reader_a, writer_a = await self._connect()

@@ -541,7 +541,7 @@ def test_until_delivered_job_disables_itself_after_first_news(tmp_path: Path) ->
     flag = tmp_path / "released"
     job = _create(cron_job(
         "create", name="release poll", schedule="every 1m",
-        command=f"test -f {flag} && echo 'released!'", until_delivered=True,
+        command=f"test -f {flag.as_posix()} && echo 'released!'", until_delivered=True,
     ))
     assert job["until_delivered"] is True
     _set_job_fields(job["id"], next_run_at=1.0)

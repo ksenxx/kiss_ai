@@ -67,6 +67,7 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.task_runner import _stop_interrupt_wrapped
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 
 _STOP_LABEL = "Task stopped by user"
 
@@ -160,6 +161,7 @@ _BROKEN_GETTER = textwrap.dedent(
 )
 
 
+@requires_unix_sockets
 class TestStopWrappedInterrupt(TestCase):
     """An injected stop swallowed by a loader is still a user stop."""
 

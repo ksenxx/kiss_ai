@@ -7,8 +7,8 @@
 ``send_signal_message`` used to duplicate ``send_message``'s CLI
 invocation and error heuristic verbatim; it now wraps ``send_message``
 and JSON-encodes the outcome.  Tested against a REAL executable
-``signal-cli`` shell script placed on PATH — a real subprocess, not a
-mock.
+``signal-cli`` stand-in program placed on PATH — a real subprocess, not
+a mock.
 """
 
 from __future__ import annotations
@@ -21,25 +21,22 @@ import unittest
 from pathlib import Path
 
 from kiss.agents.third_party_agents.signal_agent import SignalChannelBackend
+from kiss.tests.conftest import install_cli_script
 
-_FAKE_SIGNAL_CLI = """#!/bin/sh
-if [ "$1" = "-u" ]; then shift 2; fi
-cmd="$1"
-shift
-if [ "$cmd" = "send" ]; then
-  last=""
-  for arg in "$@"; do last="$arg"; done
-  if [ "$last" = "+FAIL" ]; then
-    echo "Failed to send message: ERROR unregistered recipient" >&2
-    exit 1
-  fi
-  if [ "$last" = "+WARN" ]; then
-    echo "WARNING: error while updating profile" >&2
-    exit 0
-  fi
-  exit 0
-fi
-exit 0
+# A Python program (not a shell script) so the same stand-in runs on
+# Windows, where ``install_cli_script`` adds the ``.cmd`` shim.
+_FAKE_SIGNAL_CLI = """#!/usr/bin/env python3
+import sys
+args = sys.argv[1:]
+if args[:1] == ["-u"]:
+    args = args[2:]
+if args[:1] == ["send"]:
+    if args[-1] == "+FAIL":
+        print("Failed to send message: ERROR unregistered recipient", file=sys.stderr)
+        sys.exit(1)
+    if args[-1] == "+WARN":
+        print("WARNING: error while updating profile", file=sys.stderr)
+sys.exit(0)
 """
 
 
@@ -49,9 +46,7 @@ class TestSendSignalMessage(unittest.TestCase):
     def setUp(self) -> None:
         """Install a real executable signal-cli stub on PATH."""
         self._tmpdir = tempfile.mkdtemp(prefix="rr-area-g-signal-")
-        cli = Path(self._tmpdir) / "signal-cli"
-        cli.write_text(_FAKE_SIGNAL_CLI, encoding="utf-8")
-        cli.chmod(0o755)
+        install_cli_script(Path(self._tmpdir) / "signal-cli", _FAKE_SIGNAL_CLI)
         self._old_path = os.environ["PATH"]
         os.environ["PATH"] = self._tmpdir + os.pathsep + self._old_path
         self._backend = SignalChannelBackend()

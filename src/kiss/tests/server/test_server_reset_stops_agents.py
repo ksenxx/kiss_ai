@@ -44,6 +44,10 @@ from unittest import TestCase
 
 import pytest
 
+from kiss.tests.conftest import requires_unix_sockets
+
+pytestmark = requires_unix_sockets
+
 _CHILD_SCRIPT = r"""
 import os
 import sys
