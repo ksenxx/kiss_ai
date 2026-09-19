@@ -1,6 +1,13 @@
 # Single-task implementation plan for the Sorcar token-cost levers
 
-Status: proposal only, no code changed. Written 2026-09-19 from the 7-day efficiency
+Status: implemented 2026-09-19 (WP0–WP7; see `src/kiss/scripts/cost_report.py` /
+`cost_levers_experiment.py` for the measurements), with these items explicitly deferred:
+WP4 classifier "tier" question and cheap-model routing (quality risk; commit messages already
+use `get_fast_model()`); WP3 charging post-`set_model` spend to the review quota (the per-step
+`model` is now recorded in `usage_info` events, so it is measurable); WP1d real step-2
+cache-hit test (the `cache_read` field is recorded and reported instead); WP2 Read dedupe /
+outline for Docker tasks (`DockerTools.Read`). The `review` tool profile is a reduced toolset,
+not a sandbox: Bash remains available. Written 2026-09-19 from the 7-day efficiency
 audit of `~/.kiss/sorcar.db` (2026-09-12 → 2026-09-19: 2,828 tasks, $8,412, 6.14 B tokens).
 Edit this file freely; the condensed version lives in memory page
 `sorcar-cost-levers-implementation-plan-2026-09-19`.

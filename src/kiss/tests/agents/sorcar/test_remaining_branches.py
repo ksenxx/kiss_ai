@@ -221,8 +221,13 @@ class TestSorcarAgentDockerBranch:
         agent = SorcarAgent("test")
 
         class FakeDockerManager:
+            stop_event = None
+
             def Bash(self, cmd: str, desc: str) -> str:  # noqa: N802
                 return "docker output"
+
+            def run_commands_parallel(self, commands: str) -> str:
+                return "docker parallel output"
 
         agent.docker_manager = FakeDockerManager()
         tools = agent._get_tools()

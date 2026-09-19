@@ -738,6 +738,13 @@ def _execute_job(job: dict[str, Any], sock_path: str | None = None) -> None:
         except Exception as e:
             logger.error("Cron delivery for %s failed: %s", job["id"], e, exc_info=True)
             notes = [f"error: delivery failed: {e}"]
+    # Retire an until_delivered poll only when the news actually reached
+    # every requested target: a delivery error keeps the job alive so
+    # the next tick tries again.
+    delivered = (
+        text is not None and status == "ok"
+        and not any(note.startswith("error") for note in notes)
+    )
     with _jobs_lock(blocking=True):
         jobs = load_jobs()
         for stored in jobs:
@@ -745,6 +752,10 @@ def _execute_job(job: dict[str, Any], sock_path: str | None = None) -> None:
                 stored["last_status"] = status
                 stored["last_summary"] = (text or "")[:MAX_STORED_SUMMARY_CHARS]
                 stored["last_delivery"] = notes
+                if delivered and stored.get("until_delivered"):
+                    # A "notify me when ..." poll has done its job.
+                    stored["enabled"] = False
+                    stored["next_run_at"] = None
         save_jobs(jobs)
 
 
@@ -885,7 +896,8 @@ def _job_view(job: dict[str, Any]) -> dict[str, Any]:
         key: job.get(key)
         for key in (
             "id", "name", "schedule", "deliver", "enabled", "one_shot",
-            "prompt", "command", "last_status", "last_delivery",
+            "until_delivered", "prompt", "command", "last_status",
+            "last_delivery",
         )
         if job.get(key) not in (None, "", [])
     }
@@ -907,6 +919,7 @@ def cron_job(
     deliver: str = "local",
     model_name: str = "",
     max_budget: str = "",
+    until_delivered: bool = False,
 ) -> str:
     """Manage scheduled automations (cron jobs) stored in a local JSON file.
 
@@ -925,6 +938,17 @@ def cron_job(
       ``job_id``.
     - ``run_now``: execute the job named by ``job_id`` immediately and
       deliver its result (the regular schedule is unaffected).
+
+    Prefer ``command`` jobs for polls and checks ("is X released yet?",
+    "did the build finish?", "is the site up?"): a shell command such as
+    ``if curl -s URL | grep -q 'X'; then echo 'X is out'; fi`` costs
+    nothing per run, prints only when there is news and exits 0 (so a
+    quiet poll is silent, not an error), while a ``prompt`` job starts a
+    full LLM session every time.  A poll that should stop once it has
+    fired ("tell me WHEN X happens") gets ``until_delivered=True``: the
+    job disables itself after its first successfully delivered
+    non-silent result (also when triggered by ``run_now``) instead of
+    repeating the same news on every tick.
 
     Schedule forms (local time):
 
@@ -962,6 +986,8 @@ def cron_job(
             uses the default model).
         max_budget: Per-run USD budget override for prompt jobs, as a
             string like ``"2.5"`` (create; empty uses the default).
+        until_delivered: Disable the job after its first non-silent
+            delivery (create; for "notify me when ..." polls).
 
     Returns:
         A YAML string describing the result (created job, job list,
@@ -996,6 +1022,7 @@ def cron_job(
             "max_budget": budget,
             "enabled": True,
             "one_shot": is_one_shot(schedule),
+            "until_delivered": bool(until_delivered),
             "created_at": time.time(),
             "next_run_at": next_run,
             "last_run_at": None,
@@ -1057,8 +1084,12 @@ CRON_DISPATCH_PREAMBLE = (
     "cron_job tool for managing scheduled automations — use it directly "
     "and immediately, without exploring any source code.  Translate the "
     "user's natural-language schedule into one of the tool's four "
-    "supported schedule forms yourself.  Never call run_agent here: it "
-    "would just recurse into another session like this one.\n\n"
+    "supported schedule forms yourself.  For polls and checks (\"is X "
+    "released?\", \"is the site up?\") create a no-LLM command job (curl/"
+    "grep pipeline that prints only when there is news) rather than a "
+    "prompt job, and pass until_delivered=True when the user wants to be "
+    "told once.  Never call run_agent here: it would just recurse into "
+    "another session like this one.\n\n"
 )
 """Preamble prepended to every task dispatched to this agent script.
 
@@ -1149,6 +1180,10 @@ def main() -> None:
     parser.add_argument("--deliver", default="local", help="Delivery targets")
     parser.add_argument("-m", "--model", default="", help="Model for prompt jobs")
     parser.add_argument("-b", "--budget", default="", help="Per-run USD budget")
+    parser.add_argument(
+        "--until-delivered", action="store_true",
+        help="Disable the job after its first non-silent delivery",
+    )
     parser.add_argument("--remove", default="", metavar="ID", help="Remove a job")
     parser.add_argument("--pause", default="", metavar="ID", help="Pause a job")
     parser.add_argument("--resume", default="", metavar="ID", help="Resume a job")
@@ -1174,6 +1209,7 @@ def main() -> None:
                 deliver=args.deliver,
                 model_name=args.model,
                 max_budget=args.budget,
+                until_delivered=args.until_delivered,
             ),
             end="",
         )

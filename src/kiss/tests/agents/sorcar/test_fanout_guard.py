@@ -43,6 +43,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     _LiveUsageMonitor,
     run_tasks_parallel,
 )
+from kiss.core.config import DEFAULT_CONFIG
 
 FAST_MODEL = "claude-haiku-4-5"
 UNKNOWN_MODEL = "no-such-model-fanout-guard"
@@ -172,7 +173,20 @@ class TestRunParallelToolRefusals:
             "Error: max_workers must be an integer string"
         )
 
-    def test_reviewer_subagent_cannot_spawn_reviewers(self) -> None:
+    def test_reviewer_subagent_has_no_run_parallel_tool(self) -> None:
+        """With tool profiles on, a reviewer's toolset has no fan-out at all."""
+        agent = SorcarAgent("guard-reviewer-profile")
+        _mark_reviewer(agent)
+        agent._use_web_tools = False
+        agent._is_parallel = True
+        names = {getattr(t, "__name__", "") for t in agent._get_tools()}
+        assert "run_parallel" not in names and "Edit" not in names
+
+    def test_reviewer_subagent_cannot_spawn_reviewers(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The refusal still guards a reviewer that runs with the full toolset."""
+        monkeypatch.setattr(DEFAULT_CONFIG, "tool_profiles", False)
         agent = SorcarAgent("guard-reviewer")
         _mark_reviewer(agent)
         run_parallel = _run_parallel_tool(agent)
@@ -180,9 +194,12 @@ class TestRunParallelToolRefusals:
         assert result.startswith("Error: You are a reviewer sub-agent")
         assert agent._review_quota is None  # nothing reserved
 
-    def test_reviewer_subagent_may_still_run_non_review_fanouts(self) -> None:
+    def test_reviewer_subagent_may_still_run_non_review_fanouts(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Only reviewer-spawning is forbidden; helper fan-outs still
         dispatch (children fail fast on the unknown model)."""
+        monkeypatch.setattr(DEFAULT_CONFIG, "tool_profiles", False)
         agent = SorcarAgent("guard-reviewer-helper")
         _mark_reviewer(agent)
         agent.model_name = UNKNOWN_MODEL

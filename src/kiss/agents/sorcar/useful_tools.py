@@ -6,6 +6,7 @@
 
 import difflib
 import functools
+import hashlib
 import logging
 import mimetypes
 import os
@@ -35,6 +36,7 @@ from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SUBDIR,
 )
 from kiss.core import tool_interrupt
+from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.models.model import (
     READ_TOOL_BINARY_MIME_TYPES,
     encode_binary_attachment,
@@ -43,6 +45,19 @@ from kiss.core.models.model import (
 logger = logging.getLogger(__name__)
 
 _MAX_BINARY_READ_BYTES = 20 * 1024 * 1024
+_OUTLINE_SYMBOL_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:async\s+)?def\s+\w+|class\s+\w+"  # Python
+    r"|(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?\s+\w+|class\s+\w+)"  # JS/TS
+    r"|(?:export\s+)?(?:const|let|var)\s+\w+\s*=\s*(?:async\s*)?(?:\([^)]*\)\s*=>|function\b)"
+    r"|(?:pub\s+)?(?:fn|struct|enum|impl|trait)\s+\w+"  # Rust
+    r"|func\s+(?:\([^)]*\)\s*)?\w+"  # Go
+    r")"
+)
+_OUTLINE_HEADING_RE = re.compile(r"^#{1,6}\s+\S")
+_MARKDOWN_SUFFIXES = frozenset({".md", ".markdown", ".mdx"})
+_OUTLINE_MAX_ENTRIES = 400
+_OUTLINE_MIN_ENTRIES = 5
 
 
 @contextmanager
@@ -326,6 +341,63 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
     return None
 
 
+def _worktree_roots(work_dir: str | None) -> list[tuple[str, str]]:
+    """Return ``(main_repo, wt_root)`` for each spelling of an active worktree *work_dir*.
+
+    Empty when *work_dir* is not inside a live ``.kiss-worktrees/kiss_wt-*``
+    worktree.  Both the given and the resolved spelling are returned when
+    they differ (symlinked checkouts).
+    """
+    if not work_dir:
+        return []
+    roots: list[tuple[str, str]] = []
+    for wd_parts in (Path(work_dir).parts, Path(work_dir).resolve().parts):
+        i = _worktree_index(wd_parts)
+        if i is None:
+            continue
+        pair = (str(Path(*wd_parts[:i])), str(Path(*wd_parts[: i + 2])))
+        if pair not in roots and os.path.isdir(pair[1]):
+            roots.append(pair)
+    return roots
+
+
+def rewrite_parent_repo_paths(text: str, work_dir: str | None) -> str:
+    """Rewrite absolute parent-repo paths in *text* to the active worktree's.
+
+    Sub-agent tasks written by a parent running in a worktree kept
+    naming files under the parent repository (134 refused Bash commands
+    in the 7-day audit of 2026-09-19).  Every ``<main_repo>/...`` path
+    that is not already inside a ``.kiss-worktrees`` directory becomes
+    ``<wt_root>/...``; the bare repo path itself is rewritten too.
+
+    The rewrite is textual: prose that deliberately names the parent
+    repository ("do not touch <main_repo>") is rewritten too.  A parent
+    that needs the child to act on the main checkout must say so
+    without an absolute path (the worktree is the only tree a
+    sub-agent's tools may modify anyway).
+
+    Args:
+        text: A task description or shell command.
+        work_dir: The dispatching agent's working directory.
+
+    Returns:
+        *text* with the paths rewritten, or unchanged when *work_dir*
+        is not inside a live worktree.
+    """
+    for main_repo, wt_root in _worktree_roots(work_dir):
+        pattern = re.escape(main_repo) + r"(?=[/\\]|[\s'\";|&<>()`,:]|$)"
+        text = re.sub(pattern, functools.partial(_swap_root, wt_root=wt_root), text)
+    return text
+
+
+def _swap_root(match: re.Match[str], wt_root: str) -> str:
+    """Replace one matched repo root unless it already names a worktree."""
+    rest = match.string[match.end():]
+    if rest[:1] in ("/", "\\") and rest[1:].startswith(".kiss-worktrees"):
+        return match.group(0)
+    return wt_root
+
+
 def _parent_repo_guard_for_parts(
     command: str, wd_parts: tuple[str, ...]
 ) -> str | None:
@@ -355,13 +427,15 @@ def _parent_repo_guard_for_parts(
         hit = command[tail_start:end]
         if hit == wt_root or hit.startswith(wt_root + os.sep):
             continue
+        suggested = rewrite_parent_repo_paths(command, wt_root)
         return (
             f"Error: command references the parent-repo path "
             f"{hit!r}, which is outside the active worktree "
             f"{wt_root!r}.  Rewrite the command to use the "
             f"worktree path (or a path relative to it) so the "
             f"change is captured by the framework's auto-commit "
-            f"and does not mutate the user's main checkout."
+            f"and does not mutate the user's main checkout. "
+            f"Suggested command: {suggested[:2000]}"
         )
     return None
 
@@ -394,6 +468,44 @@ def _suggest_close_path(resolved: Path) -> str:
     if matches:
         return f" Did you mean: {parent / matches[0]} ?"
     return ""
+
+
+def _outline(file_path: str, lines: list[str], size: int) -> str | None:
+    """Build the outline a whole-file ``Read`` of a long file returns.
+
+    Args:
+        file_path: The path as the model passed it (for the header).
+        lines: The file's lines.
+        size: The file size in characters.
+
+    Returns:
+        The line count plus a ``line: symbol`` list of definitions and
+        headings and how to read a range, or ``None`` when the file has
+        too few recognisable symbols for an outline to be useful (the
+        caller then returns the first window as before).
+    """
+    pattern = (
+        _OUTLINE_HEADING_RE
+        if Path(file_path).suffix.lower() in _MARKDOWN_SUFFIXES
+        else _OUTLINE_SYMBOL_RE
+    )
+    entries = [
+        f"{number}: {line.strip()}"
+        for number, line in enumerate(lines, 1)
+        if pattern.match(line)
+    ]
+    if len(entries) < _OUTLINE_MIN_ENTRIES:
+        return None
+    shown = entries[:_OUTLINE_MAX_ENTRIES]
+    more = len(entries) - len(shown)
+    return (
+        f"{file_path}: {len(lines):,} lines, {size:,} chars. Too long to send "
+        f"whole; outline of its {len(entries)} definitions/headings (line: text):\n"
+        + "\n".join(shown)
+        + (f"\n... {more} more entries" if more else "")
+        + "\n\nRead a range with Read(file_path, start_line=N, max_lines=M), or "
+        "locate text with Bash(\"grep -n PATTERN FILE\")."
+    )
 
 
 def _find_windows_bash() -> str | None:  # pragma: no cover — Windows only
@@ -715,6 +827,18 @@ class UsefulTools:
         self.stream_callback = stream_callback
         self.stop_event = stop_event
         self.work_dir = work_dir
+        # Read dedupe: (path, start_line, max_lines) -> sha of the file text
+        # the model was last shown for that window (see :meth:`Read`).
+        self._reads_shown: dict[tuple[str, int, int], str] = {}
+
+    def forget_reads(self) -> None:
+        """Forget which file windows the model has already been shown.
+
+        Called by the agent when earlier tool outputs left the model's
+        context (compaction, a new session), so the next ``Read`` of an
+        unchanged file returns its content instead of the dedupe stub.
+        """
+        self._reads_shown.clear()
 
     def _spawn(self, command: str) -> subprocess.Popen:
         """Launch *command* with the shared Popen configuration.
@@ -813,8 +937,9 @@ class UsefulTools:
         file_path: str,
         max_lines: int = 2000,
         start_line: int = 1,
+        force: bool = False,
     ) -> str:
-        """Read file contents.
+        """Read file contents; a long file with no line range returns its outline first.
 
         Args:
             file_path: Absolute path to file.
@@ -825,6 +950,9 @@ class UsefulTools:
                 less than 1 are rejected; values beyond EOF return an
                 explicit sentinel rather than empty content so the
                 model is not misled into thinking the file is empty.
+            force: Re-send a window that is unchanged since an earlier
+                Read in this task (by default such a Read returns a
+                one-line "unchanged" note instead of the content).
         """
         if start_line < 1:
             return (
@@ -875,11 +1003,33 @@ class UsefulTools:
                     f"Error: start_line={start_line} is past EOF "
                     f"(file has {total} line{'s' if total != 1 else ''})."
                 )
+            outline_limit = DEFAULT_CONFIG.read_outline_lines
+            whole_file_requested = start_line == 1 and max_lines >= 2000
+            outline = (
+                _outline(file_path, lines, len(text))
+                if whole_file_requested and 0 < outline_limit < total else None
+            )
             window = lines[start_line - 1 : start_line - 1 + max_lines]
-            remaining = total - (start_line - 1) - len(window)
-            if remaining > 0:
-                return "".join(window) + f"\n[truncated: {remaining} more lines]"
-            return "".join(window)
+            last = start_line - 1 + len(window)
+            remaining = total - last
+            if outline is not None:
+                content, shown = outline, "outline"
+                key = (str(resolved), 0, 0)
+            else:
+                content = "".join(window)
+                if remaining > 0:
+                    content += f"\n[truncated: {remaining} more lines]"
+                shown = f"lines {start_line}-{last} of {total}"
+                key = (str(resolved), start_line, max_lines)
+            digest = hashlib.sha1(text.encode("utf-8", "surrogatepass")).hexdigest()
+            if DEFAULT_CONFIG.read_dedupe and not force and self._reads_shown.get(key) == digest:
+                return (
+                    f"Unchanged since your earlier Read of {file_path} ({shown}): the "
+                    f"content is already in your context above. Pass force=True to "
+                    f"re-read it."
+                )
+            self._reads_shown[key] = digest
+            return content
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"

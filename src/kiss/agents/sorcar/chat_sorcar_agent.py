@@ -12,6 +12,7 @@ management — the same workflow that the VS Code extension performs in
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -34,9 +35,69 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.relentless_agent import DEFAULT_MAX_BUDGET
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core._version import __version__
+from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.printer import parse_result_yaml
 
 MAX_TASKS = 10
+DIGEST_FULL_RESULTS = 2
+"""The newest prior tasks whose result is quoted in full in the chat prefix."""
+DIGEST_MAX_PREFIX_CHARS = 6_000
+"""Older prior tasks are dropped (oldest first) until the prefix fits this."""
+DIGEST_TASK_CHARS = 600
+DIGEST_RESULT_CHARS = 300
+_TAG_RE = re.compile(r"<[^<>]+>")
+
+
+def _digest(text: str, limit: int) -> str:
+    """Strip HTML tags, collapse whitespace and cut *text* to *limit* chars."""
+    plain = " ".join(_TAG_RE.sub(" ", str(text)).split())
+    return plain if len(plain) <= limit else plain[:limit].rstrip() + " …"
+
+
+def _format_history(entries: list[dict[str, object]], full_from: int) -> str:
+    """Render prior tasks; entries before index *full_from* are digested."""
+    parts: list[str] = []
+    for i, entry in enumerate(entries):
+        task = str(entry["task"])
+        result = str(entry.get("result") or "")
+        if i < full_from:
+            task = _digest(task, DIGEST_TASK_CHARS)
+            result = _digest(result, DIGEST_RESULT_CHARS)
+        parts.append(f"### Task {i + 1}\n{task}")
+        if result:
+            parts.append(f"### Result {i + 1}\n{result}")
+    return "\n\n".join(parts)
+
+
+def _digest_history(entries: list[dict[str, object]]) -> str:
+    """Render the chat history with only the newest results in full.
+
+    The prefix is re-sent on every step of the task, so older tasks are
+    reduced to a tag-stripped digest and, when the prefix still exceeds
+    :data:`DIGEST_MAX_PREFIX_CHARS`, dropped oldest-first.  The newest
+    :data:`DIGEST_FULL_RESULTS` tasks are kept whole as long as they fit;
+    the cap wins otherwise (they are digested too, then hard-truncated).
+
+    Args:
+        entries: Prior tasks, oldest first, each with ``task`` and ``result``.
+
+    Returns:
+        The rendered history section.
+    """
+    kept = list(entries)
+    full = DIGEST_FULL_RESULTS
+    while True:
+        body = _format_history(kept, full_from=max(0, len(kept) - full))
+        if len(body) <= DIGEST_MAX_PREFIX_CHARS:
+            return body
+        if len(kept) > DIGEST_FULL_RESULTS:
+            del kept[0]
+        elif full > 0:
+            # Even the newest results are too long: digest them too,
+            # oldest first, rather than exceed the cap.
+            full -= 1
+        else:
+            return body[:DIGEST_MAX_PREFIX_CHARS].rstrip() + " …"
 
 
 def _dir_inside_worktree(work_dir: str, wt_dir: object) -> bool:
@@ -215,15 +276,16 @@ class ChatSorcarAgent(SorcarAgent):
             chat_context = _load_chat_context(self._chat_id)
         if not chat_context:
             return "# Task\n" + prompt
-        parts = ["## Previous tasks and results from the chat session for reference\n"]
         if len(chat_context) > MAX_TASKS:
             del chat_context[2:2 + len(chat_context) - MAX_TASKS]
-        for i, entry in enumerate(chat_context, 1):
-            parts.append(f"### Task {i}\n{entry['task']}")
-            if entry.get("result"):
-                parts.append(f"### Result {i}\n{entry['result']}")
-        parts.append("---\n")
-        return "\n\n".join(parts) + "# Task (work on it now)\n\n" + prompt
+        if DEFAULT_CONFIG.chat_history_digest:
+            body = _digest_history(chat_context)
+        else:
+            body = _format_history(chat_context, full_from=0)
+        return (
+            "## Previous tasks and results from the chat session for reference\n\n"
+            + body + "\n\n---\n\n# Task (work on it now)\n\n" + prompt
+        )
 
     def _build_extra_payload(
         self,
@@ -653,6 +715,9 @@ class ChatSorcarAgent(SorcarAgent):
                 extra_payload["tokens"] = final_tokens
                 extra_payload["cost"] = round(final_cost, 6)
                 extra_payload["steps"] = final_steps
+                # The run is over: stamp its end so sub-agents (which no
+                # server runner finalises) get a duration too.
+                extra_payload["endTs"] = int(time.time() * 1000)
                 _save_task_extra(extra_payload, task_id=task_id)
                 self._persist_replay_events_if_missing(
                     task_id=task_id,

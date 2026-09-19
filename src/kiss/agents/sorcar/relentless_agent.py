@@ -1179,6 +1179,12 @@ class RelentlessAgent(Base):
             executor = KISSAgent(f"{self.name} Session-{session}")
             executor.pre_step_hook = getattr(self, "pre_step_hook", None)
             executor.tool_call_guard = getattr(self, "tool_call_guard", None)
+            context_reset_hook = getattr(self, "context_reset_hook", None)
+            executor.context_reset_hook = context_reset_hook
+            if session > 0 and context_reset_hook is not None:
+                # A new session starts from an empty context: nothing
+                # shown to the previous session's model is visible now.
+                context_reset_hook()
             llm_call_hook = getattr(self, "llm_call_hook", None)
             tool_call_hook = getattr(self, "tool_call_hook", None)
             executor.budget_check_hook = self._check_total_budget

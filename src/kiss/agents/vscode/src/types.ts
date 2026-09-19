@@ -577,6 +577,8 @@ type ToWebviewMessageBody =
       total_tokens?: number;
       cost?: string;
       total_steps?: number;
+      cache_read?: number;
+      model?: string;
     }
   | {type: 'system_prompt'; text: string}
   | {type: 'prompt'; text: string}
