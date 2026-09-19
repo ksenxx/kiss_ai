@@ -689,6 +689,18 @@
   // Row elements in allHistSessions order, for the fast path's in-place
   // refresh of time-derived metrics text.
   let historyRenderedRows = [];
+  // The history panel's view: collapsible per-chat panels (the
+  // default), or the legacy flat list — every task newest first, each
+  // row with a color bar naming its chat.  Persisted across reloads.
+  const HISTORY_LEGACY_VIEW_KEY = 'kissSorcar.historyLegacyView';
+  let historyLegacyView = false;
+  try {
+    historyLegacyView =
+      window.localStorage.getItem(HISTORY_LEGACY_VIEW_KEY) === '1';
+  } catch {}
+  // The view the rows on screen were built for: a view switch is a
+  // rebuild even when the data did not change.
+  let historyRenderedLegacy = false;
   // A destructive history rebuild is deferred while a press (mouse
   // button or touch contact) is held inside the list: replacing ANY row
   // between press and release would swallow the resulting click (its
@@ -1193,7 +1205,7 @@
       else taskPanel.classList.remove('visible');
     }
     currentTaskSettings = tab.taskSettings || null;
-    renderTaskPanelInfo(currentTaskSettings);
+    updateMetaTaskDetails(currentTaskSettings);
     currentTaskName = (tab.taskPanelHTML || '').trim();
     currentTaskId = tab.currentTaskId !== undefined ? tab.currentTaskId : null;
     if (statusText) {
@@ -3736,7 +3748,6 @@
   const shareBtn = document.getElementById('share-btn');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
-  const taskPanelInfo = document.getElementById('task-panel-info');
   const taskPanelCopy = document.getElementById('task-panel-copy');
   const taskPanelDrawerBtn = document.getElementById('task-panel-drawer-btn');
   const inputDrawerBtn = document.getElementById('input-drawer-btn');
@@ -4096,6 +4107,21 @@
     return el ? (el.textContent || '').trim() : '';
   }
 
+  /**
+   * Write one #meta-* value's display text ('—' for an empty *text*)
+   * and, optionally, its inline color.
+   *
+   * @param {string} id The value span's element id.
+   * @param {string} text The display text.
+   * @param {string} [color] Inline CSS color ('' clears it).
+   */
+  function setMetaValue(id, text, color) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text || '\u2014';
+    if (color !== undefined) el.style.color = color || '';
+  }
+
   /** Post this panel's task-info values to the host right now. */
   function postMetaUpdateNow() {
     const timeEl = document.getElementById('meta-time');
@@ -4110,6 +4136,13 @@
         machine: metaValueText('meta-machine'),
         workdir: metaValueText('meta-workdir'),
         maxBudget: metaValueText('meta-max-budget'),
+        date: metaValueText('meta-date'),
+        model: metaValueText('meta-model'),
+        worktree: metaValueText('meta-worktree'),
+        parallel: metaValueText('meta-parallel'),
+        chatId: metaValueText('meta-chat-id'),
+        taskId: metaValueText('meta-task-id'),
+        parentTask: metaValueText('meta-parent-id'),
       },
       progressMd: metaInfoMd,
     });
@@ -4159,23 +4192,21 @@
   function renderMetaState(ev) {
     const values =
       ev && ev.values && typeof ev.values === 'object' ? ev.values : null;
-    const put = (id, text, color) => {
-      const el = document.getElementById(id);
-      if (!el) return;
-      el.textContent = text || '\u2014';
-      el.style.color = color || '';
-    };
-    put('meta-tokens', values && values.tokens);
-    put('meta-cost', values && values.cost);
-    put('meta-steps', values && values.steps);
-    put(
-      'meta-time',
-      (values && values.time) || 'Ready',
-      values && values.timeColor,
-    );
-    put('meta-machine', values && values.machine);
-    put('meta-workdir', values && values.workdir);
-    put('meta-max-budget', values && values.maxBudget);
+    const v = key => (values && values[key]) || '';
+    setMetaValue('meta-tokens', v('tokens'), '');
+    setMetaValue('meta-cost', v('cost'), '');
+    setMetaValue('meta-steps', v('steps'), '');
+    setMetaValue('meta-time', v('time') || 'Ready', v('timeColor'));
+    setMetaValue('meta-machine', v('machine'), '');
+    setMetaValue('meta-workdir', v('workdir'), '');
+    setMetaValue('meta-max-budget', v('maxBudget'), '');
+    setMetaValue('meta-date', v('date'));
+    setMetaValue('meta-model', v('model'));
+    setMetaValue('meta-worktree', v('worktree'));
+    setMetaValue('meta-parallel', v('parallel'));
+    setMetaValue('meta-chat-id', v('chatId'));
+    setMetaValue('meta-task-id', v('taskId'));
+    setMetaParentTask(v('parentTask') || '\u2014');
     const md = ev && typeof ev.progressMd === 'string' ? ev.progressMd : '';
     if (!md.trim()) {
       setMetaInfoHTML('');
@@ -7248,10 +7279,32 @@
 
   // taskinfo-coverage:start
   /**
-   * The static task panel's settings info as HTML — the same shape the
-   * history sidebar's info rows use: a `workDir • model • wt •
-   * parallel • budget • started` line and a `chat • task • parent •
-   * subagent` ids line.
+   * A task's start time as the localized `Sep 19, 2026, 05:40 PM`
+   * style text the Task Info panel and the shared page show.
+   *
+   * @param {*} startTs The settings' start_ts (epoch milliseconds).
+   * @returns {string} The formatted time, '' when unknown or invalid.
+   */
+  function taskStartText(startTs) {
+    const ts = Number(startTs || 0);
+    if (!(ts > 0)) return '';
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+
+  /**
+   * A task's settings info as HTML for the STATIC task panels of the
+   * shared page (the live panel shows none: the Task Info panel carries
+   * them) — the same shape the history sidebar's info rows use: a
+   * `workDir • model • wt • parallel • budget • started` line and a
+   * `chat • task • parent • subagent` ids line.
    *
    * @param {object|null} s A task_settings event's settings payload.
    * @returns {string} The info HTML, '' when there is nothing to show.
@@ -7267,22 +7320,8 @@
     }
     const budget = Number(s.max_budget || 0);
     if (budget > 0) parts.push('budget $' + budget.toFixed(2));
-    const startTs = Number(s.start_ts || 0);
-    if (startTs > 0) {
-      const d = new Date(startTs);
-      if (!isNaN(d.getTime())) {
-        parts.push(
-          'started ' +
-            d.toLocaleString(undefined, {
-              year: 'numeric',
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-            }),
-        );
-      }
-    }
+    const started = taskStartText(s.start_ts);
+    if (started) parts.push('started ' + started);
     const ids = [];
     if (s.chat_id) ids.push('chat ' + s.chat_id);
     if (s.task_id !== undefined && s.task_id !== null && s.task_id !== '') {
@@ -7307,7 +7346,7 @@
   // may not double as the unknown sentinel.
   let configMaxBudget = null;
   // The settings payload the meta rows currently describe — whatever
-  // renderTaskPanelInfo painted LAST, which during a scroll onto a
+  // updateMetaTaskDetails painted LAST, which during a scroll onto a
   // spliced-in neighbouring task is the neighbour's settings, not the
   // tab's own currentTaskSettings.  A configData repaint must reuse
   // this, or it would silently jump the rows (and the info-subpanel
@@ -7323,14 +7362,40 @@
   }
 
   /**
-   * Paint the Workdir and Max budget items of the docked task-info
-   * panel (#meta-panel, remote desktop mode only).  Driven from
-   * renderTaskPanelInfo — the choke point every task-settings repaint
-   * (tab switch, task_settings event, scroll into a neighbouring
-   * task) already goes through — so the two items always describe the
-   * same task as the static task panel.  A task without settings
-   * falls back to the tab's pinned workdir and the configured default
-   * budget.  The workdir shown here is also adopted as the info
+   * *value* as Task Info row text: '—' for an unknown (empty) value.
+   *
+   * @param {*} value The raw settings value.
+   * @returns {string} The display text.
+   */
+  function metaText(value) {
+    return value === undefined || value === null || value === ''
+      ? '\u2014'
+      : String(value);
+  }
+
+  /**
+   * Show or hide the Parent task row: shown whenever the task names a
+   * parent (a subagent's task does; a top-level task does not).
+   *
+   * @param {string} text The row's value text ('—' when none).
+   */
+  function setMetaParentTask(text) {
+    const item = document.getElementById('meta-parent-item');
+    if (item) item.hidden = text === '\u2014';
+    setMetaValue('meta-parent-id', text);
+  }
+
+  /**
+   * Paint the task-settings items of the task-info panel (#meta-panel:
+   * the remote desktop dock, the sidebar-chat drawer, the mobile
+   * drawer): Workdir, Max budget, Date, Base model, Worktree mode,
+   * Parallel mode, Chat id, Task id and — when the task has one —
+   * Parent task.  This is the choke point every task-settings repaint (tab
+   * switch, task_settings event, scroll into a neighbouring task) goes
+   * through, so the items always describe the task the static task
+   * panel names.  A task without settings falls back to the tab's
+   * pinned workdir and the configured default budget, and shows '—'
+   * for the rest.  The workdir shown here is also adopted as the info
    * subpanel's poll target (setMetaInfoTarget), keeping the row and
    * the mirrored tmp/PROGRESS.md in the same directory.
    *
@@ -7359,25 +7424,45 @@
       metaMaxBudgetEl.textContent =
         budget === null ? '\u2014' : '$' + budget.toFixed(2);
     }
+    setMetaValue('meta-date', metaText(s ? taskStartText(s.start_ts) : ''));
+    setMetaValue('meta-model', metaText(s ? s.model : ''));
+    setMetaValue(
+      'meta-worktree',
+      s && 'is_worktree' in s
+        ? s.is_worktree
+          ? 'worktree'
+          : 'no worktree'
+        : '\u2014',
+    );
+    setMetaValue(
+      'meta-parallel',
+      s && 'is_parallel' in s
+        ? s.is_parallel
+          ? 'parallel'
+          : 'sequential'
+        : '\u2014',
+    );
+    setMetaValue('meta-chat-id', metaText(s ? s.chat_id : ''));
+    const taskId = metaText(s ? s.task_id : '');
+    setMetaValue(
+      'meta-task-id',
+      s && s.is_subagent && taskId !== '\u2014'
+        ? taskId + ' (subagent)'
+        : taskId,
+    );
+    setMetaParentTask(metaText(s ? s.parent_task_id : ''));
     setMetaInfoTarget(wd);
   }
   updateMetaTaskDetails(null);
 
-  /** Paint *s* into the panel's info block (clears it for null). */
-  function renderTaskPanelInfo(s) {
-    updateMetaTaskDetails(s);
-    if (!taskPanelInfo) return;
-    taskPanelInfo.innerHTML = taskPanelInfoHTML(s);
-  }
-
   /**
    * Adopt *s* as the active tab's own task's settings and show them.
    * Mirrors setTaskText: callers that only LEND the panel to a
-   * neighbouring task use renderTaskPanelInfo directly instead.
+   * neighbouring task use updateMetaTaskDetails directly instead.
    */
   function setTaskSettings(s) {
     currentTaskSettings = s && typeof s === 'object' ? s : null;
-    renderTaskPanelInfo(currentTaskSettings);
+    updateMetaTaskDetails(currentTaskSettings);
   }
   // taskinfo-coverage:end
 
@@ -10925,9 +11010,9 @@
     const container = regionNeighbour(region);
     setTaskText(region.task || currentTaskName);
     // taskinfo-coverage:start
-    // The info block follows the panel: a neighbour's settings while
-    // the reader is parked on it, the tab's own otherwise.
-    renderTaskPanelInfo(
+    // The Task Info rows follow the panel: a neighbour's settings
+    // while the reader is parked on it, the tab's own otherwise.
+    updateMetaTaskDetails(
       container
         ? taskSettingsById[container.dataset.taskId || ''] || null
         : currentTaskSettings,
@@ -11023,7 +11108,7 @@
     if (O.querySelector('.adjacent-task[data-task]')) {
       taskWheelLastTarget = null;
       setTaskText(currentTaskName);
-      renderTaskPanelInfo(currentTaskSettings);
+      updateMetaTaskDetails(currentTaskSettings);
       showLiveMetrics();
     }
     return true;
@@ -13186,12 +13271,16 @@
       txt.removeAttribute('data-tooltip');
     }
     // taskinfo-coverage:start
-    // The clone carries the LIVE task's info block; every exported
-    // panel must show ITS OWN task's settings instead.
-    const info = panel.querySelector('#task-panel-info');
-    if (info) info.innerHTML = taskPanelInfoHTML(settings || null);
-    // taskinfo-coverage:end
+    // The live panel shows no settings (the Task Info panel carries
+    // them); the shared page has no such panel, so every exported
+    // panel gets an info block with ITS OWN task's settings, below the
+    // text and above the buttons (main.css hides an empty one).
+    const info = document.createElement('div');
+    info.id = 'task-panel-info';
+    info.innerHTML = taskPanelInfoHTML(settings || null);
     const btn = panel.querySelector('#task-panel-drawer-btn');
+    panel.insertBefore(info, btn);
+    // taskinfo-coverage:end
     if (btn) {
       btn.setAttribute('aria-expanded', 'true');
       btn.setAttribute('aria-label', 'Collapse task panel');
@@ -15365,6 +15454,26 @@
         historySearch.focus();
       });
     }
+    const historyViewToggle = document.getElementById('history-view-toggle');
+    if (historyViewToggle) {
+      applyHistoryViewToggle(historyViewToggle);
+      historyViewToggle.addEventListener('click', () => {
+        historyLegacyView = !historyLegacyView;
+        try {
+          window.localStorage.setItem(
+            HISTORY_LEGACY_VIEW_KEY,
+            historyLegacyView ? '1' : '0',
+          );
+        } catch {}
+        applyHistoryViewToggle(historyViewToggle);
+        // Rebuild what is on screen in the other view; no refetch — the
+        // loaded pages are the same rows either way (the fast path is
+        // bypassed because the rendered view no longer matches).
+        if (allHistSessions.length > 0) {
+          renderHistory(allHistSessions.slice(), 0, historyGeneration);
+        }
+      });
+    }
     const {
       hfRunning,
       hfErrors,
@@ -16603,11 +16712,10 @@
   function applyHistoryGroupCollapsed(group) {
     const collapsed = historyGroupCollapsed(group);
     group.classList.toggle('collapsed', collapsed);
+    // The header carries no tooltip (neither data-tooltip nor title):
+    // its one line of text is the whole of what it shows.
     const btn = group.querySelector(':scope > .history-chat-header');
-    if (btn) {
-      btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-      btn.dataset.tooltip = collapsed ? 'Expand chat' : 'Collapse chat';
-    }
+    if (btn) btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
   }
 
   /**
@@ -16631,10 +16739,15 @@
     } else if (group.dataset.firstFromServer === '1') {
       return;
     }
-    const text = first || session.preview || session.title || 'Untitled';
+    // One line of text: a newline in the task would render as a space
+    // anyway (white-space: nowrap), but the first line alone reads as
+    // the title rather than a run-on of the whole prompt.
+    const text =
+      (first || session.preview || session.title || 'Untitled')
+        .split('\n')
+        .map(l => l.trim())
+        .filter(Boolean)[0] || 'Untitled';
     if (titleEl.textContent !== text) titleEl.textContent = text;
-    const btn = group.querySelector(':scope > .history-chat-header');
-    if (btn && btn.title !== text) btn.title = text;
   }
 
   /** Build the collapsible chat panel's clickable header. */
@@ -17131,6 +17244,7 @@
         allHistSessions.length === sessions.length &&
         sessions.length > 0 &&
         historyRenderedTz === tzNow &&
+        historyRenderedLegacy === historyLegacyView &&
         historySessionsEqual(allHistSessions, sessions)
       ) {
         allHistSessions.forEach((s, i) => {
@@ -17211,6 +17325,8 @@
       // must not advance the cursor past what is on screen.
       historyOffset = 0;
       historyRenderedTz = tzNow;
+      historyRenderedLegacy = historyLegacyView;
+      historyList.classList.toggle('legacy-view', historyLegacyView);
       historyRenderedRows = [];
       allHistSessions = [];
       historyChatGroups.clear();
@@ -17471,12 +17587,20 @@
         }
         closeSidebar();
       });
-      const group = historyGroupFor(s);
-      historyGroupBody(group).appendChild(div);
-      if (s.is_running && group.dataset.hasRunning !== '1') {
-        // A running task keeps its chat's panel open by default.
-        group.dataset.hasRunning = '1';
-        applyHistoryGroupCollapsed(group);
+      if (historyLegacyView) {
+        // The flat list: rows in the daemon's newest-first order, each
+        // with its chat's color (a hue hashed from the chat id) as a
+        // narrow bar on its right edge.
+        div.style.setProperty('--task-color', chatIdBgColor(chatId));
+        historyList.appendChild(div);
+      } else {
+        const group = historyGroupFor(s);
+        historyGroupBody(group).appendChild(div);
+        if (s.is_running && group.dataset.hasRunning !== '1') {
+          // A running task keeps its chat's panel open by default.
+          group.dataset.hasRunning = '1';
+          applyHistoryGroupCollapsed(group);
+        }
       }
       historyRenderedRows.push(div);
     });
@@ -17508,6 +17632,23 @@
         headerGroup.querySelector(':scope > .history-chat-header');
       if (headerBtn) headerBtn.focus({preventScroll: true});
     }
+  }
+
+  /**
+   * Paint the flat-list / chat-panels switch beside the search box and
+   * the list's view class after historyLegacyView changed.
+   *
+   * @param {Element} btn The #history-view-toggle button.
+   */
+  function applyHistoryViewToggle(btn) {
+    btn.setAttribute('aria-pressed', historyLegacyView ? 'true' : 'false');
+    btn.classList.toggle('active', historyLegacyView);
+    const label = historyLegacyView
+      ? 'Group tasks by chat'
+      : 'Show tasks as a flat list';
+    btn.setAttribute('aria-label', label);
+    btn.dataset.tooltip = historyLegacyView ? 'Group by chat' : 'Flat list';
+    historyList.classList.toggle('legacy-view', historyLegacyView);
   }
 
   function autofillHistoryDateRange(range) {

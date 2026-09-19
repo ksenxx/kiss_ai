@@ -37,7 +37,7 @@
       </div>
     </div>
 
-    <div id="task-panel"><div id="task-panel-text"></div><div id="task-panel-info"></div><button id="task-panel-drawer-btn" type="button" aria-expanded="true" aria-controls="task-panel-text" aria-label="Collapse task panel"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg></button><button id="task-panel-copy" type="button" aria-label="Copy task to clipboard"><svg class="icon-copy" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><svg class="icon-check" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none;"><polyline points="20 6 9 17 4 12"/></svg></button></div>
+    <div id="task-panel"><div id="task-panel-text"></div><button id="task-panel-drawer-btn" type="button" aria-expanded="true" aria-controls="task-panel-text" aria-label="Collapse task panel"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg></button><button id="task-panel-copy" type="button" aria-label="Copy task to clipboard"><svg class="icon-copy" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><svg class="icon-check" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none;"><polyline points="20 6 9 17 4 12"/></svg></button></div>
 
     <!-- The one shared chat surface: every chat tab swaps its content
          into this element, so it is the single tabpanel that all tabs
@@ -164,9 +164,15 @@
         <div id="sidebar-views">
       <div id="sidebar-tab-history-panel" class="sidebar-section sidebar-tab-panel sidebar-view" data-view="tasks" role="tabpanel" aria-labelledby="activity-tasks">
         <div class="sidebar-hdr">History</div>
-        <div class="search-wrap">
-          <input type="text" id="history-search" placeholder="Search history...">
-          <button class="search-clear-btn" id="history-search-clear" style="display:none;">&times;</button>
+        <div class="history-search-row">
+          <div class="search-wrap">
+            <input type="text" id="history-search" placeholder="Search history...">
+            <button class="search-clear-btn" id="history-search-clear" style="display:none;">&times;</button>
+          </div>
+          <!-- Flat list / grouped-by-chat switch: pressed = the legacy
+               flat list (newest first, a per-chat color bar on each
+               row), released = collapsible per-chat panels. -->
+          <button type="button" id="history-view-toggle" aria-pressed="false" aria-label="Show tasks as a flat list" data-tooltip="Flat list"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
         </div>
         <div id="history-filters-panel" class="history-filters-panel">
           <button type="button" id="history-filters-toggle" class="history-filters-toggle" aria-expanded="false" aria-controls="history-filters-body"><svg class="history-filters-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Filters</span></button>
@@ -252,6 +258,15 @@
         <li class="meta-item"><span class="meta-label">Machine:</span><span id="meta-machine" class="meta-value">&mdash;</span></li>
         <li class="meta-item"><span class="meta-label">Workdir:</span><span id="meta-workdir" class="meta-value">&mdash;</span></li>
         <li class="meta-item"><span class="meta-label">Max budget:</span><span id="meta-max-budget" class="meta-value">&mdash;</span></li>
+        <!-- The task's own settings (a task_settings event), which
+             used to sit at the bottom of the static task panel. -->
+        <li class="meta-item"><span class="meta-label">Date:</span><span id="meta-date" class="meta-value">&mdash;</span></li>
+        <li class="meta-item"><span class="meta-label">Base model:</span><span id="meta-model" class="meta-value">&mdash;</span></li>
+        <li class="meta-item"><span class="meta-label">Worktree mode:</span><span id="meta-worktree" class="meta-value">&mdash;</span></li>
+        <li class="meta-item"><span class="meta-label">Parallel mode:</span><span id="meta-parallel" class="meta-value">&mdash;</span></li>
+        <li class="meta-item"><span class="meta-label">Chat id:</span><span id="meta-chat-id" class="meta-value">&mdash;</span></li>
+        <li class="meta-item"><span class="meta-label">Task id:</span><span id="meta-task-id" class="meta-value">&mdash;</span></li>
+        <li class="meta-item" id="meta-parent-item" hidden><span class="meta-label">Parent task:</span><span id="meta-parent-id" class="meta-value">&mdash;</span></li>
       </ul>
       <!-- Info subpanel: mirrors the RUNNING task's ./tmp/PROGRESS.md
            (main.js polls getInfoFile every second, so the panel
