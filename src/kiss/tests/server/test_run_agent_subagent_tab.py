@@ -585,9 +585,10 @@ class RunAgentSubagentTabTest(unittest.TestCase):
 
         The dispatched child's reconstructed ``_subagent_info`` must
         carry the reviewer marker (see
-        :mod:`kiss.agents.sorcar.fanout_guard`), so the child's own
-        ``run_parallel`` refuses to spawn further reviewers.  A control
-        dispatch without the flag stays unmarked.
+        :mod:`kiss.agents.sorcar.fanout_guard`), which puts the child on
+        the ``review`` tool profile: ``run_parallel`` is not built at
+        all, so it cannot spawn further reviewers.  A control dispatch
+        without the flag stays unmarked and keeps the full tool set.
         """
         reviewer_marker = "reviewer wire child zq9"
         control_marker = "control wire child zq9"
@@ -604,11 +605,11 @@ class RunAgentSubagentTabTest(unittest.TestCase):
                     recorded[marker] = {
                         "info": dict(self_agent._subagent_info or {}),
                         "is_reviewer": self_agent._is_reviewer_subagent(),
-                        "spawn_result": next(
-                            t for t in self_agent._get_tools()
-                            if getattr(t, "__name__", "") == "run_parallel"
-                        )('["Review the diff for regressions"]')
-                        if marker == reviewer_marker else "",
+                        "profile": self_agent._tool_profile(),
+                        "tool_names": {
+                            getattr(t, "__name__", "")
+                            for t in self_agent._get_tools()
+                        },
                     }
             self_agent.total_tokens_used = 1
             self_agent.budget_used = 0.0001
@@ -659,12 +660,15 @@ class RunAgentSubagentTabTest(unittest.TestCase):
         reviewer = recorded[reviewer_marker]
         assert reviewer["info"]["reviewer"] is True
         assert reviewer["is_reviewer"] is True
-        assert reviewer["spawn_result"].startswith(
-            "Error: You are a reviewer sub-agent"
-        )
+        assert reviewer["profile"] == "review"
+        assert "run_parallel" not in reviewer["tool_names"]
         control = recorded[control_marker]
         assert control["info"]["reviewer"] is False
         assert control["is_reviewer"] is False
+        assert control["profile"] == "full"
+        assert "run_parallel" in control["tool_names"]
         worded = recorded[worded_marker]
         assert worded["info"]["reviewer"] is True
         assert worded["is_reviewer"] is True
+        assert worded["profile"] == "review"
+        assert "run_parallel" not in worded["tool_names"]
