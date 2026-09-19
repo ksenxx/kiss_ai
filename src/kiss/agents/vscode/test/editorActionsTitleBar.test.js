@@ -224,6 +224,7 @@ class FakePanelManager {
   }
   enterMode() {}
   closeAll() {}
+  setMetaSink() {}
   markShutdown() {}
   adoptRegistryTabs() {}
   activeController() {

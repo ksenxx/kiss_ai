@@ -38,7 +38,9 @@ class TestCatalogFlagRouting:
         """
         checked = 0
         for name, info in MODEL_INFO.items():
-            if _match_openai_compatible_provider(name) is None:
+            if _match_openai_compatible_provider(name) is None or info.is_decisions_supported:
+                # Decisions models (``"dec": true``) are OpenRouter-keyed
+                # but speak /api/alpha/decisions, not either OpenAI transport.
                 continue
             m = model(name)
             expected = (

@@ -11,7 +11,12 @@ highest accepted ``reasoning_effort`` level, and OpenAI v2 (Responses API)
 support: every tested model is live-probed through ``/v1/responses`` (see
 ``update_responses_api_support.probe_responses_support``) and gets
 ``"use_responses_api": true`` only when the probe passes, which makes the
-``model()`` factory build it on the v2 transport.
+``model()`` factory build it on the v2 transport.  OpenRouter
+``text->decisions`` models (TypeSafe Jev) are fetched from the
+``?output_modalities=decisions`` listing, probed through
+``POST /api/alpha/decisions`` with one ``noul``/``choice``/``score``
+question each, and written with ``"dec": true`` (``gen``/``fc``/``emb``
+false).
 
 By default the script writes the source-of-truth
 ``src/kiss/core/models/MODEL_INFO.json`` in the repo.  The ``--model-info``
@@ -160,38 +165,59 @@ def api_get(url: str, headers: dict[str, str] | None = None) -> Any:
     raise RuntimeError("unreachable")
 
 
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+OPENROUTER_DECISIONS_MODELS_URL = f"{OPENROUTER_MODELS_URL}?output_modalities=decisions"
+
+
 def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
     """Fetch all models from OpenRouter (public API, no auth).
 
     Models with an expiration_date in the past are filtered out.
+
+    Two listings are merged.  The unfiltered ``/api/v1/models`` contains
+    only models whose output modality includes ``text`` (everything
+    callable through ``/api/v1/chat/completions``).  Typed-decision models
+    such as ``typesafe/jev-1.13`` / ``~typesafe/jev-latest``
+    (``text->decisions``) are omitted from it and appear only under
+    ``/api/v1/models?output_modalities=decisions``; they are served by
+    ``POST /api/alpha/decisions`` (chat/completions rejects them with HTTP
+    400 "is a decisions model") through
+    :class:`kiss.core.models.decisions_model.DecisionsModel`.  Entries from
+    the second listing carry ``"decisions": True`` so the new-model probe
+    uses :func:`test_decisions` and the catalog entry is written with
+    ``"dec": true``.  Merging both into one mapping also keeps
+    :func:`find_deprecated_models` from flagging a catalogued decisions
+    model as "not in OpenRouter API".
     """
     if verbose:  # pragma: no branch
         print("  Fetching OpenRouter models...")
-    data = api_get("https://openrouter.ai/api/v1/models")
     today = datetime.date.today().isoformat()
     models: dict[str, dict] = {}
     skipped_deprecated = 0
-    for m in data.get("data", []):  # pragma: no branch
-        model_id = m.get("id", "")
-        if not model_id:  # pragma: no branch
-            continue
-        expiration = m.get("expiration_date")
-        if expiration and expiration <= today:  # pragma: no branch
-            skipped_deprecated += 1
-            continue
-        pricing = m.get("pricing", {})
-        prompt_per_tok = float(pricing.get("prompt") or "0")
-        completion_per_tok = float(pricing.get("completion") or "0")
-        ctx = _cap_context_length(m.get("context_length", 0) or 0)
-        name = f"openrouter/{model_id}"
-        if _is_excluded_provider(name):  # pragma: no branch
-            continue
-        models[name] = {
-            "context_length": ctx,
-            "input_price_per_1M": round(prompt_per_tok * 1_000_000, 3),
-            "output_price_per_1M": round(completion_per_tok * 1_000_000, 3),
-            "source": "openrouter",
-        }
+    for url, decisions in ((OPENROUTER_MODELS_URL, False), (OPENROUTER_DECISIONS_MODELS_URL, True)):
+        data = api_get(url)
+        for m in data.get("data", []):  # pragma: no branch
+            model_id = m.get("id", "")
+            if not model_id:  # pragma: no branch
+                continue
+            expiration = m.get("expiration_date")
+            if expiration and expiration <= today:  # pragma: no branch
+                skipped_deprecated += 1
+                continue
+            pricing = m.get("pricing", {})
+            prompt_per_tok = float(pricing.get("prompt") or "0")
+            completion_per_tok = float(pricing.get("completion") or "0")
+            ctx = _cap_context_length(m.get("context_length", 0) or 0)
+            name = f"openrouter/{model_id}"
+            if _is_excluded_provider(name):  # pragma: no branch
+                continue
+            models[name] = {
+                "context_length": ctx,
+                "input_price_per_1M": round(prompt_per_tok * 1_000_000, 3),
+                "output_price_per_1M": round(completion_per_tok * 1_000_000, 3),
+                "source": "openrouter",
+                "decisions": decisions,
+            }
     if verbose:  # pragma: no branch
         print(f"    Found {len(models)} models ({skipped_deprecated} deprecated filtered out)")
     return models
@@ -370,6 +396,7 @@ def get_current_model_info() -> dict[str, dict]:
             "fc": info.is_function_calling_supported,
             "emb": info.is_embedding_supported,
             "gen": info.is_generation_supported,
+            "dec": info.is_decisions_supported,
             "thinking": info.thinking,
             "alias_of": info.alias_of,
             "use_responses_api": info.use_responses_api,
@@ -449,6 +476,43 @@ def test_embedding(model_name: str) -> bool:
         m.initialize("")
         vec = m.get_embedding("Hello world")
         return isinstance(vec, list) and len(vec) > 0
+    except Exception:
+        logger.debug("Exception caught", exc_info=True)
+        return False
+
+
+def test_decisions(model_name: str) -> bool:
+    """Live-probe a decisions model with one question of each type.
+
+    The candidate is not in the catalog yet, so the ``model()`` factory
+    cannot route it; the adapter is built directly against OpenRouter.
+    Passes when the endpoint answers all three questions with the
+    documented shapes (a ``noul`` probability, a ``choice`` key, a
+    ``score`` value).
+
+    Args:
+        model_name: Catalog name, e.g. ``openrouter/~typesafe/jev-latest``.
+
+    Returns:
+        True when the probe round-trips, False on any error.
+    """
+    from kiss.core.models.decisions_model import DecisionsModel, choice, noul, score
+
+    try:
+        m = DecisionsModel(model_name, api_key=os.getenv("OPENROUTER_API_KEY", ""))
+        answers = m.decide(
+            "The package arrived crushed and the item inside is broken.",
+            {
+                "damaged": noul("Was the delivered item damaged?"),
+                "issue": choice("What kind of issue is this?", ["damage", "delay", "other"]),
+                "severity": score("How severe is the problem?", ["minor", "moderate", "severe"]),
+            },
+        )["answers"]
+        return (
+            isinstance(answers["damaged"].get("noul"), (int, float))
+            and answers["issue"].get("choice") in ("damage", "delay", "other")
+            and isinstance(answers["severity"].get("score"), (int, float))
+        )
     except Exception:
         logger.debug("Exception caught", exc_info=True)
         return False
@@ -874,13 +938,49 @@ def test_responses_api(model_name: str, fc: bool) -> bool | None:
     return result.supported
 
 
+def _print_capability_flags(results: dict[str, Any]) -> None:
+    """Print one probe's results as ``key=Y/N`` (or the level string) flags."""
+    flags = " ".join(
+        f"{k}={v if isinstance(v, str) else ('Y' if v else 'N')}" for k, v in results.items()
+    )
+    print(f" {flags}")
+
+
 def test_model_capabilities(
     model_name: str,
     verbose: bool = False,
+    decisions: bool = False,
 ) -> dict[str, Any]:
+    """Live-probe every capability flag the catalog records for a model.
+
+    Args:
+        model_name: The catalog name to probe.
+        verbose: Print a one-line ``key=Y/N`` summary.
+        decisions: True for an OpenRouter ``text->decisions`` model.  Such
+            a model is neither a generator nor an embedder, so the text
+            probes (which would all fail) are skipped and the single
+            :func:`test_decisions` round-trip decides ``dec``.
+
+    Returns:
+        ``{"gen", "emb", "fc", "thinking", "use_responses_api", "dec"}``.
+    """
     results: dict[str, Any] = {}
     if verbose:  # pragma: no branch
         print(f"    Testing {model_name}...", end="", flush=True)
+
+    if decisions:
+        results.update(
+            gen=False,
+            emb=False,
+            fc=False,
+            thinking=None,
+            use_responses_api=None,
+            dec=test_decisions(model_name),
+        )
+        if verbose:  # pragma: no branch
+            _print_capability_flags(results)
+        return results
+    results["dec"] = False
 
     results["gen"] = test_generate(model_name)
     time.sleep(0.5)
@@ -910,10 +1010,7 @@ def test_model_capabilities(
         results["use_responses_api"] = None
 
     if verbose:  # pragma: no branch
-        flags = " ".join(
-            f"{k}={v if isinstance(v, str) else ('Y' if v else 'N')}" for k, v in results.items()
-        )
-        print(f" {flags}")
+        _print_capability_flags(results)
     return results
 
 
@@ -1313,6 +1410,7 @@ def compute_changes(
                         "output_price_per_1M": fetched["output_price_per_1M"],
                         "source": "openrouter",
                         "needs_pricing": not has_pricing,
+                        "is_decisions": fetched.get("decisions", False),
                     }
                 )
 
@@ -1476,12 +1574,13 @@ def _build_entry(
     thinking: str | None = None,
     comment: str = "",
     use_responses_api: bool = False,
+    dec: bool = False,
 ) -> dict[str, Any]:
     """Build a MODEL_INFO.json entry dict for one model.
 
-    Optional fields (``thinking``, ``comment``, ``use_responses_api``) are
-    only included when set so the on-disk JSON stays compact and
-    reviewable; required fields (``context_length``, prices,
+    Optional fields (``thinking``, ``comment``, ``use_responses_api``,
+    ``dec``) are only included when set so the on-disk JSON stays compact
+    and reviewable; required fields (``context_length``, prices,
     ``fc``/``emb``/``gen``) are always present.
 
     Args:
@@ -1496,6 +1595,8 @@ def _build_entry(
             ``"NEW: needs pricing"``). Omitted when empty.
         use_responses_api: Whether the model passed the live OpenAI v2
             (``/v1/responses``) probe and should use that transport.
+        dec: Whether the model is an OpenRouter decisions model (passed
+            the live ``/api/alpha/decisions`` probe).
 
     Returns:
         A dict suitable for serialization to MODEL_INFO.json.
@@ -1508,6 +1609,8 @@ def _build_entry(
         "emb": emb,
         "gen": gen,
     }
+    if dec:
+        entry["dec"] = True
     if thinking:  # pragma: no branch
         entry["thinking"] = thinking
     if comment:  # pragma: no branch
@@ -1799,12 +1902,13 @@ def apply_updates_to_file(
         updates: ``[{"name": str, "changes": {field: value, ...}}]``.
             ``changes`` may target ``context_length``, ``input_price_per_1M``,
             ``output_price_per_1M``, ``fc``, ``emb``, ``gen``, ``thinking``,
-            ``use_responses_api``.  A ``thinking`` value of ``None`` and a
-            falsy ``use_responses_api`` value remove their field.
+            ``use_responses_api``, ``dec``.  A ``thinking`` value of ``None``
+            and a falsy ``use_responses_api`` / ``dec`` value remove their
+            field.
         new_models: Each entry must carry at minimum ``name``,
             ``context_length``, ``input_price_per_1M``, ``output_price_per_1M``.
             Optional flags: ``fc`` (default True), ``emb`` (False),
-            ``gen`` (True), ``thinking``, ``needs_pricing``.
+            ``gen`` (True), ``dec`` (False), ``thinking``, ``needs_pricing``.
         deprecated: ``[{"name": str, "reason": str}]``; removed by name.
         current: Snapshot of the pre-update ``MODEL_INFO`` (used to
             preserve unchanged fields when applying updates to models that
@@ -1840,13 +1944,14 @@ def apply_updates_to_file(
             gen=cur.get("gen", True),
             thinking=cur.get("thinking"),
             use_responses_api=bool(cur.get("use_responses_api")),
+            dec=cur.get("dec", False),
         )
         changes = upd["changes"]
         for field, value in changes.items():  # pragma: no branch
             if field == "thinking" and value is None:  # pragma: no branch
                 entry.pop("thinking", None)
-            elif field == "use_responses_api" and not value:
-                entry.pop("use_responses_api", None)
+            elif field in ("use_responses_api", "dec") and not value:
+                entry.pop(field, None)
             else:
                 entry[field] = value
         if entry.get("comment") == "NEW: needs pricing" and entry["input_price_per_1M"] > 0:
@@ -1872,6 +1977,7 @@ def apply_updates_to_file(
             thinking=nm.get("thinking"),
             comment=comment,
             use_responses_api=nm.get("use_responses_api", False),
+            dec=nm.get("dec", False),
         )
         _write_entry_with_thinking_split(data, nm["name"], entry)
         added += 1
@@ -1972,6 +2078,7 @@ def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
     generation = sum(1 for entry in data.values() if entry.get("gen"))
     function_calling = sum(1 for entry in data.values() if entry.get("fc"))
     embedding = sum(1 for entry in data.values() if entry.get("emb"))
+    decisions = sum(1 for entry in data.values() if entry.get("dec"))
 
     text = readme_path.read_text(encoding="utf-8")
     original = text
@@ -1999,6 +2106,11 @@ def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
     text = re.sub(
         r"- \*\*\d+\*\* embedding models",
         f"- **{embedding}** embedding models",
+        text,
+    )
+    text = re.sub(
+        r"- \*\*\d+\*\* decision models",
+        f"- **{decisions}** decision models",
         text,
     )
 
@@ -2068,6 +2180,65 @@ def _run_scrub_only(dry_run: bool = False) -> None:
     else:
         print("\n[3/3] Non-default catalog target: README left untouched")
     print("\nDone!")
+
+
+def _probe_new_models(new_models: list[dict], verbose: bool = False) -> list[dict]:
+    """Live-probe every new candidate and keep those with a usable capability.
+
+    Each candidate's ``gen`` / ``emb`` / ``fc`` / ``dec`` / ``thinking`` /
+    ``use_responses_api`` flags are filled from
+    :func:`test_model_capabilities`; a candidate flagged ``is_decisions``
+    gets the decisions probe.  Subscription CLI candidates (``codex/``,
+    ``cc/``) are not probed.  Candidates that are neither generators nor
+    embedders nor decisions models are dropped.
+
+    Args:
+        new_models: Candidate dicts from :func:`compute_changes`; mutated
+            in place with the probe results.
+        verbose: Print one ``key=Y/N`` line per probed model.
+
+    Returns:
+        The candidates that passed (or were exempt from) probing.
+    """
+    for nm in new_models:
+        if nm["name"].startswith(("codex/", "cc/")):
+            continue
+        caps = test_model_capabilities(
+            nm["name"], verbose=verbose, decisions=nm.get("is_decisions", False)
+        )
+        nm["gen"] = caps["gen"]
+        nm["emb"] = caps["emb"]
+        nm["fc"] = caps["fc"]
+        nm["dec"] = caps.get("dec", False)
+        nm["thinking"] = caps["thinking"]
+        # A brand-new entry is flagged only on a verified pass; an
+        # inconclusive (None) verdict stays on Chat Completions.
+        nm["use_responses_api"] = bool(caps.get("use_responses_api"))
+        if not caps["gen"] and not caps["emb"] and not nm["dec"]:
+            nm["_skip"] = True
+    return [nm for nm in new_models if not nm.get("_skip")]
+
+
+def _assume_untested_capabilities(new_models: list[dict]) -> None:
+    """Fill capability flags for ``--skip-test`` from the vendor listing alone.
+
+    A candidate the listing marked ``is_embedding`` becomes an embedder,
+    one marked ``is_decisions`` a decisions model, everything else a
+    function-calling generator.  ``thinking`` stays unknown and the v2
+    transport flag stays off: both are only ever written after a live
+    probe.
+
+    Args:
+        new_models: Candidate dicts from :func:`compute_changes`; mutated
+            in place.
+    """
+    for nm in new_models:
+        nm["dec"] = nm.get("is_decisions", False)
+        nm["emb"] = nm.get("is_embedding", False)
+        nm["gen"] = not nm["emb"] and not nm["dec"]
+        nm["fc"] = not nm["dec"]
+        nm["thinking"] = None
+        nm["use_responses_api"] = False
 
 
 def main() -> None:
@@ -2216,31 +2387,11 @@ def main() -> None:
 
     if new_models and not args.skip_test:  # pragma: no branch
         print(f"\n[5/6] Testing {len(new_models)} new models...")
-        for nm in new_models:  # pragma: no branch
-            if nm["name"].startswith(("codex/", "cc/")):  # pragma: no branch
-                continue
-            caps = test_model_capabilities(nm["name"], verbose=args.verbose)
-            nm["gen"] = caps["gen"]
-            nm["emb"] = caps["emb"]
-            nm["fc"] = caps["fc"]
-            nm["thinking"] = caps["thinking"]
-            # A brand-new entry is flagged only on a verified pass; an
-            # inconclusive (None) verdict stays on Chat Completions.
-            nm["use_responses_api"] = bool(caps.get("use_responses_api"))
-            if not caps["gen"] and not caps["emb"]:  # pragma: no branch
-                nm["_skip"] = True
-        new_models = [nm for nm in new_models if not nm.get("_skip")]
+        new_models = _probe_new_models(new_models, verbose=args.verbose)
         print(f"  {len(new_models)} models passed testing")
     elif new_models and args.skip_test:  # pragma: no branch
         print("\n[5/6] Skipping model testing (--skip-test)")
-        for nm in new_models:  # pragma: no branch
-            nm["fc"] = True
-            nm["gen"] = not nm.get("is_embedding", False)
-            nm["emb"] = nm.get("is_embedding", False)
-            nm["thinking"] = None
-            # Unverified: the v2 transport flag is only ever written after
-            # a live probe, so --skip-test models stay on Chat Completions.
-            nm["use_responses_api"] = False
+        _assume_untested_capabilities(new_models)
     else:
         print("\n[5/6] No new models to test")
 
@@ -2250,7 +2401,9 @@ def main() -> None:
         for name, cur in current.items():  # pragma: no branch
             if name.endswith(_XHIGH_SUFFIX) or cur.get("alias_of"):
                 continue
-            caps = test_model_capabilities(name, verbose=args.verbose)
+            caps = test_model_capabilities(
+                name, verbose=args.verbose, decisions=cur.get("dec", False)
+            )
             fc_changed = caps["fc"] != cur["fc"]
             stored_thinking = cur.get("thinking")
             top_level = _thinking_scale_for(name)[-1]
@@ -2264,7 +2417,8 @@ def main() -> None:
             responses_changed = responses_verdict is not None and bool(
                 responses_verdict
             ) != bool(cur.get("use_responses_api"))
-            if not (fc_changed or thinking_changed or responses_changed):
+            dec_changed = bool(caps.get("dec")) != bool(cur.get("dec"))
+            if not (fc_changed or thinking_changed or responses_changed or dec_changed):
                 continue
             existing = update_by_name.get(name)
             if existing is None:  # pragma: no branch
@@ -2286,6 +2440,9 @@ def main() -> None:
                     f"{bool(cur.get('use_responses_api'))} -> "
                     f"{bool(responses_verdict)}"
                 )
+            if dec_changed:
+                existing["changes"]["dec"] = bool(caps.get("dec"))
+                print(f"    {name}: dec changed {bool(cur.get('dec'))} -> {bool(caps.get('dec'))}")
 
     print("\n[6/6] Applying changes...")
     apply_updates_to_file(updates, new_models, deprecated, current, dry_run=args.dry_run)

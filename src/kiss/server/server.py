@@ -34,6 +34,7 @@ from typing import Any, cast
 
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.persistence import (
+    _chat_first_tasks,
     _delete_frequent_task,
     _get_adjacent_task_by_chat_id,
     _history_date_range,
@@ -1218,6 +1219,11 @@ class VSCodeServer(
             if session.get("is_running") and entry_id is not None:
                 self._overlay_live_metrics(session, entry_id)
             sessions.append(session)
+        # The chat-panel headers in the History sidebar show each chat's
+        # FIRST task, which may be older than any row on this page.
+        first_tasks = _chat_first_tasks([str(s["id"]) for s in sessions])
+        for session in sessions:
+            session["chat_first_task"] = first_tasks.get(str(session["id"]), "")
         min_ts, max_ts = _history_date_range()
         event: dict[str, Any] = {
             "type": "history",

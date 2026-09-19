@@ -381,9 +381,11 @@ def test_desktop_media_query_docks_sidebar() -> None:
     assert not re.search(
         r"body\.remote-chat\.remote-desktop #sidebar\s*\{", block
     ), "the docked rules must require #sidebar.open, else the burger cannot hide it"
+    # The rule may group further overlays (e.g. #meta-overlay) into
+    # the same declaration block.
     overlay = re.search(
-        r"body\.remote-chat\.remote-desktop #sidebar-overlay\s*"
-        r"\{([^}]*)\}",
+        r"body\.remote-chat\.remote-desktop #sidebar-overlay"
+        r"[^{}]*\{([^}]*)\}",
         block,
     )
     assert overlay and "display: none" in overlay.group(1), (

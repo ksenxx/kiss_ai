@@ -23,6 +23,32 @@
   const HISTORY_PANEL_MODE =
     document.body.classList.contains('history-panel-mode');
 
+  // Meta-panel mode: this webview is the SECONDARY-sidebar Task Info
+  // panel of editor-tabs mode — the remote webapp's rightmost desktop
+  // panel. It shows ONLY #meta-panel (see body.meta-panel-mode in
+  // main.css) and renders the `metaState` relays of the active chat
+  // editor tab instead of mirroring its own (idle) status spans.
+  const META_PANEL_MODE = document.body.classList.contains('meta-panel-mode');
+
+  // Sidebar-chat mode: this webview is the extension's SECONDARY-
+  // sidebar chat view (editor-tabs mode OFF) — the surface with the
+  // internal tab strip. It shows the task-info panel as a right-hand
+  // drawer toggled from the tab bar, exactly like the mobile remote
+  // webapp, and hides the top status bar the drawer replaces. The
+  // class is set here (the host passes no body attrs for this view)
+  // so main.css can scope those rules.
+  const SIDEBAR_CHAT_MODE =
+    !EDITOR_TAB_MODE && !document.body.classList.contains('remote-chat');
+  if (SIDEBAR_CHAT_MODE) document.body.classList.add('sidebar-chat-mode');
+
+  // Chat panels of editor-tabs mode report their task-info values to
+  // the host (metaUpdate), which relays the ACTIVE panel's into the
+  // Task Info view. The two panel-shaped surfaces (history, task info)
+  // never report: they run no tasks, and a report from them would
+  // blank the view.
+  const POST_META_UPDATES =
+    EDITOR_TAB_MODE && !HISTORY_PANEL_MODE && !META_PANEL_MODE;
+
   // Host-only messages (never daemon commands, so not in api.js's
   // whitelist): everything the webview asks of its hosting editor tab.
   function postToHost(msg) {
@@ -655,6 +681,43 @@
   let historyDateRangeUserSet = false;
   const historyLastRunningTaskIds = new Set();
   const historyJustCompletedTaskIds = new Set();
+  // Clock-localization identity (historyTzIdentity) the history rows
+  // were last built under: their timestamps are localized at build
+  // time, so a zone change invalidates the identical-refresh fast path
+  // in renderHistory.
+  let historyRenderedTz = '';
+  // Row elements in allHistSessions order, for the fast path's in-place
+  // refresh of time-derived metrics text.
+  let historyRenderedRows = [];
+  // A destructive history rebuild is deferred while a press (mouse
+  // button or touch contact) is held inside the list: replacing ANY row
+  // between press and release would swallow the resulting click (its
+  // targets diverge, so it fires on a handler-less ancestor).  Only the
+  // newest deferred page is kept; it is applied right after the click
+  // has dispatched.
+  let historyMouseHeld = false;
+  // Activation keys currently held on a list control (Space activates a
+  // native button on KEYUP, so Space and Enter can overlap): a set, so
+  // releasing one key cannot release the other's press.
+  const historyHeldKeys = new Set();
+  let historyParkSafetyTimer = null;
+  // When the latest press began: the stale-press safety release must
+  // never clear the latches of a press younger than its own bound.
+  let historyLastPressTs = 0;
+  // pointerId -> epoch token.  Browsers reuse pointer IDs, so a touch's
+  // 300ms release-grace timer must only release the contact it was
+  // armed for, never a newer contact that inherited the ID.
+  const historyActivePointers = new Map();
+  let historyPointerEpoch = 0;
+  let historyPendingRender = null;
+  // Optimistic favourite toggles awaiting the daemon (setFavorite has
+  // no acknowledgement): merged over every incoming history page until
+  // the daemon's data agrees, so a refetch that predates the write (or
+  // a page deferred across the very click that toggled the star)
+  // cannot flip the star back.
+  const historyPendingFavorites = new Map();
+  let historyFavExpiryTimer = null;
+  let historyFavExpiryDeadline = Infinity;
 
   let currentTaskName = '';
   let currentTaskId = null;
@@ -1062,6 +1125,29 @@
     return chat ? chat.id : '';
   }
   // readychat-coverage:end
+
+  /**
+   * The tab a chat-scoped composer action (Stop, Share chat, voice)
+   * must target: the active tab, or — when a content tab is on
+   * screen — the chat tab whose work produced it (same resolution Git
+   * Commit uses). Falls back to the active tab id when the owner is
+   * gone, where the action lands on a tab with no conversation and
+   * stays a harmless no-op.
+   *
+   * @returns {string} The id of the chat tab the action belongs to.
+   */
+  function chatTargetTabId() {
+    let tab = getTab(activeTabId);
+    // A file opened FROM a file view names that view as its owner, so
+    // the chain is walked to the chat at its root (like
+    // tabScopeWorkDir does); the visited set fails closed on a cycle.
+    const visited = new Set();
+    while (tab && tab.isContentTab && !visited.has(tab.id)) {
+      visited.add(tab.id);
+      tab = getTab(tab.ownerTabId);
+    }
+    return tab && !tab.isContentTab ? tab.id : activeTabId;
+  }
 
   function restoreTab(tab) {
     hideContentArea();
@@ -1618,10 +1704,18 @@
   }
 
   function setChatSurfaceVisible(visible) {
-    ['output', 'task-panel', 'input-area'].forEach(id => {
+    ['output', 'task-panel'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.style.display = visible ? '' : 'none';
     });
+    // The composer's button row stays on screen on every surface: a
+    // file/webview tab still offers + (new chat) and ... (more
+    // actions). CSS scoped by `content-tab-open` hides the text box
+    // and the chat-only controls (Inject promptlet, model picker,
+    // Send) instead — they act on a transcript that is not on screen.
+    const inputArea = document.getElementById('input-area');
+    if (inputArea) inputArea.style.display = '';
+    document.body.classList.toggle('content-tab-open', !visible);
   }
 
   function showContentTab(tab) {
@@ -1644,6 +1738,14 @@
     // A content tab browses the workspace of the chat it was opened
     // from (sidebarWorkDir), which may differ from the previous tab's.
     refreshSidebarDataViews(false);
+    // The composer's button row stays on screen here. Stop mirrors the
+    // OWNING chat's run — it targets that chat (see chatTargetTabId) —
+    // instead of keeping whatever the previously shown tab left behind.
+    const stopOwner = getTab(chatTargetTabId());
+    stopBtn.style.display =
+      stopOwner && !stopOwner.isContentTab && stopOwner.isRunning
+        ? 'flex'
+        : 'none';
   }
 
   function hideContentArea() {
@@ -3551,6 +3653,8 @@
   const O = document.getElementById('output');
   const welcome = document.getElementById('welcome');
   const inp = document.getElementById('task-input');
+  // Pending deferred composer focus retries (focusInputWithRetry).
+  let inputFocusRetryTimers = [];
   const sendBtn = document.getElementById('send-btn');
   const stopBtn = document.getElementById('stop-btn');
   const uploadBtn = document.getElementById('upload-btn');
@@ -3625,6 +3729,9 @@
   );
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
   const classifyTasksToggleBtn = document.getElementById('cfg-classify-tasks');
+  const classifyWithDecisionsToggleBtn = document.getElementById(
+    'cfg-classify-with-decisions',
+  );
   const memoryToggleBtn = document.getElementById('cfg-use-memory');
   const shareBtn = document.getElementById('share-btn');
   const taskPanel = document.getElementById('task-panel');
@@ -3670,11 +3777,16 @@
       attributeFilter: ['style'],
     });
   }
-  mirrorStatusIntoMetaPanel('status-tokens', 'meta-tokens', true);
-  mirrorStatusIntoMetaPanel('status-budget', 'meta-cost', true);
-  mirrorStatusIntoMetaPanel('status-steps', 'meta-steps', true);
-  mirrorStatusIntoMetaPanel('status-text', 'meta-time', false);
-  mirrorStatusIntoMetaPanel('status-machine', 'meta-machine', false);
+  // The Task Info view renders ONLY relayed metaState values: its own
+  // status spans never run a task, and mirroring them would overwrite
+  // the active panel's relayed values with idle placeholders.
+  if (!META_PANEL_MODE) {
+    mirrorStatusIntoMetaPanel('status-tokens', 'meta-tokens', true);
+    mirrorStatusIntoMetaPanel('status-budget', 'meta-cost', true);
+    mirrorStatusIntoMetaPanel('status-steps', 'meta-steps', true);
+    mirrorStatusIntoMetaPanel('status-text', 'meta-time', false);
+    mirrorStatusIntoMetaPanel('status-machine', 'meta-machine', false);
+  }
 
   // metainfo-coverage:start
   // The info subpanel of the docked task-info panel (#meta-info,
@@ -3688,7 +3800,17 @@
   // a missing file renders as an empty subpanel.
   const metaInfoEl = document.getElementById('meta-info');
   const metaInfoContent = document.getElementById('meta-info-content');
+  // The task-info panel and its mobile-drawer controls (the toggle at
+  // the tab bar's right edge, the in-panel close button, the dimming
+  // backdrop — all remote mobile only, see remote-codex.css).
+  const metaPanel = document.getElementById('meta-panel');
+  const metaOverlay = document.getElementById('meta-overlay');
+  const metaDrawerBtn = document.getElementById('meta-drawer-btn');
+  const metaCloseBtn = document.getElementById('meta-close');
   let metaInfoSig = '';
+  // The raw markdown behind the info subpanel ('' when hidden): what a
+  // chat editor panel relays to the Task Info view (postMetaUpdate).
+  let metaInfoMd = '';
   // The poll target: the visible tab and the workdir its panel shows.
   let metaInfoWorkDir = '';
   let metaInfoTabId = '';
@@ -3730,13 +3852,44 @@
     return activeTabId;
   }
 
+  /**
+   * Whether this surface currently mirrors tmp/PROGRESS.md at all:
+   * the docked desktop panel (always), the mobile drawer (only while
+   * it is open — a hidden drawer must not poll the phone's network
+   * every second), or an editor-tab chat panel (only while its task
+   * runs, so an idle panel holds no live timer). The two panel-shaped
+   * webviews (history, Task Info) never poll — the Task Info view gets
+   * the file relayed from the active chat panel.
+   */
+  function metaInfoPollWanted() {
+    if (document.body.classList.contains('remote-desktop')) return true;
+    // An OPEN task-info drawer polls; a hidden one must not poll the
+    // network every second. Both drawer surfaces behave alike: the
+    // mobile remote page and the extension's sidebar chat view.
+    if (
+      (document.body.classList.contains('remote-chat') || SIDEBAR_CHAT_MODE) &&
+      metaPanel &&
+      metaPanel.classList.contains('open')
+    ) {
+      return true;
+    }
+    return POST_META_UPDATES && isRunning;
+  }
+
   /** Ask the daemon for the visible tab's task's tmp/PROGRESS.md. */
   function requestInfoFile() {
     if (!metaInfoContent) return;
     // Only a RUNNING task has a live tmp/PROGRESS.md worth mirroring; an
     // idle tab's subpanel stays empty and costs the daemon nothing.
-    if (!isRunning) return;
-    if (!document.body.classList.contains('remote-desktop')) return;
+    // The POLLED tab's own flag decides, not the module-level
+    // isRunning: that one lags around tab switches (restoreTab
+    // retargets before the switch applies the destination's running
+    // state, which would fire one poll for an idle tab) and, while a
+    // CONTENT tab is visible, never learns that the owner chat's task
+    // ended (its `status running:false` is not the active tab's).
+    const pollTab = getTab(metaInfoChatTabId());
+    if (pollTab ? !pollTab.isRunning : !isRunning) return;
+    if (!metaInfoPollWanted()) return;
     if (document.visibilityState === 'hidden') return;
     // A tab switch that reached neither updateMetaTaskDetails nor a
     // running-state flip (two running tabs in one workdir) is caught
@@ -3777,7 +3930,9 @@
     metaInfoTabId = tabId;
     metaInfoSig = '';
     metaInfoGen++;
+    metaInfoMd = '';
     setMetaInfoHTML('');
+    postMetaUpdateSoon();
     requestInfoFile();
   }
 
@@ -3800,11 +3955,20 @@
     if (running === metaInfoSawRunning) return;
     metaInfoSawRunning = running;
     if (running) {
-      requestInfoFile();
+      // An editor-tab chat panel's poll timer lives exactly while its
+      // task does (see metaInfoPollWanted). Starting the timer fires
+      // its own immediate poll; only a timer that was ALREADY running
+      // (remote desktop, an open drawer) needs the explicit one here.
+      const hadTimer = metaInfoTimer !== null;
+      syncMetaInfoPolling();
+      if (hadTimer) requestInfoFile();
     } else {
+      syncMetaInfoPolling();
       metaInfoSig = '';
       metaInfoGen++;
+      metaInfoMd = '';
       setMetaInfoHTML('');
+      postMetaUpdateSoon();
     }
   }
 
@@ -3820,32 +3984,37 @@
     metaInfoSig = typeof ev.sig === 'string' ? ev.sig : '';
     const text = ev.exists && typeof ev.content === 'string' ? ev.content : '';
     if (!text.trim()) {
+      metaInfoMd = '';
       setMetaInfoHTML('');
+      postMetaUpdateSoon();
       return;
     }
+    metaInfoMd = text;
     if (typeof marked !== 'undefined') {
       setMetaInfoHTML(kissSanitize(marked.parse(text)));
     } else {
       metaInfoContent.textContent = text;
       if (metaInfoEl) metaInfoEl.classList.add('visible');
     }
+    postMetaUpdateSoon();
   }
 
   let metaInfoTimer = null;
 
   /**
-   * Start or stop the 1s info-file poll to match remote desktop mode.
-   * The short interval keeps the mirrored tmp/PROGRESS.md fresh — the
-   * panel repaints within a second of the file changing, and the sig
-   * check keeps an unchanged file at one stat per poll.  Called by
-   * applyRemoteDesktop whenever the mode is (re)applied.  A timer that
-   * ran unconditionally would tick forever in webviews that can never
-   * show the panel (the VS Code extension, phone-sized remote windows)
-   * — and would keep every jsdom-hosted webview's node process alive
-   * after its tests finish.
+   * Start or stop the 1s info-file poll to match metaInfoPollWanted:
+   * remote desktop mode, an open mobile task-info drawer, or a chat
+   * editor panel with a running task.  The short interval keeps the
+   * mirrored tmp/PROGRESS.md fresh — the panel repaints within a
+   * second of the file changing, and the sig check keeps an unchanged
+   * file at one stat per poll.  Called by applyRemoteDesktop, the
+   * drawer toggle and syncMetaInfoRunning whenever the answer may have
+   * changed.  A timer that ran unconditionally would tick forever in
+   * webviews that can never show the panel — and would keep every
+   * jsdom-hosted webview's node process alive after its tests finish.
    */
   function syncMetaInfoPolling() {
-    const want = document.body.classList.contains('remote-desktop');
+    const want = metaInfoPollWanted();
     if (want && metaInfoTimer === null) {
       metaInfoTimer = setInterval(requestInfoFile, 1000);
       requestInfoFile();
@@ -3854,7 +4023,170 @@
       metaInfoTimer = null;
     }
   }
+
+  /**
+   * Open or close the mobile task-info drawer (remote < 900px): the
+   * right-hand twin of the history drawer, showing the same task-info
+   * panel desktop mode docks. Opening starts the tmp/PROGRESS.md poll
+   * and repolls immediately so the drawer never shows stale contents.
+   *
+   * @param {boolean} open Whether the drawer should be open.
+   */
+  function setMetaDrawerOpen(open) {
+    open = !!open;
+    if (!metaPanel) return;
+    const wasOpen = metaPanel.classList.contains('open');
+    metaPanel.classList.toggle('open', open);
+    if (metaOverlay) metaOverlay.classList.toggle('open', open);
+    if (metaDrawerBtn) {
+      metaDrawerBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    // A closed DRAWER sits translated off-screen but keeps rendering
+    // (the slide-in animation needs it), so `inert` takes its close
+    // button out of the keyboard tab order. The panel is a drawer on
+    // the mobile remote page and in the extension's sidebar chat view;
+    // the docked desktop panel and the VS Code Task Info view are
+    // never drawers and must never go inert (applyRemoteDesktop flips
+    // the body class before calling here, so entering desktop lifts
+    // the attribute).
+    const inertDrawer =
+      !open &&
+      (SIDEBAR_CHAT_MODE ||
+        (document.body.classList.contains('remote-chat') &&
+          !document.body.classList.contains('remote-desktop')));
+    if (typeof metaPanel.toggleAttribute === 'function') {
+      metaPanel.toggleAttribute('inert', inertDrawer);
+    }
+    // Focus follows the drawer: opening lands on its close button,
+    // closing hands focus back to the toggle instead of stranding it
+    // on an off-screen control.
+    try {
+      if (open && !wasOpen) {
+        if (metaCloseBtn) metaCloseBtn.focus();
+      } else if (!open && wasOpen) {
+        if (
+          metaDrawerBtn &&
+          document.activeElement &&
+          metaPanel.contains(document.activeElement)
+        ) {
+          metaDrawerBtn.focus();
+        }
+      }
+    } catch (_e) {
+      // Focus is best-effort (detached nodes, jsdom quirks).
+    }
+    syncMetaInfoPolling();
+  }
   // metainfo-coverage:end
+
+  // metarelay-coverage:start
+  // ---- Editor-tabs mode: task-info relay to the Task Info view ----
+  //
+  // A chat editor panel keeps its (hidden) #meta-list current in every
+  // mode — mirrorStatusIntoMetaPanel and updateMetaTaskDetails write it
+  // unconditionally — so the panel simply reports those display strings
+  // (plus the raw tmp/PROGRESS.md) to the host whenever they change.
+  // The host caches per panel and forwards the ACTIVE panel's report to
+  // the secondary sidebar's Task Info view (see SorcarPanelManager).
+  let metaPostTimer = null;
+
+  /** Read one #meta-* value's display text ('' when absent). */
+  function metaValueText(id) {
+    const el = document.getElementById(id);
+    return el ? (el.textContent || '').trim() : '';
+  }
+
+  /** Post this panel's task-info values to the host right now. */
+  function postMetaUpdateNow() {
+    const timeEl = document.getElementById('meta-time');
+    postToHost({
+      type: 'metaUpdate',
+      values: {
+        tokens: metaValueText('meta-tokens'),
+        cost: metaValueText('meta-cost'),
+        steps: metaValueText('meta-steps'),
+        time: metaValueText('meta-time'),
+        timeColor: timeEl ? timeEl.style.color || '' : '',
+        machine: metaValueText('meta-machine'),
+        workdir: metaValueText('meta-workdir'),
+        maxBudget: metaValueText('meta-max-budget'),
+      },
+      progressMd: metaInfoMd,
+    });
+  }
+
+  /**
+   * Post this panel's task-info values to the host, coalescing the
+   * bursts a single event produces (several status spans and both
+   * task-detail rows may repaint in one tick) into one report.
+   */
+  function postMetaUpdateSoon() {
+    if (!POST_META_UPDATES) return;
+    if (metaPostTimer !== null) return;
+    metaPostTimer = setTimeout(() => {
+      metaPostTimer = null;
+      postMetaUpdateNow();
+    }, 150);
+  }
+
+  if (POST_META_UPDATES) {
+    // One observer on the whole list catches every writer — the five
+    // status mirrors and updateMetaTaskDetails — without patching any
+    // of them; the initial report seeds the host cache so a panel
+    // switch right after opening never shows another panel's values.
+    const metaListEl = document.getElementById('meta-list');
+    if (metaListEl && typeof MutationObserver === 'function') {
+      new MutationObserver(postMetaUpdateSoon).observe(metaListEl, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['style'],
+      });
+    }
+    postMetaUpdateSoon();
+  }
+
+  /**
+   * Paint one relayed metaState into the Task Info view (meta-panel
+   * mode only): the active chat panel's display strings land in the
+   * bullet list, and its tmp/PROGRESS.md markdown renders in the info
+   * subpanel exactly like the remote desktop panel renders its own.
+   *
+   * @param {object} ev The metaState message (values may be null: no
+   *   chat panel is reporting — show the placeholder dashes).
+   */
+  function renderMetaState(ev) {
+    const values =
+      ev && ev.values && typeof ev.values === 'object' ? ev.values : null;
+    const put = (id, text, color) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = text || '\u2014';
+      el.style.color = color || '';
+    };
+    put('meta-tokens', values && values.tokens);
+    put('meta-cost', values && values.cost);
+    put('meta-steps', values && values.steps);
+    put(
+      'meta-time',
+      (values && values.time) || 'Ready',
+      values && values.timeColor,
+    );
+    put('meta-machine', values && values.machine);
+    put('meta-workdir', values && values.workdir);
+    put('meta-max-budget', values && values.maxBudget);
+    const md = ev && typeof ev.progressMd === 'string' ? ev.progressMd : '';
+    if (!md.trim()) {
+      setMetaInfoHTML('');
+    } else if (typeof marked !== 'undefined') {
+      setMetaInfoHTML(kissSanitize(marked.parse(md)));
+    } else if (metaInfoContent) {
+      metaInfoContent.textContent = md;
+      if (metaInfoEl) metaInfoEl.classList.add('visible');
+    }
+  }
+  // metarelay-coverage:end
 
   // activitybar-coverage:start
   // ---- Activity bar: Tasks / Explorer / Source Control views ----
@@ -3991,16 +4323,30 @@
 
   /** Last path segment of a file system path ('' for a bare root). */
   function pathBaseName(p) {
-    const s = String(p || '').replace(/[\\/]+$/, '');
-    const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    const s = String(p || '').replace(
+      isWindowsPath(p) ? /[\\/]+$/ : /\/+$/,
+      '',
+    );
+    const i = lastSeparatorIndex(s);
     return i >= 0 ? s.slice(i + 1) : s;
   }
 
   /** Directory part of a relative path ('' when there is none). */
   function pathDirName(p) {
     const s = String(p || '');
-    const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    const i = lastSeparatorIndex(s);
     return i >= 0 ? s.slice(0, i) : '';
+  }
+
+  /**
+   * Index of the last path separator in *s*: `/` or `\` on a Windows
+   * path, only `/` otherwise (a backslash is a plain character in a
+   * POSIX name).
+   */
+  function lastSeparatorIndex(s) {
+    return isWindowsPath(s)
+      ? Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'))
+      : s.lastIndexOf('/');
   }
 
   /**
@@ -4061,52 +4407,395 @@
   // `explorerDirs` maps a folder's request path to its node so a
   // dirListing reply (token = generation + ':' + path) finds it; the
   // generation lets a rebuilt tree ignore replies meant for the old one.
+  // The working directory shown as the first top-level folder.  Extra
+  // top-level folders the user added with "Add Folder to Explorer..."
+  // (explorerExtraRoots, kept in localStorage) follow it; every row and
+  // node remembers the top-level folder it belongs to (`root`), which
+  // is the workDir its daemon requests are confined to.
   let explorerRoot = '';
+  let explorerRootsKey = '';
   let explorerGeneration = 0;
   const explorerDirs = new Map();
+  const EXPLORER_ROOTS_KEY = 'kiss-explorer-roots';
+  let explorerExtraRoots = loadExplorerExtraRoots();
+
+  function loadExplorerExtraRoots() {
+    try {
+      const raw = window.localStorage.getItem(EXPLORER_ROOTS_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      return dedupeRoots(
+        Array.isArray(list)
+          ? list.filter(p => typeof p === 'string' && p && !isRootDir(p))
+          : [],
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /** *roots* without a second spelling of a folder already in it. */
+  function dedupeRoots(roots) {
+    const out = [];
+    roots.forEach(p => {
+      if (!out.some(q => samePath(p, q))) out.push(p);
+    });
+    return out;
+  }
+
+  function saveExplorerExtraRoots() {
+    try {
+      window.localStorage.setItem(
+        EXPLORER_ROOTS_KEY,
+        JSON.stringify(explorerExtraRoots),
+      );
+    } catch {}
+  }
+
+  /** Whether *p* is spelled as a Windows path (drive letter or UNC share). */
+  function isWindowsPath(p) {
+    return /^[A-Za-z]:/.test(String(p)) || /^\\\\/.test(String(p));
+  }
+
+  /**
+   * Strip trailing separators so a folder keeps one spelling: `/` on
+   * POSIX (where a backslash is an ordinary name character), either
+   * separator on Windows.
+   */
+  function normalizeRootPath(p) {
+    const s = String(p || '');
+    const trimmed = s.replace(isWindowsPath(s) ? /[\\/]+$/ : /\/+$/, '');
+    return trimmed || s;
+  }
+
+  /**
+   * The identity two spellings of one folder share: trailing separators
+   * dropped; on Windows also `/` folded to `\` and case ignored.
+   */
+  function rootIdentity(p) {
+    const s = normalizeRootPath(p);
+    return isWindowsPath(s) ? s.replace(/\//g, '\\').toLowerCase() : s;
+  }
+
+  function samePath(a, b) {
+    return rootIdentity(a) === rootIdentity(b);
+  }
+
+  /** Whether *p* is *dir* itself or lies inside it (lexically). */
+  function pathWithin(p, dir) {
+    const win = isWindowsPath(dir);
+    const sepChar = win ? '\\' : '/';
+    const d = rootIdentity(dir);
+    const q = win ? String(p).replace(/\//g, '\\').toLowerCase() : String(p);
+    return q === d || q.indexOf(d + sepChar) === 0;
+  }
+
+  /**
+   * The top-level folders the Explorer shows: the working directory
+   * first, then the added folders (an added folder that IS the working
+   * directory is shown once, as the working directory).
+   */
+  function explorerRoots(wd) {
+    const roots = [];
+    if (wd) roots.push(wd);
+    return dedupeRoots(roots.concat(explorerExtraRoots));
+  }
 
   function explorerToken(path) {
     return explorerGeneration + ':' + path;
   }
 
   /**
-   * Make sure the Explorer shows the current workspace.  An unchanged
-   * workspace is left alone unless `force`, in which case every folder
-   * already listed is re-listed in place (expansion state kept).
+   * Make sure the Explorer shows the current workspace and the added
+   * folders.  An unchanged set of top-level folders is left alone
+   * unless `force`, in which case every folder already listed is
+   * re-listed in place (expansion state kept).
    */
   function refreshExplorer(force) {
     if (!explorerTree) return;
     const wd = sidebarWorkDir();
-    if (wd === explorerRoot && explorerDirs.size) {
+    const roots = explorerRoots(wd);
+    const key = JSON.stringify(roots);
+    if (wd === explorerRoot && key === explorerRootsKey && explorerDirs.size) {
       if (force) reloadExplorerDirs();
       return;
     }
-    buildExplorerRoot(wd);
+    buildExplorerRoot(wd, roots);
   }
 
-  function buildExplorerRoot(wd) {
+  /**
+   * Rebuild the tree: one top-level row per folder in *roots*.  The
+   * working directory (*wd*) starts expanded; a folder named in
+   * *expandRoot* (one just added) opens too.
+   */
+  function buildExplorerRoot(wd, roots, expandRoot) {
     explorerRoot = wd;
+    roots = roots || explorerRoots(wd);
+    explorerRootsKey = JSON.stringify(roots);
     explorerGeneration++;
     explorerDirs.clear();
     explorerTree.textContent = '';
-    if (!wd) {
+    if (!roots.length) {
       const empty = document.createElement('div');
       empty.className = 'sidebar-empty';
       empty.textContent = 'No workspace folder';
       explorerTree.appendChild(empty);
       return;
     }
-    const rootRow = createExplorerRow(
+    roots.forEach(dir => {
+      appendExplorerRootRow(dir, dir === wd, dir === wd || dir === expandRoot);
+    });
+    rovingFocus(explorerTree, '.explorer-row', null);
+  }
+
+  /** Append the row (and children container) of top-level folder *dir*. */
+  function appendExplorerRootRow(dir, isWorkDir, expand) {
+    const row = createExplorerRow(
       explorerTree,
-      {name: pathBaseName(wd) || wd, path: wd, isDir: true},
+      {name: pathBaseName(dir) || dir, path: dir, isDir: true, root: dir},
       0,
     );
-    toggleExplorerDir(rootRow, true);
+    row.classList.add('is-root');
+    row.classList.toggle('is-workdir', isWorkDir);
+    row.title = dir + (isWorkDir ? ' (working directory)' : '');
+    row.appendChild(explorerRootActions(dir, isWorkDir));
+    if (expand) toggleExplorerDir(row, true);
+    return row;
+  }
+
+  const ICON_CHECK = ['M3 8.5l3.2 3.2L13 4.5'];
+  const ICON_CLOSE = ['M4 4l8 8M12 4l-8 8'];
+
+  /**
+   * The buttons at the right of a top-level folder row: the working
+   * directory carries a check mark; any other folder can be made the
+   * working directory or removed from the Explorer.
+   */
+  function explorerRootActions(dir, isWorkDir) {
+    const actions = document.createElement('span');
+    actions.className = 'explorer-root-actions';
+    if (isWorkDir) {
+      const mark = document.createElement('span');
+      mark.className = 'explorer-root-mark';
+      mark.title = 'Current working directory';
+      mark.setAttribute('aria-label', 'Current working directory');
+      mark.appendChild(svgIcon('', ICON_CHECK));
+      actions.appendChild(mark);
+      return actions;
+    }
+    const setBtn = document.createElement('button');
+    setBtn.type = 'button';
+    setBtn.className = 'explorer-root-btn explorer-root-set';
+    setBtn.title = 'Set as Working Directory';
+    setBtn.setAttribute('aria-label', 'Set ' + dir + ' as working directory');
+    setBtn.tabIndex = -1;
+    setBtn.appendChild(svgIcon('', ICON_CHECK));
+    setBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      setExplorerWorkDir(dir);
+    });
+    actions.appendChild(setBtn);
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'explorer-root-btn explorer-root-remove';
+    removeBtn.title = 'Remove Folder from Explorer';
+    removeBtn.setAttribute('aria-label', 'Remove ' + dir + ' from Explorer');
+    removeBtn.tabIndex = -1;
+    removeBtn.appendChild(svgIcon('', ICON_CLOSE));
+    removeBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      removeExplorerRoot(dir);
+    });
+    actions.appendChild(removeBtn);
+    return actions;
+  }
+
+  /** Whether the tree on screen shows exactly the current top-level folders. */
+  function explorerTreeInSync() {
+    const wd = sidebarWorkDir();
+    return (
+      wd === explorerRoot &&
+      JSON.stringify(explorerRoots(wd)) === explorerRootsKey &&
+      !!explorerTree.querySelector(':scope > .explorer-row.is-root')
+    );
+  }
+
+  /**
+   * "Add Folder to Explorer...": show *dir* as an extra top-level
+   * folder (expanded) and remember it across reloads.  The working
+   * directory itself is already the first folder.  A tree that is up
+   * to date just grows a row, keeping the other folders as they are.
+   */
+  function addExplorerRoot(dir) {
+    dir = normalizeRootPath(dir);
+    if (!dir || isRootDir(dir)) return;
+    const wd = sidebarWorkDir();
+    const known = explorerRoots(wd).some(p => samePath(p, dir));
+    if (known) {
+      const node = explorerDirs.get(explorerKey(dir, dir));
+      if (node && !node.row.classList.contains('expanded'))
+        toggleExplorerDir(node.row, true);
+      return;
+    }
+    const inSync = explorerTree && explorerTreeInSync();
+    explorerExtraRoots.push(dir);
+    saveExplorerExtraRoots();
+    if (!explorerTree) return;
+    if (!inSync) {
+      buildExplorerRoot(wd, explorerRoots(wd), dir);
+      return;
+    }
+    appendExplorerRootRow(dir, false, true);
+    explorerRootsKey = JSON.stringify(explorerRoots(wd));
+    rovingFocus(explorerTree, '.explorer-row', null);
+  }
+
+  /** "Remove Folder from Explorer": forget an added top-level folder. */
+  function removeExplorerRoot(dir) {
+    const before = explorerExtraRoots.length;
+    const inSync = explorerTree && explorerTreeInSync();
+    explorerExtraRoots = explorerExtraRoots.filter(p => !samePath(p, dir));
+    if (explorerExtraRoots.length === before) return;
+    saveExplorerExtraRoots();
+    if (!explorerTree) return;
+    const node = explorerDirs.get(explorerKey(dir, dir));
+    const roots = explorerRoots(explorerRoot);
+    if (
+      !inSync ||
+      !node ||
+      node.row.parentNode !== explorerTree ||
+      !roots.length
+    ) {
+      buildExplorerRoot(explorerRoot, roots);
+      return;
+    }
+    // Drop just that folder's rows and nodes; the others stay as they are.
+    const hadFocus = explorerHasFocus();
+    dropExplorerSubtree(dir, dir);
+    node.kids.remove();
+    node.row.remove();
+    explorerRootsKey = JSON.stringify(roots);
+    rovingFocus(explorerTree, '.explorer-row', null);
+    if (hadFocus) focusExplorerStop();
+  }
+
+  /**
+   * Whether keyboard focus is in the Explorer -- or nowhere (on the
+   * body), as it is right after the context menu that ran the action
+   * closed itself and took the focused menu item away.
+   */
+  function explorerHasFocus() {
+    const focused = document.activeElement;
+    return (
+      !focused ||
+      focused === document.body ||
+      (!!explorerTree && explorerTree.contains(focused))
+    );
+  }
+
+  /** Put focus on the tree's single tab stop (its roving row). */
+  function focusExplorerStop() {
+    const stop = explorerTree
+      ? explorerTree.querySelector('.explorer-row[tabindex="0"]')
+      : null;
+    if (!stop) return;
+    // A workspace switch may have activated another tab, whose deferred
+    // composer focus would take the keyboard back a moment later.
+    cancelInputFocusRetry();
+    stop.focus({preventScroll: true});
+  }
+
+  /**
+   * "Set as Working Directory" on a top-level folder: the folder
+   * becomes the workspace exactly as the folder picker's "Select
+   * Folder" makes it (applyPickedWorkDir).  The folder that was the
+   * working directory stays in the Explorer as an added folder, so
+   * switching never makes a tree disappear.
+   */
+  function setExplorerWorkDir(dir) {
+    if (!dir || isRootDir(dir)) return;
+    const hadFocus = explorerHasFocus();
+    const previous = explorerRoot;
+    if (
+      previous &&
+      !isRootDir(previous) &&
+      !samePath(previous, dir) &&
+      !explorerExtraRoots.some(p => samePath(p, previous))
+    ) {
+      explorerExtraRoots.push(previous);
+      saveExplorerExtraRoots();
+    }
+    applyPickedWorkDir(dir);
+    // The rebuilt tree keeps the keyboard: focus lands on its tab stop
+    // (the new working directory's row).
+    if (hadFocus) focusExplorerStop();
+  }
+
+  /** The top-level folder an Explorer row belongs to. */
+  function explorerRowRoot(row) {
+    return (row && row.dataset.explorerRoot) || explorerRoot;
+  }
+
+  /**
+   * The explorerDirs key of a folder: its top-level folder plus its
+   * path.  Two top-level folders may nest (a repository and one of its
+   * worktrees, say), so the same folder path can be listed under both;
+   * keying by root keeps the two nodes apart.
+   */
+  function explorerKey(root, path) {
+    return root + '\0' + path;
+  }
+
+  function explorerRowKey(row) {
+    return explorerKey(explorerRowRoot(row), row.dataset.explorerPath);
+  }
+
+  /**
+   * The deepest folder containing both *a* and *b* ('' when they share
+   * only the file-system root, which the daemon never accepts as a
+   * workspace).  Used as the workDir of an action spanning two
+   * top-level folders (a paste or a comparison across them).
+   */
+  function commonParentDir(a, b) {
+    const win = isWindowsPath(a) || isWindowsPath(b);
+    // POSIX names may contain backslashes: only `/` separates there.
+    const pa = String(a || '').split(win ? /[\\/]+/ : '/');
+    const pb = String(b || '').split(win ? /[\\/]+/ : '/');
+    const shared = [];
+    for (let i = 0; i < pa.length && i < pb.length; i++) {
+      const same = win
+        ? pa[i].toLowerCase() === pb[i].toLowerCase()
+        : pa[i] === pb[i];
+      if (!same) break;
+      shared.push(pa[i]);
+    }
+    // One path inside the other: the shared prefix is the outer FOLDER
+    // (a folder is the only entry another path can lie inside).
+    let common;
+    if (win) {
+      // A UNC path's two leading backslashes split as one empty part.
+      const unc = /^\\\\/.test(String(a)) && /^\\\\/.test(String(b));
+      common = shared.join('\\');
+      if (unc && common) common = '\\' + common;
+    } else {
+      common = shared.join('/') || (shared.length ? '/' : '');
+    }
+    return !common || isRootDir(common) ? '' : common;
+  }
+
+  /**
+   * The workDir for an action on *path* (in top-level folder *root*)
+   * that also touches *other*: the root itself when *other* lies inside
+   * it, else the deepest common folder.
+   */
+  function actionWorkDir(root, other) {
+    if (!other) return root;
+    if (pathWithin(other, root)) return root;
+    return commonParentDir(root, other);
   }
 
   /** Re-list every folder that has been listed so far. */
   function reloadExplorerDirs() {
-    explorerDirs.forEach((node, path) => {
+    explorerDirs.forEach((node, key) => {
       // A listing for this folder is already in flight.  Re-sending the
       // identical request now would double the daemon work and the DOM
       // refill, but the in-flight reply may have read the disk BEFORE
@@ -4120,10 +4809,10 @@
       if (!node.loaded) return;
       node.loading = true;
       api.listDir({
-        path: path,
-        workDir: explorerRoot,
+        path: node.path,
+        workDir: node.root,
         tabId: activeTabId,
-        token: explorerToken(path),
+        token: explorerToken(key),
       });
     });
   }
@@ -4143,6 +4832,7 @@
     // Roving tabindex: the tree is ONE tab stop (see rovingFocus).
     row.tabIndex = -1;
     row.dataset.explorerPath = entry.path;
+    row.dataset.explorerRoot = entry.root || explorerRoot;
     row.title = entry.path;
     const chevron = document.createElement('span');
     chevron.className = 'explorer-chevron';
@@ -4164,13 +4854,17 @@
       kids.setAttribute('role', 'group');
       kids.hidden = true;
       container.appendChild(kids);
-      explorerDirs.set(entry.path, {
+      const root = entry.root || explorerRoot;
+      explorerDirs.set(explorerKey(root, entry.path), {
         row: row,
         kids: kids,
         depth: depth,
         loaded: false,
         loading: false,
+        root: root,
+        path: entry.path,
         parent: entry.parent || '',
+        parentKey: entry.parent ? explorerKey(root, entry.parent) : '',
         // The folder's real location (a symlink's target), known from
         // the listing that produced it; the daemon fills it in for the
         // folder itself once it is listed.
@@ -4187,9 +4881,9 @@
   function explorerIsCycle(node) {
     if (!node.realPath) return false;
     for (
-      let up = explorerDirs.get(node.parent);
+      let up = explorerDirs.get(node.parentKey);
       up;
-      up = explorerDirs.get(up.parent)
+      up = explorerDirs.get(up.parentKey)
     ) {
       if (up.realPath && up.realPath === node.realPath) return true;
     }
@@ -4213,7 +4907,8 @@
    */
   function toggleExplorerDir(row, expand) {
     const path = row.dataset.explorerPath;
-    const node = explorerDirs.get(path);
+    const key = explorerRowKey(row);
+    const node = explorerDirs.get(key);
     if (!node) return;
     const open =
       expand === undefined ? !row.classList.contains('expanded') : expand;
@@ -4238,9 +4933,9 @@
       explorerNote(node.kids, node.depth + 1, 'Loading...');
       api.listDir({
         path: path,
-        workDir: explorerRoot,
+        workDir: node.root,
         tabId: activeTabId,
-        token: explorerToken(path),
+        token: explorerToken(key),
       });
     }
   }
@@ -4265,8 +4960,8 @@
       node.refreshAfterLoad = false;
       node.loading = true;
       api.listDir({
-        path: token.slice(sep + 1),
-        workDir: explorerRoot,
+        path: node.path,
+        workDir: node.root,
         tabId: activeTabId,
         token: token,
       });
@@ -4288,7 +4983,9 @@
     // right after it), so a Rename... box on an expanded folder keeps
     // the folder's listed contents through an error re-listing.
     const editingNode =
-      editing && explorerDirs.get(editing.dataset.explorerPath);
+      editing && editing.dataset.explorerPath
+        ? explorerDirs.get(explorerRowKey(editing))
+        : null;
     const editingKids = editingNode ? editingNode.kids : null;
     const focused = document.activeElement;
     const focusedInKids = focused && kids.contains(focused) ? focused : null;
@@ -4300,7 +4997,7 @@
       return;
     }
     const entries = Array.isArray(ev.entries) ? ev.entries : [];
-    const parentPath = token.slice(sep + 1);
+    const parentPath = node.path;
     // Existing rows by path, so a re-listing keeps expanded folders.
     const keep = new Map();
     kids
@@ -4319,7 +5016,7 @@
       const old = keep.get(childPath);
       if (old) {
         keep.delete(childPath);
-        const oldNode = explorerDirs.get(childPath);
+        const oldNode = explorerDirs.get(explorerKey(node.root, childPath));
         if (!!oldNode === !!entry.isDir) {
           fresh.appendChild(old);
           if (oldNode) fresh.appendChild(oldNode.kids);
@@ -4327,7 +5024,7 @@
         }
         // The entry changed kind (file <-> folder): the old row and
         // whatever it registered go before the replacement is made.
-        dropExplorerSubtree(childPath);
+        dropExplorerSubtree(node.root, childPath);
         old.remove();
       }
       createExplorerRow(
@@ -4336,6 +5033,7 @@
           name: entry.name,
           path: childPath,
           isDir: !!entry.isDir,
+          root: node.root,
           parent: parentPath,
           // A plain sub-folder of a resolved folder is at its parent's
           // real path + name; a symlinked one is wherever it points.
@@ -4351,7 +5049,7 @@
     });
     // Rows for entries that disappeared take their sub-trees with them.
     keep.forEach((r, p) => {
-      dropExplorerSubtree(p);
+      dropExplorerSubtree(node.root, p);
       r.remove();
     });
     Array.from(kids.childNodes).forEach(n => {
@@ -4391,19 +5089,20 @@
     return p.endsWith(sepChar) ? p + name : p + sepChar + name;
   }
 
-  /** Forget a folder and every listed folder beneath it. */
-  function dropExplorerSubtree(path) {
-    const node = explorerDirs.get(path);
+  /** Forget a folder (under top-level folder *root*) and every listed folder beneath it. */
+  function dropExplorerSubtree(root, path) {
+    const key = explorerKey(root, path);
+    const node = explorerDirs.get(key);
     if (!node) return;
     node.kids.querySelectorAll('.explorer-row.is-dir').forEach(r => {
-      explorerDirs.delete(r.dataset.explorerPath);
+      explorerDirs.delete(explorerRowKey(r));
     });
-    explorerDirs.delete(path);
+    explorerDirs.delete(key);
   }
 
   function onExplorerActivate(row) {
     if (row.classList.contains('is-dir')) toggleExplorerDir(row);
-    else openWorkspaceFile(row.dataset.explorerPath, explorerRoot);
+    else openWorkspaceFile(row.dataset.explorerPath, explorerRowRoot(row));
   }
 
   // ---- Source Control ----
@@ -5264,22 +5963,20 @@
     });
   }
 
-  /** *abs* relative to the Explorer root ('' for the root itself). */
-  function explorerRelativePath(abs) {
-    const root = explorerRoot.replace(/[\\/]+$/, '');
+  /** *abs* relative to its top-level folder *rootDir* ('' for the folder itself). */
+  function explorerRelativePath(abs, rootDir) {
+    const root = normalizeRootPath(rootDir || explorerRoot);
     if (!root) return abs;
     if (abs === root) return '';
-    const sepChar =
-      root.indexOf('\\') >= 0 && root.indexOf('/') < 0 ? '\\' : '/';
-    return abs.indexOf(root + sepChar) === 0 ? abs.slice(root.length + 1) : abs;
+    return pathWithin(abs, root) ? abs.slice(root.length + 1) : abs;
   }
 
   /** The folder an Explorer row lives in (the row's parent node path). */
   function explorerParentPath(row) {
-    const node = explorerDirs.get(row.dataset.explorerPath);
+    const node = explorerDirs.get(explorerRowKey(row));
     if (node && node.parent) return node.parent;
     const parent = explorerParentRow(row);
-    return parent ? parent.dataset.explorerPath : explorerRoot;
+    return parent ? parent.dataset.explorerPath : explorerRowRoot(row);
   }
 
   /**
@@ -5301,7 +5998,30 @@
     );
   }
 
+  /**
+   * Send an fsAction.  `request.root` is the top-level Explorer folder
+   * the action belongs to; an action whose `dest` lies in another
+   * top-level folder (a paste or a comparison across two of them) is
+   * confined to the deepest folder containing both, and refused when
+   * that is the file-system root.
+   */
   function sendFsAction(request) {
+    const root = request.root || explorerRoot || sidebarWorkDir();
+    let workDir = root;
+    if (
+      request.action === 'copy' ||
+      request.action === 'move' ||
+      request.action === 'compare'
+    ) {
+      workDir = actionWorkDir(root, request.dest);
+      if (workDir) workDir = actionWorkDir(workDir, request.path);
+    }
+    if (!workDir) {
+      sidebarError(
+        'These folders share only the file-system root; the action cannot span them.',
+      );
+      return;
+    }
     const token = nextSidebarToken('fs');
     pendingSidebarRequests.set(token, request);
     api.fsAction({
@@ -5311,7 +6031,7 @@
       name: request.name || '',
       query: request.query || '',
       overwrite: request.overwrite === true,
-      workDir: explorerRoot || sidebarWorkDir(),
+      workDir: workDir,
       tabId: activeTabId,
       token: token,
     });
@@ -5392,13 +6112,15 @@
         : request.action === 'newFile' || request.action === 'newFolder'
           ? request.path
           : '';
-    const targetNode = target ? explorerDirs.get(target) : null;
+    const targetNode = target
+      ? explorerDirs.get(explorerKey(request.root || explorerRoot, target))
+      : null;
     if (targetNode && !targetNode.row.classList.contains('expanded')) {
       toggleExplorerDir(targetNode.row, true);
     }
     if (request.action === 'newFile' && ev.path) {
       // Like VS Code, a new file opens in an editor right away.
-      openWorkspaceFile(ev.path, explorerRoot);
+      openWorkspaceFile(ev.path, request.root || explorerRoot);
     }
     if (request.action === 'rename' && ev.path) {
       // An editor showing the renamed file (or one inside a renamed
@@ -5410,7 +6132,7 @@
         if (t.contentPath === from) {
           t.contentPath = to;
           t.title = pathBaseName(to);
-        } else if (t.contentPath.indexOf(from + '/') === 0) {
+        } else if (pathWithin(t.contentPath, from)) {
           t.contentPath = to + t.contentPath.slice(from.length);
         }
       });
@@ -5423,7 +6145,7 @@
           return (
             t.isContentTab &&
             typeof t.contentPath === 'string' &&
-            (t.contentPath === gone || t.contentPath.indexOf(gone + '/') === 0)
+            pathWithin(t.contentPath, gone)
           );
         })
         .forEach(t => {
@@ -5480,13 +6202,14 @@
         input.setSelectionRange(0, dot > 0 ? dot : oldName.length);
       }, 0);
     } else {
-      const node = explorerDirs.get(row.dataset.explorerPath);
+      const node = explorerDirs.get(explorerRowKey(row));
       if (!node) return;
       if (!row.classList.contains('expanded')) toggleExplorerDir(row, true);
       const isDir = kind === 'newFolder';
       host = document.createElement('div');
       host.className =
         'explorer-row is-editing ' + (isDir ? 'is-dir' : 'is-file');
+      host.dataset.explorerRoot = node.root;
       host.style.setProperty('--depth', String(node.depth + 1));
       const chevron = document.createElement('span');
       chevron.className = 'explorer-chevron';
@@ -5538,11 +6261,11 @@
   // ---- Explorer context menu ----
 
   /** Open a file as a content tab without leaving the current tab. */
-  function openWorkspaceFileToSide(path) {
+  function openWorkspaceFileToSide(path, root) {
     api.send({
       type: 'openFile',
       path: path,
-      workDir: explorerRoot || sidebarWorkDir(),
+      workDir: root || explorerRoot || sidebarWorkDir(),
       tabId: activeTabId,
       background: true,
     });
@@ -5550,8 +6273,10 @@
 
   function explorerMenuItems(row) {
     const path = row.dataset.explorerPath;
+    const root = explorerRowRoot(row);
     const isDir = row.classList.contains('is-dir');
-    const isRoot = path === explorerRoot;
+    const isRoot = row.classList.contains('is-root') || path === root;
+    const isWorkDir = isRoot && path === explorerRoot;
     const parent = isDir ? path : explorerParentPath(row);
     const name = pathBaseName(path) || path;
     const items = [];
@@ -5561,7 +6286,12 @@
         label: 'New File...',
         run: () => {
           startExplorerInput('newFile', row, value => {
-            sendFsAction({action: 'newFile', path: path, name: value});
+            sendFsAction({
+              action: 'newFile',
+              path: path,
+              name: value,
+              root: root,
+            });
           });
         },
       });
@@ -5570,7 +6300,12 @@
         label: 'New Folder...',
         run: () => {
           startExplorerInput('newFolder', row, value => {
-            sendFsAction({action: 'newFolder', path: path, name: value});
+            sendFsAction({
+              action: 'newFolder',
+              path: path,
+              name: value,
+              root: root,
+            });
           });
         },
       });
@@ -5579,7 +6314,7 @@
         id: 'open-to-side',
         label: 'Open to the Side',
         key: keyLabel('Ctrl+Enter', '\u2303Enter'),
-        run: () => openWorkspaceFileToSide(path),
+        run: () => openWorkspaceFileToSide(path, root),
       });
     }
     items.push({separator: true});
@@ -5600,6 +6335,7 @@
               action: 'compare',
               path: explorerCompareWith,
               dest: path,
+              root: root,
             });
           },
         });
@@ -5614,7 +6350,12 @@
         run: () => {
           const query = window.prompt('Find in ' + name, '');
           if (query)
-            sendFsAction({action: 'findInFolder', path: path, query: query});
+            sendFsAction({
+              action: 'findInFolder',
+              path: path,
+              query: query,
+              root: root,
+            });
         },
       });
       items.push({separator: true});
@@ -5648,6 +6389,7 @@
           action: explorerClipboard.cut ? 'move' : 'copy',
           path: explorerClipboard.path,
           dest: parent,
+          root: root,
         });
       },
     });
@@ -5662,14 +6404,36 @@
       id: 'copy-relative-path',
       label: 'Copy Relative Path',
       key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
-      run: () => copyTextToClipboard(explorerRelativePath(path) || '.'),
+      run: () => copyTextToClipboard(explorerRelativePath(path, root) || '.'),
     });
     items.push({separator: true});
+    if (isRoot) {
+      // The top-level folder items VS Code's root menu ends with (Add
+      // Folder to Workspace... / Remove Folder from Workspace), plus
+      // the working-directory switch this Explorer adds.
+      items.push({
+        id: 'add-folder',
+        label: 'Add Folder to Explorer...',
+        run: () => openFolderPicker('add'),
+      });
+      items.push({
+        id: 'set-work-dir',
+        label: 'Set as Working Directory',
+        enabled: !isWorkDir,
+        run: () => setExplorerWorkDir(path),
+      });
+      items.push({
+        id: 'remove-folder',
+        label: 'Remove Folder from Explorer',
+        enabled: !isWorkDir,
+        run: () => removeExplorerRoot(path),
+      });
+      return items;
+    }
     items.push({
       id: 'rename',
       label: 'Rename...',
       key: 'F2',
-      enabled: !isRoot,
       run: () => {
         startExplorerInput('rename', row, value => {
           if (value === name) return;
@@ -5677,6 +6441,7 @@
             action: 'rename',
             path: path,
             dest: joinPath(parent, value),
+            root: root,
           });
         });
       },
@@ -5685,7 +6450,6 @@
       id: 'delete',
       label: 'Delete',
       key: keyLabel('Delete', '\u2318\u232B'),
-      enabled: !isRoot,
       run: () => {
         if (
           window.confirm(
@@ -5694,7 +6458,7 @@
               "'?\nThis action is irreversible!",
           )
         ) {
-          sendFsAction({action: 'delete', path: path});
+          sendFsAction({action: 'delete', path: path, root: root});
         }
       },
     });
@@ -5714,7 +6478,9 @@
     let id = '';
     if (key === 'f2') id = 'rename';
     else if (key === 'delete' || (IS_MAC && key === 'backspace' && e.metaKey))
-      id = 'delete';
+      // On a top-level folder, Delete removes it from the Explorer (VS
+      // Code's "Remove Folder from Workspace" binding).
+      id = row.classList.contains('is-root') ? 'remove-folder' : 'delete';
     else if (key === 'c' && e.altKey && e.shiftKey && mod)
       id = 'copy-relative-path';
     else if (key === 'c' && e.altKey && e.shiftKey && !IS_MAC && !e.ctrlKey)
@@ -6020,6 +6786,10 @@
   let folderPickerEl = null;
   let folderPickerDir = '';
   let folderPickerSeq = 0;
+  // What "Select Folder" does with the pick: make it the working
+  // directory ('workdir', the default) or add it to the Explorer as
+  // another top-level folder ('add').
+  let folderPickerMode = 'workdir';
   // The folder the last successful listing showed, and the folder a
   // "Select Folder" click is waiting to have listed first: only a
   // folder the daemon has actually listed can be picked, so a typo in
@@ -6054,7 +6824,7 @@
     overlay
       .querySelector('.folder-picker-select')
       .addEventListener('click', () => {
-        selectPickedFolder(input.value.trim() || folderPickerDir);
+        selectPickedFolder(pickerPathValue(input) || folderPickerDir);
       });
     overlay.querySelector('.folder-picker-up').addEventListener('click', () => {
       folderPickerNavigate(parentFolderPath(folderPickerDir));
@@ -6062,7 +6832,7 @@
     input.addEventListener('keydown', e => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        folderPickerNavigate(input.value.trim());
+        folderPickerNavigate(pickerPathValue(input));
       }
     });
     // Like a file dialog: a click highlights a folder (and puts its
@@ -6106,17 +6876,27 @@
   }
 
   /**
+   * The path typed into the picker's box: '' when blank, otherwise as
+   * typed -- a folder name may legally end (or start) with a space, so
+   * whitespace is only used to tell an empty box from a filled one.
+   */
+  function pickerPathValue(input) {
+    const raw = input.value;
+    return raw.trim() ? raw : '';
+  }
+
+  /**
    * The parent of folder *path* ('/' stays '/', a Windows drive root
    * such as 'C:\\' stays itself rather than becoming the drive-relative
    * 'C').
    */
   function parentFolderPath(path) {
-    const cur = String(path || '').replace(/[\\/]+$/, '');
-    if (!cur) return '/';
+    const cur = normalizeRootPath(path);
+    if (!cur || cur === '/') return '/';
     if (/^[A-Za-z]:$/.test(cur)) return cur + '\\';
     // A UNC share (two leading backslashes, server, share) is a root.
     if (/^\\\\[^\\/]+[\\/][^\\/]+$/.test(cur)) return cur + '\\';
-    const i = Math.max(cur.lastIndexOf('/'), cur.lastIndexOf('\\'));
+    const i = lastSeparatorIndex(cur);
     const parent = i > 0 ? cur.slice(0, i) : cur.slice(0, 1);
     return /^[A-Za-z]:$/.test(parent) ? parent + '\\' : parent;
   }
@@ -6141,11 +6921,21 @@
       '.folder-picker-item[data-path="' + cssEscape(dir) + '"]',
     );
     if (dir === folderPickerListed || listedChild) {
-      applyPickedWorkDir(dir);
+      applyPickedFolder(dir);
       return;
     }
     folderPickerNavigate(dir);
     folderPickerSelectPending = folderPickerSeq;
+  }
+
+  /** Hand a verified pick to the action the dialog was opened for. */
+  function applyPickedFolder(dir) {
+    if (folderPickerMode === 'add') {
+      closeFolderPicker();
+      addExplorerRoot(dir);
+      return;
+    }
+    applyPickedWorkDir(dir);
   }
 
   function cssEscape(value) {
@@ -6154,13 +6944,28 @@
     return String(value).replace(/["\\]/g, '\\$&');
   }
 
-  function openFolderPicker() {
+  /**
+   * Open the folder dialog.  *mode* is 'add' for "Add Folder to
+   * Explorer..." (the pick becomes an extra top-level folder), anything
+   * else for "Open Folder" (the pick becomes the working directory).
+   */
+  function openFolderPicker(mode) {
     const el = ensureFolderPicker();
+    folderPickerMode = mode === 'add' ? 'add' : 'workdir';
+    el.querySelector('#folder-picker-title').textContent =
+      folderPickerMode === 'add'
+        ? 'Add Folder to Explorer'
+        : 'Open Folder as Working Directory';
+    el.querySelector('.folder-picker-select').textContent =
+      folderPickerMode === 'add' ? 'Add Folder' : 'Select Folder';
     el.hidden = false;
     folderPickerListed = '';
     folderPickerNavigate(sidebarWorkDir() || explorerRoot || '/');
     const input = el.querySelector('.folder-picker-input');
-    window.setTimeout(() => input.focus(), 0);
+    window.setTimeout(() => {
+      // The dialog may already be gone (a pick made at once).
+      if (!el.hidden) input.focus();
+    }, 0);
   }
 
   function closeFolderPicker() {
@@ -6196,7 +7001,7 @@
     list.textContent = '';
     // The path box follows the listing (git's canonical spelling of
     // the folder) unless the user has typed something else meanwhile.
-    const untouched = input.value.trim() === folderPickerDir;
+    const untouched = pickerPathValue(input) === folderPickerDir;
     if (ev.error) {
       note.textContent = String(ev.error);
       folderPickerSelectPending = 0;
@@ -6210,7 +7015,7 @@
       // path, so it is a real folder -- pick it (its canonical
       // spelling) now.
       folderPickerSelectPending = 0;
-      applyPickedWorkDir(folderPickerDir);
+      applyPickedFolder(folderPickerDir);
       return;
     }
     const dirs = (Array.isArray(ev.entries) ? ev.entries : []).filter(en => {
@@ -6291,7 +7096,11 @@
     }
     const explorerPick = document.getElementById('explorer-pick-folder');
     if (explorerPick) {
-      explorerPick.addEventListener('click', openFolderPicker);
+      explorerPick.addEventListener('click', () => openFolderPicker('workdir'));
+    }
+    const explorerAdd = document.getElementById('explorer-add-folder');
+    if (explorerAdd) {
+      explorerAdd.addEventListener('click', () => openFolderPicker('add'));
     }
     const scmRefresh = document.getElementById('scm-refresh');
     if (scmRefresh) {
@@ -6305,6 +7114,8 @@
     }
     if (explorerTree) {
       explorerTree.addEventListener('click', e => {
+        // The buttons on a top-level folder row act on their own.
+        if (e.target.closest('.explorer-root-actions')) return;
         const row = e.target.closest('.explorer-row');
         if (row && !row.classList.contains('is-editing'))
           onExplorerActivate(row);
@@ -6528,6 +7339,10 @@
   function updateMetaTaskDetails(s) {
     metaShownSettings = s && typeof s === 'object' ? s : null;
     s = metaShownSettings;
+    // The Task Info view's rows show the ACTIVE chat panel's relayed
+    // values; its own (idle, taskless) settings must not overwrite
+    // them — e.g. a configData repaint landing between two relays.
+    if (META_PANEL_MODE) return;
     if (!metaWorkdirEl && !metaMaxBudgetEl) return;
     // A filesystem root is never a real workspace (replayed historical
     // tasks are a known source of poisoned root paths — see
@@ -10327,20 +11142,33 @@
     currentTaskMetrics = {tokens: '', budget: '', steps: ''};
   }
 
+  // The composer's deferred focus retries (a tab activation focuses
+  // the input again at 100 and 300 ms, when host-side focus churn has
+  // settled).  They are dropped when something else claims the
+  // keyboard meanwhile (the Explorer after a top-level folder action).
   function focusInputWithRetry() {
+    cancelInputFocusRetry();
     inp.focus();
-    setTimeout(() => {
-      inp.focus();
-    }, 100);
-    setTimeout(() => {
-      inp.focus();
-    }, 300);
+    inputFocusRetryTimers = [100, 300].map(ms =>
+      setTimeout(() => {
+        inp.focus();
+      }, ms),
+    );
+  }
+
+  function cancelInputFocusRetry() {
+    inputFocusRetryTimers.forEach(clearTimeout);
+    inputFocusRetryTimers = [];
   }
 
   function resetHistoryPagination() {
     historyOffset = 0;
     historyHasMore = true;
-    historyLoading = false;
+    // Every caller sends its offset-0 request right after this reset:
+    // marking the list as loading until that reply lands keeps a
+    // bottom-scroll from firing a second, overlapping request of the
+    // same generation (whose late reply would re-order pagination).
+    historyLoading = true;
     historyGeneration++;
   }
 
@@ -10608,6 +11436,10 @@
     const detail = event ? event.detail : null;
     const tabId = detail ? detail.tabId : null;
     if (tabId === undefined || tabId === null || tabId === '') return true;
+    // An utterance recorded while a content tab was on screen names
+    // the owning CHAT tab (kissVoiceOwner resolves the owner), so the
+    // owner's id counts as "this screen" too while its file is up.
+    if (String(tabId) === String(chatTargetTabId())) return true;
     return isForActiveTab({tabId: tabId});
   }
 
@@ -10620,7 +11452,10 @@
    * isForActiveTab() applies.
    */
   window.kissVoiceOwner = function () {
-    return {tabId: activeTabId, taskId: tabTaskId(getTab(activeTabId))};
+    // Voice acts on the conversation, so a content tab hands the
+    // utterance to the chat tab whose work produced it.
+    const id = chatTargetTabId();
+    return {tabId: id, taskId: tabTaskId(getTab(id))};
   };
   // Retained for callers that only need the visible tab id.
   window.kissActiveTabId = function () {
@@ -10824,12 +11659,33 @@
           if (!ev.running) clearAgentModel(evTab.id);
           // modelpick-coverage:end
         }
+        // A visible CONTENT tab has no task of its own: the timer, the
+        // spinner and the task-info panel keep describing the chat tab
+        // the panel was lent to (metaInfoChatTabId). A status flip of
+        // THAT tab therefore applies here as if it were the active one
+        // — otherwise a task ending behind a file view would leave the
+        // clock ticking and the mirrored tmp/PROGRESS.md stale until
+        // the user switched back.
+        const activeIsContent = (() => {
+          const act = getTab(activeTabId);
+          return Boolean(act && act.isContentTab);
+        })();
+        const mirrorsActive =
+          ev.tabId !== undefined &&
+          ev.tabId !== activeTabId &&
+          activeIsContent &&
+          evTab !== null &&
+          metaInfoChatTabId() === evTab.id;
         if (ev.running && typeof ev.startTs === 'number' && ev.startTs > 0) {
           if (evTab) {
             evTab.t0 = ev.startTs;
             evTab.endTs = 0;
           }
-          if (ev.tabId === undefined || ev.tabId === activeTabId) {
+          if (
+            ev.tabId === undefined ||
+            ev.tabId === activeTabId ||
+            mirrorsActive
+          ) {
             t0 = ev.startTs;
             endTs = 0;
           }
@@ -10842,6 +11698,11 @@
               inputContainer.style.display = 'none';
           }
           if (ev.running) applyChevronState(currentTaskName);
+        } else if (mirrorsActive) {
+          // Only the shared surface state (timer, spinner, buttons,
+          // task-info sync); the transcript-shaped work (chevrons,
+          // sub-agent composer) waits for the real tab switch.
+          setRunningState(ev.running);
         }
         renderTabBar();
         refreshHistory();
@@ -10931,6 +11792,11 @@
         break;
       case 'infoFile':
         renderInfoFileEvent(ev);
+        break;
+      case 'metaState':
+        // The host relays the ACTIVE chat editor panel's task-info
+        // values; only the Task Info view renders them.
+        if (META_PANEL_MODE) renderMetaState(ev);
         break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
@@ -11110,6 +11976,46 @@
             taskId: ev.taskId,
             tabId: stRoot.id,
           });
+        }
+        break;
+      }
+      // The primary-sidebar history panel clicked a task while the
+      // extension runs in SIDEBAR mode: open the chat here, exactly
+      // like the in-webview history rows do — switch to the chat's
+      // tab, resume the chat in a fresh tab, or (no chat id) show the
+      // task text read-only in a fresh tab.
+      case 'openChatFromHistory': {
+        if (EDITOR_TAB_MODE) break;
+        const chatId = typeof ev.chatId === 'string' ? ev.chatId : '';
+        const taskText = typeof ev.title === 'string' ? ev.title : '';
+        const hasTaskId =
+          ev.taskId !== undefined && ev.taskId !== null && ev.taskId !== '';
+        const ocTab = chatId ? getTabByBackendChatId(chatId) : null;
+        if (ocTab && !isTabHidden(ocTab)) {
+          switchToTab(ocTab.id);
+          if (
+            !ocTab.isContentTab &&
+            !scrollChatToTask(ev.taskId) &&
+            hasTaskId
+          ) {
+            api.resumeSession({
+              id: chatId,
+              taskId: ev.taskId,
+              tabId: ocTab.id,
+            });
+          }
+        } else if (chatId) {
+          createNewTab();
+          setTaskText(taskText);
+          api.resumeSession({
+            id: chatId,
+            taskId: ev.taskId,
+            tabId: activeTabId,
+          });
+        } else {
+          createNewTab();
+          setTaskText(taskText);
+          focusInputWithRetry();
         }
         break;
       }
@@ -11454,10 +12360,14 @@
         }
         break;
 
-      case 'triggerStop':
-        markStopping(activeTabId, true);
-        api.stop({tabId: activeTabId});
+      case 'triggerStop': {
+        // The host command stops the conversation on screen; on a
+        // content tab that is the owning chat, same as the button.
+        const stopTarget = chatTargetTabId();
+        markStopping(stopTarget, true);
+        api.stop({tabId: stopTarget});
         break;
+      }
       case 'appendToInput':
         if (ev.text) {
           inp.value = inp.value ? inp.value + '\n' + ev.text : ev.text;
@@ -12023,8 +12933,12 @@
    * minutes in the post-mortem `stop_button_delay_2026-08-05.html`.
    */
   function renderStopButton() {
-    const tab = getTab(activeTabId);
-    const stopping = !!(tab && tab.isStopping) && isRunning;
+    // On a content tab the button acts on (and pulses for) the OWNING
+    // chat; on a chat tab the target IS the active tab, whose running
+    // state the module flag mirrors.
+    const tab = getTab(chatTargetTabId());
+    const running = tab && tab.id !== activeTabId ? !!tab.isRunning : isRunning;
+    const stopping = !!(tab && tab.isStopping) && running;
     stopBtn.classList.toggle('stopping', stopping);
     stopBtn.setAttribute(
       'data-tooltip',
@@ -12041,7 +12955,12 @@
   function markStopping(tabId, stopping) {
     const tab = getTab(tabId);
     if (tab) tab.isStopping = stopping;
-    if (tabId === activeTabId) renderStopButton();
+    // chatTargetTabId is the active tab itself on a chat tab, and the
+    // owning chat on a content tab — whose pending stop the visible
+    // button is showing.
+    if (tabId === activeTabId || tabId === chatTargetTabId()) {
+      renderStopButton();
+    }
   }
 
   /**
@@ -12070,6 +12989,18 @@
     if (!running) flushStreamTailSweep();
     // streamtail-coverage:end
     isRunning = running;
+    // The module-level flag IS the active tab's running state (every
+    // caller passes the active tab's), so keep the tab's own record in
+    // step: a `status` event without a tabId (single-chat flows) would
+    // otherwise flip only this flag and leave the tab marked idle —
+    // and the info-file poll, which trusts the POLLED tab's flag
+    // (requestInfoFile), silenced for the whole task.
+    {
+      const activeTab = getTab(activeTabId);
+      if (activeTab && !activeTab.isContentTab) {
+        setTabRunning(activeTab, running);
+      }
+    }
     syncMetaInfoRunning(running);
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
@@ -13670,12 +14601,33 @@
       e.preventDefault();
     });
     stopBtn.addEventListener('click', () => {
-      markStopping(activeTabId, true);
-      api.stop({tabId: activeTabId});
+      // On a content tab the stop must land on the owning chat's run,
+      // not on the file view's id.
+      const target = chatTargetTabId();
+      markStopping(target, true);
+      api.stop({tabId: target});
     });
     // share-coverage:start
     if (shareBtn) {
       shareBtn.addEventListener('click', () => {
+        // A content tab shares the chat that produced it — never the
+        // file view's own id, whose transcript is empty. The export
+        // splices the LIVE screen into the chat's persisted tasks, so
+        // the owner chat comes back on screen first and the whole
+        // existing flow (reply routing included) applies to it.
+        const activeNow = getTab(activeTabId);
+        if (activeNow && activeNow.isContentTab) {
+          const target = chatTargetTabId();
+          if (target !== activeTabId) switchToTab(target);
+          const after = getTab(activeTabId);
+          if (after && after.isContentTab) {
+            // The owner is gone (or hidden in another workspace):
+            // there is no chat here to export.
+            addError('Share failed: this tab has no chat to share');
+            flashShareBtn(false);
+            return;
+          }
+        }
         const tab = getTab(activeTabId);
         if (tab && tab.isSubagentTab) {
           // A sub-agent tab shows one fan-out worker's transcript,
@@ -14034,8 +14986,40 @@
     }
     sidebarClose.addEventListener('click', () => closeSidebar(true));
     sidebarOverlay.addEventListener('click', closeSidebar);
+    // The mobile task-info drawer (remote < 900px): toggled from the
+    // tab bar, dismissed by its close button or the backdrop.
+    if (metaDrawerBtn) {
+      metaDrawerBtn.addEventListener('click', () => {
+        setMetaDrawerOpen(!(metaPanel && metaPanel.classList.contains('open')));
+      });
+    }
+    if (metaCloseBtn) {
+      metaCloseBtn.addEventListener('click', () => setMetaDrawerOpen(false));
+    }
+    if (metaOverlay) {
+      metaOverlay.addEventListener('click', () => setMetaDrawerOpen(false));
+    }
+    if (metaPanel && metaDrawerBtn) {
+      // Escape dismisses the open mobile drawer like any dialog; the
+      // docked desktop panel never carries `open`, so this never fires
+      // there.
+      document.addEventListener('keydown', e => {
+        if (e.key !== 'Escape') return;
+        if (!metaPanel.classList.contains('open')) return;
+        if (document.body.classList.contains('remote-desktop')) return;
+        e.preventDefault();
+        setMetaDrawerOpen(false);
+      });
+    }
     setupActivityBar();
     applyRemoteTheme(getSavedRemoteTheme());
+    if (SIDEBAR_CHAT_MODE) {
+      // The sidebar chat's task-info drawer starts closed AND inert:
+      // its off-screen close button must not sit in the keyboard tab
+      // order before the drawer was ever opened. (The remote page does
+      // the same below, in applyRemoteDesktop.)
+      setMetaDrawerOpen(false);
+    }
     if (
       document.body.classList.contains('remote-chat') &&
       typeof window.matchMedia === 'function'
@@ -14044,6 +15028,9 @@
       const applyRemoteDesktop = () => {
         if (desktopMq.matches) {
           document.body.classList.add('remote-desktop');
+          // Desktop docks the task-info panel permanently; the mobile
+          // drawer state (and its backdrop) must not linger under it.
+          setMetaDrawerOpen(false);
           if (!sidebar.classList.contains('open')) {
             sidebar.classList.add('open');
             resetHistoryPagination();
@@ -14058,6 +15045,10 @@
           document.body.classList.remove('remote-desktop');
           sidebar.classList.remove('open');
           sidebarOverlay.classList.remove('open');
+          // The task-info panel is a drawer again: it starts closed
+          // (and inert, so its off-screen close button leaves the tab
+          // order — setMetaDrawerOpen re-checks the body class).
+          setMetaDrawerOpen(false);
         }
         syncMetaInfoPolling();
       };
@@ -14352,6 +15343,11 @@
     }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
+      // A changed query is a fresh search view: collapse choices made
+      // inside the previous one no longer apply, and the panels flip
+      // to the right default NOW (the refetch below may be answered by
+      // the identical-refresh fast path, which rebuilds nothing).
+      reapplyAllHistoryGroupCollapse(true);
       api.getHistory({
         query: historySearch.value,
         generation: historyGeneration,
@@ -14364,6 +15360,7 @@
         historySearch.value = '';
         if (historySearchClear) historySearchClear.style.display = 'none';
         resetHistoryPagination();
+        reapplyAllHistoryGroupCollapse(true);
         api.getHistory({query: '', generation: historyGeneration});
         historySearch.focus();
       });
@@ -14564,12 +15561,26 @@
     // tableak-coverage:start
     window.addEventListener('kiss-voice-submit', event => {
       if (!isFromSpeechTab(event)) return;
+      // A voice submit landing while a content tab is up belongs to
+      // the owning chat: bring it back on screen so sendMessage()
+      // posts under the conversation, never under the file view. The
+      // dictated composer text rides along — the switch would restore
+      // the chat's own saved input over it.
+      const active = getTab(activeTabId);
+      if (active && active.isContentTab) {
+        const spoken = inp.value;
+        const target = chatTargetTabId();
+        if (target !== activeTabId) switchToTab(target);
+        const after = getTab(activeTabId);
+        if (after && after.isContentTab) return;
+        if (spoken.trim()) inp.value = spoken;
+      }
       sendMessage();
     });
 
     window.addEventListener('kiss-voice-answer', event => {
       if (!isFromSpeechTab(event)) return;
-      const tab = getTab(activeTabId);
+      const tab = getTab(chatTargetTabId());
       if (tab && tab.askPendingQuestion !== null) submitAskForTab(tab);
     });
     // tableak-coverage:end
@@ -15488,15 +16499,723 @@
     return 'hsl(' + hue + ', 55%, 75%)';
   }
 
+  // ---- History grouping: one block per chat, day separators ----
+  //
+  // The daemon lists tasks newest first, so the first task seen for a
+  // chat is its latest one and the chats come out ordered by their
+  // latest task; later pages only add older tasks to existing blocks or
+  // open blocks for older chats.  A separator ("Today", "Yesterday", or
+  // the date) precedes the first chat of each day, by local time.
+  const historyChatGroups = new Map(); // chat id -> .history-chat-group
+  let historyLastDay = '';
+  let historyMidnightTimer = null;
+
+  function historyDayKey(d) {
+    return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+  }
+
+  /**
+   * A task's timestamp (epoch seconds) as a finite number, or NaN when
+   * the row has none.  Zero is a real instant (1970), as the date
+   * filter also treats it, not a missing value.
+   */
+  function historyTimestamp(session) {
+    const raw = session.timestamp;
+    if (raw === undefined || raw === null || raw === '') return NaN;
+    const ts = Number(raw);
+    // A number beyond what Date can represent is no date either.
+    return isFinite(ts) && !isNaN(new Date(ts * 1000).getTime()) ? ts : NaN;
+  }
+
+  /** The local-day bucket of *tsSec*: a date key, or 'undated'. */
+  function historyDayBucket(tsSec) {
+    return isFinite(tsSec) ? historyDayKey(new Date(tsSec * 1000)) : 'undated';
+  }
+
+  /** "Today", "Yesterday" or the date of the local day *tsSec* falls on. */
+  function historyDayLabel(tsSec) {
+    const d = new Date(tsSec * 1000);
+    if (!isFinite(tsSec) || isNaN(d.getTime())) return 'Undated';
+    const now = new Date();
+    const key = historyDayKey(d);
+    if (key === historyDayKey(now)) return 'Today';
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (key === historyDayKey(yesterday)) return 'Yesterday';
+    const opts = {weekday: 'short', month: 'short', day: 'numeric'};
+    if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString(undefined, opts);
+  }
+
+  /**
+   * The block a history row belongs to: the existing block of its chat,
+   * else a new one appended at the end (after a new day separator when
+   * the chat's latest task falls on an earlier day than the last block).
+   */
+  // A user's explicit expand/collapse choices, by chat id, so the
+  // choice survives the constant backend-driven re-renders. Groups of
+  // rows WITHOUT a chat id remember their choice on the element only.
+  const historyChatCollapseOverrides = new Map(); // chat id -> collapsed
+  // Folds made INSIDE the current search, by chat id: they survive the
+  // constant changed-data rebuilds while the query stands, and are
+  // dropped as one when the search text changes.
+  const historySearchCollapseOverrides = new Map(); // chat id -> collapsed
+
+  /**
+   * Whether *group* renders collapsed: the user's explicit choice when
+   * there is one, otherwise collapsed unless a task of the chat is
+   * running — or a history search is active, whose matches must not
+   * hide behind closed headers.
+   */
+  function historyGroupCollapsed(group) {
+    // An active search overrides even the user's saved choice: its
+    // matches must not hide behind a header collapsed BEFORE the
+    // search. A collapse made DURING the search is honoured (kept on
+    // the element only, dropped when the search text changes).
+    if (historySearchActive()) return group._kissSearchCollapsed === true;
+    if (group._kissCollapsed !== undefined) return group._kissCollapsed;
+    return group.dataset.hasRunning !== '1';
+  }
+
+  /** Whether a history search is being shown right now. */
+  function historySearchActive() {
+    return !!(historySearch && historySearch.value.trim());
+  }
+
+  /**
+   * Repaint every chat panel's collapsed state. The rebuild paths do
+   * this per group as they create it; the identical-refresh fast path
+   * and the search listeners (whose results may equal what is already
+   * on screen) call this so entering or leaving a search still swaps
+   * between search-expanded and default-collapsed states.
+   */
+  function reapplyAllHistoryGroupCollapse(dropSearchChoices) {
+    if (dropSearchChoices) historySearchCollapseOverrides.clear();
+    historyList
+      .querySelectorAll(':scope > .history-chat-group')
+      .forEach(group => {
+        if (dropSearchChoices) delete group._kissSearchCollapsed;
+        applyHistoryGroupCollapsed(group);
+      });
+  }
+
+  /** Repaint *group*'s collapsed class and its header's ARIA state. */
+  function applyHistoryGroupCollapsed(group) {
+    const collapsed = historyGroupCollapsed(group);
+    group.classList.toggle('collapsed', collapsed);
+    const btn = group.querySelector(':scope > .history-chat-header');
+    if (btn) {
+      btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      btn.dataset.tooltip = collapsed ? 'Expand chat' : 'Collapse chat';
+    }
+  }
+
+  /**
+   * Keep *group*'s header naming the chat's FIRST task. The daemon
+   * stamps every row with `chat_first_task`; without it (an older
+   * daemon) the header follows the oldest row loaded so far — rows
+   * arrive newest first, so each of the chat's rows is older than the
+   * one before.
+   */
+  function updateHistoryGroupHeader(group, session) {
+    const titleEl = group.querySelector(
+      ':scope > .history-chat-header .history-chat-title',
+    );
+    if (!titleEl) return;
+    const first =
+      typeof session.chat_first_task === 'string'
+        ? session.chat_first_task
+        : '';
+    if (first) {
+      group.dataset.firstFromServer = '1';
+    } else if (group.dataset.firstFromServer === '1') {
+      return;
+    }
+    const text = first || session.preview || session.title || 'Untitled';
+    if (titleEl.textContent !== text) titleEl.textContent = text;
+    const btn = group.querySelector(':scope > .history-chat-header');
+    if (btn && btn.title !== text) btn.title = text;
+  }
+
+  /** Build the collapsible chat panel's clickable header. */
+  function historyGroupHeader(group, chatId) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'history-chat-header';
+    // No fixed aria-label: the first-task title span IS the button's
+    // accessible name, so screen readers can tell the chats apart
+    // (aria-expanded carries the toggle state).
+    btn.innerHTML =
+      '<svg class="history-chat-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
+    const titleEl = document.createElement('span');
+    titleEl.className = 'history-chat-title';
+    btn.appendChild(titleEl);
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      const collapsed = !historyGroupCollapsed(group);
+      if (historySearchActive()) {
+        // A toggle inside a search is about the search view only; the
+        // chat's remembered choice is what the user set outside it.
+        group._kissSearchCollapsed = collapsed;
+        if (chatId) historySearchCollapseOverrides.set(chatId, collapsed);
+      } else {
+        group._kissCollapsed = collapsed;
+        if (chatId) historyChatCollapseOverrides.set(chatId, collapsed);
+      }
+      applyHistoryGroupCollapsed(group);
+    });
+    return btn;
+  }
+
+  function historyGroupFor(session) {
+    const chatId = typeof session.id === 'string' ? session.id : '';
+    const existing = chatId ? historyChatGroups.get(chatId) : null;
+    if (existing) {
+      updateHistoryGroupHeader(existing, session);
+      return existing;
+    }
+    const ts = historyTimestamp(session);
+    const dayKey = historyDayBucket(ts);
+    if (dayKey !== historyLastDay) {
+      historyLastDay = dayKey;
+      historyList.appendChild(historyDaySeparator(ts));
+      if (!historyMidnightTimer) scheduleHistoryMidnightRelabel(true);
+    }
+    const group = document.createElement('div');
+    group.className = 'history-chat-group';
+    group.setAttribute('role', 'group');
+    group.dataset.chatId = chatId;
+    // The chat's latest task time decides its day bucket.
+    group.dataset.ts = String(ts);
+    group.appendChild(historyGroupHeader(group, chatId));
+    const body = document.createElement('div');
+    body.className = 'history-chat-body';
+    group.appendChild(body);
+    if (chatId && historyChatCollapseOverrides.has(chatId)) {
+      group._kissCollapsed = historyChatCollapseOverrides.get(chatId);
+    }
+    // A fold made inside the CURRENT search comes back after the
+    // changed-data rebuilds a search keeps triggering (tasks_updated).
+    if (chatId && historySearchCollapseOverrides.has(chatId)) {
+      group._kissSearchCollapsed = historySearchCollapseOverrides.get(chatId);
+    }
+    updateHistoryGroupHeader(group, session);
+    applyHistoryGroupCollapsed(group);
+    historyList.appendChild(group);
+    if (chatId) historyChatGroups.set(chatId, group);
+    return group;
+  }
+
+  /** Where a chat panel's task rows live: its body container. */
+  function historyGroupBody(group) {
+    return group.querySelector(':scope > .history-chat-body') || group;
+  }
+
+  function historyDaySeparator(ts) {
+    const sep = document.createElement('div');
+    sep.className = 'history-day-sep';
+    sep.setAttribute('role', 'separator');
+    sep.dataset.day = historyDayBucket(ts);
+    sep.dataset.ts = String(ts);
+    sep.textContent = historyDayLabel(ts);
+    return sep;
+  }
+
+  /**
+   * Recompute every separator's label: "Today" turns into "Yesterday"
+   * at local midnight, and a machine woken after a sleep may find the
+   * day (or the time zone) changed.  Runs at each midnight while
+   * separators are on screen, and whenever the page becomes visible
+   * again.
+   */
+  function relabelHistoryDaySeparators() {
+    // Separators are rebuilt from the chat blocks' own timestamps: a
+    // time-zone change can move a block to another local day, so the
+    // partition may change, not just the words.
+    historyList.querySelectorAll('.history-day-sep').forEach(sep => {
+      sep.remove();
+    });
+    const groups = historyList.querySelectorAll(':scope > .history-chat-group');
+    let lastDay = '';
+    groups.forEach(group => {
+      const ts = Number(group.dataset.ts);
+      const dayKey = historyDayBucket(ts);
+      if (dayKey !== lastDay) {
+        lastDay = dayKey;
+        historyList.insertBefore(historyDaySeparator(ts), group);
+      }
+    });
+    historyLastDay = lastDay;
+    if (groups.length) applyHistoryFilterVisibility();
+    scheduleHistoryMidnightRelabel(groups.length > 0);
+  }
+
+  /**
+   * Arm (or, with *armed* false, drop) the timer that relabels the
+   * separators one second past the coming local midnight.  It only
+   * runs while there are separators to relabel.
+   */
+  function scheduleHistoryMidnightRelabel(armed) {
+    if (historyMidnightTimer) clearTimeout(historyMidnightTimer);
+    historyMidnightTimer = null;
+    if (!armed) return;
+    const now = new Date();
+    const next = new Date(now);
+    next.setHours(24, 0, 1, 0);
+    historyMidnightTimer = setTimeout(
+      relabelHistoryDaySeparators,
+      Math.max(1000, next.getTime() - now.getTime()),
+    );
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) relabelHistoryDaySeparators();
+  });
+
+  // Mouse events cover pointing devices in every environment; pointer
+  // events additionally cover touch, where the compatibility mouse
+  // events only arrive AFTER the finger lifts, i.e. too late to guard
+  // the press.  Both feed the same held flag.
+  historyList.addEventListener('mousedown', () => {
+    historyMouseHeld = true;
+    historyLastPressTs = Date.now();
+  });
+  historyList.addEventListener('pointerdown', e => {
+    historyActivePointers.set(e.pointerId, ++historyPointerEpoch);
+    historyLastPressTs = Date.now();
+  });
+  // Keyboard activation is a press too: a native button focused in the
+  // list activates on Space KEYUP (Enter clicks on keydown), so a
+  // rebuild landing between keydown and keyup would detach the button
+  // and swallow the activation exactly like a swallowed mouse click.
+  historyList.addEventListener('keydown', e => {
+    if (e.key === ' ' || e.key === 'Enter') {
+      historyHeldKeys.add(e.key);
+      historyLastPressTs = Date.now();
+    }
+  });
+  window.addEventListener('keyup', e => {
+    if (e.key === ' ' || e.key === 'Enter') {
+      historyHeldKeys.delete(e.key);
+      historyMaybeApplyPending();
+    }
+  });
+  // A hidden page cannot hold a press, but hiding it mid-press can eat
+  // the release event: drop the latches so the parked page can land.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      historyMouseHeld = false;
+      historyHeldKeys.clear();
+      historyActivePointers.clear();
+      historyMaybeApplyPending();
+    }
+  });
+
+  function historyPressHeld() {
+    return (
+      historyMouseHeld ||
+      historyHeldKeys.size > 0 ||
+      historyActivePointers.size > 0
+    );
+  }
+
+  /** Drop the parked page's stale-press safety timer. */
+  function clearHistoryParkSafety() {
+    if (historyParkSafetyTimer) clearTimeout(historyParkSafetyTimer);
+    historyParkSafetyTimer = null;
+  }
+
+  /**
+   * Stale-press safety release: a press whose release event never
+   * arrived must not park the panel forever.  Latches that have been
+   * held for the full bound are dropped and the parked page lands; a
+   * younger press (its release will do the applying) only re-arms the
+   * timer for its own remainder, so a real click is never swallowed by
+   * an older press's timer.
+   */
+  function historyParkSafetyFire() {
+    historyParkSafetyTimer = null;
+    if (!historyPendingRender) return;
+    const idle = Date.now() - historyLastPressTs;
+    if (idle < 5000) {
+      historyParkSafetyTimer = setTimeout(historyParkSafetyFire, 5000 - idle);
+      return;
+    }
+    historyMouseHeld = false;
+    historyHeldKeys.clear();
+    historyActivePointers.clear();
+    applyHistoryPendingRender();
+  }
+
+  /** Apply the newest deferred history page once the press's click is done. */
+  function applyHistoryPendingRender() {
+    const pending = historyPendingRender;
+    historyPendingRender = null;
+    clearHistoryParkSafety();
+    if (!pending) return;
+    renderHistory(pending.sessions, 0, pending.generation);
+  }
+
+  function historyMaybeApplyPending() {
+    // The browser dispatches `click` synchronously after `mouseup` /
+    // the tap's compatibility events; the deferred rebuild must land
+    // after it, hence the macrotask hop.
+    if (!historyPressHeld() && historyPendingRender) {
+      setTimeout(applyHistoryPendingRender, 0);
+    }
+  }
+
+  window.addEventListener('mouseup', () => {
+    historyMouseHeld = false;
+    historyMaybeApplyPending();
+  });
+  window.addEventListener('pointerup', e => {
+    if (e.pointerType === 'touch') {
+      // A tap's compatibility mousedown/mouseup/click are dispatched
+      // AFTER pointerup; applying the parked page in that gap would
+      // re-target them at whatever row lands under the finger.  Hold
+      // the press through a short grace period instead.
+      const id = e.pointerId;
+      const token = historyActivePointers.get(id);
+      setTimeout(() => {
+        // Only release the contact this timer was armed for: a newer
+        // touch that reused the pointer ID registered a fresh epoch
+        // and stays held until its own release.
+        if (historyActivePointers.get(id) !== token) return;
+        historyActivePointers.delete(id);
+        historyMaybeApplyPending();
+      }, 300);
+      return;
+    }
+    historyActivePointers.delete(e.pointerId);
+    historyMaybeApplyPending();
+  });
+  window.addEventListener('pointercancel', e => {
+    // A cancelled press (touch scroll took over, a drag started) will
+    // never produce a click — and a drag can swallow the mouseup, so
+    // the mouse flag must be released here too.
+    historyActivePointers.delete(e.pointerId);
+    historyMouseHeld = false;
+    historyMaybeApplyPending();
+  });
+  window.addEventListener('blur', () => {
+    historyMouseHeld = false;
+    historyHeldKeys.clear();
+    historyActivePointers.clear();
+    historyMaybeApplyPending();
+  });
+
+  /** Stable identity of a history row (its chat and task). */
+  function historySessionKey(s) {
+    const taskId =
+      s.task_id === undefined || s.task_id === null ? '' : String(s.task_id);
+    return String(s.id || '') + '\u241f' + taskId;
+  }
+
+  /**
+   * The metrics line of a history row: steps, tokens, cost, a duration
+   * (ticking while the task runs or lacks a recorded end), and the
+   * task's localized timestamp.  Shared by the row builder and the
+   * identical-refresh fast path, which refreshes this text in place so
+   * kept rows never show a stale duration.
+   */
+  function historyMetricsText(s) {
+    const tokens = Number(s.tokens || 0);
+    const cost = Number(s.cost || 0);
+    const steps = Number(s.steps || 0);
+    const ts = Number(s.timestamp || 0);
+    let when = '';
+    if (ts > 0) {
+      const d = new Date(ts * 1000);
+      if (!isNaN(d.getTime())) {
+        when =
+          ' • ' +
+          d.toLocaleString(undefined, {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+      }
+    }
+    const startTsMs = Number(s.startTs || 0);
+    const endTsMs = Number(s.endTs || 0);
+    let durMs = 0;
+    if (startTsMs > 0) {
+      if (endTsMs > startTsMs) {
+        durMs = endTsMs - startTsMs;
+      } else if (s.is_running || endTsMs === 0) {
+        durMs = Date.now() - startTsMs;
+      }
+    }
+    const dur = durMs > 0 ? ' • ' + formatDurationHms(durMs) : '';
+    return (
+      steps +
+      ' steps • ' +
+      fmtTokens(tokens) +
+      ' tok • ' +
+      fmtCost(cost) +
+      dur +
+      when
+    );
+  }
+
+  /**
+   * Identity of the environment's clock localization: the resolved
+   * locale options (locale, calendar, numbering system and IANA zone —
+   * two zones can share today's offset yet localize historical
+   * timestamps differently, and a locale change re-words them) plus the
+   * current UTC offset.
+   */
+  function historyTzIdentity() {
+    let resolved = '';
+    try {
+      resolved = JSON.stringify(Intl.DateTimeFormat().resolvedOptions());
+    } catch {
+      resolved = '';
+    }
+    // The local calendar day is part of the identity: a wall-clock
+    // correction across midnight must relabel "Today"/"Yesterday", so
+    // an identical refresh on a new local day rebuilds once.
+    const d = new Date();
+    return resolved + ':' + d.getTimezoneOffset() + ':' + d.toDateString();
+  }
+
+  /**
+   * Field-by-field equality of one history session (no serialization:
+   * huge prompt strings are compared directly, and a difference —
+   * typically in the newest row — is found without copying them).
+   */
+  function historySessionRowEqual(a, b) {
+    const ka = Object.keys(a);
+    const kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    for (const k of ka) {
+      const va = a[k];
+      const vb = b[k];
+      if (va === vb) continue;
+      if (
+        typeof va !== 'object' ||
+        typeof vb !== 'object' ||
+        va === null ||
+        vb === null
+      ) {
+        return false;
+      }
+      if (JSON.stringify(va) !== JSON.stringify(vb)) return false;
+    }
+    return true;
+  }
+
+  /** Whether two history pages carry identical data, row by row. */
+  function historySessionsEqual(a, b) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!historySessionRowEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Arm (or advance) the one-shot refetch that makes a pending
+   * favourite overlay's expiry visible even when no broadcast arrives
+   * in the meantime (setFavorite has no acknowledgement).  The timer
+   * always serves the EARLIEST pending deadline: with several toggles
+   * alive, a later row's deadline must not stretch an earlier bound.
+   */
+  function scheduleHistoryFavExpiry(deadline, now) {
+    if (historyFavExpiryTimer && deadline >= historyFavExpiryDeadline) return;
+    if (historyFavExpiryTimer) clearTimeout(historyFavExpiryTimer);
+    historyFavExpiryDeadline = deadline;
+    historyFavExpiryTimer = setTimeout(
+      () => {
+        historyFavExpiryTimer = null;
+        historyFavExpiryDeadline = Infinity;
+        refreshHistory();
+      },
+      Math.max(0, deadline - now),
+    );
+  }
+
+  /**
+   * Overlay optimistic favourite toggles on an incoming page.  An entry
+   * is retired once the daemon's own data agrees with it.
+   */
+  function mergePendingFavorites(sessions) {
+    if (historyPendingFavorites.size === 0) return;
+    const now = Date.now();
+    sessions.forEach(s => {
+      if (s.task_id === undefined || s.task_id === null) return;
+      const key = String(s.task_id);
+      const pending = historyPendingFavorites.get(key);
+      if (!pending) return;
+      // A parked page is merged AGAIN when it finally lands: judge
+      // agreement by the DAEMON's value, stashed before the first
+      // overlay, so the overlay can never acknowledge itself and retire
+      // the entry (cancelling the reconciliation refetch) for a write
+      // that may have failed.
+      const daemonValue = Object.prototype.hasOwnProperty.call(
+        s,
+        '_kissFavDaemon',
+      )
+        ? s._kissFavDaemon
+        : !!s.is_favorite;
+      // The overlay only shields against refetches that predate the
+      // write; setFavorite has no acknowledgement, so after this bound
+      // the daemon's data is authoritative again (it may legitimately
+      // disagree: another client toggled, or the write failed).
+      if (now - pending.ts > 10000 || daemonValue === pending.value) {
+        historyPendingFavorites.delete(key);
+        s.is_favorite = daemonValue;
+        delete s._kissFavDaemon;
+        // The last overlay retired: its reconciliation refetch has
+        // nothing left to show.
+        if (historyPendingFavorites.size === 0 && historyFavExpiryTimer) {
+          clearTimeout(historyFavExpiryTimer);
+          historyFavExpiryTimer = null;
+          historyFavExpiryDeadline = Infinity;
+        }
+        return;
+      }
+      s._kissFavDaemon = daemonValue;
+      s.is_favorite = pending.value;
+      scheduleHistoryFavExpiry(pending.ts + 10000 + 100, now);
+    });
+  }
+
   function renderHistory(sessions, offset, generation) {
     if (generation !== historyGeneration) return;
 
+    mergePendingFavorites(sessions);
     historyLoading = false;
-    const loader = document.getElementById('history-loader');
-    if (loader) loader.remove();
+    // Retire EVERY loader row: resetHistoryPagination() clears
+    // historyLoading while a previous loader is still appended, so a
+    // scroll during the in-flight refresh can add a second one.  The
+    // old offset-0 wipe removed the extras as a side effect; the
+    // identical-refresh fast path below keeps the DOM, so the reply
+    // itself must clear them all.
+    historyList.querySelectorAll('#history-loader').forEach(el => {
+      el.remove();
+    });
 
+    // A later page must extend exactly at the current cursor: a
+    // duplicate or out-of-date reply (two same-generation requests can
+    // overlap when a refresh reset the cursor while a page was in
+    // flight) would duplicate its rows and skip the next page.  The
+    // loading flag was cleared above, so a scroll simply refetches at
+    // the right offset.
+    if (offset !== 0 && offset !== historyOffset) return;
+
+    let focusKey = '';
+    let focusCtrlClass = '';
+    let focusCtrlNth = -1;
+    let focusHeaderChatId = '';
     if (offset === 0) {
+      // A refresh that returns exactly what is already on screen keeps
+      // the existing DOM.  `tasks_updated` broadcasts arrive whenever
+      // ANY task on the daemon persists a result (plus a one-shot nudge
+      // after the ready handshake), so identical refetches are routine;
+      // wiping and rebuilding identical rows would swallow an in-flight
+      // click (mousedown lands on the old row, mouseup on its
+      // replacement, so the click fires on a handler-less ancestor) and
+      // drop keyboard focus.  Kept rows still get their time-derived
+      // metrics text refreshed in place (a running task's duration keeps
+      // ticking).  The fast path only applies while a single page is on
+      // screen (a refetch cannot vouch for loaded later pages) and never
+      // across a time-zone change (row times are localized at build
+      // time).  Everything else rebuilds as before.
+      const tzNow = historyTzIdentity();
+      if (
+        allHistSessions.length === sessions.length &&
+        sessions.length > 0 &&
+        historyRenderedTz === tzNow &&
+        historySessionsEqual(allHistSessions, sessions)
+      ) {
+        allHistSessions.forEach((s, i) => {
+          const row = historyRenderedRows[i];
+          const el = row && row.querySelector('.running-item-metrics');
+          if (!el) return;
+          const text = historyMetricsText(s);
+          if (el.textContent !== text) el.textContent = text;
+        });
+        // This page supersedes any older parked one: the newest data
+        // says the screen is already right.
+        historyPendingRender = null;
+        clearHistoryParkSafety();
+        historyOffset = sessions.length;
+        historyHasMore = sessions.length >= 50;
+        applyHistoryFilterVisibility();
+        // The rows did not change, but the collapse DEFAULT may have:
+        // a search whose results equal the loaded page (and the later
+        // clearing of that search) lands here, and its matches must
+        // still expand — or fold back — accordingly.
+        reapplyAllHistoryGroupCollapse(false);
+        return;
+      }
+      if (historyPressHeld()) {
+        historyPendingRender = {sessions, generation};
+        // Keep pagination parked with the page: a scroll must not
+        // refetch (with the pre-refresh offset state) while the rebuild
+        // this reply asked for has not landed yet.
+        historyLoading = true;
+        // A press whose release event never arrives (the page hidden
+        // mid-press, a drag released outside the webview) must not park
+        // the panel forever: past any real click's duration, drop the
+        // latches and land the parked page.
+        if (!historyParkSafetyTimer) {
+          historyParkSafetyTimer = setTimeout(historyParkSafetyFire, 5000);
+        }
+        return;
+      }
+      historyPendingRender = null;
+      clearHistoryParkSafety();
+      // A keyboard user may sit on a row OR on one of its inline
+      // controls (favourite, copy, collapse, id chips): key the focus
+      // by the containing row, and remember WHICH control so the same
+      // action stays under Space/Enter after the rebuild (the control
+      // is identified by its first class among same-class siblings).
+      const active = document.activeElement;
+      // A focused chat-panel header survives the rebuild too: its
+      // group is found again by chat id after the fresh render.
+      const activeHeader =
+        active && active.closest
+          ? active.closest('#history-list .history-chat-header')
+          : null;
+      if (activeHeader) {
+        const headerGroup = activeHeader.closest('.history-chat-group');
+        focusHeaderChatId = (headerGroup && headerGroup.dataset.chatId) || '';
+      }
+      const activeRow =
+        active && active.closest
+          ? active.closest('#history-list .sidebar-item')
+          : null;
+      const focusIdx = activeRow ? historyRenderedRows.indexOf(activeRow) : -1;
+      if (focusIdx >= 0 && focusIdx < allHistSessions.length) {
+        focusKey = historySessionKey(allHistSessions[focusIdx]);
+        if (active !== activeRow && activeRow.contains(active)) {
+          const cls = active.classList && active.classList[0];
+          if (cls) {
+            focusCtrlClass = cls;
+            focusCtrlNth = Array.prototype.indexOf.call(
+              activeRow.getElementsByClassName(cls),
+              active,
+            );
+          }
+        }
+      }
+      // Offset-0 renders assign the pagination cursor instead of
+      // trusting resetHistoryPagination(): a duplicate offset-0 reply
+      // in the same generation (a scroll racing a deferred rebuild)
+      // must not advance the cursor past what is on screen.
+      historyOffset = 0;
+      historyRenderedTz = tzNow;
+      historyRenderedRows = [];
       allHistSessions = [];
+      historyChatGroups.clear();
+      historyLastDay = '';
+      scheduleHistoryMidnightRelabel(false);
       if (sessions.length === 0) {
         historyList.innerHTML =
           '<div class="sidebar-empty">No conversations yet</div>';
@@ -15539,7 +17258,6 @@
       div.dataset.workDir = s.work_dir || '';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
-      div.style.setProperty('--task-color', chatIdBgColor(String(s.id)));
 
       if (s.is_running) {
         const runningDot = document.createElement('span');
@@ -15596,6 +17314,20 @@
           e.preventDefault();
           const next = !s.is_favorite;
           s.is_favorite = next;
+          // setFavorite has no acknowledgement: shield the optimistic
+          // star from refetches that predate the write (including a
+          // page deferred across this very click), and plan the
+          // reconciliation refetch NOW — if the write fails and nothing
+          // else refreshes the panel, the daemon's value must still
+          // reappear at the bound.
+          if (s.task_id !== undefined && s.task_id !== null) {
+            const ts = Date.now();
+            historyPendingFavorites.set(String(s.task_id), {
+              value: next,
+              ts,
+            });
+            scheduleHistoryFavExpiry(ts + 10000 + 100, ts);
+          }
           applyFavState();
           div.dataset.favorite = next ? '1' : '0';
           applyHistoryFilterVisibility();
@@ -15615,44 +17347,7 @@
 
       const metrics = document.createElement('span');
       metrics.className = 'running-item-metrics';
-      const tokens = Number(s.tokens || 0);
-      const cost = Number(s.cost || 0);
-      const steps = Number(s.steps || 0);
-      const ts = Number(s.timestamp || 0);
-      let when = '';
-      if (ts > 0) {
-        const d = new Date(ts * 1000);
-        if (!isNaN(d.getTime())) {
-          when =
-            ' • ' +
-            d.toLocaleString(undefined, {
-              year: 'numeric',
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-            });
-        }
-      }
-      const startTsMs = Number(s.startTs || 0);
-      const endTsMs = Number(s.endTs || 0);
-      let durMs = 0;
-      if (startTsMs > 0) {
-        if (endTsMs > startTsMs) {
-          durMs = endTsMs - startTsMs;
-        } else if (s.is_running || endTsMs === 0) {
-          durMs = Date.now() - startTsMs;
-        }
-      }
-      const dur = durMs > 0 ? ' • ' + formatDurationHms(durMs) : '';
-      metrics.textContent =
-        steps +
-        ' steps • ' +
-        fmtTokens(tokens) +
-        ' tok • ' +
-        fmtCost(cost) +
-        dur +
-        when;
+      metrics.textContent = historyMetricsText(s);
       info.appendChild(metrics);
 
       const workDir = typeof s.work_dir === 'string' ? s.work_dir : '';
@@ -15776,7 +17471,14 @@
         }
         closeSidebar();
       });
-      historyList.appendChild(div);
+      const group = historyGroupFor(s);
+      historyGroupBody(group).appendChild(div);
+      if (s.is_running && group.dataset.hasRunning !== '1') {
+        // A running task keeps its chat's panel open by default.
+        group.dataset.hasRunning = '1';
+        applyHistoryGroupCollapsed(group);
+      }
+      historyRenderedRows.push(div);
     });
 
     historyOffset += sessions.length;
@@ -15784,6 +17486,28 @@
       historyHasMore = false;
     }
     applyHistoryFilterVisibility();
+    if (focusKey) {
+      // The rebuild detached the focused row; give the keyboard the
+      // fresh row of the same task — or the same inline control on it —
+      // so arrow/Enter navigation and a pending control action survive.
+      const idx = sessions.findIndex(s => historySessionKey(s) === focusKey);
+      if (idx >= 0 && historyRenderedRows[idx]) {
+        let target = historyRenderedRows[idx];
+        if (focusCtrlClass) {
+          const same = target.getElementsByClassName(focusCtrlClass);
+          if (same[focusCtrlNth]) target = same[focusCtrlNth];
+        }
+        target.focus({preventScroll: true});
+      }
+    } else if (focusHeaderChatId) {
+      // Likewise for a focused chat-panel header: focus the fresh
+      // header of the same chat so Space/Enter keeps toggling it.
+      const headerGroup = historyChatGroups.get(focusHeaderChatId);
+      const headerBtn =
+        headerGroup &&
+        headerGroup.querySelector(':scope > .history-chat-header');
+      if (headerBtn) headerBtn.focus({preventScroll: true});
+    }
   }
 
   function autofillHistoryDateRange(range) {
@@ -16081,6 +17805,29 @@
         row.style.display = 'none';
       }
     });
+    // A chat block with no visible task goes, and so does a day
+    // separator with no visible chat below it (before the next one).
+    historyList.querySelectorAll('.history-chat-group').forEach(group => {
+      const shown = Array.from(group.querySelectorAll('.sidebar-item')).some(
+        r => r.style.display !== 'none',
+      );
+      group.style.display = shown ? '' : 'none';
+    });
+    let daySep = null;
+    let dayShown = false;
+    Array.from(historyList.children).forEach(el => {
+      if (el.classList.contains('history-day-sep')) {
+        if (daySep) daySep.style.display = dayShown ? '' : 'none';
+        daySep = el;
+        dayShown = false;
+      } else if (
+        el.classList.contains('history-chat-group') &&
+        el.style.display !== 'none'
+      ) {
+        dayShown = true;
+      }
+    });
+    if (daySep) daySep.style.display = dayShown ? '' : 'none';
     let placeholder = historyList.querySelector('.sidebar-empty-filter');
     if (rows.length > 0 && visible === 0) {
       if (!placeholder) {
@@ -16753,6 +18500,10 @@
     // ``webTools`` override.
     webToolsStateKnown = true;
     setChecked(classifyTasksToggleBtn, cfg.classify_tasks !== false);
+    setChecked(
+      classifyWithDecisionsToggleBtn,
+      cfg.classify_with_decisions !== false,
+    );
     setChecked(memoryToggleBtn, cfg.use_memory !== false);
     setValue('cfg-memory-dir', cfg.memory_dir || '');
     // Recorded even while an edit is active (the boxes themselves are
@@ -16822,6 +18573,11 @@
     if (want('cfg-classify-tasks')) {
       cfg.classify_tasks = !!(
         classifyTasksToggleBtn && classifyTasksToggleBtn.checked
+      );
+    }
+    if (want('cfg-classify-with-decisions')) {
+      cfg.classify_with_decisions = !!(
+        classifyWithDecisionsToggleBtn && classifyWithDecisionsToggleBtn.checked
       );
     }
     if (want('cfg-use-memory')) {

@@ -427,10 +427,16 @@ _DISABLE_ENV = "KISS_DISABLE_TASK_CLASSIFIER"
 
 @pytest.fixture
 def classifier_env() -> Iterator[IsolatedKissHome]:
-    """Isolated KISS_HOME with the classifier kill switch lifted."""
+    """Isolated KISS_HOME with the classifier kill switch lifted.
+
+    The decisions classifier is pinned off so the spend figures below
+    are the LLM classifier's (one stand-in generation) regardless of
+    whether an ``OPENROUTER_API_KEY`` is configured.
+    """
     saved = os.environ.get(_DISABLE_ENV)
     os.environ[_DISABLE_ENV] = "0"
     isolated = IsolatedKissHome("kiss-usage-round7-")
+    isolated.write_config(classify_with_decisions=False)
     clear_classification_cache()
     try:
         yield isolated

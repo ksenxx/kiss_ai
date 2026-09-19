@@ -101,9 +101,11 @@ def test_readme_capability_totals_match_catalog() -> None:
     generation_count = sum(1 for entry in model_info.values() if entry.get("gen"))
     function_calling_count = sum(1 for entry in model_info.values() if entry.get("fc"))
     embedding_count = sum(1 for entry in model_info.values() if entry.get("emb"))
+    decisions_count = sum(1 for entry in model_info.values() if entry.get("dec"))
     assert f"- **{generation_count}** generation-capable models" in readme
     assert f"- **{function_calling_count}** function-calling-capable models" in readme
     assert f"- **{embedding_count}** embedding models" in readme
+    assert f"- **{decisions_count}** decision models" in readme
 
 
 def test_readme_lists_zai_and_moonshot_models() -> None:

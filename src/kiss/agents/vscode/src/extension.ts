@@ -18,6 +18,8 @@ import {kissHomeDir, sorcarSockPath} from './userAssets';
 import {
   HISTORY_PANEL_TAB_ID,
   historyPanelBodyAttrs,
+  META_PANEL_TAB_ID,
+  metaPanelBodyAttrs,
   resetTipsOnExtensionUpdate,
 } from './SorcarTab';
 import {
@@ -33,6 +35,7 @@ import {
 let sidebarView: SorcarSidebarView | undefined;
 let panelManager: SorcarPanelManager | undefined;
 let historyView: SorcarSidebarView | undefined;
+let metaView: SorcarSidebarView | undefined;
 
 // workspaceState key: root tab ids of the chat editor panels open at
 // the previous session's shutdown (see priorPanelTabIds in activate).
@@ -94,6 +97,44 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const editorTabsMode = () => SorcarPanelManager.modeEnabled();
 
+  // The secondary-sidebar Task Info view (editor-tabs mode): the
+  // remote webapp's rightmost desktop panel — live task metadata plus
+  // the running task's tmp/PROGRESS.md — rendered by the same chat
+  // webview in meta-panel-mode. It mirrors the ACTIVE chat editor
+  // panel: the panel manager relays each active panel's metaUpdate
+  // reports into it through setMetaSink below.
+  metaView = new SorcarSidebarView(context.extensionUri, {
+    rootTabId: META_PANEL_TAB_ID,
+    bodyAttrs: metaPanelBodyAttrs(),
+    // The view is display-only: it opens no chats and owns no panel.
+    onEvent: () => {},
+  });
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      'kissSorcar.metaViewSecondary',
+      metaView,
+      {webviewOptions: {retainContextWhenHidden: true}},
+    ),
+  );
+  context.subscriptions.push({dispose: () => metaView?.dispose()});
+  panelManager.setMetaSink((values, progressMd) => {
+    metaView?.postMetaState(values, progressMd);
+  });
+
+  // Bring the Task Info view on screen in the secondary sidebar
+  // without stealing the keyboard focus from wherever the caller
+  // means to leave it (the `.focus` command both opens the bar and
+  // focuses the view, so callers refocus the chat afterwards).
+  const revealMetaView = async (): Promise<void> => {
+    try {
+      await vscode.commands.executeCommand(
+        'kissSorcar.metaViewSecondary.focus',
+      );
+    } catch (err) {
+      console.error('[KISS Sorcar] Task Info reveal failed:', err);
+    }
+  };
+
   // The chat surface commands act on: in editor-tabs mode the active
   // chat panel (opening one when asked to), otherwise the sidebar view.
   const chatController = (createIfMissing: boolean) => {
@@ -110,15 +151,16 @@ export function activate(context: vscode.ExtensionContext): void {
   // Switching the editor-tabs mode (from the settings UI toggle or
   // settings.json): ON migrates the registry's chats of this workspace
   // into editor tabs (the sidebar view hides via its `when` clause)
-  // and CLOSES the secondary sidebar — the chats now live in editor
-  // tabs, so the bar the sidebar chat occupied must not linger empty;
+  // and KEEPS the secondary sidebar open, now showing the Task Info
+  // view — the remote webapp's rightmost desktop panel — in the spot
+  // the sidebar chat occupied;
   // OFF closes the panels without retiring their chats and OPENS the
   // secondary sidebar on the KISS Sorcar chat view, focusing its
   // composer — the chats moved there, so that is where the user must
   // land (the view re-adopts them from `tabs_state` as it resolves).
   // Guarded like the other optional host APIs (see
   // registerWebviewPanelSerializer): absent only in test stubs.
-  let modeSwitchAt = 0;
+  //
   // Set by the OFF branch: its reveal must END with the chat composer
   // focused. A window that started in editor-tabs mode resolves the
   // sidebar view for the first time on that reveal, which arms the
@@ -140,7 +182,6 @@ export function activate(context: vscode.ExtensionContext): void {
           void syncEditorActionsLocation(context, true);
         }
         if (!e.affectsConfiguration('kissSorcar.editorTabsMode')) return;
-        modeSwitchAt = Date.now();
         // Follow the mode with the editor-actions toolbar: ON moves
         // the four Sorcar editor-title buttons into the window title
         // bar, OFF restores the user's own actions location.
@@ -150,9 +191,23 @@ export function activate(context: vscode.ExtensionContext): void {
             sidebarView!.getRegistryTabEntries(),
             workspaceDir(),
           );
-          void vscode.commands.executeCommand(
-            'workbench.action.closeAuxiliaryBar',
-          );
+          // The secondary sidebar stays OPEN: the chat view it hosted
+          // just hid (its `when` clause flipped false), and the Task
+          // Info view takes its place. The reveal's focus then goes
+          // back to the chat the user is migrating to.
+          const revealManager = panelManager;
+          void revealMetaView().then(() => {
+            // The reveal resolves later; a mode flipped back OFF in
+            // the meantime owns the focus now (focusChatInput below,
+            // in the else branch), and this stale continuation must
+            // not steal it. Nor may it outlive its own activation:
+            // deactivate() clears panelManager, and a reactivation
+            // installs a new one.
+            if (!editorTabsMode() || panelManager !== revealManager) {
+              return undefined;
+            }
+            return panelManager?.activeController()?.focusChatInput();
+          });
         } else {
           panelManager!.closeAll();
           // focusChatInput runs kissSorcar.chatViewSecondary.focus
@@ -178,6 +233,29 @@ export function activate(context: vscode.ExtensionContext): void {
   // is global — restores happen only on explicit mode flips.
   if (editorTabsMode()) {
     void syncEditorActionsLocation(context, true);
+    // Editor-tabs mode always shows the secondary sidebar: the Task
+    // Info view is part of the mode's layout (the chat is an editor
+    // tab, the bar shows the running task's metadata beside it), so a
+    // window that starts in the mode brings it on screen too. The
+    // reveal's focus goes back to the chat composer — or, before any
+    // panel has revived, to the editor group the user started in.
+    const revealManager = panelManager;
+    void revealMetaView().then(() => {
+      // A mode flipped off while the reveal was in flight owns the
+      // focus now; this stale continuation must not steal it — nor may
+      // it outlive its own activation (deactivate() clears
+      // panelManager, a reactivation installs a new one).
+      if (!editorTabsMode() || panelManager !== revealManager) {
+        return undefined;
+      }
+      const active = panelManager?.activeController();
+      if (active) return active.focusChatInput();
+      // Back to the group the user started in — not group 1, where
+      // focusFirstEditorGroup would drag a user working in group 2/3.
+      return vscode.commands.executeCommand(
+        'workbench.action.focusActiveEditorGroup',
+      );
+    });
   }
 
   // The editor-tabs-mode invariant — at least one chat editor tab is
@@ -245,16 +323,23 @@ export function activate(context: vscode.ExtensionContext): void {
     panelManager?.ensureChatOpen();
   };
 
-  // The primary-sidebar history panel (editor-tabs mode): the same
-  // chat webview in history-only mode (see historyPanelBodyAttrs), so
+  // The primary-sidebar history panel (BOTH modes): the same chat
+  // webview in history-only mode (see historyPanelBodyAttrs), so
   // search, filters, deletes and live refreshes all come from main.js
-  // unchanged. Its history clicks arrive as `openChatPanel` messages
-  // and open editor tabs through the panel manager.
+  // unchanged. Its history clicks arrive as `openChatPanel` messages;
+  // in editor-tabs mode they open editor tabs through the panel
+  // manager, in sidebar mode they open the chat in the secondary
+  // sidebar's chat view.
   historyView = new SorcarSidebarView(context.extensionUri, {
     rootTabId: HISTORY_PANEL_TAB_ID,
     bodyAttrs: historyPanelBodyAttrs(),
     onEvent: event => {
-      if (event.kind === 'openChat') panelManager?.openChat(event);
+      if (event.kind !== 'openChat') return;
+      if (editorTabsMode()) {
+        panelManager?.openChat(event);
+      } else {
+        void sidebarView?.openChatFromHistory(event);
+      }
     },
   });
   context.subscriptions.push(
@@ -274,18 +359,14 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   context.subscriptions.push({dispose: () => historyView?.dispose()});
 
-  // The editor-title KS button (editor-tabs mode): show the history
-  // panel in the primary sidebar, and make sure a chat tab is open.
-  // In non-editor-tabs mode a KS button only reveals the chat in the
-  // secondary sidebar: no history panel, no new chat.
+  // The KS button: show the history panel in the primary sidebar —
+  // the same surface in both modes. Editor-tabs mode also makes sure
+  // a chat tab is open (the chat lives in editor tabs there; in
+  // sidebar mode it lives in the secondary sidebar and needs no help).
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.showHistory', async () => {
-      if (!editorTabsMode()) {
-        await sidebarView!.focusChatInput();
-        return;
-      }
       await vscode.commands.executeCommand('kissSorcar.historyView.focus');
-      openChatIfNoneOpen();
+      if (editorTabsMode()) openChatIfNoneOpen();
     }),
   );
 
@@ -675,49 +756,6 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   });
 
-  const treeView = vscode.window.createTreeView('kissSorcar.chatView', {
-    treeDataProvider: {
-      getTreeItem: (el: string) => new vscode.TreeItem(el),
-      getChildren: () => [],
-    },
-  });
-  context.subscriptions.push(treeView);
-
-  // The KS activity-bar button in non-editor-tabs mode shows this
-  // dummy tree: never leave anything (history panel or otherwise) up
-  // in the primary sidebar — close it back and reveal the existing
-  // chat in the secondary sidebar instead, creating no new chat.
-  // Bumped on EVERY visibility flip: the continuation below parks in two
-  // awaits, and a newer user action (hiding the tree again, switching
-  // primary-sidebar views) during that window must win over the stale
-  // continuation instead of having focus stolen back from it.
-  let treeVisGen = 0;
-  treeView.onDidChangeVisibility(async e => {
-    treeVisGen += 1;
-    if (!e.visible) return;
-    await vscode.commands.executeCommand('workbench.action.closeSidebar');
-    // Event delivery is ordered, so the hide flip our own closeSidebar
-    // just caused has arrived by now: snapshot AFTER it, and only newer
-    // (user-driven) flips invalidate this continuation.
-    const gen = treeVisGen;
-    // The tree also pops up when editorTabsMode flips OFF while the
-    // KISS container is the active primary-sidebar view (the history
-    // panel hides, the tree takes its spot). The flip's config handler
-    // already opens the secondary sidebar on the chat and focuses its
-    // composer; a second reveal from here would race it (two
-    // `.focus` commands and two focusInput posts against a view still
-    // resolving), so give the config handler — which may run in this
-    // same tick — a moment to record itself, then bail.
-    await new Promise(r => setTimeout(r, 50));
-    if (Date.now() - modeSwitchAt < 2000) return;
-    if (gen !== treeVisGen) return;
-    // Deactivation during either await disposes the view and clears the
-    // module slot; a disposed surface must not be focused (and the old
-    // `sidebarView!` assertion threw an unhandled TypeError here).
-    if (!sidebarView) return;
-    await sidebarView.focusChatInput();
-  });
-
   if (!context.workspaceState.get<boolean>('sidebarWidened')) {
     sidebarView!.onFirstResolve(() => {
       const widenTimer = setTimeout(async () => {
@@ -782,14 +820,18 @@ export function activate(context: vscode.ExtensionContext): void {
         if (firstLaunch) {
           // The workbench's default layout (code-server and recent VS
           // Code) starts with the secondary sidebar open on the
-          // built-in Chat view. KISS Sorcar's chat replaces it: close
-          // the bar before opening the chat surface. In sidebar mode
-          // the focusChatInput below reopens it on the KISS chat view;
-          // in editor-tabs mode the chat is an editor tab and the bar
-          // stays closed.
-          await vscode.commands.executeCommand(
-            'workbench.action.closeAuxiliaryBar',
-          );
+          // built-in Chat view. KISS Sorcar replaces it: in sidebar
+          // mode close the bar (the focusChatInput below reopens it on
+          // the KISS chat view); in editor-tabs mode reveal the Task
+          // Info view — the chat itself is an editor tab, and the bar
+          // shows the running task's metadata beside it.
+          if (editorTabsMode()) {
+            await revealMetaView();
+          } else {
+            await vscode.commands.executeCommand(
+              'workbench.action.closeAuxiliaryBar',
+            );
+          }
           if (sidebarView !== view) return;
         }
         const controller = chatController(true);
@@ -846,5 +888,7 @@ export function deactivate(): void {
   sidebarView = undefined;
   historyView?.dispose();
   historyView = undefined;
+  metaView?.dispose();
+  metaView = undefined;
   console.log('KISS Sorcar extension deactivated');
 }
