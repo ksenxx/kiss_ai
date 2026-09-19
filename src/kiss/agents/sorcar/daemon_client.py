@@ -615,10 +615,10 @@ def run(
             returned by the *tools* file's ``get_tools()`` — so the
             *use_web_tools* and *is_parallel* toggles have no tools left
             to act on.  The default system prompt (``SYSTEM.md``)
-            assumes the basic toolset (e.g. it mandates a first
-            ``Read("./SORCAR.md")`` call), so a restricted run should
-            usually pass a *system_prompt* written for the tools it
-            actually has.
+            assumes the basic toolset (its workflow rules name ``Read``,
+            ``Edit``, ``Bash`` and the browser tools), so a restricted
+            run should usually pass a *system_prompt* written for the
+            tools it actually has.
         append_to_system_prompt: Extra text appended to the run's
             system prompt when the agent is executed — after the
             default ``SYSTEM.md`` prompt (or the *system_prompt*

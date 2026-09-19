@@ -294,11 +294,12 @@ class TestFanOutReceivesPartialResult:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_child_partial_result_reaches_parent_and_history(self) -> None:
-        # $0.054 per step (90k output tokens, under the 115k context
-        # cap): the child's $0.50 share is gone at step 10, after nine
-        # recorded steps — one more than the quoted tail holds.
+        # $0.051 per step (85k output tokens, under the 70 % context
+        # hand-off of the 128k window): the child's $0.50 share is gone
+        # at step 10, after nine recorded steps — one more than the
+        # quoted tail holds.
         body = _tool_call_body(
-            "Bash", {"command": "echo probing", "description": "d"}, 100, 90_000,
+            "Bash", {"command": "echo probing", "description": "d"}, 100, 85_000,
         )
         with _serve(body) as base_url:
             parent = SorcarAgent("fanout-parent")

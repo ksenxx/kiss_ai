@@ -10,6 +10,7 @@ runs an incremental index sync, so pages written by any process (the agent,
 a human in an editor, git pull) are searchable without a separate reindex.
 """
 
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -29,12 +30,18 @@ search index. Follow this protocol:
    file paths so the fact can be re-verified later. Prefer updating an existing
    page over creating a near-duplicate.
 3. Do not store secrets, credentials or raw transcripts. Delete pages that turn
-   out to be wrong or obsolete with `memory_delete`.
+   out to be wrong or obsolete with `memory_delete`. Per-round or per-session
+   working notes (review round N findings, fix lists, progress) are not durable
+   knowledge: keep them in `./tmp/PROGRESS.md`, not in memory.
 4. When search results look redundant or outdated, call `memory_refresh`: it
    re-indexes pages edited outside the agent and lists near-duplicate and stale
    pages. Merge duplicates with `memory_write` + `memory_delete`, and re-verify
    or delete stale pages.
 """
+
+_EPHEMERAL_NAME_RE = re.compile(r"(^|-)(round|session|iteration|pass)-?\d+(-|$)")
+"""Page names such as ``muse-auth-round4-review`` or ``server-fixes-round-7``
+are per-round working notes (36 of 260 pages in the 2026-09-19 audit)."""
 
 # Cap on characters returned by memory_pull so a broad query cannot flood the context.
 PULL_CHAR_LIMIT = 24_000
@@ -157,8 +164,14 @@ class MemoryTools:
         size = len(page.raw.encode("utf-8"))
         embedded = len(embedding_text(page.raw).encode("utf-8"))
         note = ""
-        if embedded > MAX_PAGE_BYTES:
+        if _EPHEMERAL_NAME_RE.search(name):
             note = (
+                " Warning: the name looks like a per-round/per-session note; such "
+                "notes belong in ./tmp/PROGRESS.md, not in durable memory. Consider "
+                "memory_delete once the task is over."
+            )
+        if embedded > MAX_PAGE_BYTES:
+            note += (
                 f" Warning: the page's searchable text (title, summary and body) is "
                 f"{embedded} bytes; only the first {MAX_PAGE_BYTES} bytes are embedded. "
                 "Split it into several pages."

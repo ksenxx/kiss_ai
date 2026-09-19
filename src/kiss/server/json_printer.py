@@ -1745,15 +1745,21 @@ class JsonPrinter(Printer):
             total_tokens = raw_tokens + self.tokens_offset
             total_steps = raw_steps + self.steps_offset
             total_cost = self._cost_with_offset(raw_cost)
-            self.broadcast(
-                {
-                    "type": "usage_info",
-                    "text": str(content),
-                    "total_tokens": total_tokens,
-                    "cost": total_cost,
-                    "total_steps": total_steps,
-                }
-            )
+            event: dict[str, Any] = {
+                "type": "usage_info",
+                "text": str(content),
+                "total_tokens": total_tokens,
+                "cost": total_cost,
+                "total_steps": total_steps,
+            }
+            # Per-step provenance for the cost report: the model that
+            # served the step (a ``set_model`` switch is otherwise
+            # invisible in task_history) and its prompt-cache read
+            # tokens (0 = the static prefix missed the cache).
+            for key in ("cache_read", "model"):
+                if key in kwargs:
+                    event[key] = kwargs[key]
+            self.broadcast(event)
             return ""
         if type == "result":
             self.broadcast({"type": "text_end"})

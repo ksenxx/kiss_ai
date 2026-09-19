@@ -373,8 +373,8 @@ When `append_basic_tools=False`, the agent's **only** tools are
 building focused, restricted agents.
 
 When restricting tools, the default system prompt (`SYSTEM.md`)
-assumes the full toolset (it mandates a first `Read("./SORCAR.md")`
-call, among other things).  Pass a custom `system_prompt()` that
+assumes the full toolset (its workflow rules name `Read`, `Edit`,
+`Bash` and the browser tools).  Pass a custom `system_prompt()` that
 matches the tools you provide:
 
 ```python

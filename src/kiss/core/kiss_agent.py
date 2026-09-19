@@ -14,6 +14,12 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from kiss.core.base import Base
+from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.context_compaction import (
+    COMPACTION_START_TOKENS,
+    COMPACTION_STEP_TOKENS,
+    compact_tool_results,
+)
 from kiss.core.kiss_error import (
     BudgetExceededError,
     ContextWindowExceededError,
@@ -59,7 +65,16 @@ MAX_CONSECUTIVE_NO_TOOL_CALLS = 2
 # where a single long native command (a build, a test suite) can be silent
 # for many minutes.  model_config["timeout"] still overrides it.
 CLI_TASK_TIMEOUT_SECONDS = 3600
-CONTEXT_LIMIT_FRACTION = 0.9
+CONTEXT_LIMIT_FRACTION = (
+    DEFAULT_CONFIG.context_limit_fraction
+    if 0.0 < DEFAULT_CONFIG.context_limit_fraction <= 1.0
+    else 0.7
+)
+"""Share of the model's context window at which a session raises
+:class:`ContextWindowExceededError` and RelentlessAgent hands off with a
+trajectory summary.  Steps near a full window cost several times more
+than early ones (the whole context is re-sent every step), so the hand-off
+happens at 70 % by default; ``KISS_CONTEXT_LIMIT_FRACTION`` overrides it."""
 _CONTEXT_OVERFLOW_PHRASES = (
     "exceeds the context window",
     "prompt is too long",
@@ -198,8 +213,14 @@ class KISSAgent(Base):
         ) = None
         self.tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None
         self.context_tokens_used = 0
+        self.last_cache_read_tokens = 0
         self.budget_check_hook: Callable[[], None] | None = None
+        self.context_reset_hook: Callable[[], None] | None = None
+        """Called after old tool outputs were compacted out of the
+        conversation, so tools that assume the model still sees an
+        earlier output (the Read tool's dedupe) can forget it."""
         self._llm_hook_conversation_index = 0
+        self._next_compaction_at = COMPACTION_START_TOKENS
         self._reset_progress_trackers()
 
     def _reset(
@@ -231,6 +252,8 @@ class KISSAgent(Base):
         self.step_count = 0
         self.total_tokens_used = 0  # pyright: ignore[reportIncompatibleVariableOverride]
         self.context_tokens_used = 0
+        self.last_cache_read_tokens = 0
+        self._next_compaction_at = COMPACTION_START_TOKENS
         self._llm_hook_conversation_index = 0
         self.budget_used = 0.0  # pyright: ignore[reportIncompatibleVariableOverride]
         # ``run_start_timestamp`` is the real wall clock: the saved record
@@ -713,6 +736,7 @@ class KISSAgent(Base):
 
         if self.pre_step_hook is not None:
             self.pre_step_hook(self.model)
+        self._maybe_compact_conversation()
         if self.llm_call_hook is not None:
             hook_start = self._llm_hook_conversation_index
             modified_messages = self.llm_call_hook(
@@ -741,6 +765,8 @@ class KISSAgent(Base):
                 total_tokens=self.total_tokens_used,
                 cost=f"${self.budget_used:.4f}",
                 total_steps=self.step_count,
+                cache_read=self.last_cache_read_tokens,
+                model=self.model.model_name,
             )
 
         if function_calls and any(fc["name"] != "finish" for fc in function_calls):
@@ -850,6 +876,31 @@ class KISSAgent(Base):
 
         self.model.add_function_results_to_conversation_and_return(function_results)
         return None
+
+    def _maybe_compact_conversation(self) -> None:
+        """Compact old tool outputs once the context crosses the next threshold.
+
+        Runs before a model call when ``DEFAULT_CONFIG.tool_output_compaction``
+        is on and the last response's context size reached
+        ``_next_compaction_at`` (100k tokens, then every further 50k of
+        growth).  Batching keeps the provider's prompt cache valid
+        between compactions; see :mod:`kiss.core.context_compaction`.
+        """
+        if not DEFAULT_CONFIG.tool_output_compaction:
+            return
+        if self.context_tokens_used < self._next_compaction_at:
+            return
+        self._next_compaction_at = self.context_tokens_used + COMPACTION_STEP_TOKENS
+        compacted = compact_tool_results(self.model.conversation)
+        logger.info(
+            "Compacted %d old tool outputs at %d context tokens: agent=%s step=%d",
+            compacted,
+            self.context_tokens_used,
+            self.name,
+            self.step_count,
+        )
+        if compacted and self.context_reset_hook is not None:
+            self.context_reset_hook()
 
     def _implicit_finish_allowed(self) -> bool:
         """Return whether an implicit finish may end the run right now.
@@ -1093,6 +1144,7 @@ class KISSAgent(Base):
             )
             if call_tokens > 0:
                 self.context_tokens_used = call_tokens
+            self.last_cache_read_tokens = cache_read
             cost = calculate_cost(
                 self.model.model_name,
                 input_tokens,
