@@ -29,3 +29,11 @@ python3 projects/speed-audit-2026-09-19/speed_analysis.py
 ```
 
 Findings are in FINDINGS.md.
+
+## Second pass (2026-09-19 08:05 UTC window)
+
+```bash
+python3 projects/speed-audit-2026-09-19/speed_report.py   # reads /tmp/speed7a.db + /tmp/speed7d.db, writes /tmp/speed7_report.txt
+```
+
+Ranked speed levers with quality-risk assessment: `SPEED_LEVERS.md`; raw numbers: `speed_report_2026-09-19.txt`.
