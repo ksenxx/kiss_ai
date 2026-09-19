@@ -347,8 +347,28 @@ def _dispatch(
     # ``subagentDone`` when it ends) instead of a top-level tab.
     # Standalone use (no calling agent, or one that has not persisted
     # a task row) dispatches an ordinary top-level task, unchanged.
+    # Reviewer guardrail (see kiss.agents.sorcar.fanout_guard): a
+    # reviewer's sub-tree may not spawn further reviewers through a
+    # daemon dispatch either, and any child a reviewer dispatches
+    # carries the reviewer marker so its own run_parallel stays bound.
+    from kiss.agents.sorcar.fanout_guard import (
+        REVIEW_CAP_REFUSAL,
+        REVIEWER_SPAWN_REFUSAL,
+        is_review_task,
+    )
     from kiss.agents.sorcar.sorcar_agent import _persisted_task_id
 
+    _is_rev = getattr(parent_agent, "_is_reviewer_subagent", None)
+    parent_reviewer = bool(_is_rev()) if callable(_is_rev) else False
+    if is_review_task(prompt):
+        if parent_reviewer:
+            return f"Error: {REVIEWER_SPAWN_REFUSAL}"
+        # A review dispatched through run_agent draws from the same
+        # task-tree budget as a run_parallel review round; otherwise
+        # run_agent would be a free side door around the cap.
+        quota = getattr(parent_agent, "_review_quota", None)
+        if quota is not None and not quota.try_reserve():
+            return f"Error: {REVIEW_CAP_REFUSAL}"
     parent_task_id = _persisted_task_id(parent_agent)
     parent_tab_id = ""
     if parent_task_id:
@@ -370,6 +390,7 @@ def _dispatch(
             scope_work_dir=scope_work_dir,
             parent_task_id=parent_task_id,
             parent_tab_id=parent_tab_id,
+            parent_reviewer=parent_reviewer or is_review_task(prompt),
             model=model_name,
             use_worktree=git_lifecycle,
             auto_commit=git_lifecycle,

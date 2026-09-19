@@ -579,3 +579,92 @@ class RunAgentSubagentTabTest(unittest.TestCase):
         assert leaked == [], (
             f"parentless dispatch leaked sub-agent broadcasts: {leaked!r}"
         )
+
+    def test_parent_reviewer_wire_field_marks_child_reviewer(self) -> None:
+        """``parent_reviewer=True`` survives the daemon round trip.
+
+        The dispatched child's reconstructed ``_subagent_info`` must
+        carry the reviewer marker (see
+        :mod:`kiss.agents.sorcar.fanout_guard`), so the child's own
+        ``run_parallel`` refuses to spawn further reviewers.  A control
+        dispatch without the flag stays unmarked.
+        """
+        reviewer_marker = "reviewer wire child zq9"
+        control_marker = "control wire child zq9"
+        # No parentReviewer flag, but the prompt itself is a review
+        # task: the daemon must mark it from the EFFECTIVE prompt (the
+        # path an agent script's prompt() override would take).
+        worded_marker = "wire child zq9, inspect it for defects"
+        recorded: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            prompt = str(kwargs.get("prompt_template", ""))
+            for marker in (reviewer_marker, control_marker, worded_marker):
+                if marker in prompt:
+                    recorded[marker] = {
+                        "info": dict(self_agent._subagent_info or {}),
+                        "is_reviewer": self_agent._is_reviewer_subagent(),
+                        "spawn_result": next(
+                            t for t in self_agent._get_tools()
+                            if getattr(t, "__name__", "") == "run_parallel"
+                        )('["Review the diff for regressions"]')
+                        if marker == reviewer_marker else "",
+                    }
+            self_agent.total_tokens_used = 1
+            self_agent.budget_used = 0.0001
+            self_agent.total_steps = 1
+            raw = "success: true\nis_continue: false\nsummary: done\n"
+            printer = kwargs.get("printer") or getattr(
+                self_agent, "printer", None,
+            )
+            if printer is not None:  # pragma: no branch
+                printer.print(
+                    raw, type="result", step_count=1,
+                    total_tokens=1, cost="$0.0001",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+        self._open_viewer()
+
+        parent = daemon_client.run(
+            "parent seed task",
+            work_dir=self.repo,
+            use_worktree=False,
+            auto_commit=False,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert parent.success is True
+
+        for marker, parent_reviewer in (
+            (reviewer_marker, True),
+            (control_marker, False),
+            (worded_marker, False),
+        ):
+            child = daemon_client.run(
+                marker,
+                work_dir=self.repo,
+                use_worktree=False,
+                auto_commit=False,
+                use_web_tools=False,
+                parent_task_id=parent.task_id,
+                parent_tab_id=PARENT_TAB_ID,
+                parent_reviewer=parent_reviewer,
+                sock_path=self.sock_path,
+                timeout=60,
+            )
+            assert child.success is True
+
+        reviewer = recorded[reviewer_marker]
+        assert reviewer["info"]["reviewer"] is True
+        assert reviewer["is_reviewer"] is True
+        assert reviewer["spawn_result"].startswith(
+            "Error: You are a reviewer sub-agent"
+        )
+        control = recorded[control_marker]
+        assert control["info"]["reviewer"] is False
+        assert control["is_reviewer"] is False
+        worded = recorded[worded_marker]
+        assert worded["info"]["reviewer"] is True
+        assert worded["is_reviewer"] is True

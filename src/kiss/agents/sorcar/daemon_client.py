@@ -354,6 +354,7 @@ def run(
     scope_work_dir: str = "",
     parent_task_id: str = "",
     parent_tab_id: str = "",
+    parent_reviewer: bool = False,
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -416,6 +417,14 @@ def run(
             cascade-close).  Only meaningful with *parent_task_id*;
             empty spawns a parentless sub-agent tab, exactly like a
             headless ``run_parallel`` fan-out.  No agent-script getter.
+        parent_reviewer: Whether the dispatched run belongs to a
+            reviewer's sub-tree — the caller is a reviewer sub-agent,
+            or *prompt* itself is a review task (see
+            :mod:`kiss.agents.sorcar.fanout_guard`).  Stamped on the
+            child's ``_subagent_info`` so its own ``run_parallel``
+            refuses to spawn further reviewers.  Only meaningful with
+            *parent_task_id*; no agent-script getter, for the same
+            reason as *parent_task_id*.
         model: Model name; the daemon's selected default when empty.
         chat_id: Optional existing chat session id to continue.  Pass
             the ``chat_id`` of a previous :class:`TaskResult` to run
@@ -738,6 +747,7 @@ def run(
             "tabScopeWorkDir": scope_work_dir,
             "parentTaskId": parent_task_id,
             "parentTabId": parent_tab_id,
+            "parentReviewer": parent_reviewer,
             "model": model,
             "systemPrompt": system_prompt,
             "toolsFile": tools_file,

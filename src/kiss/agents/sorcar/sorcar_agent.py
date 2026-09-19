@@ -24,6 +24,13 @@ import yaml
 
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide_tool
+from kiss.agents.sorcar.fanout_guard import (
+    REVIEW_CAP_REFUSAL,
+    REVIEWER_SPAWN_REFUSAL,
+    ReviewQuota,
+    is_review_task,
+    parse_tasks_json,
+)
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.agents.sorcar.skills import make_skill_tool
@@ -1220,6 +1227,12 @@ class SorcarAgent(RelentlessAgent):
         self._use_web_tools: bool = True
         self._is_parallel: bool = True
         self._append_basic_tools: bool = True
+        # Task-tree-wide budget of review fan-outs (see
+        # :class:`fanout_guard.ReviewQuota`).  A top-level :meth:`run`
+        # creates a fresh one; the fan-out engine hands the parent's
+        # instance to every child, so the whole in-process tree draws
+        # from ONE budget of ``MAX_REVIEW_ROUNDS`` rounds.
+        self._review_quota: ReviewQuota | None = None
         # Pre-run task classification state (see
         # :meth:`_classify_task_once`).  ``_classification_attempted``
         # makes the classifier run at most once per task even though
@@ -1405,6 +1418,20 @@ class SorcarAgent(RelentlessAgent):
                 "tasks."
             )
         return share
+
+    def _is_reviewer_subagent(self) -> bool:
+        """Return whether this agent runs inside a reviewer's sub-tree.
+
+        The fan-out engine stamps ``_subagent_info["reviewer"]`` on a
+        child whose task is a review task or whose parent is itself a
+        reviewer, so the flag covers the whole sub-tree under a
+        reviewer.
+
+        Returns:
+            True for a reviewer sub-agent or any of its descendants.
+        """
+        info = getattr(self, "_subagent_info", None) or {}
+        return bool(info.get("reviewer", False))
 
     def _subagent_parent_tab_id(self) -> str:
         """Return the frontend tab id sub-agents should call their parent.
@@ -1710,6 +1737,15 @@ class SorcarAgent(RelentlessAgent):
               API contract between them is already pinned down in a
               spec.
 
+            **Hard limits (enforced, not advisory):**
+            - ``tasks`` must be a literal JSON array; shell substitutions
+              such as ``"$(cat tasks.json)"`` are not expanded and are
+              rejected.
+            - At most 3 fan-outs per task tree may contain review/audit
+              tasks (the budget is shared with every sub-agent); the 4th
+              is refused, so verify the last fixes yourself.
+            - A reviewer sub-agent (and anything it spawns) may not spawn
+              further reviewers.
 
             Args:
                 tasks: A JSON-encoded list of task description strings.
@@ -1727,9 +1763,34 @@ class SorcarAgent(RelentlessAgent):
                 A YAML-formatted string containing a list of result
                 objects, one per task, in the same order as the input.
                 Each result object has ``success`` and ``summary`` keys.
+                A string starting with ``Error:`` when the call was
+                refused by one of the hard limits above.
             """
-            task_list = _coerce_tasks(tasks)
-            workers: int | None = int(max_workers) if max_workers else None
+            try:
+                task_list = parse_tasks_json(tasks)
+            except ValueError as e:
+                return f"Error: {e.args[0]}"
+            try:
+                workers: int | None = int(max_workers) if max_workers else None
+            except ValueError:
+                return (
+                    f"Error: max_workers must be an integer string, "
+                    f"got {max_workers!r}."
+                )
+            if workers is not None and workers < 1:
+                return f"Error: max_workers must be at least 1, got {workers}."
+            if any(is_review_task(t) for t in task_list):
+                if self._is_reviewer_subagent():
+                    return f"Error: {REVIEWER_SPAWN_REFUSAL}"
+                # Zero-child preflight BEFORE reserving a round: a
+                # fan-out refused for budget must not burn the review
+                # quota (it spawned no reviewer).  Raises the same
+                # error the dispatch itself would.
+                self._subagent_budget_share(len(task_list))
+                if self._review_quota is None:
+                    self._review_quota = ReviewQuota()
+                if not self._review_quota.try_reserve():
+                    return f"Error: {REVIEW_CAP_REFUSAL}"
             results = self._run_tasks_parallel(task_list, max_workers=workers)
             result_str: str = yaml.dump(results, sort_keys=False)
             return result_str
@@ -2347,6 +2408,12 @@ class SorcarAgent(RelentlessAgent):
         self._use_memory_override = use_memory
         self._is_parallel = is_parallel
         self._append_basic_tools = append_basic_tools
+        # A top-level task starts with a fresh review budget; a
+        # sub-agent keeps the quota the fan-out engine inherited from
+        # its parent (falling back to a fresh one when spawned outside
+        # the engine).
+        if getattr(self, "_subagent_info", None) is None or self._review_quota is None:
+            self._review_quota = ReviewQuota()
         # Stored on self (not just a local) so the ``run_parallel``
         # fan-out — which executes DURING ``super().run`` below — can
         # forward the same base system prompt to every sub-agent.
@@ -2703,6 +2770,10 @@ def run_tasks_parallel(
     parent_key = str(getattr(parent_tl, "task_id", "") or "") if parent_tl else ""
     parent_stop_event = getattr(parent_tl, "stop_event", None) if parent_tl else None
     persisted_parent_id = _persisted_task_id(parent_agent)
+    parent_is_reviewer = bool(
+        (getattr(parent_agent, "_subagent_info", None) or {}).get("reviewer")
+    )
+    parent_quota = getattr(parent_agent, "_review_quota", None)
     # Stable for the whole fan-out: the children's synthetic tab ids
     # must not change between submission and the subagentDone
     # broadcast, even though the parent's persisted id can appear late.
@@ -2742,6 +2813,9 @@ def run_tasks_parallel(
         if tl is not None:
             tl.stop_event = sub_stop_event
         agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
+        # The parent's review budget, BEFORE run() (which keeps an
+        # inherited quota): the whole in-process tree shares one cap.
+        agent._review_quota = parent_quota
         sub_agents[idx] = agent
         if chat_id:
             agent.resume_chat_by_id(chat_id)
@@ -2754,6 +2828,9 @@ def run_tasks_parallel(
             "parent_task_id": _persisted_task_id(parent_agent)
             or fanout_parent_id,
             "parent_tab_id": parent_tab_id,
+            # Inherited down the whole sub-tree so a reviewer cannot
+            # launch reviewers through an intermediate helper child.
+            "reviewer": parent_is_reviewer or is_review_task(task),
         }
         if usage_monitor is not None:
             usage_monitor.track(agent)
