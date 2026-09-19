@@ -44,22 +44,20 @@ class TestOpenAIGpt56CacheWritePricing:
         for name, cw in expected.items():
             info = MODEL_INFO[name]
             assert info.cache_write_price_per_1M == pytest.approx(cw), name
-            assert info.cache_write_price_per_1M == pytest.approx(
-                info.input_price_per_1M * 1.25
-            ), name
+            assert info.cache_write_price_per_1M == pytest.approx(info.input_price_per_1M * 1.25), (
+                name
+            )
 
     def test_gpt56_xhigh_aliases_bill_cache_writes(self):
         for name in ("gpt-5.6-sol-xhigh", "gpt-5.6-terra-xhigh", "gpt-5.6-luna-xhigh"):
             info = MODEL_INFO[name]
-            assert info.cache_write_price_per_1M == pytest.approx(
-                info.input_price_per_1M * 1.25
-            ), name
+            assert info.cache_write_price_per_1M == pytest.approx(info.input_price_per_1M * 1.25), (
+                name
+            )
 
     def test_openrouter_openai_gpt56_passthrough_bills_cache_writes(self):
         info = MODEL_INFO["openrouter/openai/gpt-5.6-sol"]
-        assert info.cache_write_price_per_1M == pytest.approx(
-            info.input_price_per_1M * 1.25
-        )
+        assert info.cache_write_price_per_1M == pytest.approx(info.input_price_per_1M * 1.25)
 
     def test_pre_gpt56_openai_models_keep_free_cache_writes(self):
         for name in ("gpt-5.5", "gpt-5.4", "gpt-5", "gpt-4.1", "gpt-4o", "o3"):
@@ -79,9 +77,7 @@ class TestOpenAIGpt56CacheWritePricing:
 class TestOpenAIGpt56LongContextPricing:
     def test_gpt56_terra_long_context_cost(self):
         cost = calculate_cost("gpt-5.6-terra", 300_000, 10_000, 50_000, 40_000)
-        expected = (
-            300_000 * 4.0 + 10_000 * 18.0 + 50_000 * 0.40 + 40_000 * 5.0
-        ) / 1e6
+        expected = (300_000 * 4.0 + 10_000 * 18.0 + 50_000 * 0.40 + 40_000 * 5.0) / 1e6
         assert cost == pytest.approx(expected)
 
     def test_gpt56_sol_long_context_cost(self):
@@ -108,9 +104,7 @@ class TestOpenAIGpt56LongContextPricing:
         info = MODEL_INFO["openrouter/openai/gpt-5.6-sol"]
         assert info.input_price_per_1M == pytest.approx(2.0)
         cost = calculate_cost("openrouter/openai/gpt-5.6-sol", 300_000, 10_000, 50_000, 40_000)
-        expected = (
-            300_000 * 4.0 + 10_000 * 15.0 + 50_000 * 0.40 + 40_000 * 5.0
-        ) / 1e6
+        expected = (300_000 * 4.0 + 10_000 * 15.0 + 50_000 * 0.40 + 40_000 * 5.0) / 1e6
         assert cost == pytest.approx(expected)
 
     def test_gpt55_long_context_cache_writes_stay_free(self):
@@ -120,12 +114,8 @@ class TestOpenAIGpt56LongContextPricing:
     def test_openai_threshold_is_272k_not_200k(self):
         cost = calculate_cost("gpt-5.6-sol", 250_000, 5_000)
         assert cost == pytest.approx((250_000 * 4.0 + 5_000 * 20.0) / 1e6)
-        assert calculate_cost("gpt-5.5", 272_000, 0) == pytest.approx(
-            272_000 * 5.0 / 1e6
-        )
-        assert calculate_cost("gpt-5.5", 272_001, 0) == pytest.approx(
-            272_001 * 10.0 / 1e6
-        )
+        assert calculate_cost("gpt-5.5", 272_000, 0) == pytest.approx(272_000 * 5.0 / 1e6)
+        assert calculate_cost("gpt-5.5", 272_001, 0) == pytest.approx(272_001 * 10.0 / 1e6)
 
 
 class TestGpt6AstraPricing:
@@ -158,9 +148,7 @@ class TestGpt6AstraPricing:
     def test_short_context_cost_matches_official_caching_formula(self):
         """Mirrors the cost formula in the OpenAI prompt-caching guide."""
         cost = calculate_cost("gpt-6-astra", 50_000, 10_000, 30_000, 20_000)
-        expected = (
-            50_000 * 10.0 + 10_000 * 50.0 + 30_000 * 1.00 + 20_000 * 12.50
-        ) / 1e6
+        expected = (50_000 * 10.0 + 10_000 * 50.0 + 30_000 * 1.00 + 20_000 * 12.50) / 1e6
         assert cost == pytest.approx(expected)
 
     def test_long_context_reprices_full_request(self):
@@ -170,18 +158,14 @@ class TestGpt6AstraPricing:
 
     def test_long_context_cache_rates_doubled(self):
         cost = calculate_cost("gpt-6-astra", 200_000, 5_000, 80_000, 10_000)
-        expected = (
-            200_000 * 20.0 + 5_000 * 75.0 + 80_000 * 2.00 + 10_000 * 25.00
-        ) / 1e6
+        expected = (200_000 * 20.0 + 5_000 * 75.0 + 80_000 * 2.00 + 10_000 * 25.00) / 1e6
         assert cost == pytest.approx(expected)
 
     def test_thinking_aliases_price_like_base(self):
         for level in ("low", "medium", "high", "xhigh"):
             assert calculate_cost(
                 f"gpt-6-astra-{level}", 300_000, 5_000, 10_000, 10_000
-            ) == pytest.approx(
-                calculate_cost("gpt-6-astra", 300_000, 5_000, 10_000, 10_000)
-            ), level
+            ) == pytest.approx(calculate_cost("gpt-6-astra", 300_000, 5_000, 10_000, 10_000)), level
 
     def test_context_length_stays_at_intentional_500k_cap(self):
         """The catalog caps >=1M context windows at 500K by design.
@@ -257,9 +241,7 @@ class TestDirectMoonshotCachePricing:
     def test_moonshot_v1_fallback_cache_read_quarter(self):
         """Entries without an explicit cache-read price fall back to 0.25x."""
         info = MODEL_INFO["moonshot-v1-8k"]
-        assert info.cache_read_price_per_1M == pytest.approx(
-            info.input_price_per_1M * 0.25
-        )
+        assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.25)
         assert info.cache_write_price_per_1M == 0.0
 
     def test_kimi_k25_cache_hit_cost(self):
@@ -272,8 +254,44 @@ class TestDirectMoonshotCachePricing:
         assert cost == pytest.approx(expected)
 
     def test_openrouter_kimi_k3_cache_read_not_overcharged(self):
-        info = MODEL_INFO["openrouter/moonshotai/kimi-k3"]
-        assert info.cache_read_price_per_1M == pytest.approx(0.30)
+        """openrouter.ai 2026-09: kimi-k3 $1.70 in, $0.17 cache read (0.1x), on every alias."""
+        for name in (
+            "openrouter/moonshotai/kimi-k3",
+            "openrouter/moonshotai/kimi-k3-low",
+            "openrouter/moonshotai/kimi-k3-high",
+            "openrouter/moonshotai/kimi-k3-max",
+            "openrouter/~moonshotai/kimi-latest",
+        ):
+            info = MODEL_INFO[name]
+            assert info.input_price_per_1M == pytest.approx(1.70), name
+            assert info.output_price_per_1M == pytest.approx(8.50), name
+            assert info.cache_read_price_per_1M == pytest.approx(0.17), name
+
+
+class TestDirectCatalogPricesMatchProviderPages:
+    def test_gemini_36_and_37_flash_are_standard_not_batch_price(self):
+        """ai.google.dev pricing 2026-09: 3.6/3.7/3.8 Flash are $0.75 / $3.75.
+
+        The batch tier is $0.375 / $1.875, which the catalog had picked up for 3.7.
+        """
+        for name in ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"):
+            info = MODEL_INFO[name]
+            assert info.input_price_per_1M == pytest.approx(0.75), name
+            assert info.output_price_per_1M == pytest.approx(3.75), name
+            assert info.cache_read_price_per_1M == pytest.approx(0.075), name
+        assert calculate_cost("gemini-3.7-flash", 1_000_000, 100_000, 500_000, 0) == pytest.approx(
+            (1_000_000 * 0.75 + 100_000 * 3.75 + 500_000 * 0.075) / 1e6
+        )
+
+    def test_gpt_audio_mini_audio_tokens_priced_separately(self):
+        """developers.openai.com pricing 2026-09: audio $10 / $20, text $0.60 / $2.40."""
+        info = MODEL_INFO["gpt-audio-mini"]
+        assert info.audio_input_price_per_1M == pytest.approx(10.0)
+        assert info.audio_output_price_per_1M == pytest.approx(20.0)
+        cost = calculate_cost("gpt-audio-mini", 1_000, 1_000, 0, 0, 0, 1_000, 1_000)
+        assert cost == pytest.approx(
+            (1_000 * 0.60 + 1_000 * 2.40 + 1_000 * 10.0 + 1_000 * 20.0) / 1e6
+        )
 
 
 class TestLongContextTierUsesPromptTokens:
@@ -307,6 +325,4 @@ class TestGlmCachePricing:
 
     def test_glm45_cache_hit_cost(self):
         cost = calculate_cost("glm-4.5", 10_000, 5_000, 100_000, 0)
-        assert cost == pytest.approx(
-            (10_000 * 0.6 + 5_000 * 2.2 + 100_000 * 0.11) / 1e6
-        )
+        assert cost == pytest.approx((10_000 * 0.6 + 5_000 * 2.2 + 100_000 * 0.11) / 1e6)

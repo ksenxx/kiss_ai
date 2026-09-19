@@ -1080,13 +1080,17 @@ _ANTHROPIC_CACHE_PREFIXES = (
     "openrouter/anthropic/",
     "openrouter/~anthropic/",
 )
+# Anthropic bills cache hits at 0.1x the base input price, except on these
+# families where the published rate is 0.025x ($0.25/MTok on a $10 base):
+# https://platform.claude.com/docs/en/about-claude/pricing
+_ANTHROPIC_LOW_CACHE_READ_FAMILIES = (
+    "claude-fable-5-1",
+    "claude-fable-5.1",
+    "claude-mythos-5-1",
+    "claude-mythos-5.1",
+)
 _OPENAI_OPENROUTER_PREFIXES = ("openrouter/openai/", "openrouter/~openai/")
 _GOOGLE_OPENROUTER_PREFIXES = ("openrouter/google/", "openrouter/~google/")
-_QUARTER_CACHE_OPENROUTER_PREFIXES = (
-    "openrouter/moonshotai/",
-    "openrouter/~moonshotai/",
-    "openrouter/x-ai/",
-)
 
 _XHIGH_SUFFIX = "-xhigh"
 
@@ -1255,64 +1259,71 @@ def _openai_bare_name(name: str) -> str | None:
     return None
 
 
+def _provider_cache_defaults(name: str, inp: float) -> tuple[float, float, float | None] | None:
+    """Return the published ``(read, write_5m, write_1h)`` cache prices for *name*.
+
+    Encodes each provider's prompt-caching rule as multiples of the base
+    input price *inp*; ``write_1h`` is ``None`` for providers without a
+    one-hour cache tier.  Returns ``None`` for providers without a
+    documented cache discount.
+
+    Args:
+        name: The MODEL_INFO key.
+        inp: The model's input price per 1M tokens.
+    """
+    if name.startswith(_ANTHROPIC_CACHE_PREFIXES):
+        claude = name.rsplit("/", 1)[-1]
+        read_mult = 0.025 if claude.startswith(_ANTHROPIC_LOW_CACHE_READ_FAMILIES) else 0.1
+        return inp * read_mult, inp * 1.25, inp * 2.0
+    bare = _openai_bare_name(name)
+    if bare is not None:
+        write_mult = 1.25 if _openai_charges_cache_writes(bare) else 0.0
+        return inp * _openai_cache_read_multiplier(bare), inp * write_mult, None
+    if name.startswith("gemini-") or name.startswith(_GOOGLE_OPENROUTER_PREFIXES):
+        # OpenRouter passes Google's 0.1x cache-read rate through unchanged
+        # (e.g. google/gemini-3.1-pro-preview: $2.00 input, $0.20 cache read).
+        return inp * 0.1, 0.0, None
+    if name.startswith(("kimi-", "moonshot-")):
+        return inp * 0.25, 0.0, None
+    return None
+
+
 def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
     """Populate ``info``'s cache read/write prices from provider pricing rules.
 
     Cache-read tokens are billed at a fraction of the base input price and
     cache-write tokens at a (possibly different) multiple, matching each
-    provider's published prompt-caching pricing. Providers without a
-    documented cache discount are left as ``None`` so ``calculate_cost`` falls
-    back to the full input price (a conservative over-estimate).
+    provider's published prompt-caching pricing
+    (:func:`_provider_cache_defaults`).  An explicit catalog
+    ``cache_read_price_per_1M`` marks the entry as carrying published
+    prices: ``update_models.py`` writes ``cache_read_price_per_1M`` /
+    ``cache_write_price_per_1M`` for every ``openrouter/*`` model from
+    OpenRouter's per-model ``pricing.input_cache_read`` /
+    ``pricing.input_cache_write``, and a write price OpenRouter omits
+    stays ``None`` (billed at the input price by ``calculate_cost``)
+    rather than taking a provider default.  Only the Anthropic 1h-write
+    tier, which OpenRouter never publishes, is always derived.  Entries
+    with no published prices get the full provider rule; providers
+    without a documented cache discount are left as ``None`` so
+    ``calculate_cost`` falls back to the full input price (a conservative
+    over-estimate).
 
     Args:
         name: The MODEL_INFO key.
         info: The ModelInfo to mutate in place.
     """
-    if info.cache_read_price_per_1M is not None:
-        return
     if not info.is_generation_supported:
         return
-    inp = info.input_price_per_1M
-    if name.startswith(_ANTHROPIC_CACHE_PREFIXES):
-        info.cache_read_price_per_1M = inp * 0.1
-        info.cache_write_price_per_1M = inp * 1.25
-        info.cache_write_1h_price_per_1M = inp * 2.0
+    defaults = _provider_cache_defaults(name, info.input_price_per_1M)
+    if defaults is None:
         return
-    bare = _openai_bare_name(name)
-    if bare is not None:
-        info.cache_read_price_per_1M = inp * _openai_cache_read_multiplier(bare)
-        if _openai_charges_cache_writes(bare):
-            info.cache_write_price_per_1M = inp * 1.25
-        else:
-            info.cache_write_price_per_1M = 0.0
-        return
-    if name.startswith("gemini-"):
-        info.cache_read_price_per_1M = inp * 0.1
-        info.cache_write_price_per_1M = 0.0
-        return
-    if name.startswith(_GOOGLE_OPENROUTER_PREFIXES):
-        info.cache_read_price_per_1M = inp * 0.25
-        info.cache_write_price_per_1M = 0.0
-        return
-    if name.startswith("openrouter/deepseek/"):
-        multiplier = 0.02
-        if name.startswith("openrouter/deepseek/deepseek-v4-pro"):
-            multiplier = 0.003625 / 0.435
-        info.cache_read_price_per_1M = inp * multiplier
-        info.cache_write_price_per_1M = inp
-        return
-    if name.startswith("openrouter/qwen/"):
-        info.cache_read_price_per_1M = inp * 0.2
-        info.cache_write_price_per_1M = inp * 1.25
-        return
-    if name.startswith(_QUARTER_CACHE_OPENROUTER_PREFIXES):
-        info.cache_read_price_per_1M = inp * 0.25
-        info.cache_write_price_per_1M = 0.0
-        return
-    if name.startswith(("kimi-", "moonshot-")):
-        info.cache_read_price_per_1M = inp * 0.25
-        info.cache_write_price_per_1M = 0.0
-        return
+    read, write, write_1h = defaults
+    if info.cache_read_price_per_1M is None:
+        info.cache_read_price_per_1M = read
+        if info.cache_write_price_per_1M is None:
+            info.cache_write_price_per_1M = write
+    if info.cache_write_1h_price_per_1M is None:
+        info.cache_write_1h_price_per_1M = write_1h
 
 
 for _name, _info in MODEL_INFO.items():
