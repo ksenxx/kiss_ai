@@ -718,6 +718,7 @@ class _TaskRunnerMixin:
         def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]: ...
         def _extract_result_summary(self) -> str: ...
         def _refresh_files_after_task(self, work_dir: str = "") -> None: ...
+        def _merge_deferred_worktrees(self, repo: Path | None) -> None: ...
 
     def _run_task(self, cmd: dict[str, Any]) -> None:
         """Run the agent with the given task.
@@ -946,6 +947,11 @@ class _TaskRunnerMixin:
                 # this run never reached.
                 with suppress(BaseException):
                     state = self._resolve_run_state(cmd)
+            # Main-tree occupancy ``_run_task_inner`` did not release
+            # itself (it crashed before its own cleanup); worktree
+            # merges it kept waiting are retried below.  ``None`` on
+            # every normal path, where the inner cleanup already ran.
+            stranded_repo: Path | None = None
             with self._state_lock:
                 task_id_for_end: str | None = None
                 if state is not None:
@@ -960,6 +966,7 @@ class _TaskRunnerMixin:
                     # not leak into a later run on the same tab.
                     state.queued_followup_tasks.clear()
                     state.is_task_active = False
+                    stranded_repo = state.non_wt_repo_root
                     state.is_running_non_wt = False
                     state.non_wt_repo_root = None
                     state.interrupted_by_shutdown = False
@@ -996,6 +1003,11 @@ class _TaskRunnerMixin:
             # learns about a stop — so it has to end with the run, or
             # anything this thread does next would inherit it.
             self.printer._thread_local.stop_event = None
+            if stranded_repo is not None:
+                try:
+                    self._merge_deferred_worktrees(stranded_repo)
+                except BaseException:  # pragma: no cover — merge error handler
+                    logger.debug("Deferred worktree merge error", exc_info=True)
 
     def _restore_user_model_pick(self, tab_id: str) -> None:
         """Put the user's own model back in *tab_id*'s picker.
@@ -2006,6 +2018,10 @@ class _TaskRunnerMixin:
             # backstops it on exception paths so a watching sub-agent
             # tab can never keep spinning forever.
             subagent_done_sent = False
+            # Main-repo root this non-worktree task occupied.  Worktree
+            # merges the occupancy kept waiting run once the task is
+            # over and its changes are committed (mandatory finally).
+            freed_repo: Path | None = None
             try:
                 _agent_parsed = parse_result_yaml(agent_returned) if agent_returned else None
                 _agent_reported_failure = bool(
@@ -2065,6 +2081,7 @@ class _TaskRunnerMixin:
                         logger.debug("Post-task autocommit error", exc_info=True)
                     finally:
                         with self._state_lock:
+                            freed_repo = state.non_wt_repo_root
                             state.is_running_non_wt = False
                             state.non_wt_repo_root = None
                 assert task_end_event is not None
@@ -2233,6 +2250,10 @@ class _TaskRunnerMixin:
                 with self._state_lock:
                     state.is_task_active = False
                     if not use_worktree:
+                        if state.non_wt_repo_root is not None:
+                            # The normal path did not get as far as
+                            # releasing the occupancy: release it here.
+                            freed_repo = state.non_wt_repo_root
                         state.is_running_non_wt = False
                         state.non_wt_repo_root = None
                 if task_history_id is not None:
@@ -2255,6 +2276,20 @@ class _TaskRunnerMixin:
                 tl = getattr(self.printer, "_thread_local", None)
                 if tl is not None:
                     tl.task_id = ""
+                # The main tree this task occupied is free again and,
+                # with auto-commit on, committed: merge the worktrees
+                # whose post-task merge the guard refused meanwhile
+                # (they used to wait for the user to open a new chat).
+                # Lives in the mandatory finally so an exception in the
+                # persistence/broadcast block above (after the commit)
+                # cannot strand the promised merge; runs after this
+                # task's own end event so the other tabs' merge results
+                # never interleave with it, and is a no-op while the
+                # tree is still dirty.
+                try:
+                    self._merge_deferred_worktrees(freed_repo)
+                except BaseException:  # pragma: no cover — merge error handler
+                    logger.debug("Deferred worktree merge error", exc_info=True)
 
     def _persist_subtask_row(
         self,

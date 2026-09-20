@@ -1562,9 +1562,89 @@ class _MergeFlowMixin:
                 f"tree. Wait for it to finish before {verb}."
             )
             if verb == "merging":
-                message += " Then open a new chat to auto merge."
+                message += " " + self._defer_worktree_merge(state)
             return {"success": False, "message": message}
         return None
+
+    def _defer_worktree_merge(self, state: AgentState) -> str:
+        """Schedule the tab's pending worktree for an automatic merge.
+
+        Called (under ``_state_lock``) when a merge is refused because
+        another tab's non-worktree task occupies the main working
+        tree.  Records the pending worktree's branch on *state* so
+        :meth:`_merge_deferred_worktrees` retries the merge once that
+        task's changes are committed, and returns the sentence that
+        tells the user so.
+
+        Args:
+            state: The tab state owning the pending worktree.
+
+        Returns:
+            The sentence to append to the refusal message.
+        """
+        agent = state.agent
+        assert agent is not None  # callers verified the pending worktree
+        state.wt_merge_deferred_branch = agent._wt_branch
+        return (
+            "The worktree will be merged automatically once the "
+            "parent branch has been committed."
+        )
+
+    def _merge_deferred_worktrees(self, repo: Path | None) -> None:
+        """Merge the pending worktrees whose merge waited on *repo*'s main tree.
+
+        Called when the main working tree of *repo* may have just been
+        committed: a non-worktree task finished (its post-task
+        auto-commit included), the user pressed Git Commit, or the
+        main-tree bar's Discard cleaned the tree.  Every tab that holds
+        a pending worktree of *repo* marked by
+        :meth:`_defer_worktree_merge` is merged through the regular
+        user-action path (so all its busy guards still apply) and the
+        outcome is broadcast to that tab as a ``worktree_result``.
+
+        Nothing happens while the main tree is still dirty (or its
+        status cannot be read) — the changes have not been committed
+        yet, and the main-tree bar (or a later Git Commit) will trigger
+        the merge when they are.
+
+        Args:
+            repo: Resolved main-repo root whose tree may have been
+                committed, or ``None`` when the caller's working
+                directory is not inside a git repository.
+        """
+        if repo is None:
+            return
+        status = _git(str(repo), "status", "--porcelain", "-uall")
+        if status.returncode != 0 or status.stdout.strip():
+            # Dirty — or unknown, when git itself failed: the changes
+            # are not known to be committed, so the deferral stands
+            # (fail closed; a later trigger retries).
+            return
+        with self._state_lock:
+            candidates = [
+                state
+                for state in agent_state.snapshot()
+                if state.tab_id
+                and state.wt_merge_deferred_branch is not None
+                and state.agent is not None
+                and state.agent._wt_pending
+                and state.agent._wt_branch == state.wt_merge_deferred_branch
+                and _same_repo(repo, state.agent._repo_root)
+            ]
+        for state in candidates:
+            result = self._handle_worktree_action("merge", state.tab_id)
+            with self._state_lock:
+                # ``_handle_worktree_action`` clears the marker only
+                # once it owns the worktree; a marker still set means a
+                # guard refused before anything ran (the tab started a
+                # new task, or the main tree got busy again) and the
+                # deferral simply stands until the next trigger.
+                still_deferred = state.wt_merge_deferred_branch is not None
+            if still_deferred:
+                continue
+            self.printer.broadcast(
+                {"type": "worktree_result", "tabId": state.tab_id, **result}
+            )
 
     def _handle_worktree_action(
         self,
@@ -1681,15 +1761,21 @@ class _MergeFlowMixin:
                 # and deletes the unmerged branch, touching neither
                 # the main working tree's files nor its HEAD, so
                 # refusing it would leak the worktree forever
-                # (nothing ever retries).
+                # (nothing ever retries).  The refused MERGE is
+                # retried by ``_merge_deferred_worktrees`` once the
+                # other task's changes are committed.
                 return {
                     "success": False,
                     "message": (
                         "Another tab is running a task on the main "
                         "working tree. Wait for it to finish before "
-                        f"{verb}. Then open a new chat to auto merge."
+                        f"{verb}. " + self._defer_worktree_merge(state)
                     ),
                 }
+            # From here on this call owns the worktree's fate, so a
+            # merge deferred to "once the main tree is committed" is
+            # no longer outstanding.
+            state.wt_merge_deferred_branch = None
             if not already_claimed:
                 state.is_merging = True
                 # This runs in the event loop's default executor, and

@@ -72,6 +72,7 @@ class AgentState:
         "merge_thread",
         "is_running_non_wt",
         "non_wt_repo_root",
+        "wt_merge_deferred_branch",
         "interrupted_by_shutdown",
         "stop_acknowledged",
         "frontend_closed",
@@ -146,6 +147,13 @@ class AgentState:
         # when the task starts), so worktree merges in OTHER
         # repositories are not blocked by it (repo-aware busy guard).
         self.non_wt_repo_root: Path | None = None
+        # Branch of this tab's pending worktree whose merge was refused
+        # because another tab's non-worktree task occupied the main
+        # tree.  ``_merge_deferred_worktrees`` retries the merge once
+        # that task's changes are committed; cleared the moment any
+        # worktree action actually runs.  Keyed by branch so a stale
+        # value can never target a later worktree of the same tab.
+        self.wt_merge_deferred_branch: str | None = None
         self.interrupted_by_shutdown: bool = False
         # Raised by the task runner the moment a cancelling
         # ``KeyboardInterrupt`` has been caught and turned into the
