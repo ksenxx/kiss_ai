@@ -2500,9 +2500,11 @@ class WebPrinter(JsonPrinter):
           askUser, commitMessage, etc.) are treated as
           targeted "system" events: sent verbatim to all connected
           clients (which filter by ``tabId``), but **not** recorded
-          or persisted — except ``prompt`` echoes that ALSO carry a
-          ``taskId``, whose tabId-stripped copy is recorded and
-          persisted under that task (see the tabId branch below).
+          or persisted — except the ``TAB_STAMPED_TASK_EVENT_TYPES``
+          (``prompt`` echoes, ``ask_answer`` replies, ``result``) that
+          ALSO carry a ``taskId``, whose tabId-stripped copy is
+          recorded and persisted under that task (see the tabId branch
+          below).
         * Events with no ``tabId`` but a thread-local ``task_id`` are
           task events: ``taskId`` is injected, the event is recorded
           under the task and queued for persistence, and one stamped
@@ -2548,11 +2550,7 @@ class WebPrinter(JsonPrinter):
 
         if "tabId" in event:
             self._track_worktree_event(event, event.get("tabId"))
-            if event.get("type") in ("prompt", "result") and event.get("taskId"):
-                record = {k: v for k, v in event.items() if k != "tabId"}
-                with self._lock:
-                    self._record_event(record)
-                self._persist_event(record)
+            self._keep_tab_stamped_task_event(event)
             if record_only:
                 return
             self._send_to_ws_clients(json.dumps(event))

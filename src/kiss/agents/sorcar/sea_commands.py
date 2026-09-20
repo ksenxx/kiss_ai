@@ -38,6 +38,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+from kiss.agents.third_party_agents import ask_sea
 from kiss.core.config import kiss_home
 
 logger = logging.getLogger("kiss.sea_commands")
@@ -374,20 +375,19 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
     if command == "ask":
         # ``/ask <question>`` is a fixed side-channel Q&A over the
         # calling task's persisted events: the two ``append_to_*``
-        # arguments are wired verbatim from the user task description
-        # of ``ask_sea.py`` and must reach ``run_agent`` unchanged.
-        # ``<task_id>`` is left as a literal placeholder here — the
-        # calling task's id is not known until the daemon dispatch
-        # allocates one, so ``_dispatch_reserved`` substitutes it into
+        # arguments must reach ``run_agent`` unchanged.  ``<task_id>``
+        # is left as a literal placeholder here — the calling task's
+        # id is not known until the daemon dispatch allocates one, so
+        # ``_dispatch_reserved`` substitutes it into
         # ``append_to_prompt`` right before the daemon round trip.
+        # The system-prompt suffix is owned by ``ask_sea.py`` (its
+        # ``append_to_system_prompt()`` getter also overrides the
+        # wire value daemon-side), so it is read from there.
         append_to_prompt = (
             "Read the events of the task <task_id> from "
             "~/.kiss/sorcar.db and answer the user question above."
         )
-        append_to_system_prompt = (
-            "**MUST FOLLOW: You MUST NOT USE internet or internet "
-            "search at any point."
-        )
+        append_to_system_prompt = ask_sea.append_to_system_prompt()
         rewritten = (
             f"The user invoked the slash command /ask.  Call the "
             f"run_agent tool IMMEDIATELY, as your very first action, "

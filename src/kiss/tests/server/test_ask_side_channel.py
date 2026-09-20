@@ -28,10 +28,15 @@ The tests exercise:
 * ``_dispatch_ask_side_channel`` — the background worker calls
   ``daemon_client.run`` with the ask_sea path, the OWNER's task id
   substituted into ``append_to_prompt``, the fixed
-  ``append_to_system_prompt``, ``parent_task_id`` /
-  ``parent_tab_id`` / ``chat_id`` propagated, and
-  ``use_worktree`` / ``auto_commit`` disabled (this is a read-only
-  Q&A run).
+  ``append_to_system_prompt`` (read from ``ask_sea``),
+  ``parent_task_id`` / ``parent_tab_id`` / ``chat_id`` propagated,
+  and ``use_worktree`` / ``auto_commit`` disabled (this is a
+  read-only Q&A run).
+* ``_broadcast_ask_answer`` — once ``daemon_client.run`` returns
+  (or raises) the worker broadcasts ONE ``ask_answer`` event carrying
+  the question, the answer text, the success flag, the asking tab id
+  and the owner task id, so the running task's transcript shows the
+  answer after the answering sub-agent's tab is gone.
 """
 
 from __future__ import annotations
@@ -92,7 +97,9 @@ def _register_running_task(
         task_id, tab_id=tab_id, chat_id=chat_id, server_owned=True,
     )
     st.is_task_active = True
-    st.agent = _AgentStub(task_id)
+    # ``_owner_task_id`` reads only ``last_task_id`` off the agent; the
+    # stub is not a WorktreeSorcarAgent and the annotation says so.
+    st.agent = _AgentStub(task_id)  # type: ignore[assignment]
     agent_state.register(st)
     return st
 
@@ -339,15 +346,22 @@ def _install_daemon_run_capture(
     """Replace ``daemon_client.run`` with a recorder.
 
     Returns the mutable list every fake dispatch appends its kwargs
-    to.  The recorder returns immediately (no result inspected by
-    the caller in this side-channel path).
+    to.  The recorder returns immediately with a canned successful
+    :class:`daemon_client.TaskResult` — the answer the worker relays
+    into the owner task's transcript.
     """
     calls: list[dict[str, Any]] = []
 
-    def _fake_run(prompt: str, **kwargs: Any) -> object:
+    def _fake_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
         kwargs["prompt"] = prompt
         calls.append(kwargs)
-        return object()
+        return daemon_client.TaskResult(
+            text="<p>Step 3 failed because the file was missing.</p>",
+            success=True,
+            cost=0.01,
+            tokens=10,
+            steps=2,
+        )
 
     monkeypatch.setattr(daemon_client, "run", _fake_run)
     return calls
@@ -373,7 +387,8 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
     - ``prompt`` is the user's question (verbatim).
     - ``extension_agent_path`` is the resolved ``ask_sea.py`` path.
     - ``append_to_prompt`` embeds the OWNER's task id (substituted).
-    - ``append_to_system_prompt`` is the fixed no-internet directive.
+    - ``append_to_system_prompt`` is ``ask_sea``'s fixed suffix (the
+      no-internet directive plus the answer-quickly sentence).
     - ``parent_task_id`` / ``parent_tab_id`` / ``chat_id`` reach the
       daemon so the sub-agent tab lands in the running task's tab.
     - ``use_worktree`` / ``auto_commit`` are False (read-only Q&A).
@@ -398,9 +413,9 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
         "Read the events of the task task-abc from ~/.kiss/sorcar.db "
         "and answer the user question above."
     )
-    assert kwargs["append_to_system_prompt"] == (
-        "**MUST FOLLOW: You MUST NOT USE internet or internet search "
-        "at any point."
+    assert kwargs["append_to_system_prompt"] == ask_sea.append_to_system_prompt()
+    assert kwargs["append_to_system_prompt"].endswith(
+        "You must answer quickly because the user is waiting."
     )
     assert kwargs["parent_task_id"] == "task-abc"
     assert kwargs["parent_tab_id"] == "tab-1"
@@ -442,20 +457,92 @@ def test_side_channel_survives_daemon_run_exception(
     print an unhandled-exception traceback into the daemon log and
     then die; the interactive session must keep running either way.
     """
-    server, _ = _make_server()
+    server, events = _make_server()
 
     def _boom(prompt: str, **kwargs: Any) -> None:
         raise RuntimeError("simulated daemon failure")
 
     monkeypatch.setattr(daemon_client, "run", _boom)
-    # No assertion needed: the worker MUST NOT raise back into any
-    # calling thread — this call would surface an unhandled thread
-    # exception in the test runner if it did.
+    # The worker MUST NOT raise back into any calling thread — this
+    # call would surface an unhandled thread exception in the test
+    # runner if it did.  Instead the user gets a FAILED answer panel
+    # naming the error, so they are not left waiting.
     server._dispatch_ask_side_channel(
         tab_id="tab-1", owner_task_id="task-1",
         chat_id="chat-1", question="q",
     )
-    # Give the daemon thread a chance to run + log.
-    import time
+    _wait_for(lambda: any(e["type"] == "ask_answer" for e in events))
+    answers = [e for e in events if e["type"] == "ask_answer"]
+    assert len(answers) == 1
+    assert answers[0]["success"] is False
+    assert "simulated daemon failure" in answers[0]["text"]
+    assert answers[0]["question"] == "q"
+    assert answers[0]["tabId"] == "tab-1"
+    assert answers[0]["taskId"] == "task-1"
 
-    time.sleep(0.05)
+
+# ---------------------------------------------------------------------------
+# _broadcast_ask_answer
+# ---------------------------------------------------------------------------
+
+
+def test_side_channel_broadcasts_answer_into_owner_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finished dispatch MUST emit exactly one ``ask_answer`` event.
+
+    The answering sub-agent's nested tab is closed by the frontend
+    the moment it ends, so this event is the ONLY way the user sees
+    the reply.  It carries the question (so the panel is
+    self-contained on replay), the answer text and success flag from
+    the :class:`TaskResult`, the asking tab id and the OWNER task id
+    (the stamp that makes the printer record + persist it under the
+    running task).
+    """
+    server, events = _make_server()
+    _install_daemon_run_capture(monkeypatch)
+
+    server._dispatch_ask_side_channel(
+        tab_id="tab-1",
+        owner_task_id="task-abc",
+        chat_id="chat-xyz",
+        question="why did step 3 fail?",
+    )
+    _wait_for(lambda: any(e["type"] == "ask_answer" for e in events))
+
+    answers = [e for e in events if e["type"] == "ask_answer"]
+    assert len(answers) == 1
+    assert answers[0] == {
+        "type": "ask_answer",
+        "question": "why did step 3 fail?",
+        "text": "<p>Step 3 failed because the file was missing.</p>",
+        "success": True,
+        "tabId": "tab-1",
+        "taskId": "task-abc",
+    }
+
+
+def test_broadcast_ask_answer_without_owner_task_omits_task_id() -> None:
+    """No owner task id → no ``taskId`` stamp (transient, still shown).
+
+    The running task had not allocated its row at dispatch time; the
+    answer is still rendered live in the asking tab, it just cannot
+    be filed under a task for replay.
+    """
+    server, events = _make_server()
+    server._broadcast_ask_answer(
+        tab_id="tab-9",
+        owner_task_id="",
+        question="q",
+        text="a",
+        success=True,
+    )
+    assert events == [
+        {
+            "type": "ask_answer",
+            "question": "q",
+            "text": "a",
+            "success": True,
+            "tabId": "tab-9",
+        }
+    ]

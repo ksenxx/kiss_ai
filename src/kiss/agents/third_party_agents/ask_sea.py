@@ -16,14 +16,17 @@ this script:
   (parent) task's id inside :func:`_dispatch_reserved` before the
   daemon round trip, so the answering agent reads the events of the
   task the user is asking about,
-* ``append_to_system_prompt`` = ``"**MUST FOLLOW: You MUST NOT USE
-  internet or internet search at any point."``.
+* ``append_to_system_prompt`` = :func:`append_to_system_prompt` — the
+  no-internet directive plus a reminder to answer quickly.
 
-Only the three overrides the task description names are wired here:
-:func:`system_prompt` swaps the base system prompt for the SYSTEM_LITE
-ablation prompt, :func:`is_parallel` and :func:`use_web_tools` both
-return ``False`` so the answering session runs as a single offline
-agent that only queries ``~/.kiss/sorcar.db``.
+Four overrides are wired here: :func:`system_prompt` swaps the base
+system prompt for the SYSTEM_LITE ablation prompt,
+:func:`append_to_system_prompt` supplies the fixed suffix above (a
+getter defined in this file wins over the wire value, so it is the
+single source of truth for both dispatch paths), and
+:func:`is_parallel` and :func:`use_web_tools` both return ``False`` so
+the answering session runs as a single offline agent that only queries
+``~/.kiss/sorcar.db``.
 """
 
 from __future__ import annotations
@@ -60,6 +63,25 @@ def system_prompt() -> str:
     """
     src = _SYSTEM_LITE_PATH if _SYSTEM_LITE_PATH.is_file() else _BUNDLED_SYSTEM_LITE_PATH
     return src.read_text(encoding="utf-8")
+
+
+def append_to_system_prompt() -> str:
+    """Return the fixed suffix appended to the answering agent's system prompt.
+
+    Two directives: never touch the internet (the answer must come
+    from the task's own persisted events), and answer quickly (the
+    user typed ``/ask`` into a live task and is waiting on the reply).
+    Both dispatch paths — the idle-tab ``run_agent`` rewrite in
+    :mod:`kiss.agents.sorcar.sea_commands` and the running-tab side
+    channel in :mod:`kiss.server.commands` — read the string from
+    here, and the daemon applies this getter over the wire value as
+    well, so there is exactly one copy of the text.
+    """
+    return (
+        "**MUST FOLLOW: You MUST NOT USE internet or internet search "
+        "at any point. You must answer quickly because the user is "
+        "waiting."
+    )
 
 
 def is_parallel() -> bool:

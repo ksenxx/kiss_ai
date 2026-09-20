@@ -1104,6 +1104,14 @@ class _CommandsMixin:
         tab — same webview, no interaction with the outer agent's
         (possibly blocked) tool call.
 
+        The nested tab is closed by the frontend the moment the
+        answering session ends, so the answer itself is delivered
+        separately: when :func:`daemon_client.run` returns (or
+        raises), the worker broadcasts a persisted ``ask_answer``
+        event into the OWNER task's transcript via
+        :meth:`_broadcast_ask_answer`, and the running task's tab
+        renders it as a distinct "Answer" panel that survives replays.
+
         The ``<task_id>`` placeholder is substituted HERE so the
         answering session receives the OWNER's task id even when it
         would end up as the answering task's own parent id (which is
@@ -1128,6 +1136,7 @@ class _CommandsMixin:
         """
         from kiss.agents.sorcar import daemon_client, sea_commands
         from kiss.agents.sorcar.agent_dispatch import _daemon_sock_path
+        from kiss.agents.third_party_agents import ask_sea
 
         sea_path = sea_commands.get_command("ask")
         if sea_path is None:
@@ -1140,15 +1149,12 @@ class _CommandsMixin:
             f"Read the events of the task {owner_task_id} from "
             f"~/.kiss/sorcar.db and answer the user question above."
         )
-        append_to_system_prompt = (
-            "**MUST FOLLOW: You MUST NOT USE internet or internet "
-            "search at any point."
-        )
+        append_to_system_prompt = ask_sea.append_to_system_prompt()
         sock_path = _daemon_sock_path()
 
         def _run() -> None:
             try:
-                daemon_client.run(
+                result = daemon_client.run(
                     question,
                     extension_agent_path=str(sea_path),
                     append_to_prompt=append_to_prompt,
@@ -1162,18 +1168,70 @@ class _CommandsMixin:
                     timeout=600.0,
                     stop_on_timeout=True,
                 )
-            except Exception:
+                text, success = result.text, result.success
+            except Exception as exc:
                 # A crashed side-channel MUST NOT bring down the
                 # daemon: the interactive tab keeps running.  The
-                # user sees no answer; the exception goes to the
-                # daemon log for triage.
+                # exception goes to the daemon log for triage, and
+                # the user gets a failed answer panel instead of
+                # waiting on a reply that will never come.
                 logger.exception(
                     "/ask side-channel dispatch failed for tab %s", tab_id,
                 )
+                text, success = f"The /ask agent failed: {exc}", False
+            self._broadcast_ask_answer(
+                tab_id=tab_id,
+                owner_task_id=owner_task_id,
+                question=question,
+                text=text,
+                success=success,
+            )
 
         threading.Thread(
             target=_run, daemon=True, name="kiss-ask-sidechannel",
         ).start()
+
+    def _broadcast_ask_answer(
+        self,
+        *,
+        tab_id: str,
+        owner_task_id: str,
+        question: str,
+        text: str,
+        success: bool,
+    ) -> None:
+        """Deliver a finished ``/ask`` answer into the running task's transcript.
+
+        Broadcasts an ``ask_answer`` event stamped with the asking
+        *tab_id* and, when known, the OWNER task's id.  The stamp makes
+        :meth:`WebPrinter.broadcast` treat it like the ``/ask`` prompt
+        echo (see :meth:`_echo_injected_prompt`): it is rendered live
+        in the tab, appended to the owner task's in-memory recording
+        (so a viewer attaching to the still-running task replays it)
+        and persisted into the task's ``events`` rows (so it survives
+        a history reopen).  Without *owner_task_id* the event is a
+        transient targeted broadcast — shown once, not replayed.
+
+        Args:
+            tab_id: The frontend tab the ``/ask`` was typed into.
+            owner_task_id: The running task's persisted id, or ``""``
+                when its row was not allocated at dispatch time.
+            question: The user's question, ``/ask`` prefix stripped.
+            text: The answering agent's final summary (HTML from
+                ``finish(summary_in_html=...)``), or the failure text
+                when the dispatch itself failed.
+            success: Whether the answering agent reported success.
+        """
+        event: dict[str, Any] = {
+            "type": "ask_answer",
+            "question": question,
+            "text": text,
+            "success": success,
+            "tabId": tab_id,
+        }
+        if owner_task_id:
+            event["taskId"] = owner_task_id
+        self.printer.broadcast(event)
 
     def _cmd_append_user_message(self, cmd: dict[str, Any]) -> None:
         """Queue a user message to be injected into the running agent's context.
@@ -1259,15 +1317,15 @@ class _CommandsMixin:
             # ``/ask …`` line as a steering message instead — that
             # path already handles the pre-allocation window through
             # ``unattributed_prompt_echoes``.
+            ask_question: str | None = None
             if question is not None and owner_task:
                 owner_chat_id = owner.chat_id
-                dispatched = True
+                ask_question = question
             else:
-                dispatched = False
                 _route_prompt_to_owner(owner, prompt)
                 if not owner_task:
                     owner.unattributed_prompt_echoes.append(prompt)
-        if dispatched:
+        if ask_question is not None:
             # Echo the raw ``/ask …`` line the user typed, then hand
             # off to the side-channel worker.  The echo carries the
             # OWNER's task id (not a fresh one) so the message appears
@@ -1278,7 +1336,7 @@ class _CommandsMixin:
                 tab_id=tab_id,
                 owner_task_id=owner_task,
                 chat_id=owner_chat_id,
-                question=question,
+                question=ask_question,
             )
             return
         self._echo_injected_prompt(tab_id, prompt, owner_task)
