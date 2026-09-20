@@ -122,6 +122,19 @@ def _start_openai_server(responses: list[dict[str, Any]]) -> tuple[Any, int]:
     return server, port
 
 
+def note(text: str) -> str:
+    """Record *text*: the tool a scripted session calls to count as progress.
+
+    A continuation that only calls ``finish`` is a zero-progress session
+    (``relentless_agent.MAX_ZERO_PROGRESS_SESSIONS``), so tests that need
+    the loop to keep going script one ``note`` call per session.
+    """
+    return f"noted: {text}"
+
+
+_NOTE = _make_tool_call_response("note", {"text": "working"}, call_id="call_note")
+
+
 def _run_agent(
     responses: list[dict[str, Any]],
     *,
@@ -141,6 +154,7 @@ def _run_agent(
                 work_dir=td,
                 verbose=False,
                 printer=printer,
+                tools=[note],
                 model_config={
                     "base_url": f"http://127.0.0.1:{port}/v1",
                     "api_key": "sk-test",
@@ -204,29 +218,66 @@ class TestExhaustionEmitsMergedFinalResult:
     failed."""
 
     def test_exhaustion_emits_terminal_failed_result(self) -> None:
+        # Both sessions call a tool and report distinct summaries, so the
+        # run is ended by max_sub_sessions rather than the zero-progress guard.
+        step1 = _make_tool_call_response(
+            "finish",
+            {"success": False, "is_continue": True, "summary_in_html": "step 1 done"},
+        )
+        step2 = _make_tool_call_response(
+            "finish",
+            {"success": False, "is_continue": True, "summary_in_html": "step 2 done"},
+        )
+        printer = RecordingPrinter()
+        with pytest.raises(KISSError, match=r"Task failed after 2 sub-sessions"):
+            _run_agent([_NOTE, step1, _NOTE, step2], max_sub_sessions=2, printer=printer)
+
+        self._assert_terminal_failed_result(
+            printer, "Task failed after 2 sub-sessions", "step 1 done", "step 2 done"
+        )
+
+    def test_zero_progress_stop_emits_terminal_failed_result(self) -> None:
+        """Stopping for lack of progress is a terminal FAILED outcome too.
+
+        Two finish-only continuations trip the guard after session 2; the
+        front end must see one merged Result with the stop banner, exactly
+        like sub-session exhaustion — not a stale "Status: Continue".
+        """
         resp_continue = _make_tool_call_response(
             "finish",
             {"success": False, "is_continue": True, "summary_in_html": "step done"},
         )
         printer = RecordingPrinter()
-        with pytest.raises(KISSError, match=r"Task failed after 2 sub-sessions"):
-            _run_agent([resp_continue], max_sub_sessions=2, printer=printer)
+        banner = (
+            "Task stopped after 2 consecutive sub-sessions with no progress "
+            "(no tool calls or an unchanged summary)"
+        )
+        with pytest.raises(KISSError, match=r"no progress"):
+            _run_agent([resp_continue], max_sub_sessions=10, printer=printer)
 
+        self._assert_terminal_failed_result(printer, banner, "step done", "step done")
+
+    @staticmethod
+    def _assert_terminal_failed_result(
+        printer: RecordingPrinter, banner: str, session1: str, session2: str
+    ) -> None:
+        """Check the 3rd Result event is the merged, terminal FAILED payload."""
         result_events = printer.result_events()
         assert len(result_events) == 3, (
-            f"expected 2 inner + 1 outer exhaustion Result; got {len(result_events)}"
+            f"expected 2 inner + 1 outer terminal Result; got {len(result_events)}"
         )
         final_content, kwargs = result_events[-1]
         final_payload = _parse_result_payload(final_content)
         assert final_payload["success"] is False
         assert final_payload["is_continue"] is False
         summary = final_payload["summary"]
-        assert "Task failed after 2 sub-sessions" in summary
         assert "<h3>Previous Session 1</h3>" in summary
         assert "<h3>Previous Session 2</h3>" in summary
-        assert "step done" in summary
+        assert session1 in summary
+        assert session2 in summary
+        assert summary.index(session1) <= summary.index(session2)
         assert "<h3>Final Session</h3>" not in summary
-        assert summary.rstrip().endswith("Task failed after 2 sub-sessions")
+        assert summary.rstrip().endswith(banner)
         assert "step_count" in kwargs
         assert "total_tokens" in kwargs
         assert "cost" in kwargs
