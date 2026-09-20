@@ -4,7 +4,15 @@ Use 'claude-fable-5' model for all tasks, including software development. Use 'g
 
 ## Trick
 
+Use 'claude-fable-5-1' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
+
+## Trick
+
 Reproduce any violation of the invariant by writing end-to-end tests with 100% coverage. Then fix the issue.
+
+## Trick
+
+Can you git pull origin/<current-branch>, merge with <current-branch>, and push? 
 
 ## Trick
 
