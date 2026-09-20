@@ -28,6 +28,7 @@ proactively by a background polling watcher (see
 appearance/removal of ``*_sea.py`` files in any of its folders — take
 effect while the daemon is running.
 """
+
 from __future__ import annotations
 
 import logging
@@ -111,9 +112,10 @@ def _scan_folder(folder: Path) -> dict[str, Path]:
 
     Returns:
         Mapping from command name (filename minus ``_sea.py``) to the
-        absolute, resolved SEA-script path.  Private modules (name
-        starts with ``_``) are excluded so ``_helper_sea.py`` is not
-        exposed as ``/_helper``.
+        absolute, resolved SEA-script path.  An underscore-prefixed
+        stem is a valid command (``_helper_sea.py`` becomes
+        ``/_helper``); only stems outside ``[A-Za-z0-9_-]`` are
+        skipped.
     """
     out: dict[str, Path] = {}
     try:

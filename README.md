@@ -246,6 +246,8 @@ def tool_call_hook():
 
 The full authoring guide — every getter's semantics, error handling, chat continuation, model configuration, and a complete worked example — is in [src/kiss/server/README.md](src/kiss/server/README.md).
 
+**Slash commands.** Name the file `xxx_sea.py` and it is also a chat command: typing `/xxx some text` in the VS Code extension or web app makes the session call `run_agent` with that file and "some text" as the task. The bundled channel agents are registered this way (`/slack`, `/gmail`, ...); list your own SEA folders, one per line, in `~/.kiss/SEAS.md` and they are picked up within two seconds, no restart needed. Syntax, precedence, and the dispatch flow are documented in [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md).
+
 ### Skills, MCP servers, and customization
 
 - Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.

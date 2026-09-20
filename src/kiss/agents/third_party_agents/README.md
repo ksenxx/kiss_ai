@@ -82,6 +82,14 @@ them. Each dispatched channel session handles only its own service (it cannot di
 further), so let the session you are chatting with do the coordination — which it does
 by default.
 
+When you want a specific channel with no routing guesswork, start the prompt with its
+slash command: `/slack post "deploy done" to #eng`. Every `xxx_sea.py` in this
+package is registered as `/xxx`, the chat box autocompletes the names, and the daemon
+turns the prompt into a direct `run_agent` call on that file. Folders of your own SEAs
+listed in `~/.kiss/SEAS.md` are registered the same way; the file syntax and the
+dispatch flow are in
+[docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md).
+
 ## How a channel agent works
 
 A channel agent is **not** an executable agent itself. Every prompt is submitted to
