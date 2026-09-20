@@ -1318,8 +1318,8 @@ class _CommandsMixin:
             # path already handles the pre-allocation window through
             # ``unattributed_prompt_echoes``.
             ask_question: str | None = None
+            owner_chat_id = owner.chat_id
             if question is not None and owner_task:
-                owner_chat_id = owner.chat_id
                 ask_question = question
             else:
                 _route_prompt_to_owner(owner, prompt)
@@ -1955,12 +1955,12 @@ class _CommandsMixin:
             logger.warning("saveMyModel failed", exc_info=True)
             error = f"Could not write ~/.kiss/MY_MODELS.json: {e}"
         if error:
-            self._send_my_models_error(error, cmd)
+            self._send_error_to_sender(error, cmd)
             return
         self._broadcast_my_models()
 
-    def _send_my_models_error(self, error: str, cmd: dict[str, Any]) -> None:
-        """Answer a failed custom-model mutation with an ``error`` event.
+    def _send_error_to_sender(self, error: str, cmd: dict[str, Any]) -> None:
+        """Answer a failed ``~/.kiss`` file mutation with an ``error`` event.
 
         Stamped with the sender's ``connId`` when present so the banner
         pops only in the window that clicked.
@@ -1988,9 +1988,35 @@ class _CommandsMixin:
                 logger.warning("deleteMyModel failed", exc_info=True)
                 error = f"Could not write ~/.kiss/MY_MODELS.json: {e}"
         if error:
-            self._send_my_models_error(error, cmd)
+            self._send_error_to_sender(error, cmd)
             return
         self._broadcast_my_models()
+
+    def _cmd_add_trick(self, cmd: dict[str, Any]) -> None:
+        """Append a promptlet to ``~/.kiss/MY_INJECTION.md``.
+
+        Services the Inject promptlet panel's Add button.  ``text`` is
+        the promptlet body; a rejected body (empty, duplicate, or one
+        that would start a new ``##`` section) or a failed write
+        answers the sender with an ``error`` event.  Success
+        rebroadcasts the full list as an UNstamped ``tricksData`` event
+        — the file is shared by every window, so every open panel
+        repaints, not only the one that clicked.
+        """
+        from kiss.server.tricks import append_my_injection_trick, read_tricks
+
+        text = cmd.get("text", "")
+        try:
+            error = append_my_injection_trick(
+                text if isinstance(text, str) else ""
+            )
+        except OSError as e:
+            logger.warning("addTrick failed", exc_info=True)
+            error = f"Could not write ~/.kiss/MY_INJECTION.md: {e}"
+        if error:
+            self._send_error_to_sender(error, cmd)
+            return
+        self.printer.broadcast({"type": "tricksData", "tricks": read_tricks()})
 
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
         """Update the server's *fallback* working directory.
@@ -2067,4 +2093,5 @@ class _CommandsMixin:
         "getMyModels": _cmd_get_my_models,
         "saveMyModel": _cmd_save_my_model,
         "deleteMyModel": _cmd_delete_my_model,
+        "addTrick": _cmd_add_trick,
     }

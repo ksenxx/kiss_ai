@@ -252,6 +252,8 @@ export type FromWebviewMessage =
       originalName?: string;
     }
   | {type: 'deleteMyModel'; name: string}
+  /** Inject promptlet panel: append `text` to ~/.kiss/MY_INJECTION.md. */
+  | {type: 'addTrick'; text: string}
   | {type: 'sizeReport'; innerWidth: number; screenWidth: number}
   | {type: 'runUpdate'}
   | {type: 'updateModels'}
@@ -679,6 +681,8 @@ type ToWebviewMessageBody =
         headers: string;
       }>;
     }
+  /** The full Inject promptlet list after an `addTrick` succeeded. */
+  | {type: 'tricksData'; tricks: string[]}
   | {
       type: 'history';
       sessions: SessionInfo[];
@@ -967,6 +971,7 @@ export interface AgentCommand {
     | 'getMyModels'
     | 'saveMyModel'
     | 'deleteMyModel'
+    | 'addTrick'
     | 'serverReset'
     | 'shareChat'
     | 'shareChatTasks'
@@ -1011,6 +1016,8 @@ export interface AgentCommand {
   headers?: string;
   /** saveMyModel: the entry's name before an edit-and-rename. */
   originalName?: string;
+  /** addTrick: the promptlet body to append. */
+  text?: string;
   /** getInfoFile: fingerprint of the file version the client holds. */
   knownSig?: string;
   /** getInfoFile: generation token echoed on the `infoFile` reply. */

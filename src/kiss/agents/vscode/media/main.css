@@ -2842,13 +2842,22 @@ body.sidebar-chat-mode #meta-info-content {
   letter-spacing: 0.05em; color: color-mix(in srgb, var(--fg) 50%, transparent); margin-bottom: 10px;
 }
 
-#history-search {
+#history-search,
+#tricks-search,
+#tricks-add-input {
   width: 100%; background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border);
   border-radius: 6px; color: var(--fg); font-size: var(--fs-base); padding: 6px 28px 6px 10px;
   outline: none; box-sizing: border-box;
 }
 .sidebar-section .search-wrap { margin-bottom: 10px; }
-#history-search:focus { border-color: var(--accent); }
+
+#history-search:focus,
+#tricks-search:focus,
+#tricks-add-input:focus { border-color: var(--accent); }
+
+/* The Inject promptlet panel's "new promptlet" box with its Add button. */
+#tricks-add-row { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+#tricks-add-row #tricks-add-input { flex: 1; min-width: 0; padding-right: 10px; }
 
 /* The search box with the flat-list / chat-panels switch on its right. */
 .history-search-row { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
