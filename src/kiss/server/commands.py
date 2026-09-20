@@ -437,6 +437,7 @@ class _CommandsMixin:
         def _handle_main_tree_action(
             self, action: str, work_dir: str,
         ) -> dict[str, Any]: ...
+        def _merge_deferred_worktrees(self, repo: Path | None) -> None: ...
         def _handle_delete_frequent_task(self, task: str) -> None: ...
         def _handle_set_favorite(
             self, task_id: str, is_favorite: bool,
@@ -1743,6 +1744,9 @@ class _CommandsMixin:
                 self._autocommit_tabs.discard(tab_id)
                 for claim in dispatch_claims or []:
                     self._release_main_tree_claim(claim)
+        # The main tree is committed (and its claim released): merge
+        # the worktrees whose merge waited for exactly this commit.
+        self._merge_deferred_worktrees(repo)
 
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""
@@ -1779,6 +1783,12 @@ class _CommandsMixin:
         self.printer.broadcast(
             {"type": "main_tree_result", "tabId": tab_id, **result},
         )
+        if action == "discard" and result.get("success"):
+            # The task's uncommitted main-tree changes are gone, so the
+            # tree is back at its committed state: merge the worktrees
+            # whose merge waited for that.  ("Do nothing" leaves the
+            # tree dirty; a later Git Commit triggers them instead.)
+            self._merge_deferred_worktrees(_effective_commit_repo(work_dir))
 
     def _cmd_get_config(self, cmd: dict[str, Any]) -> None:
         """Send the current configuration to the frontend.

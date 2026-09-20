@@ -12,10 +12,14 @@ when it can, else with one lightweight NON-AGENTIC
 - ``is_simple``: the task involves neither software development nor
   Internet search.  A simple task runs with the lite system prompt
   (``SYSTEM_LITE.md``) instead of the full ``SYSTEM.md``.
-- ``is_development``: the task is a software development task that
-  requires creating or editing files.  Tasks that only request git
-  operations (commit, merge, rebase, resolving merge conflicts, ...)
-  are NOT development.  The verdict decides the run's effective
+- ``is_development``: the task may create or modify files in the
+  project — software development, documentation, or producing an
+  artifact such as a report, presentation, notebook or data file.
+  Any such task must run in a worktree, since every file it writes
+  may end up git-tracked.  Tasks that create or edit no file, and
+  tasks that only request git operations (commit, merge, rebase,
+  resolving merge conflicts, ...), are NOT development.  The verdict
+  decides the run's effective
   ``is_worktree`` value (worktree isolation on/off) without ever
   touching the persisted ``is_worktree`` setting — but it can only
   DEMOTE a run that asked for a worktree to direct execution, never
@@ -37,7 +41,7 @@ per call:
   (``cc/*``, ``codex/*``) the LLM classifier must skip.  Measured on
   ``benchmarkings/task_classifier/`` (415 real and synthetic prompts)
   its verdicts agreed with the hand labels more often than any of the
-  four LLM classifiers measured (88% against 80% for the best), at
+  four LLM classifiers measured (89% against 84% for the best), at
   about 1/200 of that LLM's cost and 1/15 of its latency.  It runs only
   when
   :func:`decisions_classification_enabled` says so: the
@@ -141,26 +145,31 @@ _GIT_OPERATIONS = (
 # designs (see ``run_benchmark.py`` there).
 _DECISIONS_KIND_CRITERIA: dict[str, str] = {
     "development": (
-        "software development that requires creating or editing files in a "
-        "project: implementing or changing features, fixing bugs or reported "
-        "errors, refactoring, writing tests, updating documentation, README "
-        "files or scripts; includes requests phrased as required behaviour "
-        "of the software ('when X happens, the app must do Y')"
+        "any work that may create or modify files in the project: software "
+        "development (implementing or changing features, fixing bugs or "
+        "reported errors, refactoring, writing tests), updating "
+        "documentation, README files or scripts, and producing a file such "
+        "as a report, document, presentation, notebook, database, data or "
+        "image file, or writing results into a file; includes requests "
+        "phrased as required behaviour of the software ('when X happens, "
+        "the app must do Y')"
     ),
     "git_only": (
         f"only git version-control operations ({_GIT_OPERATIONS}) with no "
         "code or file changes"
     ),
     "internet": (
-        "answering a question or producing a report that requires searching "
-        "or browsing the Internet or reading a web page, without editing "
-        "project files"
+        "answering a question, in the reply only, that requires searching "
+        "or browsing the Internet or reading a web page, without creating "
+        "or editing any file"
     ),
     "simple": (
-        "a question, explanation, shell command or chore that needs neither "
-        "software development nor Internet search: explaining or reading "
-        "code, running a command or tests, reading messages or email, "
-        "authenticating a service, managing servers or databases"
+        "a question, explanation, shell command or chore that creates or "
+        "edits no file and needs neither software development nor Internet "
+        "search: explaining or reading code, running a command or tests, "
+        "reading messages or email, authenticating a service, managing "
+        "servers, virtual machines or remote services, querying a database "
+        "without changing it"
     ),
     "ambiguous": (
         "a fragment or follow-up that continues earlier work not shown here, "
@@ -270,9 +279,12 @@ _VERDICT_JSON_SCHEMA: dict[str, Any] = {
         "is_development": {
             "type": "boolean",
             "description": (
-                "True only if the task is a software development or research task "
-                "that requires creating or editing files; git-only "
-                "tasks are false."
+                "True if the task may create or modify any file in the "
+                "project: software development, documentation, or "
+                "producing a report, document, presentation, notebook, "
+                "database or data file. False for tasks that create or "
+                "edit no file (questions, explanations, running commands, "
+                "answers given in the reply) and for git-only tasks."
             ),
         },
     },
@@ -287,8 +299,14 @@ _CLASSIFIER_PROMPT_PREFIX = (
     '{"is_simple": <true|false>, "is_development": <true|false>}\n\n'
     "- is_simple: true if the task involves NEITHER software "
     "development NOR searching the internet. false otherwise.\n"
-    "- is_development: true ONLY if the task is a software development "
-    "task that requires creating or editing files. false otherwise. A "
+    "- is_development: true if the task may create or modify ANY file in "
+    "the project: software development (implementing or changing "
+    "features, fixing bugs, refactoring, writing tests), updating "
+    "documentation or scripts, and producing a file such as a report, "
+    "document, presentation, notebook, database, data or image file. "
+    "false only for tasks that create or edit no file: questions, "
+    "explanations, running commands or tests, reading messages, or "
+    "answers given in the reply. A "
     "task that only requests git operations (e.g. status, diff, log, "
     "add, commit, push, pull, fetch, checkout, branch, merge, squash, "
     "rebase, resolving merge conflicts, tagging, worktree management) "
@@ -310,8 +328,10 @@ class TaskClassification:
     Attributes:
         is_simple: The task involves neither software development nor
             Internet search.
-        is_development: The task is a software development task that
-            requires creating or editing files (git-only tasks are not
+        is_development: The task may create or modify files in the
+            project — code, documentation, or artifacts such as
+            reports, presentations, notebooks or data files — and so
+            must run in a worktree (git-only tasks are not
             development).
     """
 
