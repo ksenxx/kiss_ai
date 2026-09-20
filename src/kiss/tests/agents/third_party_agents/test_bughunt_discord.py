@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
-from kiss.agents.third_party_agents.discord_agent import DiscordChannelBackend, _config
+from kiss.agents.third_party_agents.discord_sea import DiscordChannelBackend, _config
 
 
 class _RecordingServer(ThreadingHTTPServer):

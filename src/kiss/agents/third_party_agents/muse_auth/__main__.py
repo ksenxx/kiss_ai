@@ -43,12 +43,12 @@ from kiss.agents.third_party_agents.muse_auth.client import (
 
 # Google-OAuth connector service name -> module holding its _SCOPES.
 _SERVICE_MODULES = {
-    "gmail": "kiss.agents.third_party_agents.gmail_agent",
-    "google_drive": "kiss.agents.third_party_agents.google_drive_agent",
-    "google_calendar": "kiss.agents.third_party_agents.google_calendar_agent",
-    "google_docs": "kiss.agents.third_party_agents.google_docs_agent",
-    "google_sheets": "kiss.agents.third_party_agents.google_sheets_agent",
-    "googlechat": "kiss.agents.third_party_agents.googlechat_agent",
+    "gmail": "kiss.agents.third_party_agents.gmail_sea",
+    "google_drive": "kiss.agents.third_party_agents.gdrive_sea",
+    "google_calendar": "kiss.agents.third_party_agents.gcal_sea",
+    "google_docs": "kiss.agents.third_party_agents.gdocs_sea",
+    "google_sheets": "kiss.agents.third_party_agents.gsheets_sea",
+    "googlechat": "kiss.agents.third_party_agents.googlechat_sea",
 }
 
 # Plain token connectors: the legacy config.json key holding the token,
@@ -92,28 +92,28 @@ def _import_hosts(service: str, cfg: dict) -> tuple[tuple[str, ...], tuple[str, 
         ``(hosts, insecure_hosts)`` tuples (possibly empty).
     """
     if service == "firecrawl":
-        from kiss.agents.third_party_agents import firecrawl_agent
+        from kiss.agents.third_party_agents import firecrawl_sea
 
         # Firecrawl is origin-bound with no built-in host, so a cloud
         # key (no base_url) must still enroll the cloud origin.
-        base_url = str(cfg.get("base_url") or firecrawl_agent._DEFAULT_BASE_URL)
+        base_url = str(cfg.get("base_url") or firecrawl_sea._DEFAULT_BASE_URL)
         return (
-            firecrawl_agent._extra_hosts(base_url),
-            firecrawl_agent._insecure_extra_hosts(base_url),
+            firecrawl_sea._extra_hosts(base_url),
+            firecrawl_sea._insecure_extra_hosts(base_url),
         )
     if service == "homeassistant" and cfg.get("base_url"):
-        from kiss.agents.third_party_agents import homeassistant_agent as ha
+        from kiss.agents.third_party_agents import homeassistant_sea as ha
 
         base_url = str(cfg["base_url"])
         return ha._extra_hosts(base_url), ha._insecure_extra_hosts(base_url)
     if service == "ntfy":
-        from kiss.agents.third_party_agents import ntfy_agent
+        from kiss.agents.third_party_agents import ntfy_sea
 
         # ntfy is origin-bound with no built-in host, so a public-cloud
         # token (no server configured) must still enroll ntfy.sh — the
         # same default the connector's loader substitutes.
-        server = str(cfg.get("server") or ntfy_agent._DEFAULT_SERVER)
-        return ntfy_agent._extra_hosts(server), ntfy_agent._insecure_extra_hosts(server)
+        server = str(cfg.get("server") or ntfy_sea._DEFAULT_SERVER)
+        return ntfy_sea._extra_hosts(server), ntfy_sea._insecure_extra_hosts(server)
     if service in ("mattermost", "bluebubbles"):
         from kiss.agents.third_party_agents.muse_auth._common import (
             insecure_origin_hosts,
@@ -137,7 +137,7 @@ def _service_base_url(service: str, cfg: dict) -> str:
         The base URL string (may be empty or invalid; callers validate).
     """
     if service == "mattermost":
-        from kiss.agents.third_party_agents.mattermost_agent import _base_url_from_config
+        from kiss.agents.third_party_agents.mattermost_sea import _base_url_from_config
 
         return _base_url_from_config(cfg)
     return str(cfg.get("server_url") or "")
@@ -289,7 +289,7 @@ def _cmd_import(service: str) -> int:
         Process exit code.
     """
     if service == "slack":
-        from kiss.agents.third_party_agents.slack_agent import _load_token, _token_path
+        from kiss.agents.third_party_agents.slack_sea import _load_token, _token_path
 
         token = _load_token("default")
         if not token:
@@ -419,7 +419,7 @@ def _cmd_import_nextcloud() -> int:
     Returns:
         Process exit code.
     """
-    from kiss.agents.third_party_agents import nextcloud_talk_agent as nc
+    from kiss.agents.third_party_agents import nextcloud_sea as nc
     from kiss.agents.third_party_agents.muse_auth._common import (
         insecure_origin_hosts,
         origin_hosts,
@@ -474,7 +474,7 @@ def _cmd_import_msteams() -> int:
     Returns:
         Process exit code.
     """
-    from kiss.agents.third_party_agents import msteams_agent as ms
+    from kiss.agents.third_party_agents import msteams_sea as ms
 
     path = muse_auth_dir().parent / "third_party_agents" / "msteams" / "config.json"
     if not path.exists():
@@ -524,7 +524,7 @@ def _cmd_import_synology() -> int:
     Returns:
         Process exit code.
     """
-    from kiss.agents.third_party_agents import synology_chat_agent as syno
+    from kiss.agents.third_party_agents import synology_sea as syno
     from kiss.agents.third_party_agents.muse_auth._common import (
         insecure_origin_hosts,
         origin_hosts,

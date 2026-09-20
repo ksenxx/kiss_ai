@@ -2,10 +2,10 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for round-2 bugs in signal_agent, sms_agent and nostr_agent.
+"""Integration tests for round-2 bugs in signal_sea, sms_sea and nostr_sea.
 
 Covers:
-- signal_agent.py: ``poll_messages`` performs a DESTRUCTIVE ``signal-cli
+- signal_sea.py: ``poll_messages`` performs a DESTRUCTIVE ``signal-cli
   receive`` (the server acks every envelope), and the channel runner
   replies to the configured ``channel_id`` — so with a ``channel_id`` only
   that sender's envelopes may be surfaced (anything else would leak replies
@@ -16,11 +16,11 @@ Covers:
   ``send_message`` must raise ``RuntimeError`` on CLI failure. Tested
   end-to-end against a REAL executable ``signal-cli`` stand-in program
   placed on PATH (no mock libraries).
-- sms_agent.py: ``from_number`` is a required config key (a config without it is
+- sms_sea.py: ``from_number`` is a required config key (a config without it is
   invalid and ``connect()`` reports "No Twilio config found."); ``is_from_bot``
   keys on the bot's number. Runtime Twilio API behavior is skipif-guarded because
   the twilio package is optional.
-- nostr_agent.py: ``is_from_bot`` must key on the message contract key ``user``
+- nostr_sea.py: ``is_from_bot`` must key on the message contract key ``user``
   (with a ``pubkey`` fallback); the pynostr publish flow is skipif-guarded.
 """
 
@@ -34,8 +34,8 @@ import unittest
 from importlib.util import find_spec
 from pathlib import Path
 
-from kiss.agents.third_party_agents.signal_agent import _config as _signal_config
-from kiss.agents.third_party_agents.sms_agent import _config as _sms_config
+from kiss.agents.third_party_agents.signal_sea import _config as _signal_config
+from kiss.agents.third_party_agents.sms_sea import _config as _sms_config
 from kiss.tests.conftest import install_cli_script
 
 _SIGNAL_CONFIG = _signal_config.path
@@ -101,7 +101,7 @@ class TestSignalBackend(unittest.TestCase):
         self.addCleanup(os.environ.__setitem__, "PATH", self._old_path)
         _backup_config(_SIGNAL_CONFIG, _SIGNAL_BACKUP)
         self.addCleanup(_restore_config, _SIGNAL_CONFIG, _SIGNAL_BACKUP)
-        from kiss.agents.third_party_agents.signal_agent import (
+        from kiss.agents.third_party_agents.signal_sea import (
             SignalChannelBackend,
             _config,
         )
@@ -200,7 +200,7 @@ class TestSMSBackend(unittest.TestCase):
 
     def test_config_without_from_number_is_invalid(self) -> None:
         """A legacy config lacking from_number must be rejected by connect()."""
-        from kiss.agents.third_party_agents.sms_agent import SMSChannelBackend, _config
+        from kiss.agents.third_party_agents.sms_sea import SMSChannelBackend, _config
 
         _config.save({"account_sid": "AC1", "auth_token": "tok"})
         backend = SMSChannelBackend()
@@ -210,7 +210,7 @@ class TestSMSBackend(unittest.TestCase):
 
     def test_is_from_bot_keys_on_from_number(self) -> None:
         """is_from_bot compares the message user against the bot's number."""
-        from kiss.agents.third_party_agents.sms_agent import SMSChannelBackend
+        from kiss.agents.third_party_agents.sms_sea import SMSChannelBackend
 
         backend = SMSChannelBackend()
         backend._from_number = "+1BOT"
@@ -235,7 +235,7 @@ class TestSMSBackend(unittest.TestCase):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         from urllib.parse import urlsplit, urlunsplit
 
-        from kiss.agents.third_party_agents.sms_agent import SMSChannelBackend
+        from kiss.agents.third_party_agents.sms_sea import SMSChannelBackend
 
         twilio_rest = importlib.import_module("twilio.rest")
         twilio_http = importlib.import_module("twilio.http.http_client")
@@ -317,7 +317,7 @@ class TestNostrBackend(unittest.TestCase):
 
     def test_is_from_bot_checks_user_key(self) -> None:
         """is_from_bot must key on the contract key 'user'."""
-        from kiss.agents.third_party_agents.nostr_agent import NostrChannelBackend
+        from kiss.agents.third_party_agents.nostr_sea import NostrChannelBackend
 
         backend = NostrChannelBackend()
         backend._public_key = "botpub123"
@@ -327,7 +327,7 @@ class TestNostrBackend(unittest.TestCase):
 
     def test_is_from_bot_falls_back_to_pubkey(self) -> None:
         """Messages without 'user' fall back to the legacy 'pubkey' key."""
-        from kiss.agents.third_party_agents.nostr_agent import NostrChannelBackend
+        from kiss.agents.third_party_agents.nostr_sea import NostrChannelBackend
 
         backend = NostrChannelBackend()
         backend._public_key = "botpub123"
@@ -336,7 +336,7 @@ class TestNostrBackend(unittest.TestCase):
 
     def test_is_from_bot_without_key_is_false(self) -> None:
         """An unauthenticated backend never claims a message as its own."""
-        from kiss.agents.third_party_agents.nostr_agent import NostrChannelBackend
+        from kiss.agents.third_party_agents.nostr_sea import NostrChannelBackend
 
         backend = NostrChannelBackend()
         self.assertFalse(backend.is_from_bot({"user": ""}))
@@ -347,7 +347,7 @@ class TestNostrBackend(unittest.TestCase):
         """publish_note must use the pynostr RelayManager API (no open_connections)."""
         import importlib
 
-        from kiss.agents.third_party_agents.nostr_agent import NostrChannelBackend
+        from kiss.agents.third_party_agents.nostr_sea import NostrChannelBackend
 
         pynostr_key = importlib.import_module("pynostr.key")
         backend = NostrChannelBackend()

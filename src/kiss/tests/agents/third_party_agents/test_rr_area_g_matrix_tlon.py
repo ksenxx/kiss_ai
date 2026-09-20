@@ -32,8 +32,8 @@ from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents.matrix_agent import MatrixChannelBackend
-from kiss.agents.third_party_agents.tlon_agent import TlonChannelBackend
+from kiss.agents.third_party_agents.matrix_sea import MatrixChannelBackend
+from kiss.agents.third_party_agents.tlon_sea import TlonChannelBackend
 
 
 class _SyncRecordingHandler(BaseHTTPRequestHandler):

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests reproducing verified bugs in gmail_agent and whatsapp_agent.
+"""Integration tests reproducing verified bugs in gmail_sea and whatsapp_sea.
 
 No mocks, patches, or fakes of kiss classes: WhatsApp tests run the real
 ``WhatsAppChannelBackend`` against a real local HTTP server speaking the
@@ -35,13 +35,13 @@ import pytest
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from kiss.agents.third_party_agents import gmail_agent
+from kiss.agents.third_party_agents import gmail_sea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents.gmail_agent import GmailChannelBackend
-from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
+from kiss.agents.third_party_agents.gmail_sea import GmailChannelBackend
+from kiss.agents.third_party_agents.whatsapp_sea import WhatsAppChannelBackend
 
 _DUMMY_CLIENT_SECRETS = {
     "installed": {
@@ -225,7 +225,7 @@ class TestGmailOAuthFlow:
         CSRF state check before any network I/O, which lets the flow
         thread and its listening socket exit instead of leaking.
         """
-        creds_path = gmail_agent._credentials_path()
+        creds_path = gmail_sea._credentials_path()
         backup = creds_path.read_text() if creds_path.exists() else None
         creds_path.parent.mkdir(parents=True, exist_ok=True)
         creds_path.write_text(json.dumps(_DUMMY_CLIENT_SECRETS))
@@ -234,7 +234,7 @@ class TestGmailOAuthFlow:
 
         def run_flow() -> None:
             try:
-                gmail_agent._run_oauth_flow()
+                gmail_sea._run_oauth_flow()
             except BaseException as exc:
                 result["exc"] = exc
 

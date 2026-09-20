@@ -76,7 +76,7 @@ def test_available_channels_discovery() -> None:
     for expected in ("slack", "telegram", "discord", "email", "ntfy"):
         assert expected in channels
     # Infrastructure and private modules are not user-facing channels.
-    for hidden in ("a2a", "openai_compat", "channel_cli", "backend_utils"):
+    for hidden in ("a2a", "oai", "channel_cli", "backend_utils"):
         assert hidden not in channels
     assert channels == sorted(channels)
 
@@ -124,7 +124,7 @@ def test_channel_alias_normalization() -> None:
     # case, spaces, hyphens, and underscores must all resolve.
     for alias, canonical in (
         ("Home Assistant", "homeassistant"),
-        ("phone control", "phone_control"),
+        ("home_assistant", "homeassistant"),
         ("SLACK", "slack"),
     ):
         out = run_agent(alias, "say hi")
@@ -137,10 +137,10 @@ def test_channel_alias_normalization() -> None:
 def test_hyphenated_alias_is_a_channel_not_a_path() -> None:
     # A hyphen is a channel-name separator, not a path marker: the
     # alias resolves to the channel even though "-" appears in it.
-    out = run_agent("nextcloud-talk", "say hi")
+    out = run_agent("home-assistant", "say hi")
     assert "unknown agent" not in out
     assert out.startswith(
-        "Error: the nextcloud_talk agent task could not run:"
+        "Error: the homeassistant agent task could not run:"
     )
 
 
@@ -430,7 +430,7 @@ def test_path_mode_detected_by_py_suffix_and_separator(
     tmp_path: Path,
 ) -> None:
     # ".py" suffix without a separator is path mode, not a channel.
-    out = run_agent("slack_agent.py", "say hi")
+    out = run_agent("slack_sea.py", "say hi")
     assert out.startswith("Error: agent script")
     # A separator without a ".py" suffix is path mode too — rejected
     # with the loader's .py diagnostic rather than "unknown agent".
@@ -545,9 +545,9 @@ def test_dispatch_uses_recorded_daemon_socket(
 
 
 def test_agent_class_resolution() -> None:
-    import kiss.agents.third_party_agents.slack_agent as slack_agent
+    import kiss.agents.third_party_agents.slack_sea as slack_sea
 
-    cls = _agent_class(slack_agent)
+    cls = _agent_class(slack_sea)
     assert cls is not None and cls.__name__ == "SlackAgent"
     # A module defining no BaseChannelAgent subclass of its own
     # (imported classes do not count) resolves to None.
@@ -559,7 +559,7 @@ def test_every_channel_module_is_dispatchable() -> None:
 
     for channel in available_channels():
         module = importlib.import_module(
-            f"kiss.agents.third_party_agents.{channel}_agent"
+            f"kiss.agents.third_party_agents.{channel}_sea"
         )
         cls = _agent_class(module)
         assert cls is not None, channel
@@ -574,12 +574,12 @@ def test_channel_module_is_a_valid_agent_script() -> None:
     # The exact contract the dispatch relies on: passing a channel
     # module as ``extension_agent_path`` makes the daemon use the module as its
     # own tools file (its ``tools()`` returns the tool list).
-    import kiss.agents.third_party_agents.ntfy_agent as ntfy_agent
+    import kiss.agents.third_party_agents.ntfy_sea as ntfy_sea
 
-    cmd = {"agentPath": ntfy_agent.__file__, "toolsFile": ""}
+    cmd = {"agentPath": ntfy_sea.__file__, "toolsFile": ""}
     overridden = apply_agent_overrides(cmd)
     assert overridden == {"toolsFile"}
-    assert cmd["toolsFile"] == ntfy_agent.__file__
+    assert cmd["toolsFile"] == ntfy_sea.__file__
 
 
 def test_get_tools_and_sorcar_wiring() -> None:

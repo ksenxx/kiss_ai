@@ -4,7 +4,7 @@
 # add your name here
 """Integration tests reproducing the "channels" -> "third_party_agents" rename bugs.
 
-A mechanical rename corrupted Slack API-facing strings in slack_agent.py:
+A mechanical rename corrupted Slack API-facing strings in slack_sea.py:
 response key ``resp.get("third_party_agents")`` (must be ``"channels"``) and
 the ``files_upload_v2(third_party_agents=...)`` kwarg (must be ``channels=``).
 
@@ -25,7 +25,7 @@ from typing import Any, ClassVar
 
 from slack_sdk import WebClient
 
-from kiss.agents.third_party_agents.slack_agent import SlackChannelBackend
+from kiss.agents.third_party_agents.slack_sea import SlackChannelBackend
 
 _CHANNELS_JSON = {
     "ok": True,

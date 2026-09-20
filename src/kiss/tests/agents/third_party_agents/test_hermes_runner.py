@@ -48,8 +48,8 @@ from kiss.agents.third_party_agents._channel_cli import (
     _build_arg_parser,
     _build_run_kwargs,
 )
-from kiss.agents.third_party_agents.telegram_agent import TelegramAgent
-from kiss.agents.third_party_agents.telegram_agent import main as telegram_main
+from kiss.agents.third_party_agents.telegram_sea import TelegramAgent
+from kiss.agents.third_party_agents.telegram_sea import main as telegram_main
 from kiss.core import config as config_module
 from kiss.core.file_lock import lock_exclusive
 from kiss.core.models.model_info import get_default_model

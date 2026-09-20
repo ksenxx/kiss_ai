@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for the matrix_agent.py event-loop bug.
+"""Integration tests for the matrix_sea.py event-loop bug.
 
 Covered bug (reproduced end-to-end, no mock/patch libraries):
 
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 
-from kiss.agents.third_party_agents.matrix_agent import MatrixChannelBackend
+from kiss.agents.third_party_agents.matrix_sea import MatrixChannelBackend
 
 
 class TestMatrixPersistentLoop:

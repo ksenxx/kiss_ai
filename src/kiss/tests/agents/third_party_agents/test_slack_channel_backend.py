@@ -23,7 +23,7 @@ import pytest
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from kiss.agents.third_party_agents.slack_agent import (
+from kiss.agents.third_party_agents.slack_sea import (
     SlackChannelBackend,
     _save_token,
     _token_path,

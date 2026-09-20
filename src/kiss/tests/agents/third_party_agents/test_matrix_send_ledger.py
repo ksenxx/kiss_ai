@@ -28,7 +28,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.third_party_agents.matrix_agent import (
+from kiss.agents.third_party_agents.matrix_sea import (
     MatrixChannelBackend,
     _raise_on_send_error,
 )

@@ -32,7 +32,7 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   prompt jobs still need a reachable kiss-web daemon (they are
   submitted through its socket).
 - Delivery targets are looked up dynamically: any module named
-  ``kiss.agents.third_party_agents.<channel>_agent`` with a
+  ``kiss.agents.third_party_agents.<channel>_sea`` with a
   ``_make_backend()`` factory can receive results (``telegram:123``,
   ``slack:eng``, ``ntfy``, ...).  This module works without those
   optional channel modules — an unknown channel just yields a
@@ -402,7 +402,7 @@ def _recorded_daemon_sock_path() -> str | None:
 def _deliver_to_channel(channel: str, chat: str, text: str) -> str:
     """Send *text* to one channel agent's backend.
 
-    Imports ``kiss.agents.third_party_agents.<channel>_agent``, builds
+    Imports ``kiss.agents.third_party_agents.<channel>_sea``, builds
     its backend with the module's ``_make_backend()`` factory (which
     loads the credentials persisted under ``~/.kiss``), and calls
     ``send_message``.
@@ -420,7 +420,7 @@ def _deliver_to_channel(channel: str, chat: str, text: str) -> str:
     target = f"{channel}:{chat}" if chat else channel
     try:
         module = importlib.import_module(
-            f"kiss.agents.third_party_agents.{channel}_agent"
+            f"kiss.agents.third_party_agents.{channel}_sea"
         )
     except ImportError:
         return f"error: unknown channel {channel!r}"

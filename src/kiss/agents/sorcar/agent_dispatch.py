@@ -18,7 +18,7 @@ what those agents are and how they work.
 
 The channel agents are looked up dynamically, the same soft-plugin
 style the cron deliverer uses: any module named
-``kiss.agents.third_party_agents.<channel>_agent`` that defines a
+``kiss.agents.third_party_agents.<channel>_sea`` that defines a
 ``BaseChannelAgent`` subclass is dispatchable.  This module never
 imports ``kiss.agents.third_party_agents`` statically — only the
 requested channel module is imported, dynamically, at dispatch time
@@ -113,11 +113,11 @@ invisibly.  Work the sub-task completed before the stop (side
 effects, spend) is not reported back to the calling task.
 """
 
-_NON_CHANNEL_MODULES = frozenset({"a2a_agent", "openai_compat_agent"})
-"""Modules matching ``*_agent.py`` that are not user-facing channels.
+_NON_CHANNEL_MODULES = frozenset({"a2a_sea", "oai_sea"})
+"""Modules matching ``*_sea.py`` that are not user-facing channels.
 
-``a2a_agent`` (agent-to-agent protocol plumbing) and
-``openai_compat_agent`` (an OpenAI-compatible HTTP server) subclass
+``a2a_sea`` (agent-to-agent protocol plumbing) and
+``oai_sea`` (an OpenAI-compatible HTTP server) subclass
 ``BaseChannelAgent`` for infrastructure reasons but are not services a
 user asks Sorcar to act on, so they are hidden from the tool.
 """
@@ -144,7 +144,7 @@ def _package_dir() -> Path | None:
 def available_channels() -> list[str]:
     """Return the names of the installed third-party channel agents.
 
-    A channel is any ``<channel>_agent.py`` module in the third-party
+    A channel is any ``<channel>_sea.py`` module in the third-party
     agents package (private ``_``-prefixed helpers and the known
     non-channel infrastructure modules excluded).  The scan reads the
     directory listing only — no channel module is imported.
@@ -157,8 +157,8 @@ def available_channels() -> list[str]:
     if package_dir is None:
         return []
     return sorted(
-        path.stem[: -len("_agent")]
-        for path in package_dir.glob("*_agent.py")
+        path.stem[: -len("_sea")]
+        for path in package_dir.glob("*_sea.py")
         if not path.name.startswith("_")
         and path.stem not in _NON_CHANNEL_MODULES
     )
@@ -168,8 +168,8 @@ def _squash(name: str) -> str:
     """Normalize a channel name for forgiving lookup.
 
     Case, spaces, hyphens, and underscores are ignored, so
-    ``"Home Assistant"`` matches the ``homeassistant`` channel and
-    ``"phone control"`` matches ``phone_control``.
+    ``"Home Assistant"``, ``"home-assistant"`` and ``"HOMEASSISTANT"``
+    all match the ``homeassistant`` channel.
 
     Args:
         name: A user- or model-supplied channel name.
@@ -188,7 +188,7 @@ def _agent_class(module: Any) -> type | None:
     own.  Classes merely imported into the module are ignored.
 
     Args:
-        module: An imported ``<channel>_agent`` module.
+        module: An imported ``<channel>_sea`` module.
 
     Returns:
         The agent class, or ``None`` when the module defines none.
@@ -566,8 +566,8 @@ def _run_agent(
         return _dispatch(Path(agent_path).stem, task, agent_path,
                          work_dir, model_name, budget, wait, parent_agent,
                          scope_work_dir=parent_work_dir)
-    # Forgiving lookup: "Home Assistant", "phone control", and
-    # "nextcloud-talk" all resolve — spelling variants differ only in
+    # Forgiving lookup: "Home Assistant", "HOMEASSISTANT", and
+    # "home-assistant" all resolve — spelling variants differ only in
     # case, spaces, hyphens, and underscores.
     squashed = _squash(requested)
     if squashed == "cron":
@@ -596,7 +596,7 @@ def _run_agent(
     channel = matches[0]
     try:
         module = importlib.import_module(
-            f"kiss.agents.third_party_agents.{channel}_agent"
+            f"kiss.agents.third_party_agents.{channel}_sea"
         )
     except Exception as e:
         logger.warning("channel module import failed", exc_info=True)
