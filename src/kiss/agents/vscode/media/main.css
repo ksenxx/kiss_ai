@@ -3821,6 +3821,38 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   color: var(--fg);
 }
 
+/* Reconnect banner (remote webapp, socket lost after the app was on
+   screen): the overlay shrinks to a pill pinned to the top centre and #app
+   stays visible and usable underneath — see setServerLoading() in main.js.
+   Clicks pass through to the app. */
+#kiss-server-loading.kiss-server-loading--banner {
+  inset: 8px auto auto 50%;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 16px);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+  pointer-events: none;
+}
+
+#kiss-server-loading.kiss-server-loading--banner .kiss-server-loading-inner {
+  flex-direction: row;
+  gap: 8px;
+  padding: 6px 12px;
+}
+
+#kiss-server-loading.kiss-server-loading--banner .kiss-server-loading-spinner {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+
+#kiss-server-loading.kiss-server-loading--banner .kiss-server-loading-msg {
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+
 @keyframes kiss-server-loading-spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
