@@ -3850,6 +3850,10 @@
   const tricksPanelClose = document.getElementById('tricks-panel-close');
   const tricksBtn = document.getElementById('tricks-btn');
   const tricksList = document.getElementById('tricks-list');
+  const tricksSearch = document.getElementById('tricks-search');
+  const tricksSearchClear = document.getElementById('tricks-search-clear');
+  const tricksAddInput = document.getElementById('tricks-add-input');
+  const tricksAddBtn = document.getElementById('tricks-add-btn');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
@@ -12167,6 +12171,13 @@
         }
         renderCustomModels();
         break;
+      case 'tricksData':
+        // The daemon's full promptlet list after an Add (from this or
+        // any other window): it replaces the list frozen into the page
+        // at load time so the panel shows the new entry right away.
+        window.__TRICKS__ = Array.isArray(ev.tricks) ? ev.tricks : [];
+        renderTricks(window.__TRICKS__);
+        break;
       case 'infoFile':
         renderInfoFileEvent(ev);
         break;
@@ -15764,6 +15775,33 @@
     if (tricksOverlay) {
       tricksOverlay.addEventListener('click', closeTricksPanel);
     }
+    if (tricksSearch) {
+      tricksSearch.addEventListener('input', () => {
+        if (tricksSearchClear)
+          tricksSearchClear.style.display = tricksSearch.value ? '' : 'none';
+        renderTricks(window.__TRICKS__ || []);
+      });
+    }
+    if (tricksSearchClear) {
+      tricksSearchClear.addEventListener('click', () => {
+        tricksSearch.value = '';
+        tricksSearchClear.style.display = 'none';
+        renderTricks(window.__TRICKS__ || []);
+        tricksSearch.focus();
+      });
+    }
+    if (tricksAddInput) {
+      tricksAddInput.addEventListener('input', syncTricksAddBtn);
+      tricksAddInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          submitNewTrick();
+        }
+      });
+    }
+    if (tricksAddBtn) {
+      tricksAddBtn.addEventListener('click', submitNewTrick);
+    }
     if (settingsPanelClose) {
       settingsPanelClose.addEventListener('click', closeSettingsPanel);
     }
@@ -18684,6 +18722,34 @@
     setPanelOpen(tricksPanel, tricksOverlay, false);
   }
 
+  /** Enable the panel's Add button only while its box holds text. */
+  function syncTricksAddBtn() {
+    if (!tricksAddBtn || !tricksAddInput) return;
+    tricksAddBtn.disabled = !tricksAddInput.value.trim();
+  }
+
+  /**
+   * Post the Add box's promptlet as `addTrick`: the daemon appends it
+   * to ~/.kiss/MY_INJECTION.md and answers every window with a
+   * `tricksData` list (or the sender alone with an `error`).  The box
+   * is cleared right away; a rejected promptlet is reported through
+   * the error banner, not by keeping the text.
+   */
+  function submitNewTrick() {
+    if (!tricksAddInput) return;
+    const text = tricksAddInput.value.trim();
+    if (!text) return;
+    api.addTrick({text});
+    tricksAddInput.value = '';
+    syncTricksAddBtn();
+    tricksAddInput.focus();
+  }
+
+  /**
+   * Repaint #tricks-list with the promptlets matching the search box
+   * (case-insensitive substring; every promptlet when the box is
+   * empty).  Clicking a row injects it at the composer's caret.
+   */
   function renderTricks(tricks) {
     if (!tricksList) return;
     if (!tricks || tricks.length === 0) {
@@ -18691,8 +18757,17 @@
         '<div class="sidebar-empty">No tricks available</div>';
       return;
     }
+    const query = tricksSearch ? tricksSearch.value.trim().toLowerCase() : '';
+    const shown = query
+      ? tricks.filter(text => text.toLowerCase().includes(query))
+      : tricks;
+    if (shown.length === 0) {
+      tricksList.innerHTML =
+        '<div class="sidebar-empty">No matching promptlets</div>';
+      return;
+    }
     tricksList.innerHTML = '';
-    tricks.forEach(text => {
+    shown.forEach(text => {
       const div = document.createElement('div');
       div.className = 'sidebar-item tricks-item';
       div.dataset.tooltip = text;

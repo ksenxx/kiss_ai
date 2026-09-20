@@ -299,6 +299,17 @@
       <button id="tricks-panel-close">&times;</button>
       <div class="sidebar-section sidebar-tab-panel">
         <div class="sidebar-hdr">Inject</div>
+        <div class="search-wrap">
+          <input type="text" id="tricks-search" placeholder="Search promptlets..." aria-label="Search promptlets">
+          <button class="search-clear-btn" id="tricks-search-clear" style="display:none;" aria-label="Clear search">&times;</button>
+        </div>
+        <!-- Add row: the daemon appends the text to ~/.kiss/MY_INJECTION.md
+             (addTrick) and answers with a tricksData list that repaints
+             #tricks-list. -->
+        <div id="tricks-add-row">
+          <input type="text" id="tricks-add-input" placeholder="New promptlet..." aria-label="New promptlet">
+          <button type="button" id="tricks-add-btn" class="config-update-btn" disabled>Add</button>
+        </div>
         <div id="tricks-list">
           <div class="sidebar-empty">No tricks available</div>
         </div>
