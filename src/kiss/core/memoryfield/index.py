@@ -348,9 +348,14 @@ class VectorIndex:
         on_disk: set[str] = set()
         for name in self.memory.page_names():
             filename = f"{name}.md"
-            on_disk.add(filename)
             path = self.memory.page_path(name)
-            data = path.read_bytes()
+            try:
+                data = path.read_bytes()
+            except FileNotFoundError:
+                # Deleted by another process since page_names(): its row
+                # (if any) is stale and is removed below.
+                continue
+            on_disk.add(filename)
             digest = hashlib.sha256(data).digest()
             if stored.get(filename) == (digest, EMBEDDING_INPUT_FORMAT):
                 unchanged += 1
@@ -358,7 +363,12 @@ class VectorIndex:
             raw = data.decode("utf-8", errors="replace")
             frontmatter, _ = split_frontmatter(raw)
             vector = normalize(self.embed(self.embedding_input(raw)))
-            if hashlib.sha256(path.read_bytes()).digest() != digest:
+            try:
+                changed = hashlib.sha256(path.read_bytes()).digest() != digest
+                mtime = path.stat().st_mtime
+            except FileNotFoundError:
+                changed, mtime = True, 0.0  # deleted mid-embed; skipped below
+            if changed:
                 logger.info(
                     "%s changed while being embedded; it will be indexed on the next sync", filename
                 )
@@ -367,7 +377,7 @@ class VectorIndex:
                 (
                     filename,
                     json.dumps(frontmatter, default=str),
-                    path.stat().st_mtime,
+                    mtime,
                     digest,
                     serialize_float32(vector),
                     EMBEDDING_INPUT_FORMAT,

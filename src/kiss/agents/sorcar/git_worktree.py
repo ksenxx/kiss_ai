@@ -721,7 +721,14 @@ class GitWorktreeOps:
             True if the worktree was created AND stamped with this
             process's pid, False otherwise (nothing is left on disk).
         """
-        with _reclaim_process_lock(repo):
+        # ``repo_lock`` first, flock second — the file-wide order (see
+        # ``_reclaim_process_lock``).  The failed-stamp path below calls
+        # ``cleanup_partial`` -> ``remove``, which takes ``repo_lock``;
+        # taking only the flock here would invert the order against
+        # ``sweep_orphaned_state`` (repo_lock -> flock) and deadlock.
+        # ``repo_lock`` is an RLock, so callers already holding it are
+        # unaffected.
+        with repo_lock(repo), _reclaim_process_lock(repo):
             result = _git("worktree", "add", "-b", branch, str(wt_dir), cwd=repo)
             if result.returncode != 0:
                 logger.warning(

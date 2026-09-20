@@ -1583,7 +1583,13 @@ def open_mic_stream(
         channels=1,
         callback=on_audio,
     )
-    stream.start()
+    try:
+        stream.start()
+    except Exception:
+        # The PortAudio stream is already open; the watchdog reopen
+        # path retries, so an un-closed stream would leak per attempt.
+        stream.close(ignore_errors=True)
+        raise
     return stream
 
 

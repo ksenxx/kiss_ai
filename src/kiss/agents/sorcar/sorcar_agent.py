@@ -459,6 +459,10 @@ _SUBAGENT_POLL_SECONDS = 1.0
 # kiss.core.tool_interrupt's 1 s injection grace, see _await_subagents.
 _SUBAGENT_TOOL_POLL_SECONDS = 0.4
 _SUBAGENT_STOP_GRACE_SECONDS = 15.0
+# Upper bound on how long _LiveUsageMonitor.stop() waits for its polling
+# thread; the thread calls printer.print synchronously and a blocked
+# printer must not hang the parent task's fan-out unwind.
+_LIVE_USAGE_JOIN_TIMEOUT = 2.0
 
 
 class _SubagentStopEvent(threading.Event):
@@ -955,6 +959,9 @@ class _LiveUsageMonitor:
         self._agents_lock = threading.Lock()
         self._agents: list[Any] = []
         self._done = threading.Event()
+        # Set by stop() when the join timed out: _emit() must not START
+        # a print after the caller has moved on to the offsets bump.
+        self._detached = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_emitted: tuple[float, int, int] | None = None
         thread_local = getattr(printer, "_thread_local", None) if printer else None
@@ -990,12 +997,30 @@ class _LiveUsageMonitor:
         thread that never registered as started, so only a live thread
         is joined — ``_done`` is set regardless, and a thread that did
         start exits at its next tick.
+
+        The join is bounded: the monitor calls ``printer.print``
+        synchronously, and a printer whose sink stops consuming (a
+        pipe/file nobody reads) would otherwise hang the fan-out's
+        ``finally`` — and with it the parent task's unwind and usage
+        accounting — forever.  On timeout the monitor is detached:
+        ``_detached`` stops any emission that has not yet reached the
+        printer, a warning is logged, and the caller proceeds.  A print
+        already blocked inside the printer may still complete once
+        after detachment; that is the accepted trade-off for never
+        hanging the task.
         """
         self._done.set()
         thread = self._thread
         self._thread = None
         if thread is not None and thread.is_alive():
-            thread.join()
+            thread.join(_LIVE_USAGE_JOIN_TIMEOUT)
+            if thread.is_alive():
+                self._detached.set()
+                logger.warning(
+                    "Live usage monitor did not stop within %.1fs "
+                    "(printer blocked?); detaching it and continuing",
+                    _LIVE_USAGE_JOIN_TIMEOUT,
+                )
 
     def _loop(self) -> None:
         thread_local = getattr(self._printer, "_thread_local", None)
@@ -1048,6 +1073,11 @@ class _LiveUsageMonitor:
                 # (budget, tokens, or steps) regresses — the next poll
                 # repairs it.
                 return
+        if self._detached.is_set():
+            # stop() gave up waiting for this thread; the parent has
+            # already bumped its offsets, so this emission would
+            # double-count the sub-agents' spend.
+            return
         self._last_emitted = snapshot
         cost = f"${budget:.4f}"
         self._printer.print(
