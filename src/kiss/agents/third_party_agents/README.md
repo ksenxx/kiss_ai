@@ -1,14 +1,18 @@
 # Third-Party Agents
 
-This package contains KISS Sorcar's **channel agents**: 43 `*_sea.py` modules plus the
-`govee.py` smart-light helper. Each module wraps one external service — a messaging
+This package contains KISS Sorcar's **channel agents**: 44 `*_sea.py` modules plus the
+`govee.py` smart-light helper. All but one wrap an external service — a messaging
 platform (Slack, Telegram, WhatsApp, ...), a service API (GitHub, Notion, PostgreSQL,
-...), or a piece of agent infrastructure (A2A, OpenAI-compatible server) — and exposes
-it as a set of authenticated LLM tools.
+...), or a piece of agent infrastructure (A2A, OpenAI-compatible server) — and expose
+it as a set of authenticated LLM tools; the exception is `ask_sea.py`, the `/ask`
+command that answers questions about a running task from its own event log.
 
-You do not run these agents directly. You **prompt KISS Sorcar in plain language** on
-any of its UI surfaces, name the service you want acted on, and Sorcar dispatches the
-work to the right channel agent. This document explains what prompts you can send, on
+For ordinary service actions you do not run these agents directly. You **prompt KISS
+Sorcar in plain language** on any of its UI surfaces, name the service you want acted
+on, and Sorcar dispatches the work to the right channel agent. Every module except
+`ask_sea.py` also has a console entry point (`kiss-slack`, `kiss-gmail`, ...; see
+`pyproject.toml` `[project.scripts]`), used for one-off shell runs, gateway poll ticks,
+and infrastructure setup. This document explains what prompts you can send, on
 which surfaces, and what each channel can do.
 
 - [The surfaces: where prompts go](#the-surfaces-where-prompts-go)
@@ -20,6 +24,7 @@ which surfaces, and what each channel can do.
   - [Messaging and device channels](#messaging-and-device-channels-32)
   - [Service APIs](#service-apis-9)
   - [Infrastructure: two extra surfaces](#infrastructure-two-extra-surfaces)
+  - [Task Q&A: the `/ask` command](#task-qa-the-ask-command)
   - [Home lights (Govee)](#home-lights-govee)
 - [Writing good prompts — tips from Meta Muse](#writing-good-prompts--tips-from-meta-muse)
 - [Example prompts](#example-prompts)
@@ -73,14 +78,17 @@ ignored, so "Home Assistant", "home-assistant", and "HOMEASSISTANT" all resolve 
 `homeassistant` channel. For multi-account
 channels, name the workspace in the prompt ("using the acme Slack workspace, ...") and
 Sorcar passes it through; you can likewise ask for a specific model or budget for the
-sub-task. The two infrastructure modules (`a2a`, `oai`) are not
-dispatchable — they are surfaces, not services you ask Sorcar to act on.
+sub-task. Three modules are hidden from this channel dispatch: the two infrastructure
+modules (`a2a`, `oai`) are surfaces, not services you ask Sorcar to act on, and
+`ask_sea.py` is reached only through its `/ask` slash command (see
+[Task Q&A](#task-qa-the-ask-command)).
 
 Prompts that span several services also work in a single message: the top-level
 session orchestrates, dispatching one channel at a time and passing results between
-them. Each dispatched channel session handles only its own service (it cannot dispatch
-further), so let the session you are chatting with do the coordination — which it does
-by default.
+them. Each dispatched channel session is instructed to handle only its own service and
+never call `run_agent` (it keeps the standard toolset, so this is a prompt rule, not a
+tool restriction), so let the session you are chatting with do the coordination — which
+it does by default.
 
 When you want a specific channel with no routing guesswork, start the prompt with its
 slash command: `/slack post "deploy done" to #eng`. Every `xxx_sea.py` in this
@@ -97,8 +105,10 @@ the kiss-web daemon, and the daemon builds a full chat agent with the standard t
 (bash, file editing, browser automation). The channel agent instance is the *carrier*
 of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 
-- Each module defines a `tools()` function. The daemon calls it to build the channel's
-  tool list: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
+- Each service module defines a `tools()` function (`ask_sea.py`, which wraps no
+  service, defines only the agent-script getters `system_prompt()`,
+  `append_to_system_prompt()`, `is_parallel()`, and `use_web_tools()`). The daemon calls
+  `tools()` to build the channel's tool list: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
   `authenticate_slack`) plus, once authenticated, every public method of the module's
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
 - Config lives under `~/.kiss/third_party_agents/<service>/` (`$KISS_HOME` overrides
@@ -265,7 +275,7 @@ through another channel's backend (`deliver_module` routes).
 | --- | --- | --- | --- |
 | Brave Search | `brave` | subscription token, `brave_search/config.json` | `brave_web_search`, `brave_news_search`, `brave_image_search`, `brave_video_search` |
 | Firecrawl (scraping/crawling) | `firecrawl` | API key (+ optional self-hosted `base_url`), `firecrawl/config.json` | `firecrawl_scrape`, `firecrawl_map`, `firecrawl_search`, `firecrawl_start_crawl`, `firecrawl_get_crawl_status`, `firecrawl_cancel_crawl` |
-| GitHub | `github` | browser sign-in via the OAuth device flow (`authenticate_github(client_id=...)` with a device-flow-enabled OAuth app, `finish_github_auth`) or a personal access token (+ optional `read_only: "true"`), `github/config.json` | `gh_get_me`, `gh_search_repositories`, `gh_get_repository`, `gh_list_issues`, `gh_get_issue`, `gh_list_issue_comments`, `gh_search_issues`, `gh_search_code`, `gh_list_pull_requests`, `gh_get_pull_request`, `gh_get_pull_request_diff`, `gh_get_file_contents`, `gh_list_commits`, `gh_list_branches`, `gh_create_issue`, `gh_comment_on_issue`, `gh_update_issue`, `gh_create_pull_request`, `gh_merge_pull_request` |
+| GitHub | `github` | browser sign-in via the OAuth device flow (`authenticate_github(client_id=...)` with a device-flow-enabled OAuth app; the client ID may instead come from `oauth_client_id` in `github/config.json` or `$KISS_GITHUB_CLIENT_ID`; finish with `finish_github_auth`) or a personal access token (+ optional `read_only: "true"`), `github/config.json` | `gh_get_me`, `gh_search_repositories`, `gh_get_repository`, `gh_list_issues`, `gh_get_issue`, `gh_list_issue_comments`, `gh_search_issues`, `gh_search_code`, `gh_list_pull_requests`, `gh_get_pull_request`, `gh_get_pull_request_diff`, `gh_get_file_contents`, `gh_list_commits`, `gh_list_branches`, `gh_create_issue`, `gh_comment_on_issue`, `gh_update_issue`, `gh_create_pull_request`, `gh_merge_pull_request` |
 | Google Calendar | `gcal` | OAuth2 quintet (`check_google_calendar_auth`, `authenticate_google_calendar`, `clear_google_calendar_auth`, `start_google_calendar_browser_setup`, `finish_google_calendar_auth`), `google_calendar/` | `gcal_list_calendars`, `gcal_list_events`, `gcal_get_event`, `gcal_create_event`, `gcal_update_event`, `gcal_delete_event`, `gcal_quick_add` |
 | Google Docs | `gdocs` | OAuth2 quintet (as above, for `google_docs`), `google_docs/` | `gdocs_create_document`, `gdocs_read_document`, `gdocs_append_text`, `gdocs_replace_text`, `gdocs_insert_text`, `gdocs_batch_update`, `gdocs_list_documents` |
 | Google Drive | `gdrive` | OAuth2 quintet (for `google_drive`), `google_drive/` | `gdrive_search_files`, `gdrive_get_file`, `gdrive_read_file`, `gdrive_download_file`, `gdrive_upload_file`, `gdrive_create_folder`, `gdrive_share_file`, `gdrive_move_file`, `gdrive_trash_file` |
@@ -303,6 +313,22 @@ Sorcar to act on, but ways for *other software* to send prompts to your daemon.
   20-messages-per-`contextId`-per-hour cap (per backend instance) stops ping-pong
   loops; inbound JSON-RPC requests land in `a2a_audit.jsonl`. Config:
   `a2a/config.json`.
+
+### Task Q&A: the `/ask` command
+
+`ask_sea.py` is the one module that wraps no external service. On an idle tab,
+`/ask <question>` is rewritten into a `run_agent` sub-task whose prompt is your question
+plus an instruction to read the events of the task you are asking about from
+`~/.kiss/sorcar.db`; the script swaps the system prompt for the compact SYSTEM_LITE
+prompt with a no-internet, answer-quickly suffix, and returns `False` from
+`is_parallel()` and `use_web_tools()`, so the answering session has no browser tools and
+no parallel sub-agents and is instructed to answer only from the local event log. Typed
+into a tab whose task is still running, the question is instead dispatched directly to
+the daemon through a background side channel that does not interrupt the running agent,
+and the reply appears in that task's transcript. No configuration or credentials are
+involved.
+
+> /ask Which files has this task modified so far, and why did the last test run fail?
 
 ### Home lights (Govee)
 
@@ -544,8 +570,10 @@ name (without the `#`), Discord a channel name (searched across your guilds), Ma
 
 From then on, anything anyone types to the bot in the gatewayed chat is a prompt to
 Sorcar, and Sorcar answers in the same chat. With pairing enabled, unknown senders receive
-a one-time approval code in-channel (a sender allowlist is the stricter alternative);
-on adapters that implement thread polling (Slack), follow-ups in the same thread
+a one-time approval code in-channel; you approve them from a terminal with
+`kiss-<channel> --channel=<chat> --approve CODE` and can review the queue with
+`--list-pending` (a sender allowlist, `--allow-users user1,user2`, is the stricter
+alternative); on adapters that implement thread polling (Slack), follow-ups in the same thread
 resume the same daemon chat. Gateway state — per-thread chat continuity, an
 at-least-once delivery ledger with `(recovered reply)` redelivery, and a circuit
 breaker that pauses the channel after repeated tick crashes (only errors that escape a

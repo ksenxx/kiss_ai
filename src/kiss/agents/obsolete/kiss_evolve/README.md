@@ -2,6 +2,8 @@
 
 KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It enables automatic discovery of improved algorithms through evolutionary search with multiple advanced features.
 
+This module lives under `kiss.agents.obsolete.kiss_evolve` and is no longer part of the main Sorcar workflow.
+
 ## Overview
 
 KISSEvolve evolves code variants through:
@@ -24,7 +26,7 @@ KISSEvolve evolves code variants through:
 
 ## Installation
 
-KISSEvolve is part of the KISS Agent Framework. See the main [README.md](../../../../README.md) for installation instructions.
+KISSEvolve is part of the KISS Agent Framework. See the main [README.md](../../../../../README.md) for installation instructions.
 
 ## Quick Start
 

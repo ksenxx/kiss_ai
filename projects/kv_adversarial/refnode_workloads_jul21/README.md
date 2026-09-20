@@ -10,7 +10,9 @@ Engines (see `../WORKLOAD_HARDENING.md` for the fixes):
 - chain5 = commit 4138924c (tombstone key-verify + capwarn).
 - chain6/chain7 = commit 5050e98f (FINAL: + review fixes M1/M2/minors).
 
-Files:
+Files (the `.out` logs below are not checked in: the repository's root
+`.gitignore` excludes `*.out`, so they remain on the node only; the numbers
+quoted here are transcribed from them):
 
 - `chain5.out` — engine 4138924c: TSan compact loop 15/15 rc=0 (the
   previously-flaky combo), full matrix ALL_PHASES_DONE, scored
