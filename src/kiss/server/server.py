@@ -2255,9 +2255,9 @@ class VSCodeServer(
         ``isDone`` is decided by :func:`_subagent_is_done`: presence in
         the agent-state registry under the sub-agent's
         own task id means its thread is still running so the tab
-        should pulse the ◉ indicator; absence means the sub-agent has
-        completed and the tab should render as a finished tab without
-        the indicator.
+        should show the spinner; absence means the sub-agent has
+        completed and the tab should render as a finished tab with the
+        green tick.
 
         Args:
             parent_task_id: ``task_history.id`` of the parent task.

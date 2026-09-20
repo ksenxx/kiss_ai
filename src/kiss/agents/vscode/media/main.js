@@ -1383,19 +1383,18 @@
     if (!tabList || !tabBar) return;
 
     // Checked on <body> inline — not via EDITOR_TAB_MODE — so the
-    // function stays self-contained for the harness that replays it in
-    // isolation (see test_subagent_tab_done_solid_indicator.py).
+    // function stays self-contained.
     if (document.body.classList.contains('editor-tab-mode')) {
       // The EDITOR TAB is this chat's tab: mirror the root chat tab's
       // title onto it through the host.
       const root = editorRootTab();
       if (root) {
         const title = root.title || 'new chat';
-        // Mirror the internal tab strip's status dot onto the EDITOR
-        // tab: the host paints a pulsing green circle while the task
-        // runs and a solid green/red one after it ends (the same
-        // states .chat-tab-spinner / .chat-tab-ok / .chat-tab-fail
-        // render in sidebar mode).
+        // Mirror the internal tab strip's status icon onto the EDITOR
+        // tab: the host paints a spinner while the task runs and a
+        // green tick / red cross after it ends (the same states
+        // .chat-tab-spinner / .chat-tab-ok / .chat-tab-fail render in
+        // sidebar mode).
         const state = root.isRunning
           ? 'running'
           : root.hasRunTask
@@ -1476,23 +1475,25 @@
         fileIcon.title = tab.contentPath || '';
         el.appendChild(fileIcon);
       } else if (tab.isSubagentTab) {
+        // Spinner while the sub-agent runs, green tick once it is done.
         const subIndicator = document.createElement('span');
-        subIndicator.className =
-          'subagent-indicator' + (tab.isDone ? ' done' : '');
-        subIndicator.textContent = '\u25C9';
+        subIndicator.className = tab.isDone
+          ? 'subagent-indicator done status-tick'
+          : 'subagent-indicator status-spinner';
         subIndicator.title = tab.isDone ? 'Done' : 'Running';
         el.appendChild(subIndicator);
       } else {
         if (tab.isRunning) {
           const spinner = document.createElement('span');
-          spinner.className = 'chat-tab-spinner';
+          spinner.className = 'chat-tab-spinner status-spinner';
           el.appendChild(spinner);
         } else if (tab.hasRunTask) {
+          // Green tick after a successful task, red cross after a
+          // failed one.
           const icon = document.createElement('span');
           icon.className = tab.lastTaskFailed
-            ? 'chat-tab-status chat-tab-fail'
-            : 'chat-tab-status chat-tab-ok';
-          icon.textContent = '\u25CF';
+            ? 'chat-tab-status chat-tab-fail status-cross'
+            : 'chat-tab-status chat-tab-ok status-tick';
           el.appendChild(icon);
         }
       }
@@ -3376,7 +3377,7 @@
       // A chat binding proves a task ran in this chat (chat ids are
       // allocated by the first run) — the same inference the shared
       // reconcile makes for tabs it adopts — so a revived or migrated
-      // panel gets its status circle back without waiting for a
+      // panel gets its status icon back without waiting for a
       // replay.
       if (entry.chatId) root.hasRunTask = true;
       if (entry.workDir && !root.workDir) root.workDir = entry.workDir;
@@ -10539,7 +10540,7 @@
       if (rTab) {
         // A result proves this tab ran a task — set on replays too
         // (task_events / resumed panels), where no `clear` ever ran,
-        // so the status dot (and the editor tab's title circle) can
+        // so the status icon (and the editor tab's title prefix) can
         // describe the replayed task.
         rTab.hasRunTask = true;
         if (ev.success === false && !ev.is_continue) {
@@ -12189,7 +12190,7 @@
         const teTab = getTab(teTabId);
         dropStaleMainTreeBar(teTabId);
         // faildot-coverage:start
-        // The replay REPLACES the tab's transcript, so the status dot
+        // The replay REPLACES the tab's transcript, so the status icon
         // must describe the replayed task: its own failed `result`
         // re-raises the flag (streamEnd), a successful one leaves it
         // down. Mirrors the reset `clear` does when a task starts.
@@ -12391,7 +12392,7 @@
         setTaskSettings(null);
         replayTaskEvents(ev.events || []);
         // The replay recomputed the tab's verdict (hasRunTask /
-        // lastTaskFailed in streamEnd); repaint the status dot and, in
+        // lastTaskFailed in streamEnd); repaint the status icon and, in
         // editor-tabs mode, repost the panel title's state.
         renderTabBar();
         break;
@@ -17495,19 +17496,19 @@
 
       if (s.is_running) {
         const runningDot = document.createElement('span');
-        runningDot.className = 'sidebar-item-running';
+        runningDot.className = 'sidebar-item-running status-spinner';
         runningDot.dataset.tooltip = 'Task running';
         runningDot.setAttribute('aria-label', 'Task running');
         div.appendChild(runningDot);
       } else if (s.failed) {
         const failedDot = document.createElement('span');
-        failedDot.className = 'sidebar-item-failed';
+        failedDot.className = 'sidebar-item-failed status-cross';
         failedDot.dataset.tooltip = 'Task failed';
         failedDot.setAttribute('aria-label', 'Task failed');
         div.appendChild(failedDot);
       } else if (s.task_id && historyJustCompletedTaskIds.has(s.task_id)) {
         const completedDot = document.createElement('span');
-        completedDot.className = 'sidebar-item-completed';
+        completedDot.className = 'sidebar-item-completed status-tick';
         completedDot.dataset.tooltip = 'Task completed';
         completedDot.setAttribute('aria-label', 'Task completed');
         div.appendChild(completedDot);

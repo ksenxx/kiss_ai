@@ -23,19 +23,25 @@ export const CHAT_PANEL_VIEW_TYPE = 'kissSorcar.chatTab';
 const DEFAULT_PANEL_TITLE = 'KISS Sorcar';
 
 // Editor-tab title status prefixes — the editor-tab analogue of the
-// sidebar tab strip's status dot (.chat-tab-spinner / .chat-tab-ok /
-// .chat-tab-fail in main.css): a green circle while the task runs
-// (pulsed by alternating with a hollow circle), solid green after a
-// success, solid red after a failure.
-const STATUS_OK_PREFIX = '\u{1F7E2} '; // 🟢
-const STATUS_FAIL_PREFIX = '\u{1F534} '; // 🔴
-const STATUS_RUNNING_DIM_PREFIX = '\u{26AA} '; // ⚪ (pulse's dim phase)
-// Half the sidebar dot's 1.5s CSS pulse period: one bright + one dim
-// phase per cycle.
-const PULSE_INTERVAL_MS = 750;
-const STATUS_PREFIX_RE = /^(?:\u{1F7E2}|\u{1F534}|\u{26AA})\s+/u;
+// sidebar tab strip's status icon (.chat-tab-spinner / .chat-tab-ok /
+// .chat-tab-fail in main.css): a text spinner while the task runs, a
+// green tick after a success, a red cross after a failure.  A tab
+// title is plain text, so the spinner is a braille frame sequence
+// advanced on a shared clock.
+const STATUS_OK_PREFIX = '\u2705 '; // ✅
+const STATUS_FAIL_PREFIX = '\u274C '; // ❌
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const SPINNER_INTERVAL_MS = 100;
+// Also matches the 🟢 / 🔴 / ⚪ circles older versions persisted, so a
+// panel revived from a previous session still comes back clean.
+const STATUS_PREFIX_RE = new RegExp(
+  '^(?:\\u2705|\\u274C|[' +
+    SPINNER_FRAMES.join('') +
+    ']|\\u{1F7E2}|\\u{1F534}|\\u{26AA})\\s+',
+  'u',
+);
 
-/** Drop a status circle a previous session left in a panel title. */
+/** Drop a status prefix a previous session left in a panel title. */
 function stripStatusPrefix(title: string): string {
   return (title || '').replace(STATUS_PREFIX_RE, '');
 }
@@ -140,10 +146,10 @@ export class SorcarPanelManager {
     values: MetaPanelValues | null,
     progressMd: string,
   ) => void;
-  // Shared pulse clock for every running panel's title circle; live
-  // only while at least one panel is in the 'running' state.
-  private _pulseTimer: ReturnType<typeof setInterval> | undefined;
-  private _pulseBright: boolean = true;
+  // Shared spinner clock for every running panel's title; live only
+  // while at least one panel is in the 'running' state.
+  private _spinnerTimer: ReturnType<typeof setInterval> | undefined;
+  private _spinnerFrame: number = 0;
   // Terminal teardown (deactivate / window reload): panel disposals
   // after this are not user closes and must not retire chats from the
   // daemon's registry.
@@ -531,7 +537,7 @@ export class SorcarPanelManager {
     }
     this._panels.clear();
     this._pendingAdoptions.clear();
-    this._syncPulseTimer();
+    this._syncSpinnerTimer();
     this._active = undefined;
     this._refreshPoster();
   }
@@ -591,7 +597,7 @@ export class SorcarPanelManager {
       userClosed: false,
     };
     // A revived panel may still carry the previous session's status
-    // circle in its persisted title (the serializer strips it from
+    // prefix in its persisted title (the serializer strips it from
     // init.title); repaint from the clean slate.
     this._applyPanelTitle(cp);
     cp.controller = new SorcarSidebarView(this._extensionUri, {
@@ -637,7 +643,7 @@ export class SorcarPanelManager {
       if (!this._shuttingDown && this._recordPanelTab) {
         this._recordPanelTab(cp.tabId, false);
       }
-      this._syncPulseTimer();
+      this._syncSpinnerTimer();
       if (this._active === cp) this._active = undefined;
       // The Task Info view must not keep describing a closed panel.
       this._pushActiveMeta();
@@ -687,14 +693,14 @@ export class SorcarPanelManager {
   }
 
   /**
-   * Paint *cp*'s editor tab title: the status circle (solid green /
-   * solid red / pulsing green while running) followed by the chat
-   * title — the editor-tab analogue of the sidebar strip's status dot.
+   * Paint *cp*'s editor tab title: the status prefix (spinner while
+   * running / green tick / red cross) followed by the chat title — the
+   * editor-tab analogue of the sidebar strip's status icon.
    */
   private _applyPanelTitle(cp: ChatPanel): void {
     let prefix = '';
     if (cp.status === 'running') {
-      prefix = this._pulseBright ? STATUS_OK_PREFIX : STATUS_RUNNING_DIM_PREFIX;
+      prefix = SPINNER_FRAMES[this._spinnerFrame] + ' ';
     } else if (cp.status === 'ok') {
       prefix = STATUS_OK_PREFIX;
     } else if (cp.status === 'fail') {
@@ -704,25 +710,26 @@ export class SorcarPanelManager {
   }
 
   /**
-   * Keep the shared pulse interval alive exactly while some panel is
-   * running: each tick flips the bright/dim phase and repaints every
-   * running panel's title circle.
+   * Keep the shared spinner interval alive exactly while some panel is
+   * running: each tick advances the frame and repaints every running
+   * panel's title.
    */
-  private _syncPulseTimer(): void {
+  private _syncSpinnerTimer(): void {
     const anyRunning = [...this._panels.values()].some(
       cp => cp.status === 'running',
     );
-    if (anyRunning && this._pulseTimer === undefined) {
-      this._pulseTimer = setInterval(() => {
-        this._pulseBright = !this._pulseBright;
+    if (anyRunning && this._spinnerTimer === undefined) {
+      this._spinnerTimer = setInterval(() => {
+        this._spinnerFrame = (this._spinnerFrame + 1) % SPINNER_FRAMES.length;
         for (const cp of this._panels.values()) {
           if (cp.status === 'running') this._applyPanelTitle(cp);
         }
-      }, PULSE_INTERVAL_MS);
-    } else if (!anyRunning && this._pulseTimer !== undefined) {
-      clearInterval(this._pulseTimer);
-      this._pulseTimer = undefined;
-      this._pulseBright = true;
+      }, SPINNER_INTERVAL_MS);
+    } else if (!anyRunning && this._spinnerTimer !== undefined) {
+      clearInterval(this._spinnerTimer);
+      this._spinnerTimer = undefined;
+      // The next run starts on the first frame again.
+      this._spinnerFrame = 0;
     }
   }
 
@@ -730,18 +737,13 @@ export class SorcarPanelManager {
     switch (event.kind) {
       case 'title': {
         // The webview's title is authoritative and never decorated —
-        // a chat legitimately titled "🟢 deploy status" keeps its
-        // circle (only the serializer strips, and only the one prefix
+        // a chat legitimately titled "✅ deploy status" keeps its
+        // tick (only the serializer strips, and only the one prefix
         // a previous session's decoration added).
         cp.baseTitle = (event.title || '').trim();
         cp.status = event.state || '';
-        // A fresh run always starts on the bright phase so the circle
-        // appears immediately, not half a period late.
-        if (cp.status === 'running' && this._pulseTimer === undefined) {
-          this._pulseBright = true;
-        }
         this._applyPanelTitle(cp);
-        this._syncPulseTimer();
+        this._syncSpinnerTimer();
         break;
       }
       case 'reveal':

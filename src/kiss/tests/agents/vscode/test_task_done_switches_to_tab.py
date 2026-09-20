@@ -29,7 +29,7 @@ Chromium (Playwright) so the real event handlers, the real DOM, and
 the real per-tab state run end-to-end.
 
 The fixture-injected synthetic page mimics the same harness used by
-``test_history_running_green_circle.py`` so the behaviour is exercised
+``test_history_running_spinner.py`` so the behaviour is exercised
 against the shipped JS/CSS verbatim.
 """
 
@@ -57,7 +57,7 @@ def _build_test_page() -> str:
     """Return a self-contained HTML page that loads the real CSS+JS.
 
     Mirrors :func:`_build_test_page` from
-    ``test_history_running_green_circle.py`` so the harness is
+    ``test_history_running_spinner.py`` so the harness is
     drop-in compatible with the rest of the VS Code webview test
     suite.
     """

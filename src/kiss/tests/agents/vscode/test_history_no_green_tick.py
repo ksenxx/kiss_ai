@@ -4,27 +4,27 @@
 # add your name here
 """End-to-end test pinning the History sidebar's status-dot invariant:
 
-    The History panel MUST NOT show a SOLID green circle on a row
+    The History panel MUST NOT show a green tick on a row
     that was simply loaded as "completed" from the backend.  The
-    solid green circle is reserved exclusively for the live
+    green tick is reserved exclusively for the live
     running→completed transition the user just witnessed in the
     current page session.  Specifically:
 
-      * A *running* row renders the PULSING green dot
-        (``.sidebar-item-running`` with the ``running-pulse``
+      * A *running* row renders the spinner
+        (``.sidebar-item-running`` with the ``status-spin``
         keyframe animation).
       * When a row that the current session previously rendered as
         running transitions to ``is_running:false`` and
         ``failed:false`` on a follow-up ``history`` event, its dot
-        becomes SOLID green (``.sidebar-item-completed``, no
-        animation) and STAYS solid green across subsequent
+        becomes the green tick (``.sidebar-item-completed``, no
+        animation) and STAYS a tick across subsequent
         ``refreshHistory()`` reloads.
       * Every other completed row — including all rows on the very
         first ``history`` event, search results, and pagination
         batches — renders NO dot at all.
 
 The Playwright harness mirrors
-``test_history_running_green_circle.py`` so the same review
+``test_history_running_spinner.py`` so the same review
 checklist applies (visible offsetParent, real viewport, real CSS).
 """
 
@@ -90,7 +90,7 @@ def _build_test_page() -> str:
     html, body {{ height: 100%; margin: 0; padding: 0; }}
   </style>
   <style>{css}</style>
-  <title>history no solid green circle test</title>
+  <title>history no green tick test</title>
 </head>
 <body>
 {body}
@@ -244,13 +244,13 @@ def _row_states(page) -> list[dict]:
 
 
 
-def test_fresh_history_load_with_completed_row_renders_no_solid_green(
+def test_fresh_history_load_with_completed_row_renders_no_green_tick(
     _browser,
 ) -> None:
     """A fresh ``history`` event delivering a single completed row
     must render NO ``.sidebar-item-completed`` dot — and no
     ``.sidebar-item-running`` dot — on it.  This is the regression
-    the user reported: simply opening History showed a solid green
+    the user reported: simply opening History showed a green tick
     circle on every old, persisted, completed task.
     """
     context, page = _open_history_page(_browser)
@@ -265,11 +265,11 @@ def test_fresh_history_load_with_completed_row_renders_no_solid_green(
         assert row["category"] == "completed"
         assert row["hasCompleted"] is False, (
             "fresh history load of a completed task MUST NOT render a "
-            f"solid green circle; row state: {row}"
+            f"green tick; row state: {row}"
         )
         assert row["hasRunning"] is False, (
             "fresh history load of a completed task MUST NOT render a "
-            f"pulsing green circle either; row state: {row}"
+            f"spinner either; row state: {row}"
         )
         assert row["hasFailed"] is False, (
             "fresh history load of a completed task MUST NOT render a "
@@ -279,7 +279,7 @@ def test_fresh_history_load_with_completed_row_renders_no_solid_green(
         context.close()
 
 
-def test_fresh_history_load_with_many_completed_rows_renders_no_dots(
+def test_fresh_history_load_with_many_completed_rows_renders_no_icons(
     _browser,
 ) -> None:
     """Every row in a fresh batch of finished tasks must render with
@@ -296,7 +296,7 @@ def test_fresh_history_load_with_many_completed_rows_renders_no_dots(
         for row in rows:
             assert row["hasCompleted"] is False, (
                 "no row in a fresh completed-history batch may render a "
-                f"solid green circle; offending row: {row}"
+                f"green tick; offending row: {row}"
             )
             assert row["hasRunning"] is False, row
             assert row["hasFailed"] is False, row
@@ -309,9 +309,9 @@ def test_fresh_history_load_with_many_completed_rows_renders_no_dots(
         context.close()
 
 
-def test_failed_row_still_renders_red_circle(_browser) -> None:
+def test_failed_row_still_renders_red_cross(_browser) -> None:
     """The new invariant must NOT silence the red ``failed`` dot.
-    Failed rows always render their red circle."""
+    Failed rows always render their red cross."""
     context, page = _open_history_page(_browser)
     try:
         _post_history(page, [
@@ -326,7 +326,7 @@ def test_failed_row_still_renders_red_circle(_browser) -> None:
 
 
 
-def test_live_running_to_completed_transition_shows_solid_green(
+def test_live_running_to_completed_transition_shows_green_tick(
     _browser,
 ) -> None:
     """A row first rendered as ``is_running:true`` and then
@@ -351,15 +351,15 @@ def test_live_running_to_completed_transition_shows_solid_green(
         assert rows[0]["hasRunning"] is False, rows
         assert rows[0]["hasCompleted"] is True, (
             "after a live running→completed transition the row MUST "
-            f"render the solid green circle; rows: {rows}"
+            f"render the green tick; rows: {rows}"
         )
         anim = page.evaluate(
             "() => getComputedStyle("
             "document.querySelector('#history-list .sidebar-item-completed')"
             ").animationName"
         )
-        assert "running-pulse" not in (anim or ""), (
-            "completed dot must NOT inherit the pulse animation; "
+        assert anim == "none", (
+            "the completed tick must NOT inherit the spinner animation; "
             f"got animation-name={anim!r}"
         )
 
@@ -368,19 +368,19 @@ def test_live_running_to_completed_transition_shows_solid_green(
         ])
         rows = _row_states(page)
         assert rows[0]["hasCompleted"] is True, (
-            "solid green circle MUST persist across subsequent history "
+            "green tick MUST persist across subsequent history "
             f"refreshes once the task has completed; rows: {rows}"
         )
     finally:
         context.close()
 
 
-def test_unrelated_completed_row_after_a_transition_still_has_no_dot(
+def test_unrelated_completed_row_after_a_transition_still_has_no_icon(
     _browser,
 ) -> None:
-    """Once one row in the session has transitioned to solid green,
+    """Once one row in the session has transitioned to the green tick,
     other unrelated completed rows arriving in the same session must
-    still render with NO dot — the solid green stick only applies to
+    still render with NO dot — the green tick only applies to
     task_ids the user actually saw running."""
     context, page = _open_history_page(_browser)
     try:
@@ -405,7 +405,7 @@ def test_unrelated_completed_row_after_a_transition_still_has_no_dot(
         assert by_text["witnessed task"]["hasCompleted"] is True, by_text
         assert by_text["unrelated task"]["hasCompleted"] is False, (
             "an unrelated completed row arriving in the same session "
-            "must NOT inherit the solid green circle from another "
+            "must NOT inherit the green tick from another "
             f"transitioned row; rows: {by_text}"
         )
         assert by_text["unrelated task"]["hasRunning"] is False
@@ -414,11 +414,11 @@ def test_unrelated_completed_row_after_a_transition_still_has_no_dot(
         context.close()
 
 
-def test_no_solid_green_for_pagination_batch_of_completed_rows(
+def test_no_green_tick_for_pagination_batch_of_completed_rows(
     _browser,
 ) -> None:
     """A pagination batch (``offset > 0``) of completed rows must
-    not render any solid green dots — these are also "fresh" rows
+    not render any green ticks — these are also "fresh" rows
     the user never saw running."""
     context, page = _open_history_page(_browser)
     try:
@@ -434,7 +434,7 @@ def test_no_solid_green_for_pagination_batch_of_completed_rows(
         for row in rows:
             assert row["hasCompleted"] is False, (
                 "pagination batch of completed rows must not introduce "
-                f"a solid green circle; offending row: {row}"
+                f"a green tick; offending row: {row}"
             )
             assert row["hasRunning"] is False, row
     finally:
