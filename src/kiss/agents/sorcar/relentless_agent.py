@@ -17,7 +17,7 @@ import threading
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NamedTuple, cast
+from typing import Any, NamedTuple, NoReturn, cast
 from uuid import uuid4
 
 import yaml
@@ -330,11 +330,22 @@ summary_in_html="precise chronologically-ordered list of things the agent did \
 with the reason for doing that along with relevant code snippets, formatted \
 as HTML (e.g. <ol>, <p>, <pre><code>), never Markdown")**
 - The summary_in_html argument of finish MUST always be formatted as HTML.
-- Work dir: {work_dir}
-- Current process PID: {current_pid} — NEVER kill this process.
+{work_dir_line}- Current process PID: {current_pid} — NEVER kill this process.
 """
 
+#: The ``IMPORTANT_INSTRUCTIONS`` work-dir line.  Omitted for container
+#: runs (``docker_image`` set): the tools then execute inside the
+#: container, whose working directory is not the host ``work_dir``, so
+#: naming the host path would point the model at files it cannot reach.
+WORK_DIR_LINE = "- Work dir: {work_dir}\n"
+
 TASK_SETTINGS_HEADER = "\n# Task Settings\n"
+
+#: Consecutive continuation sessions that made no progress — no tool
+#: call other than ``finish``, or a summary identical to the previous
+#: session's — after which :meth:`RelentlessAgent.perform_task` stops
+#: instead of spending the remaining sub-sessions on the same stall.
+MAX_ZERO_PROGRESS_SESSIONS = 2
 
 #: Budget cap (USD) a run falls back to when the caller states none.
 DEFAULT_MAX_BUDGET = 200.0
@@ -1109,6 +1120,11 @@ class RelentlessAgent(Base):
     ) -> str:
         """Execute the task with auto-continuation across multiple sub-sessions.
 
+        Each sub-session is a fresh :class:`KISSAgent`; one that returns
+        ``finish(is_continue=True, ...)`` hands its summary to the next.
+        The ``IMPORTANT_INSTRUCTIONS`` suffix names the host work dir
+        only when the tools run on the host (no ``docker_image``).
+
         Args:
             tools: List of callable tools available to the agent during execution.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
@@ -1117,7 +1133,11 @@ class RelentlessAgent(Base):
             YAML string with 'success' and 'summary' keys on successful completion.
 
         Raises:
-            KISSError: If the task fails after exhausting all sub-sessions.
+            KISSError: If the task fails after exhausting all sub-sessions,
+                or after :data:`MAX_ZERO_PROGRESS_SESSIONS` consecutive
+                continuations that made no progress (no tool call other
+                than ``finish``, or a summary identical to the previous
+                session's).
         """
         logger.info(
             "Executing task: agent=%s model=%s max_steps=%d "
@@ -1133,9 +1153,13 @@ class RelentlessAgent(Base):
 
         progress_section = ""
         summaries: list[str] = []
+        previous_summary: str | None = None  # the last continuation's, even if empty
+        zero_progress_streak = 0
         current_pid = str(os.getpid())
         important_instructions = IMPORTANT_INSTRUCTIONS.format(
-            work_dir=self.work_dir,
+            work_dir_line=(
+                "" if self.docker_image else WORK_DIR_LINE.format(work_dir=self.work_dir)
+            ),
             current_pid=current_pid,
         )
         important_instructions += self._task_settings_section()
@@ -1304,14 +1328,51 @@ class RelentlessAgent(Base):
                 return result
 
             summary = payload.get("summary", "")
-            if summary:  # pragma: no branch
+            # Zero-progress guard: a continuation that called no tool but
+            # ``finish``, or that repeated the previous session's summary
+            # verbatim (an empty one included — ``summaries`` below keeps
+            # only non-empty ones), did nothing the next session could
+            # build on.
+            stalled = executor.tool_calls_made == 0 or summary == previous_summary
+            previous_summary = summary
+            zero_progress_streak = zero_progress_streak + 1 if stalled else 0
+            if summary:
                 summaries.append(summary)
 
                 progress_section = CONTINUATION_PROMPT.format(
                     progress_text=_capped_progress_text(summaries),
                     continuation_number=session + 1,
                 )
-        banner = f"Task failed after {self.max_sub_sessions} sub-sessions"
+            if zero_progress_streak >= MAX_ZERO_PROGRESS_SESSIONS:
+                self._fail_after_sessions(
+                    summaries,
+                    f"Task stopped after {zero_progress_streak} consecutive "
+                    "sub-sessions with no progress (no tool calls or an "
+                    "unchanged summary)",
+                )
+        self._fail_after_sessions(
+            summaries, f"Task failed after {self.max_sub_sessions} sub-sessions",
+        )
+
+    def _fail_after_sessions(self, summaries: list[str], banner: str) -> NoReturn:
+        """End the run with *banner* after its sub-sessions stopped paying off.
+
+        Shared by the two ways :meth:`perform_task` gives up without a
+        terminal ``finish``: every sub-session was used, or
+        :data:`MAX_ZERO_PROGRESS_SESSIONS` continuations in a row made
+        no progress.  Emits the merged ``result`` event (the prior
+        sessions' summaries followed by *banner*, see
+        :func:`_build_exhaustion_summary`) and raises a :class:`KISSError`
+        flagged ``terminal_result_broadcast`` so the runner does not
+        emit a second terminal event.
+
+        Args:
+            summaries: Prior sessions' summaries, oldest first.
+            banner: The short reason shown as the terminal result.
+
+        Raises:
+            KISSError: Always, carrying *banner*.
+        """
         self._emit_merged_result_event(
             {
                 "success": False,

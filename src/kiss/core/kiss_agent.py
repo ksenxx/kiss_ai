@@ -219,6 +219,12 @@ class KISSAgent(Base):
         self.tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None
         self.context_tokens_used = 0
         self.last_cache_read_tokens = 0
+        self.tool_calls_made = 0
+        """Tool calls other than ``finish`` the model issued during the
+        current run (blocked ones included: the model still acted).
+        ``RelentlessAgent`` reads it after a sub-session ends — a
+        continuation session that only called ``finish`` made no
+        progress."""
         self.budget_check_hook: Callable[[], None] | None = None
         self.context_reset_hook: Callable[[], None] | None = None
         """Called after old tool outputs were compacted out of the
@@ -258,6 +264,7 @@ class KISSAgent(Base):
         self._cached_tools_schema: list[dict[str, Any]] | None = None
         self.messages: list[dict[str, Any]] = []
         self.step_count = 0
+        self.tool_calls_made = 0
         self.total_tokens_used = 0  # pyright: ignore[reportIncompatibleVariableOverride]
         self.context_tokens_used = 0
         self.last_cache_read_tokens = 0
@@ -835,6 +842,8 @@ class KISSAgent(Base):
         limit_error: KISSError | None = None
 
         for fc in function_calls:
+            if fc["name"] != "finish":
+                self.tool_calls_made += 1
             blocked: str | None = None
             # The hook is called before EVERY tool call (its contract), so it
             # runs first; a non-"OK" verdict is the result the model sees.
