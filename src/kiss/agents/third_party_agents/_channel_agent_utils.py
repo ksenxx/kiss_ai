@@ -363,20 +363,30 @@ class ChannelConfig:
         metadata keys survive (readable via :meth:`load_metadata`) and
         the file is deleted when nothing but the secrets was stored.
 
+        The whole read-filter-write cycle runs under
+        :func:`config_file_lock`, so a concurrent :meth:`save` can never
+        land between the read and the write and be overwritten by the
+        stale filtered copy.  The lock is not reentrant, hence the raw
+        :func:`write_private_file` / ``unlink`` calls inside the block.
+
         Args:
             secret_keys: Keys holding real credentials (e.g. ``("token",)``).
         """
-        try:
-            cfg = json.loads(self.path.read_text())
-        except (OSError, ValueError):
-            return
-        if not isinstance(cfg, dict) or not any(k in cfg for k in secret_keys):
-            return
-        kept = {str(k): str(v) for k, v in cfg.items() if k not in secret_keys and v}
-        if kept:
-            save_json_config(self.path, kept)
-        else:
-            self.clear()
+        with config_file_lock(self.path):
+            try:
+                cfg = json.loads(self.path.read_text())
+            except (OSError, ValueError):
+                return
+            if not isinstance(cfg, dict) or not any(k in cfg for k in secret_keys):
+                return
+            kept = {str(k): str(v) for k, v in cfg.items() if k not in secret_keys and v}
+            if kept:
+                write_private_file(self.path, json.dumps(kept, indent=2))
+            else:
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    pass
 
 
 _BREAKER_FAILURE_LIMIT = 5
@@ -594,8 +604,8 @@ def channel_state_lock(state_path: Path, blocking: bool) -> Iterator[Any | None]
 
     The same lock serializes the runner's tick (non-blocking: an
     overlapping tick skips) and the pairing admin's read-modify-write
-    (blocking: the admin waits for a running tick to finish), so an
-    approval can never be overwritten by a stale in-memory save.
+    (polled with a deadline via :func:`_channel_state_lock_with_deadline`),
+    so an approval can never be overwritten by a stale in-memory save.
 
     Args:
         state_path: The state file whose sibling ``.lock`` file to lock.
@@ -616,6 +626,45 @@ def channel_state_lock(state_path: Path, blocking: bool) -> Iterator[Any | None]
         yield fp
     finally:
         fp.close()
+
+
+_ADMIN_LOCK_TIMEOUT_SECONDS = 30.0
+_ADMIN_LOCK_POLL_SECONDS = 0.25
+
+
+@contextlib.contextmanager
+def _channel_state_lock_with_deadline(state_path: Path, timeout: float) -> Iterator[None]:
+    """Hold the channel state lock, giving up after *timeout* seconds.
+
+    The tick holds the state lock for its whole duration, including the
+    launched agent's run, which has no upper bound.  A blocking acquire
+    would therefore make ``--approve`` / ``--list-pending`` appear hung
+    for hours; this polls the non-blocking lock against a monotonic
+    deadline and exits with an actionable message instead.
+
+    Args:
+        state_path: The state file whose sibling ``.lock`` file to lock.
+        timeout: Seconds to keep retrying before giving up.
+
+    Yields:
+        None while the lock is held.
+
+    Raises:
+        SystemExit: Nonzero when the lock is still held at the deadline.
+    """
+    deadline = _time.monotonic() + timeout
+    while True:
+        with channel_state_lock(state_path, blocking=False) as lock_fp:
+            if lock_fp is not None:
+                yield
+                return
+        if _time.monotonic() >= deadline:
+            print(
+                f"Error: the channel tick is still running (state lock held for "
+                f"{timeout:.0f}s); retry once the current run finishes"
+            )
+            sys.exit(1)
+        _time.sleep(_ADMIN_LOCK_POLL_SECONDS)
 
 
 def sanitize_state_component(name: str) -> str:
@@ -1745,10 +1794,13 @@ def _handle_pairing_admin(
     and exits nonzero.  Both flags require ``--channel`` (the state is
     per-channel).
 
-    The entire read-modify-write runs under the channel's state lock
-    (blocking mode), so an approval issued while a tick is running
-    waits for the tick to finish instead of being overwritten by the
-    runner's stale in-memory save.
+    The entire read-modify-write runs under the channel's state lock,
+    so an approval issued while a tick is running waits for the tick
+    to finish instead of being overwritten by the runner's stale
+    in-memory save.  The wait is bounded (``_ADMIN_LOCK_TIMEOUT_SECONDS``):
+    a tick that is mid-launch can hold the lock for the whole agent
+    run, so past the deadline the command exits nonzero asking the
+    operator to retry rather than hanging.
 
     Args:
         agent_cls: The channel agent class (for state-path derivation).
@@ -1766,7 +1818,7 @@ def _handle_pairing_admin(
         print("Error: --approve and --list-pending require --channel")
         sys.exit(1)
     state_path = derive_state_path(agent_cls, agent_label, workspace, channel)
-    with channel_state_lock(state_path, blocking=True):
+    with _channel_state_lock_with_deadline(state_path, _ADMIN_LOCK_TIMEOUT_SECONDS):
         state = load_channel_state(state_path)
         pending = state.get("pending_pairing", {})
         if list_pending:

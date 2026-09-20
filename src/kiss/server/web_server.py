@@ -520,6 +520,10 @@ def _share_subagent_entries(
 # wake-word model, which reaches the browser as ERR_EMPTY_RESPONSE.
 _OPEN_TIMEOUT_SECONDS = 300.0
 
+# Upper bound on waiting for a sibling daemon's ``.tls.lock`` (a
+# self-signed cert generation takes well under a second).
+_TLS_LOCK_TIMEOUT_S = 30.0
+
 _MAX_VOICE_AUDIO_B64 = 4 * 1024 * 1024
 
 _KISS_HOME: Path | None = None
@@ -2243,7 +2247,11 @@ def _create_ssl_context(
         tls_dir.mkdir(parents=True, exist_ok=True)
         lock_path = tls_dir / ".tls.lock"
         with open(lock_path, "w", encoding="utf-8") as lock_file:
-            lock_exclusive(lock_file)
+            # Bounded like the UDS sidecar lock in ``_bind_uds``: a
+            # blocking ``LOCK_EX`` behind a wedged sibling would stall
+            # startup forever, and cancelling the ``to_thread`` caller
+            # cannot interrupt the executor syscall.
+            _flock_with_deadline(lock_file, _TLS_LOCK_TIMEOUT_S)
             if not cert_path.is_file() or not key_path.is_file():
                 logger.info(
                     "Generating self-signed TLS certificate in %s", tls_dir,
@@ -7473,8 +7481,20 @@ class RemoteAccessServer:
                 proc.returncode,
             )
             attempt += 1
-        self._tunnel_proc = last_proc
-        self._tunnel_started_at = time.monotonic()
+        # Same publish handshake as the success path above: after
+        # ``_stop_tunnel`` has reset the tunnel state, this executor
+        # thread must not overwrite it with a stale (dead) ``Popen``
+        # whose stderr pipe would then outlive ``stop_async``.
+        with self._tunnel_lock:
+            if self._tunnel_stopped and last_proc is not None:
+                if last_proc.stderr is not None:
+                    last_proc.stderr.close()
+                last_proc.wait()
+                raise RuntimeError(
+                    "tunnel stopped while cloudflared was starting",
+                )
+            self._tunnel_proc = last_proc
+            self._tunnel_started_at = time.monotonic()
 
     def _start_tunnel(self) -> str | None:
         """Start a ``cloudflared`` tunnel and return the public URL.
@@ -7854,6 +7874,16 @@ class RemoteAccessServer:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    # Keep shutdown bounded, but retain ownership until
+                    # a delayed SIGKILL can take effect and be reaped.
+                    threading.Thread(
+                        target=proc.wait,
+                        name=f"kiss-cloudflared-reaper-{proc.pid}",
+                        daemon=True,
+                    ).start()
             _unlink_cloudflared_pidfile()
         elif kill_adopted and self._tunnel_adopted_pid is not None:
             # An adopted pid came from the pidfile of a PREVIOUS
