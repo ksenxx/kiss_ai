@@ -19,9 +19,14 @@ import pytest
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.context_compaction import (
     COMPACTION_START_TOKENS,
+    COMPACTION_STEP_TOKENS,
     STUB_PREFIX,
+    apply_compaction,
     compact_tool_results,
+    dropped_chars,
     make_stub,
+    plan_compaction,
+    should_compact,
 )
 from kiss.core.kiss_agent import KISSAgent
 from kiss.tests.agents.sorcar.local_model_server import (
@@ -120,9 +125,30 @@ def test_nothing_to_do_and_unknown_messages() -> None:
     assert make_stub("abc", preview_chars=2).endswith("\nab")
 
 
+def test_plan_drop_and_gate() -> None:
+    conversation = _generic(10)
+    # 10 results, the last one unseen (after the last assistant turn), 4 kept.
+    plan = plan_compaction(conversation, keep_recent=4)
+    assert len(plan) == 5
+    # Nothing was edited by planning.
+    assert all(t == BIG for t in _texts(conversation))
+    expected_drop = 5 * (len(BIG) - len(make_stub(BIG)))
+    assert dropped_chars(plan) == expected_drop
+    assert dropped_chars([]) == 0
+    assert apply_compaction(plan) == 5
+    assert sum(t.startswith(STUB_PREFIX) for t in _texts(conversation)) == 5
+    # Gate: the drop must be >= 25 % of the context ...
+    assert should_compact(100_000, 25_000, None) is True
+    assert should_compact(100_000, 24_999, None) is False
+    # ... and the session must be below 80 % of its hand-off limit.
+    assert should_compact(200_000, 60_000, 350_000) is True
+    assert should_compact(280_000, 84_000, 350_000) is False
+    assert should_compact(280_000, 84_000, None) is True
+
+
 def big_output() -> str:
     """Return a large tool output (a stand-in for a file read or test log)."""
-    return "line\n" * 800
+    return "line\n" * 1600
 
 
 def Write(text: str) -> str:  # noqa: N802
@@ -153,27 +179,51 @@ def _run_agent(base_url: str, script_len: int, hook_calls: list[int]) -> KISSAge
     return agent
 
 
-def test_agent_compaction_needs_more_than_keep_recent_results() -> None:
-    # The threshold is crossed at step 20 with only 20 tool results in the
-    # conversation: all of them are "recent", so nothing is compacted and
-    # the hook is not called, but the next threshold still moves to +50k.
-    script = [tool_call_body("big_output", {}, 5000 * i) for i in range(1, 21)]
-    script.append(finish_body("<p>done</p>", prompt_tokens=130_000))
+def _stubbed(agent: KISSAgent) -> list[bool]:
+    return [
+        str(m.get("content", "")).startswith(STUB_PREFIX)
+        for m in agent.model.conversation if m.get("role") == "tool"
+    ]
+
+
+def test_agent_compaction_skipped_while_the_drop_is_under_a_quarter() -> None:
+    # Step 7 reports 100k context with 7 results seen and 6 kept: the one
+    # candidate (8k chars ≈ 2k tokens) is far below 25 % of the context, so
+    # the compaction is skipped, the hook is not called and the threshold
+    # stays put so the plan is re-evaluated on every later step.
+    script = [tool_call_body("big_output", {}, 5000 * i) for i in range(1, 7)]
+    script.append(tool_call_body("big_output", {}, COMPACTION_START_TOKENS))
+    script.append(tool_call_body("big_output", {}, COMPACTION_START_TOKENS))
+    script.append(finish_body("<p>done</p>", prompt_tokens=60_000))
     hook_calls: list[int] = []
     with serve(script) as (url, requests):
         agent = _run_agent(url, len(script), hook_calls)
     assert hook_calls == []
     assert len(requests) == len(script)
-    # The last reported context (100k prompt + 100 completion tokens) + 50k.
-    assert agent._next_compaction_at == 100_100 + 50_000
-    assert not any(
-        str(m.get("content", "")).startswith(STUB_PREFIX)
-        for m in agent.model.conversation if m.get("role") == "tool"
-    )
+    assert agent._next_compaction_at == COMPACTION_START_TOKENS
+    assert not any(_stubbed(agent))
+
+
+def test_agent_compaction_skipped_near_the_handoff_limit() -> None:
+    # 50 big outputs would drop ~84k tokens, more than 25 % of the reported
+    # 290k context, but 290k is past 80 % of the 350k hand-off limit
+    # (70 % of the 500k window): too few steps remain to amortise the miss.
+    script = [tool_call_body("big_output", {}, 3000) for _ in range(50)]
+    script.append(tool_call_body("big_output", {}, 290_000))
+    script.append(finish_body("<p>done</p>", prompt_tokens=60_000))
+    hook_calls: list[int] = []
+    with serve(script) as (url, _requests):
+        agent = _run_agent(url, len(script), hook_calls)
+    assert hook_calls == []
+    assert agent._next_compaction_at == COMPACTION_START_TOKENS
+    assert not any(_stubbed(agent))
 
 
 def test_agent_compaction_replaces_old_outputs_but_not_writes() -> None:
-    # 30 big outputs; step 31 reports 100k context, so compaction runs before step 32.
+    # 30 big outputs; step 31 reports 100k context, so compaction runs before
+    # step 32: 31 results exist, the 31st not yet seen by the model, the
+    # newest 6 seen ones kept, the Write protected, so results 0..23 minus
+    # index 5 (23 x ~7.6k chars ≈ 44k tokens) go, well over 25 % of the context.
     script = [tool_call_body("big_output", {}, 3000) for _ in range(30)]
     script[5] = tool_call_body("Write", {"text": "w"}, 3000)
     script.append(tool_call_body("big_output", {}, COMPACTION_START_TOKENS))
@@ -182,14 +232,13 @@ def test_agent_compaction_replaces_old_outputs_but_not_writes() -> None:
     with serve(script) as (url, requests):
         agent = _run_agent(url, len(script), hook_calls)
     assert hook_calls == [32]
+    # The last reported context (100k prompt + 100 completion tokens) + 100k.
+    assert agent._next_compaction_at == 100_100 + COMPACTION_STEP_TOKENS
     tool_msgs = [m for m in agent.model.conversation if m.get("role") == "tool"]
     assert len(tool_msgs) == 31  # the finish result never enters the conversation
-    # 31 results existed at compaction, the 31st not yet seen by the model;
-    # the newest 20 seen ones are kept → results 0..9 are candidates; index
-    # 5 is the protected Write.
     for i, m in enumerate(tool_msgs):
         content = str(m["content"])
-        if i < 10 and i != 5:
+        if i < 24 and i != 5:
             assert content.startswith(STUB_PREFIX), i
         else:
             assert not content.startswith(STUB_PREFIX), i

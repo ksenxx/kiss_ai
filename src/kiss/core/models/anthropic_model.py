@@ -65,6 +65,28 @@ _WORKSPACE_ID_HINT = (
 # model_config key is reported instead of raising TypeError.
 _ANTHROPIC_REQUEST_PARAMS = accepted_request_params(Messages.stream)
 
+KEEP_ALIVE_TEXT = "Tool still running. Reply with the single word: ok."
+"""Placeholder tool result of a prompt-cache keep-alive ping (see
+:meth:`AnthropicModel.keep_prompt_cache_warm`)."""
+KEEP_ALIVE_MAX_TOKENS = 256
+"""Output cap of a keep-alive ping: bounds both its cost and how long the
+agent thread may wait for an in-flight ping once the tool call ends.
+Adaptive thinking may spend some of it before the reply; ``stop_reason ==
+"max_tokens"`` is fine.  Raised to ``budget_tokens + 1`` when manual
+extended thinking is configured, which the API requires."""
+KEEP_ALIVE_TIMEOUT_SECONDS = 30.0
+"""HTTP timeout of a keep-alive ping (a cache read plus a one-word reply);
+with retries off this bounds the wait for a ping in flight."""
+
+
+def _last_assistant_blocks(messages: list[Any]) -> list[dict[str, Any]]:
+    """Return the content blocks of the last assistant message in *messages*, or ``[]``."""
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            content = message.get("content")
+            return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+    return []
+
 
 def cache_creation_tokens(usage: Any, get: Callable[[Any, str], Any]) -> tuple[int, int]:
     """Return the 5-minute and 1-hour cache-creation token counts.
@@ -1086,6 +1108,60 @@ class AnthropicModel(Model):
 
         self._append_assistant_message(blocks, content)
         return function_calls, content, response
+
+    def keep_prompt_cache_warm(
+        self,
+        function_map: dict[str, Callable[..., Any]],
+        tools_schema: list[dict[str, Any]] | None = None,
+    ) -> Any:
+        """Re-read the cached prefix so its 5-minute TTL restarts.
+
+        Sends the request the last step sent, byte-for-byte in the parts
+        the cache is keyed on (tools, system, thinking, ``tool_choice``,
+        messages), plus one user message that answers every in-flight
+        ``tool_use`` with a placeholder ``tool_result`` (the API rejects an
+        assistant tool-use turn with nothing after it).  Only
+        ``max_tokens`` shrinks, which is not part of the cached prefix.
+        The reply is discarded: the conversation is not touched, so the
+        real tool results are appended exactly as without the ping.
+
+        Args:
+            function_map: The agent's tools, as passed to
+                :meth:`generate_and_process_with_tools`.
+            tools_schema: The pre-built tool schema list, as passed to
+                :meth:`generate_and_process_with_tools`.
+
+        Returns:
+            The raw Anthropic message of the ping, for cost accounting, or
+            ``None`` when prompt caching is disabled for this model
+            (``model_config["enable_cache"]`` false): nothing to keep warm.
+        """
+        resolved = self._resolve_openai_tools_schema(function_map, tools_schema)
+        tools = self._build_anthropic_tools_schema(resolved)
+        kwargs = self._build_create_kwargs(tools=tools or None)
+        if "cache_control" not in kwargs:
+            return None
+        pending = [
+            block["id"]
+            for block in _last_assistant_blocks(kwargs["messages"])
+            if block.get("type") == "tool_use" and block.get("id")
+        ]
+        if pending:
+            content: str | list[dict[str, Any]] = [
+                {"type": "tool_result", "tool_use_id": call_id, "content": KEEP_ALIVE_TEXT}
+                for call_id in pending
+            ]
+        else:
+            content = KEEP_ALIVE_TEXT
+        kwargs["messages"] = [*kwargs["messages"], {"role": "user", "content": content}]
+        thinking = kwargs.get("thinking") or {}
+        budget = thinking.get("budget_tokens", 0) if thinking.get("type") == "enabled" else 0
+        kwargs["max_tokens"] = max(KEEP_ALIVE_MAX_TOKENS, budget + 1)
+        # No SDK retries: a failed ping is just a cold cache, and the agent
+        # thread waits for this request when the tool call ends.
+        return self.client.with_options(max_retries=0).messages.create(
+            **kwargs, timeout=KEEP_ALIVE_TIMEOUT_SECONDS
+        )
 
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
