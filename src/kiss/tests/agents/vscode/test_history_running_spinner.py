@@ -19,9 +19,10 @@ pipeline used by the History sidebar to surface the
 
 * The **frontend** half — ``renderHistory`` in ``media/main.js``
   must render a visible ``.sidebar-item-running`` spinner as the FIRST
-  child of every row whose ``is_running`` is ``True``: a 10x10 ring
+  child of every row whose ``is_running`` is ``True``: a 12x12 ring
   whose leading edge is the green ``#2e7d32`` (``rgb(46, 125, 50)``),
-  rotated by the ``status-spin`` keyframe animation.
+  rotated by the ``status-spin`` keyframe animation -- the same ring,
+  same animation as the composer's ``#wait-spinner``.
   Rows whose ``is_running`` is ``False`` must NOT render the spinner.
 
 * A **live update** half — a ``status: running=true`` event must
@@ -329,8 +330,8 @@ def test_running_session_renders_spinner(_browser) -> None:
         )
         dot = run["dot"]
         assert dot["isSpinner"], "running indicator must be the .status-spinner icon"
-        assert dot["width"] == "10px" and dot["height"] == "10px", (
-            f"running spinner is not 10x10: {dot['width']} x {dot['height']}"
+        assert dot["width"] == "12px" and dot["height"] == "12px", (
+            f"running spinner is not 12x12: {dot['width']} x {dot['height']}"
         )
         assert dot["borderRadius"] in ("5px", "50%"), (
             f"running spinner is not a ring: border-radius={dot['borderRadius']}"

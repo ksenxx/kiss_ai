@@ -14,8 +14,9 @@ regression in the class wiring (``main.js``) or in the shared
 ``.status-spinner`` / ``.status-tick`` / ``.status-cross`` rules
 (``main.css``) both fail here:
 
-* running root tab   -> ``.chat-tab-spinner.status-spinner``: a 10x10
-  ring rotated by ``status-spin`` whose leading edge is ``--green``;
+* running root tab   -> ``.chat-tab-spinner.status-spinner``: a 12x12
+  ring rotated by ``status-spin`` whose leading edge is ``--green`` (the
+  same ring as the composer's ``#wait-spinner``);
 * succeeded root tab -> ``.chat-tab-ok.status-tick``: SVG-masked box
   filled ``--green``;
 * failed root tab    -> ``.chat-tab-fail.status-cross``: SVG-masked box
@@ -123,7 +124,7 @@ def _assert_spinner(icon: dict, colour: str, marker: str) -> None:
     assert marker in icon["icon"].split() and "status-spinner" in icon["icon"].split(), icon
     assert icon["text"] == "", f"the spinner is drawn by CSS, not a glyph: {icon}"
     assert icon["visible"], icon
-    assert icon["width"] == "10px" and icon["height"] == "10px", icon
+    assert icon["width"] == "12px" and icon["height"] == "12px", icon
     assert icon["borderRadius"] in ("5px", "50%"), f"not a ring: {icon}"
     assert icon["borderTopWidth"] == "2px", icon
     assert icon["borderTopColor"] == colour, icon
@@ -138,7 +139,7 @@ def _assert_mask_icon(icon: dict, shape: str, colour: str, marker: str) -> None:
     assert "status-spinner" not in classes, icon
     assert icon["text"] == "", f"the {shape} is drawn by CSS, not a glyph: {icon}"
     assert icon["visible"], icon
-    assert icon["width"] == "10px" and icon["height"] == "10px", icon
+    assert icon["width"] == "12px" and icon["height"] == "12px", icon
     assert "svg" in (icon["maskImage"] or ""), f"{shape} must be SVG-masked: {icon}"
     assert icon["backgroundColor"] == colour, icon
     assert icon["animationName"] == "none", f"a {shape} must not animate: {icon}"
