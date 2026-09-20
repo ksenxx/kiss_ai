@@ -48,6 +48,9 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "flask>=3.0.0",
     "playwright>=1.40.0",
+    # Patched Playwright driver without the CDP leaks bot-protection
+    # vendors fingerprint (kiss.agents.sorcar.web_stealth).
+    "patchright>=1.63.0",
     # Local "Sorcar" wake-word listener (kiss.server.voice_wake).
     # Pinned to 0.3.44: it is the newest release shipping macOS wheels
     # (0.3.45 only publishes Linux/Windows wheels).
@@ -153,6 +156,7 @@ gemini = [
 sorcar = [
     {include-group = "core"},
     "playwright>=1.40.0",
+    "patchright>=1.63.0",
     "mcp>=1.20.0",
 ]
 
@@ -273,6 +277,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "playwright.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "patchright.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
