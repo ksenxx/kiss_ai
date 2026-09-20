@@ -1252,6 +1252,13 @@
     attachErrors = tab.attachErrors || [];
     renderFileChips();
     inp.value = tab.inputValue || '';
+    // The picker and ghost text were computed for the draft that just
+    // left the screen. A user switch blurs the textbox and drops them,
+    // but a programmatic switch (a background task finishing pulls its
+    // tab forward) does not, and Tab would then paste the old tab's
+    // suggestion into this one.
+    clearGhost();
+    hideAC();
     syncClearBtn();
     inp.style.height = 'auto';
     inp.style.height = inp.scrollHeight + 'px';
@@ -8179,9 +8186,13 @@
     }
   }
 
+  // Ghost text and the completions picker stay live while a task is
+  // running: the composer then drafts the message queued for the running
+  // agent, and that draft deserves the same history / suggestion help as a
+  // fresh task (the daemon's ``complete`` never depended on the run state).
   function requestGhost() {
     clearGhost();
-    if (isRunning || !inp.value) return;
+    if (!inp.value) return;
     if (getAtCtx() || getSlashCtx()) return;
     if (inp.selectionStart < inp.value.length) return;
     if (inp.value.replace(/\s/g, '').length < 2) return;
@@ -19293,10 +19304,6 @@
       return;
     }
     if (!data || !data.length) {
-      hideAC();
-      return;
-    }
-    if (isRunning) {
       hideAC();
       return;
     }
