@@ -32,7 +32,14 @@ Each dispatch is a plain call of the daemon client
 public API ``kiss.server.sorcar.run``) passing the prompt and the agent file's
 path as ``extension_agent_path``: the daemon imports the file as an
 agent script
-and applies its ``X()`` parameter overrides.  For a channel, the
+and applies its ``X()`` parameter overrides.  The tool's optional
+arguments (``model_name``, ``max_budget``, ``timeout``, ``chat_id``,
+``system_prompt``, ``tools``, ``model_config``, ``use_worktree``,
+``auto_commit``, ``use_web_tools``, ``classify_tasks``,
+``use_memory``, ``is_parallel``, ``append_basic_tools``,
+``append_to_system_prompt``, ``append_to_prompt``) are the string
+form of that function's keyword options, parsed into a
+:class:`RunOptions` and forwarded as-is.  For a channel, the
 module's ``tools()`` returns the channel's tool callables, so the
 script serves as its own tools file — the daemon-built agent gets the
 channel's authenticated API tools (credentials persisted under
@@ -43,8 +50,9 @@ cron dispatch, a channel dispatch passes ``use_worktree=False`` and
 ``auto_commit=False``, so no git worktree is ever created for it, while
 pre-run task classification stays enabled (``classify_tasks=None`` —
 the daemon default decides; a verdict can only demote, never force a
-worktree).  Only a cron dispatch additionally pins
-``classify_tasks=False`` (see ``_dispatch``).  For a path-named agent script, whatever
+worktree).  Only a cron dispatch additionally defaults
+``classify_tasks`` to ``False`` (see ``_dispatch``); the tool's
+``classify_tasks`` argument overrides that default.  For a path-named agent script, whatever
 getters the file defines (``tools``, ``model``,
 ``system_prompt``, ...) configure the session the same way; a
 relative path is resolved against the CALLING task's work directory
@@ -64,10 +72,12 @@ import difflib
 import importlib
 import importlib.util
 import inspect
+import json
 import logging
 import math
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +131,148 @@ _NON_CHANNEL_MODULES = frozenset({"a2a_sea", "oai_sea"})
 ``BaseChannelAgent`` for infrastructure reasons but are not services a
 user asks Sorcar to act on, so they are hidden from the tool.
 """
+
+
+@dataclass(frozen=True)
+class RunOptions:
+    """Optional per-run overrides of a dispatched sub-task.
+
+    The parsed form of the ``run_agent`` tool's optional string
+    arguments, each mirroring the keyword parameter of the same name
+    on :func:`kiss.server.sorcar.run` (see that docstring for the
+    semantics).  ``None`` / empty means "not passed": the dispatch mode
+    default applies (``use_worktree``, ``auto_commit``,
+    ``classify_tasks``) or the daemon's configured default decides
+    (everything else).  An agent script's own getters still win over
+    every value here on the daemon.
+    """
+
+    chat_id: str = ""
+    system_prompt: str = ""
+    tools: str = ""
+    model_config: dict[str, Any] | None = None
+    use_worktree: bool | None = None
+    auto_commit: bool | None = None
+    use_web_tools: bool | None = None
+    classify_tasks: bool | None = None
+    use_memory: bool | None = None
+    is_parallel: bool = True
+    append_basic_tools: bool = True
+    append_to_system_prompt: str = ""
+    append_to_prompt: str = ""
+
+
+def _parse_bool(name: str, value: str) -> bool | None:
+    """Parse a tool's optional boolean string argument.
+
+    Args:
+        name: The argument's name, for the error message.
+        value: ``"true"`` / ``"false"`` (any case, surrounding
+            whitespace ignored) or empty for "not passed".
+
+    Returns:
+        The boolean, or ``None`` when *value* is empty.
+
+    Raises:
+        ValueError: When *value* is neither empty nor a boolean word.
+    """
+    word = value.strip().lower()
+    if not word:
+        return None
+    if word in ("true", "false"):
+        return word == "true"
+    raise ValueError(f"{name} must be 'true' or 'false', got {value!r}.")
+
+
+def _parse_run_options(
+    parent_work_dir: str,
+    chat_id: str,
+    system_prompt: str,
+    tools: str,
+    model_config: str,
+    use_worktree: str,
+    auto_commit: str,
+    use_web_tools: str,
+    classify_tasks: str,
+    use_memory: str,
+    is_parallel: str,
+    append_basic_tools: str,
+    append_to_system_prompt: str,
+    append_to_prompt: str,
+) -> RunOptions:
+    """Parse the ``run_agent`` tool's optional string arguments.
+
+    Args:
+        parent_work_dir: The calling task's work directory; a relative
+            *tools* path is resolved against it (the tool runs in the
+            daemon process, whose working directory is unrelated).
+            Empty resolves against the process working directory.
+        chat_id: Existing chat session id to continue; empty starts a
+            new chat.
+        system_prompt: Replacement system prompt; empty keeps the
+            default.
+        tools: Path of a tools file (``get_tools()``); empty for none.
+        model_config: JSON object with the model configuration
+            override; empty for the daemon default.
+        use_worktree: ``"true"``/``"false"``; empty for the mode default.
+        auto_commit: ``"true"``/``"false"``; empty for the mode default.
+        use_web_tools: ``"true"``/``"false"``; empty for the daemon
+            default.
+        classify_tasks: ``"true"``/``"false"``; empty for the mode
+            default.
+        use_memory: ``"true"``/``"false"``; empty for the daemon
+            default.
+        is_parallel: ``"true"``/``"false"``; empty means ``true``.
+        append_basic_tools: ``"true"``/``"false"``; empty means
+            ``true``.
+        append_to_system_prompt: Text appended to the system prompt.
+        append_to_prompt: Text appended to the task prompt.
+
+    Returns:
+        The parsed options.
+
+    Raises:
+        ValueError: On a malformed boolean, a *model_config* that is
+            not a JSON object, or a *tools* path that is not an
+            existing ``.py`` file.
+    """
+    from kiss.agents.sorcar.daemon_client import resolve_tools_file
+
+    tools_path = ""
+    if tools.strip():
+        candidate = Path(tools.strip()).expanduser()
+        if not candidate.is_absolute() and parent_work_dir:
+            candidate = Path(parent_work_dir) / candidate
+        tools_path = resolve_tools_file(str(candidate))
+    config: dict[str, Any] | None = None
+    if model_config.strip():
+        try:
+            config = json.loads(model_config)
+        except ValueError as e:
+            raise ValueError(
+                f"model_config must be a JSON object, got {model_config!r}: {e}"
+            ) from None
+        if not isinstance(config, dict):
+            raise ValueError(
+                f"model_config must be a JSON object, got {model_config!r}."
+            )
+    parallel = _parse_bool("is_parallel", is_parallel)
+    basic_tools = _parse_bool("append_basic_tools", append_basic_tools)
+    return RunOptions(
+        chat_id=chat_id.strip(),
+        system_prompt=system_prompt,
+        tools=tools_path,
+        model_config=config,
+        use_worktree=_parse_bool("use_worktree", use_worktree),
+        auto_commit=_parse_bool("auto_commit", auto_commit),
+        use_web_tools=_parse_bool("use_web_tools", use_web_tools),
+        classify_tasks=_parse_bool("classify_tasks", classify_tasks),
+        use_memory=_parse_bool("use_memory", use_memory),
+        is_parallel=True if parallel is None else parallel,
+        append_basic_tools=True if basic_tools is None else basic_tools,
+        append_to_system_prompt=append_to_system_prompt,
+        append_to_prompt=append_to_prompt,
+    )
 
 
 def _package_dir() -> Path | None:
@@ -277,6 +429,7 @@ def _dispatch(
     scope_work_dir: str = "",
     git_lifecycle: bool = True,
     classify: bool = True,
+    options: RunOptions = RunOptions(),
 ) -> str:
     """Submit an agent-script task to the kiss-web daemon and wait.
 
@@ -329,16 +482,31 @@ def _dispatch(
             ``classify_tasks=None`` — no per-run override, the
             daemon's persisted "Classify tasks before running" setting
             decides — so a simple channel task still gets the reduced
-            SYSTEM_LITE prompt.  ``False`` (the cron mode) pins
+            SYSTEM_LITE prompt.  ``False`` (the cron mode) defaults
             classification off: unattended scheduled automations run
-            repeatedly and must not spend a classifier round trip per
-            run.  An agent script's own getters still win over all
-            three wire values on the daemon.
+            repeatedly and should not spend a classifier round trip per
+            run.  Either way an explicit ``options.classify_tasks``
+            replaces this default.  An agent script's own getters still
+            win over all three wire values on the daemon.
+        options: The caller's optional per-run overrides (the
+            ``run_agent`` tool's optional arguments, parsed).  An
+            explicit ``classify_tasks`` replaces the *classify* mode
+            default.  ``use_worktree`` / ``auto_commit`` may only be
+            set when *git_lifecycle* is on: a channel or cron sub-task
+            never gets a worktree or an auto-commit (see
+            *git_lifecycle*), so asking for one is an error.
 
     Returns:
         The sub-task's YAML result ("success" and "summary" keys), or
         an error message.
     """
+    if not git_lifecycle and (options.use_worktree or options.auto_commit):
+        return (
+            f"Error: the {name} agent task always runs without a git "
+            f"worktree or auto-commit (it executes in a scratch "
+            f"directory outside the project); drop the use_worktree / "
+            f"auto_commit arguments."
+        )
 
     # The calling task's identity, threaded through the daemon so the
     # dispatched run is a SUB-AGENT of that task: its tab then behaves
@@ -389,6 +557,7 @@ def _dispatch(
         text, cost = _dispatch_reserved(
             name, prompt, agent_path, work_dir, model_name, budget, timeout,
             parent_agent, scope_work_dir, git_lifecycle, classify, parent_reviewer,
+            options,
         )
         return text
     finally:
@@ -409,6 +578,7 @@ def _dispatch_reserved(
     git_lifecycle: bool,
     classify: bool,
     parent_reviewer: bool,
+    options: RunOptions,
 ) -> tuple[str, float]:
     """Run the daemon round trip of :func:`_dispatch` (quota already reserved).
 
@@ -433,6 +603,19 @@ def _dispatch_reserved(
         if callable(resolve_tab):
             parent_tab_id = str(resolve_tab() or "")
     Path(work_dir).mkdir(parents=True, exist_ok=True)
+    # The caller's explicit overrides win over the dispatch-mode
+    # defaults (``_dispatch`` has already refused a worktree /
+    # auto-commit request in the pinned-off modes).
+    use_worktree = (
+        git_lifecycle if options.use_worktree is None else options.use_worktree
+    )
+    auto_commit = (
+        git_lifecycle if options.auto_commit is None else options.auto_commit
+    )
+    classify_tasks = (
+        (None if classify else False)
+        if options.classify_tasks is None else options.classify_tasks
+    )
     try:
         result = daemon_client.run(
             prompt,
@@ -443,10 +626,20 @@ def _dispatch_reserved(
             parent_tab_id=parent_tab_id,
             parent_reviewer=parent_reviewer or is_review_task(prompt),
             model=model_name,
-            use_worktree=git_lifecycle,
-            auto_commit=git_lifecycle,
-            classify_tasks=None if classify else False,
+            chat_id=options.chat_id,
+            system_prompt=options.system_prompt,
+            tools=options.tools or None,
+            use_worktree=use_worktree,
+            auto_commit=auto_commit,
+            classify_tasks=classify_tasks,
             max_budget=budget,
+            model_config=options.model_config,
+            use_web_tools=options.use_web_tools,
+            use_memory=options.use_memory,
+            is_parallel=options.is_parallel,
+            append_basic_tools=options.append_basic_tools,
+            append_to_system_prompt=options.append_to_system_prompt,
+            append_to_prompt=options.append_to_prompt,
             timeout=timeout,
             stop_on_timeout=True,
             sock_path=_daemon_sock_path(),
@@ -487,12 +680,28 @@ def _run_agent(
     max_budget: str,
     timeout: str,
     parent_agent: Any = None,
+    chat_id: str = "",
+    system_prompt: str = "",
+    tools: str = "",
+    model_config: str = "",
+    use_worktree: str = "",
+    auto_commit: str = "",
+    use_web_tools: str = "",
+    classify_tasks: str = "",
+    use_memory: str = "",
+    is_parallel: str = "",
+    append_basic_tools: str = "",
+    append_to_system_prompt: str = "",
+    append_to_prompt: str = "",
 ) -> str:
     """Run a channel agent or an agent script on a task immediately.
 
     The implementation behind the per-task ``run_agent`` tool built by
     :func:`make_run_agent_tool`, which captures *parent_work_dir*; the
-    remaining arguments are the tool's.
+    remaining arguments are the tool's (the optional string arguments
+    after *parent_agent* are parsed by :func:`_parse_run_options` into
+    the :class:`RunOptions` forwarded to the daemon — see the tool
+    docstring for each one).
 
     Args:
         parent_work_dir: Work directory of the calling task.  In path
@@ -546,6 +755,15 @@ def _run_agent(
             f"Error: timeout must be a positive finite number of seconds, "
             f"got {timeout!r}."
         )
+    try:
+        options = _parse_run_options(
+            parent_work_dir, chat_id, system_prompt, tools, model_config,
+            use_worktree, auto_commit, use_web_tools, classify_tasks,
+            use_memory, is_parallel, append_basic_tools,
+            append_to_system_prompt, append_to_prompt,
+        )
+    except ValueError as e:
+        return f"Error: {e}"
     requested = agent.strip()
     if requested.endswith(".py") or "/" in requested or "\\" in requested:
         # Path mode: any agent-script file.  The task is passed through
@@ -565,7 +783,7 @@ def _run_agent(
             task = rewrite_parent_repo_paths(task, parent_work_dir)
         return _dispatch(Path(agent_path).stem, task, agent_path,
                          work_dir, model_name, budget, wait, parent_agent,
-                         scope_work_dir=parent_work_dir)
+                         scope_work_dir=parent_work_dir, options=options)
     # Forgiving lookup: "Home Assistant", "HOMEASSISTANT", and
     # "home-assistant" all resolve — spelling variants differ only in
     # case, spaces, hyphens, and underscores.
@@ -577,8 +795,9 @@ def _run_agent(
         # its work_dir()/use_worktree()/auto_commit()
         # getters keep the session in ~/.kiss/cron/work, out of the
         # calling project's git lifecycle.  ``classify=False``
-        # additionally pins classification off — cron is the one
-        # dispatch mode that never classifies (see ``_dispatch``).
+        # additionally defaults classification off — cron is the one
+        # dispatch mode that does not classify unless the caller's
+        # ``classify_tasks`` argument asks for it (see ``_dispatch``).
         from kiss.agents.sorcar import cron_agent
 
         return _dispatch(
@@ -588,6 +807,7 @@ def _run_agent(
             scope_work_dir=parent_work_dir,
             git_lifecycle=False,
             classify=False,
+            options=options,
         )
     channels = available_channels()
     matches = [name for name in channels if _squash(name) == squashed]
@@ -646,7 +866,7 @@ def _run_agent(
         return _dispatch(channel, prompt, str(module.__file__),
                          work_dir, model_name, budget, wait, parent_agent,
                          scope_work_dir=parent_work_dir,
-                         git_lifecycle=False)
+                         git_lifecycle=False, options=options)
     finally:
         exit_workspace(workspace)
 
@@ -724,6 +944,19 @@ def make_run_agent_tool(
         model_name: str = "",
         max_budget: str = "",
         timeout: str = "",
+        chat_id: str = "",
+        system_prompt: str = "",
+        tools: str = "",
+        model_config: str = "",
+        use_worktree: str = "",
+        auto_commit: str = "",
+        use_web_tools: str = "",
+        classify_tasks: str = "",
+        use_memory: str = "",
+        is_parallel: str = "",
+        append_basic_tools: str = "",
+        append_to_system_prompt: str = "",
+        append_to_prompt: str = "",
     ) -> str:
         """Run an agent — a channel agent or any agent script — on a task now.
 
@@ -756,6 +989,9 @@ def make_run_agent_tool(
         with the standard worktree/auto-commit lifecycle) unless the
         script's ``work_dir()`` says otherwise; a channel agent's
         session runs in the channels' shared ``~/.kiss/channel_work``.
+        The optional arguments from ``model_name`` on mirror the
+        keyword options of :func:`kiss.server.sorcar.run`; leave one
+        empty to keep its default.
         This call blocks until the task finishes or the ``timeout``
         (default 300 seconds) expires, whichever comes first; a
         timed-out call spends up to 20 further seconds confirming the
@@ -796,6 +1032,40 @@ def make_run_agent_tool(
                 the stop (side effects, spend) is not reported back
                 here, so check what it already did before retrying
                 with a larger timeout.
+            chat_id: Existing chat session id to continue; empty starts a new chat.
+                Pass the chat id a previous run belonged to and the sub-task sees
+                that chat's earlier tasks and results as context.
+            system_prompt: Replacement system prompt for the sub-task; empty keeps the default.
+                It replaces the default system prompt of the sub-task and of its own
+                ``run_parallel`` sub-agents; the daemon still appends its per-run
+                operational instructions.  An agent script's ``system_prompt()`` still wins.
+            tools: Path of a Python tools file adding extra tools to the sub-task; empty = none.
+                The file's ``get_tools()`` returns the tool functions.  A relative path is
+                resolved against this task's work directory and must exist.  An agent
+                script's ``tools()`` still wins.
+            model_config: Model configuration override as a JSON object string; empty = default.
+                Custom endpoint / headers, e.g. ``'{"base_url": "http://localhost:8000/v1"}'``.
+            use_worktree: "true"/"false": run the sub-task in a git worktree; empty = default.
+                The default is ``true`` for a path-named agent script.  Channel and cron
+                sub-tasks never use a worktree: passing ``"true"`` for them is an error.
+            auto_commit: "true"/"false": auto-commit the sub-task's changes; empty = default.
+                The default is ``true`` for a path-named agent script.  Channel and cron
+                sub-tasks never auto-commit: passing ``"true"`` for them is an error.
+            use_web_tools: "true"/"false": give the sub-task the browser tools; empty = default.
+            classify_tasks: "true"/"false": classify the sub-task before it runs; empty = default.
+                Classification picks the lite vs. full system prompt and may demote a
+                worktree run to direct execution.  The default is the daemon setting,
+                except ``false`` for the cron agent.
+            use_memory: "true"/"false": give the sub-task persistent-memory tools; empty = default.
+            is_parallel: "true"/"false": let the sub-task use run_parallel; empty means true.
+            append_basic_tools: "true"/"false": give the sub-task the basic toolset; empty = true.
+                With ``"false"`` the sub-task has ONLY ``finish`` and the tools from
+                ``tools`` / the agent script, so pass a ``system_prompt`` written for them.
+            append_to_system_prompt: Extra text appended to the sub-task's system prompt.
+                Appended after the default (or the ``system_prompt`` replacement) and
+                inherited by the sub-task's ``run_parallel`` sub-agents.
+            append_to_prompt: Extra text appended to the sub-task's prompt; empty appends nothing.
+                Appended to each ``<task>`` when the task holds several.
 
         Returns:
             The sub-task's YAML result ("success" and "summary" keys),
@@ -804,7 +1074,10 @@ def make_run_agent_tool(
         """
         return _run_agent(
             work_dir, agent, task, workspace, model_name, max_budget,
-            timeout, parent_agent,
+            timeout, parent_agent, chat_id, system_prompt, tools,
+            model_config, use_worktree, auto_commit, use_web_tools,
+            classify_tasks, use_memory, is_parallel, append_basic_tools,
+            append_to_system_prompt, append_to_prompt,
         )
 
     run_agent.__doc__ = (run_agent.__doc__ or "").replace(
