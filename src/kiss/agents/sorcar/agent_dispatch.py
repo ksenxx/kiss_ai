@@ -68,6 +68,7 @@ scheduler); standalone runs use the standard socket resolution
 reachable daemon.
 """
 
+import dataclasses
 import difflib
 import importlib
 import importlib.util
@@ -123,13 +124,18 @@ invisibly.  Work the sub-task completed before the stop (side
 effects, spend) is not reported back to the calling task.
 """
 
-_NON_CHANNEL_MODULES = frozenset({"a2a_sea", "oai_sea"})
+_NON_CHANNEL_MODULES = frozenset({"a2a_sea", "ask_sea", "oai_sea"})
 """Modules matching ``*_sea.py`` that are not user-facing channels.
 
 ``a2a_sea`` (agent-to-agent protocol plumbing) and
 ``oai_sea`` (an OpenAI-compatible HTTP server) subclass
 ``BaseChannelAgent`` for infrastructure reasons but are not services a
 user asks Sorcar to act on, so they are hidden from the tool.
+``ask_sea`` (the ``/ask`` side-channel Q&A over a running task's
+persisted events) is a slash-command-only SEA that does not implement
+a ``BaseChannelAgent`` subclass, so listing it as a channel would
+make ``test_every_channel_module_is_dispatchable`` fail on the very
+first import.
 """
 
 
@@ -591,6 +597,27 @@ def _dispatch_reserved(
     from kiss.agents.sorcar.sorcar_agent import _persisted_task_id
 
     parent_task_id = _persisted_task_id(parent_agent)
+    # ``/ask <question>`` routes here with a fixed
+    # ``append_to_prompt`` that carries a literal ``<task_id>``
+    # placeholder (see ``ask_sea.py`` and
+    # ``sea_commands.rewrite_prompt_if_command``): the calling task's
+    # id is not known until here — the daemon dispatch that finally
+    # allocates it is one call away — so the substitution happens
+    # NOW, keeping the placeholder out of the outer LLM's context.
+    # Guarded on the file basename (``Path(...).name``, NOT
+    # ``str.endswith``) so an unrelated file whose path happens to
+    # end in ``ask_sea.py`` — e.g. ``test_ask_sea.py``,
+    # ``not_ask_sea.py`` — is left untouched.
+    if (
+        Path(agent_path).name == "ask_sea.py"
+        and "<task_id>" in options.append_to_prompt
+    ):
+        options = dataclasses.replace(
+            options,
+            append_to_prompt=options.append_to_prompt.replace(
+                "<task_id>", parent_task_id,
+            ),
+        )
     parent_tab_id = ""
     if parent_task_id:
         # The tab really watching the caller (its own tab id, or —

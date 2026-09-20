@@ -140,6 +140,38 @@ def _task_accepts_input(state: AgentState | None) -> bool:
     return state.is_task_active or state.thread_alive()
 
 
+# Prefix that flags an ``appendUserMessage`` as a live-side-channel
+# /ask query.  Kept identical to the SEA registry stem so a
+# ``list_commands`` reader and the interceptor agree on the name.
+_ASK_COMMAND_PREFIX = "/ask"
+
+
+def _split_ask_command(prompt: str) -> str | None:
+    """Return the question text of a ``/ask <question>`` prompt.
+
+    Returns the question with surrounding whitespace stripped when
+    *prompt* begins with ``/ask`` followed by whitespace and at least
+    one non-whitespace character; otherwise returns ``None``.  A bare
+    ``/ask`` or ``/ask   `` returns ``None`` (no question to answer),
+    and a prompt whose ``/ask`` prefix is glued to more text
+    (``/askme``) does not match — the same word-boundary rule the
+    general SEA slash-command parser uses.
+
+    Args:
+        prompt: The raw user message.
+
+    Returns:
+        The question text, or ``None``.
+    """
+    if not prompt.startswith(_ASK_COMMAND_PREFIX):
+        return None
+    tail = prompt[len(_ASK_COMMAND_PREFIX):]
+    if not tail or not tail[:1].isspace():
+        return None
+    question = tail.strip()
+    return question or None
+
+
 def _route_prompt_to_owner(owner: AgentState, prompt: str) -> None:
     """Queue a mid-run user *prompt* on the right list of *owner*.
 
@@ -1058,6 +1090,91 @@ class _CommandsMixin:
             echo["taskId"] = owner_task
         self.printer.broadcast(echo)
 
+    def _dispatch_ask_side_channel(
+        self, *, tab_id: str, owner_task_id: str, chat_id: str, question: str,
+    ) -> None:
+        """Fire a background ``ask_sea`` dispatch for a live ``/ask`` query.
+
+        Spawns a daemon thread that calls
+        :func:`daemon_client.run` with the resolved ``ask_sea`` script
+        as ``extension_agent_path``: the daemon accepts the run over
+        its own Unix socket and runs it as a sub-agent of
+        *owner_task_id*.  The frontend then renders the answering
+        session as a nested sub-agent tab under the running task's
+        tab — same webview, no interaction with the outer agent's
+        (possibly blocked) tool call.
+
+        The ``<task_id>`` placeholder is substituted HERE so the
+        answering session receives the OWNER's task id even when it
+        would end up as the answering task's own parent id (which is
+        the same value; kept explicit for clarity).
+
+        Args:
+            tab_id: The frontend tab whose ``/ask`` produced this
+                dispatch.  Threaded as ``parent_tab_id`` so the
+                nested sub-agent tab renders inside it.
+            owner_task_id: The persisted task id of the running task
+                the user is asking about.  Empty means the running
+                task has not allocated its row yet (rare — the
+                narrow window between ``run()`` entry and
+                ``_add_task``); the dispatch still fires but the
+                answering agent will see an empty task id and report
+                that no events exist.
+            chat_id: The chat the running task belongs to; passed so
+                the answering sub-agent joins the same chat's
+                history.
+            question: The user's question, already stripped of the
+                ``/ask`` prefix and surrounding whitespace.
+        """
+        from kiss.agents.sorcar import daemon_client, sea_commands
+        from kiss.agents.sorcar.agent_dispatch import _daemon_sock_path
+
+        sea_path = sea_commands.get_command("ask")
+        if sea_path is None:
+            logger.warning(
+                "/ask received on tab %s but ask_sea is not registered",
+                tab_id,
+            )
+            return
+        append_to_prompt = (
+            f"Read the events of the task {owner_task_id} from "
+            f"~/.kiss/sorcar.db and answer the user question above."
+        )
+        append_to_system_prompt = (
+            "**MUST FOLLOW: You MUST NOT USE internet or internet "
+            "search at any point."
+        )
+        sock_path = _daemon_sock_path()
+
+        def _run() -> None:
+            try:
+                daemon_client.run(
+                    question,
+                    extension_agent_path=str(sea_path),
+                    append_to_prompt=append_to_prompt,
+                    append_to_system_prompt=append_to_system_prompt,
+                    parent_task_id=owner_task_id,
+                    parent_tab_id=tab_id,
+                    chat_id=chat_id,
+                    use_worktree=False,
+                    auto_commit=False,
+                    sock_path=sock_path,
+                    timeout=600.0,
+                    stop_on_timeout=True,
+                )
+            except Exception:
+                # A crashed side-channel MUST NOT bring down the
+                # daemon: the interactive tab keeps running.  The
+                # user sees no answer; the exception goes to the
+                # daemon log for triage.
+                logger.exception(
+                    "/ask side-channel dispatch failed for tab %s", tab_id,
+                )
+
+        threading.Thread(
+            target=_run, daemon=True, name="kiss-ask-sidechannel",
+        ).start()
+
     def _cmd_append_user_message(self, cmd: dict[str, Any]) -> None:
         """Queue a user message to be injected into the running agent's context.
 
@@ -1116,10 +1233,54 @@ class _CommandsMixin:
                     tab_id,
                 )
                 return
-            _route_prompt_to_owner(owner, prompt)
+            # ``/ask <question>`` is a live side-channel Q&A over the
+            # running task's persisted events: routed to a background
+            # ``ask_sea`` dispatch instead of ``pending_user_messages``
+            # so the answering session runs independently of the outer
+            # agent (which may be blocked inside a long tool call).
+            # The captured id is the SAME task id the message was
+            # queued against — the state lock is still held here, so
+            # a successor task cannot have re-armed the tab yet.  The
+            # SEA parser (``sea_commands._split_slash_command``) is
+            # word-boundary strict at character zero (no leading
+            # whitespace), and this helper matches it: passing
+            # ``prompt`` without pre-stripping keeps ``  /ask q``
+            # (leading spaces) OUT of the side channel so it flows
+            # through the normal steering queue like any other typed
+            # message.
+            question = _split_ask_command(prompt)
             owner_task = _owner_task_id(owner)
-            if not owner_task:
-                owner.unattributed_prompt_echoes.append(prompt)
+            # An empty ``owner_task`` means the running task has not
+            # allocated its ``task_history`` row yet (the narrow
+            # window between ``run()`` entry and ``_add_task``): the
+            # answering session would receive an empty task id and
+            # be unable to read any events, so bail out of the side
+            # channel and let the normal queue path handle the
+            # ``/ask …`` line as a steering message instead — that
+            # path already handles the pre-allocation window through
+            # ``unattributed_prompt_echoes``.
+            if question is not None and owner_task:
+                owner_chat_id = owner.chat_id
+                dispatched = True
+            else:
+                dispatched = False
+                _route_prompt_to_owner(owner, prompt)
+                if not owner_task:
+                    owner.unattributed_prompt_echoes.append(prompt)
+        if dispatched:
+            # Echo the raw ``/ask …`` line the user typed, then hand
+            # off to the side-channel worker.  The echo carries the
+            # OWNER's task id (not a fresh one) so the message appears
+            # in the running task's history stream, right where the
+            # answer will land.
+            self._echo_injected_prompt(tab_id, prompt, owner_task)
+            self._dispatch_ask_side_channel(
+                tab_id=tab_id,
+                owner_task_id=owner_task,
+                chat_id=owner_chat_id,
+                question=question,
+            )
+            return
         self._echo_injected_prompt(tab_id, prompt, owner_task)
 
     def _cmd_resume_session(self, cmd: dict[str, Any]) -> None:
