@@ -790,6 +790,16 @@
       // Set by sendMessage() the moment a submit leaves this tab, so the tab
       // owns the task before the daemon has told anyone its real id.
       pendingTaskId: null,
+      // The last prompt sent from this tab until the daemon echoes it
+      // (setTaskText for a run, prompt for a follow-up), and the
+      // ask-user answer (with its question) until askUserDone confirms
+      // it.  A connection that died silently swallows both without any
+      // error; persistTabState carries them over to the reloaded page
+      // as drafts so the user can send them again instead of losing
+      // them.
+      unackedPrompt: '',
+      unackedAnswer: '',
+      unackedQuestion: null,
       isRunning: false,
       // Raised by the Stop button until the task actually ends, so a
       // stop the agent has not reached yet looks different from a stop
@@ -2211,6 +2221,16 @@
     const editor = tab.contentEditor;
     if (!editor || tab.contentSaving || !tab.contentPath) return;
     if (!tab.contentDirty && !force) return;
+    if (daemonWasDown) {
+      // The post would never arrive; the tab stays dirty so the user
+      // can save again once the connection is back.
+      setContentSaveStatus(
+        tab,
+        'Not connected: try again when reconnected',
+        true,
+      );
+      return;
+    }
     const model = editor.getModel();
     contentSaveSeq += 1;
     tab.contentSaving = true;
@@ -2331,6 +2351,9 @@
     e.preventDefault();
     e.returnValue = '';
   });
+  // Last chance to save the composer draft before a reload or
+  // navigation takes the page down (see persistTabState).
+  window.addEventListener('pagehide', persistTabState);
 
   // ctxmenu-coverage:start
   // An opened .html file renders inside an iframe sandboxed with
@@ -3172,8 +3195,37 @@
   // selected tab and the drawer preferences.
   function persistTabState() {
     const root = EDITOR_TAB_MODE ? editorRootTab() : null;
+    const composer = document.getElementById('task-input');
+    const active = getTab(activeTabId);
+    // Every tab's unsent prompt, keyed by tab id.  The remote webapp
+    // reloads itself when its connection comes back after an outage
+    // (web_server._WS_SHIM_JS) and a webview can be reloaded any time;
+    // the `pagehide` handler below persists the drafts on the way out
+    // and the first snapshot after the reload hands them back.  The
+    // active tab's draft is what the composer shows, or, when that is
+    // empty, a prompt the daemon never acknowledged (see unackedPrompt).
+    const inputDrafts = {};
+    const askDrafts = {};
+    tabs.forEach(t => {
+      const typed = t === active ? composer && composer.value : t.inputValue;
+      const draft = typed || t.unackedPrompt;
+      if (draft) inputDrafts[t.id] = draft;
+      // Likewise the answer typed into (or sent from, but never
+      // confirmed) a tab's ask-user modal, with its question: it comes
+      // back when the daemon asks that same question again after the
+      // reload.
+      const asked = t.askPendingQuestion !== null;
+      const answer =
+        asked && t.askInputEl ? t.askInputEl.value : t.unackedAnswer;
+      const question = asked ? t.askPendingQuestion : t.unackedQuestion;
+      if (answer && typeof question === 'string') {
+        askDrafts[t.id] = {question, answer};
+      }
+    });
     vscode.setState({
       chatId: activeTabId,
+      inputDrafts,
+      askDrafts,
       // Editor-tabs mode: the panel serializer re-adopts THIS chat tab
       // after a window reload (SorcarPanelManager.registerSerializer).
       // The active tab id will not do — a sub-agent tab may be on
@@ -3543,17 +3595,36 @@
       // runs a task; until then it is a welcome screen only.
       tabs.push(makeTab('new chat'));
     }
+    // Drafts persisted by the previous page instance go back to their
+    // tabs (restoreTab shows a tab's inputValue when it is selected).
+    if (savedInputDrafts) {
+      tabs.forEach(t => {
+        if (savedInputDrafts[t.id] && !t.inputValue) {
+          t.inputValue = savedInputDrafts[t.id];
+        }
+      });
+    }
     const activeAfter = getTab(activeTabId);
     if (!activeAfter || isTabHidden(activeAfter)) {
       // A hidden survivor keeps its draft; a removed tab has nothing
       // left to save.
       if (activeAfter) saveCurrentTab();
       const saved = savedActiveTabId ? getTab(savedActiveTabId) : null;
-      activateAdjacentTab(
-        saved && !isTabHidden(saved) ? saved : firstVisibleTab(),
-      );
+      const target = saved && !isTabHidden(saved) ? saved : firstVisibleTab();
+      // The previously selected tab is gone: the draft the boot tab
+      // showed for it follows the screen to the tab taking it
+      // (restoreTab shows tab.inputValue).
+      const activeDraft =
+        savedInputDrafts && savedActiveTabId
+          ? savedInputDrafts[savedActiveTabId]
+          : '';
+      if (activeDraft && !saved && !target.inputValue) {
+        target.inputValue = activeDraft;
+      }
+      activateAdjacentTab(target);
     }
     savedActiveTabId = '';
+    savedInputDrafts = null;
     reportSurvivingChatTab();
     renderTabBar();
     persistTabState();
@@ -3624,9 +3695,43 @@
   // persisted tab set into `ready` exactly once, so the first daemon
   // with an empty registry can adopt it (one-time migration).
   let savedActiveTabId = '';
+  // The composer drafts the previous page instance persisted on its way
+  // out (persistTabState), by tab id: the selected tab's is shown in the
+  // boot tab right away, and the first snapshot hands each to its tab.
+  let savedInputDrafts = null;
+  // The ask-user answers persisted the same way, by tab id
+  // ({question, answer}): shown again when the daemon re-asks that same
+  // question after the reload (it re-emits an unanswered question on
+  // every replay), dropped when it asks nothing or something else — the
+  // answer had arrived after all.
+  let savedAskDrafts = null;
   const legacyRestoredTabs = [];
   (function () {
     const saved = vscode.getState();
+    const drafts = saved && saved.inputDrafts;
+    if (drafts && typeof drafts === 'object') {
+      savedInputDrafts = {};
+      Object.keys(drafts).forEach(id => {
+        if (typeof drafts[id] === 'string' && drafts[id]) {
+          savedInputDrafts[id] = drafts[id];
+        }
+      });
+    }
+    const asks = saved && saved.askDrafts;
+    if (asks && typeof asks === 'object') {
+      savedAskDrafts = {};
+      Object.keys(asks).forEach(id => {
+        const d = asks[id];
+        if (
+          d &&
+          typeof d.question === 'string' &&
+          typeof d.answer === 'string' &&
+          d.answer
+        ) {
+          savedAskDrafts[id] = {question: d.question, answer: d.answer};
+        }
+      });
+    }
     if (saved && saved.tabs && saved.tabs.length > 0) {
       const seenChatIds = new Set();
       saved.tabs.forEach(st => {
@@ -3644,6 +3749,9 @@
     }
     if (saved && saved.chatId) savedActiveTabId = String(saved.chatId);
     const initial = makeTab('new chat');
+    if (savedInputDrafts && savedActiveTabId) {
+      initial.inputValue = savedInputDrafts[savedActiveTabId] || '';
+    }
     if (EDITOR_TAB_MODE) {
       // The hosting editor tab pins this webview to one root chat tab:
       // adopt the id (and title) the extension stamped on <body>, so
@@ -11288,11 +11396,25 @@
     refreshSidebarDataViews(true);
   }
 
-  function setServerLoading(loading) {
+  /**
+   * Show or hide the "server is starting / reconnecting" overlay.
+   *
+   * `banner` (remote webapp, socket lost AFTER the app was on screen)
+   * shrinks the overlay to a slim bar along the top and leaves `#app`
+   * visible: the user keeps reading what was loaded while the shim
+   * reconnects, instead of losing the whole screen on every blip of a
+   * flaky connection.  Without `banner` the overlay covers a hidden
+   * `#app` (cold start, auth lockout, dismissed password prompt).
+   */
+  function setServerLoading(loading, banner) {
     const overlay = document.getElementById('kiss-server-loading');
     const app = document.getElementById('app');
-    if (overlay) overlay.style.display = loading ? '' : 'none';
-    if (app) app.style.display = loading ? 'none' : '';
+    const asBanner = loading && !!banner;
+    if (overlay) {
+      overlay.style.display = loading ? '' : 'none';
+      overlay.classList.toggle('kiss-server-loading--banner', asBanner);
+    }
+    if (app) app.style.display = loading && !asBanner ? 'none' : '';
   }
 
   const spokenTalkIds = new Set();
@@ -11569,9 +11691,20 @@
 
   function handleEvent(ev) {
     const t = ev.type;
+    // The daemon echoes every prompt it takes — setTaskText for a run,
+    // prompt for a follow-up — to the tab it came from (an unaddressed
+    // echo is for the tab on screen, as in the handlers below):
+    // acknowledged.
+    if (t === 'setTaskText' || t === 'prompt') {
+      const echoed = getTab(ev.tabId || activeTabId);
+      if (echoed) echoed.unackedPrompt = '';
+    }
     switch (t) {
       case 'daemonStatus':
-        setServerLoading(!ev.connected);
+        // `reconnecting` is set by the remote webapp's shim when the
+        // socket dropped after this page was authenticated: the app
+        // stays on screen under a banner (see setServerLoading).
+        setServerLoading(!ev.connected, ev.reconnecting === true);
         if (!ev.connected) {
           forgetInFlightPathChecks();
           // An outage swallows in-flight replies. A getAdjacentTask reply
@@ -11945,6 +12078,15 @@
         if (askTab.askPendingQuestion === askQuestion) break;
         askTab.askPendingQuestion = askQuestion;
         showAskForTab(askTab);
+        const draft = savedAskDrafts && savedAskDrafts[askTab.id];
+        if (draft) {
+          // The same question is still open: the answer goes back in.
+          // A different one means the old answer was taken.
+          if (draft.question === askQuestion && askTab.askInputEl) {
+            askTab.askInputEl.value = draft.answer;
+          }
+          delete savedAskDrafts[askTab.id];
+        }
         renderTabBar();
         break;
       }
@@ -11952,6 +12094,8 @@
         const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
         const askTab = getTab(askTabId);
         if (!askTab) break;
+        askTab.unackedAnswer = '';
+        askTab.unackedQuestion = null;
         clearAskForMatchingChatTabs(askTab);
         break;
       }
@@ -14591,17 +14735,18 @@
       // be able to re-adopt this chat even if the window reloads
       // before any tab activity (e.g. while the daemon is down).
       persistTabState();
-      // Show the composer draft carried over from the opening panel
-      // (data-kiss-pending-text, adopted into the boot tab's
-      // inputValue): the boot tab is put on screen without restoreTab,
-      // so the textarea must be seeded here.
-      const bootTab = getTab(activeTabId);
-      if (bootTab && bootTab.inputValue && !inp.value) {
-        inp.value = bootTab.inputValue;
-        syncClearBtn();
-        inp.style.height = 'auto';
-        inp.style.height = inp.scrollHeight + 'px';
-      }
+    }
+    // Show the composer draft adopted into the boot tab's inputValue —
+    // carried over from the opening panel (data-kiss-pending-text) or
+    // persisted by the previous page instance (savedInputDrafts): the
+    // boot tab is put on screen without restoreTab, so the textarea
+    // must be seeded here.
+    const bootTab = getTab(activeTabId);
+    if (bootTab && bootTab.inputValue && !inp.value) {
+      inp.value = bootTab.inputValue;
+      syncClearBtn();
+      inp.style.height = 'auto';
+      inp.style.height = inp.scrollHeight + 'px';
     }
     sendReady();
     if (EDITOR_TAB_MODE) {
@@ -16143,6 +16288,12 @@
   async function sendMessage() {
     let prompt = inp.value.trim();
     if (!prompt) return;
+    // Daemon unreachable (the remote webapp shows the app under its
+    // "Reconnecting ..." banner): a submit now would only sit in the
+    // shim's queue, and the page reload that follows the reconnect
+    // would drop it.  Keep the prompt in the composer instead of
+    // losing it silently; the user sends it once the banner is gone.
+    if (daemonWasDown) return;
 
     // Enter and the voice trigger bypass the disabled send button, so a photo
     // that is still being converted has to be waited for rather than lost.
@@ -16164,7 +16315,8 @@
       // A conversion that failed leaves its error chip in place: sending the
       // prompt without the photo is exactly the silent loss to avoid.  A tab
       // switch means this submission no longer matches what the user sees.
-      if (!ready || activeTabId !== waitTab.id) return;
+      // The connection may have dropped during the wait: re-check.
+      if (!ready || activeTabId !== waitTab.id || daemonWasDown) return;
       // attachlatch-coverage:end
       // The composer may have been edited during the wait.
       prompt = inp.value.trim();
@@ -16177,6 +16329,7 @@
     const curTab = getTab(activeTabId);
 
     if (isRunning) {
+      if (curTab) curTab.unackedPrompt = prompt;
       api.appendUserMessage({prompt: prompt, tabId: activeTabId});
       resetComposerAfterSend();
       return;
@@ -16215,6 +16368,7 @@
       // only it -- a legitimate owner of the output that is about to arrive.
       if (!curTab.currentTaskId) curTab.pendingTaskId = 'pending:' + curTab.id;
       // tableak-coverage:end
+      curTab.unackedPrompt = prompt;
     }
     resetComposerAfterSend();
   }
@@ -16339,9 +16493,15 @@
   }
 
   function submitAskForTab(tab) {
+    // While the daemon is unreachable the answer stays in the modal:
+    // a post made now would never arrive (see sendMessage).
+    if (daemonWasDown) return;
     const answer = tab.askInputEl ? tab.askInputEl.value : '';
+    const question = tab.askPendingQuestion;
     api.userAnswer({answer: answer, tabId: tab.id});
     clearAskForMatchingChatTabs(tab);
+    tab.unackedAnswer = answer;
+    tab.unackedQuestion = question;
   }
 
   function syncAskModalToActiveTab() {
