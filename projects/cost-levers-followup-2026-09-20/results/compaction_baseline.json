@@ -1,0 +1,369 @@
+{
+  "tasks": 560,
+  "sessions": 582,
+  "steps": 9502,
+  "compactions_observed": 25,
+  "compaction_raw_drop_total": 1435316,
+  "compaction_est_saved_total": 1437337,
+  "compaction_median_raw_drop": 9161,
+  "compaction_after_below_100k": 25,
+  "compaction_examples": [
+    {
+      "task": "3846ee65",
+      "step": 2,
+      "before": 8939,
+      "after": 4686,
+      "raw_drop": 4253,
+      "est_saved": 4313
+    },
+    {
+      "task": "69c485fb",
+      "step": 3,
+      "before": 22541,
+      "after": 13519,
+      "raw_drop": 9022,
+      "est_saved": 9082
+    },
+    {
+      "task": "76672068",
+      "step": 87,
+      "before": 360504,
+      "after": 1256,
+      "raw_drop": 359248,
+      "est_saved": 359248
+    },
+    {
+      "task": "7c1a8cc1",
+      "step": 3,
+      "before": 24262,
+      "after": 14931,
+      "raw_drop": 9331,
+      "est_saved": 9391
+    },
+    {
+      "task": "8dddb09d",
+      "step": 2,
+      "before": 17155,
+      "after": 10046,
+      "raw_drop": 7109,
+      "est_saved": 7236
+    },
+    {
+      "task": "93952f0e",
+      "step": 2,
+      "before": 29270,
+      "after": 17870,
+      "raw_drop": 11400,
+      "est_saved": 11528
+    },
+    {
+      "task": "b3b52c7b",
+      "step": 3,
+      "before": 22820,
+      "after": 13659,
+      "raw_drop": 9161,
+      "est_saved": 9221
+    },
+    {
+      "task": "b43b6afa",
+      "step": 2,
+      "before": 20980,
+      "after": 12837,
+      "raw_drop": 8143,
+      "est_saved": 8271
+    },
+    {
+      "task": "b959a115",
+      "step": 2,
+      "before": 28855,
+      "after": 17736,
+      "raw_drop": 11119,
+      "est_saved": 11246
+    },
+    {
+      "task": "bed0b8ff",
+      "step": 2,
+      "before": 28851,
+      "after": 17707,
+      "raw_drop": 11144,
+      "est_saved": 11272
+    },
+    {
+      "task": "c66965b6",
+      "step": 3,
+      "before": 22926,
+      "after": 13765,
+      "raw_drop": 9161,
+      "est_saved": 9221
+    },
+    {
+      "task": "e3094d24",
+      "step": 2,
+      "before": 13952,
+      "after": 8042,
+      "raw_drop": 5910,
+      "est_saved": 6038
+    }
+  ],
+  "steps_over_100k": 3554,
+  "steps_over_100k_share": 0.374,
+  "context_tokens_total": 931441549,
+  "context_tokens_over_100k_share": 0.7201,
+  "by_session_length": {
+    "0-20 steps": {
+      "sessions": 447,
+      "steps": 2993,
+      "steps_over_100k": 77,
+      "share": 0.026,
+      "cost": 315.47,
+      "peak_ctx_avg": 36843
+    },
+    "20-50 steps": {
+      "sessions": 98,
+      "steps": 2932,
+      "steps_over_100k": 848,
+      "share": 0.289,
+      "cost": 309.77,
+      "peak_ctx_avg": 117356
+    },
+    "50-100 steps": {
+      "sessions": 25,
+      "steps": 1833,
+      "steps_over_100k": 1128,
+      "share": 0.615,
+      "cost": 358.74,
+      "peak_ctx_avg": 204860
+    },
+    "100-200 steps": {
+      "sessions": 11,
+      "steps": 1538,
+      "steps_over_100k": 1340,
+      "share": 0.871,
+      "cost": 443.07,
+      "peak_ctx_avg": 299744
+    },
+    "200-inf steps": {
+      "sessions": 1,
+      "steps": 206,
+      "steps_over_100k": 161,
+      "share": 0.782,
+      "cost": 47.16,
+      "peak_ctx_avg": 329400
+    }
+  },
+  "long_sessions": [
+    {
+      "task": "fa87ca48",
+      "model": "claude-opus-4-8",
+      "session": 2,
+      "steps": 161,
+      "peak_ctx": 229317,
+      "steps_over_100k": 116,
+      "cost": 81.58,
+      "first_step_over_100k": 437,
+      "task_text": "Across all surfaces, in the task history panel organize the "
+    },
+    {
+      "task": "cc6dcd48",
+      "model": "claude-fable-5-1",
+      "session": 1,
+      "steps": 156,
+      "peak_ctx": 410905,
+      "steps_over_100k": 148,
+      "cost": 54.69,
+      "first_step_over_100k": 27,
+      "task_text": "Update the paper based on the review at ./reports/kiss_sorca"
+    },
+    {
+      "task": "340da661",
+      "model": "claude-fable-5",
+      "session": 0,
+      "steps": 206,
+      "peak_ctx": 329400,
+      "steps_over_100k": 161,
+      "cost": 47.16,
+      "first_step_over_100k": 207,
+      "task_text": "test: Can you run all tests (python and javascript? Use `run"
+    },
+    {
+      "task": "ad9a24ce",
+      "model": "claude-fable-5-1",
+      "session": 1,
+      "steps": 145,
+      "peak_ctx": 384141,
+      "steps_over_100k": 145,
+      "cost": 46.84,
+      "first_step_over_100k": 16,
+      "task_text": "can you compress the paper in ./papers/kisssorcar/ks_assista"
+    },
+    {
+      "task": "521d636b",
+      "model": "claude-fable-5",
+      "session": 1,
+      "steps": 173,
+      "peak_ctx": 306064,
+      "steps_over_100k": 162,
+      "cost": 44.81,
+      "first_step_over_100k": 34,
+      "task_text": "In the remote web app explorer, add a button at the top that"
+    },
+    {
+      "task": "76672068",
+      "model": "claude-fable-5",
+      "session": 0,
+      "steps": 148,
+      "peak_ctx": 322590,
+      "steps_over_100k": 133,
+      "cost": 41.0,
+      "first_step_over_100k": 16,
+      "task_text": "in the editor tab mode of the vscode extension, can you show"
+    },
+    {
+      "task": "fa87ca48",
+      "model": "claude-opus-4-8",
+      "session": 1,
+      "steps": 129,
+      "peak_ctx": 360266,
+      "steps_over_100k": 119,
+      "cost": 39.63,
+      "first_step_over_100k": 87,
+      "task_text": "Across all surfaces, in the task history panel organize the "
+    },
+    {
+      "task": "93b2c0c2",
+      "model": "claude-fable-5-1",
+      "session": 1,
+      "steps": 130,
+      "peak_ctx": 293541,
+      "steps_over_100k": 121,
+      "cost": 33.07,
+      "first_step_over_100k": 21,
+      "task_text": "Use the new decide tool in the task classifier (src/kiss/age"
+    },
+    {
+      "task": "72502c7f",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 146,
+      "peak_ctx": 250876,
+      "steps_over_100k": 114,
+      "cost": 28.11,
+      "first_step_over_100k": 33,
+      "task_text": "Implement a KISS model backend for OpenRouter's /api/alpha/d"
+    },
+    {
+      "task": "30c0f685",
+      "model": "claude-fable-5-1",
+      "session": 2,
+      "steps": 114,
+      "peak_ctx": 262285,
+      "steps_over_100k": 111,
+      "cost": 27.53,
+      "first_step_over_100k": 24,
+      "task_text": "# Single-task implementation plan for the Sorcar token-cost "
+    },
+    {
+      "task": "79175ee7",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 121,
+      "peak_ctx": 272487,
+      "steps_over_100k": 100,
+      "cost": 25.36,
+      "first_step_over_100k": 22,
+      "task_text": "can you update the paper at ./papers/kisssorcar/kiss_sorcar."
+    },
+    {
+      "task": "340da661",
+      "model": "claude-fable-5",
+      "session": 1,
+      "steps": 115,
+      "peak_ctx": 204710,
+      "steps_over_100k": 71,
+      "cost": 20.45,
+      "first_step_over_100k": 2437,
+      "task_text": "test: Can you run all tests (python and javascript? Use `run"
+    }
+  ],
+  "chars_added_by_category": {
+    "tool_results": 39357293,
+    "tool_call_args": 9874477,
+    "prompt": 7769383,
+    "thinking": 2981146,
+    "assistant_text": 45355
+  },
+  "tool_result_chars_by_tool": {
+    "Bash(stream)": 33117233,
+    "Read": 3784914,
+    "memory_pull": 664620,
+    "go_to_url": 604693,
+    "memory_search": 417598,
+    "run_parallel": 308411,
+    "memory_read": 131494,
+    "Edit": 79499,
+    "Bash": 77844,
+    "run_agent": 43127,
+    "decide": 35481,
+    "Write": 24431
+  },
+  "tool_call_arg_chars_by_tool": {
+    "Bash": 5108994,
+    "Write": 1199523,
+    "Edit": 938206,
+    "summary": 908085,
+    "memory_write": 622943,
+    "Read": 450797,
+    "run_parallel": 301310,
+    "decide": 94087,
+    "memory_search": 66494,
+    "memory_pull": 62243,
+    "run_agent": 47482,
+    "go_to_url": 47328
+  },
+  "tool_results": 10022,
+  "tool_result_chars": 39357293,
+  "tool_result_chars_below_min_compact": 2685782,
+  "tool_result_chars_below_min_compact_share": 0.068,
+  "tool_result_chars_protected_tools": 103930,
+  "tool_result_chars_in_sessions_reaching_100k": 19595387,
+  "tool_result_chars_in_last_20_results_of_those": 7893111,
+  "chars_per_context_token_median": 2.66,
+  "per_model": {
+    "claude-fable-5-1": {
+      "steps": 3709,
+      "cost": 810.12,
+      "over_100k": 2114,
+      "own_steps": 3682,
+      "cost_per_step": 0.22,
+      "over_100k_share": 0.57,
+      "ctx_avg": 133019
+    },
+    "claude-fable-5": {
+      "steps": 1935,
+      "cost": 343.25,
+      "over_100k": 797,
+      "own_steps": 1915,
+      "cost_per_step": 0.1792,
+      "over_100k_share": 0.412,
+      "ctx_avg": 96946
+    },
+    "gpt-5.6-sol": {
+      "steps": 3182,
+      "cost": 166.73,
+      "over_100k": 353,
+      "own_steps": 3090,
+      "cost_per_step": 0.054,
+      "over_100k_share": 0.111,
+      "ctx_avg": 56186
+    },
+    "claude-opus-4-8": {
+      "steps": 676,
+      "cost": 154.13,
+      "over_100k": 290,
+      "own_steps": 667,
+      "cost_per_step": 0.2311,
+      "over_100k_share": 0.429,
+      "ctx_avg": 106066
+    }
+  }
+}

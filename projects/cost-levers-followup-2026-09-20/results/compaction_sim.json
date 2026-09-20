@@ -1,0 +1,62 @@
+{
+  "sessions": 48,
+  "recorded_ctx_total": 614325918,
+  "policies": {
+    "A: no compaction": {
+      "ctx_tokens_total": 716233648,
+      "vs_production": 1.0,
+      "steps_over_100k": 2936,
+      "steps_over_100k_share": 0.64,
+      "peak_ctx_avg": 183779,
+      "sessions_reaching_350k": 4
+    },
+    "B: production (100k/50k, keep 20, min 2000)": {
+      "ctx_tokens_total": 613682652,
+      "vs_production": 1.0,
+      "steps_over_100k": 2630,
+      "steps_over_100k_share": 0.573,
+      "peak_ctx_avg": 160415,
+      "sessions_reaching_350k": 2
+    },
+    "C: keep 5": {
+      "ctx_tokens_total": 601686056,
+      "vs_production": 0.98,
+      "steps_over_100k": 2545,
+      "steps_over_100k_share": 0.555,
+      "peak_ctx_avg": 157393,
+      "sessions_reaching_350k": 2
+    },
+    "D: keep 5, min 500": {
+      "ctx_tokens_total": 587108252,
+      "vs_production": 0.957,
+      "steps_over_100k": 2512,
+      "steps_over_100k_share": 0.548,
+      "peak_ctx_avg": 153870,
+      "sessions_reaching_350k": 2
+    },
+    "E: start 50k, keep 5, min 500": {
+      "ctx_tokens_total": 566544118,
+      "vs_production": 0.923,
+      "steps_over_100k": 2437,
+      "steps_over_100k_share": 0.531,
+      "peak_ctx_avg": 150446,
+      "sessions_reaching_350k": 2
+    },
+    "F: D + compact large tool-call args": {
+      "ctx_tokens_total": 556303969,
+      "vs_production": 0.907,
+      "steps_over_100k": 2342,
+      "steps_over_100k_share": 0.51,
+      "peak_ctx_avg": 143342,
+      "sessions_reaching_350k": 2
+    },
+    "G: E + compact large tool-call args": {
+      "ctx_tokens_total": 530727939,
+      "vs_production": 0.865,
+      "steps_over_100k": 2246,
+      "steps_over_100k_share": 0.49,
+      "peak_ctx_avg": 137692,
+      "sessions_reaching_350k": 1
+    }
+  }
+}
