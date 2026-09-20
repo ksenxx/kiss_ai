@@ -81,7 +81,12 @@ function panelState(p) {
   };
 }
 
-/** Stream a small real task: prompt, thoughts, two tools, finish. */
+/**
+ * Stream a small real task: prompt, thoughts, three tools, finish. The
+ * stream keeps its newest two panels open, so the Bash panel only folds
+ * because two more panels (the Read call and the thoughts its result
+ * arms) follow it.
+ */
 function streamTask(win, tabId) {
   send(win, {type: 'status', running: true, tabId, startTs: Date.now()});
   send(win, {type: 'prompt', text: 'do something', tabId});
@@ -89,6 +94,9 @@ function streamTask(win, tabId) {
   send(win, {type: 'thinking_delta', text: 'planning', tabId});
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId});
   send(win, {type: 'tool_result', name: 'Bash', content: 'ok', tabId});
+  send(win, {type: 'thinking_delta', text: 'checking', tabId});
+  send(win, {type: 'tool_call', name: 'Read', path: 'a.txt', tabId});
+  send(win, {type: 'tool_result', name: 'Read', content: 'aaa', tabId});
   send(win, {type: 'thinking_delta', text: 'wrapping up', tabId});
   send(win, {
     type: 'tool_call',
