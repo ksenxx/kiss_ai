@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.fanout_guard import is_review_task
-from kiss.core.config import kiss_home
+from kiss.core.config import DEFAULT_CONFIG, kiss_home
 
 CONTEXT_BUCKETS: tuple[tuple[str, int], ...] = (
     ("<50k", 50_000),
@@ -46,10 +46,13 @@ CONTEXT_BUCKETS: tuple[tuple[str, int], ...] = (
     (">300k", 1 << 62),
 )
 FANOUT_TOOLS = frozenset({"run_parallel", "run_agent"})
-HANDOFF_CONTEXT_FRACTION = 0.8
-"""A session restart whose last context was above this share of the window
-counts as a context hand-off (as opposed to an is_continue restart for
-another reason)."""
+HANDOFF_CONTEXT_FRACTION = DEFAULT_CONFIG.context_limit_fraction * 0.95
+"""A session restart whose last context was at or above this share of the
+window counts as a context hand-off (as opposed to an is_continue restart
+for another reason).  The agent hands off at
+``DEFAULT_CONFIG.context_limit_fraction`` (0.7 by default); the 5 % margin
+absorbs the round-off of the last reported context so a hand-off at exactly
+the threshold is still counted."""
 
 _CONTEXT_RE = re.compile(r"Context:\s*([\d,]+)\s*/\s*([\d,]+)")
 _SHELL_WRAPPER_RE = re.compile(
@@ -117,7 +120,11 @@ def _scan_events(conn: sqlite3.Connection, rows: dict[str, TaskRow]) -> None:
     seen_reads: dict[str, set[tuple[str, Any, Any]]] = defaultdict(set)
     last_cost: dict[str, float] = {}
     last_steps: dict[str, int] = {}
-    last_context: dict[str, tuple[int, int]] = {}
+    # Peak (context, window) of the current session of each task.  A
+    # hand-off runs a small trajectory-summarizer session before the next
+    # ``prompt`` event, so the *last* context before a restart is not the
+    # one that triggered it; the session's peak is.
+    peak_context: dict[str, tuple[int, int]] = {}
     # The tool called last in each task: a usage_info right after a
     # run_parallel / run_agent carries the children's spend too, which
     # must not be attributed to the parent's context bucket.
@@ -145,16 +152,18 @@ def _scan_events(conn: sqlite3.Connection, rows: dict[str, TaskRow]) -> None:
         elif kind == "prompt":
             row.prompt_events += 1
             if row.prompt_events > 1:
-                ctx, window = last_context.get(task_id, (0, 0))
+                ctx, window = peak_context.get(task_id, (0, 0))
                 if window and ctx >= HANDOFF_CONTEXT_FRACTION * window:
                     row.handoffs += 1
+            peak_context.pop(task_id, None)
         elif kind == "usage_info":
             match = _CONTEXT_RE.search(str(event.get("text", "")))
             if match is None:
                 continue
             context = int(match.group(1).replace(",", ""))
             window = int(match.group(2).replace(",", ""))
-            last_context[task_id] = (context, window)
+            if context >= peak_context.get(task_id, (0, 0))[0]:
+                peak_context[task_id] = (context, window)
             if row.first_context is None:
                 row.first_context = context
             cost = _money(event.get("cost"))
