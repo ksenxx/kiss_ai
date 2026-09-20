@@ -689,7 +689,14 @@ type ToWebviewMessageBody =
   | {type: 'followup_suggestion'; text: string}
   | {type: 'tasks_updated'}
   | {type: 'welcome_suggestions'; suggestions: Array<{text: string}>}
-  | {type: 'remote_url'; url: string; ntfyUrl?: string; tunnelActive?: boolean}
+  | {
+      type: 'remote_url';
+      url: string;
+      ntfyUrl?: string;
+      tunnelActive?: boolean;
+      loopbackUrl?: string;
+      lanUrls?: string[];
+    }
   // A session replay (server.py): task_id is the history row id (None
   // for a task still running without a row), chat_id the chat's uuid
   // string, extra the row's JSON-encoded extra column ('' when absent).

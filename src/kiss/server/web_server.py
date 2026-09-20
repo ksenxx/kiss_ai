@@ -1692,6 +1692,7 @@ def _wait_for_remote_password(timeout: float = 30.0) -> str:
 
 def _save_url_file(
     url_file: Path, local_url: str, tunnel_url: str | None = None,
+    loopback_url: str | None = None, lan_urls: list[str] | None = None,
 ) -> None:
     """Write the active server URLs to ``url_file``.
 
@@ -1705,10 +1706,17 @@ def _save_url_file(
         url_file: Path to the JSON file to write.
         local_url: The local ``https://localhost:PORT`` URL.
         tunnel_url: The Cloudflare tunnel URL, or None.
+        loopback_url: The ``https://127.0.0.1:PORT`` URL, or None.
+        lan_urls: ``https://<lan-ip>:PORT`` URLs for the host's
+            routable LAN addresses, or None.
     """
-    data: dict[str, str] = {"local": local_url}
+    data: dict[str, object] = {"local": local_url}
     if tunnel_url:
         data["tunnel"] = tunnel_url
+    if loopback_url:
+        data["loopback"] = loopback_url
+    if lan_urls:
+        data["lan"] = list(lan_urls)
     _atomic_write_text(url_file, json.dumps(data, indent=2) + "\n")
 
 
@@ -4391,6 +4399,7 @@ class RemoteAccessServer:
         self._uds_handler_tasks: set[asyncio.Task[None]] = set()
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
+        self._ips_probed = False
         self._pending_ip_change: frozenset[str] | None = None
         self._pending_ip_change_count: int = 0
         self._auth_failures: dict[str, list[float]] = {}
@@ -6849,12 +6858,97 @@ class RemoteAccessServer:
         }, "activeTasksQuery")
 
 
+    @property
+    def _loopback_url(self) -> str:
+        """The ``https://127.0.0.1:PORT`` URL for local-machine access."""
+        return f"https://127.0.0.1:{self.port}"
+
+    def _lan_urls(self) -> list[str]:
+        """Return ``https://<lan-ip>:PORT`` URLs for this host's LAN IPs.
+
+        Returns ``[]`` when LAN clients cannot actually reach the
+        webapp — the server is bound to a loopback-only host, or no
+        ``remote_password`` is configured (``_process_request`` answers
+        non-loopback peers 403 in that case) — so the UI never
+        advertises a LAN URL that would be refused.
+
+        Uses only the cached :attr:`_last_ips` snapshot (seeded
+        off-thread in ``_setup_server`` before the first URL-file
+        write, refreshed by the watchdog), so callers on the event
+        loop never block on the socket probes in
+        :func:`_get_local_ips`.  Before that first probe completes —
+        e.g. a client that connects during the listener/tunnel setup
+        window and asks for welcome info — no LAN URLs are advertised
+        yet rather than probing on the loop.
+        """
+        if self.host == "localhost" or _is_loopback_ip(self.host):
+            return []
+        if not str(load_config().get("remote_password", "") or ""):
+            return []
+        if not self._ips_probed:
+            return []
+        return [f"https://{ip}:{self.port}" for ip in sorted(self._last_ips)]
+
+    def _write_url_file_sync(self, tunnel_url: str | None) -> None:
+        """Write the URL file with local, loopback, LAN + tunnel URLs.
+
+        Blocking (disk + possible LAN-IP probe); callers on the event
+        loop must run it via an executor / ``asyncio.to_thread``.
+
+        Args:
+            tunnel_url: The Cloudflare tunnel URL, or None.
+        """
+        _save_url_file(
+            self._url_file, self._local_url, tunnel_url,
+            self._loopback_url, self._lan_urls(),
+        )
+
+    def _write_url_file_logged(self, tunnel_url: str | None) -> None:
+        """Run :meth:`_write_url_file_sync`, logging any failure.
+
+        Executor target for fire-and-forget URL-file re-writes whose
+        exceptions would otherwise vanish with the unawaited future.
+
+        Args:
+            tunnel_url: The Cloudflare tunnel URL, or None.
+        """
+        try:
+            self._write_url_file_sync(tunnel_url)
+        except Exception:
+            logger.warning("URL-file re-write failed", exc_info=True)
+
+    def _republish_urls(self) -> None:
+        """Re-write the URL file and re-broadcast ``remote_url``.
+
+        Called on the event loop after the watchdog adopts a new
+        LAN-IP baseline so the URL file's ``lan`` list and every open
+        settings/welcome panel stop showing addresses the machine no
+        longer holds.  The disk write runs in the default executor to
+        keep the loop responsive; the broadcast happens immediately.
+        """
+        tunnel_url = (
+            self._active_url
+            if self._active_url and self._active_url != self._local_url
+            else None
+        )
+        asyncio.get_running_loop().run_in_executor(
+            None, self._write_url_file_logged, tunnel_url,
+        )
+        self._broadcast_remote_url(
+            self._active_url or self._local_url, bool(tunnel_url),
+        )
+
     def _broadcast_remote_url(self, url: str, tunnel_active: bool) -> None:
         """Broadcast a ``remote_url`` event to every connected client.
 
         Includes the ``ntfyUrl`` field only when both *url* is
         non-empty and an ntfy topic is configured, matching the
         contract pinned by the welcome-info and tunnel-restart tests.
+        Always carries ``loopbackUrl`` (the ``https://127.0.0.1:PORT``
+        address for the local machine) and ``lanUrls`` (the
+        ``https://<lan-ip>:PORT`` addresses for other devices on the
+        LAN) so the settings panel and the welcome page can show how
+        to reach the webapp alongside the Cloudflare URL.
 
         Args:
             url: The active URL (``""`` when none is known).
@@ -6866,6 +6960,8 @@ class RemoteAccessServer:
             "type": "remote_url",
             "url": url or "",
             "tunnelActive": tunnel_active,
+            "loopbackUrl": self._loopback_url,
+            "lanUrls": self._lan_urls(),
         }
         if ntfy_url:
             msg["ntfyUrl"] = ntfy_url
@@ -6973,8 +7069,7 @@ class RemoteAccessServer:
             )
             if discovered:
                 await loop.run_in_executor(
-                    None, _save_url_file,
-                    self._url_file, self._local_url, discovered,
+                    None, self._write_url_file_sync, discovered,
                 )
                 self._active_url = discovered
                 url = discovered
@@ -7667,9 +7762,7 @@ class RemoteAccessServer:
         the watchdog when the ``remote_password`` is cleared while a
         tunnel is live.
         """
-        await asyncio.to_thread(
-            _save_url_file, self._url_file, self._local_url, None,
-        )
+        await asyncio.to_thread(self._write_url_file_sync, None)
         self._active_url = self._local_url
         self._broadcast_remote_url(self._active_url, False)
         await self._post_url_if_changed()
@@ -7727,9 +7820,7 @@ class RemoteAccessServer:
                     delay,
                 )
             self._tunnel_next_retry = time.monotonic() + delay
-        await asyncio.to_thread(
-            _save_url_file, self._url_file, self._local_url, tunnel_url,
-        )
+        await asyncio.to_thread(self._write_url_file_sync, tunnel_url)
         self._active_url = tunnel_url or self._local_url
         self._broadcast_remote_url(self._active_url, bool(tunnel_url))
         await self._post_url_if_changed()
@@ -7917,7 +8008,7 @@ class RemoteAccessServer:
                 if self._active_url and self._active_url != self._local_url
                 else None
             )
-            _save_url_file(self._url_file, self._local_url, tunnel_url)
+            self._write_url_file_sync(tunnel_url)
             logger.info(
                 "Re-wrote missing URL file %s (tunnel=%s)",
                 self._url_file, tunnel_url,
@@ -7956,6 +8047,7 @@ class RemoteAccessServer:
             self._last_ips = current_ips
             self._pending_ip_change = None
             self._pending_ip_change_count = 0
+            self._republish_urls()
         else:
             if current_ips == self._pending_ip_change:
                 self._pending_ip_change_count += 1
@@ -7975,6 +8067,7 @@ class RemoteAccessServer:
                         prev_ips,
                         current_ips,
                     )
+                    self._republish_urls()
                 else:
                     logger.info(
                         "IP address changed: %s → %s, "
@@ -8546,13 +8639,11 @@ class RemoteAccessServer:
                     None, self._start_tunnel,
                 )
 
-        await asyncio.to_thread(
-            _save_url_file, self._url_file, self._local_url, tunnel_url,
-        )
+        self._last_ips = await asyncio.to_thread(_get_local_ips)
+        self._ips_probed = True
+        await asyncio.to_thread(self._write_url_file_sync, tunnel_url)
         self._active_url = tunnel_url or self._local_url
         await self._post_url_if_changed()
-
-        self._last_ips = await asyncio.to_thread(_get_local_ips)
         self._watchdog_task = asyncio.create_task(self._watchdog())
         self._version_check_task = asyncio.create_task(
             self._version_check_loop(),
@@ -8572,6 +8663,9 @@ class RemoteAccessServer:
         """
         await self._setup_server()
         print(f"KISS Sorcar remote access: {self._local_url}", file=sys.stderr)
+        print(f"Local machine:             {self._loopback_url}", file=sys.stderr)
+        for lan_url in self._lan_urls():
+            print(f"LAN:                       {lan_url}", file=sys.stderr)
         if self.use_tunnel and self._active_url != self._local_url:
             print(f"Cloudflare tunnel:         {self._active_url}", file=sys.stderr)
         elif self.use_tunnel:

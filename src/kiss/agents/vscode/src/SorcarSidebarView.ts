@@ -1238,20 +1238,34 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _tryReadAndSendUrl(urlFile: string): void {
     let tunnel = '';
     let local = '';
+    let loopback = '';
+    let lanUrls: string[] = [];
     try {
       const data = JSON.parse(fs.readFileSync(urlFile, 'utf-8'));
       tunnel = data.tunnel || '';
       local = data.local || '';
+      loopback = data.loopback || '';
+      if (Array.isArray(data.lan)) {
+        lanUrls = data.lan.filter((u: unknown) => typeof u === 'string');
+      }
     } catch {}
     const tunnelActive = !!tunnel;
     const url = tunnel || local || '';
     const ntfyUrl = this._getNtfyUrl();
-    const key = `${tunnelActive ? '1' : '0'}|${url}|${ntfyUrl}`;
+    const key =
+      `${tunnelActive ? '1' : '0'}|${url}|${ntfyUrl}|` +
+      `${loopback}|${lanUrls.join(',')}`;
     if (key === this._lastSentUrl) return;
     this._lastSentUrl = key;
     const msg: ToWebviewMessage = {type: 'remote_url', url, tunnelActive};
     if (ntfyUrl) {
       msg.ntfyUrl = ntfyUrl;
+    }
+    if (loopback) {
+      msg.loopbackUrl = loopback;
+    }
+    if (lanUrls.length > 0) {
+      msg.lanUrls = lanUrls;
     }
     this._sendToWebview(msg);
   }
