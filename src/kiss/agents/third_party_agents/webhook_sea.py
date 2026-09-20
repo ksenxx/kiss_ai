@@ -463,7 +463,7 @@ class WebhookChannelBackend(ToolMethodBackend):
             filters_json: Optional JSON object of dot-path -> expected string;
                 events where any filter does not match are dropped.
             deliver_module: Optional channel module (e.g.
-                ``kiss.agents.third_party_agents.synology_chat_agent``); when
+                ``kiss.agents.third_party_agents.synology_sea``); when
                 set the route is deliver-only: rendered text is sent through
                 that module instead of being queued for the agent.
             deliver_channel: Channel id passed to the delivery module.

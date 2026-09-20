@@ -168,7 +168,7 @@ class TestGmailSaveCredentials:
         monkeypatch.setenv("KISS_HOME", str(tmp_path / "kiss_home"))
         from google.oauth2.credentials import Credentials
 
-        from kiss.agents.third_party_agents.gmail_agent import (
+        from kiss.agents.third_party_agents.gmail_sea import (
             _save_credentials,
             _token_path,
         )

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests reproducing verified bugs in twitch_agent and tlon_agent.
+"""Integration tests reproducing verified bugs in twitch_sea and tlon_sea.
 
 Runs a real in-process HTTP server that records request paths/bodies and
 returns Helix/Eyre-shaped JSON. No mocks, patches, or test doubles.
@@ -23,9 +23,9 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from kiss.agents.third_party_agents.tlon_agent import TlonChannelBackend
-from kiss.agents.third_party_agents.tlon_agent import _config as _tlon_config
-from kiss.agents.third_party_agents.twitch_agent import TwitchChannelBackend
+from kiss.agents.third_party_agents.tlon_sea import TlonChannelBackend
+from kiss.agents.third_party_agents.tlon_sea import _config as _tlon_config
+from kiss.agents.third_party_agents.twitch_sea import TwitchChannelBackend
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):
@@ -231,7 +231,7 @@ class TestTlonBackendBugs:
 
     def test_authenticate_tlon_persists_normalized_ship_url(self) -> None:
         """authenticate_tlon must save the rstrip('/')-normalized ship_url."""
-        from kiss.agents.third_party_agents.tlon_agent import TlonAgent
+        from kiss.agents.third_party_agents.tlon_sea import TlonAgent
 
         agent = TlonAgent()
         tools = {t.__name__: t for t in agent._get_auth_tools()}

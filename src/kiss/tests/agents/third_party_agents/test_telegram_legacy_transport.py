@@ -29,7 +29,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.third_party_agents.telegram_agent import (
+from kiss.agents.third_party_agents.telegram_sea import (
     TelegramAgent,
     TelegramChannelBackend,
     _config,

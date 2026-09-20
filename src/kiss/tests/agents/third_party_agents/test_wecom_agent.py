@@ -19,13 +19,13 @@ from typing import Any
 
 import pytest
 
-import kiss.agents.third_party_agents.wecom_agent as wecom_mod
+import kiss.agents.third_party_agents.wecom_sea as wecom_mod
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
-from kiss.agents.third_party_agents.wecom_agent import (
+from kiss.agents.third_party_agents.wecom_sea import (
     WeComAgent,
     WeComChannelBackend,
 )
-from kiss.agents.third_party_agents.wecom_agent import (
+from kiss.agents.third_party_agents.wecom_sea import (
     tools as module_tools,
 )
 

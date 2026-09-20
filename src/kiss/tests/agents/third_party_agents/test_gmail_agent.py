@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for gmail_agent — no mocks or test doubles.
+"""Integration tests for gmail_sea — no mocks or test doubles.
 
 Tests token persistence, tool creation, GmailAgent construction,
 authentication workflows, body extraction, and tool function signatures.
@@ -26,7 +26,7 @@ from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents.gmail_agent import (
+from kiss.agents.third_party_agents.gmail_sea import (
     GmailAgent,
     GmailChannelBackend,
     _credentials_path,
@@ -396,7 +396,7 @@ class TestCLIMain:
         import sys
 
         original_argv = sys.argv
-        sys.argv = ["gmail_agent"]
+        sys.argv = ["gmail_sea"]
         try:
             main()
             assert False, "Should have raised SystemExit"

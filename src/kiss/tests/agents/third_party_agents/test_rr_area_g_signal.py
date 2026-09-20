@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for signal_agent's deduplicated send path (G-R3).
+"""End-to-end tests for signal_sea's deduplicated send path (G-R3).
 
 ``send_signal_message`` used to duplicate ``send_message``'s CLI
 invocation and error heuristic verbatim; it now wraps ``send_message``
@@ -20,7 +20,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.third_party_agents.signal_agent import SignalChannelBackend
+from kiss.agents.third_party_agents.signal_sea import SignalChannelBackend
 from kiss.tests.conftest import install_cli_script
 
 # A Python program (not a shell script) so the same stand-in runs on
