@@ -3309,6 +3309,21 @@ body.sidebar-chat-mode #meta-info-content {
 .running-item:not(.collapsed) .sidebar-item-collapse svg { transform: rotate(180deg); }
 .running-item.collapsed > .running-item-info { display: none; }
 
+/* "launched 3 hours ago" — the task's age, next to the show-details
+   chevron of a history task panel. Muted and small so it reads as
+   metadata; it may shrink (with an ellipsis) but never wraps. */
+.sidebar-item-launched {
+  flex-shrink: 1;
+  min-width: 0;
+  margin-left: 2px;
+  font-size: 10px;
+  color: var(--fg);
+  opacity: 0.55;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .sidebar-item-copy.copied { opacity: 0.9; color: #2e7d32; }
 
 /* The frequent-tasks list keeps its pastel per-task backgrounds with

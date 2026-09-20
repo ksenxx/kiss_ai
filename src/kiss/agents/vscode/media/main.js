@@ -16555,6 +16555,90 @@
     return btn;
   }
 
+  // "launched 3 hours ago" label shown next to the show-details
+  // chevron of every task panel in the task-history panel. The unit
+  // ladder is minutes -> hours -> days -> weeks -> months -> years;
+  // anything under a minute reads "launched just now".
+
+  function launchedAgoUnit(count, unit) {
+    return count + ' ' + unit + (count === 1 ? '' : 's') + ' ago';
+  }
+
+  function taskLaunchedAgoText(launchMs, nowMs) {
+    const now = typeof nowMs === 'number' ? nowMs : Date.now();
+    const minutes = Math.floor(Math.max(0, now - launchMs) / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return launchedAgoUnit(minutes, 'minute');
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return launchedAgoUnit(hours, 'hour');
+    const days = Math.floor(hours / 24);
+    if (days < 7) return launchedAgoUnit(days, 'day');
+    if (days < 30) return launchedAgoUnit(Math.floor(days / 7), 'week');
+    if (days < 365) return launchedAgoUnit(Math.floor(days / 30), 'month');
+    return launchedAgoUnit(Math.floor(days / 365), 'year');
+  }
+
+  // Largest epoch offset a JavaScript Date can represent (ECMA-262:
+  // ±8.64e15 ms). A "timestamp" beyond it is corrupt data — the date
+  // renderer classifies such rows as Undated — so it gets no label.
+  const MAX_LAUNCH_EPOCH_MS = 8.64e15;
+
+  // The launch instant of a history session in epoch milliseconds:
+  // ``startTs`` (already ms) when the daemon recorded a valid one,
+  // otherwise the row's insertion ``timestamp`` (epoch seconds).
+  // Epoch zero is a real launch instant (imported databases carry it),
+  // so only an absent, non-numeric, negative, or out-of-Date-range
+  // timestamp yields NaN — meaning "render no label".
+  function taskLaunchMs(session) {
+    const start = Number(session.startTs || 0);
+    if (start > 0 && start <= MAX_LAUNCH_EPOCH_MS) return start;
+    if (session.timestamp === undefined || session.timestamp === null) {
+      return NaN;
+    }
+    const ms = Number(session.timestamp) * 1000;
+    if (!(ms >= 0) || ms > MAX_LAUNCH_EPOCH_MS) return NaN;
+    return ms;
+  }
+
+  function makeLaunchedAgoLabel(session) {
+    const ms = taskLaunchMs(session);
+    if (!isFinite(ms)) return null;
+    const span = document.createElement('span');
+    span.className = 'sidebar-item-launched';
+    span.dataset.launchTs = String(ms);
+    span.textContent = 'launched ' + taskLaunchedAgoText(ms);
+    span.title = 'Launched ' + new Date(ms).toLocaleString();
+    scheduleLaunchedAgoRefresh();
+    return span;
+  }
+
+  // Keep every on-screen "launched ... ago" label current: history
+  // re-renders only happen on daemon broadcasts, so without this sweep
+  // a quiet panel would keep saying "just now" forever. The sweep is a
+  // 30 s timeout CHAIN, not a permanent interval: it is armed when a
+  // label is built and re-arms itself only while at least one label is
+  // still in the document, so a window that never renders history (or
+  // whose history was cleared) holds no live timer keeping the host
+  // process alive.
+  let launchedAgoRefreshTimer = null;
+
+  function scheduleLaunchedAgoRefresh() {
+    if (launchedAgoRefreshTimer) return;
+    launchedAgoRefreshTimer = setTimeout(runLaunchedAgoRefresh, 30000);
+  }
+
+  function runLaunchedAgoRefresh() {
+    launchedAgoRefreshTimer = null;
+    const labels = document.querySelectorAll('.sidebar-item-launched');
+    labels.forEach(el => {
+      const ms = Number(el.dataset.launchTs);
+      if (!isFinite(ms) || ms < 0) return;
+      const text = 'launched ' + taskLaunchedAgoText(ms);
+      if (el.textContent !== text) el.textContent = text;
+    });
+    if (labels.length > 0) scheduleLaunchedAgoRefresh();
+  }
+
   function makeSidebarCopyButton(text) {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -17467,6 +17551,8 @@
       }
 
       actions.appendChild(makeSidebarCollapseToggle(div, s));
+      const launchedAgo = makeLaunchedAgoLabel(s);
+      if (launchedAgo) actions.appendChild(launchedAgo);
       div.appendChild(actions);
 
       const info = document.createElement('div');
