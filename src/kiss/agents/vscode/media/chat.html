@@ -180,13 +180,13 @@
         <div class="history-filter-bar">
           <div class="history-filter-chips" role="group" aria-label="Filter tasks by status">
             <label class="hf-chip hf-chip-running" title="Show running tasks">
-              <input type="checkbox" id="hf-running" checked><span class="hf-chip-dot" aria-hidden="true"></span><span class="hf-chip-label">Running</span>
+              <input type="checkbox" id="hf-running" checked><span class="hf-chip-dot status-spinner" aria-hidden="true"></span><span class="hf-chip-label">Running</span>
             </label>
             <label class="hf-chip hf-chip-errored" title="Show tasks that finished with error">
-              <input type="checkbox" id="hf-errors" checked><span class="hf-chip-dot" aria-hidden="true"></span><span class="hf-chip-label">Errored</span>
+              <input type="checkbox" id="hf-errors" checked><span class="hf-chip-dot status-cross" aria-hidden="true"></span><span class="hf-chip-label">Errored</span>
             </label>
             <label class="hf-chip hf-chip-succeeded" title="Show successfully completed tasks">
-              <input type="checkbox" id="hf-completed" checked><span class="hf-chip-dot" aria-hidden="true"></span><span class="hf-chip-label">Succeeded</span>
+              <input type="checkbox" id="hf-completed" checked><span class="hf-chip-dot status-tick" aria-hidden="true"></span><span class="hf-chip-label">Succeeded</span>
             </label>
             <label class="hf-chip" title="Show only tasks whose work_dir matches the configured workspace">
               <input type="checkbox" id="hf-workspace" checked><svg class="hf-chip-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1.5 4a1 1 0 0 1 1-1h3l1.5 1.8h6.5a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V4z"/></svg><span class="hf-chip-label">Workspace</span>

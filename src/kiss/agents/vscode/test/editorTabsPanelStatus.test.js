@@ -3,18 +3,19 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end tests for editor-tabs mode's TAB-TITLE STATUS CIRCLES and
+// End-to-end tests for editor-tabs mode's TAB-TITLE STATUS PREFIXES and
 // finished-task reveal (out/SorcarPanelManager.js +
 // out/SorcarSidebarView.js) against a real Unix-domain-socket daemon
 // stub:
-//  - `panelTitle {state:'running'}` paints a green circle that PULSES
-//    (alternates with a hollow circle on the shared 750 ms clock);
-//  - `state:'ok'` paints a steady solid green circle, `state:'fail'` a
-//    steady solid red one, and no state paints no circle;
+//  - `panelTitle {state:'running'}` paints a text SPINNER that advances
+//    through its braille frames on the shared 100 ms clock;
+//  - `state:'ok'` paints a steady green tick, `state:'fail'` a steady
+//    red cross, and no state paints no prefix;
 //  - `revealPanel` from the webview reveals the hosting editor tab
 //    without stealing focus (preserveFocus);
-//  - a serializer-revived panel drops the status circle a previous
-//    session persisted into its title.
+//  - a serializer-revived panel drops the status prefix a previous
+//    session persisted into its title, including the 🟢 / 🔴 circles
+//    older versions used.
 
 'use strict';
 
@@ -37,9 +38,16 @@ if (process.platform === 'win32') {
   process.exit(0);
 }
 
-const GREEN = '\u{1F7E2} ';
-const RED = '\u{1F534} ';
-const HOLLOW = '\u{26AA} ';
+const TICK = '\u2705 ';
+const CROSS = '\u274C ';
+const LEGACY_GREEN = '\u{1F7E2} ';
+const LEGACY_RED = '\u{1F534} ';
+// The spinner frames SorcarPanelManager cycles through while running.
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const spinnerFrame = title =>
+  SPINNER_FRAMES.indexOf(title.charAt(0)) >= 0 && title.charAt(1) === ' '
+    ? title.charAt(0)
+    : null;
 
 class StubEventEmitter {
   constructor() {
@@ -197,7 +205,7 @@ async function runTest() {
     'a stateless panelTitle must set the plain title',
   );
 
-  // --- running: green circle that PULSES -------------------------------
+  // --- running: a text spinner that ADVANCES ----------------------------
   panel._recv.fire({
     type: 'panelTitle',
     title: 'fix the bug',
@@ -205,19 +213,21 @@ async function runTest() {
     state: 'running',
   });
   await waitFor(
-    () => panel.title === GREEN + 'fix the bug',
-    'a running task must paint the green circle immediately',
+    () => panel.title === SPINNER_FRAMES[0] + ' fix the bug',
+    'a running task must paint the first spinner frame immediately',
   );
-  await waitFor(
-    () => panel.title === HOLLOW + 'fix the bug',
-    'the running circle must pulse to its dim phase',
-  );
-  await waitFor(
-    () => panel.title === GREEN + 'fix the bug',
-    'the running circle must pulse back to its bright phase',
-  );
+  const seenFrames = new Set();
+  await waitFor(() => {
+    const frame = spinnerFrame(panel.title);
+    assert.ok(
+      frame !== null && panel.title === frame + ' fix the bug',
+      'a running title must stay "<frame> <title>": ' + panel.title,
+    );
+    seenFrames.add(frame);
+    return seenFrames.size >= 3;
+  }, 'the spinner must advance through its frames');
 
-  // --- ok: steady solid green circle ------------------------------------
+  // --- ok: steady green tick ---------------------------------------------
   panel._recv.fire({
     type: 'panelTitle',
     title: 'fix the bug',
@@ -225,18 +235,18 @@ async function runTest() {
     state: 'ok',
   });
   await waitFor(
-    () => panel.title === GREEN + 'fix the bug',
-    'a successful task must paint the solid green circle',
+    () => panel.title === TICK + 'fix the bug',
+    'a successful task must paint the green tick',
   );
-  // The pulse clock must be gone: the title stays green past a period.
-  await new Promise(r => setTimeout(r, 900));
+  // The spinner clock must be gone: the title stays put past many frames.
+  await new Promise(r => setTimeout(r, 400));
   assert.strictEqual(
     panel.title,
-    GREEN + 'fix the bug',
-    'the ok circle must not pulse',
+    TICK + 'fix the bug',
+    'the tick must not animate',
   );
 
-  // --- fail: steady solid red circle -------------------------------------
+  // --- fail: steady red cross --------------------------------------------
   panel._recv.fire({
     type: 'panelTitle',
     title: 'fix the bug',
@@ -244,14 +254,14 @@ async function runTest() {
     state: 'fail',
   });
   await waitFor(
-    () => panel.title === RED + 'fix the bug',
-    'a failed task must paint the solid red circle',
+    () => panel.title === CROSS + 'fix the bug',
+    'a failed task must paint the red cross',
   );
-  await new Promise(r => setTimeout(r, 900));
+  await new Promise(r => setTimeout(r, 400));
   assert.strictEqual(
     panel.title,
-    RED + 'fix the bug',
-    'the fail circle must not pulse',
+    CROSS + 'fix the bug',
+    'the cross must not animate',
   );
 
   // --- revealPanel brings the tab forward without stealing focus --------
@@ -267,34 +277,54 @@ async function runTest() {
     'the reveal must not steal keyboard focus',
   );
 
-  // --- a legitimate circle-leading title is never corrupted --------------
+  // --- a legitimate tick-leading title is never corrupted ----------------
   panel._recv.fire({
     type: 'panelTitle',
-    title: GREEN + 'deploy status',
+    title: TICK + 'deploy status',
     tabId,
     state: 'fail',
   });
   await waitFor(
-    () => panel.title === RED + GREEN + 'deploy status',
-    'a chat legitimately titled with a leading circle must keep it',
+    () => panel.title === CROSS + TICK + 'deploy status',
+    'a chat legitimately titled with a leading tick must keep it',
   );
 
-  // --- a revived panel drops the persisted status circle ----------------
-  const revived = makeFakePanel(CHAT_PANEL_VIEW_TYPE, GREEN + 'old chat');
-  revived.active = false;
-  await registeredSerializer.serializer.deserializeWebviewPanel(revived, {
-    editorRootTabId: 'revived-tab-1',
+  // --- a revived panel drops the persisted status prefix ----------------
+  for (const [prefix, what] of [
+    [TICK, 'tick'],
+    [CROSS, 'cross'],
+    [SPINNER_FRAMES[4] + ' ', 'spinner frame'],
+    [LEGACY_GREEN, 'legacy green circle'],
+    [LEGACY_RED, 'legacy red circle'],
+  ]) {
+    const revived = makeFakePanel(CHAT_PANEL_VIEW_TYPE, prefix + 'old chat');
+    revived.active = false;
+    await registeredSerializer.serializer.deserializeWebviewPanel(revived, {
+      editorRootTabId: 'revived-tab-' + what,
+    });
+    assert.strictEqual(
+      revived.title,
+      'old chat',
+      'revival must strip the previous session ' + what,
+    );
+  }
+
+  // --- ... and leaves braille that is not a spinner frame alone ---------
+  const braille = makeFakePanel(CHAT_PANEL_VIEW_TYPE, '\u28FF load-test notes');
+  braille.active = false;
+  await registeredSerializer.serializer.deserializeWebviewPanel(braille, {
+    editorRootTabId: 'revived-tab-braille',
   });
   assert.strictEqual(
-    revived.title,
-    'old chat',
-    'revival must strip the previous session status circle',
+    braille.title,
+    '\u28FF load-test notes',
+    'revival must only strip the frames the spinner can have persisted',
   );
 
   // --- ... but strips only the ONE decoration it added itself ------------
   const revived2 = makeFakePanel(
     CHAT_PANEL_VIEW_TYPE,
-    RED + GREEN + 'deploy status',
+    CROSS + TICK + 'deploy status',
   );
   revived2.active = false;
   await registeredSerializer.serializer.deserializeWebviewPanel(revived2, {
@@ -302,8 +332,8 @@ async function runTest() {
   });
   assert.strictEqual(
     revived2.title,
-    GREEN + 'deploy status',
-    'revival must keep a legitimate leading circle in the chat title',
+    TICK + 'deploy status',
+    'revival must keep a legitimate leading tick in the chat title',
   );
 
   manager.dispose();

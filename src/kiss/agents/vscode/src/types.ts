@@ -276,7 +276,7 @@ export type FromWebviewMessage =
   // Editor-tabs mode (host-only, never forwarded to the daemon): the
   // webview's root chat tab renamed itself or its task's status
   // changed, so the hosting editor tab should follow. `state` mirrors
-  // the internal tab strip's status dot: '' (no task yet), 'running',
+  // the internal tab strip's status icon: '' (no task yet), 'running',
   // 'ok' or 'fail'.
   | {type: 'panelTitle'; title: string; tabId?: string; state?: string}
   // Editor-tabs mode: a task in this panel just finished — bring the

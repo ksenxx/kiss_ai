@@ -2,13 +2,13 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end test: the task history panel renders a pulsing green
+"""End-to-end test: the task history panel renders a green spinner
 circle next to every task that is currently running.
 
 This is the running-indicator counterpart to
-``test_history_failed_red_circle.py``.  It exercises the full
+``test_history_failed_red_cross.py``.  It exercises the full
 pipeline used by the History sidebar to surface the
-``.sidebar-item-running`` green pulsing dot:
+``.sidebar-item-running`` green spinner:
 
 * The **backend** half — :meth:`VSCodeServer._get_running_task_ids`
   must report the row id of a task whose worker thread is alive.
@@ -18,11 +18,11 @@ pipeline used by the History sidebar to surface the
   sentinel left behind by a prior crashed task on the same row.
 
 * The **frontend** half — ``renderHistory`` in ``media/main.js``
-  must render a visible ``.sidebar-item-running`` dot as the FIRST
-  child of every row whose ``is_running`` is ``True``, using the
-  green colour ``#2e7d32`` (``rgb(46, 125, 50)``), the
-  ``running-pulse`` keyframe animation, and 8x8 geometry.
-  Rows whose ``is_running`` is ``False`` must NOT render the dot.
+  must render a visible ``.sidebar-item-running`` spinner as the FIRST
+  child of every row whose ``is_running`` is ``True``: a 10x10 ring
+  whose leading edge is the green ``#2e7d32`` (``rgb(46, 125, 50)``),
+  rotated by the ``status-spin`` keyframe animation.
+  Rows whose ``is_running`` is ``False`` must NOT render the spinner.
 
 * A **live update** half — a ``status: running=true`` event must
   trigger ``refreshHistory()`` and a subsequent ``history`` reply
@@ -30,7 +30,7 @@ pipeline used by the History sidebar to surface the
   matching row WITHOUT a full page reload.  Likewise for the
   ``status: running=false`` transition that drops the dot.
 
-The Playwright harness mirrors ``test_history_failed_red_circle.py``
+The Playwright harness mirrors ``test_history_failed_red_cross.py``
 so the same review checklist applies (visible offsetParent, real
 viewport, real CSS).
 """
@@ -42,7 +42,7 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright
 
-from kiss.tests.server.test_history_running_green_circle import _history_event_from_real_backend
+from kiss.tests.server.test_history_running_spinner import _history_event_from_real_backend
 
 _MEDIA_DIR = (
     Path(__file__).resolve().parents[4]
@@ -99,7 +99,7 @@ def _build_test_page() -> str:
     html, body {{ height: 100%; margin: 0; padding: 0; }}
   </style>
   <style>{css}</style>
-  <title>history running green circle test</title>
+  <title>history running spinner test</title>
 </head>
 <body>
 {body}
@@ -261,9 +261,9 @@ def _post_history(
     )
 
 
-def test_running_session_renders_green_circle(_browser) -> None:
+def test_running_session_renders_spinner(_browser) -> None:
     """Every ``s.is_running`` session must render exactly one visible
-    green pulsing circle inside its row.
+    green spinner inside its row.
 
     Asserts the element exists, is painted, and matches the intended
     geometry / colour / animation from ``main.css``.
@@ -292,8 +292,10 @@ def test_running_session_renders_green_circle(_browser) -> None:
                   out.dot = {
                     width: cs.width,
                     height: cs.height,
+                    isSpinner: dot.classList.contains('status-spinner'),
                     borderRadius: cs.borderRadius,
-                    background: cs.backgroundColor,
+                    borderTopColor: cs.borderTopColor,
+                    borderTopWidth: cs.borderTopWidth,
                     animationName: cs.animationName,
                     animationDuration: cs.animationDuration,
                     animationIterationCount: cs.animationIterationCount,
@@ -326,26 +328,30 @@ def test_running_session_renders_green_circle(_browser) -> None:
             "to the left of the title"
         )
         dot = run["dot"]
-        assert dot["width"] == "8px" and dot["height"] == "8px", (
-            f"running dot is not 8x8: {dot['width']} x {dot['height']}"
+        assert dot["isSpinner"], "running indicator must be the .status-spinner icon"
+        assert dot["width"] == "10px" and dot["height"] == "10px", (
+            f"running spinner is not 10x10: {dot['width']} x {dot['height']}"
         )
-        assert dot["borderRadius"] in ("4px", "50%"), (
-            f"running dot is not rounded: border-radius={dot['borderRadius']}"
+        assert dot["borderRadius"] in ("5px", "50%"), (
+            f"running spinner is not a ring: border-radius={dot['borderRadius']}"
         )
-        assert dot["background"] == "rgb(46, 125, 50)", (
-            "running dot is not the success-green colour: "
-            f"background-color={dot['background']!r}; expected rgb(46, 125, 50)"
+        assert dot["borderTopWidth"] == "2px", (
+            f"running spinner ring must be 2px thick; got {dot['borderTopWidth']!r}"
         )
-        assert dot["animationName"] == "running-pulse", (
-            "running dot must animate via 'running-pulse'; "
+        assert dot["borderTopColor"] == "rgb(46, 125, 50)", (
+            "running spinner is not the green colour: "
+            f"border-top-color={dot['borderTopColor']!r}; expected rgb(46, 125, 50)"
+        )
+        assert dot["animationName"] == "status-spin", (
+            "running spinner must animate via 'status-spin'; "
             f"animation-name={dot['animationName']!r}"
         )
-        assert dot["animationDuration"] == "1.5s", (
-            f"running dot animation duration must be 1.5s; "
+        assert dot["animationDuration"] == "0.8s", (
+            f"running spinner animation duration must be 0.8s; "
             f"got: {dot['animationDuration']!r}"
         )
         assert dot["animationIterationCount"] == "infinite", (
-            "running dot must pulse indefinitely; "
+            "running spinner must spin indefinitely; "
             f"iteration-count={dot['animationIterationCount']!r}"
         )
         assert dot["visibility"] == "visible", (
@@ -421,7 +427,7 @@ def test_running_filter_is_checked_by_default(_browser) -> None:
             """
         )
         assert visible_running_dot, (
-            "running task green circle should be visible with default filters"
+            "running task spinner should be visible with default filters"
         )
     finally:
         context.close()
@@ -470,7 +476,7 @@ def test_running_filter_toggle_hides_and_shows_running_row(_browser) -> None:
 def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
     """A backend ``status: running=true`` event must trigger the
     frontend to refetch history.  The follow-up ``history`` reply
-    with ``is_running=true`` must then make the pulsing green dot
+    with ``is_running=true`` must then make the spinner
     appear on the matching row WITHOUT a full page reload.
     """
     context, page = _open_history_page(_browser)
@@ -556,7 +562,7 @@ def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
         context.close()
 
 
-def test_running_dot_is_centered_middle_left_in_history_task_panel(
+def test_running_spinner_is_centered_middle_left_in_history_task_panel(
     _browser,
 ) -> None:
     """At a narrow viewport the running marker must remain at the
@@ -610,7 +616,7 @@ def test_running_dot_is_centered_middle_left_in_history_task_panel(
         context.close()
 
 
-def test_search_results_can_render_running_green_circle(_browser) -> None:
+def test_search_results_can_render_running_spinner(_browser) -> None:
     """Search-triggered history results must use the same running-dot
     rendering path as normal history loads."""
     context, page = _open_history_page(_browser)
@@ -643,24 +649,23 @@ def test_search_results_can_render_running_green_circle(_browser) -> None:
                 row.querySelector('.sidebar-item-text').textContent ===
                   'running task' &&
                 !!dot && dot.offsetParent !== null &&
-                getComputedStyle(dot).backgroundColor === 'rgb(46, 125, 50)' &&
-                getComputedStyle(dot).animationName ===
-                  'running-pulse';
+                getComputedStyle(dot).borderTopColor === 'rgb(46, 125, 50)' &&
+                getComputedStyle(dot).animationName === 'status-spin';
             }
             """
         )
         assert dot_visible, (
-            "running search result did not show a visible green pulsing dot"
+            "running search result did not show a visible green spinner"
         )
     finally:
         context.close()
 
 
-def test_paginated_history_batch_can_append_running_green_circle(
+def test_paginated_history_batch_can_append_running_spinner(
     _browser,
 ) -> None:
     """A running task arriving in an ``offset > 0`` pagination batch
-    must still get a visible green circle when appended to existing
+    must still get a visible spinner when appended to existing
     rows."""
     context, page = _open_history_page(_browser)
     try:
@@ -698,12 +703,12 @@ def test_paginated_history_batch_can_append_running_green_circle(
         context.close()
 
 
-def test_backend_history_event_renders_green_circle_end_to_end(
+def test_backend_history_event_renders_spinner_end_to_end(
     _browser,
 ) -> None:
     """Drive a real ``getHistory`` broadcast (with a synthetic alive
     worker thread) through the real frontend renderer and assert the
-    green pulsing dot is visible on the row backed by the real DB."""
+    green spinner is visible on the row backed by the real DB."""
     context, page = _open_history_page(_browser)
     try:
         event = _history_event_from_real_backend(fake_running_task_id="-1")
@@ -732,14 +737,14 @@ def test_backend_history_event_renders_green_circle_end_to_end(
               const cs = getComputedStyle(dot);
               return row.offsetParent !== null &&
                 dot.offsetParent !== null &&
-                cs.backgroundColor === 'rgb(46, 125, 50)' &&
-                cs.animationName === 'running-pulse';
+                cs.borderTopColor === 'rgb(46, 125, 50)' &&
+                cs.animationName === 'status-spin';
             }
             """
         )
         assert dot_visible, (
             "real backend → frontend pipeline did not render a visible "
-            "green pulsing dot on the running row"
+            "green spinner on the running row"
         )
     finally:
         context.close()

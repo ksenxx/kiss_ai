@@ -518,23 +518,51 @@ body {
   min-width: 0;
 }
 
-.chat-tab-spinner {
-  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-  background: #2e7d32;
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
-  animation: running-pulse 1.5s ease-in-out infinite;
+/* Task status icons, shared by the chat tab strip, the history rows and
+   the history filter chips: a spinning ring while a task runs, a tick
+   once it succeeded, a cross once it failed.  Every icon takes its
+   colour from `currentcolor`, so the element that carries the state
+   class only has to set `color`. */
+.status-spinner, .status-tick, .status-cross {
+  display: inline-block; flex-shrink: 0; box-sizing: border-box;
+  width: 10px; height: 10px;
 }
+
+.status-spinner {
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, currentcolor 30%, transparent);
+  border-top-color: currentcolor;
+  border-right-color: currentcolor;
+  animation: status-spin 0.8s linear infinite;
+}
+
+/* Rotates through the `rotate` property (not `transform`) so the
+   history rows can still centre the icon with a transform. */
+@keyframes status-spin {
+  to { rotate: 360deg; }
+}
+
+.status-tick, .status-cross {
+  background: currentcolor;
+  mask: var(--status-icon) center / contain no-repeat;
+}
+
+.status-tick {
+  --status-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2.5 8.5l3.5 3.5 7.5-8' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.status-cross {
+  --status-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 3.5l9 9M12.5 3.5l-9 9' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+
+.chat-tab-spinner { color: var(--green); }
+.chat-tab-ok { color: var(--green); }
+.chat-tab-fail { color: var(--red); }
 
 @keyframes running-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 1px rgb(0 0 0 / 15%); }
   50% { opacity: 0.4; box-shadow: 0 0 6px 2px rgb(46 125 50 / 50%); }
 }
-
-.chat-tab-status {
-  font-size: 12px; font-weight: 700; flex-shrink: 0; line-height: 1;
-}
-.chat-tab-ok { color: var(--green); }
-.chat-tab-fail { color: var(--red); }
 
 .chat-tab-attention {
   font-size: 12px; font-weight: 700; flex-shrink: 0; line-height: 1;
@@ -579,23 +607,10 @@ body {
   color: var(--purple);
 }
 
-.subagent-indicator {
-  font-size: 10px;
-  flex-shrink: 0;
-  line-height: 1;
-  color: var(--purple);
-  animation: subagent-pulse 1.5s ease-in-out infinite;
-}
-
-.chat-tab.subagent-tab .subagent-indicator.done {
-  animation: none;
-  opacity: 1;
-}
-
-@keyframes subagent-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
-}
+/* Sub-agent tab status: the shared green spinner while the sub-agent
+   runs (.status-spinner), the shared green tick once it is done
+   (.status-tick). */
+.subagent-indicator { color: var(--green); }
 
 #tab-context-menu {
   position: fixed;
@@ -2868,25 +2883,24 @@ body.sidebar-chat-mode #meta-info-content {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
+/* Chip legends reuse the row status icons (.status-spinner /
+   .status-cross / .status-tick), greyed out while the chip is off.  The
+   Running chip's spinner only turns while that filter is on. */
 .hf-chip-dot {
-  flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%;
-  background: color-mix(in srgb, var(--fg) 35%, transparent);
+  flex: 0 0 auto; width: 9px; height: 9px;
+  color: color-mix(in srgb, var(--fg) 35%, transparent);
 }
+
+.hf-chip-dot.status-spinner { animation-play-state: paused; }
 
 .hf-chip-running:has(> input:checked) .hf-chip-dot {
-  background: #3fb950;
-  box-shadow: 0 0 4px color-mix(in srgb, #3fb950 60%, transparent);
+  color: #3fb950;
+  animation-play-state: running;
 }
 
-.hf-chip-errored:has(> input:checked) .hf-chip-dot {
-  background: #f85149;
-  box-shadow: 0 0 4px color-mix(in srgb, #f85149 60%, transparent);
-}
+.hf-chip-errored:has(> input:checked) .hf-chip-dot { color: #f85149; }
 
-.hf-chip-succeeded:has(> input:checked) .hf-chip-dot {
-  background: #58a6ff;
-  box-shadow: 0 0 4px color-mix(in srgb, #58a6ff 60%, transparent);
-}
+.hf-chip-succeeded:has(> input:checked) .hf-chip-dot { color: #58a6ff; }
 
 .hf-chip-icon {
   flex: 0 0 auto; width: 10px; height: 10px; opacity: 0.85;
@@ -3154,30 +3168,18 @@ body.sidebar-chat-mode #meta-info-content {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-.sidebar-item-failed {
-  flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%;
-  background: #d32f2f; margin-right: 8px;
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
-}
-
-.sidebar-item-running {
-  flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%;
-  background: #2e7d32; margin-right: 8px;
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
-  animation: running-pulse 1.5s ease-in-out infinite;
-}
-
-.sidebar-item-completed {
-  flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%;
-  background: #2e7d32; margin-right: 8px;
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
-}
+/* Row status icons (.status-cross / .status-spinner / .status-tick
+   shapes): red cross for a failed task, green spinner while it runs,
+   green tick once it just completed. */
+.sidebar-item-failed { color: #d32f2f; margin-right: 8px; }
+.sidebar-item-running { color: #2e7d32; margin-right: 8px; }
+.sidebar-item-completed { color: #2e7d32; margin-right: 8px; }
 
 /* The panel is at least two lines tall - the task text and, below it,
-   the action strip - so the status dot is centred on the first line of
+   the action strip - so the status icon is centred on the first line of
    the task text rather than on the whole panel.  The offset is the
    panel's own padding-top plus half a line box, and the translation
-   then centres the dot on that point. */
+   then centres the icon on that point. */
 .running-item > .sidebar-item-failed,
 .running-item > .sidebar-item-running,
 .running-item > .sidebar-item-completed {

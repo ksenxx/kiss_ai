@@ -237,7 +237,7 @@ export interface ChatWebviewHost {
 export type PanelEvent =
   // The root chat tab renamed itself or its task's status changed;
   // retitle the editor tab. `state` is '' (no task yet), 'running',
-  // 'ok' or 'fail' — the internal tab strip's status dot.
+  // 'ok' or 'fail' — the internal tab strip's status icon.
   | {kind: 'title'; title: string; state?: string}
   // A task in the panel just finished; bring the editor tab forward.
   | {kind: 'reveal'}

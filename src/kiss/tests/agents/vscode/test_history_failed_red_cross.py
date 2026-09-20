@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end test: the task history panel renders a red circle next to
+"""End-to-end test: the task history panel renders a red cross next to
 every failed task.
 
 This is the **frontend** half of the "red marker for failed tasks in
@@ -60,6 +60,7 @@ _MEDIA_DIR = (
     / "media"
 )
 _CSS = _MEDIA_DIR / "main.css"
+_PANEL_COPY_JS = _MEDIA_DIR / "panelCopy.js"
 _API_JS = _MEDIA_DIR / "api.js"
 _JS = _MEDIA_DIR / "main.js"
 _HTML = _MEDIA_DIR / "chat.html"
@@ -71,13 +72,14 @@ def _build_test_page() -> str:
     The page mirrors the production ``media/chat.html`` body so the
     ``main.js`` IIFE finds every ``getElementById`` it issues during
     ``setupEventListeners`` and ``init``.  ``acquireVsCodeApi``,
-    ``hljs``, ``marked``, ``PanelCopy`` and ``__TRICKS__`` are stubbed
+    ``hljs``, ``marked`` and ``__TRICKS__`` are stubbed
     because they are provided by host-side scripts that are not loaded
     here.  Once the IIFE finishes, ``window.__post(ev)`` dispatches a
     ``message`` event identical to what the webview receives from the
     extension host.
     """
     css = _CSS.read_text(encoding="utf-8")
+    panel_copy_js = _PANEL_COPY_JS.read_text(encoding="utf-8")
     api_js = _API_JS.read_text(encoding="utf-8")
     js = _JS.read_text(encoding="utf-8")
     html = _HTML.read_text(encoding="utf-8")
@@ -117,7 +119,7 @@ def _build_test_page() -> str:
     html, body {{ height: 100%; margin: 0; padding: 0; }}
   </style>
   <style>{css}</style>
-  <title>history failed red circle test</title>
+  <title>history failed red cross test</title>
 </head>
 <body>
 {body}
@@ -139,7 +141,6 @@ def _build_test_page() -> str:
       highlightAll: function () {{}},
     }};
     window.marked = {{ parse: function (s) {{ return s; }} }};
-    window.PanelCopy = {{ addCopyButton: function () {{}} }};
     window.__TRICKS__ = [];
     // Dispatch a ``message`` event identical to what the webview
     // receives from the extension host.
@@ -154,6 +155,7 @@ def _build_test_page() -> str:
       if (!window.__iifeError) window.__iifeError = String(ev.error || ev.message);
     }});
   </script>
+  <script>{panel_copy_js}</script>
   <script>{api_js}</script>
   <script>{js}</script>
 </body>
@@ -296,7 +298,7 @@ def _post_history_event(
     )
     # Chat panels are collapsed by default (no chat here is running):
     # open them all, as a user inspecting the rows would, so the rows
-    # and their status dots lay out. The explicit expands are
+    # and their status icons lay out. The explicit expands are
     # remembered per chat across the later re-renders.
     page.evaluate(
         "() => document.querySelectorAll('#history-list "
@@ -312,7 +314,7 @@ def _history_event_for_persisted_result(result: str) -> dict[str, Any]:
     of fabricating ``session.failed`` in the browser test.  A cancelled
     task previously persisted as ``"Task stopped by user"`` but the
     server emitted ``failed: false``, so the real frontend had no red
-    circle to render.
+    cross to render.
     """
     tmp = tempfile.mkdtemp(prefix="kiss-history-cancel-test-")
     orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
@@ -347,15 +349,15 @@ def _history_event_for_persisted_result(result: str) -> dict[str, Any]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_user_cancelled_task_from_backend_history_renders_red_circle(
+def test_user_cancelled_task_from_backend_history_renders_red_cross(
     _browser,
 ) -> None:
-    """A user-cancelled task must get a red circle in real history.
+    """A user-cancelled task must get a red cross in real history.
 
     This is the regression the user reported: clicking Stop persists
     ``"Task stopped by user"``.  Before the fix, ``getHistory`` emitted
     that row with ``failed: false`` and the task history panel rendered
-    it as a completed row with no red circle.
+    it as a completed row with no red cross.
     """
     event = _history_event_for_persisted_result("Task stopped by user")
     session = event["sessions"][0]
@@ -377,6 +379,7 @@ def test_user_cancelled_task_from_backend_history_renders_red_circle(
                 rowVisible: !!row && row.offsetParent !== null,
                 hasFailedDot: !!dot,
                 dotVisible: !!dot && dot.offsetParent !== null,
+                dotIsCross: !!dot && dot.classList.contains('status-cross'),
                 dotBackground: dotStyle && dotStyle.backgroundColor,
                 dotWidth: dotStyle && dotStyle.width,
                 dotHeight: dotStyle && dotStyle.height,
@@ -390,15 +393,16 @@ def test_user_cancelled_task_from_backend_history_renders_red_circle(
             "rowVisible": True,
             "hasFailedDot": True,
             "dotVisible": True,
+            "dotIsCross": True,
             "dotBackground": "rgb(211, 47, 47)",
-            "dotWidth": "8px",
-            "dotHeight": "8px",
+            "dotWidth": "10px",
+            "dotHeight": "10px",
         }
     finally:
         context.close()
 
 
-def test_failed_session_renders_red_circle(_browser) -> None:
+def test_failed_session_renders_red_cross(_browser) -> None:
     """Every ``s.failed`` session must render exactly one visible red
     circle (``.sidebar-item-failed``) inside its row.
 
@@ -428,7 +432,8 @@ def test_failed_session_renders_red_circle(_browser) -> None:
                   out.dot = {
                     width: cs.width,
                     height: cs.height,
-                    borderRadius: cs.borderRadius,
+                    isCross: dot.classList.contains('status-cross'),
+                    maskImage: cs.maskImage || cs.webkitMaskImage,
                     background: cs.backgroundColor,
                     visibility: cs.visibility,
                     display: cs.display,
@@ -455,14 +460,15 @@ def test_failed_session_renders_red_circle(_browser) -> None:
             f"row info: {json.dumps(fail, indent=2)}"
         )
         dot = fail["dot"]
-        assert dot["width"] == "8px" and dot["height"] == "8px", (
-            f"failed dot is not 8x8: {dot['width']} x {dot['height']}"
+        assert dot["width"] == "10px" and dot["height"] == "10px", (
+            f"failed cross is not 10x10: {dot['width']} x {dot['height']}"
         )
-        assert dot["borderRadius"] in ("4px", "50%"), (
-            f"failed dot is not rounded: border-radius={dot['borderRadius']}"
+        assert dot["isCross"], "failed indicator must be the .status-cross icon"
+        assert "svg" in (dot["maskImage"] or ""), (
+            f"failed cross must be drawn by the SVG mask: mask-image={dot['maskImage']!r}"
         )
         assert dot["background"] == "rgb(211, 47, 47)", (
-            f"failed dot is not the failure-red colour: "
+            f"failed cross is not the failure-red colour: "
             f"background-color={dot['background']!r}; expected rgb(211, 47, 47)"
         )
         assert dot["visibility"] == "visible", (
@@ -514,7 +520,7 @@ def test_errored_filter_toggle_hides_and_shows_failed_row(_browser) -> None:
     """Unchecking the "Errored" filter must hide the failed row;
     re-checking it must restore it.  This guards against a regression
     where the failed dot exists but the row itself is hidden by the
-    filter bar so the user never sees the red circle.
+    filter bar so the user never sees the red cross.
     """
     context, page = _open_history_page(_browser)
     try:
@@ -554,7 +560,7 @@ def test_errored_filter_toggle_hides_and_shows_failed_row(_browser) -> None:
 def test_errored_filter_is_checked_by_default(_browser) -> None:
     """The default History filter must include errored tasks.
 
-    A failed row can only show its red circle on first open if the
+    A failed row can only show its red cross on first open if the
     production ``#hf-errors`` checkbox starts checked.  This reproduces
     the review concern that a default-unchecked Errored filter would
     make the feature appear broken even though the dot DOM exists.
@@ -586,7 +592,7 @@ def test_errored_filter_is_checked_by_default(_browser) -> None:
             """
         )
         assert visible_failed_dot, (
-            "failed task red circle should be visible with the default filters"
+            "failed task red cross should be visible with the default filters"
         )
     finally:
         context.close()
@@ -626,14 +632,14 @@ def test_filter_that_hides_all_failed_rows_shows_empty_placeholder(_browser) -> 
         context.close()
 
 
-def test_search_results_can_render_failed_red_circle(_browser) -> None:
+def test_search_results_can_render_failed_red_cross(_browser) -> None:
     """Search-triggered history results must use the same failed-dot
     rendering path as normal history loads.
 
     The test enters a query in the real search box, verifies the
     frontend asks the host for ``getHistory`` with that query, then
     delivers the host's filtered ``history`` response and checks that
-    the failed search result is visible with its red circle.
+    the failed search result is visible with its red cross.
     """
     context, page = _open_history_page(_browser)
     try:
@@ -673,9 +679,9 @@ def test_search_results_can_render_failed_red_circle(_browser) -> None:
         context.close()
 
 
-def test_paginated_history_batch_can_append_failed_red_circle(_browser) -> None:
+def test_paginated_history_batch_can_append_failed_red_cross(_browser) -> None:
     """A failed task arriving in an ``offset > 0`` pagination batch must
-    still get a visible red circle when appended to existing rows."""
+    still get a visible red cross when appended to existing rows."""
     context, page = _open_history_page(_browser)
     try:
         completed = _sample_sessions()[2]
@@ -712,7 +718,7 @@ def test_paginated_history_batch_can_append_failed_red_circle(_browser) -> None:
         context.close()
 
 
-def test_failed_dot_is_centered_middle_left_in_history_task_panel(
+def test_failed_cross_is_centered_middle_left_in_history_task_panel(
     _browser,
 ) -> None:
     """At a narrow viewport the failed marker must remain at the
@@ -766,7 +772,7 @@ def test_failed_dot_is_centered_middle_left_in_history_task_panel(
         context.close()
 
 
-def test_live_running_failed_task_does_not_render_red_dot(_browser) -> None:
+def test_live_running_failed_task_does_not_render_red_cross(_browser) -> None:
     """A session that is both ``is_running=True`` and ``failed=True``
     must render the **green** running dot, not the red failed dot.
 
