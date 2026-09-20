@@ -42,7 +42,11 @@ from kiss.agents.sorcar.task_classifier import (
     classification_enabled,
     classify_task,
 )
-from kiss.agents.sorcar.useful_tools import UsefulTools, rewrite_parent_repo_paths
+from kiss.agents.sorcar.useful_tools import (
+    BackgroundJob,
+    UsefulTools,
+    rewrite_parent_repo_paths,
+)
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core import tool_interrupt
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
@@ -82,11 +86,11 @@ TOOL_PROFILES: dict[str, frozenset[str] | None] = {
     # (Bash is unrestricted, so this is not a sandbox) but has no file
     # editing, browser, talk, agent dispatch or fan-out tools.
     "review": frozenset({
-        "Bash", "Read", "run_commands_parallel", "memory_search",
+        "Bash", "bash_job", "Read", "run_commands_parallel", "memory_search",
         "memory_pull", "memory_read", "memory_list", "decide", "summary",
     }),
     # Shell runner: just enough to run commands and read their output.
-    "shell": frozenset({"Bash", "Read", "run_commands_parallel"}),
+    "shell": frozenset({"Bash", "bash_job", "Read", "run_commands_parallel"}),
 }
 """Tool profiles a sub-agent can run with (``finish`` is always added).
 
@@ -1294,6 +1298,10 @@ class SorcarAgent(RelentlessAgent):
         self._use_web_tools: bool = True
         self._is_parallel: bool = True
         self._append_basic_tools: bool = True
+        # Background jobs started by ``Bash(background=True)``, kept on
+        # the agent (not the per-run UsefulTools) so a follow-up prompt
+        # in the same chat can still wait on, tail or kill them.
+        self._background_jobs: dict[str, BackgroundJob] = {}
         # Task-tree-wide budget of review fan-outs (see
         # :class:`fanout_guard.ReviewQuota`).  A top-level :meth:`run`
         # creates a fresh one; the fan-out engine hands the parent's
@@ -1838,18 +1846,31 @@ class SorcarAgent(RelentlessAgent):
                 description: str,
                 timeout_seconds: int = 30,
                 max_output_chars: int = 50000,
+                background: bool = False,
             ) -> str:
                 """Runs a bash command in the task's Docker container and returns its output.
+
+                Background jobs (``background=True``) are not available in
+                Docker mode: start long commands yourself with
+                ``nohup cmd > /tmp/out.log 2>&1 < /dev/null &`` and poll
+                the log file with ``tail``.
 
                 Args:
                     command: The bash command to run.
                     description: A brief description of the command.
                     timeout_seconds: Timeout in seconds for the command.
                     max_output_chars: Maximum characters in output before truncation.
+                    background: Must stay false in Docker mode (see above).
 
                 Returns:
                     The output of the command.
                 """
+                if background:
+                    return (
+                        "Error: background=True is not available in Docker mode. "
+                        "Run the command as `nohup cmd > /tmp/out.log 2>&1 "
+                        "< /dev/null &` and poll the log with `tail`."
+                    )
                 return self._docker_bash(
                     command, description, timeout_seconds, max_output_chars,
                 )
@@ -1863,9 +1884,11 @@ class SorcarAgent(RelentlessAgent):
                 stream_callback=_stream,
                 stop_event=getattr(self, "_stop_event", None),
                 work_dir=self.work_dir,
+                jobs=self._background_jobs,
             )
             tools = [
-                useful_tools.Bash, useful_tools.run_commands_parallel,
+                useful_tools.Bash, useful_tools.bash_job,
+                useful_tools.run_commands_parallel,
                 useful_tools.Read, useful_tools.Edit, useful_tools.Write,
             ]
             # The Read dedupe assumes an earlier output is still in the
@@ -1941,9 +1964,10 @@ class SorcarAgent(RelentlessAgent):
                     the sub-agent to call ``set_model`` itself, which
                     costs a whole step on the wrong model.
                 tool_profile: ``"review"`` gives the sub-agents the
-                    read-only toolset (Bash, Read, run_commands_parallel,
-                    memory reads, decide, summary); ``"shell"`` just
-                    Bash, Read and run_commands_parallel.  Empty
+                    read-only toolset (Bash, bash_job, Read,
+                    run_commands_parallel, memory reads, decide, summary);
+                    ``"shell"`` just Bash, bash_job, Read and
+                    run_commands_parallel.  Empty
                     (default): review tasks get ``"review"``, others
                     the full toolset.
 
@@ -2676,8 +2700,12 @@ class SorcarAgent(RelentlessAgent):
             if profile != "full":
                 allowed = TOOL_PROFILES[profile]
                 assert allowed is not None
+                # The docker toolset has no job registry (see the docker
+                # ``Bash`` shim in :meth:`_get_tools`), so the note must
+                # not promise ``bash_job`` there.
+                offered = set(allowed) - ({"bash_job"} if docker_image else set())
                 system_instructions += RESTRICTED_PROFILE_NOTE.format(
-                    profile=profile, tools=", ".join(sorted(allowed)),
+                    profile=profile, tools=", ".join(sorted(offered)),
                 )
             memory_root = _memory_root_for_run(
                 self._append_basic_tools,

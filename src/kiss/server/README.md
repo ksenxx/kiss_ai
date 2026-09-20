@@ -371,7 +371,9 @@ def search_database(query: str, max_results: int = 10) -> str:
 ## The `append_basic_tools` parameter
 
 By default (`append_basic_tools=True`) the agent gets `finish` (always
-present) and the built-in KISS Sorcar toolset — `Bash`, `run_commands_parallel` (several shell
+present) and the built-in KISS Sorcar toolset — `Bash` (with
+`background=True` for detached jobs), `bash_job` (wait for / tail /
+kill a background job), `run_commands_parallel` (several shell
 commands at once, no LLM sub-agents), `Read`, `Edit`, `Write`,
 `ask_user_question`, `talk`, `set_model`, `summary`, `run_agent`,
 browser tools (when `use_web_tools`), `run_parallel` and

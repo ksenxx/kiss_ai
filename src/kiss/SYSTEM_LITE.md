@@ -24,6 +24,10 @@ The user cannot see your thoughts, reasoning, scratchpad, intermediate tool outp
 
 <tool_rules>
 
+## Tool Usage
+
+- For any command you expect to run longer than a minute (builds, training runs, servers, large test suites, long installs), call Bash(command, description, background=true): it starts the command detached, returns a job id at once, and does not block your step. Then bash_job(job_id, action="wait", timeout_seconds=N) blocks until it exits, bash_job(job_id, action="tail") shows the latest log lines, and bash_job(job_id, action="kill") stops it. Never background with cmd & inside a foreground Bash call. If Bash reports that background mode is unavailable (Docker mode), use nohup cmd > log 2>&1 < /dev/null & and poll the log instead.
+
 ## Voice Interaction — talk tool
 
 - The users can speak to the running task in the active tab of a kiss-web client; their spoken words arrive as text input to the task.

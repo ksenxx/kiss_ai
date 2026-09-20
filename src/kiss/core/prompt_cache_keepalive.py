@@ -52,11 +52,14 @@ def is_long_running_call(name: str, args: dict[str, Any]) -> bool:
         args: The tool's keyword arguments as the model supplied them.
 
     Returns:
-        ``True`` for fan-out tools and for calls whose ``timeout`` or
-        ``timeout_seconds`` argument is at least
+        ``True`` for fan-out tools, for a ``bash_job`` wait (its default
+        timeout already reaches the threshold), and for calls whose
+        ``timeout`` or ``timeout_seconds`` argument is at least
         :data:`LONG_TOOL_TIMEOUT_SECONDS`.
     """
     if name in FAN_OUT_TOOLS:
+        return True
+    if name == "bash_job" and args.get("action") == "wait":
         return True
     for key in ("timeout_seconds", "timeout"):
         try:

@@ -1425,7 +1425,7 @@ class RelentlessAgent(Base):
                 summarizer_result = summarizer_agent.run(
                     model_name=self.model_name,
                     prompt_template=SUMMARIZER_PROMPT,
-                    tools=[shell_tools.Read, shell_tools.Bash],
+                    tools=[shell_tools.Read, shell_tools.Bash, shell_tools.bash_job],
                     arguments={
                         "trajectory_path": str(trajectory_path),
                     },
