@@ -16,11 +16,20 @@ by the `mcp_permissions` wildcard rules in `~/.kiss/config.json`.
 ```bash
 uv run python connectors/enable.py list          # see everything + status
 uv run python connectors/enable.py enable slack  # checks prereqs/env, writes config
+uv run python connectors/enable.py enable slack --scope project   # <project>/.kiss/mcp.json instead of ~/.kiss/mcp.json
 uv run python connectors/enable.py disable slack
 uv run python connectors/verify.py               # connect to all configured servers
+uv run python connectors/verify.py fetch time    # ... or only the named ones
 ```
 
-## Enabled by default (verified working, no credentials needed)
+`enable` writes to `~/.kiss/mcp.json` (`--scope user`, the default) or
+`<project>/.kiss/mcp.json` (`--scope project`); `disable` removes the entry
+from every config file it appears in, including `<project>/.mcp.json`.
+
+## Default set (verified working; no API keys, except `github` needs `gh auth login`)
+
+These are flagged `"default": true` in `catalog.json`. Nothing turns them on
+for you: run `enable.py enable <name>` for each one you want.
 
 | Connector | What it gives the agent | Runs |
 |---|---|---|
@@ -41,9 +50,12 @@ file issues or PRs, and rely on the `mcp_permissions` deny rules instead.
 Privacy note: `deepwiki` and `context7` are the only remote entries — their
 operators see the queries you send them (repo names, library names) and
 nothing else. Disable either with `enable.py disable <name>` if that matters.
-All packages are version-pinned in `catalog.json`; bump them deliberately.
+The npm/uvx package specs are version-pinned in `catalog.json`; bump them
+deliberately. Two exceptions are not pinned by the catalog: the `whatsapp`
+Git clone (`git clone --depth 1`, no ref) and the separately installed `gh` /
+`github-mcp-server` executables.
 
-## Available with your own credentials (enable when ready)
+## Additional connectors (most need your own credentials or a pairing step; enable when ready)
 
 | Connector | Service | Credential (env var, read from your shell) |
 |---|---|---|
@@ -58,7 +70,8 @@ All packages are version-pinned in `catalog.json`; bump them deliberately.
 | `playwright` | Second isolated browser (Sorcar has one natively) | none |
 
 `enable.py` refuses to enable a connector whose executables or env vars are
-missing and prints the exact setup steps (from `catalog.json`). Export
+missing and prints the exact setup steps (from `catalog.json`); `--force`
+writes the entry anyway. Export
 credentials in your shell profile — Sorcar's stdio launcher passes your
 environment to the server at launch, so **no secret is ever stored in
 `mcp.json` or this repository**. Restart Sorcar after changing env vars or
@@ -107,8 +120,8 @@ the logged-in session. Keep it read-only; never automate transfers or trades.
 
 ## Safety defaults
 
-`~/.kiss/config.json` ships deny rules so destructive tools never even reach
-the agent (last matching rule wins):
+Add deny rules to `~/.kiss/config.json` so destructive tools never even reach
+the agent (nothing installs these for you; last matching rule wins):
 
 ```json
 "mcp_permissions": {

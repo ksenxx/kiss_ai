@@ -2,6 +2,8 @@
 
 GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts for compound AI systems. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge.
 
+This module lives under `kiss.agents.obsolete.gepa` and is no longer part of the main Sorcar workflow.
+
 **Paper**: [GEPA: REFLECTIVE PROMPT EVOLUTION CAN OUTPERFORM REINFORCEMENT LEARNING](https://arxiv.org/pdf/2507.19457)
 
 **Official Implementation**: [github.com/gepa-ai/gepa](https://github.com/gepa-ai/gepa)
