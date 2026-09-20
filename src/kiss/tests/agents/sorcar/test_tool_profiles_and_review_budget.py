@@ -111,7 +111,9 @@ class TestToolProfiles:
 
     def test_shell_profile(self, tmp_path: Path) -> None:
         agent = _bare_agent(tmp_path, _tool_profile_name="shell")
-        assert _names(agent._get_tools()) == {"Bash", "Read", "run_commands_parallel"}
+        assert _names(agent._get_tools()) == {
+            "Bash", "bash_job", "Read", "run_commands_parallel",
+        }
 
     def test_reviewer_subagent_defaults_to_review(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -311,10 +313,10 @@ def test_child_profile_is_stamped_by_engine(tmp_path: Path) -> None:
     assert len(requests) == 2
     for request in requests:
         names = {t["function"]["name"] for t in request["tools"]}
-        assert names == {"Bash", "Read", "run_commands_parallel", "finish"}
+        assert names == {"Bash", "bash_job", "Read", "run_commands_parallel", "finish"}
         system = next(m for m in request["messages"] if m["role"] == "system")["content"]
         assert "# Restricted tool profile: shell" in system
-        assert "Bash, Read, run_commands_parallel" in system
+        assert "Bash, Read, bash_job, run_commands_parallel" in system
     assert os.environ.get("KISS_HOME")  # tests run against an isolated KISS_HOME
 
 

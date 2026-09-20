@@ -541,7 +541,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             c for c in calls if "trajectory_path" in c["arguments"]
         ]
         assert len(summarizer_calls) == 1, calls
-        assert summarizer_calls[0]["tool_names"] == ["Read", "Bash"]
+        assert summarizer_calls[0]["tool_names"] == ["Read", "Bash", "bash_job"]
 
     def test_absent_wire_field_defaults_true(self) -> None:
         """A raw command without ``appendBasicTools`` keeps the basics.
