@@ -61,6 +61,12 @@ def _load_gitignore_dirs(work_dir: str) -> tuple[set[str], set[str]]:
     return skip_names, skip_paths
 
 
+# Hard cap on the number of entries ``_scan_files`` returns.  The picker
+# filters this cache by substring, so a too-small cap silently hides whole
+# subtrees (e.g. ``src/`` in a repo with thousands of tracked data files).
+_SCAN_FILES_CAP = 1_000_000
+
+
 def _scan_files(work_dir: str) -> list[str]:
     """Scan workspace files, respecting .gitignore patterns.
 
@@ -89,11 +95,11 @@ def _scan_files(work_dir: str) -> list[str]:
             )
             for name in sorted(files):
                 paths.append(str(rel_root / name).replace(os.sep, "/"))
-                if len(paths) >= 5000:
+                if len(paths) >= _SCAN_FILES_CAP:
                     return paths
             for d in dirs:
                 paths.append(str(rel_root / d).replace(os.sep, "/") + "/")
-                if len(paths) >= 5000:
+                if len(paths) >= _SCAN_FILES_CAP:
                     return paths
     except OSError:  # pragma: no cover — Path.walk swallows OSErrors internally
         logger.debug("Exception caught", exc_info=True)
