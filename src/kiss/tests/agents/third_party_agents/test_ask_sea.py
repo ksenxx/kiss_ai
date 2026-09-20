@@ -10,7 +10,9 @@ dispatch code:
 
 1. The ``ask_sea`` module itself: ``system_prompt`` MUST return the
    bytes of ``papers/kisssorcar/ablation/prompts/SYSTEM_LITE.md``,
-   ``is_parallel`` and ``use_web_tools`` MUST return ``False``.
+   ``append_to_system_prompt`` MUST return the no-internet directive
+   followed by the answer-quickly sentence, and ``is_parallel`` and
+   ``use_web_tools`` MUST return ``False``.
 2. The command rewriter ``rewrite_prompt_if_command`` MUST recognise
    ``/ask <question>`` and emit a directive that instructs the outer
    LLM to call ``run_agent`` with the fixed ``append_to_prompt`` (with
@@ -47,7 +49,7 @@ _EXPECTED_APPEND_TO_PROMPT = (
 )
 _EXPECTED_APPEND_TO_SYSTEM_PROMPT = (
     "**MUST FOLLOW: You MUST NOT USE internet or internet search "
-    "at any point."
+    "at any point. You must answer quickly because the user is waiting."
 )
 
 
@@ -79,6 +81,19 @@ def test_system_prompt_returns_system_lite_md() -> None:
     # blank / accidentally-empty file would silently satisfy equality
     # above.
     assert "<identity>" in text
+
+
+def test_append_to_system_prompt_returns_fixed_suffix() -> None:
+    """append_to_system_prompt MUST return the two fixed directives.
+
+    The exact text is pinned: the no-internet directive first, then
+    the answer-quickly sentence (the user typed ``/ask`` into a live
+    task and is waiting on the reply).
+    """
+    assert ask_sea.append_to_system_prompt() == _EXPECTED_APPEND_TO_SYSTEM_PROMPT
+    assert ask_sea.append_to_system_prompt().endswith(
+        "You must answer quickly because the user is waiting."
+    )
 
 
 def test_is_parallel_returns_false() -> None:
@@ -438,9 +453,11 @@ def test_apply_agent_overrides_reads_ask_sea_getters(tmp_path: Path) -> None:
 
     This exercises the real ``apply_agent_overrides`` path —
     :meth:`TaskRunner._run_task_inner` calls it just before the run —
-    so the three getters ``system_prompt``, ``is_parallel``,
-    ``use_web_tools`` reach the ``systemPrompt`` / ``useParallel`` /
-    ``webTools`` wire fields correctly.
+    so the four getters ``system_prompt``, ``append_to_system_prompt``,
+    ``is_parallel``, ``use_web_tools`` reach the ``systemPrompt`` /
+    ``appendToSystemPrompt`` / ``useParallel`` / ``webTools`` wire
+    fields correctly.  A stale wire value for ``appendToSystemPrompt``
+    (e.g. from an older client) MUST be replaced by the getter's text.
     """
     from kiss.server.agent_file import apply_agent_overrides
 
@@ -448,11 +465,14 @@ def test_apply_agent_overrides_reads_ask_sea_getters(tmp_path: Path) -> None:
     cmd: dict[str, Any] = {
         "agentPath": ask_path,
         "prompt": "why did the run fail?",
+        "appendToSystemPrompt": "stale wire value",
     }
     overridden = apply_agent_overrides(cmd)
     assert "systemPrompt" in overridden
+    assert "appendToSystemPrompt" in overridden
     assert "useParallel" in overridden
     assert "webTools" in overridden
     assert cmd["systemPrompt"] == ask_sea.system_prompt()
+    assert cmd["appendToSystemPrompt"] == _EXPECTED_APPEND_TO_SYSTEM_PROMPT
     assert cmd["useParallel"] is False
     assert cmd["webTools"] is False

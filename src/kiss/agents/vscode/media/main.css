@@ -1041,6 +1041,39 @@ body.remote-chat #welcome-config { display: none !important; }
   line-height: 1.6; max-height: 400px; overflow-y: auto;
 }
 
+/* The finished `/ask` answer, shown inside the running task's transcript
+   (the answering sub-agent's nested tab closes when it ends). */
+.ask-answer {
+  border: 1px solid var(--cyan); border-radius: 8px; margin: 8px 0;
+  overflow: hidden; background: var(--surface);
+}
+.ask-answer.failed { border-color: var(--red); }
+
+.ask-answer-h {
+  padding: 6px 12px; font-size: var(--fs-sm); color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 8%, transparent);
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+
+.ask-answer.failed .ask-answer-h {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+}
+
+.ask-answer-label {
+  font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+}
+
+.ask-answer-q {
+  color: var(--fg); font-style: italic; font-size: var(--fs-md);
+  text-transform: none; letter-spacing: 0; word-break: break-word;
+}
+
+.ask-answer-body {
+  padding: 8px 12px; font-size: var(--fs-md); word-break: break-word;
+  line-height: 1.7;
+}
+
 .sys {
   font-size: var(--fs-base); color: var(--dim);
   font-family: var(--vscode-editor-font-family, monospace);
@@ -3771,7 +3804,8 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 }
 
 .system-prompt.collapsed .system-prompt-body,
-.prompt.collapsed .prompt-body { display: none; }
+.prompt.collapsed .prompt-body,
+.ask-answer.collapsed .ask-answer-body { display: none; }
 
 .tr.collapsed .tr-content { display: none; }
 

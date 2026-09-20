@@ -9474,6 +9474,10 @@
       const p = panels[i];
       if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
         continue;
+      // A `/ask` answer is something the user asked for and is reading
+      // while the task keeps streaming: the next event must not fold it
+      // away.  The user collapses it by hand (its header) when done.
+      if (p.classList.contains('ask-answer')) continue;
       if (panelShowsImage(p)) continue;
       if (p.classList.contains('tc-run-parallel'))
         rpAdoptOpenSubagents(p, tabId);
@@ -9601,6 +9605,53 @@
     const rcBody = rc.querySelector('.rc-body');
     if (rcBody) linkifyFilePaths(rcBody, workDir, ownerTabId);
     return rc;
+  }
+
+  /**
+   * Build the panel for a finished `/ask` answer (an `ask_answer` event).
+   *
+   * Header: "Answer" (or "Answer (failed)" when the answering agent did
+   * not succeed) followed by the quoted question.  Body: the answering
+   * agent's summary, which is HTML from `finish(summary_in_html=...)`
+   * or Markdown from an older agent, rendered by the same
+   * resultSummaryHtml + sanitize path as a result panel.  Collapsible
+   * on its header like a prompt panel; copy button copies the body as
+   * the reader sees it.
+   *
+   * @param {object} ev The `ask_answer` event
+   *   ({question, text, success, ts}).
+   * @param {string} workDir The owning tab's work dir, for file links.
+   * @param {string} ownerTabId The tab that owns the transcript.
+   * @returns {Element} The `.ev.ask-answer` panel.
+   */
+  function createAskAnswerPanel(ev, workDir, ownerTabId) {
+    const el = mkEl(
+      'div',
+      'ev ask-answer' + (ev.success === false ? ' failed' : ''),
+    );
+    const question = String(ev.question || '').trim();
+    const answer = String(ev.text || '(no answer)')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    el.innerHTML =
+      '<div class="ask-answer-h">' +
+      '<span class="ask-answer-label">' +
+      (ev.success === false ? 'Answer (failed)' : 'Answer') +
+      '</span>' +
+      (question
+        ? '<span class="ask-answer-q">' + esc(question) + '</span>'
+        : '') +
+      '</div>' +
+      '<div class="ask-answer-body md-body">' +
+      kissSanitize(resultSummaryHtml(answer)) +
+      '</div>';
+    const body = el.querySelector('.ask-answer-body');
+    el.dataset.rawText = formattedTextFromNode(body).replace(/^\n+|\n+$/g, '');
+    // addCollapse also adds the copy button and the timestamp.
+    addCollapse(el, el.querySelector('.ask-answer-h'), ev.ts);
+    hlBlock(el);
+    linkifyFilePaths(body, workDir, ownerTabId);
+    return el;
   }
 
   window.toggleThink = toggleThink;
@@ -10408,6 +10459,16 @@
         if (bodyEl) {
           linkifyFilePaths(bodyEl, evWorkDir, evOwnerTab);
         }
+        break;
+      }
+      case 'ask_answer': {
+        // The finished `/ask` side-channel reply.  The answering
+        // sub-agent's nested tab is closed the moment it ends
+        // (subagentDone), so this panel in the OWNER task's transcript
+        // is the one place the user reads the answer.  It quotes the
+        // question so the panel stands on its own on a replay, where
+        // the `/ask` prompt echo may sit many panels above.
+        target.appendChild(createAskAnswerPanel(ev, evWorkDir, evOwnerTab));
         break;
       }
       case 'usage_info': {
@@ -11512,6 +11573,9 @@
     'worktree_progress',
     'warning',
     'error',
+    // The finished `/ask` answer, emitted by the daemon's side-channel
+    // worker into the OWNER task's transcript (tabId + taskId stamped).
+    'ask_answer',
   ]);
 
   /**
@@ -11644,6 +11708,36 @@
     }
     const tab = getTab(activeTabId);
     return !!tab && !!tab.pendingTaskId;
+  }
+
+  /**
+   * True when a `/ask` answer names a task other than the one `tab` shows.
+   *
+   * The answer arrives minutes after the question, stamped with the tab it
+   * was typed into and the task it answers. If that tab has since started
+   * a newer task, the answer belongs to a transcript that is no longer on
+   * screen: rendering it would put a stale panel into the new task, and
+   * letting it adopt its taskId (mayAdoptTaskId trusts a tabId) would
+   * re-bind the tab to the finished task and reject every later event of
+   * the real one. The answer is not lost -- the daemon persisted it under
+   * its own task, so the history view of that task shows it.
+   *
+   * Two tests, because the tab's identity lags the new run: a task the
+   * tab already left behind (recorded by the `clear` that started its
+   * replacement, while the tab still carries the old id) is stale, and so
+   * is any task other than the one the tab owns now.
+   */
+  function isStaleAskAnswer(ev, tab) {
+    if (!ev || ev.type !== 'ask_answer') return false;
+    if (ev.taskId === undefined || ev.taskId === null || ev.taskId === '') {
+      return false;
+    }
+    const evTask = String(ev.taskId);
+    if (tab && tab.supersededTaskIds && tab.supersededTaskIds.has(evTask)) {
+      return true;
+    }
+    const owned = tabTaskId(tab);
+    return owned !== '' && owned !== evTask;
   }
 
   /**
@@ -12178,6 +12272,17 @@
           // A new run replaces the tab's task: its settings arrive
           // with the run's own task_settings event.
           clearTab.taskSettings = null;
+          // The tab keeps the replaced task's id until the new run's
+          // first id-bearing event (sendMessage claims a pending id only
+          // for a tab that has none), so a `/ask` answer for the old task
+          // landing in that window would pass the same-task check in
+          // isStaleAskAnswer. Remember the id it is leaving behind.
+          if (clearTab.currentTaskId) {
+            if (!clearTab.supersededTaskIds) {
+              clearTab.supersededTaskIds = new Set();
+            }
+            clearTab.supersededTaskIds.add(String(clearTab.currentTaskId));
+          }
         }
         if (ev.chat_id && clearTab) {
           clearTab.backendChatId = ev.chat_id;
@@ -13130,7 +13235,9 @@
         if (!TRANSCRIPT_EVENT_TYPES.has(t)) break;
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgTab = findTabByEvt(ev);
-          if (bgTab) processOutputEventForBgTab(ev, bgTab);
+          if (bgTab && !isStaleAskAnswer(ev, bgTab)) {
+            processOutputEventForBgTab(ev, bgTab);
+          }
           if (!isForActiveTab(ev)) break;
         }
         // tableak-coverage:start
@@ -13138,6 +13245,9 @@
         // names no tab cannot be attributed and must not be shown.
         if (TASK_SCOPED_STREAM_TYPES.has(t) && !isForActiveTab(ev)) break;
         // tableak-coverage:end
+        // A delayed answer for a task this tab has moved on from: neither
+        // rendered here nor allowed to drive the adoption below.
+        if (isStaleAskAnswer(ev, getTab(activeTabId))) break;
         if (
           ev.taskId !== undefined &&
           ev.taskId !== null &&

@@ -595,6 +595,9 @@ type ToWebviewMessageBody =
     }
   | {type: 'system_prompt'; text: string}
   | {type: 'prompt'; text: string}
+  // The finished ``/ask`` side-channel answer, delivered into the
+  // running (owner) task's transcript as its own panel.
+  | {type: 'ask_answer'; question: string; text: string; success: boolean}
   | {
       type: 'talk';
       text: string;
