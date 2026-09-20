@@ -1286,9 +1286,6 @@
       if (inputContainer) inputContainer.style.display = '';
     }
     updateInputDisabled();
-    // A tab that ran while hidden comes back looking like one that ran
-    // on screen: everything but its latest panel collapsed.
-    collapseOlderPanels(O, tab.id);
     resetAdjacentState();
     syncAskModalToActiveTab();
     // visibletask-coverage:start
@@ -1794,6 +1791,13 @@
     }
     restoreTab(newTab);
     setRunningState(newTab.isRunning);
+    // A tab that ran while hidden comes back looking like one that ran
+    // on screen: everything but its newest two panels collapsed. This
+    // runs after setRunningState so the pass sees THIS tab's running
+    // state; inside restoreTab the module flag still described the tab
+    // the user just left, and a running tab restored from behind an
+    // idle one came back with nothing folded.
+    collapseOlderPanels(O, newTab.id);
     if (!newTab.isRunning) {
       stopTimer();
       removeSpinner();
@@ -9443,6 +9447,12 @@
    * one -- it used to consult the visible tab's flag and so never
    * collapsed anything.
    *
+   * The module flag, not the tab's own, is deliberately what the
+   * visible tab answers with: the `status running:false` handler flips
+   * the tab's flag first and only then calls setRunningState, whose
+   * flush of a pending stream-tail sweep must still see the task as
+   * running to settle its collapse debt.
+   *
    * @param {string} tabId The tab that owns a transcript.
    * @returns {boolean} Whether that tab's task is running.
    */
@@ -9452,8 +9462,13 @@
     return !!(tab && tab.isRunning);
   }
 
+  /** How many of the newest panels a streaming transcript keeps open. */
+  const STREAM_OPEN_PANELS = 2;
+
   /**
-   * Collapse every top-level panel of a running transcript but the last.
+   * Collapse every top-level panel of a running transcript but the
+   * newest STREAM_OPEN_PANELS, so the panel just finished stays readable
+   * next to the one being streamed.
    *
    * @param {Element|DocumentFragment} container The transcript.
    * @param {string} tabId The tab that owns it.
@@ -9461,16 +9476,16 @@
   function collapseOlderPanels(container, tabId) {
     // Only an attached transcript is collapsed as it streams.  A
     // background tab's fragment is collapsed once, when it is restored
-    // (see restoreTab): collapsing a run_parallel panel adopts its open
-    // sub-agent tabs into the newest fan-out call, and mid-stream that
-    // call does not exist yet, so a live sub-agent tab would be closed
-    // by the very panel it is about to move out of.
+    // (see activateAdjacentTab): collapsing a run_parallel panel adopts
+    // its open sub-agent tabs into the newest fan-out call, and
+    // mid-stream that call does not exist yet, so a live sub-agent tab
+    // would be closed by the very panel it is about to move out of.
     if (!container || container.nodeType !== 1) return;
     if (!streamTabIsRunning(tabId)) return;
     const panels = Array.from(container.children).filter(
       el => el.classList && el.classList.contains('collapsible'),
     );
-    for (let i = 0; i < panels.length - 1; i++) {
+    for (let i = 0; i < panels.length - STREAM_OPEN_PANELS; i++) {
       const p = panels[i];
       if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
         continue;
