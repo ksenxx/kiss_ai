@@ -893,6 +893,32 @@ class Model(ABC):
         """
         pass  # pragma: no cover
 
+    def keep_prompt_cache_warm(
+        self,
+        function_map: dict[str, Callable[..., Any]],
+        tools_schema: list[dict[str, Any]] | None = None,
+    ) -> Any | None:
+        """Touch the provider's prompt cache so it survives a long tool call.
+
+        Called from a background thread while a tool call that may outlive
+        the cache TTL is running (see
+        :mod:`kiss.core.prompt_cache_keepalive`).  The conversation ends
+        with the assistant turn whose tool calls are in flight and must
+        not be modified.  Providers whose cache outlives the longest tool
+        call, or that have none, return ``None`` (this default).
+
+        Args:
+            function_map: The agent's tools, exactly as passed to
+                :meth:`generate_and_process_with_tools`.
+            tools_schema: The pre-built tool schema list, exactly as passed
+                to :meth:`generate_and_process_with_tools`.
+
+        Returns:
+            The raw provider response of the ping (a billed request the
+            caller accounts for), or ``None`` when no request was sent.
+        """
+        return None
+
     def _find_tool_call_ids_from_last_assistant(self) -> list[tuple[str, str]]:
         """Find tool call (name, id) pairs from the last assistant message.
 

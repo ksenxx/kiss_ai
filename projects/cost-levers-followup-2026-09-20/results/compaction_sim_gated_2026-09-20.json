@@ -1,0 +1,126 @@
+{
+  "sessions": 213,
+  "recorded_ctx_total": 1979159399,
+  "policies": {
+    "A: no compaction": {
+      "ctx_tokens_total": 1833918486,
+      "steps_over_100k": 7521,
+      "steps_over_100k_share": 0.521,
+      "peak_ctx_avg": 155511,
+      "sessions_reaching_350k": 12,
+      "compactions": 0,
+      "gate_evaluations_skipped": 0,
+      "input_cost_usd_fable51": 542.47,
+      "vs_production": 1.117,
+      "input_cost_vs_production": 0.621
+    },
+    "B: production 2026-09-19 (100k/50k, keep 20, min 2000)": {
+      "ctx_tokens_total": 1642205977,
+      "steps_over_100k": 6529,
+      "steps_over_100k_share": 0.453,
+      "peak_ctx_avg": 139761,
+      "sessions_reaching_350k": 6,
+      "compactions": 217,
+      "gate_evaluations_skipped": 0,
+      "input_cost_usd_fable51": 874.11,
+      "vs_production": 1.0,
+      "input_cost_vs_production": 1.0
+    },
+    "C: keep 5": {
+      "ctx_tokens_total": 1594983727,
+      "steps_over_100k": 6137,
+      "steps_over_100k_share": 0.426,
+      "peak_ctx_avg": 135468,
+      "sessions_reaching_350k": 6,
+      "compactions": 228,
+      "gate_evaluations_skipped": 0,
+      "input_cost_usd_fable51": 848.34,
+      "vs_production": 0.971,
+      "input_cost_vs_production": 0.971
+    },
+    "D: keep 5, min 500": {
+      "ctx_tokens_total": 1570548073,
+      "steps_over_100k": 6029,
+      "steps_over_100k_share": 0.418,
+      "peak_ctx_avg": 133827,
+      "sessions_reaching_350k": 6,
+      "compactions": 221,
+      "gate_evaluations_skipped": 0,
+      "input_cost_usd_fable51": 813.6,
+      "vs_production": 0.956,
+      "input_cost_vs_production": 0.931
+    },
+    "E: start 50k, keep 5, min 500": {
+      "ctx_tokens_total": 1503267837,
+      "steps_over_100k": 5746,
+      "steps_over_100k_share": 0.398,
+      "peak_ctx_avg": 126807,
+      "sessions_reaching_350k": 6,
+      "compactions": 581,
+      "gate_evaluations_skipped": 0,
+      "input_cost_usd_fable51": 1225.52,
+      "vs_production": 0.915,
+      "input_cost_vs_production": 1.402
+    },
+    "F: D + compact large tool-call args": {
+      "ctx_tokens_total": 1503552361,
+      "steps_over_100k": 5676,
+      "steps_over_100k_share": 0.394,
+      "peak_ctx_avg": 128143,
+      "sessions_reaching_350k": 4,
+      "compactions": 211,
+      "gate_evaluations_skipped": 0,
+      "input_cost_usd_fable51": 742.78,
+      "vs_production": 0.916,
+      "input_cost_vs_production": 0.85
+    },
+    "G: E + compact large tool-call args": {
+      "ctx_tokens_total": 1424761921,
+      "steps_over_100k": 5298,
+      "steps_over_100k_share": 0.367,
+      "peak_ctx_avg": 119352,
+      "sessions_reaching_350k": 4,
+      "compactions": 534,
+      "gate_evaluations_skipped": 0,
+      "input_cost_usd_fable51": 1050.34,
+      "vs_production": 0.868,
+      "input_cost_vs_production": 1.202
+    },
+    "H: new defaults ungated (100k/100k, keep 6, min 500)": {
+      "ctx_tokens_total": 1610985587,
+      "steps_over_100k": 6122,
+      "steps_over_100k_share": 0.424,
+      "peak_ctx_avg": 137657,
+      "sessions_reaching_350k": 6,
+      "compactions": 164,
+      "gate_evaluations_skipped": 0,
+      "input_cost_usd_fable51": 705.68,
+      "vs_production": 0.981,
+      "input_cost_vs_production": 0.807
+    },
+    "I: new defaults + cache gate (drop >= 25 %, below 80 % of hand-off)": {
+      "ctx_tokens_total": 1712709937,
+      "steps_over_100k": 6711,
+      "steps_over_100k_share": 0.465,
+      "peak_ctx_avg": 144743,
+      "sessions_reaching_350k": 11,
+      "compactions": 67,
+      "gate_evaluations_skipped": 4862,
+      "input_cost_usd_fable51": 574.66,
+      "vs_production": 1.043,
+      "input_cost_vs_production": 0.657
+    },
+    "J: new defaults + drop gate only (no hand-off proximity skip)": {
+      "ctx_tokens_total": 1712709937,
+      "steps_over_100k": 6711,
+      "steps_over_100k_share": 0.465,
+      "peak_ctx_avg": 144743,
+      "sessions_reaching_350k": 11,
+      "compactions": 67,
+      "gate_evaluations_skipped": 4862,
+      "input_cost_usd_fable51": 574.66,
+      "vs_production": 1.043,
+      "input_cost_vs_production": 0.657
+    }
+  }
+}

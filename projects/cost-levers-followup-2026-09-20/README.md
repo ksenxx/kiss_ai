@@ -22,3 +22,10 @@ investigates why tool-output compaction did not lower the share of steps above 1
   ```
 
 * `results/` — outputs of the 2026-09-20 06:24 UTC run.
+
+## 2026-09-20 07:30 UTC update
+
+`compaction_simulation.py` now also prices each replay at Fable 5.1 cache rates and includes the
+policies implemented in `kiss.core.context_compaction` (H: new defaults, I: new defaults + cache
+gate, J: drop gate only).  Results: `results/compaction_sim_gated_2026-09-20.json`,
+`results/compare_72h_2026-09-20T0730.*`; discussion in `FINDINGS.md` section 4.

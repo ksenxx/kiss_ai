@@ -130,7 +130,7 @@ cache-miss source is as large: **37 steps whose previous step ended ≥5 min ear
 10 min — long test runs, LaTeX builds, waiting on sub-agents) lose the 5-minute ephemeral cache
 and cost $2.24 each ($82.8 total).
 
-## 3. Recommendations (not implemented here)
+## 3. Recommendations (1 and 2 implemented, see section 4)
 
 1. **Make compaction cache-aware.**  Skip a compaction when `drop < 0.25 × context` or when the
    session is near its hand-off (saving ≈ 0); prefer bigger, rarer compactions
@@ -148,3 +148,63 @@ and cost $2.24 each ($82.8 total).
    non-Bash tools (Bash output is streamed as `system_output`); hand-off summarizer `usage_info`
    events are persisted out of order with a lower cumulative cost (naïve deltas show a fake
    $115 "first step"); post-lever code is identifiable by the `cache_read` field.
+
+## 4. Implementation and measurement (2026-09-20, 07:30 UTC)
+
+Recommendations 1 and 2 are now implemented (`src/kiss/core/context_compaction.py`,
+`src/kiss/core/prompt_cache_keepalive.py`, `KISSAgent`, `AnthropicModel.keep_prompt_cache_warm`):
+
+* compaction is planned first and applied only when `should_compact()` agrees: the drop must be
+  at least 25 % of the context and the context below 80 % of the hand-off limit; defaults are now
+  `keep_recent` 6, `min_chars` 500, re-trigger step 100k; a skipped compaction is re-planned every
+  step;
+* a keep-alive thread pings the Anthropic cache every 4 min (timed from the request start, which is
+  what the TTL is measured from) during tool calls with `timeout(_seconds)` ≥ 300 s and during
+  `run_parallel` / `run_commands_parallel` / `run_agent`; at most 10 pings per call; ping cost is
+  added to the agent budget.
+
+### 72 h KPI re-run (`results/compare_72h_2026-09-20T0730.*`)
+
+Identical to the 06:24 run within the window shift — the daemon still runs the pre-change code, so
+this is the *before* number for this lever, not a measurement of it: claude-fable-5-1 filtered,
+3,728 steps, compaction misses 56 steps / $93.92 (7.9 %), TTL-gap misses 40 steps / $87.58 (7.3 %).
+Re-run after deployment (the `cost-levers-72h-recheck` cron job on 2026-09-23 does this).
+
+### Replay with the new policy (`results/compaction_sim_gated_2026-09-20.json`)
+
+213 Claude sessions of ≥ 20 steps in the last 72 h, replayed through the real compaction code, input
+bill priced at Fable 5.1 cache rates (write $12.50/M on the step after a compaction and on step 1,
+read $0.25/M otherwise; per-step growth left out because it is identical across policies):
+
+| policy | compactions | input bill | vs 09-19 production | steps ≥ 100k | sessions reaching 350k |
+|---|---|---|---|---|---|
+| A no compaction | 0 | $542 | 0.62 | 52.1 % | 12 |
+| B production 09-19 (100k/50k, keep 20, min 2000) | 217 | $874 | 1.00 | 45.3 % | 6 |
+| H new defaults, ungated (100k/100k, keep 6, min 500) | 164 | $706 | 0.81 | 42.4 % | 6 |
+| **I new defaults + gate (implemented)** | 67 | $575 | **0.66** | 46.5 % | 11 |
+| J drop gate only, no hand-off skip | 67 | $575 | 0.66 | 46.5 % | 11 |
+
+The replay decides on the input size the last completed request reported (`series[-2]`), as the
+agent does, after the review of 2026-09-20 pointed out the one-step lead of the first version.
+
+Reading: the gate removes 70 % of the compactions and 35 % of the compaction-related input bill
+(≈ $299 per 72 h at this volume).  Two caveats the numbers make plain:
+
+1. At Fable 5.1's 0.025x cache-read price a compaction that drops a quarter of the context needs
+   ~196 further steps to pay back; "no compaction" is still $32 cheaper than the gated policy on
+   input alone.  What compaction buys on this model is hand-off avoidance, and the 25 % gate gives
+   most of that back (11 sessions reach 350k vs 6).  A price-aware gate (break-even from the
+   model's `cache_read`/`cache_write` prices in `MODEL_INFO` against the steps left before hand-off)
+   would compact on 0.1x models and only near the hand-off on 0.025x models.
+2. The hand-off proximity skip (I vs J) changed no decision in this data: a 25 % drop is never
+   available that late in a session.
+
+### Risk found while researching (not changed here)
+
+Anthropic's preserved-thinking prefix check (Claude Fable 5.1 and later) treats a shortened earlier
+`tool_result` as invalidating every later thinking block; accounts created on or after
+2026-08-31 get a 400 by default and "later models will enforce the prefix check for all accounts".
+The client-side stubbing this module does is therefore a latent failure on Anthropic; the
+Anthropic-native replacement is server-side `clear_tool_uses_20250919` (beta header
+`context-management-2025-06-27`) with `clear_at_least` as the cache-worth gate.  See the memory
+page `anthropic-prompt-cache-facts-2026-09` for the sources.
