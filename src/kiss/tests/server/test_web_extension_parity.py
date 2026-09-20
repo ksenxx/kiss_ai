@@ -62,6 +62,34 @@ def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
 
 
+def _join_task_threads() -> None:
+    """Wait for every registered state's worker thread to finish.
+
+    The ``submit`` tests stub ``agent.run`` to return at once, but
+    ``_run_task`` keeps working on its SQLite connection afterwards
+    (``_persist_subtask_row`` → ``_save_task_result``).  That connection
+    is usually the one ``persistence._db_conn`` names — the last one
+    opened by ANY thread — so ``asyncTearDown``'s ``_db_conn.close()``
+    would close it while the worker is inside ``COMMIT`` and crash the
+    interpreter (SIGSEGV in ``_sqlite3``).  ``stop_async`` would join the
+    worker itself, but only while the state is still registered, and the
+    tests clear the registry first; so join here, before that clear.
+    The join is unbounded on purpose: the stubbed ``agent.run`` returns
+    at once, and returning early (a timed-out join) would re-create the
+    crash — SQLite's busy timeout alone is 30 s.
+    """
+    from kiss.server import agent_state
+
+    with agent_state.STATE_LOCK:
+        threads = [
+            state.task_thread
+            for state in agent_state.agent_states.values()
+            if state.task_thread is not None
+        ]
+    for thread in threads:
+        thread.join()
+
+
 class TestWebExtensionParity(IsolatedAsyncioTestCase):
     """End-to-end parity tests over the shared dispatch path."""
 
@@ -361,6 +389,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     pass
         finally:
             keys.ANTHROPIC_API_KEY = saved_key
+            await asyncio.to_thread(_join_task_threads)
             agent_state.agent_states.clear()
 
     async def test_submit_forwards_web_tools_to_run(self) -> None:
@@ -441,6 +470,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     pass
         finally:
             keys.ANTHROPIC_API_KEY = saved_key
+            await asyncio.to_thread(_join_task_threads)
             agent_state.agent_states.clear()
 
     async def test_submit_forwards_use_memory_to_run(self) -> None:
@@ -521,6 +551,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     pass
         finally:
             keys.ANTHROPIC_API_KEY = saved_key
+            await asyncio.to_thread(_join_task_threads)
             agent_state.agent_states.clear()
 
     async def test_submit_forwards_classify_tasks_to_run(self) -> None:
@@ -612,4 +643,5 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         finally:
             SorcarAgent.classify_task_for_run = original_classify  # type: ignore[method-assign]
             keys.ANTHROPIC_API_KEY = saved_key
+            await asyncio.to_thread(_join_task_threads)
             agent_state.agent_states.clear()
