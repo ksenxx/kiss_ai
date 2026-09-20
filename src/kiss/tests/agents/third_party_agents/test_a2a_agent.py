@@ -23,8 +23,8 @@ from typing import Any
 import pytest
 import requests
 
-import kiss.agents.third_party_agents.a2a_agent as a2a_mod
-from kiss.agents.third_party_agents.a2a_agent import (
+import kiss.agents.third_party_agents.a2a_sea as a2a_mod
+from kiss.agents.third_party_agents.a2a_sea import (
     A2AAgent,
     A2AChannelBackend,
     _config,

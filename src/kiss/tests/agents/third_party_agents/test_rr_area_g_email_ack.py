@@ -38,7 +38,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
-from kiss.agents.third_party_agents.email_agent import EmailChannelBackend, _config
+from kiss.agents.third_party_agents.email_sea import EmailChannelBackend, _config
 
 _RAW_MAIL = (
     b"From: Alice Example <alice@example.com>\r\n"

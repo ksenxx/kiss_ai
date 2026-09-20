@@ -451,7 +451,7 @@ class TestBusyRunConversion:
 
 
 class TestWebPrinterTargetedEventGuard:
-    """Only ``prompt`` echoes may cross from transient to task events."""
+    """Only ``TAB_STAMPED_TASK_EVENT_TYPES`` cross from transient to task events."""
 
     def test_nonprompt_tab_event_with_task_id_stays_transient(
         self, isolated_db,
@@ -574,6 +574,111 @@ class TestWebPrinterTargetedEventGuard:
         assert not _persisted_prompts(
             h.persisted_events(h.parent_task_id), "NOWHERE TO GO",
         )
+
+
+class TestAskAnswerEvent:
+    """The ``/ask`` reply lands in the OWNER task's recording and rows.
+
+    ``VSCodeServer._broadcast_ask_answer`` (the side-channel worker's
+    last act) broadcasts a ``tabId`` + ``taskId`` stamped
+    ``ask_answer`` event through the real :class:`WebPrinter`: like
+    the ``/ask`` prompt echo, it must be recorded into the owner
+    task's in-memory recording (replayed to a viewer attaching to the
+    still-running task) and persisted into its ``events`` rows
+    (replayed on a history reopen), with the ``tabId`` stripped.
+    """
+
+    def test_ask_answer_recorded_and_persisted_under_owner_task(
+        self, isolated_db,
+    ) -> None:
+        h = _Harness()
+        h.server._broadcast_ask_answer(
+            tab_id="tab-parent",
+            owner_task_id=h.parent_task_id,
+            question="why did step 3 fail?",
+            text="<p>The file was missing.</p>",
+            success=True,
+        )
+        rec = [
+            e for e in h.recording(h.parent_task_id)
+            if e.get("type") == "ask_answer"
+        ]
+        assert len(rec) == 1
+        assert rec[0]["question"] == "why did step 3 fail?"
+        assert rec[0]["text"] == "<p>The file was missing.</p>"
+        assert rec[0]["success"] is True
+        assert rec[0]["taskId"] == h.parent_task_id
+        assert "tabId" not in rec[0]
+        assert "ts" in rec[0]
+        persisted = [
+            e for e in h.persisted_events(h.parent_task_id)
+            if e.get("type") == "ask_answer"
+        ]
+        assert len(persisted) == 1
+        assert persisted[0]["text"] == "<p>The file was missing.</p>"
+        assert "tabId" not in persisted[0]
+        # The reply belongs to the task that was asked about only.
+        assert h.recording(h.sub_task_id) == []
+
+    def test_ask_answer_after_owner_finished_is_still_persisted(
+        self, isolated_db,
+    ) -> None:
+        """An answer that lands after its task ended MUST still be saved.
+
+        The answering agent runs on its own thread and may outlive the
+        task it was asked about.  By then the task-runner has cleared
+        the owner's live agent and dropped its recording
+        (``cleanup_task``), so a persistence path that resolves the
+        LIVE agent would file the reply nowhere and a history reopen
+        would lose it.  The event names its ``task_history`` row
+        itself; that is what it is filed under.
+        """
+        h = _Harness()
+        # Normal owner completion: task_runner clears the agent under
+        # the state lock, then drops the printer's per-task state.
+        with agent_state.STATE_LOCK:
+            h.parent_state.agent = None
+            h.parent_state.is_task_active = False
+        h.printer.cleanup_task(h.parent_task_id)
+        assert h.recording(h.parent_task_id) == []
+
+        h.server._broadcast_ask_answer(
+            tab_id="tab-parent",
+            owner_task_id=h.parent_task_id,
+            question="what did the run change?",
+            text="<p>Two files under src/.</p>",
+            success=True,
+        )
+        persisted = [
+            e for e in h.persisted_events(h.parent_task_id)
+            if e.get("type") == "ask_answer"
+        ]
+        assert len(persisted) == 1
+        assert persisted[0]["question"] == "what did the run change?"
+        assert persisted[0]["text"] == "<p>Two files under src/.</p>"
+        assert persisted[0]["taskId"] == h.parent_task_id
+        assert "tabId" not in persisted[0]
+        # The closed task's in-memory recording is not resurrected.
+        assert h.recording(h.parent_task_id) == []
+
+    def test_ask_answer_without_owner_task_stays_transient(
+        self, isolated_db,
+    ) -> None:
+        """No ``taskId`` stamp → shown live only, recorded nowhere."""
+        h = _Harness()
+        h.server._broadcast_ask_answer(
+            tab_id="tab-parent",
+            owner_task_id="",
+            question="q",
+            text="a",
+            success=False,
+        )
+        assert h.recording(h.parent_task_id) == []
+        assert h.recording(h.sub_task_id) == []
+        assert not [
+            e for e in h.persisted_events(h.parent_task_id)
+            if e.get("type") == "ask_answer"
+        ]
 
 
 class TestSubagentStop:

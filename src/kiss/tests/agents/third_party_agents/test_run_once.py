@@ -20,7 +20,7 @@ import pytest
 
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
 from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
-from kiss.agents.third_party_agents.slack_agent import (
+from kiss.agents.third_party_agents.slack_sea import (
     SlackChannelBackend,
     _save_token,
     _token_path,

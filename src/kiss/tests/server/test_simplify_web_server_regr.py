@@ -290,12 +290,13 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """An unreadable ``scripts`` dir degrades to the root script.
 
-        On Python 3.13+ ``Path.is_file()`` suppresses ``OSError`` (e.g.
-        the ``PermissionError`` an unreadable ``scripts`` directory
-        raises underneath) and returns False, so the probe treats the
-        bootstrap as absent: the update must fall back to running the
-        root ``install.sh`` directly rather than erroring out or leaving
-        ``_update_starting`` wedged.
+        The bootstrap probe uses ``os.path.isfile``, which returns False
+        on every ``OSError`` (``Path.is_file()`` re-raises the
+        ``PermissionError`` an unreadable ``scripts`` directory produces
+        on Python 3.13), so the probe treats the bootstrap as absent:
+        the update must fall back to running the root ``install.sh``
+        directly rather than erroring out or leaving ``_update_starting``
+        wedged.
         """
         if is_root():
             self.skipTest("permission bits do not bind root")

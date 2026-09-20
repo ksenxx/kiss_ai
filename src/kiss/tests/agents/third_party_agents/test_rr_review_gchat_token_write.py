@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for Google Chat's atomic OAuth-token persistence.
 
-Review finding: ``googlechat_agent.py`` still wrote the OAuth token with
+Review finding: ``googlechat_sea.py`` still wrote the OAuth token with
 ``write_text`` + ``chmod`` — the exact truncate-then-chmod pattern the
 audit replaced for gmail — exposing a brief world-readable window and
 torn reads to concurrent processes.  Both token-write sites now
@@ -62,7 +62,7 @@ class TestGoogleChatSaveToken:
     ) -> None:
         """A real google Credentials object persists to a private file."""
         monkeypatch.setenv("KISS_HOME", str(tmp_path / "kiss_home"))
-        from kiss.agents.third_party_agents.googlechat_agent import (
+        from kiss.agents.third_party_agents.googlechat_sea import (
             _save_token,
             _token_path,
         )
@@ -86,7 +86,7 @@ class TestGoogleChatSaveToken:
         with atomic replace every read is one complete private payload.
         """
         monkeypatch.setenv("KISS_HOME", str(tmp_path / "kiss_home"))
-        from kiss.agents.third_party_agents.googlechat_agent import (
+        from kiss.agents.third_party_agents.googlechat_sea import (
             _save_token,
             _token_path,
         )

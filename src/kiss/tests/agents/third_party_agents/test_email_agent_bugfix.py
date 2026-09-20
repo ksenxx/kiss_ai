@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.third_party_agents.email_agent import (
+from kiss.agents.third_party_agents.email_sea import (
     EmailChannelBackend,
     _build_outbound,
     _message_body_text,

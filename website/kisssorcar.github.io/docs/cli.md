@@ -110,6 +110,8 @@ def tool_call_hook():
 
 The full authoring guide is in [`src/kiss/server/README.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md).
 
+**Slash commands.** A SEA named `xxx_sea.py` is also a chat command: `/xxx some text` makes the session run that file on "some text" through `run_agent`. Bundled channel agents are registered automatically (`/slack`, `/gmail`, ...); add your own SEA folders to `~/.kiss/SEAS.md`. See [Slash Commands for SEAs](sea-commands.md).
+
 ## Skills, MCP Servers, and Customization
 
 - Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.

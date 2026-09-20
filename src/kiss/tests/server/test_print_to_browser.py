@@ -60,8 +60,8 @@ class TestDisplayEventTypes(unittest.TestCase):
             "text_delta", "text_end", "tool_call", "tool_result",
             "system_output", "result", "system_prompt", "prompt",
             "task_done", "task_error", "task_stopped", "task_interrupted",
-            "followup_suggestion", "autocommit_done", "warning",
-            "usage_info", "task_settings",
+            "followup_suggestion", "ask_answer", "autocommit_done",
+            "warning", "usage_info", "task_settings",
         }
         assert _DISPLAY_EVENT_TYPES == expected
 

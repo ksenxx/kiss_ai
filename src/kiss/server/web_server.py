@@ -314,6 +314,10 @@ _EXTENSION_DIR_PREFIX = "ksenxx.kiss-sorcar-"
 _PYPI_FETCH_TIMEOUT = 5.0
 
 _WS_PING_TIMEOUT = 10
+
+_WS_HEARTBEAT_FRAME = json.dumps({"type": "heartbeat"})
+"""Proof-of-life frame the watchdog sends every WSS client after each
+successful keep-alive ping (see :meth:`RemoteAccessServer._ping_one_ws`)."""
 # Catchable termination signals routed through
 # ``RemoteAccessServer._handle_shutdown_signal``.  SIGHUP (terminal
 # closed) does not exist on Windows, where only SIGTERM is available.
@@ -519,6 +523,10 @@ def _share_subagent_entries(
 # 10s default silently guillotines large downloads such as the 40MB
 # wake-word model, which reaches the browser as ERR_EMPTY_RESPONSE.
 _OPEN_TIMEOUT_SECONDS = 300.0
+
+# Upper bound on waiting for a sibling daemon's ``.tls.lock`` (a
+# self-signed cert generation takes well under a second).
+_TLS_LOCK_TIMEOUT_S = 30.0
 
 _MAX_VOICE_AUDIO_B64 = 4 * 1024 * 1024
 
@@ -1692,6 +1700,7 @@ def _wait_for_remote_password(timeout: float = 30.0) -> str:
 
 def _save_url_file(
     url_file: Path, local_url: str, tunnel_url: str | None = None,
+    loopback_url: str | None = None, lan_urls: list[str] | None = None,
 ) -> None:
     """Write the active server URLs to ``url_file``.
 
@@ -1705,10 +1714,17 @@ def _save_url_file(
         url_file: Path to the JSON file to write.
         local_url: The local ``https://localhost:PORT`` URL.
         tunnel_url: The Cloudflare tunnel URL, or None.
+        loopback_url: The ``https://127.0.0.1:PORT`` URL, or None.
+        lan_urls: ``https://<lan-ip>:PORT`` URLs for the host's
+            routable LAN addresses, or None.
     """
-    data: dict[str, str] = {"local": local_url}
+    data: dict[str, object] = {"local": local_url}
     if tunnel_url:
         data["tunnel"] = tunnel_url
+    if loopback_url:
+        data["loopback"] = loopback_url
+    if lan_urls:
+        data["lan"] = list(lan_urls)
     _atomic_write_text(url_file, json.dumps(data, indent=2) + "\n")
 
 
@@ -2235,7 +2251,11 @@ def _create_ssl_context(
         tls_dir.mkdir(parents=True, exist_ok=True)
         lock_path = tls_dir / ".tls.lock"
         with open(lock_path, "w", encoding="utf-8") as lock_file:
-            lock_exclusive(lock_file)
+            # Bounded like the UDS sidecar lock in ``_bind_uds``: a
+            # blocking ``LOCK_EX`` behind a wedged sibling would stall
+            # startup forever, and cancelling the ``to_thread`` caller
+            # cannot interrupt the executor syscall.
+            _flock_with_deadline(lock_file, _TLS_LOCK_TIMEOUT_S)
             if not cert_path.is_file() or not key_path.is_file():
                 logger.info(
                     "Generating self-signed TLS certificate in %s", tls_dir,
@@ -2480,9 +2500,11 @@ class WebPrinter(JsonPrinter):
           askUser, commitMessage, etc.) are treated as
           targeted "system" events: sent verbatim to all connected
           clients (which filter by ``tabId``), but **not** recorded
-          or persisted — except ``prompt`` echoes that ALSO carry a
-          ``taskId``, whose tabId-stripped copy is recorded and
-          persisted under that task (see the tabId branch below).
+          or persisted — except the ``TAB_STAMPED_TASK_EVENT_TYPES``
+          (``prompt`` echoes, ``ask_answer`` replies, ``result``) that
+          ALSO carry a ``taskId``, whose tabId-stripped copy is
+          recorded and persisted under that task (see the tabId branch
+          below).
         * Events with no ``tabId`` but a thread-local ``task_id`` are
           task events: ``taskId`` is injected, the event is recorded
           under the task and queued for persistence, and one stamped
@@ -2528,11 +2550,7 @@ class WebPrinter(JsonPrinter):
 
         if "tabId" in event:
             self._track_worktree_event(event, event.get("tabId"))
-            if event.get("type") in ("prompt", "result") and event.get("taskId"):
-                record = {k: v for k, v in event.items() if k != "tabId"}
-                with self._lock:
-                    self._record_event(record)
-                self._persist_event(record)
+            self._keep_tab_stamped_task_event(event)
             if record_only:
                 return
             self._send_to_ws_clients(json.dumps(event))
@@ -3423,6 +3441,49 @@ def _build_html() -> str:
     )
 
 
+_MEDIA_URL_RE = re.compile(r"/media/[A-Za-z0-9_.-]+\?v=[0-9a-f]+")
+
+
+def _app_shell_urls() -> list[str]:
+    """Return the URLs the service worker precaches: the app shell.
+
+    The shell is the page itself (``/``) plus every cache-busted
+    ``/media/<name>?v=<hash>`` URL the rendered page references
+    (stylesheets, scripts, the theme CSS swapped in by ``main.js``,
+    the voice engine and its ack sound).  Deriving the list from
+    :func:`_build_html` keeps it in lockstep with the page: an asset
+    added to the template is precached without a second list to
+    maintain.  The hashes come from :func:`_media_url`, so the list
+    is stable for the daemon's lifetime and changes exactly when an
+    asset's bytes change.
+    """
+    urls = sorted(set(_MEDIA_URL_RE.findall(_build_html())))
+    return ["/", *urls]
+
+
+def _build_service_worker() -> str:
+    """Render ``media/sw.js`` for the ``/sw.js`` endpoint.
+
+    Substitutes the ``__KISS_SW_SHELL__`` placeholder with a JSON
+    object ``{"version": <hash of the manifest>, "urls": [...]}``
+    (see :func:`_app_shell_urls`).  Because the manifest is part of
+    the script, the browser sees a byte-different worker — and
+    installs it, with a new cache name — whenever any shell asset
+    changes; identical assets yield an identical script and the
+    browser keeps the worker it has.
+
+    Returns:
+        The complete service-worker script.
+    """
+    urls = _app_shell_urls()
+    shell = {
+        "version": hashlib.sha256("\n".join(urls).encode("utf-8")).hexdigest()[:16],
+        "urls": urls,
+    }
+    tpl = (MEDIA_DIR / "sw.js").read_text(encoding="utf-8")
+    return tpl.replace("__KISS_SW_SHELL__", json.dumps(shell))
+
+
 def _parse_version_py(vfile: Path) -> str:
     """Return the ``__version__`` string from a ``_version.py`` file.
 
@@ -3774,6 +3835,96 @@ _WS_SHIM_JS = r"""
     _updateLoadingMsg(true);
   }
 
+  // A page the service worker answered from its cache because the
+  // server was unreachable carries the ``kiss-offline-shell`` meta
+  // (see media/sw.js).  Its code may be older than what the server
+  // now runs, so the first successful handshake reloads it — exactly
+  // as a reconnect after an outage does.  The sessionStorage flag
+  // survives that reload and stops a loop when the page fetch keeps
+  // timing out (slow link) while the WebSocket still comes up: the
+  // second cached load is kept.  A page the server itself served
+  // clears the flag.
+  var _OFFLINE_RELOADED_FLAG = 'sorcar-offline-reloaded';
+  var _reloadOnFirstAuth = false;
+  // Set when a lost session (or an offline-cached page) has been
+  // re-authenticated and the page waits for the server's ``pong``
+  // before reloading itself; ``_inflight`` holds the commands flushed
+  // on that connection until the pong confirms them, so a connection
+  // that dies first re-queues them for the next one (at-least-once:
+  // a settings save may be applied twice, never silently lost).
+  var _reloadOnPong = false;
+  var _inflight = [];
+  try {
+    if (document.querySelector('meta[name="kiss-offline-shell"]')) {
+      _reloadOnFirstAuth =
+        sessionStorage.getItem(_OFFLINE_RELOADED_FLAG) !== '1';
+    } else {
+      sessionStorage.removeItem(_OFFLINE_RELOADED_FLAG);
+    }
+  } catch (e) {}
+
+  // Half-open sockets: when the network path dies silently (Wi-Fi to
+  // cellular hand-over, a NAT entry expiring, the laptop lid closing)
+  // the browser keeps reporting the socket OPEN and no ``onclose``
+  // ever fires, so the app would sit "connected" while every frame
+  // is lost.  The server sends a ``heartbeat`` frame to every client
+  // right after each of its own keep-alive pings (every 15 s, see
+  // ``RemoteAccessServer._ping_one_ws``); a socket that has been
+  // silent for ``_STALE_AFTER_MS`` is therefore dead and is dropped
+  // here so the regular reconnect path (banner, backoff, reload on
+  // re-auth) takes over.  Any frame counts as life, so a slow server
+  // command cannot cause a false alarm.
+  var _STALE_CHECK_MS = 15000;
+  var _STALE_AFTER_MS = 45000;
+  var _lastFrameAt = 0;
+  var _staleTimer = null;
+
+  function _stopStaleCheck() {
+    if (_staleTimer !== null) {
+      try { clearTimeout(_staleTimer); } catch (e) {}
+      _staleTimer = null;
+    }
+  }
+
+  function _checkStale() {
+    _staleTimer = null;
+    if (!_authenticated || !_ws || _ws.readyState !== WebSocket.OPEN) return;
+    if (Date.now() - _lastFrameAt >= _STALE_AFTER_MS) {
+      _dropSocket(_ws);
+      _onSocketClosed();
+      return;
+    }
+    _staleTimer = setTimeout(_checkStale, _STALE_CHECK_MS);
+  }
+
+  // Neutralise *ws* so none of its late events reach the shim, then
+  // close it.  Shared by connect() (replacing a dead socket on
+  // wake-up) and the stale check.
+  function _dropSocket(ws) {
+    try {
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+    } catch (e) {}
+    try { ws.close(); } catch (e) {}
+  }
+
+  // Offline app shell: the service worker served at ``/sw.js`` (see
+  // ``_build_service_worker``) caches this page and its ``/media``
+  // assets, so the app still opens — and stays on screen — when the
+  // connection is slow, flaky or gone, and a reload after a
+  // reconnect is served network-first.  Best effort: browsers refuse
+  // a worker fetched over a self-signed certificate (the LAN URL),
+  // and the app must keep working without one.
+  if (typeof navigator !== 'undefined' && navigator.serviceWorker &&
+      typeof navigator.serviceWorker.register === 'function') {
+    try {
+      navigator.serviceWorker.register('/sw.js', {updateViaCache: 'none'})
+        .catch(function () {});
+    } catch (e) {}
+  }
+
   // Deliver a server frame (or a synthesised ``daemonStatus`` post) to
   // the app as a window ``message`` event.  This shim script runs at
   // the TOP of the body script list, so the WebSocket regularly
@@ -3900,6 +4051,82 @@ _WS_SHIM_JS = r"""
     };
   };
 
+  // A connection that went away while its ``pong`` was still awaited
+  // proves nothing about the batch flushed on it: the next connection
+  // sends the batch again, ahead of whatever has been queued since.
+  function _requeueUnconfirmed() {
+    if (!_reloadOnPong) return;
+    _pending = _inflight.concat(_pending);
+    _inflight = [];
+    _reloadOnPong = false;
+  }
+
+  // Shared by the socket's ``onclose`` and the stale-socket check
+  // (``_checkStale``), which drops a half-open socket that will never
+  // fire ``onclose`` on its own.
+  function _onSocketClosed() {
+    // Latch "we had a real session and then lost it" so the next
+    // successful ``auth_ok`` reloads the page.  We only set the
+    // flag when the prior socket had completed its auth handshake
+    // — a fresh page that has not yet authenticated must NOT
+    // trigger a reload on its first ``auth_ok``.
+    if (_authenticated) {
+      _hadAuthThenClosed = true;
+      // Persist the reconnect-state across the ``location.reload()``
+      // that ``auth_ok`` will trigger so the freshly-loaded page
+      // labels its overlay "Reconnecting ..." instead of the
+      // misleading "KISS Sorcar Server is starting ...".  Mobile
+      // Safari frequently kills the WebSocket whenever the user
+      // switches apps, so this is the common case, not an edge
+      // case.
+      _setReconnectingFlag(true);
+    }
+    _authenticated = false;
+    _requeueUnconfirmed();
+    _stopStaleCheck();
+    if (_lockedRetryMs > 0) {
+      // This close follows an ``auth_locked`` frame: the server is
+      // rate-limiting this IP after too many failed logins.  Keep
+      // the lockout explanation on the overlay (do NOT overwrite it
+      // with the generic label below) and hold off reconnecting
+      // until the server-provided lockout expiry — the fast backoff
+      // would only harvest more silent refusals.  The wake-up
+      // listeners may still reconnect earlier; the server then just
+      // re-sends ``auth_locked`` with a fresher ``retry_after``.
+      var lockedDelay = _lockedRetryMs;
+      _lockedRetryMs = 0;
+      _dispatchToApp({type: 'daemonStatus', connected: false});
+      try { clearTimeout(_reconnectTimer); } catch (e) {}
+      _reconnectTimer = setTimeout(function () {
+        _reconnectTimer = null;
+        connect();
+      }, lockedDelay);
+      return;
+    }
+    // Switch the overlay text BEFORE re-revealing it: once we have
+    // had at least one successful handshake (current page or any
+    // previous one, latched via sessionStorage) every overlay
+    // appearance is a reconnect from the user's perspective.
+    _updateLoadingMsg(_hadAuthThenClosed || _readReconnectingFlag());
+    // Tell the app the socket is down.  Symmetric to the ``auth_ok``
+    // dispatch above and to ``SorcarSidebarView.ts``'s disconnect
+    // handler in the VS Code path.  ``reconnecting: true`` — the
+    // app was authenticated and on screen in THIS page — makes
+    // ``main.js`` keep ``#app`` visible under a slim "Reconnecting
+    // ..." banner instead of covering it with the full-screen
+    // overlay: a flaky link must not blank the app every few
+    // seconds.  A page that never authenticated has nothing to show
+    // and keeps the full overlay.  The banner also tells the user
+    // that sending is on hold (``main.js`` holds prompts back while
+    // the daemon is down); the reload on the next ``auth_ok``
+    // resyncs everything.
+    _dispatchToApp({
+      type: 'daemonStatus', connected: false,
+      reconnecting: _hadAuthThenClosed,
+    });
+    _scheduleReconnect();
+  }
+
   function connect() {
     // Neutralise the previous socket BEFORE we install a fresh one.
     // On iOS Safari the OS may kill the underlying WebSocket while
@@ -3925,14 +4152,10 @@ _WS_SHIM_JS = r"""
         _hadAuthThenClosed = true;
         _setReconnectingFlag(true);
       }
-      try {
-        _ws.onopen = null;
-        _ws.onmessage = null;
-        _ws.onclose = null;
-        _ws.onerror = null;
-      } catch (e) {}
-      try { _ws.close(); } catch (e) {}
+      _requeueUnconfirmed();
+      _dropSocket(_ws);
     }
+    _stopStaleCheck();
     _ws = new WebSocket('wss://' + location.host + '/ws');
     _authenticated = false;
 
@@ -3944,29 +4167,33 @@ _WS_SHIM_JS = r"""
 
     _ws.onmessage = function(event) {
       var msg = JSON.parse(event.data);
+      _lastFrameAt = Date.now();
+      if (msg.type === 'heartbeat') return;
       if (msg.type === 'auth_ok') {
         // Recover from a server restart / network blip: if we had
         // already authenticated at least once and the WS later
         // closed, the page JS state is stale relative to the
         // freshly booted backend.  Reload so the normal page-load
         // pipeline (history replay, restored tabs, ...) runs
-        // against the new server state.
+        // against the new server state.  A page the service worker
+        // served from its offline cache reloads on its first
+        // handshake for the same reason (``_reloadOnFirstAuth``).
         // The reload is gated by ``_hadAuthThenClosed`` so the
         // very first authentication on a fresh page load does NOT
         // reload (otherwise we would loop forever).
-        if (_hadAuthThenClosed) {
-          try { window.location.reload(); } catch (e) {}
-          return;
-        }
+        var reloading = _hadAuthThenClosed || _reloadOnFirstAuth;
+        _hadAuthThenClosed = false;
         _authenticated = true;
+        _stopStaleCheck();
+        _staleTimer = setTimeout(_checkStale, _STALE_CHECK_MS);
         // We have a live, authenticated socket — any future
         // disconnect IS a reconnect, but the just-completed
         // handshake is not.  Drop the sessionStorage flag so a
         // subsequent fresh tab (different browsing session, same
-        // device) doesn't mislabel its first overlay.  The
-        // _hadAuthThenClosed branch above keeps the flag intact
-        // during the reload it triggers.
-        _setReconnectingFlag(false);
+        // device) doesn't mislabel its first overlay.  A reload
+        // keeps the flag intact so the next page labels its overlay
+        // "Reconnecting".
+        _setReconnectingFlag(reloading);
         _reconnectAttempt = 0;
         // Re-establish this instance's pinned work_dir BEFORE flushing
         // any queued commands: the server stamps each connection's
@@ -3980,8 +4207,25 @@ _WS_SHIM_JS = r"""
         if (_wd) {
           _ws.send(JSON.stringify({type: 'setWorkDir', workDir: _wd}));
         }
-        for (var i = 0; i < _pending.length; i++) _ws.send(_pending[i]);
+        // Everything the page posted while the connection was down
+        // (a settings save, a model change, a closed tab, ...) goes
+        // out now, on the new connection, so none of it is lost to
+        // the reload below.
+        var batch = _pending;
         _pending = [];
+        for (var i = 0; i < batch.length; i++) _ws.send(batch[i]);
+        if (reloading) {
+          // The server handles a connection's commands one at a
+          // time, so its ``pong`` proves it has taken every command
+          // flushed above; the page reloads when it arrives (see the
+          // ``pong`` branch).  Until then — and if the reload never
+          // happens because the user cancels the browser's "unsaved
+          // changes" dialog a dirty editor tab raises — this is a
+          // working, authenticated page, not a wedged one.
+          _inflight = batch;
+          _reloadOnPong = true;
+          _ws.send(JSON.stringify({type: 'ping'}));
+        }
         // Hide the "KISS Sorcar Server is starting ..." overlay now
         // that the WebSocket is authenticated.  The remote webapp has
         // no equivalent of the VS Code extension host's daemonStatus
@@ -3990,6 +4234,20 @@ _WS_SHIM_JS = r"""
         // Without this the overlay covers ``#app`` forever and the
         // user only ever sees "KISS Sorcar Server is starting ...".
         _dispatchToApp({type: 'daemonStatus', connected: true});
+        return;
+      }
+      if (msg.type === 'pong') {
+        if (!_reloadOnPong) return;
+        _reloadOnPong = false;
+        _inflight = [];
+        if (_reloadOnFirstAuth) {
+          // Record the offline-cached page's one reload only now that
+          // it really happens; a cached page that went away before
+          // this point (auth never completed) has not used it up.
+          _reloadOnFirstAuth = false;
+          try { sessionStorage.setItem(_OFFLINE_RELOADED_FLAG, '1'); } catch (e) {}
+        }
+        try { window.location.reload(); } catch (e) {}
         return;
       }
       if (msg.type === 'auth_required') {
@@ -4057,56 +4315,7 @@ _WS_SHIM_JS = r"""
       _dispatchToApp(msg);
     };
 
-    _ws.onclose = function() {
-      // Latch "we had a real session and then lost it" so the next
-      // successful ``auth_ok`` reloads the page.  We only set the
-      // flag when the prior socket had completed its auth handshake
-      // — a fresh page that has not yet authenticated must NOT
-      // trigger a reload on its first ``auth_ok``.
-      if (_authenticated) {
-        _hadAuthThenClosed = true;
-        // Persist the reconnect-state across the ``location.reload()``
-        // that ``auth_ok`` will trigger so the freshly-loaded page
-        // labels its overlay "Reconnecting ..." instead of the
-        // misleading "KISS Sorcar Server is starting ...".  Mobile
-        // Safari frequently kills the WebSocket whenever the user
-        // switches apps, so this is the common case, not an edge
-        // case.
-        _setReconnectingFlag(true);
-      }
-      _authenticated = false;
-      if (_lockedRetryMs > 0) {
-        // This close follows an ``auth_locked`` frame: the server is
-        // rate-limiting this IP after too many failed logins.  Keep
-        // the lockout explanation on the overlay (do NOT overwrite it
-        // with the generic label below) and hold off reconnecting
-        // until the server-provided lockout expiry — the fast backoff
-        // would only harvest more silent refusals.  The wake-up
-        // listeners may still reconnect earlier; the server then just
-        // re-sends ``auth_locked`` with a fresher ``retry_after``.
-        var lockedDelay = _lockedRetryMs;
-        _lockedRetryMs = 0;
-        _dispatchToApp({type: 'daemonStatus', connected: false});
-        try { clearTimeout(_reconnectTimer); } catch (e) {}
-        _reconnectTimer = setTimeout(function () {
-          _reconnectTimer = null;
-          connect();
-        }, lockedDelay);
-        return;
-      }
-      // Switch the overlay text BEFORE re-revealing it: once we have
-      // had at least one successful handshake (current page or any
-      // previous one, latched via sessionStorage) every overlay
-      // appearance is a reconnect from the user's perspective.
-      _updateLoadingMsg(_hadAuthThenClosed || _readReconnectingFlag());
-      // Re-show the loading overlay while the socket is down so the
-      // user knows actions will not reach the backend.  Symmetric to
-      // the ``auth_ok`` dispatch above and to
-      // ``SorcarSidebarView.ts``'s disconnect handler in the VS Code
-      // path.
-      _dispatchToApp({type: 'daemonStatus', connected: false});
-      _scheduleReconnect();
-    };
+    _ws.onclose = _onSocketClosed;
 
     _ws.onerror = function() {};
   }
@@ -4391,6 +4600,7 @@ class RemoteAccessServer:
         self._uds_handler_tasks: set[asyncio.Task[None]] = set()
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
+        self._ips_probed = False
         self._pending_ip_change: frozenset[str] | None = None
         self._pending_ip_change_count: int = 0
         self._auth_failures: dict[str, list[float]] = {}
@@ -4476,6 +4686,16 @@ class RemoteAccessServer:
             )
         if path == "/ws":
             return None
+        if path == "/sw.js":
+            # The offline app-shell service worker (media/sw.js with
+            # the precache manifest filled in).  Served from the site
+            # root so its scope covers "/"; the no-store headers of
+            # _http_response make every navigation's update check
+            # fetch the current script.
+            sw_script = await asyncio.to_thread(_build_service_worker)
+            return _http_response(
+                200, "text/javascript; charset=utf-8", sw_script.encode("utf-8"),
+            )
         if path in ("/trajectories", "/trajectories/"):
             return _http_response(
                 200,
@@ -5101,7 +5321,12 @@ class RemoteAccessServer:
         """
         if script is not None:
             bootstrap = script.parent / "scripts" / "install.sh"
-            if bootstrap.is_file():
+            # os.path.isfile, not Path.is_file: an unreadable ``scripts``
+            # directory must degrade to the root script below, and on
+            # Python 3.13 ``Path.is_file`` re-raises the PermissionError
+            # (only ENOENT/ENOTDIR/EBADF/ELOOP are swallowed) whereas
+            # ``os.path.isfile`` returns False for every OSError.
+            if os.path.isfile(bootstrap):
                 # scripts/install.sh (the curl bootstrap committed in the
                 # clone) synchronizes the checkout with origin under the
                 # cross-process update lock and hands over to the root
@@ -6849,12 +7074,97 @@ class RemoteAccessServer:
         }, "activeTasksQuery")
 
 
+    @property
+    def _loopback_url(self) -> str:
+        """The ``https://127.0.0.1:PORT`` URL for local-machine access."""
+        return f"https://127.0.0.1:{self.port}"
+
+    def _lan_urls(self) -> list[str]:
+        """Return ``https://<lan-ip>:PORT`` URLs for this host's LAN IPs.
+
+        Returns ``[]`` when LAN clients cannot actually reach the
+        webapp — the server is bound to a loopback-only host, or no
+        ``remote_password`` is configured (``_process_request`` answers
+        non-loopback peers 403 in that case) — so the UI never
+        advertises a LAN URL that would be refused.
+
+        Uses only the cached :attr:`_last_ips` snapshot (seeded
+        off-thread in ``_setup_server`` before the first URL-file
+        write, refreshed by the watchdog), so callers on the event
+        loop never block on the socket probes in
+        :func:`_get_local_ips`.  Before that first probe completes —
+        e.g. a client that connects during the listener/tunnel setup
+        window and asks for welcome info — no LAN URLs are advertised
+        yet rather than probing on the loop.
+        """
+        if self.host == "localhost" or _is_loopback_ip(self.host):
+            return []
+        if not str(load_config().get("remote_password", "") or ""):
+            return []
+        if not self._ips_probed:
+            return []
+        return [f"https://{ip}:{self.port}" for ip in sorted(self._last_ips)]
+
+    def _write_url_file_sync(self, tunnel_url: str | None) -> None:
+        """Write the URL file with local, loopback, LAN + tunnel URLs.
+
+        Blocking (disk + possible LAN-IP probe); callers on the event
+        loop must run it via an executor / ``asyncio.to_thread``.
+
+        Args:
+            tunnel_url: The Cloudflare tunnel URL, or None.
+        """
+        _save_url_file(
+            self._url_file, self._local_url, tunnel_url,
+            self._loopback_url, self._lan_urls(),
+        )
+
+    def _write_url_file_logged(self, tunnel_url: str | None) -> None:
+        """Run :meth:`_write_url_file_sync`, logging any failure.
+
+        Executor target for fire-and-forget URL-file re-writes whose
+        exceptions would otherwise vanish with the unawaited future.
+
+        Args:
+            tunnel_url: The Cloudflare tunnel URL, or None.
+        """
+        try:
+            self._write_url_file_sync(tunnel_url)
+        except Exception:
+            logger.warning("URL-file re-write failed", exc_info=True)
+
+    def _republish_urls(self) -> None:
+        """Re-write the URL file and re-broadcast ``remote_url``.
+
+        Called on the event loop after the watchdog adopts a new
+        LAN-IP baseline so the URL file's ``lan`` list and every open
+        settings/welcome panel stop showing addresses the machine no
+        longer holds.  The disk write runs in the default executor to
+        keep the loop responsive; the broadcast happens immediately.
+        """
+        tunnel_url = (
+            self._active_url
+            if self._active_url and self._active_url != self._local_url
+            else None
+        )
+        asyncio.get_running_loop().run_in_executor(
+            None, self._write_url_file_logged, tunnel_url,
+        )
+        self._broadcast_remote_url(
+            self._active_url or self._local_url, bool(tunnel_url),
+        )
+
     def _broadcast_remote_url(self, url: str, tunnel_active: bool) -> None:
         """Broadcast a ``remote_url`` event to every connected client.
 
         Includes the ``ntfyUrl`` field only when both *url* is
         non-empty and an ntfy topic is configured, matching the
         contract pinned by the welcome-info and tunnel-restart tests.
+        Always carries ``loopbackUrl`` (the ``https://127.0.0.1:PORT``
+        address for the local machine) and ``lanUrls`` (the
+        ``https://<lan-ip>:PORT`` addresses for other devices on the
+        LAN) so the settings panel and the welcome page can show how
+        to reach the webapp alongside the Cloudflare URL.
 
         Args:
             url: The active URL (``""`` when none is known).
@@ -6866,6 +7176,8 @@ class RemoteAccessServer:
             "type": "remote_url",
             "url": url or "",
             "tunnelActive": tunnel_active,
+            "loopbackUrl": self._loopback_url,
+            "lanUrls": self._lan_urls(),
         }
         if ntfy_url:
             msg["ntfyUrl"] = ntfy_url
@@ -6973,8 +7285,7 @@ class RemoteAccessServer:
             )
             if discovered:
                 await loop.run_in_executor(
-                    None, _save_url_file,
-                    self._url_file, self._local_url, discovered,
+                    None, self._write_url_file_sync, discovered,
                 )
                 self._active_url = discovered
                 url = discovered
@@ -7110,6 +7421,7 @@ class RemoteAccessServer:
         work_dir = cmd.get("workDir", "")
         for init_cmd in (
             "getModels", "getInputHistory", "getConfig", "getMyModels",
+            "getSeaCommands",
         ):
             init: dict[str, Any] = {"type": init_cmd, "connId": conn_id}
             if work_dir:
@@ -7378,8 +7690,20 @@ class RemoteAccessServer:
                 proc.returncode,
             )
             attempt += 1
-        self._tunnel_proc = last_proc
-        self._tunnel_started_at = time.monotonic()
+        # Same publish handshake as the success path above: after
+        # ``_stop_tunnel`` has reset the tunnel state, this executor
+        # thread must not overwrite it with a stale (dead) ``Popen``
+        # whose stderr pipe would then outlive ``stop_async``.
+        with self._tunnel_lock:
+            if self._tunnel_stopped and last_proc is not None:
+                if last_proc.stderr is not None:
+                    last_proc.stderr.close()
+                last_proc.wait()
+                raise RuntimeError(
+                    "tunnel stopped while cloudflared was starting",
+                )
+            self._tunnel_proc = last_proc
+            self._tunnel_started_at = time.monotonic()
 
     def _start_tunnel(self) -> str | None:
         """Start a ``cloudflared`` tunnel and return the public URL.
@@ -7667,9 +7991,7 @@ class RemoteAccessServer:
         the watchdog when the ``remote_password`` is cleared while a
         tunnel is live.
         """
-        await asyncio.to_thread(
-            _save_url_file, self._url_file, self._local_url, None,
-        )
+        await asyncio.to_thread(self._write_url_file_sync, None)
         self._active_url = self._local_url
         self._broadcast_remote_url(self._active_url, False)
         await self._post_url_if_changed()
@@ -7727,9 +8049,7 @@ class RemoteAccessServer:
                     delay,
                 )
             self._tunnel_next_retry = time.monotonic() + delay
-        await asyncio.to_thread(
-            _save_url_file, self._url_file, self._local_url, tunnel_url,
-        )
+        await asyncio.to_thread(self._write_url_file_sync, tunnel_url)
         self._active_url = tunnel_url or self._local_url
         self._broadcast_remote_url(self._active_url, bool(tunnel_url))
         await self._post_url_if_changed()
@@ -7763,6 +8083,16 @@ class RemoteAccessServer:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    # Keep shutdown bounded, but retain ownership until
+                    # a delayed SIGKILL can take effect and be reaped.
+                    threading.Thread(
+                        target=proc.wait,
+                        name=f"kiss-cloudflared-reaper-{proc.pid}",
+                        daemon=True,
+                    ).start()
             _unlink_cloudflared_pidfile()
         elif kill_adopted and self._tunnel_adopted_pid is not None:
             # An adopted pid came from the pidfile of a PREVIOUS
@@ -7803,10 +8133,24 @@ class RemoteAccessServer:
         self._reset_tunnel_proc_state()
 
     async def _ping_one_ws(self, ws: Any) -> None:
-        """Send a ping to a single WebSocket client, closing if stale."""
+        """Send a ping to a single WebSocket client, closing if stale.
+
+        A client that answers the protocol-level ping is then sent an
+        application-level ``{"type": "heartbeat"}`` frame.  The browser
+        answers pings inside its network stack, invisible to page
+        JavaScript, so this frame is the only regular proof of life
+        the remote webapp's WebSocket shim (``_WS_SHIM_JS``) can
+        observe: a shim that sees no frame at all for 45 s treats its
+        socket as half-open and reconnects.  Any failure closes the
+        connection.
+        """
         try:
             pong = await ws.ping()
             await asyncio.wait_for(pong, timeout=_WS_PING_TIMEOUT)
+            await asyncio.wait_for(
+                self._endpoint_send(ws, _WS_HEARTBEAT_FRAME),
+                timeout=_WS_PING_TIMEOUT,
+            )
         except Exception:
             try:
                 await ws.close()
@@ -7917,7 +8261,7 @@ class RemoteAccessServer:
                 if self._active_url and self._active_url != self._local_url
                 else None
             )
-            _save_url_file(self._url_file, self._local_url, tunnel_url)
+            self._write_url_file_sync(tunnel_url)
             logger.info(
                 "Re-wrote missing URL file %s (tunnel=%s)",
                 self._url_file, tunnel_url,
@@ -7956,6 +8300,7 @@ class RemoteAccessServer:
             self._last_ips = current_ips
             self._pending_ip_change = None
             self._pending_ip_change_count = 0
+            self._republish_urls()
         else:
             if current_ips == self._pending_ip_change:
                 self._pending_ip_change_count += 1
@@ -7975,6 +8320,7 @@ class RemoteAccessServer:
                         prev_ips,
                         current_ips,
                     )
+                    self._republish_urls()
                 else:
                     logger.info(
                         "IP address changed: %s → %s, "
@@ -8546,19 +8892,46 @@ class RemoteAccessServer:
                     None, self._start_tunnel,
                 )
 
-        await asyncio.to_thread(
-            _save_url_file, self._url_file, self._local_url, tunnel_url,
-        )
+        self._last_ips = await asyncio.to_thread(_get_local_ips)
+        self._ips_probed = True
+        await asyncio.to_thread(self._write_url_file_sync, tunnel_url)
         self._active_url = tunnel_url or self._local_url
         await self._post_url_if_changed()
-
-        self._last_ips = await asyncio.to_thread(_get_local_ips)
         self._watchdog_task = asyncio.create_task(self._watchdog())
         self._version_check_task = asyncio.create_task(
             self._version_check_loop(),
         )
 
+        self._start_sea_command_watcher()
         self._maybe_schedule_server_reset_complete()
+
+    def _start_sea_command_watcher(self) -> None:
+        """Start the SEA slash-command registry watcher.
+
+        Registers a subscriber that broadcasts a ``seaCommands`` event
+        to every connected client on any registry change (a SEA added
+        or removed from a watched folder, or ``SEAS.md`` edited), then
+        launches the background poller.  Idempotent per server
+        instance: the ``_sea_command_watcher_started`` guard prevents
+        a second call from stacking duplicate subscribers, so a
+        rebound listener or a test-time re-setup cannot fan a single
+        rescan out twice.
+        """
+        if getattr(self, "_sea_command_watcher_started", False):
+            return
+        self._sea_command_watcher_started = True
+        from kiss.agents.sorcar import sea_commands
+
+        def _on_change(commands: list[str]) -> None:
+            self._printer.broadcast(
+                {"type": "seaCommands", "commands": commands},
+            )
+
+        self._sea_command_subscriber: Callable[[list[str]], None] | None = (
+            _on_change
+        )
+        sea_commands.subscribe(_on_change)
+        sea_commands.start_registry_watcher()
 
     async def _serve_async(self) -> None:
         """Internal async entry point for the server.
@@ -8572,6 +8945,9 @@ class RemoteAccessServer:
         """
         await self._setup_server()
         print(f"KISS Sorcar remote access: {self._local_url}", file=sys.stderr)
+        print(f"Local machine:             {self._loopback_url}", file=sys.stderr)
+        for lan_url in self._lan_urls():
+            print(f"LAN:                       {lan_url}", file=sys.stderr)
         if self.use_tunnel and self._active_url != self._local_url:
             print(f"Cloudflare tunnel:         {self._active_url}", file=sys.stderr)
         elif self.use_tunnel:
@@ -9061,6 +9437,20 @@ class RemoteAccessServer:
             # (e.g. a briefly unwritable KISS dir); no-op when the
             # last save succeeded.
             self._vscode_server.tab_registry.flush()
+            # Also stop the SEA registry watcher on the blocking
+            # start() cleanup path (KeyboardInterrupt / pre-loop
+            # SIGTERM).  The async ``stop_async`` path unhooks it via
+            # its own teardown; this branch mirrors that so a fresh
+            # server rebound in the same process does not inherit a
+            # dead subscriber bound to the old printer.
+            from kiss.agents.sorcar import sea_commands
+
+            cb = getattr(self, "_sea_command_subscriber", None)
+            if cb is not None:
+                sea_commands.unsubscribe(cb)
+                self._sea_command_subscriber = None
+            self._sea_command_watcher_started = False
+            sea_commands.stop_registry_watcher()
             logger.info("Server stopped: pid=%d", pid)
 
     async def start_async(self) -> None:
@@ -9199,6 +9589,14 @@ class RemoteAccessServer:
             # not frozen for the grace period.
             await asyncio.to_thread(self._stop_tunnel)
             _remove_url_file(self._url_file)
+            from kiss.agents.sorcar import sea_commands
+
+            cb = getattr(self, "_sea_command_subscriber", None)
+            if cb is not None:
+                sea_commands.unsubscribe(cb)
+                self._sea_command_subscriber = None
+            self._sea_command_watcher_started = False
+            await asyncio.to_thread(sea_commands.stop_registry_watcher)
 
 
 def _resolve_tunnel_settings() -> tuple[str | None, str | None]:

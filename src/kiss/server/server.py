@@ -1513,6 +1513,48 @@ class VSCodeServer(
                 state.frontend_closed = False
             self._tab_chat_views[tab_id] = chat_id
 
+    def _publish_replay_reopen(
+        self,
+        tab_id: str,
+        chat_id: str,
+        task_id: str | None,
+        source: AgentState | None,
+        *,
+        title: str | None = None,
+    ) -> None:
+        """Stamp, publish and commit a tab reopened by ``_replay_session``.
+
+        The rowless token is stamped BEFORE the row publication: if the
+        registry is at capacity (publication 0, no row), the commit is
+        qualified by this token instead, which a racing token-0 close
+        retires (round-2 finding 1).  It is stamped under
+        ``_state_lock`` so it is totally ordered against every close
+        teardown's single destructive ``_state_lock`` section — it can
+        no longer land between a teardown's ownership check and its
+        cleanup (gpt-5.6-sol round-6 review, finding 1).
+
+        Args:
+            tab_id: The reopened frontend tab.
+            chat_id: The chat the tab is bound to.
+            task_id: The task to record on the registry row (falsy
+                values publish an empty task id).
+            source: The live state the viewer should subscribe to, if any.
+            title: New row title, or ``None`` to keep the current one.
+        """
+        with self._state_lock:
+            fallback = self.tab_registry.stamp_unregistered(tab_id)
+        publication = self._registry_update_tab(
+            tab_id,
+            chat_id=chat_id,
+            title=title,
+            task_id=str(task_id) if task_id else "",
+            create=True,
+        )
+        self._commit_replay_publication(
+            tab_id, chat_id, publication, source,
+            fallback_publication=fallback,
+        )
+
     def _drop_tab_state(
         self, tab_id: str, removal_token: int | None = None,
     ) -> None:
@@ -1935,28 +1977,8 @@ class VSCodeServer(
             # the publication, or a newer publication, owns the tab
             # from here on.
             if chat_id and not is_sub_view:
-                # Stamped BEFORE the row publication: if the registry
-                # is at capacity (publication 0, no row), the commit is
-                # qualified by this rowless token instead, which a
-                # racing token-0 close retires (round-2 finding 1).
-                # Stamped under ``_state_lock``: every close teardown
-                # performs its destructive steps in one ``_state_lock``
-                # section, so serializing the stamp on the same lock
-                # totally orders it against any in-flight teardown — it
-                # can no longer land between a teardown's ownership
-                # check and its cleanup (gpt-5.6-sol round-6 review,
-                # finding 1).
-                with self._state_lock:
-                    fallback = self.tab_registry.stamp_unregistered(tab_id)
-                publication = self._registry_update_tab(
-                    tab_id,
-                    chat_id=chat_id,
-                    task_id=str(task_id) if task_id else "",
-                    create=True,
-                )
-                self._commit_replay_publication(
-                    tab_id, chat_id, publication, rebound_state,
-                    fallback_publication=fallback,
+                self._publish_replay_reopen(
+                    tab_id, chat_id, task_id, rebound_state,
                 )
             else:
                 with self._state_lock:
@@ -2026,25 +2048,9 @@ class VSCodeServer(
             # qualified by THIS publication's generation (see
             # ``_commit_replay_publication``): a close that removed
             # the publication, or a newer publication, owns the tab.
-            # Stamped BEFORE the row publication: if the registry is
-            # at capacity (publication 0, no row), the commit is
-            # qualified by this rowless token instead, which a racing
-            # token-0 close retires (round-2 finding 1).  Stamped under
-            # ``_state_lock`` so it is totally ordered against every
-            # close teardown's single destructive ``_state_lock``
-            # section (gpt-5.6-sol round-6 review, finding 1).
-            with self._state_lock:
-                fallback = self.tab_registry.stamp_unregistered(tab_id)
-            publication = self._registry_update_tab(
-                tab_id,
-                chat_id=chat_id,
+            self._publish_replay_reopen(
+                tab_id, chat_id, task_id, rebound_state,
                 title=str(result.get("task", "") or ""),
-                task_id=str(task_id) if task_id else "",
-                create=True,
-            )
-            self._commit_replay_publication(
-                tab_id, chat_id, publication, rebound_state,
-                fallback_publication=fallback,
             )
         else:
             with self._state_lock:
@@ -2249,9 +2255,9 @@ class VSCodeServer(
         ``isDone`` is decided by :func:`_subagent_is_done`: presence in
         the agent-state registry under the sub-agent's
         own task id means its thread is still running so the tab
-        should pulse the ◉ indicator; absence means the sub-agent has
-        completed and the tab should render as a finished tab without
-        the indicator.
+        should show the spinner; absence means the sub-agent has
+        completed and the tab should render as a finished tab with the
+        green tick.
 
         Args:
             parent_task_id: ``task_history.id`` of the parent task.

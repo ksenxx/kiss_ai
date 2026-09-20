@@ -1785,5 +1785,211 @@ test('the visible tab id is published for voice', () => {
   win.close();
 });
 
+// ---------------------------------------------------------------------------
+// Leak 9 -- a delayed `/ask` answer names a task its tab has moved on from.
+// ---------------------------------------------------------------------------
+
+// The answering agent runs for minutes on its own thread.  Its reply is
+// stamped with the asking tab and the task it answers; by the time it
+// lands, the same tab may be running a NEWER task.  mayAdoptTaskId trusts
+// any tabId-stamped event, so without a guard the stale reply would render
+// into the new task and re-bind the tab to the finished one.
+
+test('a stale ask answer never enters the task that replaced it', () => {
+  const {win} = makeWebview();
+  const api = win._testApi;
+  const tab = api.getActiveTabId();
+  send(win, {type: 'text_delta', text: 'old task', tabId: tab, taskId: '100'});
+  send(win, {type: 'text_end', tabId: tab, taskId: '100'});
+  send(win, {type: 'text_delta', text: 'new task', tabId: tab, taskId: '200'});
+  send(win, {type: 'text_end', tabId: tab, taskId: '200'});
+
+  send(win, {
+    type: 'ask_answer',
+    question: 'stale question',
+    text: 'STALE_ANSWER_L9A',
+    success: true,
+    tabId: tab,
+    taskId: '100',
+  });
+  assert.ok(
+    !visibleText(win).includes('STALE_ANSWER_L9A'),
+    'an answer for task 100 must not show inside task 200',
+  );
+  // Still bound to task 200: a task-only addressed event of it renders.
+  send(win, {type: 'prompt', text: 'STILL_200_L9B', taskId: '200'});
+  assert.ok(
+    visibleText(win).includes('STILL_200_L9B'),
+    'the stale answer must not re-bind the tab to task 100',
+  );
+
+  win.close();
+});
+
+test('an ask answer for the task on screen still renders', () => {
+  const {win} = makeWebview();
+  const api = win._testApi;
+  const tab = api.getActiveTabId();
+  send(win, {type: 'text_delta', text: 'task', tabId: tab, taskId: '300'});
+  send(win, {type: 'text_end', tabId: tab, taskId: '300'});
+
+  send(win, {
+    type: 'ask_answer',
+    question: 'q',
+    text: 'CURRENT_ANSWER_L9C',
+    success: true,
+    tabId: tab,
+    taskId: '300',
+  });
+  assert.ok(
+    visibleText(win).includes('CURRENT_ANSWER_L9C'),
+    'the answer to the current task must render',
+  );
+  // An answer whose owner task never got a row carries no taskId: it is
+  // shown in the tab it was asked from, there is nothing to compare.
+  send(win, {
+    type: 'ask_answer',
+    question: 'q2',
+    text: 'UNSTAMPED_ANSWER_L9D',
+    success: false,
+    tabId: tab,
+  });
+  assert.ok(
+    visibleText(win).includes('UNSTAMPED_ANSWER_L9D'),
+    'an answer without a taskId is shown in the asking tab',
+  );
+
+  win.close();
+});
+
+test('a stale ask answer is not buffered into a background tab either', () => {
+  const {win} = makeWebview();
+  const {first, second} = twoTabs(win);
+  // A background tab is bound to its task by the task_settings event the
+  // daemon emits at task start (a hidden tab adopts that id; streamed
+  // deltas alone do not re-bind it).
+  send(win, {type: 'task_settings', tabId: first, settings: {task_id: '100'}});
+  send(win, {
+    type: 'text_delta',
+    text: 'first old',
+    tabId: first,
+    taskId: '100',
+  });
+  send(win, {type: 'text_end', tabId: first, taskId: '100'});
+  send(win, {type: 'task_settings', tabId: first, settings: {task_id: '200'}});
+  send(win, {
+    type: 'text_delta',
+    text: 'first new',
+    tabId: first,
+    taskId: '200',
+  });
+  send(win, {type: 'text_end', tabId: first, taskId: '200'});
+  assert.strictEqual(win._testApi.getActiveTabId(), second);
+
+  send(win, {
+    type: 'ask_answer',
+    question: 'q',
+    text: 'STALE_BG_ANSWER_L9E',
+    success: true,
+    tabId: first,
+    taskId: '100',
+  });
+  clickTab(win, first);
+  assert.ok(
+    !visibleText(win).includes('STALE_BG_ANSWER_L9E'),
+    'the restored tab must not show an answer for the task it left',
+  );
+
+  win.close();
+});
+
+test("a stale ask answer is dropped in the replacement run's pre-adoption window", () => {
+  // The tab still carries task 100's id after the new run's setTaskText +
+  // clear, until the run's first id-bearing event arrives.  An answer for
+  // task 100 landing in that window must not enter the cleared transcript.
+  const {win} = makeWebview();
+  const api = win._testApi;
+  const tab = api.getActiveTabId();
+  send(win, {type: 'text_delta', text: 'old task', tabId: tab, taskId: '100'});
+  send(win, {type: 'text_end', tabId: tab, taskId: '100'});
+  send(win, {type: 'setTaskText', text: 'new task', tabId: tab});
+  send(win, {type: 'clear', tabId: tab, chat_id: 'chat-1'});
+
+  send(win, {
+    type: 'ask_answer',
+    question: 'old q',
+    text: 'STALE_PRE_ADOPTION_L9F',
+    success: true,
+    tabId: tab,
+    taskId: '100',
+  });
+  assert.ok(
+    !visibleText(win).includes('STALE_PRE_ADOPTION_L9F'),
+    'an answer for the replaced task must not enter the new run',
+  );
+  // The new run then binds the tab to task 200 and streams normally.
+  send(win, {
+    type: 'text_delta',
+    text: 'NEW_RUN_L9G',
+    tabId: tab,
+    taskId: '200',
+  });
+  send(win, {type: 'text_end', tabId: tab, taskId: '200'});
+  assert.ok(visibleText(win).includes('NEW_RUN_L9G'), 'the new run renders');
+  send(win, {
+    type: 'ask_answer',
+    question: 'new q',
+    text: 'NEW_ANSWER_L9H',
+    success: true,
+    tabId: tab,
+    taskId: '200',
+  });
+  assert.ok(
+    visibleText(win).includes('NEW_ANSWER_L9H'),
+    'an answer for the new run still renders',
+  );
+
+  win.close();
+});
+
+test("a stale ask answer is dropped in a background tab's pre-adoption window", () => {
+  const {win} = makeWebview();
+  const {first, second} = twoTabs(win);
+  send(win, {type: 'task_settings', tabId: first, settings: {task_id: '100'}});
+  send(win, {
+    type: 'text_delta',
+    text: 'first old',
+    tabId: first,
+    taskId: '100',
+  });
+  send(win, {type: 'text_end', tabId: first, taskId: '100'});
+  send(win, {type: 'clear', tabId: first, chat_id: 'chat-1'});
+  assert.strictEqual(win._testApi.getActiveTabId(), second);
+
+  send(win, {
+    type: 'ask_answer',
+    question: 'q',
+    text: 'STALE_BG_PRE_ADOPTION_L9I',
+    success: true,
+    tabId: first,
+    taskId: '100',
+  });
+  send(win, {
+    type: 'text_delta',
+    text: 'first new',
+    tabId: first,
+    taskId: '200',
+  });
+  send(win, {type: 'text_end', tabId: first, taskId: '200'});
+  clickTab(win, first);
+  assert.ok(
+    !visibleText(win).includes('STALE_BG_PRE_ADOPTION_L9I'),
+    'the restored tab must not show an answer for the task it left',
+  );
+  assert.ok(visibleText(win).includes('first new'), 'the new run is shown');
+
+  win.close();
+});
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 process.exit(failures.length > 0 ? 1 : 0);
