@@ -250,6 +250,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("deleteFrequentTask", required=("task",)),
     ApiCommand("setFavorite", required=("taskId", "isFavorite")),
     ApiCommand("getInputHistory"),
+    ApiCommand("getSeaCommands"),
     ApiCommand(
         "getWelcomeSuggestions", handler="get_welcome_suggestions"
     ),

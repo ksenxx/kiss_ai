@@ -24,6 +24,7 @@
     'deleteFrequentTask',
     'setFavorite',
     'getInputHistory',
+    'getSeaCommands',
     'getWelcomeSuggestions',
     'activeTasksQuery',
     'getModels',

@@ -7218,6 +7218,7 @@ class RemoteAccessServer:
         work_dir = cmd.get("workDir", "")
         for init_cmd in (
             "getModels", "getInputHistory", "getConfig", "getMyModels",
+            "getSeaCommands",
         ):
             init: dict[str, Any] = {"type": init_cmd, "connId": conn_id}
             if work_dir:
@@ -8684,7 +8685,36 @@ class RemoteAccessServer:
             self._version_check_loop(),
         )
 
+        self._start_sea_command_watcher()
         self._maybe_schedule_server_reset_complete()
+
+    def _start_sea_command_watcher(self) -> None:
+        """Start the SEA slash-command registry watcher.
+
+        Registers a subscriber that broadcasts a ``seaCommands`` event
+        to every connected client on any registry change (a SEA added
+        or removed from a watched folder, or ``SEAS.md`` edited), then
+        launches the background poller.  Idempotent per server
+        instance: the ``_sea_command_watcher_started`` guard prevents
+        a second call from stacking duplicate subscribers, so a
+        rebound listener or a test-time re-setup cannot fan a single
+        rescan out twice.
+        """
+        if getattr(self, "_sea_command_watcher_started", False):
+            return
+        self._sea_command_watcher_started = True
+        from kiss.agents.sorcar import sea_commands
+
+        def _on_change(commands: list[str]) -> None:
+            self._printer.broadcast(
+                {"type": "seaCommands", "commands": commands},
+            )
+
+        self._sea_command_subscriber: Callable[[list[str]], None] | None = (
+            _on_change
+        )
+        sea_commands.subscribe(_on_change)
+        sea_commands.start_registry_watcher()
 
     async def _serve_async(self) -> None:
         """Internal async entry point for the server.
@@ -9190,6 +9220,20 @@ class RemoteAccessServer:
             # (e.g. a briefly unwritable KISS dir); no-op when the
             # last save succeeded.
             self._vscode_server.tab_registry.flush()
+            # Also stop the SEA registry watcher on the blocking
+            # start() cleanup path (KeyboardInterrupt / pre-loop
+            # SIGTERM).  The async ``stop_async`` path unhooks it via
+            # its own teardown; this branch mirrors that so a fresh
+            # server rebound in the same process does not inherit a
+            # dead subscriber bound to the old printer.
+            from kiss.agents.sorcar import sea_commands
+
+            cb = getattr(self, "_sea_command_subscriber", None)
+            if cb is not None:
+                sea_commands.unsubscribe(cb)
+                self._sea_command_subscriber = None
+            self._sea_command_watcher_started = False
+            sea_commands.stop_registry_watcher()
             logger.info("Server stopped: pid=%d", pid)
 
     async def start_async(self) -> None:
@@ -9328,6 +9372,14 @@ class RemoteAccessServer:
             # not frozen for the grace period.
             await asyncio.to_thread(self._stop_tunnel)
             _remove_url_file(self._url_file)
+            from kiss.agents.sorcar import sea_commands
+
+            cb = getattr(self, "_sea_command_subscriber", None)
+            if cb is not None:
+                sea_commands.unsubscribe(cb)
+                self._sea_command_subscriber = None
+            self._sea_command_watcher_started = False
+            await asyncio.to_thread(sea_commands.stop_registry_watcher)
 
 
 def _resolve_tunnel_settings() -> tuple[str | None, str | None]:

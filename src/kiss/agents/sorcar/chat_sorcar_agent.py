@@ -494,6 +494,19 @@ class ChatSorcarAgent(SorcarAgent):
         """
         skip_persistence = kwargs.pop("_skip_persistence", False)
         on_task_id_allocated = kwargs.pop("_on_task_id_allocated", None)
+        # A caller (currently the slash-command dispatch in
+        # ``TaskRunner._run_task_inner``) can supply the raw user text
+        # to use for every history / display / frequent-task write,
+        # while ``prompt_template`` carries an internal directive the
+        # LLM must actually see.  Absent, the two are the same and
+        # ``prompt_template`` is used everywhere — the original
+        # behaviour.
+        raw_history_prompt = kwargs.pop("_history_prompt", None)
+        history_prompt = (
+            raw_history_prompt
+            if isinstance(raw_history_prompt, str) and raw_history_prompt
+            else prompt_template
+        )
         if self._chat_id == "":
             self._chat_id = _allocate_chat_id()
         # ``_last_task_id`` is deliberately NOT cleared here.  The next
@@ -504,7 +517,7 @@ class ChatSorcarAgent(SorcarAgent):
         # whole window and drop or misroute the user's action.  The
         # previous run's id is stale but valid, and it is replaced by
         # the single publish below.
-        self._last_user_prompt = prompt_template
+        self._last_user_prompt = history_prompt
         self._last_result_summary = ""
 
         agent_prompt = self.build_chat_prompt(prompt_template)
@@ -553,7 +566,7 @@ class ChatSorcarAgent(SorcarAgent):
         early_extra["startTs"] = start_ts_ms
 
         task_id, self._chat_id = _add_task(
-            prompt_template, chat_id=self._chat_id, extra=early_extra,
+            history_prompt, chat_id=self._chat_id, extra=early_extra,
         )
         with self._task_id_lock:
             self._last_task_id = task_id
@@ -642,7 +655,7 @@ class ChatSorcarAgent(SorcarAgent):
                             "task_settings broadcast raised", exc_info=True,
                         )
             if self._subagent_info is None:
-                _record_frequent_task(prompt_template)
+                _record_frequent_task(history_prompt)
 
             run_started = True
             result = super().run(prompt_template=agent_prompt, **kwargs)
