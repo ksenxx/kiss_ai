@@ -395,8 +395,8 @@ def test_user_cancelled_task_from_backend_history_renders_red_cross(
             "dotVisible": True,
             "dotIsCross": True,
             "dotBackground": "rgb(211, 47, 47)",
-            "dotWidth": "10px",
-            "dotHeight": "10px",
+            "dotWidth": "12px",
+            "dotHeight": "12px",
         }
     finally:
         context.close()
@@ -460,8 +460,8 @@ def test_failed_session_renders_red_cross(_browser) -> None:
             f"row info: {json.dumps(fail, indent=2)}"
         )
         dot = fail["dot"]
-        assert dot["width"] == "10px" and dot["height"] == "10px", (
-            f"failed cross is not 10x10: {dot['width']} x {dot['height']}"
+        assert dot["width"] == "12px" and dot["height"] == "12px", (
+            f"failed cross is not 12x12: {dot['width']} x {dot['height']}"
         )
         assert dot["isCross"], "failed indicator must be the .status-cross icon"
         assert "svg" in (dot["maskImage"] or ""), (

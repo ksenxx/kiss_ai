@@ -22,24 +22,20 @@ export const CHAT_PANEL_VIEW_TYPE = 'kissSorcar.chatTab';
 
 const DEFAULT_PANEL_TITLE = 'KISS Sorcar';
 
-// Editor-tab title status prefixes — the editor-tab analogue of the
-// sidebar tab strip's status icon (.chat-tab-spinner / .chat-tab-ok /
-// .chat-tab-fail in main.css): a text spinner while the task runs, a
-// green tick after a success, a red cross after a failure.  A tab
-// title is plain text, so the spinner is a braille frame sequence
-// advanced on a shared clock.
+// Editor-tab status — the editor-tab analogue of the sidebar tab
+// strip's status icon (.chat-tab-spinner / .chat-tab-ok / .chat-tab-fail
+// in main.css).  While the task runs the tab ICON is the green ring
+// spinner (media/spinner-running.svg, the same ring the composer's
+// wait spinner and the history rows draw, animated inside the SVG so
+// the workbench turns it without any clock of ours); a title is plain
+// text, so the finished states are a green tick / red cross prefix.
 const STATUS_OK_PREFIX = '\u2705 '; // ✅
 const STATUS_FAIL_PREFIX = '\u274C '; // ❌
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const SPINNER_INTERVAL_MS = 100;
-// Also matches the 🟢 / 🔴 / ⚪ circles older versions persisted, so a
-// panel revived from a previous session still comes back clean.
-const STATUS_PREFIX_RE = new RegExp(
-  '^(?:\\u2705|\\u274C|[' +
-    SPINNER_FRAMES.join('') +
-    ']|\\u{1F7E2}|\\u{1F534}|\\u{26AA})\\s+',
-  'u',
-);
+// Also matches the braille spinner frames and the 🟢 / 🔴 / ⚪ circles
+// older versions persisted in the title, so a panel revived from a
+// previous session still comes back clean.
+const STATUS_PREFIX_RE =
+  /^(?:\u2705|\u274C|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|\u{1F7E2}|\u{1F534}|\u{26AA})\s+/u;
 
 /** Drop a status prefix a previous session left in a panel title. */
 function stripStatusPrefix(title: string): string {
@@ -146,10 +142,11 @@ export class SorcarPanelManager {
     values: MetaPanelValues | null,
     progressMd: string,
   ) => void;
-  // Shared spinner clock for every running panel's title; live only
-  // while at least one panel is in the 'running' state.
-  private _spinnerTimer: ReturnType<typeof setInterval> | undefined;
-  private _spinnerFrame: number = 0;
+  // The two editor-tab icons: the KISS logo, and the green ring spinner
+  // shown while the panel's task runs.  Built once so a repaint that
+  // keeps the icon does not push a fresh Uri to the workbench.
+  private readonly _kissIcon: vscode.Uri;
+  private readonly _spinnerIcon: vscode.Uri;
   // Terminal teardown (deactivate / window reload): panel disposals
   // after this are not user closes and must not retire chats from the
   // daemon's registry.
@@ -183,7 +180,11 @@ export class SorcarPanelManager {
     private readonly _extensionUri: vscode.Uri,
     private readonly _retireTab?: (tabId: string) => void,
     private readonly _recordPanelTab?: (tabId: string, open: boolean) => void,
-  ) {}
+  ) {
+    const media = vscode.Uri.joinPath(_extensionUri, 'media');
+    this._kissIcon = vscode.Uri.joinPath(media, 'kiss-icon.svg');
+    this._spinnerIcon = vscode.Uri.joinPath(media, 'spinner-running.svg');
+  }
 
   /** Whether editor-tabs mode is currently switched on. */
   public static modeEnabled(): boolean {
@@ -537,7 +538,6 @@ export class SorcarPanelManager {
     }
     this._panels.clear();
     this._pendingAdoptions.clear();
-    this._syncSpinnerTimer();
     this._active = undefined;
     this._refreshPoster();
   }
@@ -580,11 +580,6 @@ export class SorcarPanelManager {
     panel: vscode.WebviewPanel,
     init: EditorTabInit,
   ): ChatPanel {
-    panel.iconPath = vscode.Uri.joinPath(
-      this._extensionUri,
-      'media',
-      'kiss-icon.svg',
-    );
     const cp: ChatPanel = {
       tabId: init.tabId,
       chatId: init.resumeChatId || '',
@@ -598,7 +593,8 @@ export class SorcarPanelManager {
     };
     // A revived panel may still carry the previous session's status
     // prefix in its persisted title (the serializer strips it from
-    // init.title); repaint from the clean slate.
+    // init.title); repaint from the clean slate.  This also gives the
+    // panel its icon.
     this._applyPanelTitle(cp);
     cp.controller = new SorcarSidebarView(this._extensionUri, {
       rootTabId: init.tabId,
@@ -643,7 +639,6 @@ export class SorcarPanelManager {
       if (!this._shuttingDown && this._recordPanelTab) {
         this._recordPanelTab(cp.tabId, false);
       }
-      this._syncSpinnerTimer();
       if (this._active === cp) this._active = undefined;
       // The Task Info view must not keep describing a closed panel.
       this._pushActiveMeta();
@@ -693,44 +688,21 @@ export class SorcarPanelManager {
   }
 
   /**
-   * Paint *cp*'s editor tab title: the status prefix (spinner while
-   * running / green tick / red cross) followed by the chat title — the
-   * editor-tab analogue of the sidebar strip's status icon.
+   * Paint *cp*'s editor tab: the green ring spinner as the tab icon
+   * while the task runs (the KISS logo otherwise), and a green tick /
+   * red cross prefix on the title once it finished — the editor-tab
+   * analogue of the sidebar strip's status icon.
    */
   private _applyPanelTitle(cp: ChatPanel): void {
+    const icon = cp.status === 'running' ? this._spinnerIcon : this._kissIcon;
+    if (cp.panel.iconPath !== icon) cp.panel.iconPath = icon;
     let prefix = '';
-    if (cp.status === 'running') {
-      prefix = SPINNER_FRAMES[this._spinnerFrame] + ' ';
-    } else if (cp.status === 'ok') {
+    if (cp.status === 'ok') {
       prefix = STATUS_OK_PREFIX;
     } else if (cp.status === 'fail') {
       prefix = STATUS_FAIL_PREFIX;
     }
     cp.panel.title = prefix + (cp.baseTitle || DEFAULT_PANEL_TITLE);
-  }
-
-  /**
-   * Keep the shared spinner interval alive exactly while some panel is
-   * running: each tick advances the frame and repaints every running
-   * panel's title.
-   */
-  private _syncSpinnerTimer(): void {
-    const anyRunning = [...this._panels.values()].some(
-      cp => cp.status === 'running',
-    );
-    if (anyRunning && this._spinnerTimer === undefined) {
-      this._spinnerTimer = setInterval(() => {
-        this._spinnerFrame = (this._spinnerFrame + 1) % SPINNER_FRAMES.length;
-        for (const cp of this._panels.values()) {
-          if (cp.status === 'running') this._applyPanelTitle(cp);
-        }
-      }, SPINNER_INTERVAL_MS);
-    } else if (!anyRunning && this._spinnerTimer !== undefined) {
-      clearInterval(this._spinnerTimer);
-      this._spinnerTimer = undefined;
-      // The next run starts on the first frame again.
-      this._spinnerFrame = 0;
-    }
   }
 
   private _onPanelEvent(cp: ChatPanel, event: PanelEvent): void {
@@ -743,7 +715,6 @@ export class SorcarPanelManager {
         cp.baseTitle = (event.title || '').trim();
         cp.status = event.state || '';
         this._applyPanelTitle(cp);
-        this._syncSpinnerTimer();
         break;
       }
       case 'reveal':

@@ -518,21 +518,25 @@ body {
   min-width: 0;
 }
 
-/* Task status icons, shared by the chat tab strip, the history rows and
-   the history filter chips: a spinning ring while a task runs, a tick
-   once it succeeded, a cross once it failed.  Every icon takes its
-   colour from `currentcolor`, so the element that carries the state
-   class only has to set `color`. */
-.status-spinner, .status-tick, .status-cross {
+/* Task status icons, shared by the composer's wait spinner, the chat
+   tab strip, the history rows and the history filter chips: a spinning
+   ring while a task runs, a tick once it succeeded, a cross once it
+   failed.  Every icon takes its colour from `currentcolor`, so the
+   element that carries the state class only has to set `color`. */
+.status-spinner, .status-tick, .status-cross, #wait-spinner {
   display: inline-block; flex-shrink: 0; box-sizing: border-box;
-  width: 10px; height: 10px;
+  width: 12px; height: 12px;
 }
 
-.status-spinner {
+/* The one ring every surface shows: a faint track with a single bright
+   leading arc, turning once every 0.8s. */
+.status-spinner, #wait-spinner {
   border-radius: 50%;
-  border: 2px solid color-mix(in srgb, currentcolor 30%, transparent);
+  border: 2px solid color-mix(in srgb, currentcolor 25%, transparent);
   border-top-color: currentcolor;
-  border-right-color: currentcolor;
+}
+
+.status-spinner, #wait-spinner.active {
   animation: status-spin 0.8s linear infinite;
 }
 
@@ -1109,21 +1113,14 @@ body.remote-chat #welcome-config { display: none !important; }
 .llm-panel .txt { font-size: var(--fs-md); line-height: 1.5; color: color-mix(in srgb, var(--fg) 79%, transparent); }
 .llm-panel .think .cnt { font-size: var(--fs-md); }
 
-@keyframes spin { to { transform: rotate(360deg); } }
-
+/* The composer's wait spinner: the shared ring (see .status-spinner)
+   in the accent colour, faded in while a task runs. */
 #wait-spinner {
-  width: 12px; height: 12px;
-  border: 2px solid rgb(255 255 255 / 8%);
-  border-top-color: rgb(255 255 255 / 15%);
-  border-radius: 50%; flex-shrink: 0;
+  color: rgb(88 166 255 / 70%);
   transition: opacity 0.2s; opacity: 0;
 }
 
-#wait-spinner.active {
-  border-color: rgb(255 255 255 / 15%);
-  border-top-color: rgb(88 166 255 / 70%);
-  animation: spin .8s linear infinite; opacity: 1;
-}
+#wait-spinner.active { opacity: 1; }
 
 .followup-bar {
   display: flex; flex-direction: column; gap: 4px;
