@@ -24,13 +24,13 @@ from typing import Any
 import pytest
 from websockets.sync.server import Server, ServerConnection, serve
 
-import kiss.agents.third_party_agents.simplex_agent as simplex_mod
-from kiss.agents.third_party_agents.simplex_agent import (
+import kiss.agents.third_party_agents.simplex_sea as simplex_mod
+from kiss.agents.third_party_agents.simplex_sea import (
     SimpleXAgent,
     SimpleXChannelBackend,
     _config,
 )
-from kiss.agents.third_party_agents.simplex_agent import (
+from kiss.agents.third_party_agents.simplex_sea import (
     tools as module_tools,
 )
 

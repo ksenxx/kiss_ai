@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 import pytest
 import requests
 
-from kiss.agents.third_party_agents.discord_agent import DiscordChannelBackend
+from kiss.agents.third_party_agents.discord_sea import DiscordChannelBackend
 from kiss.tests.agents.third_party_agents.recording_http import RecordingServer
 
 

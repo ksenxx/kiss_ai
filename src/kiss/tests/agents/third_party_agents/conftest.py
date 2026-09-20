@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-import kiss.agents.third_party_agents.slack_agent as slack_agent_mod
+import kiss.agents.third_party_agents.slack_sea as slack_agent_mod
 
 
 @pytest.fixture
@@ -68,7 +68,7 @@ def _isolated_slack_dir(
 ) -> Path:
     """Redirect Slack token storage to a per-test temporary directory.
 
-    ``slack_agent._SLACK_DIR`` is a module global built from ``Path.home()``,
+    ``slack_sea._SLACK_DIR`` is a module global built from ``Path.home()``,
     so tests that save or clear tokens would otherwise touch the real user
     token file and race with concurrent pytest processes. Some test modules
     also import ``_SLACK_DIR`` by value, so their own module binding is

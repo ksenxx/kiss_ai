@@ -6,9 +6,9 @@
 
 Covers:
 - govee.py: importing the module must not sys.exit when GOVEE_API_KEY is unset.
-- imessage_agent.py: AppleScript source built by the real script-builder functions
+- imessage_sea.py: AppleScript source built by the real script-builder functions
   must escape backslashes and double quotes in interpolated values.
-- phone_control_agent.py: poll_messages must persist its cursor to _last_msg_id so
+- phone_sea.py: poll_messages must persist its cursor to _last_msg_id so
   the ``oldest or self._last_msg_id`` fallback advances across calls (verified
   against a real local HTTP server that records request params).
 """
@@ -25,7 +25,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from kiss.agents.third_party_agents.phone_control_agent import _config as _phone_config
+from kiss.agents.third_party_agents.phone_sea import _config as _phone_config
 
 _PHONE_CONFIG = _phone_config.path
 _PHONE_CONFIG_BACKUP = _PHONE_CONFIG.with_suffix(".json.bughunt-bak")
@@ -73,7 +73,7 @@ class TestIMessageAppleScriptEscaping(unittest.TestCase):
 
     def test_send_message_script_escapes_double_quotes(self) -> None:
         """A message like say "hi" must appear escaped in the generated script."""
-        from kiss.agents.third_party_agents.imessage_agent import _build_send_message_script
+        from kiss.agents.third_party_agents.imessage_sea import _build_send_message_script
 
         script = _build_send_message_script("+14155238886", 'say "hi"')
         self.assertIn('send "say \\"hi\\"" to targetBuddy', script)
@@ -81,21 +81,21 @@ class TestIMessageAppleScriptEscaping(unittest.TestCase):
 
     def test_send_message_script_escapes_backslashes(self) -> None:
         """Backslashes in the text must be doubled before quote escaping."""
-        from kiss.agents.third_party_agents.imessage_agent import _build_send_message_script
+        from kiss.agents.third_party_agents.imessage_sea import _build_send_message_script
 
         script = _build_send_message_script("+14155238886", 'C:\\path "x"')
         self.assertIn('send "C:\\\\path \\"x\\"" to targetBuddy', script)
 
     def test_send_message_script_escapes_recipient(self) -> None:
         """The recipient is also interpolated and must be escaped."""
-        from kiss.agents.third_party_agents.imessage_agent import _build_send_message_script
+        from kiss.agents.third_party_agents.imessage_sea import _build_send_message_script
 
         script = _build_send_message_script('evil" & quit -- ', "hello")
         self.assertIn('buddy "evil\\" & quit -- " of targetService', script)
 
     def test_send_attachment_script_escapes_file_path(self) -> None:
         """File paths with quotes/backslashes must be escaped in the attachment script."""
-        from kiss.agents.third_party_agents.imessage_agent import (
+        from kiss.agents.third_party_agents.imessage_sea import (
             _build_send_attachment_script,
         )
 
@@ -104,7 +104,7 @@ class TestIMessageAppleScriptEscaping(unittest.TestCase):
 
     def test_invalid_service_rejected(self) -> None:
         """A service value outside iMessage/SMS must be rejected, not interpolated."""
-        from kiss.agents.third_party_agents.imessage_agent import _build_send_message_script
+        from kiss.agents.third_party_agents.imessage_sea import _build_send_message_script
 
         with self.assertRaises(ValueError):
             _build_send_message_script("+14155238886", "hi", service='x" & quit')
@@ -173,7 +173,7 @@ class TestPhoneControlPollCursor(unittest.TestCase):
 
     def test_second_poll_sends_advanced_cursor(self) -> None:
         """After a poll returns messages, a later poll with oldest='' must reuse the cursor."""
-        from kiss.agents.third_party_agents.phone_control_agent import (
+        from kiss.agents.third_party_agents.phone_sea import (
             PhoneControlChannelBackend,
         )
 

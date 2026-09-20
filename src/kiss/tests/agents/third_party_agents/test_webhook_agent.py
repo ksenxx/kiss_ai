@@ -27,8 +27,8 @@ from pathlib import Path
 import pytest
 import requests
 
-import kiss.agents.third_party_agents.webhook_agent as webhook_agent_mod
-from kiss.agents.third_party_agents.webhook_agent import (
+import kiss.agents.third_party_agents.webhook_sea as webhook_agent_mod
+from kiss.agents.third_party_agents.webhook_sea import (
     _RATE_LIMIT_EVENTS,
     _RATE_LIMIT_WINDOW_SECONDS,
     WebhookAgent,

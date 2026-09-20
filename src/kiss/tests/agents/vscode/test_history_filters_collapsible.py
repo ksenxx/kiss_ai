@@ -19,7 +19,7 @@ Coverage is split across three surfaces:
 
 * **Real browser behaviour** — a headless Chromium loads the real
   ``chat.html`` body with the real ``main.css`` + ``main.js`` (the
-  same harness as ``test_history_failed_red_circle.py``) and this
+  same harness as ``test_history_failed_red_cross.py``) and this
   test asserts actual painted geometry: every chip and date input
   has a live layout box while the panel is uncollapsed, loses it
   after clicking the "Filters" header, and gets it back on the next
@@ -106,7 +106,7 @@ class TestRemoteWebViewFiltersPanel(unittest.TestCase):
 def _build_test_page(remote_chat: bool = False) -> str:
     """Return a self-contained page loading the real CSS + JS.
 
-    Mirrors the harness of ``test_history_failed_red_circle.py``: the
+    Mirrors the harness of ``test_history_failed_red_cross.py``: the
     production ``chat.html`` body plus inlined ``main.css`` and
     ``main.js`` with the host APIs stubbed.  With ``remote_chat=True``
     the page also inlines ``remote-codex.css`` and tags the body with

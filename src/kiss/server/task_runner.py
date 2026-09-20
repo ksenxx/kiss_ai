@@ -40,6 +40,9 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
+from kiss.agents.sorcar.sea_commands import (
+    rewrite_prompt_if_command as _rewrite_sea_command_prompt,
+)
 from kiss.agents.sorcar.sorcar_agent import _broadcast_subagent_done
 from kiss.agents.sorcar.task_classifier import classification_will_call_model
 from kiss.agents.sorcar.worktree_sorcar_agent import (
@@ -1283,6 +1286,20 @@ class _TaskRunnerMixin:
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
         """Inner implementation of _run_task (without the status guarantee)."""
         prompt = cmd.get("prompt", "")
+        # Detect a slash-command dispatch (``/xxx text``) HERE, but do
+        # not rewrite the outer ``prompt`` yet — the tab's task-panel
+        # text, the task classifier, ``state.last_user_prompt`` and
+        # every persistence path all read the raw prompt, and they
+        # must keep showing what the user actually typed.  The
+        # rewritten ``run_agent`` directive is substituted lower down
+        # (after ``parse_task_tags``) as a SINGLE atomic subtask so a
+        # slash command whose task text embeds ``<task>`` blocks is
+        # not split into multiple subagents.
+        _sea_dispatch: tuple[str, Path] | None = None
+        if isinstance(prompt, str) and prompt:
+            _hit = _rewrite_sea_command_prompt(prompt)
+            if _hit is not None:
+                _sea_dispatch = _hit
         work_dir = cmd.get("workDir") or self.work_dir
         active_file = cmd.get("activeFile")
         # Caller-supplied custom base system prompt (wire field
@@ -1595,6 +1612,15 @@ class _TaskRunnerMixin:
         run_task_ids: list[str] = []
         try:
             subtasks = parse_task_tags(prompt)
+            if _sea_dispatch is not None:
+                # A ``/xxx text`` command runs as ONE atomic subtask
+                # against the resolved SEA — any ``<task>`` blocks in
+                # the trailing text are meaningful to the SEA, not to
+                # the kiss task splitter.  Overwriting ``subtasks``
+                # here (rather than at parse time) keeps the raw
+                # user-visible ``prompt`` intact for classification,
+                # persistence and the tab's task-panel echo.
+                subtasks = [_sea_dispatch[0]]
             if append_to_prompt:
                 # The suffix is part of the EXECUTED prompt: appending
                 # here (once per subtask, before the loop) keeps the
@@ -1688,7 +1714,19 @@ class _TaskRunnerMixin:
             subtask_index = 0
             while subtask_index < len(subtasks):
                 task_prompt = subtasks[subtask_index]
-                state.last_user_prompt = task_prompt
+                # A slash-command dispatch is a single atomic subtask
+                # (see the ``_sea_dispatch`` branch above): keep the
+                # tab's ``last_user_prompt`` on the raw ``/xxx text``
+                # the user typed, not on the (long) ``run_agent``
+                # directive the LLM will actually see, so the tab
+                # title / history rebind / merge flow all still show
+                # what was submitted.
+                if _sea_dispatch is not None and subtask_index == 0:
+                    state.last_user_prompt = prompt if isinstance(
+                        prompt, str,
+                    ) else task_prompt
+                else:
+                    state.last_user_prompt = task_prompt
                 state.last_result_summary = ""
                 # Reset per subtask: a later subtask that fails must not
                 # publish an earlier subtask's suggestion.
@@ -1747,6 +1785,19 @@ class _TaskRunnerMixin:
                         tool_call_hook=_tool_call_hook,
                         _skip_persistence=True,
                         _on_task_id_allocated=on_task_id_allocated,
+                        # Persist the raw ``/xxx text`` (not the
+                        # internal ``run_agent`` directive) in the
+                        # task-history row, frequent-tasks table and
+                        # the chat's last-user-prompt cache.  Only the
+                        # slash-command dispatch sets ``_sea_dispatch``,
+                        # so every other run persists as before.
+                        _history_prompt=(
+                            prompt
+                            if _sea_dispatch is not None
+                            and subtask_index == 0
+                            and isinstance(prompt, str)
+                            else None
+                        ),
                     )
                     _run_parsed = parse_result_yaml(agent_returned) if agent_returned else None
                     if _run_parsed and _run_parsed.get("summary"):
@@ -1874,7 +1925,22 @@ class _TaskRunnerMixin:
                     self._persist_subtask_row(
                         state,
                         task_id=task_history_id,
-                        task_prompt=task_prompt,
+                        # A slash-command dispatch stored the raw
+                        # ``/xxx text`` in the DB (see the
+                        # ``_history_prompt`` branch of
+                        # ``ChatSorcarAgent.run``); the fallback
+                        # id-resolver for legacy callers must resolve
+                        # by that same string, not by the internal
+                        # ``run_agent`` directive.
+                        task_prompt=(
+                            prompt
+                            if (
+                                _sea_dispatch is not None
+                                and subtask_index == 0
+                                and isinstance(prompt, str)
+                            )
+                            else task_prompt
+                        ),
                         result_summary=result_summary,
                         model=model,
                         work_dir=work_dir,

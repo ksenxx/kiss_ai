@@ -27,12 +27,12 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-import kiss.agents.third_party_agents.homeassistant_agent as ha_mod
+import kiss.agents.third_party_agents.homeassistant_sea as ha_mod
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents.homeassistant_agent import (
+from kiss.agents.third_party_agents.homeassistant_sea import (
     HomeAssistantAgent,
     HomeAssistantChannelBackend,
     _config,

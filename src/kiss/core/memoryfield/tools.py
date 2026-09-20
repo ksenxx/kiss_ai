@@ -118,8 +118,14 @@ class MemoryTools:
             return "No memory pages yet." if self.index.count() == 0 else "No matches."
         chunks: list[str] = []
         used = 0
+        vanished = 0
         for hit in hits:
-            raw = self.memory.read(hit.name).raw
+            try:
+                raw = self.memory.read(hit.name).raw
+            except FileNotFoundError:
+                # Another process deleted the page after sync() indexed it.
+                vanished += 1
+                continue
             chunk = f"### {hit.name}.md  (score {hit.score:.3f})\n{raw}"
             if used + len(chunk) > PULL_CHAR_LIMIT:
                 if not chunks:
@@ -127,12 +133,14 @@ class MemoryTools:
                         chunk[:PULL_CHAR_LIMIT] + "\n[page truncated; use memory_read for the rest]"
                     )
                     chunks.append(chunk)
-                omitted = len(hits) - len(chunks)
+                omitted = len(hits) - vanished - len(chunks)
                 if omitted:
                     chunks.append(f"[{omitted} more page(s) omitted; lower k or refine the query]")
                 break
             chunks.append(chunk)
             used += len(chunk)
+        if not chunks:
+            return "No matches."
         return "\n\n".join(chunks)
 
     def memory_read(self, name: str) -> str:
@@ -185,7 +193,11 @@ class MemoryTools:
             return "No memory pages yet."
         lines = []
         for name in names:
-            page = self.memory.read(name)
+            try:
+                page = self.memory.read(name)
+            except FileNotFoundError:
+                # Deleted by another process after page_names() listed it.
+                continue
             line = f"{name}  —  {page.title}"
             if page.summary:
                 line += f": {page.summary}"
@@ -237,7 +249,11 @@ class MemoryTools:
         cutoff = datetime.now(UTC) - timedelta(days=stale_days)
         stale: list[tuple[str, str]] = []
         for name in self.memory.page_names():
-            raw_updated = str(self.memory.read(name).frontmatter.get("updated", ""))
+            try:
+                raw_updated = str(self.memory.read(name).frontmatter.get("updated", ""))
+            except FileNotFoundError:
+                # Deleted by another process after page_names() listed it.
+                continue
             try:
                 updated = datetime.strptime(raw_updated, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
             except ValueError:

@@ -63,9 +63,9 @@ from kiss.agents.third_party_agents._google_workspace_utils import (
     load_google_credentials,
     save_google_credentials,
 )
-from kiss.agents.third_party_agents.github_agent import GitHubChannelBackend
-from kiss.agents.third_party_agents.gmail_agent import _build_service, _load_credentials
-from kiss.agents.third_party_agents.google_drive_agent import GoogleDriveChannelBackend
+from kiss.agents.third_party_agents.gdrive_sea import GoogleDriveChannelBackend
+from kiss.agents.third_party_agents.github_sea import GitHubChannelBackend
+from kiss.agents.third_party_agents.gmail_sea import _build_service, _load_credentials
 from kiss.agents.third_party_agents.muse_auth import __main__ as muse_cli
 from kiss.agents.third_party_agents.muse_auth import client as muse_client
 from kiss.agents.third_party_agents.muse_auth._common import (
@@ -532,7 +532,7 @@ def test_default_on_migrates_google_token_json(
     muse_env: Path, api_server: _ApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An upgrade with a working legacy token.json keeps working by default."""
-    from kiss.agents.third_party_agents.google_drive_agent import _SCOPES as DRIVE_SCOPES
+    from kiss.agents.third_party_agents.gdrive_sea import _SCOPES as DRIVE_SCOPES
 
     # The true production default: no env var set at all.
     monkeypatch.delenv("KISS_MUSE_AUTH")
@@ -675,10 +675,10 @@ def test_export_cli_recovers_vault_credential(
 
 def test_bearer_connect_scrubs_plaintext_config(muse_env: Path) -> None:
     """notion/brave connects move the token to the vault and scrub the config."""
-    from kiss.agents.third_party_agents.brave_search_agent import BraveSearchChannelBackend
-    from kiss.agents.third_party_agents.brave_search_agent import _config as brave_config
-    from kiss.agents.third_party_agents.notion_agent import NotionChannelBackend
-    from kiss.agents.third_party_agents.notion_agent import _config as notion_config
+    from kiss.agents.third_party_agents.brave_sea import BraveSearchChannelBackend
+    from kiss.agents.third_party_agents.brave_sea import _config as brave_config
+    from kiss.agents.third_party_agents.notion_sea import NotionChannelBackend
+    from kiss.agents.third_party_agents.notion_sea import _config as notion_config
 
     notion_config.save({"token": "ntn_scrub_me", "workspace_hint": "acme"})
     backend = NotionChannelBackend()
@@ -707,7 +707,7 @@ def test_channel_main_loads_api_keys_env_first(
     ``muse_auth_enabled()`` or migrate credentials.
     """
     from kiss.agents.third_party_agents._channel_agent_utils import channel_main
-    from kiss.agents.third_party_agents.notion_agent import NotionAgent
+    from kiss.agents.third_party_agents.notion_sea import NotionAgent
 
     monkeypatch.delenv("KISS_MUSE_AUTH", raising=False)
     isolated_kiss_home.mkdir(parents=True, exist_ok=True)
@@ -853,7 +853,7 @@ def test_github_read_only_survives_token_migration(
 
 def test_googlechat_legacy_token_migrates_into_vault(muse_env: Path) -> None:
     """In Muse mode a leftover Chat token.json is vaulted, never used raw."""
-    from kiss.agents.third_party_agents.googlechat_agent import _load_service
+    from kiss.agents.third_party_agents.googlechat_sea import _load_service
 
     chat_dir = muse_env / "third_party_agents" / "googlechat"
     chat_dir.mkdir(parents=True, exist_ok=True)
@@ -939,10 +939,10 @@ def test_remote_oauth_paste_back_consent_flow(
     the same machine, and the pasted loopback redirect URL is replayed
     against the session's real WSGI consent server.
     """
-    from kiss.agents.third_party_agents.google_calendar_agent import (
+    from kiss.agents.third_party_agents.gcal_sea import (
         _SCOPES as CAL_SCOPES,
     )
-    from kiss.agents.third_party_agents.google_calendar_agent import (
+    from kiss.agents.third_party_agents.gcal_sea import (
         GoogleCalendarAgent,
     )
 
@@ -1005,7 +1005,7 @@ def test_remote_oauth_legacy_mode_writes_token_json(
 ) -> None:
     """Without Muse mode the remote consent flow persists token.json."""
     from kiss.agents.third_party_agents._google_workspace_utils import RemoteOAuthSession
-    from kiss.agents.third_party_agents.google_calendar_agent import (
+    from kiss.agents.third_party_agents.gcal_sea import (
         _SCOPES as CAL_SCOPES,
     )
 
@@ -1287,7 +1287,7 @@ def test_boundary_strips_token_on_cross_host_redirect(muse_env: Path) -> None:
 
 def test_github_token_rotation_via_authenticate(muse_env: Path, api_server: _ApiServer) -> None:
     """Re-authenticating replaces the enrolled vault token, not keeps the old one."""
-    from kiss.agents.third_party_agents.github_agent import GitHubAgent
+    from kiss.agents.third_party_agents.github_sea import GitHubAgent
 
     agent = GitHubAgent()
     tools = auth_tools(agent)

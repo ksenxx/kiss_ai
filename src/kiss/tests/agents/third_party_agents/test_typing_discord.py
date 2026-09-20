@@ -26,7 +26,7 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import urlsplit
 
-from kiss.agents.third_party_agents.discord_agent import DiscordChannelBackend
+from kiss.agents.third_party_agents.discord_sea import DiscordChannelBackend
 from kiss.tests.agents.third_party_agents.recording_http import RecordingServer
 
 

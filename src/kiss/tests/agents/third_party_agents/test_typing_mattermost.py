@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.third_party_agents.mattermost_agent import MattermostChannelBackend
+from kiss.agents.third_party_agents.mattermost_sea import MattermostChannelBackend
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):

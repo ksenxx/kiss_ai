@@ -725,9 +725,17 @@ class ModuleInternalsTest(_PersistenceTestCase):
         )
 
     def test_marker_is_removed_when_its_owner_exits_normally(self) -> None:
-        """A process that simply finishes leaves no marker behind."""
-        out_queue: multiprocessing.Queue[str] = multiprocessing.Queue()
-        proc = multiprocessing.Process(
+        """A process that simply finishes leaves no marker behind.
+
+        The child is a ``spawn`` process: a fresh interpreter that
+        finishes through ``sys.exit`` and so runs ``atexit`` hooks, like
+        a real daemon or CLI run.  A ``fork`` child would leave through
+        ``os._exit`` in ``multiprocessing``'s bootstrap, which skips
+        ``atexit`` and cannot exercise :func:`_release_owner_marker`.
+        """
+        ctx = multiprocessing.get_context("spawn")
+        out_queue = ctx.Queue()
+        proc = ctx.Process(
             target=_clean_exit_owner_worker,
             args=(str(self.kiss_dir), out_queue),
         )

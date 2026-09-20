@@ -198,9 +198,10 @@ class TestWebappServerLoadingOverlay(unittest.TestCase):
         the user must see the overlay again instead of a frozen #app.
         """
         html = _build_html()
-        marker = "_ws.onclose = function()"
+        self.assertIn("_ws.onclose = _onSocketClosed;", html)
+        marker = "function _onSocketClosed()"
         self.assertIn(marker, html)
-        onclose_branch = html.split(marker, 1)[1].split("};", 1)[0]
+        onclose_branch = html.split(marker, 1)[1].split("\n  }\n", 1)[0]
         self.assertIn("daemonStatus", onclose_branch)
         self.assertIn("connected: false", onclose_branch)
         self.assertIn("_dispatchToApp", onclose_branch)
@@ -2998,14 +2999,19 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
             except asyncio.CancelledError:
                 pass
             await ws.send(json.dumps({"type": "getModels"}))
+            # Every watchdog round also pushed a ``heartbeat`` frame (the
+            # shim's proof of life); the reply follows them.
             resp: dict[str, object] = {}
-            for _ in range(10):
+            seen: list[object] = []
+            for _ in range(2000):
                 resp = json.loads(
                     await asyncio.wait_for(ws.recv(), timeout=5),
                 )
+                seen.append(resp.get("type"))
                 if resp.get("type") == "models":
                     break
             self.assertEqual(resp["type"], "models")
+            self.assertIn("heartbeat", seen)
         finally:
             ws_mod.TUNNEL_CHECK_INTERVAL = original_interval
             await ws.close()
@@ -4468,6 +4474,11 @@ class TestWatchdogWSPingWithConnections(IsolatedAsyncioTestCase):
 
         for conn in connections:
             await self.server._ping_one_ws(conn)
+
+        # A successful ping is followed by the app-level heartbeat frame
+        # the remote webapp's shim uses to detect half-open sockets.
+        beat = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        self.assertEqual(beat, {"type": "heartbeat"})
 
         await ws.send(json.dumps({"type": "getModels"}))
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))

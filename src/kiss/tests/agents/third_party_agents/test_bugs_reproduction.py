@@ -22,7 +22,7 @@ class TestI2FindChannelReturnsName:
         local port that refuses connections, so the lookup path is
         exercised without leaving the host.
         """
-        from kiss.agents.third_party_agents.discord_agent import DiscordChannelBackend
+        from kiss.agents.third_party_agents.discord_sea import DiscordChannelBackend
 
         backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{refusing_port}")
         result = backend.find_channel("general")

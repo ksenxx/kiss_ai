@@ -3402,13 +3402,25 @@ def _queue_chat_event(
             unrelated task in the new database (see
             :func:`_current_db_path`).
     """
-    _reserve_pending(task_id)
-    _event_queue.put((
+    # Build the complete queue item BEFORE reserving: ``json.dumps``
+    # raises TypeError on a non-serialisable value, and a reservation
+    # with no matching queue item is never released by the writer, so
+    # ``_flush_chat_events(task_id)`` would then spin forever.
+    item = (
         task_id,
         json.dumps(event),
         time.time(),
         origin_db_path or _current_db_path(),
-    ))
+    )
+    _reserve_pending(task_id)
+    try:
+        # The queue is unbounded, so this never blocks; the guard only
+        # rolls the reservation back if an injected stop (or any other
+        # BaseException) lands between the reserve and the publication.
+        _event_queue.put_nowait(item)
+    except BaseException:
+        _unreserve_pending(task_id)
+        raise
     t = _event_writer_thread
     if t is None or not t.is_alive():
         _start_event_writer()
@@ -3418,6 +3430,21 @@ def _reserve_pending(task_id: str) -> None:
     """Record one queued-but-unwritten event for *task_id*."""
     with _pending_cond:
         _pending_by_task[task_id] = _pending_by_task.get(task_id, 0) + 1
+
+
+def _unreserve_pending(task_id: str) -> None:
+    """Roll back one :func:`_reserve_pending` whose item never reached the queue.
+
+    Unlike :func:`_release_pending` this must NOT call
+    ``_event_queue.task_done()`` — nothing was enqueued.
+    """
+    with _pending_cond:
+        remaining = _pending_by_task.get(task_id, 0) - 1
+        if remaining > 0:
+            _pending_by_task[task_id] = remaining
+        else:
+            _pending_by_task.pop(task_id, None)
+        _pending_cond.notify_all()
 
 
 def _release_pending(batch: list[tuple[str, str, float, str]]) -> None:

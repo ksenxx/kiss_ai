@@ -272,7 +272,7 @@ class SlackChannelBackend(ToolMethodBackend):
                 self._connection_info = (
                     "No Slack token found. Please store a bot token first.\n"
                     "Run: uv run python -m kiss.agents.third_party_agents"
-                    ".slack_agent --task 'check auth'\n"
+                    ".slack_sea --task 'check auth'\n"
                     "Or manually save token to "
                     f"~/.kiss/third_party_agents/slack/{self._workspace}/token.json"
                 )

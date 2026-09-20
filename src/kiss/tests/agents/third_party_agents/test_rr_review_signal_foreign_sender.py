@@ -32,7 +32,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelRunner,
     load_channel_state,
 )
-from kiss.agents.third_party_agents.signal_agent import (
+from kiss.agents.third_party_agents.signal_sea import (
     SignalChannelBackend,
     _config,
 )

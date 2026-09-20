@@ -706,3 +706,7 @@ class TaskResult:
   with the daemon user's privileges and environment.  Any libraries
   your code imports must be installed in the daemon's Python
   environment.
+- Name the file `xxx_sea.py` and put its folder in `~/.kiss/SEAS.md`
+  (one folder per line) to expose it as the chat command `/xxx`;
+  `/xxx some text` runs the SEA on "some text" via `run_agent`.  See
+  [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md).

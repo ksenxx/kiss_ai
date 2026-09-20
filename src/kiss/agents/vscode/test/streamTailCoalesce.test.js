@@ -179,14 +179,17 @@ async function testBashChunkDefersTailSweepReplaysIt(remote) {
       '): non-buffered system_output must render synchronously',
   );
 
-  send(win, {type: 'tool_call', name: 'Bash', command: 'make one'});
+  // The stream keeps its newest two panels open, so the panel whose
+  // collapse is watched needs two panels behind it.
+  send(win, {type: 'tool_call', name: 'Bash', command: 'make zero'});
   const panel1 = O.querySelector('.ev.tc');
   assert.ok(panel1, 'first tool_call panel missing');
+  send(win, {type: 'tool_call', name: 'Bash', command: 'make one'});
   send(win, {type: 'system_output', text: 'one\n'});
   send(win, {type: 'tool_call', name: 'Bash', command: 'make two'});
   const panels = O.querySelectorAll('.ev.tc');
-  assert.strictEqual(panels.length, 2, 'expected two tool panels');
-  const panel2 = panels[1];
+  assert.strictEqual(panels.length, 3, 'expected three tool panels');
+  const panel2 = panels[2];
   assert.ok(
     panel1.classList.contains('collapsed'),
     'BUG (' +
@@ -342,11 +345,12 @@ function testSyncRafKeepsPerEventTail() {
   fakeGeometry(O, {sh: 3000, ch: 500});
   startRunningTask(win, posted);
 
+  send(win, {type: 'tool_call', name: 'Bash', command: 'make zero'});
   send(win, {type: 'tool_call', name: 'Bash', command: 'make one'});
   send(win, {type: 'tool_call', name: 'Bash', command: 'make two'});
   const panels = O.querySelectorAll('.ev.tc');
   const panel1 = panels[0];
-  const panel2 = panels[1];
+  const panel2 = panels[2];
   panel1.classList.remove('collapsed');
   send(win, {type: 'system_output', text: 'two\n'});
   assert.strictEqual(
@@ -376,7 +380,9 @@ async function testTabSwitchDropsPendingSweep() {
   startRunningTask(win, posted);
   win._testApi.endLaunch();
 
-  // Tab 1: leave a sweep pending WITH collapse debt.
+  // Tab 1: leave a sweep pending WITH collapse debt (the stream keeps
+  // its newest two panels open, so the debt needs three panels).
+  send(win, {type: 'tool_call', name: 'Bash', command: 'make zero'});
   send(win, {type: 'tool_call', name: 'Bash', command: 'make one'});
   send(win, {type: 'tool_call', name: 'Bash', command: 'make two'});
   const t1panel1 = O.querySelectorAll('.ev.tc')[0];
@@ -512,6 +518,7 @@ async function testTaskEndFlushesPendingSweepWhileRunning() {
   fakeGeometry(O, {sh: 3000, ch: 500});
   const tabId = startRunningTask(win, posted);
 
+  send(win, {type: 'tool_call', name: 'Bash', command: 'make zero'});
   send(win, {type: 'tool_call', name: 'Bash', command: 'make one'});
   send(win, {type: 'tool_call', name: 'Bash', command: 'make two'});
   const panels = O.querySelectorAll('.ev.tc');
@@ -539,7 +546,7 @@ async function testTaskEndFlushesPendingSweepWhileRunning() {
     'BUG: a straggler sweep hid panels after the task ended',
   );
   assert.ok(
-    panels[1].querySelector('.bash-panel-content').textContent.includes(
+    panels[2].querySelector('.bash-panel-content').textContent.includes(
       'late output',
     ),
     'buffered chunk text must still flush after the task ends',

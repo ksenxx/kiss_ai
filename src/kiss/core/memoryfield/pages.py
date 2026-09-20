@@ -288,8 +288,13 @@ class MemoryDir:
         if not body.strip():
             raise ValueError("Refusing to write an empty page.")
         frontmatter: dict[str, Any] = {}
-        if path.exists():
-            frontmatter = split_frontmatter(read_page_text(path))[0]
+        try:
+            existing = read_page_text(path)
+        except FileNotFoundError:
+            # Missing, or deleted by another process just now: create semantics.
+            existing = ""
+        if existing:
+            frontmatter = split_frontmatter(existing)[0]
             for identity_key in ("uuid", "created"):
                 if identity_key in frontmatter:
                     incoming.pop(identity_key, None)

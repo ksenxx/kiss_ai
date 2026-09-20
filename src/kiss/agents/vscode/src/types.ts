@@ -276,7 +276,7 @@ export type FromWebviewMessage =
   // Editor-tabs mode (host-only, never forwarded to the daemon): the
   // webview's root chat tab renamed itself or its task's status
   // changed, so the hosting editor tab should follow. `state` mirrors
-  // the internal tab strip's status dot: '' (no task yet), 'running',
+  // the internal tab strip's status icon: '' (no task yet), 'running',
   // 'ok' or 'fail'.
   | {type: 'panelTitle'; title: string; tabId?: string; state?: string}
   // Editor-tabs mode: a task in this panel just finished — bring the
@@ -316,7 +316,13 @@ export type FromWebviewMessage =
   // the mirror the secondary sidebar's Task Info view renders for the
   // ACTIVE panel. progressMd is the raw markdown of the running task's
   // tmp/PROGRESS.md ('' when there is nothing to show).
-  | {type: 'metaUpdate'; values: MetaPanelValues; progressMd: string};
+  | {type: 'metaUpdate'; values: MetaPanelValues; progressMd: string}
+  // Host-only: the raw chat id and task id of the task this chat
+  // surface (editor panel or sidebar chat view) shows now — the task
+  // its Task Info rows describe. The host relays the on-screen
+  // surface's ids into the primary-sidebar history panel, which
+  // highlights that task's row. Either id is '' when unknown.
+  | {type: 'activeTask'; chatId: string; taskId: string};
 
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
 
@@ -595,6 +601,9 @@ type ToWebviewMessageBody =
     }
   | {type: 'system_prompt'; text: string}
   | {type: 'prompt'; text: string}
+  // The finished ``/ask`` side-channel answer, delivered into the
+  // running (owner) task's transcript as its own panel.
+  | {type: 'ask_answer'; question: string; text: string; success: boolean}
   | {
       type: 'talk';
       text: string;
@@ -689,7 +698,14 @@ type ToWebviewMessageBody =
   | {type: 'followup_suggestion'; text: string}
   | {type: 'tasks_updated'}
   | {type: 'welcome_suggestions'; suggestions: Array<{text: string}>}
-  | {type: 'remote_url'; url: string; ntfyUrl?: string; tunnelActive?: boolean}
+  | {
+      type: 'remote_url';
+      url: string;
+      ntfyUrl?: string;
+      tunnelActive?: boolean;
+      loopbackUrl?: string;
+      lanUrls?: string[];
+    }
   // A session replay (server.py): task_id is the history row id (None
   // for a task still running without a row), chat_id the chat's uuid
   // string, extra the row's JSON-encoded extra column ('' when absent).
@@ -912,7 +928,10 @@ type ToWebviewMessageBody =
   // values for the secondary sidebar's Task Info view. `values` is
   // null when no chat panel has reported yet (render the placeholder
   // dashes).
-  | {type: 'metaState'; values: MetaPanelValues | null; progressMd: string};
+  | {type: 'metaState'; values: MetaPanelValues | null; progressMd: string}
+  // Host relay to the history panel (history-panel-mode): the chat id
+  // and task id shown by the chat surface on screen, '' when none is.
+  | {type: 'activeTask'; chatId: string; taskId: string};
 
 export interface AgentCommand {
   type:
