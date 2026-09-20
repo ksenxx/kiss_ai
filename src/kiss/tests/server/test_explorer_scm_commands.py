@@ -157,7 +157,11 @@ class ExplorerHarness:
     """A real RemoteAccessServer whose work dir is a real git repository."""
 
     def __init__(self) -> None:
-        self.tmpdir = tempfile.mkdtemp(prefix="kiss-explorer-scm-")
+        # Canonical (symlink-free): the daemon reports paths it has
+        # resolved (fileContent/fileSaved, git worktree roots), so a
+        # symlinked temp dir (macOS /var -> /private/var) would make
+        # the paths tests compare differ from the ones they created.
+        self.tmpdir = os.path.realpath(tempfile.mkdtemp(prefix="kiss-explorer-scm-"))
         tmp = Path(self.tmpdir)
         self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         kiss_dir = tmp / ".kiss"

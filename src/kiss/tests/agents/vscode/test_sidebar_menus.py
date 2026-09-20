@@ -348,8 +348,14 @@ def test_new_file_rename_and_delete_act_on_disk(browser, harness, worktree):
         inp = page.locator(".explorer-row.is-editing .explorer-input")
         inp.wait_for(timeout=5000)
         assert inp.input_value() == "fresh.py"
-        sel = inp.evaluate("el => [el.selectionStart, el.selectionEnd]")
-        assert sel == [0, 5]
+        # The client focuses the box and selects the stem in a deferred
+        # (setTimeout 0) step, so poll for it instead of reading once.
+        page.wait_for_function(
+            "() => { const el = document.querySelector("
+            "'.explorer-row.is-editing .explorer-input');"
+            " return el && el.selectionStart === 0 && el.selectionEnd === 5; }",
+            timeout=5000,
+        )
         inp.fill("renamed.py")
         inp.press("Enter")
         page.wait_for_selector(

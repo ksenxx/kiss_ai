@@ -31,12 +31,10 @@ from kiss.server.web_server import (
     _parse_quick_tunnel_url,
     _read_url_from_stderr,
 )
-from kiss.tests.server.test_concaudit_w6_commit_msg_claim import (
-    _thread_start_can_be_starved,
+from kiss.tests.conftest import (
+    nproc_limit_lowered_to_one,
+    thread_start_can_be_starved,
 )
-
-# The resource module (RLIMIT_*) only exists on POSIX; Windows skips.
-resource = pytest.importorskip("resource")
 
 
 def _spawn_long_lived_child() -> subprocess.Popen[str]:
@@ -60,19 +58,14 @@ class TestDrainStartFailureTerminatesChild(unittest.TestCase):
     """A failed drain-thread spawn kills and reaps the child, then re-raises."""
 
     def test_child_killed_and_reaped_when_thread_start_fails(self) -> None:
-        if not _thread_start_can_be_starved():
+        if not thread_start_can_be_starved():
             pytest.skip("RLIMIT_NPROC cannot starve Thread.start on this host")
         proc = _spawn_long_lived_child()
-        soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
         try:
-            resource.setrlimit(resource.RLIMIT_NPROC, (1, hard))
-            try:
-                with self.assertRaises(RuntimeError):
-                    _read_url_from_stderr(
-                        proc, _parse_quick_tunnel_url, timeout=0.2,
-                    )
-            finally:
-                resource.setrlimit(resource.RLIMIT_NPROC, (soft, hard))
+            with nproc_limit_lowered_to_one(), self.assertRaises(RuntimeError):
+                _read_url_from_stderr(
+                    proc, _parse_quick_tunnel_url, timeout=0.2,
+                )
             self.assertIsNotNone(
                 proc.returncode,
                 "child must be killed and reaped before the error propagates",

@@ -28,6 +28,7 @@ test blocks the CDN on purpose to pin the fallback behavior).
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -92,7 +93,10 @@ def _enter_source_mode(page) -> None:
 
 def _type_at_end(page, text: str) -> None:
     page.click(_MONACO + " .view-lines")
-    page.keyboard.press("Control+End")
+    # Monaco binds "go to end of document" per platform: Ctrl+End on
+    # Linux/Windows, Cmd+Down on macOS (Ctrl+End is unbound there, so
+    # the text would land wherever the click put the cursor).
+    page.keyboard.press("Meta+ArrowDown" if sys.platform == "darwin" else "Control+End")
     page.keyboard.type(text)
 
 

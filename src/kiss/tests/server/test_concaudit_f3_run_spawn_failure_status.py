@@ -27,13 +27,11 @@ import pytest
 
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.tests.server._memory_printer import MemoryPrinter
-from kiss.tests.server.test_concaudit_w6_commit_msg_claim import (
-    _thread_start_can_be_starved,
+from kiss.tests.conftest import (
+    nproc_limit_lowered_to_one,
+    thread_start_can_be_starved,
 )
-
-# The resource module (RLIMIT_*) only exists on POSIX; Windows skips.
-resource = pytest.importorskip("resource")
+from kiss.tests.server._memory_printer import MemoryPrinter
 
 
 class TestRunSpawnFailureEndsRun(unittest.TestCase):
@@ -44,7 +42,7 @@ class TestRunSpawnFailureEndsRun(unittest.TestCase):
         self.addCleanup(agent_state.agent_states.clear)
 
     def test_failed_thread_start_emits_result_and_status_end(self) -> None:
-        if not _thread_start_can_be_starved():
+        if not thread_start_can_be_starved():
             pytest.skip("RLIMIT_NPROC cannot starve Thread.start on this host")
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -56,13 +54,8 @@ class TestRunSpawnFailureEndsRun(unittest.TestCase):
             "type": "run", "tabId": tab_id, "prompt": "hello",
             "workDir": tmp.name, "taskId": "client-run-token-1",
         }
-        soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-        resource.setrlimit(resource.RLIMIT_NPROC, (1, hard))
-        try:
-            with self.assertRaises(RuntimeError):
-                server._cmd_run(cmd)
-        finally:
-            resource.setrlimit(resource.RLIMIT_NPROC, (soft, hard))
+        with nproc_limit_lowered_to_one(), self.assertRaises(RuntimeError):
+            server._cmd_run(cmd)
 
         results = [
             e for e in printer.emitted
