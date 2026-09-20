@@ -316,7 +316,13 @@ export type FromWebviewMessage =
   // the mirror the secondary sidebar's Task Info view renders for the
   // ACTIVE panel. progressMd is the raw markdown of the running task's
   // tmp/PROGRESS.md ('' when there is nothing to show).
-  | {type: 'metaUpdate'; values: MetaPanelValues; progressMd: string};
+  | {type: 'metaUpdate'; values: MetaPanelValues; progressMd: string}
+  // Host-only: the raw chat id and task id of the task this chat
+  // surface (editor panel or sidebar chat view) shows now — the task
+  // its Task Info rows describe. The host relays the on-screen
+  // surface's ids into the primary-sidebar history panel, which
+  // highlights that task's row. Either id is '' when unknown.
+  | {type: 'activeTask'; chatId: string; taskId: string};
 
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
 
@@ -922,7 +928,10 @@ type ToWebviewMessageBody =
   // values for the secondary sidebar's Task Info view. `values` is
   // null when no chat panel has reported yet (render the placeholder
   // dashes).
-  | {type: 'metaState'; values: MetaPanelValues | null; progressMd: string};
+  | {type: 'metaState'; values: MetaPanelValues | null; progressMd: string}
+  // Host relay to the history panel (history-panel-mode): the chat id
+  // and task id shown by the chat surface on screen, '' when none is.
+  | {type: 'activeTask'; chatId: string; taskId: string};
 
 export interface AgentCommand {
   type:

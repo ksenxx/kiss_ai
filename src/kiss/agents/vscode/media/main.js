@@ -49,6 +49,17 @@
   const POST_META_UPDATES =
     EDITOR_TAB_MODE && !HISTORY_PANEL_MODE && !META_PANEL_MODE;
 
+  // Every VS Code chat surface (editor-tab panel or the sidebar chat
+  // view) tells the host which chat / task it shows (activeTask), and
+  // the host relays the one on screen into the primary-sidebar history
+  // panel, which highlights that task's row.  The remote webapp keeps
+  // its history list in-page and paints it directly (its postMessage
+  // goes to the daemon, which has no use for the message).
+  const POST_ACTIVE_TASK =
+    !HISTORY_PANEL_MODE &&
+    !META_PANEL_MODE &&
+    !document.body.classList.contains('remote-chat');
+
   // Host-only messages (never daemon commands, so not in api.js's
   // whitelist): everything the webview asks of its hosting editor tab.
   function postToHost(msg) {
@@ -736,6 +747,15 @@
 
   let currentTaskName = '';
   let currentTaskId = null;
+  // The chat and task the user is looking at — the ones the Task Info
+  // rows describe — as the history list knows them: its row carries
+  // the highlight and its chat panel opens by default.  Set from this
+  // surface's own visible tab (reportVisibleTask), or by the host's
+  // `activeTask` relay when this webview is the history panel.  The
+  // pending flag asks the next repaint to scroll the row into view.
+  let historyActiveChatId = '';
+  let historyActiveTaskId = '';
+  let historyActiveScrollPending = false;
   // Settings of the active tab's OWN current task (model, worktree /
   // parallel modes, budget, start time, chat / task / parent ids) —
   // what the static task panel's info block shows while the panel
@@ -1218,9 +1238,12 @@
       else taskPanel.classList.remove('visible');
     }
     currentTaskSettings = tab.taskSettings || null;
-    updateMetaTaskDetails(currentTaskSettings);
     currentTaskName = (tab.taskPanelHTML || '').trim();
+    // The task id lands before the Task Info repaint: without settings
+    // to read the ids from, the repaint reports the tab's own task id
+    // to the history list, not the previous tab's.
     currentTaskId = tab.currentTaskId !== undefined ? tab.currentTaskId : null;
+    updateMetaTaskDetails(currentTaskSettings);
     if (statusText) {
       statusText.textContent = tab.statusTextContent || 'Ready';
       statusText.style.color = tab.statusTextColor || 'var(--green)';
@@ -7535,6 +7558,7 @@
     // values; its own (idle, taskless) settings must not overwrite
     // them — e.g. a configData repaint landing between two relays.
     if (META_PANEL_MODE) return;
+    reportVisibleTask(s);
     if (!metaWorkdirEl && !metaMaxBudgetEl) return;
     // A filesystem root is never a real workspace (replayed historical
     // tasks are a known source of poisoned root paths — see
@@ -12150,6 +12174,17 @@
         // The host relays the ACTIVE chat editor panel's task-info
         // values; only the Task Info view renders them.
         if (META_PANEL_MODE) renderMetaState(ev);
+        break;
+      case 'activeTask':
+        // The host relays the chat / task ids of the chat surface on
+        // screen; only the history panel highlights them (a chat
+        // surface follows its own visible tab).
+        if (HISTORY_PANEL_MODE) {
+          setHistoryActiveTask(
+            String(ev.chatId || ''),
+            String(ev.taskId || ''),
+          );
+        }
         break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
@@ -17117,7 +17152,126 @@
     // the element only, dropped when the search text changes).
     if (historySearchActive()) return group._kissSearchCollapsed === true;
     if (group._kissCollapsed !== undefined) return group._kissCollapsed;
-    return group.dataset.hasRunning !== '1';
+    if (group.dataset.hasRunning === '1') return false;
+    // The chat the user is looking at stays open like a running one:
+    // its highlighted task row must be in view, not behind a header.
+    return !(
+      historyActiveChatId && group.dataset.chatId === historyActiveChatId
+    );
+  }
+
+  /**
+   * Tell the history list which chat and task THIS surface shows now,
+   * and — from a VS Code chat surface — the host, which relays the
+   * on-screen chat's ids into the primary-sidebar history panel.
+   *
+   * @param {object|null} s The task settings the Task Info rows are
+   *   painted from (the tab's own task, or the spliced-in neighbour
+   *   the reader scrolled to); without them the active tab's own chat
+   *   binding and task id stand in.
+   */
+  function reportVisibleTask(s) {
+    if (HISTORY_PANEL_MODE) return;
+    const tab = getTab(activeTabId);
+    const chatId = String((s && s.chat_id) || (tab && tab.backendChatId) || '');
+    const rawTask =
+      s && s.task_id !== undefined && s.task_id !== null
+        ? s.task_id
+        : currentTaskId;
+    const taskId =
+      rawTask === undefined || rawTask === null ? '' : String(rawTask);
+    if (!setHistoryActiveTask(chatId, taskId)) return;
+    if (POST_ACTIVE_TASK) postToHost({type: 'activeTask', chatId, taskId});
+  }
+
+  /**
+   * Adopt *chatId* / *taskId* as the task the user is looking at and
+   * repaint the history list: the chat's panel opens (unless the user
+   * folded it), the task's row takes the highlight and scrolls into
+   * view.  Returns false when nothing changed.
+   */
+  function setHistoryActiveTask(chatId, taskId) {
+    if (chatId === historyActiveChatId && taskId === historyActiveTaskId) {
+      return false;
+    }
+    historyActiveChatId = chatId;
+    historyActiveTaskId = taskId;
+    historyActiveScrollPending = true;
+    // Moving to a chat the user once folded unfolds it: the fold
+    // predates the move, and the row to show sits inside.  A fold
+    // made WHILE looking at the chat stands until the next move.
+    if (chatId) {
+      historyChatCollapseOverrides.delete(chatId);
+      historySearchCollapseOverrides.delete(chatId);
+      const group = historyChatGroups.get(chatId);
+      if (group) {
+        delete group._kissCollapsed;
+        delete group._kissSearchCollapsed;
+      }
+    }
+    reapplyAllHistoryGroupCollapse(false);
+    applyHistoryActiveTask();
+    return true;
+  }
+
+  /**
+   * After a history render: re-read which task this surface shows (a
+   * chat surface's visible tab may have been bound to its chat — a
+   * registry snapshot — without a Task Info repaint) and paint the
+   * highlight.  The history panel only knows what the host relayed.
+   */
+  function syncHistoryActiveTask() {
+    if (!HISTORY_PANEL_MODE) reportVisibleTask(metaShownSettings);
+    applyHistoryActiveTask();
+  }
+
+  /**
+   * The history row of the task the user is looking at: the row of
+   * that very task — or, for a chat that names no task yet (a tab
+   * bound to its chat before any task ran), the chat's newest row
+   * (rows come newest first).  Null without a chat, and null for a
+   * named task whose row is not loaded: another task of the chat must
+   * not pass for it.
+   */
+  function historyActiveRow() {
+    if (!historyActiveChatId) return null;
+    for (let i = 0; i < historyRenderedRows.length; i++) {
+      const s = allHistSessions[i];
+      if (!s || String(s.id || '') !== historyActiveChatId) continue;
+      if (!historyActiveTaskId) return historyRenderedRows[i];
+      const taskId =
+        s.task_id === undefined || s.task_id === null ? '' : String(s.task_id);
+      if (taskId === historyActiveTaskId) return historyRenderedRows[i];
+    }
+    return null;
+  }
+
+  /**
+   * Paint the highlight on the row of the task the user is looking at
+   * and, when a scroll is pending (the task changed, or the list was
+   * rebuilt — a rebuild lands at the top), bring the row into view: the
+   * row itself, or its chat's header when the user folded that panel.
+   * Called after every history render and on every change of the task.
+   */
+  function applyHistoryActiveTask() {
+    const target = historyActiveRow();
+    historyRenderedRows.forEach(row => {
+      row.classList.toggle('history-active-task', row === target);
+    });
+    if (!target || !historyActiveScrollPending) return;
+    // A row the filters hide (display:none, see
+    // applyHistoryFilterVisibility) has no place to scroll to; the
+    // scroll waits for the filter change that shows it again.
+    if (target.style.display === 'none') return;
+    historyActiveScrollPending = false;
+    const folded = target.closest('.history-chat-group.collapsed');
+    const el = folded
+      ? folded.querySelector(':scope > .history-chat-header') || folded
+      : target;
+    // jsdom has no scrollIntoView.
+    if (typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({block: 'center'});
+    }
   }
 
   /** Whether a history search is being shown right now. */
@@ -17700,6 +17854,7 @@
         // clearing of that search) lands here, and its matches must
         // still expand — or fold back — accordingly.
         reapplyAllHistoryGroupCollapse(false);
+        syncHistoryActiveTask();
         return;
       }
       if (historyPressHeld()) {
@@ -17766,6 +17921,10 @@
       historyChatGroups.clear();
       historyLastDay = '';
       scheduleHistoryMidnightRelabel(false);
+      // Emptying the list drops its scroll offset: the rebuilt list
+      // lands at the top, so the highlighted row is brought back into
+      // view once the rows exist.
+      historyActiveScrollPending = true;
       if (sessions.length === 0) {
         historyList.innerHTML =
           '<div class="sidebar-empty">No conversations yet</div>';
@@ -18046,6 +18205,7 @@
       historyHasMore = false;
     }
     applyHistoryFilterVisibility();
+    syncHistoryActiveTask();
     if (focusKey) {
       // The rebuild detached the focused row; give the keyboard the
       // fresh row of the same task — or the same inline control on it —
@@ -18421,6 +18581,9 @@
       const hasDate = !!((hfFrom && hfFrom.value) || (hfTo && hfTo.value));
       hfDateClear.style.display = hasDate ? '' : 'none';
     }
+    // A filter change may have just shown the highlighted row a
+    // pending scroll was waiting for.
+    applyHistoryActiveTask();
   }
 
   /**
