@@ -83,6 +83,13 @@ interface ChatPanel {
   metaValues?: MetaPanelValues;
   /** The tmp/PROGRESS.md markdown that came with metaValues. */
   metaProgressMd?: string;
+  /**
+   * The chat id and task id the panel last reported showing
+   * (activeTask), cached so a panel switch can point the history
+   * panel at the right row without waiting for the next report.
+   */
+  activeChatId?: string;
+  activeTaskId?: string;
 }
 
 /** True when *tab* is an editor tab hosting a chat webview (live or a
@@ -142,6 +149,9 @@ export class SorcarPanelManager {
     values: MetaPanelValues | null,
     progressMd: string,
   ) => void;
+  // Where the ACTIVE panel's chat / task ids go: the primary sidebar's
+  // history panel (see extension.ts setActiveTaskSink wiring).
+  private _activeTaskSink?: (chatId: string, taskId: string) => void;
   // The two editor-tab icons: the KISS logo, and the green ring spinner
   // shown while the panel's task runs.  Built once so a repaint that
   // keeps the icon does not push a fresh Uri to the workbench.
@@ -350,16 +360,38 @@ export class SorcarPanelManager {
   }
 
   /**
+   * Adopt *sink* as the destination of the active panel's chat / task
+   * ids and push the current state right away, so a history panel
+   * registered after the panels highlights the right row from the
+   * start.
+   */
+  public setActiveTaskSink(
+    sink: (chatId: string, taskId: string) => void,
+  ): void {
+    this._activeTaskSink = sink;
+    this._pushActiveTask();
+  }
+
+  /**
    * Relay the ACTIVE panel's cached task-info values to the meta sink
-   * (placeholder state when no panel exists or none reported yet).
+   * (placeholder state when no panel exists or none reported yet) and
+   * its chat / task ids to the active-task sink ('' when none).
    * Called on every metaUpdate of the active panel, on panel
-   * activations and on panel closes, so the Task Info view always
-   * describes the chat editor tab the user is on.
+   * activations and on panel closes, so the Task Info view and the
+   * history panel always describe the chat editor tab the user is on.
    */
   private _pushActiveMeta(): void {
+    this._pushActiveTask();
     if (!this._metaSink) return;
     const cp = this._activePanel();
     this._metaSink(cp?.metaValues ?? null, cp?.metaProgressMd ?? '');
+  }
+
+  /** Relay the ACTIVE panel's cached chat / task ids to its sink. */
+  private _pushActiveTask(): void {
+    if (!this._activeTaskSink) return;
+    const cp = this._activePanel();
+    this._activeTaskSink(cp?.activeChatId ?? '', cp?.activeTaskId ?? '');
   }
 
   /** Open a fresh conversation in a new editor tab and focus it. */
@@ -600,6 +632,11 @@ export class SorcarPanelManager {
       rootTabId: init.tabId,
       onEvent: (event: PanelEvent) => this._onPanelEvent(cp, event),
     });
+    cp.controller.onActiveTask = (chatId: string, taskId: string) => {
+      cp.activeChatId = chatId;
+      cp.activeTaskId = taskId;
+      if (this._activePanel() === cp) this._pushActiveTask();
+    };
     cp.controller.attachWebviewHost(
       {
         webview: panel.webview,

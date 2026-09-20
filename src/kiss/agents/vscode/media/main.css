@@ -3127,15 +3127,15 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 /* The chat panel's clickable header: a chevron and the chat's first
-   task on ONE line (ellipsized), over a sky-blue (hue 197) tint that
-   reads on both dark and light themes.  No tooltip: the line is all
-   there is. */
+   task on ONE line (ellipsized), over the same cyan tint as a Bash tool
+   call's header in the transcript (.tc-h-bash).  No tooltip: the line
+   is all there is. */
 .history-chat-header {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  background: hsl(197deg 70% 55% / 30%);
+  background: color-mix(in srgb, var(--cyan) 8%, transparent);
   border: none;
   border-radius: 7px;
   padding: 4px 6px;
@@ -3149,7 +3149,7 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 .history-chat-header:hover {
-  background: hsl(197deg 70% 55% / 45%);
+  background: color-mix(in srgb, var(--cyan) 16%, transparent);
 }
 
 .history-chat-chevron {
@@ -3229,6 +3229,16 @@ body.sidebar-chat-mode #meta-info-content {
   padding-left: 19px;
   background-color: color-mix(in srgb, var(--fg) 3%, transparent);
   color: var(--fg);
+}
+
+/* The task panel of the task the user is looking at (the chat webview
+   on screen), in the Result panel's header tint (.rc-h) so the eye
+   finds it in the list.  The body.remote-chat form outranks the remote
+   webapp's plain .running-item background in remote-codex.css. */
+.running-item.history-active-task,
+body.remote-chat .running-item.history-active-task {
+  background-color: color-mix(in srgb, var(--green) 8%, transparent);
+  border-color: color-mix(in srgb, var(--green) 40%, transparent);
 }
 
 .running-item > .sidebar-item-text {

@@ -421,6 +421,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   // kept so a webview that resolves (or reloads) after the relay can
   // be brought up to date on its `ready`.
   private _lastMetaState?: Extract<ToWebviewMessage, {type: 'metaState'}>;
+  // History panel only (history-panel-mode): the last relayed
+  // activeTask, replayed on `ready` for the same reason.
+  private _lastActiveTask?: Extract<ToWebviewMessage, {type: 'activeTask'}>;
+  /**
+   * Called with the raw chat / task ids of the task this view's chat
+   * webview shows whenever they change (its `activeTask` message). The
+   * panel manager sets it on every editor panel's controller and
+   * extension.ts on the sidebar chat view, so the ids of the surface
+   * on screen reach the primary-sidebar history panel (postActiveTask).
+   */
+  public onActiveTask?: (chatId: string, taskId: string) => void;
   private _extensionUri: vscode.Uri;
   private _selectedModel: string;
   private _runningTabs: Set<string> = new Set();
@@ -1423,6 +1434,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // before the webview loaded — or lost to a webview reload —
         // must not leave the panel on its placeholder dashes.
         if (this._lastMetaState) this._sendToWebview(this._lastMetaState);
+        if (this._lastActiveTask) this._sendToWebview(this._lastActiveTask);
         // The daemon owns the canonical tab registry, so `ready` is
         // forwarded whole: the daemon fans out the connId-scoped init
         // replies (models / input history / config), merges any legacy
@@ -1828,6 +1840,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         });
         break;
 
+      case 'activeTask':
+        this.onActiveTask?.(message.chatId, message.taskId);
+        break;
+
       case 'revealPanel':
         this._panelHooks?.onEvent({kind: 'reveal'});
         break;
@@ -2211,6 +2227,20 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   ): void {
     this._lastMetaState = {type: 'metaState', values, progressMd};
     this._sendToWebview(this._lastMetaState);
+  }
+
+  /**
+   * History panel (history-panel-mode): relay the chat / task ids of
+   * the chat surface on screen, so the panel highlights that task's
+   * row and scrolls it into view. Remembered so a webview that
+   * resolves after the relay catches up on `ready`.
+   *
+   * @param chatId The chat's id, '' when no surface reports one.
+   * @param taskId The task's id, '' when unknown.
+   */
+  public postActiveTask(chatId: string, taskId: string): void {
+    this._lastActiveTask = {type: 'activeTask', chatId, taskId};
+    this._sendToWebview(this._lastActiveTask);
   }
 
   private _measureSidebar(

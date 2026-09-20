@@ -178,10 +178,14 @@ class FakeSidebarView {
     this.panelHooks = panelHooks;
     this.resolvedViews = [];
     this.metaStates = [];
+    this.activeTasks = [];
     sidebarInstances.push(this);
   }
   postMetaState(values, progressMd) {
     this.metaStates.push({values, progressMd});
+  }
+  postActiveTask(chatId, taskId) {
+    this.activeTasks.push({chatId, taskId});
   }
   resolveWebviewView(view) {
     this.resolvedViews.push(view);
@@ -352,6 +356,9 @@ class FakePanelManager {
   }
   setMetaSink(sink) {
     calls.manager.metaSink = sink;
+  }
+  setActiveTaskSink(sink) {
+    calls.manager.activeTaskSink = sink;
   }
   markShutdown() {}
   dispose() {}
@@ -821,6 +828,44 @@ async function runTest() {
       e => e.cmd === 'workbench.action.closeAuxiliaryBar',
     ),
     'mode off must NOT close the secondary sidebar it just revealed',
+  );
+
+  // --- the history panel's active-task relay follows the mode -------
+  // Sidebar mode: the sidebar chat view's report reaches the history
+  // panel; the panel manager's sink is ignored.
+  const sidebarController = sidebarInstances[0];
+  const lastActive = () =>
+    historyController.activeTasks[historyController.activeTasks.length - 1];
+  sidebarController.onActiveTask('chat-s', 'task-s1');
+  assert.deepStrictEqual(lastActive(), {chatId: 'chat-s', taskId: 'task-s1'});
+  let relayCount = historyController.activeTasks.length;
+  calls.manager.activeTaskSink('chat-p', 'task-p1');
+  assert.strictEqual(
+    historyController.activeTasks.length,
+    relayCount,
+    'sidebar mode: an editor panel report must not reach the history panel',
+  );
+  // Editor-tabs mode: the reverse.
+  editorTabsMode = true;
+  await fireConfigChange();
+  calls.manager.activeTaskSink('chat-p', 'task-p2');
+  assert.deepStrictEqual(lastActive(), {chatId: 'chat-p', taskId: 'task-p2'});
+  relayCount = historyController.activeTasks.length;
+  sidebarController.onActiveTask('chat-s', 'task-s2');
+  assert.strictEqual(
+    historyController.activeTasks.length,
+    relayCount,
+    'editor-tabs mode: the hidden sidebar chat must not override the panel',
+  );
+  // Flipping OFF replays the sidebar chat's last report so the closing
+  // panels leave no stale highlight (their own '' push is gated off).
+  editorTabsMode = false;
+  await fireConfigChange();
+  calls.manager.activeTaskSink('', '');
+  assert.deepStrictEqual(
+    lastActive(),
+    {chatId: 'chat-s', taskId: 'task-s2'},
+    'mode off: the history panel highlights the sidebar chat again',
   );
 
   // Sidebar mode: a history-view click routes to the sidebar chat
