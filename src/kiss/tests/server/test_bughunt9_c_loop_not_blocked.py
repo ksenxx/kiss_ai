@@ -102,17 +102,27 @@ class TestWatchdogIpCheckAcceptsPrefetchedIps(unittest.TestCase):
             ws._get_local_ips = old
 
     def test_no_arg_call_still_discovers(self) -> None:
-        """The no-arg form (used by older tests) still self-discovers."""
+        """The no-arg form (used by older tests) still self-discovers.
+
+        Adopting the first non-empty baseline republishes the URLs,
+        which schedules the URL-file write on the running loop's
+        executor (``_republish_urls``), so the call is made on a loop
+        exactly as the watchdog coroutine makes it in production.
+        """
         old = ws._get_local_ips
         ws._get_local_ips = lambda: frozenset({"192.0.2.7"})
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 srv = _make_server(tmp)
                 srv._last_ips = frozenset()
-                self.assertFalse(srv._watchdog_check_ip_change())
+                self.assertFalse(asyncio.run(self._check_ip_change(srv)))
                 self.assertEqual(srv._last_ips, frozenset({"192.0.2.7"}))
         finally:
             ws._get_local_ips = old
+
+    @staticmethod
+    async def _check_ip_change(srv: ws.RemoteAccessServer) -> bool:
+        return srv._watchdog_check_ip_change()
 
 
 if __name__ == "__main__":

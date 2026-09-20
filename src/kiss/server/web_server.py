@@ -5118,7 +5118,12 @@ class RemoteAccessServer:
         """
         if script is not None:
             bootstrap = script.parent / "scripts" / "install.sh"
-            if bootstrap.is_file():
+            # os.path.isfile, not Path.is_file: an unreadable ``scripts``
+            # directory must degrade to the root script below, and on
+            # Python 3.13 ``Path.is_file`` re-raises the PermissionError
+            # (only ENOENT/ENOTDIR/EBADF/ELOOP are swallowed) whereas
+            # ``os.path.isfile`` returns False for every OSError.
+            if os.path.isfile(bootstrap):
                 # scripts/install.sh (the curl bootstrap committed in the
                 # clone) synchronizes the checkout with origin under the
                 # cross-process update lock and hands over to the root
