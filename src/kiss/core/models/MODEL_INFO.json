@@ -2917,13 +2917,13 @@
   },
   "openrouter/deepseek/deepseek-v4-flash": {
     "context_length": 500000,
-    "input_price_per_1M": 0.041,
-    "output_price_per_1M": 0.082,
+    "input_price_per_1M": 0.036,
+    "output_price_per_1M": 0.071,
     "fc": true,
     "emb": false,
     "gen": true,
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.008232
+    "cache_read_price_per_1M": 0.007112
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
     "context_length": 500000,
@@ -2959,14 +2959,14 @@
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "context_length": 500000,
-    "input_price_per_1M": 0.578,
-    "output_price_per_1M": 1.734,
+    "input_price_per_1M": 0.532,
+    "output_price_per_1M": 1.596,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.018396
+    "cache_read_price_per_1M": 0.017732
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "context_length": 500000,
@@ -3485,8 +3485,8 @@
   },
   "openrouter/meta/muse-glimmer-30b": {
     "context_length": 131072,
-    "input_price_per_1M": 0.35,
-    "output_price_per_1M": 1.5,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 1.2,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -5178,12 +5178,13 @@
   },
   "openrouter/qwen/qwen3.5-35b-a3b": {
     "context_length": 262144,
-    "input_price_per_1M": 0.163,
-    "output_price_per_1M": 1.3,
+    "input_price_per_1M": 0.312,
+    "output_price_per_1M": 1.25,
     "fc": true,
     "emb": false,
     "gen": true,
-    "use_responses_api": true
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.15625
   },
   "openrouter/qwen/qwen3.5-397b-a17b": {
     "context_length": 262144,
@@ -5244,8 +5245,8 @@
   },
   "openrouter/qwen/qwen3.6-35b-a3b": {
     "context_length": 262144,
-    "input_price_per_1M": 0.1,
-    "output_price_per_1M": 0.9,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 1.0,
     "fc": false,
     "emb": false,
     "gen": true,
@@ -5329,14 +5330,14 @@
   },
   "openrouter/qwen/qwen3.8-27b": {
     "context_length": 500000,
-    "input_price_per_1M": 0.214,
+    "input_price_per_1M": 0.2,
     "output_price_per_1M": 2.55,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.15
+    "cache_read_price_per_1M": 0.085
   },
   "openrouter/qwen/qwen3.8-flash": {
     "context_length": 500000,
@@ -5912,37 +5913,37 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 500000,
-    "input_price_per_1M": 0.554,
-    "output_price_per_1M": 1.742,
+    "input_price_per_1M": 0.65,
+    "output_price_per_1M": 2.042,
     "fc": true,
     "emb": false,
     "gen": true,
     "thinking": "high",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.10296
+    "cache_read_price_per_1M": 0.12064
   },
   "openrouter/z-ai/glm-5.2-high": {
     "context_length": 500000,
-    "input_price_per_1M": 0.554,
-    "output_price_per_1M": 1.742,
+    "input_price_per_1M": 0.65,
+    "output_price_per_1M": 2.042,
     "fc": true,
     "emb": false,
     "gen": true,
     "thinking": "high",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.10296,
+    "cache_read_price_per_1M": 0.12064,
     "alias_of": "openrouter/z-ai/glm-5.2"
   },
   "openrouter/z-ai/glm-5.2-max": {
     "context_length": 500000,
-    "input_price_per_1M": 0.554,
-    "output_price_per_1M": 1.742,
+    "input_price_per_1M": 0.65,
+    "output_price_per_1M": 2.042,
     "fc": true,
     "emb": false,
     "gen": true,
     "thinking": "max",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.10296,
+    "cache_read_price_per_1M": 0.12064,
     "alias_of": "openrouter/z-ai/glm-5.2"
   },
   "openrouter/z-ai/glm-5.3": {
@@ -6046,14 +6047,14 @@
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.578,
-    "output_price_per_1M": 1.734,
+    "input_price_per_1M": 0.532,
+    "output_price_per_1M": 1.596,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.018396
+    "cache_read_price_per_1M": 0.017732
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
     "context_length": 500000,
@@ -6418,14 +6419,14 @@
   },
   "openrouter/~z-ai/glm-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.845,
-    "output_price_per_1M": 2.86,
+    "input_price_per_1M": 0.832,
+    "output_price_per_1M": 2.614,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.169
+    "cache_read_price_per_1M": 0.15444
   },
   "text-embedding-3-large": {
     "context_length": 8191,
