@@ -302,13 +302,15 @@ class TestCachePricing:
         assert MODEL_INFO["openrouter/openai/gpt-4o"].cache_read_price_per_1M == pytest.approx(
             MODEL_INFO["openrouter/openai/gpt-4o"].input_price_per_1M * 0.5
         )
-        # DeepSeek's OpenRouter price is a floating provider average: check the 0.2x ratio.
+        # DeepSeek's OpenRouter prices are floating provider averages that
+        # every ``update_models.py`` refresh moves, so only the cache-read /
+        # input ratios (fixed by the vendor) are pinned, not the absolute values.
         d = MODEL_INFO["openrouter/deepseek/deepseek-v4-flash"]
-        assert d.input_price_per_1M == pytest.approx(0.041, rel=0.05)
+        assert 0 < d.input_price_per_1M < 1
         assert d.cache_read_price_per_1M == pytest.approx(d.input_price_per_1M * 0.2, rel=0.05)
         assert d.cache_write_price_per_1M is None
         p = MODEL_INFO["openrouter/deepseek/deepseek-v4-pro"]
-        assert p.input_price_per_1M == pytest.approx(0.422, rel=0.05)
+        assert 0 < p.input_price_per_1M < 5
         assert p.cache_read_price_per_1M == pytest.approx(p.input_price_per_1M / 12, rel=0.05)
         q = MODEL_INFO["openrouter/qwen/qwen3.8-max-0902"]
         assert q.cache_read_price_per_1M == pytest.approx(0.25)

@@ -971,6 +971,11 @@ class TestPerTabT0(unittest.TestCase):
             function removeSpinner() {}
             function applyChevronState() {}
             function focusInputWithRetry() {}
+            // activateAdjacentTab folds the restored tab's older
+            // transcript panels (a DOM pass over the output container
+            // O); irrelevant to the timer/anchor contract under test.
+            var O = null;
+            function collapseOlderPanels() {}
             // Both tabs belong to the current workspace, so neither is
             // hidden (isTabHidden only hides other-workspace tabs).
             function isTabHidden() { return false; }

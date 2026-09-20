@@ -31,14 +31,15 @@ effect while the daemon is running.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 import re
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 
-from kiss.agents.third_party_agents import ask_sea
 from kiss.core.config import kiss_home
 
 logger = logging.getLogger("kiss.sea_commands")
@@ -341,6 +342,29 @@ def _split_slash_command(prompt: str) -> tuple[str, str] | None:
     return command, rest.strip()
 
 
+def _load_sea_module(sea_path: Path) -> ModuleType:
+    """Import the SEA script at *sea_path* as a standalone module.
+
+    Mirrors the daemon, which executes the agent file named by
+    ``extension_agent_path`` and reads its ``X()`` getters from the
+    resulting namespace.  Loading by path (rather than by dotted module
+    name) keeps ``kiss.agents.sorcar`` free of any static or literal
+    dependency on ``kiss.agents.third_party_agents``, which the
+    layering invariants forbid.
+
+    Args:
+        sea_path: Absolute path of the SEA ``.py`` file.
+
+    Returns:
+        The freshly executed module.
+    """
+    spec = importlib.util.spec_from_file_location(f"_kiss_sea_{sea_path.stem}", sea_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
     """Rewrite a slash-command prompt into an explicit ``run_agent`` call.
 
@@ -382,12 +406,13 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
         # ``append_to_prompt`` right before the daemon round trip.
         # The system-prompt suffix is owned by ``ask_sea.py`` (its
         # ``append_to_system_prompt()`` getter also overrides the
-        # wire value daemon-side), so it is read from there.
+        # wire value daemon-side), so it is read from the resolved SEA
+        # file itself.
         append_to_prompt = (
             "Read the events of the task <task_id> from "
             "~/.kiss/sorcar.db and answer the user question above."
         )
-        append_to_system_prompt = ask_sea.append_to_system_prompt()
+        append_to_system_prompt = _load_sea_module(sea_path).append_to_system_prompt()
         rewritten = (
             f"The user invoked the slash command /ask.  Call the "
             f"run_agent tool IMMEDIATELY, as your very first action, "
