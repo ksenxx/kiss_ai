@@ -665,6 +665,9 @@
   // Enter of another.
   let _deferHighlight = false;
   let acIdx = -1;
+  // Slash-command list (SEA agents), pushed by the daemon on connect
+  // and on any registry rescan.  Empty until the daemon replies.
+  let seaCommands = [];
 
   let histCache = [];
   let histIdx = -1;
@@ -8071,7 +8074,7 @@
   function requestGhost() {
     clearGhost();
     if (isRunning || !inp.value) return;
-    if (getAtCtx()) return;
+    if (getAtCtx() || getSlashCtx()) return;
     if (inp.selectionStart < inp.value.length) return;
     if (inp.value.replace(/\s/g, '').length < 2) return;
     ghostTimer = setTimeout(() => {
@@ -11908,7 +11911,11 @@
         // tableak-coverage:end
         const filesCtx = getAtCtx();
         if (!filesCtx) {
-          hideAC();
+          // A stale ``files`` reply from a prior ``@`` query must not
+          // hide a slash-command popup that opened AFTER the reply
+          // left the daemon: only hide when the composer is neither
+          // in an ``@`` mention nor in a ``/`` command.
+          if (!getSlashCtx()) hideAC();
           break;
         }
         if (ev.prefix !== undefined && ev.prefix !== filesCtx.query) {
@@ -11917,6 +11924,13 @@
         renderAutocomplete(ev.files || []);
         break;
       }
+      case 'seaCommands':
+        seaCommands = Array.isArray(ev.commands) ? ev.commands.slice() : [];
+        // Refresh a slash-command popup currently on screen so a
+        // registry rescan (SEAS.md edit, new SEA file) reflows the
+        // list without needing another keystroke.
+        if (getSlashCtx()) checkAutocomplete();
+        break;
       case 'askUser': {
         const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
         const askTab = getTab(askTabId);
@@ -12513,6 +12527,11 @@
         // tableak-coverage:start
         if (!isForActiveTab(ev)) break;
         // tableak-coverage:end
+        // A ghost suggestion that arrives while the composer is
+        // typing a slash-command (``/xxx``) must NOT paint under the
+        // popup: the daemon does not know about the slash context,
+        // so this guard sits on the response side.
+        if (getSlashCtx()) break;
         if (ev.suggestion && ev.query === inp.value) {
           updateGhost(ev.suggestion);
         }
@@ -18888,7 +18907,64 @@
     return m ? {start: before.length - m[0].length, query: m[1]} : null;
   }
 
+  function getSlashCtx() {
+    // Only match a leading slash on the very first line (a stray "/"
+    // typed inside multi-line text is not a command). The cursor must
+    // be inside the command word — once whitespace follows, the user
+    // is typing the sub-task text and the popup should hide.
+    const val = inp.value;
+    const pos = inp.selectionStart || 0;
+    const before = val.substring(0, pos);
+    const m = before.match(/^\/([A-Za-z0-9_-]*)$/);
+    return m ? {start: 0, query: m[1]} : null;
+  }
+
+  function acceptSlashCommand(name) {
+    const slashCtx = getSlashCtx();
+    if (!slashCtx) return;
+    const cursor = inp.selectionStart || inp.value.length;
+    const after = inp.value.substring(cursor);
+    const sep = /^\s/.test(after) ? '' : ' ';
+    const inserted = '/' + name + sep;
+    inp.value = inserted + after;
+    syncClearBtn();
+    const np = inserted.length;
+    inp.setSelectionRange(np, np);
+    inp.style.height = 'auto';
+    inp.style.height = inp.scrollHeight + 'px';
+    hideAC();
+    inp.focus();
+  }
+
+  function renderSlashCommands(query) {
+    if (!seaCommands || !seaCommands.length) {
+      hideAC();
+      return;
+    }
+    const q = (query || '').toLowerCase();
+    const matches = q
+      ? seaCommands.filter(n => n.toLowerCase().indexOf(q) >= 0)
+      : seaCommands.slice();
+    if (!matches.length) {
+      hideAC();
+      return;
+    }
+    const data = matches.map(name => ({type: 'command', text: name}));
+    renderAcDropdown(
+      data,
+      ['command'],
+      {command: 'Commands'},
+      item => (q ? '/' + hlMatch(item.text, q) : '/' + esc(item.text)),
+      acceptSlashCommand,
+    );
+  }
+
   function checkAutocomplete() {
+    const slashCtx = getSlashCtx();
+    if (slashCtx) {
+      renderSlashCommands(slashCtx.query);
+      return;
+    }
     const atCtx = getAtCtx();
     if (atCtx) {
       api.getFiles({
@@ -18916,6 +18992,7 @@
     if (type === 'task') return _acSvg.bolt;
     if (type === 'trick') return _acSvg.spark;
     if (type === 'identifier') return _acSvg.code;
+    if (type === 'command') return _acSvg.bolt;
     return _acSvg.file;
   }
   function hlMatch(text, query) {
@@ -19052,7 +19129,7 @@
   }
 
   function renderCompletions(data) {
-    if (getAtCtx()) {
+    if (getAtCtx() || getSlashCtx()) {
       return;
     }
     if (!data || !data.length) {

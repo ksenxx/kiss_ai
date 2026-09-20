@@ -27,6 +27,9 @@ from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
 )
+from kiss.agents.sorcar.sea_commands import (
+    list_commands as list_sea_commands,
+)
 from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
@@ -1276,6 +1279,21 @@ class _CommandsMixin:
         """Send deduplicated task texts for arrow-key cycling."""
         self._get_input_history(cmd.get("connId", ""))
 
+    def _cmd_get_sea_commands(self, cmd: dict[str, Any]) -> None:
+        """Send the slash-command list built from every SEA folder.
+
+        Sent as a ``seaCommands`` event scoped to the requesting
+        connection: ``{type: "seaCommands", commands: [...]}``.  The
+        chat webview uses the list to render the autocomplete popup
+        when the user types ``/`` at the start of the composer.
+        """
+        commands = list_sea_commands()
+        event: dict[str, Any] = {
+            "type": "seaCommands",
+            "commands": commands,
+        }
+        self._broadcast_to_conn(event, cmd.get("connId", ""))
+
     def _cmd_get_adjacent_task(self, cmd: dict[str, Any]) -> None:
         """Send events for the adjacent task in the same chat session.
 
@@ -1818,6 +1836,7 @@ class _CommandsMixin:
         "newChat": _cmd_new_chat,
         "complete": _cmd_complete,
         "getInputHistory": _cmd_get_input_history,
+        "getSeaCommands": _cmd_get_sea_commands,
         "getAdjacentTask": _cmd_get_adjacent_task,
         "generateCommitMessage": _cmd_generate_commit_message,
         "autocommitAction": _cmd_autocommit_action,
