@@ -371,6 +371,38 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
     if sea_path is None:
         return None
     abs_path = str(sea_path)
+    if command == "ask":
+        # ``/ask <question>`` is a fixed side-channel Q&A over the
+        # calling task's persisted events: the two ``append_to_*``
+        # arguments are wired verbatim from the user task description
+        # of ``ask_sea.py`` and must reach ``run_agent`` unchanged.
+        # ``<task_id>`` is left as a literal placeholder here — the
+        # calling task's id is not known until the daemon dispatch
+        # allocates one, so ``_dispatch_reserved`` substitutes it into
+        # ``append_to_prompt`` right before the daemon round trip.
+        append_to_prompt = (
+            "Read the events of the task <task_id> from "
+            "~/.kiss/sorcar.db and answer the user question above."
+        )
+        append_to_system_prompt = (
+            "**MUST FOLLOW: You MUST NOT USE internet or internet "
+            "search at any point."
+        )
+        rewritten = (
+            f"The user invoked the slash command /ask.  Call the "
+            f"run_agent tool IMMEDIATELY, as your very first action, "
+            f"with these arguments and no others:\n"
+            f'  agent = "{abs_path}"\n'
+            f"  task  = the text below, verbatim\n"
+            f'  append_to_prompt = "{append_to_prompt}"\n'
+            f'  append_to_system_prompt = "{append_to_system_prompt}"\n'
+            f"Do not modify these arguments, do not explore any source "
+            f"code, do not paraphrase the task, and do not call any "
+            f"other tool first.  When run_agent returns, relay its "
+            f"result to the user verbatim as your final answer.\n\n"
+            f"TASK TEXT FOR run_agent:\n{task_text}"
+        )
+        return rewritten, sea_path
     # A directive, not a suggestion: the agent's routing rules already
     # tell it to prefer ``run_agent`` for channel-style work, and this
     # phrasing removes every reason to explore anything else first.
