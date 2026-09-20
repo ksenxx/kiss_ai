@@ -12152,7 +12152,13 @@
         renderWelcomeSuggestions(ev.suggestions);
         break;
       case 'remote_url':
-        renderRemoteUrl(ev.url, ev.ntfyUrl, ev.tunnelActive);
+        renderRemoteUrl(
+          ev.url,
+          ev.ntfyUrl,
+          ev.tunnelActive,
+          ev.loopbackUrl,
+          ev.lanUrls,
+        );
         break;
       case 'update_available':
         renderUpdateAvailable(
@@ -13735,14 +13741,16 @@
   // shareflash0903-coverage:end
   // share-coverage:end
 
-  function _buildRemoteUrlBar(displayUrl, isNtfy) {
+  function _buildRemoteUrlBar(displayUrl, isNtfy, labelText) {
     const wrapper = document.createElement('div');
     wrapper.className = 'remote-url-bar';
     const label = document.createElement('div');
     label.className = 'remote-url-label';
-    label.textContent = isNtfy
-      ? 'Webapp: click the link in the first post at URL:'
-      : 'Web/mobile app';
+    label.textContent =
+      labelText ||
+      (isNtfy
+        ? 'Webapp: click the link in the first post at URL:'
+        : 'Web/mobile app');
     const row = document.createElement('div');
     row.className = 'remote-url-row';
     const link = document.createElement('a');
@@ -13788,15 +13796,30 @@
     return wrapper;
   }
 
-  function renderRemoteUrl(url, ntfyUrl, tunnelActive) {
+  function renderRemoteUrl(url, ntfyUrl, tunnelActive, loopbackUrl, lanUrls) {
     const displayUrl = ntfyUrl || url;
+    // Alongside the Cloudflare (or ntfy) URL, always show how to
+    // reach the webapp from this machine (127.0.0.1) and from other
+    // devices on the LAN.  URLs equal to the primary one are skipped
+    // so nothing is listed twice.
+    const bars = [];
+    if (displayUrl) bars.push([displayUrl, !!ntfyUrl, undefined]);
+    if (loopbackUrl && loopbackUrl !== displayUrl) {
+      bars.push([loopbackUrl, false, 'Local (this machine)']);
+    }
+    for (const lanUrl of lanUrls || []) {
+      if (lanUrl && lanUrl !== displayUrl) {
+        bars.push([lanUrl, false, 'LAN (local network)']);
+      }
+    }
     const containerIds = ['remote-url', 'welcome-remote-url'];
     for (const id of containerIds) {
       const container = document.getElementById(id);
       if (!container) continue;
       container.innerHTML = '';
-      if (!displayUrl) continue;
-      container.appendChild(_buildRemoteUrlBar(displayUrl, !!ntfyUrl));
+      for (const [barUrl, isNtfy, labelText] of bars) {
+        container.appendChild(_buildRemoteUrlBar(barUrl, isNtfy, labelText));
+      }
     }
     const welcomeCfg = document.getElementById('welcome-config');
     if (welcomeCfg) {
