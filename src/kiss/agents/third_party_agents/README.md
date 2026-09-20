@@ -491,7 +491,10 @@ link from the channel login.)
 The built-in cron agent understands plain-language schedules; the kiss-web daemon
 ticks the scheduler automatically, and a job's result can be delivered to any
 gateway-capable channel (25 of the 32 messaging channels; a `[SILENT]` or `NO_REPLY`
-result suppresses delivery).
+result suppresses delivery). Jobs due at the same time run concurrently, each in its
+own scratch directory (`~/.kiss/cron/runs/<job_id>-<random>`, removed when the run
+ends); the daemon's scheduler tick never waits for a long job, and a job whose previous
+run is still in progress in that scheduler is not started again until it finishes.
 
 **16. Scheduled brief delivered where you already read** (Muse tips 6 and 7):
 
@@ -519,8 +522,13 @@ is just a shell command, you set one up as a scheduled command job:
 
 You do not have to write that command or know the numeric chat ID yourself. Ask for
 the gateway in plain language and let the chat session do the plumbing: it looks up
-the chat identifier through the channel agent, composes the tick command, and hands it
-to the cron agent as the scheduled command job:
+the chat identifier through the channel agent and hands the request to the cron
+agent, whose `gateway_command` tool converts channel + chat into the tick command
+(`kiss-telegram --channel=-1001234567890 --pairing --quiet`; with `--quiet` a tick
+prints nothing unless it served a message, so an idle tick is silent and only
+activity and failures are logged), which is then scheduled as a command job. A
+gateway is never scheduled as a prompt job: a command tick that finds no messages
+starts no LLM session and costs no tokens.
 
 > Find the chat ID of my Telegram group "Sen family" from the bot's recent updates,
 > then schedule a gateway tick of that chat with pairing every 2 minutes.

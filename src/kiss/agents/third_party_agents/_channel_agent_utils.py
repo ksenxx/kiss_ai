@@ -1861,6 +1861,9 @@ def channel_main(
     ``channel_model_name`` / ``channel_max_budget`` config overrides
     when ``-m`` / ``-b`` are not passed, and supports the pairing admin
     flags ``--pairing``, ``--approve CODE``, and ``--list-pending``.
+    ``--quiet`` makes a poll tick print nothing unless it processed at
+    least one message, so a tick scheduled as a cron command job (an
+    always-on gateway) is silent when there is nothing to report.
 
     Args:
         agent_cls: The channel Agent class to instantiate (e.g. ``SlackAgent``).
@@ -1905,7 +1908,7 @@ def channel_main(
         parts.append("[--workspace WS]")
         if make_backend is not None:
             parts.append("[--channel CH]")
-            parts.append("[--pairing] [--approve CODE] [--list-pending]")
+            parts.append("[--pairing] [--quiet] [--approve CODE] [--list-pending]")
         if extra_usage:
             parts.append(extra_usage)
         print(" ".join(parts))
@@ -1929,6 +1932,12 @@ def channel_main(
             action="store_true",
             default=False,
             help="Enable DM pairing: unapproved senders get a one-time approval code",
+        )
+        parser.add_argument(
+            "--quiet",
+            action="store_true",
+            default=False,
+            help="Print nothing unless the poll tick processed at least one message",
         )
         parser.add_argument(
             "--approve",
@@ -1966,6 +1975,7 @@ def channel_main(
             backend = make_backend(workspace=workspace)
         else:
             backend = make_backend()
+        quiet = bool(args.quiet)
         allow_users_raw = [u.strip() for u in args.allow_users.split(",") if u.strip()]
         allow_users: list[str] | None = None
         if allow_users_raw:
@@ -1973,7 +1983,7 @@ def channel_main(
             for raw in allow_users_raw:
                 resolved = backend.find_user(raw)
                 if resolved:
-                    if resolved != raw:
+                    if resolved != raw and not quiet:
                         print(f"  Resolved user {raw!r} -> {resolved}")
                     allow_users.append(resolved)
                 else:
@@ -2004,9 +2014,11 @@ def channel_main(
             dm_pairing=getattr(args, "pairing", False),
             cli_name=cli_name,
         )
-        print(f"Checking {channel_name} channel for pending messages...")
+        if not quiet:
+            print(f"Checking {channel_name} channel for pending messages...")
         count = runner.run_once()
-        print(f"Processed {count} message(s).")
+        if count or not quiet:
+            print(f"Processed {count} message(s).")
         return
 
     sig = inspect.signature(agent_cls)

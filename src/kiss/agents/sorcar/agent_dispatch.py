@@ -9,8 +9,9 @@ Gives the Sorcar agent a single tool, ``run_agent`` (built per task by
 — an installed third-party channel agent named by channel (Slack,
 Telegram, Discord, email, WhatsApp, Home Assistant, ...), the built-in
 ``cron`` agent (the scheduled-automations agent script
-``kiss.agents.sorcar.cron_agent``, which supplies the ``cron_job``
-tool), or an arbitrary *agent script* named by its ``.py`` file path —
+``kiss.agents.sorcar.cron_agent``, which supplies the ``cron_job`` and
+``gateway_command`` tools), or an arbitrary *agent script* named by its
+``.py`` file path —
 so a request like "Send 'hello' to the #sorcar Slack channel", "every
 morning at 9 summarize my inbox", or "run my_agent.py on this task" is
 executed in one tool call instead of the agent first rediscovering
@@ -818,8 +819,8 @@ def _run_agent(
     if squashed == "cron":
         # The scheduled-automations agent: an agent script in the
         # sorcar package (not a third-party channel), dispatched the
-        # same way — its tools() supplies the cron_job tool and
-        # its work_dir()/use_worktree()/auto_commit()
+        # same way — its tools() supplies the cron_job and
+        # gateway_command tools and its work_dir()/use_worktree()/auto_commit()
         # getters keep the session in ~/.kiss/cron/work, out of the
         # calling project's git lifecycle.  ``classify=False``
         # additionally defaults classification off — cron is the one
@@ -1000,7 +1001,15 @@ def make_run_agent_tool(
         agent and the scheduling request as the task (the cron agent
         translates natural-language schedules itself).  Also use it
         whenever the user names an agent file (an *agent script*) to
-        run a task with: pass the file's path as the agent.
+        run a task with: pass the file's path as the agent.  An
+        always-on gateway for a messaging channel ("make my Telegram
+        group talk to Sorcar") is a cron task too: pass ``"cron"`` with
+        the channel, the chat id, and the polling interval — the cron
+        agent converts it into the channel CLI's tick command and
+        schedules that command (no LLM session per tick).  Only Slack,
+        Discord, Matrix and Google Chat accept a chat NAME there; on
+        every other channel resolve the name to its chat id through
+        the channel agent first (e.g. from the bot's recent updates).
 
         Available channels: {channels}.  The built-in ``"cron"``
         agent (scheduled automations) is always available.
