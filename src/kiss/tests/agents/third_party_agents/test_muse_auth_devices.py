@@ -90,11 +90,11 @@ from kiss.agents.third_party_agents.ntfy_agent import NtfyChannelBackend
 from kiss.agents.third_party_agents.ntfy_agent import _config as ntfy_config
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
+    requires_muse_daemon,
     setup_muse_env,
     teardown_muse_env,
     wait_daemon_stopped,
 )
-from kiss.tests.conftest import requires_unix_sockets
 
 _REAL_DISCORD_TOKEN = "discord-real-secret"
 _REAL_HA_TOKEN = "ha-real-secret"
@@ -1045,7 +1045,7 @@ def test_failed_enrollment_is_transactional(
     assert api_server.header("Authorization") == "Bearer tk-good"
 
 
-@requires_unix_sockets
+@requires_muse_daemon
 def test_boundary_ignores_ambient_proxy_env(
     isolated_kiss_home: Path,
     api_server: _DeviceApiServer,

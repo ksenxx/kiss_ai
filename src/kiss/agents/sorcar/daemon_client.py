@@ -738,6 +738,7 @@ def run(
         )
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     aborted: BaseException | None = None
+    connected = False
     try:
         sock.settimeout(10.0 if timeout is None else min(timeout, 10.0))
         try:
@@ -747,6 +748,7 @@ def run(
                 f"Cannot connect to the sorcar daemon at {path}: {exc} "
                 f"— start it with `kiss-web`."
             ) from exc
+        connected = True
         cmd = {
             "type": "run",
             "prompt": prompt,
@@ -955,7 +957,13 @@ def run(
         aborted = exc
         raise
     finally:
-        if aborted is not None and not isinstance(aborted, TimeoutError):
+        # Nothing to cascade or close when the connect itself failed:
+        # there is no task and no tab on the daemon's side.  Sending on
+        # the never-connected socket is not merely pointless -- on macOS
+        # ``poll()`` never reports such a socket writable, so each of
+        # the two bounded sends below would burn its full 5-second
+        # timeout and a "daemon is down" error surfaced only after 10 s.
+        if connected and aborted is not None and not isinstance(aborted, TimeoutError):
             # The wait was aborted — typically by the KeyboardInterrupt
             # injected when the CALLING task is stopped while blocked
             # here.  Cascade the stop to the dispatched task: without
@@ -981,16 +989,16 @@ def run(
         # exit path.  For a still-running task (timeout) this merely
         # flips ``frontend_closed`` and the state is disposed when the
         # task ends; for a finished task it is disposed immediately.
-        # Best-effort: the daemon may be gone or the connect may have
-        # failed.
-        try:
-            sock.settimeout(5.0)
-            sock.sendall(
-                json.dumps({"type": "closeTab", "tabId": tab_id})
-                .encode("utf-8") + b"\n",
-            )
-        except OSError:
-            pass
+        # Best-effort: the daemon may be gone.
+        if connected:
+            try:
+                sock.settimeout(5.0)
+                sock.sendall(
+                    json.dumps({"type": "closeTab", "tabId": tab_id})
+                    .encode("utf-8") + b"\n",
+                )
+            except OSError:
+                pass
         try:
             sock.close()
         except OSError:

@@ -42,11 +42,13 @@ the order-dependent crash in large ``tests/agents/vscode`` runs, e.g.
 body runs.
 """
 
+import contextlib
 import functools
 import os
 import shutil
 import socket
 import sys
+import sysconfig
 import tempfile
 import threading
 import unittest
@@ -118,6 +120,60 @@ def is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
+@contextlib.contextmanager
+def nproc_limit_lowered_to_one() -> Iterator[None]:
+    """Lower the soft ``RLIMIT_NPROC`` to 1 for the block, then restore it.
+
+    Threads count against the per-user process limit for a non-root
+    uid, so inside the block ``Thread.start()`` genuinely raises
+    ``RuntimeError`` on hosts that enforce the limit (Linux).
+
+    The restore re-reads the hard limit instead of reusing the value
+    reported before lowering: macOS *reports* the system-wide
+    ``kern.maxproc`` as the hard limit but silently clamps it to
+    ``kern.maxprocperuid`` on the first ``setrlimit`` call, so putting
+    the reported value back raises ``ValueError: not allowed to raise
+    maximum limit`` and would leave the whole pytest process stuck at
+    soft NPROC=1 -- every later ``subprocess`` spawn then fails with
+    ``BlockingIOError``.
+
+    Raises:
+        ValueError, OSError: The limit could not be lowered (the block
+            is not entered).
+    """
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+    resource.setrlimit(resource.RLIMIT_NPROC, (1, hard))
+    try:
+        yield
+    finally:
+        _, current_hard = resource.getrlimit(resource.RLIMIT_NPROC)
+        resource.setrlimit(resource.RLIMIT_NPROC, (min(soft, current_hard), current_hard))
+
+
+def thread_start_can_be_starved() -> bool:
+    """Return whether lowering ``RLIMIT_NPROC`` makes ``Thread.start`` fail here.
+
+    False for root (the limit is not enforced), on hosts where the limit
+    cannot be lowered, and on hosts that do not count threads against it
+    (macOS): tests that need real thread exhaustion skip in those cases.
+    """
+    if IS_WINDOWS or is_root():
+        return False
+    try:
+        with nproc_limit_lowered_to_one():
+            probe = threading.Thread(target=lambda: None)
+            try:
+                probe.start()
+            except RuntimeError:
+                return True
+            probe.join()
+            return False
+    except (ValueError, OSError):
+        return False
+
+
 # Errors a hot reader polling a file that writers atomically replace
 # must retry rather than report as a torn read.  Windows refuses to open
 # the target for the instant ``os.replace`` swaps it in (sharing
@@ -152,10 +208,11 @@ def install_cli_script(script: Path, source: str) -> None:
         )
 
 
-_FAKE_CLOUDFLARED_WINDOWS_WRAPPER = """\
+_FAKE_CLOUDFLARED_WRAPPER = """\
 import os
 import runpy
 import sys
+import sysconfig
 
 # A bare ``cloudflared`` start gives ``['']``; ``run_path`` fills argv[0].
 sys.argv = [sys.executable, *(sys.argv if sys.argv != [""] else [])]
@@ -178,21 +235,25 @@ def install_fake_cloudflared(directory: Path, body: str) -> Path:
     The product spawns ``cloudflared`` by bare name from ``PATH`` and
     verifies pidfile processes by executable basename
     (``web_server._looks_like_cloudflared``), so the fake must be a
-    single process that *is* named ``cloudflared``.  On POSIX that is a
-    ``#!{sys.executable}`` script.  Windows cannot execute shebang
-    scripts, a ``.cmd`` shim would make the visible process ``cmd.exe``
-    and orphan the real worker on ``terminate()``, and the kernel
-    reports a symlink's *target* as the image path -- so the base
-    interpreter is copied to ``cloudflared.exe`` beside its runtime
-    DLLs plus a ``cloudflared._pth`` file (the embeddable-distribution
-    mechanism: it lists the real installation's ``Lib``/``DLLs`` and
-    this directory as ``sys.path`` and turns on ``import site``), and
-    *body* runs from a ``sitecustomize`` module beside the copy, which
-    ``site`` imports at startup.  With both shapes ``sys.argv`` is
-    ``[<script path>, <cloudflared args>...]``.
+    single process that *is* named ``cloudflared`` -- a ``#!python``
+    script is not: macOS ``ps -o comm=`` reports the *interpreter* for
+    a shebang script (Linux reports the script), and Windows cannot run
+    one at all.  So the fake is the interpreter itself under the name
+    ``cloudflared``: a symlink to it on POSIX (the kernel names the
+    process after the exec'd path), and on Windows -- where the kernel
+    reports a symlink's *target* as the image path and a ``.cmd`` shim
+    would make the visible process ``cmd.exe`` -- a copy of the base
+    interpreter as ``cloudflared.exe`` beside its runtime DLLs.
 
-    Callers add *directory* to ``PATH`` themselves, exactly as they
-    would for a shebang fake.
+    *body* is run through the embeddable-distribution mechanism, which
+    CPython's ``getpath`` applies on every platform: a
+    ``cloudflared._pth`` file adjacent to the executable pins
+    ``sys.path`` to this directory plus the real installation's standard
+    library and turns on ``import site``, and *body* runs from a
+    ``sitecustomize`` module here, which ``site`` imports at startup.
+    ``sys.argv`` is ``[<script path>, <cloudflared args>...]``.
+
+    Callers add *directory* to ``PATH`` themselves.
 
     Args:
         directory: Existing directory that receives the fake.
@@ -201,25 +262,32 @@ def install_fake_cloudflared(directory: Path, body: str) -> Path:
     Returns:
         Path of the executable (``cloudflared`` or ``cloudflared.exe``).
     """
-    if not IS_WINDOWS:
-        fake = directory / "cloudflared"
-        fake.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
-        fake.chmod(0o755)
-        return fake
     base = Path(getattr(sys, "_base_executable", sys.executable))
-    fake = directory / "cloudflared.exe"
-    shutil.copy2(base, fake)
-    for dll in [*base.parent.glob("python3*.dll"), *base.parent.glob("vcruntime*.dll")]:
-        shutil.copy2(dll, directory / dll.name)
+    if IS_WINDOWS:
+        fake = directory / "cloudflared.exe"
+        shutil.copy2(base, fake)
+        for dll in [*base.parent.glob("python3*.dll"), *base.parent.glob("vcruntime*.dll")]:
+            shutil.copy2(dll, directory / dll.name)
+        stdlib_dirs = [base.parent / "Lib", base.parent / "DLLs"]
+    else:
+        fake = directory / "cloudflared"
+        fake.unlink(missing_ok=True)
+        fake.symlink_to(base)
+        base_vars = {"base": sys.base_prefix, "platbase": sys.base_exec_prefix}
+        stdlib_dirs = [
+            Path(sysconfig.get_path("stdlib", vars=base_vars)),
+            Path(sysconfig.get_path("platstdlib", vars=base_vars)) / "lib-dynload",
+        ]
+    # This directory goes FIRST: Debian's Python ships its own
+    # ``sitecustomize.py`` in the stdlib directory, which would shadow
+    # the fake's if the stdlib were searched before it.
     (directory / "cloudflared._pth").write_text(
-        f"{base.parent / 'Lib'}\n{base.parent / 'DLLs'}\n.\nimport site\n",
-        encoding="utf-8",
+        ".\n" + "".join(f"{d}\n" for d in stdlib_dirs) + "import site\n", encoding="utf-8",
     )
     body_path = directory / "fake_cloudflared_body.py"
     body_path.write_text(body, encoding="utf-8")
     (directory / "sitecustomize.py").write_text(
-        _FAKE_CLOUDFLARED_WINDOWS_WRAPPER.format(body_path=str(body_path)),
-        encoding="utf-8",
+        _FAKE_CLOUDFLARED_WRAPPER.format(body_path=str(body_path)), encoding="utf-8",
     )
     return fake
 

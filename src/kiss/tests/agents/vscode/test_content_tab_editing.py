@@ -24,6 +24,7 @@ unreachable the editor cannot exist, so those tests skip.
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
@@ -78,7 +79,10 @@ def _open_editor(page, path: str, link_id: str) -> None:
 
 def _type_at_end(page, text: str) -> None:
     page.click(_MONACO + " .view-lines")
-    page.keyboard.press("Control+End")
+    # Monaco binds "go to end of document" per platform: Ctrl+End on
+    # Linux/Windows, Cmd+Down on macOS (Ctrl+End is unbound there, so
+    # the text would land wherever the click put the cursor).
+    page.keyboard.press("Meta+ArrowDown" if sys.platform == "darwin" else "Control+End")
     page.keyboard.type(text)
 
 
@@ -214,7 +218,9 @@ class TestContentTabEditing:
             _open_editor(page, str(path), "lnk-e3")
             _type_at_end(page, "zzz")
             page.wait_for_selector(_DIRTY_TAB, timeout=10000)
-            page.keyboard.press("Control+z")
+            # Undo is Monaco's own keybinding, and Monaco follows the
+            # platform: Ctrl+Z on Linux/Windows, Cmd+Z on macOS.
+            page.keyboard.press("ControlOrMeta+z")
             page.wait_for_function(
                 "sel => document.querySelector(sel) === null",
                 arg=_DIRTY_TAB, timeout=10000,

@@ -43,13 +43,11 @@ import pytest
 
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.server.server import VSCodeServer
-from kiss.tests.server._memory_printer import MemoryPrinter
-from kiss.tests.server.test_concaudit_w6_commit_msg_claim import (
-    _thread_start_can_be_starved,
+from kiss.tests.conftest import (
+    nproc_limit_lowered_to_one,
+    thread_start_can_be_starved,
 )
-
-# The resource module (RLIMIT_*) only exists on POSIX; Windows skips.
-resource = pytest.importorskip("resource")
+from kiss.tests.server._memory_printer import MemoryPrinter
 
 
 class _LogWaiter(logging.Handler):
@@ -423,7 +421,7 @@ class TestFilesRefreshFailure(unittest.TestCase):
         worker will ever run the deferred cleanup — and the post-task
         refresh hook must not propagate the spawn failure into the
         task runner's cleanup."""
-        if not _thread_start_can_be_starved():
+        if not thread_start_can_be_starved():
             pytest.skip("RLIMIT_NPROC cannot starve Thread.start on this host")
         conn_id = "conn-ac1f"
         # Populate a cache entry so the post-task hook below has one.
@@ -432,10 +430,8 @@ class TestFilesRefreshFailure(unittest.TestCase):
         other = str(Path(self.tmpdir) / "work-nproc")
         Path(other).mkdir(parents=True, exist_ok=True)
 
-        soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-        resource.setrlimit(resource.RLIMIT_NPROC, (1, hard))
         raised: list[BaseException] = []
-        try:
+        with nproc_limit_lowered_to_one():
             try:
                 # Cache miss for a new work dir: the refresh thread's
                 # start() genuinely fails.
@@ -446,8 +442,6 @@ class TestFilesRefreshFailure(unittest.TestCase):
                 self.server._refresh_files_after_task(self.work_dir)
             except BaseException as exc:  # noqa: BLE001 — the bug propagated here
                 raised.append(exc)
-        finally:
-            resource.setrlimit(resource.RLIMIT_NPROC, (soft, hard))
 
         self.assertEqual(
             raised, [],

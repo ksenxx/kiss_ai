@@ -16,14 +16,24 @@ next daemon in the same test) starts from a clean slate.
 from __future__ import annotations
 
 import json
-import socket
 import time
 from typing import Any
 
 import pytest
 
-from kiss.agents.third_party_agents.muse_auth._common import muse_auth_dir, socket_path
+from kiss.agents.third_party_agents.muse_auth._common import (
+    muse_auth_dir,
+    platform_supports_muse_daemon,
+    socket_path,
+)
 from kiss.agents.third_party_agents.muse_auth.client import stop_daemon
+
+_DAEMON_SKIP_REASON = "Linux-only: the Muse-auth daemon authenticates clients with SO_PEERCRED"
+
+requires_muse_daemon = pytest.mark.skipif(
+    not platform_supports_muse_daemon(), reason=_DAEMON_SKIP_REASON,
+)
+"""Skip marker for tests that spawn the real daemon outside ``muse_env``."""
 
 
 def setup_muse_env(monkeypatch: pytest.MonkeyPatch, policy: dict[str, Any]) -> None:
@@ -35,17 +45,21 @@ def setup_muse_env(monkeypatch: pytest.MonkeyPatch, policy: dict[str, Any]) -> N
     pointed ``KISS_HOME`` at an isolated location (the
     ``isolated_kiss_home`` fixture).
 
-    The daemon's only transport is a Unix-domain socket (authenticated
-    with ``SO_PEERCRED``), so on platforms without ``AF_UNIX`` (Windows)
-    every daemon-backed test is skipped here, in the one place all six
-    ``muse_env`` fixtures pass through.
+    The daemon's only transport is a Unix-domain socket authenticated
+    with ``SO_PEERCRED``, which exists on Linux only (macOS has
+    ``LOCAL_PEERCRED`` instead, Windows has no ``AF_UNIX`` at all), so
+    the product deliberately does not run it elsewhere
+    (:func:`platform_supports_muse_daemon`).  Every daemon-backed test
+    is therefore skipped here, in the one place all six ``muse_env``
+    fixtures pass through; without the skip each one waited ~40 s for
+    a daemon that cannot start.
 
     Args:
         monkeypatch: The test's monkeypatch, used for the env var.
         policy: The Muse-auth policy document to write.
     """
-    if not hasattr(socket, "AF_UNIX"):
-        pytest.skip("POSIX-only: the Muse-auth daemon listens on a Unix-domain socket")
+    if not platform_supports_muse_daemon():
+        pytest.skip(_DAEMON_SKIP_REASON)
     monkeypatch.setenv("KISS_MUSE_AUTH", "1")
     directory = muse_auth_dir()
     directory.mkdir(parents=True, exist_ok=True)

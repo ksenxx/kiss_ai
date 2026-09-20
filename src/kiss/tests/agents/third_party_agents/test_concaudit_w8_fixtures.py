@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import errno
 import socket
+import time
 from pathlib import Path
 
 import pytest
@@ -25,9 +26,15 @@ from kiss.core.config import kiss_home
 
 
 def test_refusing_port_refuses_connections_and_stays_reserved(refusing_port: int) -> None:
-    """Connecting is refused and the port cannot be bound by anyone else."""
+    """Connecting is refused at once and the port cannot be bound by anyone else.
+
+    The refusal must be an immediate RST, not a timeout: callers use the
+    port as an "unreachable server" and assert on fast failure paths.
+    """
+    started = time.monotonic()
     with pytest.raises(ConnectionRefusedError):
         socket.create_connection(("127.0.0.1", refusing_port), timeout=5)
+    assert time.monotonic() - started < 2.0
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as other, pytest.raises(OSError) as info:
         other.bind(("127.0.0.1", refusing_port))
     assert info.value.errno == errno.EADDRINUSE
