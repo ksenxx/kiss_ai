@@ -540,8 +540,11 @@ body {
   animation: status-spin 0.8s linear infinite;
 }
 
-/* Rotates through the `rotate` property (not `transform`) so the
-   history rows can still centre the icon with a transform. */
+/* Rotates through the `rotate` property (not `transform`).  Anything
+   that offsets a spinner must use the `translate` property as well:
+   the browser applies `transform` BEFORE `rotate`, so an offset given
+   as `transform: translateY()` would be rotated too and the ring
+   would orbit the point instead of turning in place. */
 @keyframes status-spin {
   to { rotate: 360deg; }
 }
@@ -594,27 +597,49 @@ body {
   outline-offset: -1px;
 }
 
+/* A sub-agent's tab is purple all over - tint, text, underline and its
+   status icon - so it is told apart from the chat's own tabs at a
+   glance. */
 .chat-tab.subagent-tab {
   border-bottom-color: color-mix(in srgb, var(--purple) 55%, transparent);
-  background: color-mix(in srgb, var(--purple) 8%, transparent);
+  background: color-mix(in srgb, var(--purple) 24%, transparent);
   color: color-mix(in srgb, var(--purple) 75%, var(--fg));
   max-width: 160px;
 }
 
 .chat-tab.subagent-tab:hover {
-  background: color-mix(in srgb, var(--purple) 14%, transparent);
+  background: color-mix(in srgb, var(--purple) 32%, transparent);
 }
 
 .chat-tab.subagent-tab.active {
   border-bottom-color: var(--purple);
-  background: color-mix(in srgb, var(--purple) 16%, transparent);
+  background: color-mix(in srgb, var(--purple) 40%, transparent);
   color: var(--purple);
 }
 
-/* Sub-agent tab status: the shared green spinner while the sub-agent
-   runs (.status-spinner), the shared green tick once it is done
-   (.status-tick). */
-.subagent-indicator { color: var(--green); }
+/* The remote webapp's pill tabs (remote-codex.css, which carries no
+   colour of its own) would flatten a sub-agent tab into an ordinary
+   one; these forms outrank them so it stays purple there too. */
+body.remote-chat #tab-bar .chat-tab.subagent-tab {
+  background: color-mix(in srgb, var(--purple) 24%, transparent);
+  border-color: color-mix(in srgb, var(--purple) 55%, transparent);
+  color: color-mix(in srgb, var(--purple) 75%, var(--fg));
+}
+
+body.remote-chat #tab-bar .chat-tab.subagent-tab:hover {
+  background: color-mix(in srgb, var(--purple) 32%, transparent);
+}
+
+body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
+  background: color-mix(in srgb, var(--purple) 40%, transparent);
+  border-color: var(--purple);
+  color: var(--purple);
+}
+
+/* Sub-agent tab status: the shared spinner while the sub-agent runs
+   (.status-spinner), the shared tick once it is done (.status-tick),
+   both in the tab's purple. */
+.subagent-indicator { color: var(--purple); }
 
 #tab-context-menu {
   position: fixed;
@@ -3127,15 +3152,17 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 /* The chat panel's clickable header: a chevron and the chat's first
-   task on ONE line (ellipsized), over the same cyan tint as a Bash tool
-   call's header in the transcript (.tc-h-bash).  No tooltip: the line
-   is all there is. */
+   task on ONE line (ellipsized), in the cyan of a Bash tool call's
+   header in the transcript (.tc-h-bash).  The tint is much stronger
+   than that header's 8%: this header carries plain --fg text over the
+   sidebar background, so at 8% it vanished.  No tooltip: the line is
+   all there is. */
 .history-chat-header {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  background: color-mix(in srgb, var(--cyan) 8%, transparent);
+  background: color-mix(in srgb, var(--cyan) 30%, transparent);
   border: none;
   border-radius: 7px;
   padding: 4px 6px;
@@ -3149,7 +3176,7 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 .history-chat-header:hover {
-  background: color-mix(in srgb, var(--cyan) 16%, transparent);
+  background: color-mix(in srgb, var(--cyan) 42%, transparent);
 }
 
 .history-chat-chevron {
@@ -3209,14 +3236,17 @@ body.sidebar-chat-mode #meta-info-content {
    the action strip - so the status icon is centred on the first line of
    the task text rather than on the whole panel.  The offset is the
    panel's own padding-top plus half a line box, and the translation
-   then centres the icon on that point. */
+   then centres the icon on that point.  `translate`, not `transform`:
+   the spinner's `rotate` is applied after `translate` (so the ring
+   turns in place) but before `transform` (which would make it orbit;
+   see @keyframes status-spin). */
 .running-item > .sidebar-item-failed,
 .running-item > .sidebar-item-running,
 .running-item > .sidebar-item-completed {
   position: absolute;
   left: 5px;
   top: calc(7px + 0.5lh);
-  transform: translateY(-50%);
+  translate: 0 -50%;
   margin-right: 0;
 }
 
@@ -3232,13 +3262,19 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 /* The task panel of the task the user is looking at (the chat webview
-   on screen), in the Result panel's header tint (.rc-h) so the eye
-   finds it in the list.  The body.remote-chat form outranks the remote
-   webapp's plain .running-item background in remote-codex.css. */
+   on screen), in the green of the Result panel's header (.rc-h) so the
+   eye finds it in the list; well above that header's 8% tint, which
+   was indistinguishable from the other panels.  The body.remote-chat
+   form outranks the remote webapp's plain .running-item background in
+   remote-codex.css; the :hover forms outrank both surfaces' generic
+   .sidebar-item:hover rules, so the cue survives the pointer (hover
+   feedback there is the brightness filter). */
 .running-item.history-active-task,
-body.remote-chat .running-item.history-active-task {
-  background-color: color-mix(in srgb, var(--green) 8%, transparent);
-  border-color: color-mix(in srgb, var(--green) 40%, transparent);
+.running-item.history-active-task:hover,
+body.remote-chat .running-item.history-active-task,
+body.remote-chat .running-item.history-active-task:hover {
+  background-color: color-mix(in srgb, var(--green) 28%, transparent);
+  border-color: color-mix(in srgb, var(--green) 75%, transparent);
 }
 
 .running-item > .sidebar-item-text {

@@ -21,8 +21,9 @@ regression in the class wiring (``main.js``) or in the shared
   filled ``--green``;
 * failed root tab    -> ``.chat-tab-fail.status-cross``: SVG-masked box
   filled ``--red``;
-* running sub-agent  -> ``.subagent-indicator.status-spinner`` (green);
-* finished sub-agent -> ``.subagent-indicator.done.status-tick`` (green);
+* running sub-agent  -> ``.subagent-indicator.status-spinner`` (purple,
+  the sub-agent tab's colour);
+* finished sub-agent -> ``.subagent-indicator.done.status-tick`` (purple);
   a live ``subagentDone`` closes the tab, so the done state is reached
   through ``openSubagentTab {isDone: true}`` as the daemon sends it on
   replay.
@@ -51,11 +52,12 @@ def _browser():
             browser.close()
 
 
-# The harness :root defines --vscode-terminal-ansiGreen: #6a9955 and
-# --vscode-terminal-ansiRed: #f44747, which main.css aliases as
-# --green / --red.
+# The harness :root defines --vscode-terminal-ansiGreen: #6a9955,
+# --vscode-terminal-ansiRed: #f44747 and --vscode-terminal-ansiMagenta:
+# #c586c0, which main.css aliases as --green / --red / --purple.
 _GREEN = "rgb(106, 153, 85)"
 _RED = "rgb(244, 71, 71)"
+_PURPLE = "rgb(197, 134, 192)"
 
 _ICON_PROBE = """
 (tabId) => {
@@ -190,10 +192,10 @@ def test_root_tab_failed_task_shows_red_cross(_browser) -> None:
         context.close()
 
 
-def test_subagent_tab_spinner_and_green_tick(_browser) -> None:
-    """A sub-agent tab spins while the sub-agent runs; a sub-agent the
-    daemon announces as already finished (``isDone`` on
-    ``openSubagentTab``, as on replay) shows the green tick with the
+def test_subagent_tab_spinner_and_purple_tick(_browser) -> None:
+    """A sub-agent tab spins in purple while the sub-agent runs; a
+    sub-agent the daemon announces as already finished (``isDone`` on
+    ``openSubagentTab``, as on replay) shows the purple tick with the
     ``done`` marker."""
     context, page = _open_history_page(_browser)
     try:
@@ -211,11 +213,11 @@ def test_subagent_tab_spinner_and_green_tick(_browser) -> None:
                      "startTs": 1700000000000, "taskId": "task-" + running_id})
 
         running = _icon(page, running_id)
-        _assert_spinner(running, _GREEN, "subagent-indicator")
+        _assert_spinner(running, _PURPLE, "subagent-indicator")
         assert "done" not in running["icon"].split(), running
 
         done = _icon(page, done_id)
-        _assert_mask_icon(done, "status-tick", _GREEN, "subagent-indicator")
+        _assert_mask_icon(done, "status-tick", _PURPLE, "subagent-indicator")
         assert "done" in done["icon"].split(), done
     finally:
         context.close()
