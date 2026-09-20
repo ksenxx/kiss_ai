@@ -143,6 +143,60 @@ def test_history_row_spinner_is_the_composer_wait_spinner(_browser) -> None:
         context.close()
 
 
+# Freeze the running row's spinner at an instant of its animation and
+# report where its box is.  The ring is rotated by the `rotate` property;
+# a ring that turns in place keeps its bounding-box centre fixed, one
+# that orbits (an offset applied through `transform`, which the browser
+# composes BEFORE `rotate`) moves it around the offset's origin.
+_FRAME_PROBE = """
+(ms) => {
+  const el = document.querySelector(
+    '.sidebar-item.running-item > .sidebar-item-running.status-spinner');
+  const anim = el.getAnimations()[0];
+  anim.pause();
+  anim.currentTime = ms;
+  const r = el.getBoundingClientRect();
+  // The first line of the task text: the box of its first character.
+  const text = el.parentElement.querySelector('.sidebar-item-text');
+  const range = document.createRange();
+  range.setStart(text.firstChild, 0);
+  range.setEnd(text.firstChild, 1);
+  const line = range.getBoundingClientRect();
+  const cs = getComputedStyle(el);
+  return {
+    cx: (r.left + r.right) / 2, cy: (r.top + r.bottom) / 2,
+    rotate: cs.rotate, transform: cs.transform,
+    firstLineCentre: (line.top + line.bottom) / 2,
+  };
+}
+"""
+
+
+def test_history_row_spinner_turns_in_place(_browser) -> None:
+    """The running row's ring rotates about its own centre: frozen at
+    four instants of one turn, the ring's box stays put (and stays
+    centred on the first line of the task text) while its rotation
+    angle changes."""
+    context, page = _open_history_page(_browser)
+    try:
+        _post_history(page, _sample_sessions())
+        frames = [dict(page.evaluate(_FRAME_PROBE, ms)) for ms in (0, 200, 400, 600)]
+    finally:
+        context.close()
+    angles = {f["rotate"] for f in frames}
+    assert len(angles) == 4, f"the animation was not sampled at distinct angles: {frames}"
+    for f in frames:
+        assert f["transform"] == "none", f"an offset through `transform` makes it orbit: {f}"
+    first = frames[0]
+    for f in frames[1:]:
+        assert abs(f["cx"] - first["cx"]) < 0.01 and abs(f["cy"] - first["cy"]) < 0.01, (
+            f"the ring revolves instead of rotating: {frames}"
+        )
+    assert abs(first["cy"] - first["firstLineCentre"]) < 1.0, (
+        f"the ring is not centred on the first text line: {first}"
+    )
+
+
 def test_tab_strip_spinner_is_the_composer_wait_spinner(_browser) -> None:
     """The chat tab strip's running icon is the same ring too."""
     context, page = _open_history_page(_browser)

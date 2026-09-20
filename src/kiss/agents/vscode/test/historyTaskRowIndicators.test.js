@@ -416,11 +416,20 @@ function testIndicatorsAreVerticallyCenteredInTaskPanels() {
       `row ${title} indicator must sit on the first line of the task ` +
         `text, not at the panel middle; got top=${style.top}`,
     );
+    // The offset is the `translate` property, never `transform`: the
+    // spinner's `rotate` animation is composed after `translate` but
+    // before `transform`, so a `transform` offset would make the ring
+    // orbit the point instead of turning in place.
     assert.strictEqual(
-      style.transform,
-      'translateY(-50%)',
+      style.translate,
+      '0 -50%',
       `row ${title} indicator must translate by half its own height ` +
-        `to center on that line; got transform=${style.transform}`,
+        `to center on that line; got translate=${style.translate}`,
+    );
+    assert.ok(
+      style.transform === '' || style.transform === 'none',
+      `row ${title} indicator must not be offset through transform ` +
+        `(the spinner would revolve); got transform=${style.transform}`,
     );
   });
 
