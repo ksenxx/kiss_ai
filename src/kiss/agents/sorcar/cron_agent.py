@@ -1034,6 +1034,39 @@ def _job_view(job: dict[str, Any]) -> dict[str, Any]:
     return view
 
 
+def _find_duplicate(
+    jobs: list[dict[str, Any]], candidate: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Return the stored job that would do the same work as ``candidate``.
+
+    Two jobs are duplicates when they run the same ``prompt`` or
+    ``command`` on the same ``schedule`` with the same ``deliver``
+    targets.  The name, model and budget are ignored: the LLM picks
+    those freely, and the user asked for the same thing to be scheduled
+    only once.  Jobs that have finished for good (a one-shot that
+    already ran or an ``until_delivered`` poll that fired, i.e.
+    ``next_run_at`` is ``None``) are not duplicates: recreating them
+    is how a user schedules the same thing again.  Paused jobs still
+    count, so the caller can suggest resuming instead of adding a copy.
+
+    Args:
+        jobs: The stored jobs (already loaded under the store lock).
+        candidate: The job about to be created, with stripped fields.
+
+    Returns:
+        The matching stored job, or ``None`` when there is none.
+    """
+    for job in jobs:
+        if job.get("next_run_at") is None:
+            continue
+        if all(
+            str(job.get(key) or "").strip() == candidate[key]
+            for key in ("prompt", "command", "schedule", "deliver")
+        ):
+            return job
+    return None
+
+
 def cron_job(
     action: str,
     job_id: str = "",
@@ -1057,7 +1090,11 @@ def cron_job(
     - ``create``: register a job.  Requires ``name``, ``schedule``,
       and exactly one of ``prompt`` (an LLM task run unattended in a
       fresh session) or ``command`` (a shell command run without any
-      LLM; its stdout is delivered verbatim).
+      LLM; its stdout is delivered verbatim).  Refused with an
+      ``error`` (and the ``existing`` job) when a job with the same
+      prompt/command, schedule and delivery targets is already
+      scheduled or paused — do not retry under another name; tell the
+      user it exists, or ``remove``/``resume`` the existing job.
     - ``list``: list all jobs with their next/last run times.
     - ``remove`` / ``pause`` / ``resume``: manage the job named by
       ``job_id``.
@@ -1164,6 +1201,21 @@ def cron_job(
         }
         with _jobs_lock(blocking=True):
             jobs = load_jobs()
+            duplicate = _find_duplicate(jobs, job)
+            if duplicate is not None:
+                state = "paused" if not duplicate.get("enabled") else "scheduled"
+                hint = (
+                    f"resume it with cron_job('resume', job_id={duplicate['id']!r})"
+                    if state == "paused"
+                    else "remove it first if you want to replace it"
+                )
+                return _dump({
+                    "error": f"duplicate: job {duplicate['id']!r} "
+                    f"({duplicate.get('name')!r}) is already {state} with the "
+                    f"same {'command' if job['command'] else 'prompt'}, schedule "
+                    f"and delivery targets; {hint}",
+                    "existing": _job_view(duplicate),
+                })
             jobs.append(job)
             save_jobs(jobs)
         return _dump({"created": _job_view(job)})
@@ -1296,9 +1348,11 @@ CRON_DISPATCH_PREAMBLE = (
     "chat, pairing) to convert the request into the channel CLI's tick "
     "command, THEN schedule that exact string as a command job (default "
     "schedule \"every 2m\", deliver \"none\"); never schedule a gateway "
-    "as a prompt job — it would burn tokens on every tick.  Never call "
-    "run_agent here: it would just recurse into another session like "
-    "this one.\n\n"
+    "as a prompt job — it would burn tokens on every tick.  create "
+    "refuses a job whose prompt/command, schedule and delivery match an "
+    "existing scheduled or paused job: report that to the user instead "
+    "of retrying under a different name.  Never call run_agent here: it "
+    "would just recurse into another session like this one.\n\n"
 )
 """Preamble prepended to every task dispatched to this agent script.
 

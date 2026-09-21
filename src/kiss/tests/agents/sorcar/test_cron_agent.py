@@ -249,6 +249,83 @@ def test_create_validation_errors() -> None:
     ))
 
 
+def test_create_refuses_duplicate_of_scheduled_job() -> None:
+    first = _create(cron_job(
+        "create", name="brief", command="echo hi", schedule="every 1h",
+        deliver="telegram:1",
+    ))
+    # Same work, schedule and delivery under a different name, with
+    # incidental whitespace and a different model/budget: still a duplicate.
+    reply = yaml.safe_load(cron_job(
+        "create", name="morning brief", command="  echo hi ", schedule=" every 1h",
+        deliver="telegram:1 ", model_name="other", max_budget="9",
+    ))
+    assert "already scheduled" in reply["error"]
+    assert "same command" in reply["error"]
+    assert "remove it first" in reply["error"]
+    assert reply["existing"]["id"] == first["id"]
+    assert len(load_jobs()) == 1
+
+    # Any difference in the work, schedule or delivery is a new job.
+    _create(cron_job(
+        "create", name="brief", command="echo hi", schedule="every 2h",
+        deliver="telegram:1",
+    ))
+    _create(cron_job(
+        "create", name="brief", command="echo hi", schedule="every 1h",
+        deliver="telegram:2",
+    ))
+    _create(cron_job(
+        "create", name="brief", command="echo bye", schedule="every 1h",
+        deliver="telegram:1",
+    ))
+    assert len(load_jobs()) == 4
+
+
+def test_create_refuses_duplicate_of_paused_prompt_job() -> None:
+    first = _create(cron_job(
+        "create", name="llm", prompt="say hi", schedule="0 9 * * 1-5",
+    ))
+    cron_job("pause", job_id=first["id"])
+    reply = yaml.safe_load(cron_job(
+        "create", name="llm again", prompt="say hi", schedule="0 9 * * 1-5",
+    ))
+    assert "already paused" in reply["error"]
+    assert "same prompt" in reply["error"]
+    assert f"job_id={first['id']!r}" in reply["error"]
+    assert reply["existing"]["id"] == first["id"]
+    assert len(load_jobs()) == 1
+
+
+def test_create_allows_recreating_finished_job() -> None:
+    once = _create(cron_job("create", name="once", command="true", schedule="1h"))
+    _set_job_fields(once["id"], next_run_at=1.0)
+    assert tick(2.0) == 1
+    assert load_jobs()[0]["next_run_at"] is None
+    again = _create(cron_job("create", name="once", command="true", schedule="1h"))
+    assert again["id"] != once["id"]
+    assert len(load_jobs()) == 2
+
+    # A legacy store entry without the compared keys is never a match
+    # and never crashes the comparison.
+    jobs = load_jobs()
+    jobs.append({"id": "legacy", "enabled": True, "next_run_at": 1.0})
+    cron_agent.save_jobs(jobs)
+    _create(cron_job("create", name="other", command="echo x", schedule="every 1m"))
+    assert len(load_jobs()) == 4
+
+
+def test_cli_create_reports_duplicate(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    _run_cli(monkeypatch, capsys, "--create", "a", "--schedule", "every 1m",
+             "--command", "echo 1")
+    out = _run_cli(monkeypatch, capsys, "--create", "b", "--schedule", "every 1m",
+                   "--command", "echo 1")
+    assert "already scheduled" in yaml.safe_load(out)["error"]
+    assert len(load_jobs()) == 1
+
+
 def test_unknown_ids_and_actions() -> None:
     assert "no job with id" in cron_job("remove", job_id="nope")
     assert "no job with id" in cron_job("pause", job_id="nope")

@@ -17,10 +17,13 @@ real ``run_agent`` dispatch helper:
 * A reviewer sub-agent — and anything under it — may not spawn further
   reviewers, through ``run_parallel`` or ``run_agent``.
 
-No mocks or patches: refusals happen before any sub-agent exists, the
+No mocks: refusals happen before any sub-agent exists, the
 dispatch/round-consumption tests drive the real engine with an unknown
 model name so each child fails fast without a network call, and the
 LLM-driven test runs on a real cheap model (skipped without a key).
+The only patching is ``DEFAULT_CONFIG.tool_profiles = False`` in the
+tests that exercise the ``run_parallel`` refusal, because a reviewer
+running with tool profiles on has no ``run_parallel`` tool at all.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ import threading
 from typing import Any
 
 import pytest
+import yaml
 
 from kiss.agents.sorcar.agent_dispatch import _dispatch
 from kiss.agents.sorcar.fanout_guard import (
@@ -337,10 +341,18 @@ class TestRunAgentDispatchGuard:
 class TestReviewerSubtreeWithRealModel:
     @pytest.mark.slow
     def test_reviewer_child_is_refused_when_it_spawns_a_reviewer(
-        self, tmp_path,
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A real child of a reviewer asks ``run_parallel`` for another
-        reviewer and must receive the refusal as its tool result."""
+        reviewer and must receive the refusal as its tool result.
+
+        With tool profiles on, the child would get the ``review`` profile
+        and have no ``run_parallel`` tool at all (see
+        ``test_reviewer_subagent_has_no_run_parallel_tool``); the
+        refusal path exists for reviewers running with the full toolset,
+        so the profile lever is switched off here like in the fast tests.
+        """
+        monkeypatch.setattr(DEFAULT_CONFIG, "tool_profiles", False)
         parent = SorcarAgent("real-reviewer-parent")
         _mark_reviewer(parent)
         task = (
@@ -353,4 +365,7 @@ class TestReviewerSubtreeWithRealModel:
             work_dir=str(tmp_path), parent_agent=parent, max_budget=0.5,
             web_tools=False,
         )
-        assert "may not spawn further reviewers" in results[0]
+        # The child's result is a YAML document whose folded ``summary``
+        # scalar may wrap in the middle of the phrase; parse it first.
+        summary = str(yaml.safe_load(results[0])["summary"])
+        assert "may not spawn further reviewers" in summary

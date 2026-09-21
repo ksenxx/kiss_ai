@@ -20,12 +20,18 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.third_party_agents._backend_utils import is_headless_environment
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
     channel_main,
     write_private_file,
+)
+from kiss.agents.third_party_agents._google_workspace_utils import (
+    CLOUD_CONSOLE_URL,
+    RemoteOAuthSession,
+    google_consent_steps,
+    start_google_consent,
 )
 from kiss.core.config import kiss_home
 
@@ -147,40 +153,6 @@ def _load_service(sa_path: str = "") -> Any:
     except Exception:
         pass
     return None
-
-
-def _run_oauth_flow() -> Any:
-    """Run OAuth2 flow for Google Chat.
-
-    In headless/Docker environments, runs a local server without opening a
-    browser window; the user must visit the printed URL manually to complete
-    the flow.
-
-    Returns:
-        Google Chat API service resource, or None on failure.
-    """
-    from typing import cast
-
-    from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    from googleapiclient.discovery import build
-
-    creds_path = _credentials_path()
-    if not creds_path.exists():  # pragma: no branch
-        return None
-    flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), _SCOPES)
-    if is_headless_environment():  # pragma: no branch
-        creds = cast(Credentials, flow.run_local_server(port=0, open_browser=False))
-    else:
-        creds = cast(Credentials, flow.run_local_server(port=0))
-    _save_token(creds)
-    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
-
-    if muse_auth_enabled():
-        # The real credential is now vaulted; build the service around
-        # a surrogate instead of the real token.
-        return _load_service()
-    return build("chat", "v1", credentials=creds)
 
 
 def _clear_config() -> None:
@@ -521,25 +493,8 @@ class GoogleChatAgent(BaseChannelAgent):
         "specific service-account file; when it is empty, the default "
         "service_account.json is used if present, otherwise the OAuth "
         "credentials.json flow runs.\n"
-        "When authenticate_googlechat() returns status 'consent_required' "
-        "with an auth_url, do NOT open the auth_url or any accounts.google.com "
-        "page in your own browser, and never ask for or type the user's Google "
-        "password or 2FA code: Google sign-in pages are often blocked in the "
-        "built-in browser (net::ERR_FAILED), and the sign-in belongs to the "
-        "user. Hand off consent instead:\n"
-        "1. Call ask_user_question() with the full auth_url, asking the user "
-        "to open it in their OWN browser, approve access, and paste back the "
-        "complete redirect URL from the address bar (it looks like "
-        "http://localhost:PORT/?state=...&code=... and shows a connection "
-        "error page — that is expected).\n"
-        "2. The loopback consent server runs on THIS machine: deliver the "
-        "pasted URL to it with Bash: curl -s '<pasted redirect URL>' (quote "
-        "the URL; it contains & characters).\n"
-        "3. Call finish_googlechat_auth(); if it returns 'pending', wait 2 "
-        "seconds and call it once more.\n"
-        "If any browser navigation to a Google page fails, do not retry it or "
-        "relaunch the browser — switch to this hand-off immediately. Finish "
-        "by verifying with check_googlechat_auth()."
+        + google_consent_steps("googlechat")
+        + " Finish by verifying with check_googlechat_auth()."
     )
 
     def __init__(self) -> None:
@@ -577,14 +532,16 @@ class GoogleChatAgent(BaseChannelAgent):
                         "Call authenticate_googlechat() to start OAuth2 flow."
                     )
                 return (
-                    "Not authenticated with Google Chat. To set up:\n"
+                    "Not authenticated with Google Chat. The user creates the "
+                    f"credentials themselves. {portal_handoff(CLOUD_CONSOLE_URL)}\n"
                     "Option 1 (Service Account): Create at "
                     "https://console.cloud.google.com/iam-admin/serviceaccounts, "
                     f"download JSON, save to {_service_account_path()}\n"
-                    "Option 2 (OAuth): Create OAuth credentials at "
-                    "https://console.cloud.google.com/apis/credentials, "
-                    f"download JSON, save to {_credentials_path()}\n"
-                    "Enable the Google Chat API, then call authenticate_googlechat()."
+                    "Option 2 (OAuth): Create OAuth credentials (Desktop app) at "
+                    f"{CLOUD_CONSOLE_URL}, download JSON, save to {_credentials_path()}\n"
+                    "The user may paste the JSON content back for you to write to "
+                    "that path. Enable the Google Chat API, then call "
+                    "authenticate_googlechat()."
                 )
             try:
                 resp = agent._backend._service.spaces().list(pageSize=1).execute()
@@ -593,45 +550,32 @@ class GoogleChatAgent(BaseChannelAgent):
                 return json.dumps({"ok": False, "error": str(e)})
 
         def authenticate_googlechat(service_account_json_path: str = "") -> str:
-            """Authenticate with Google Chat using service account or OAuth2.
+            """Authenticate with Google Chat using a service account or OAuth2.
+
+            The OAuth2 path starts the loopback consent server, opens the
+            Google consent page in the user's default browser when this
+            machine has one, and returns the auth_url for the user to
+            open by hand otherwise; finish_googlechat_auth() completes it.
 
             Args:
                 service_account_json_path: Path to service account JSON file.
                     If empty, uses OAuth2 with credentials.json.
 
             Returns:
-                Authentication result or error message.
+                Authentication result, status 'consent_required' with
+                auth_url, browser_opened and instructions, or an error
+                message.
             """
             service = _load_service(service_account_json_path)
             if service is None and not service_account_json_path:  # pragma: no branch
-                if is_headless_environment():
-                    # Remote machine: hand back the consent URL for the
-                    # user to approve in their own browser; the pasted
-                    # redirect URL is replayed against the local consent
-                    # server, then finish_googlechat_auth() completes it.
-                    from kiss.agents.third_party_agents._google_workspace_utils import (
-                        RemoteOAuthSession,
-                        remote_oauth_instructions,
-                    )
-
-                    try:
-                        session = RemoteOAuthSession.start("googlechat", _SCOPES)
-                    except Exception as e:
-                        return json.dumps(
-                            {"ok": False, "error": f"OAuth flow failed for Google Chat: {e}"}
-                        )
-                    if session is not None:
-                        return json.dumps(
-                            {
-                                "ok": True,
-                                "status": "consent_required",
-                                "auth_url": session.auth_url,
-                                "instructions": remote_oauth_instructions(
-                                    "googlechat", "Google Chat", session.auth_url
-                                ),
-                            }
-                        )
-                service = _run_oauth_flow()
+                # OAuth: start the loopback consent server, open the
+                # consent page in the user's default browser when
+                # possible, and hand back the auth_url; the redirect
+                # (direct, or replayed from a pasted URL) is collected
+                # by finish_googlechat_auth().
+                answer = start_google_consent("googlechat", "Google Chat", _SCOPES)
+                if answer is not None:
+                    return answer
             if service is None:  # pragma: no branch
                 return (
                     f"Authentication failed. Ensure credentials exist at "
@@ -661,20 +605,17 @@ class GoogleChatAgent(BaseChannelAgent):
             return "Google Chat authentication cleared."
 
         def finish_googlechat_auth() -> str:
-            """Complete a remote Google Chat OAuth consent.
+            """Complete the Google Chat OAuth consent started by authenticate_googlechat().
 
-            Call after the user has approved consent in their own browser and
-            the pasted redirect URL has been delivered to the local consent
-            server (``curl -s '<pasted redirect URL>'``).
+            Call after the user has approved consent in their own browser
+            (and, when they did so on another machine, after the pasted
+            redirect URL has been delivered to the local consent server
+            with ``curl -s '<pasted redirect URL>'``).
 
             Returns:
                 Authentication result, a pending status when consent is not
                 finished, or an error message.
             """
-            from kiss.agents.third_party_agents._google_workspace_utils import (
-                RemoteOAuthSession,
-            )
-
             creds, status = RemoteOAuthSession.finish("googlechat", _SCOPES)
             if status == "pending":
                 return json.dumps(
