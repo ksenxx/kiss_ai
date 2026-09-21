@@ -38,8 +38,8 @@ arguments (``model_name``, ``max_budget``, ``timeout``, ``chat_id``,
 ``system_prompt``, ``tools``, ``model_config``, ``use_worktree``,
 ``auto_commit``, ``use_web_tools``, ``classify_tasks``,
 ``use_memory``, ``is_parallel``, ``append_basic_tools``,
-``append_to_system_prompt``, ``append_to_prompt``) are the string
-form of that function's keyword options, parsed into a
+``append_to_system_prompt``, ``append_to_prompt``, ``tool_profile``)
+are the string form of that function's keyword options, parsed into a
 :class:`RunOptions` and forwarded as-is.  For a channel, the
 module's ``tools()`` returns the channel's tool callables, so the
 script serves as its own tools file — the daemon-built agent gets the
@@ -167,6 +167,7 @@ class RunOptions:
     append_basic_tools: bool = True
     append_to_system_prompt: str = ""
     append_to_prompt: str = ""
+    tool_profile: str = ""
 
 
 def _parse_bool(name: str, value: str) -> bool | None:
@@ -206,6 +207,7 @@ def _parse_run_options(
     append_basic_tools: str,
     append_to_system_prompt: str,
     append_to_prompt: str,
+    tool_profile: str = "",
 ) -> RunOptions:
     """Parse the ``run_agent`` tool's optional string arguments.
 
@@ -234,15 +236,27 @@ def _parse_run_options(
             ``true``.
         append_to_system_prompt: Text appended to the system prompt.
         append_to_prompt: Text appended to the task prompt.
+        tool_profile: Name of the tool profile the sub-task's built-in
+            toolset is cut down to (a key of
+            :data:`kiss.agents.sorcar.sorcar_agent.TOOL_PROFILES`);
+            empty for the daemon's usual choice.
 
     Returns:
         The parsed options.
 
     Raises:
         ValueError: On a malformed boolean, a *model_config* that is
-            not a JSON object, or a *tools* path that is not an
-            existing ``.py`` file.
+            not a JSON object, a *tools* path that is not an existing
+            ``.py`` file, or an unknown *tool_profile* name.
     """
+    from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES
+
+    profile = tool_profile.strip()
+    if profile and profile not in TOOL_PROFILES:
+        raise ValueError(
+            f"tool_profile must be one of {', '.join(TOOL_PROFILES)}, "
+            f"got {tool_profile!r}."
+        )
     from kiss.agents.sorcar.daemon_client import resolve_tools_file
 
     tools_path = ""
@@ -279,6 +293,7 @@ def _parse_run_options(
         append_basic_tools=True if basic_tools is None else basic_tools,
         append_to_system_prompt=append_to_system_prompt,
         append_to_prompt=append_to_prompt,
+        tool_profile=profile,
     )
 
 
@@ -668,6 +683,7 @@ def _dispatch_reserved(
             append_basic_tools=options.append_basic_tools,
             append_to_system_prompt=options.append_to_system_prompt,
             append_to_prompt=options.append_to_prompt,
+            tool_profile=options.tool_profile,
             timeout=timeout,
             stop_on_timeout=True,
             sock_path=_daemon_sock_path(),
@@ -721,6 +737,7 @@ def _run_agent(
     append_basic_tools: str = "",
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
+    tool_profile: str = "",
 ) -> str:
     """Run a channel agent or an agent script on a task immediately.
 
@@ -788,7 +805,7 @@ def _run_agent(
             parent_work_dir, chat_id, system_prompt, tools, model_config,
             use_worktree, auto_commit, use_web_tools, classify_tasks,
             use_memory, is_parallel, append_basic_tools,
-            append_to_system_prompt, append_to_prompt,
+            append_to_system_prompt, append_to_prompt, tool_profile,
         )
     except ValueError as e:
         return f"Error: {e}"
@@ -988,6 +1005,7 @@ def make_run_agent_tool(
         append_basic_tools: str = "",
         append_to_system_prompt: str = "",
         append_to_prompt: str = "",
+        tool_profile: str = "",
     ) -> str:
         """Run an agent — a channel agent or any agent script — on a task now.
 
@@ -1105,6 +1123,11 @@ def make_run_agent_tool(
                 inherited by the sub-task's ``run_parallel`` sub-agents.
             append_to_prompt: Extra text appended to the sub-task's prompt; empty appends nothing.
                 Appended to each ``<task>`` when the task holds several.
+            tool_profile: Tool profile the sub-task's built-in toolset is cut down to:
+                ``"full"`` (everything), ``"review"`` (read and run, no editing, browser
+                or dispatch), ``"shell"`` (Bash, bash_job, Read, run_commands_parallel)
+                or ``"bash"`` (Bash only); empty = the daemon's usual choice.  ``finish``
+                is always available.  An agent script's ``tool_profile()`` still wins.
 
         Returns:
             The sub-task's YAML result ("success" and "summary" keys),
@@ -1116,7 +1139,7 @@ def make_run_agent_tool(
             timeout, parent_agent, chat_id, system_prompt, tools,
             model_config, use_worktree, auto_commit, use_web_tools,
             classify_tasks, use_memory, is_parallel, append_basic_tools,
-            append_to_system_prompt, append_to_prompt,
+            append_to_system_prompt, append_to_prompt, tool_profile,
         )
 
     run_agent.__doc__ = (run_agent.__doc__ or "").replace(

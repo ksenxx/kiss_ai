@@ -43,7 +43,10 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.sea_commands import (
     rewrite_prompt_if_command as _rewrite_sea_command_prompt,
 )
-from kiss.agents.sorcar.sorcar_agent import _broadcast_subagent_done
+from kiss.agents.sorcar.sea_commands import (
+    sea_getter_is_false as _sea_getter_is_false,
+)
+from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES, _broadcast_subagent_done
 from kiss.agents.sorcar.task_classifier import classification_will_call_model
 from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
@@ -1431,6 +1434,23 @@ class _TaskRunnerMixin:
             stop_event = state.stop_event
             use_worktree = state.use_worktree
         self.printer._thread_local.stop_event = stop_event
+        if _sea_dispatch is not None:
+            # The outer run of a ``/xxx`` command is only a relay that
+            # calls ``run_agent`` with ITS OWN work directory.  An SEA
+            # declaring ``use_worktree() -> False`` (``/sh``, ``/merge``
+            # act on the real checkout) must not be handed the relay's
+            # worktree instead, and the relay must not auto-commit what
+            # an SEA declaring ``auto_commit() -> False`` left in the
+            # tree — so both verdicts demote the relay as well.
+            if use_worktree and _sea_getter_is_false(_sea_dispatch[1], "use_worktree"):
+                use_worktree = False
+                with self._state_lock:
+                    state.use_worktree = False
+            if state.auto_commit_mode and _sea_getter_is_false(
+                _sea_dispatch[1], "auto_commit"
+            ):
+                with self._state_lock:
+                    state.auto_commit_mode = False
 
         self._broadcast_early_prompts(
             prompt, active_file, tab_id, system_prompt_override,
@@ -1680,6 +1700,19 @@ class _TaskRunnerMixin:
             _append_basic_tools = (
                 _raw_append if isinstance(_raw_append, bool) else True
             )
+            # Tool profile (``run(tool_profile=...)`` / an agent
+            # script's ``tool_profile()``): absent or malformed means
+            # the agent's usual choice.  An unknown name is rejected
+            # HERE, before the worktree is created and the task row is
+            # persisted, so the generic handling below fails the task
+            # with the diagnostic instead of leaving a half-set-up run.
+            _raw_profile = cmd.get("toolProfile")
+            _tool_profile = _raw_profile if isinstance(_raw_profile, str) else ""
+            if _tool_profile and _tool_profile not in TOOL_PROFILES:
+                raise ValueError(
+                    f"tool_profile must be one of {', '.join(TOOL_PROFILES)}, "
+                    f"got {_tool_profile!r}."
+                )
             _raw_model_config = cmd.get("modelConfig")
             _agent_model_config = (
                 _raw_model_config
@@ -1796,6 +1829,7 @@ class _TaskRunnerMixin:
                         system_prompt=append_to_system_prompt,
                         llm_call_hook=_llm_call_hook,
                         tool_call_hook=_tool_call_hook,
+                        tool_profile=_tool_profile,
                         _skip_persistence=True,
                         _on_task_id_allocated=on_task_id_allocated,
                         # Persist the raw ``/xxx text`` (not the
