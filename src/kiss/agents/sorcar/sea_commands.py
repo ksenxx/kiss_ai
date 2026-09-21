@@ -15,14 +15,16 @@ The registry is built from three sources, in decreasing precedence:
 
 1. ``src/kiss/agents/third_party_agents/`` (highest precedence,
    discovered through the ``kiss.agents.third_party_agents`` package).
-2. ``src/kiss/agents/seas/`` (the bundled SEAs that extend Sorcar
-   itself, e.g. ``/merge``; discovered through ``kiss.agents.seas``).
-3. The folders listed one per line in ``~/.kiss/SEAS.md`` (or
+2. The folders listed one per line in ``~/.kiss/SEAS.md`` (or
    ``$KISS_HOME/SEAS.md``).  Later lines in the file override earlier
    lines — i.e. the folder at the bottom of ``SEAS.md`` beats the one
    at the top when both contain the same command name.  Blank lines
    and lines starting with ``#`` are ignored; ``~`` and environment
    variables in a folder path are expanded.
+3. ``src/kiss/agents/seas/`` (lowest precedence: the bundled SEAs that
+   extend Sorcar itself, e.g. ``/merge``; discovered through
+   ``kiss.agents.seas``).  Any ``SEAS.md`` folder that ships a file of
+   the same name replaces the bundled one.
 
 The registry is refreshed lazily on every lookup and, in the daemon,
 proactively by a background polling watcher (see
@@ -211,13 +213,13 @@ def refresh_registry() -> list[str]:
     Precedence (highest wins):
 
     1. ``src/kiss/agents/third_party_agents/`` (the bundled channel SEAs).
-    2. ``src/kiss/agents/seas/`` (the bundled Sorcar-extending SEAs).
-    3. Folders in ``~/.kiss/SEAS.md``, from bottom line to top line.
+    2. Folders in ``~/.kiss/SEAS.md``, from bottom line to top line.
+    3. ``src/kiss/agents/seas/`` (the bundled Sorcar-extending SEAs).
 
     Concretely: the merge walks the sources from LOWEST precedence to
-    HIGHEST (top-of-file SEAS.md entries first, third-party last) and
-    lets each source overwrite the previous one, so the highest source
-    ends up in the registry.
+    HIGHEST (bundled ``seas/`` first, then top-of-file SEAS.md entries,
+    third-party last) and lets each source overwrite the previous one,
+    so the highest source ends up in the registry.
 
     Returns:
         The sorted list of command names now installed.  Subscribers
@@ -227,14 +229,18 @@ def refresh_registry() -> list[str]:
     global _last_broadcast
 
     sources: list[dict[str, Path]] = []
+    # Bundled ``seas/`` first: any SEAS.md folder may shadow it.
+    seas_dir = _seas_dir()
+    if seas_dir is not None:
+        sources.append(_scan_folder(seas_dir))
     # SEAS.md folders: top to bottom.  We want bottom to WIN, so
     # iterate top-first and let the bottom entries overwrite.
     for folder in _read_seas_md_folders():
         sources.append(_scan_folder(folder))
-    # Bundled packages override everything, third-party agents last.
-    for bundled in (_seas_dir(), _third_party_dir()):
-        if bundled is not None:
-            sources.append(_scan_folder(bundled))
+    # Third-party agents last: they override everything.
+    third_party_dir = _third_party_dir()
+    if third_party_dir is not None:
+        sources.append(_scan_folder(third_party_dir))
 
     merged: dict[str, Path] = {}
     for src in sources:
