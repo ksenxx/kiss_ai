@@ -1539,9 +1539,11 @@ def _stderr_reader_loop(
             1015) from a generic failure so the watchdog can apply a
             much longer backoff.
         url_found_event: Optional event set when a URL is first
-            discovered.  Signals :func:`_read_url_from_stderr` to
-            return the URL immediately while this thread keeps
-            draining.
+            discovered and again at EOF.  Signals
+            :func:`_read_url_from_stderr` to return the URL
+            immediately while this thread keeps draining, or to
+            report the failure as soon as the process has exited
+            instead of sitting out the whole URL timeout.
     """
     found = False
     for line in iter(stderr.readline, ""):
@@ -1558,6 +1560,10 @@ def _stderr_reader_loop(
                 found = True
                 if url_found_event is not None:
                     url_found_event.set()
+    # EOF: the process closed its stderr, i.e. it exited.  Every line
+    # has been consumed, so ``result`` and ``rate_limit_flag`` are final.
+    if url_found_event is not None:
+        url_found_event.set()
 
 
 def _read_url_from_stderr(
