@@ -304,7 +304,8 @@ def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, s
             # Site scripts (main world) and the request header see a
             # headed Chrome; only Patchright's isolated world keeps the
             # raw token, and no page can reach that world.
-            assert "HeadlessChrome" not in _main(headless_tool, "navigator.userAgent")
+            main_ua = _main(headless_tool, "navigator.userAgent")
+            assert isinstance(main_ua, str) and "HeadlessChrome" not in main_ua
             assert "HeadlessChrome" in headless_tool._page.evaluate("navigator.userAgent")
         finally:
             headless_tool.close()
