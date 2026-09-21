@@ -444,6 +444,10 @@ _MAX_FILE_USAGE_ENTRIES = 10000
 
 _MAX_FREQUENT_TASKS = 100
 
+# Cap on the ``steer_inputs`` table (messages typed into a running
+# task's composer, kept only so autocomplete can offer them again).
+_MAX_STEER_INPUTS = 1000
+
 _OWNER_DIR_NAME = "task-owners"
 
 _owner_state: tuple[str, str, IO[Any]] | None = None
@@ -905,6 +909,14 @@ _HISTORY_SELECT = (
 
 _HISTORY_NOT_SUBAGENT = "(parent_task_id IS NULL OR parent_task_id = '')"
 
+# Row shape shared by the composer-history queries
+# (``_prefix_match_tasks``, ``_load_input_history``): task_history rows
+# are UNIONed with ``steer_inputs`` rows, whose ``rid`` is 0 so a
+# timestamp tie is broken in favour of the task_history row.
+_INPUT_TEXTS_SELECT = (
+    "SELECT task, timestamp, rowid AS rid FROM task_history "
+)
+
 _TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -1235,6 +1247,14 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS frequent_tasks (
             task TEXT PRIMARY KEY,
             count INTEGER NOT NULL DEFAULT 0,
+            timestamp REAL NOT NULL DEFAULT 0
+        );
+        -- Text the user typed into a RUNNING task's composer (steer
+        -- mode).  Such a message never gets a task_history row, so it
+        -- is remembered here for the composer's autocomplete (prefix
+        -- completions, ghost text, ArrowUp history).
+        CREATE TABLE IF NOT EXISTS steer_inputs (
+            text TEXT PRIMARY KEY,
             timestamp REAL NOT NULL DEFAULT 0
         );
         -- Claimed failed-event journal snapshots whose rows have been
@@ -1933,15 +1953,78 @@ def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
     with _rw_lock.read_lock():
         db = _get_db()
         escaped = query.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
+        pattern = escaped + "*"
         rows = db.execute(
-            "SELECT task FROM task_history "
-            "WHERE task GLOB ? AND LENGTH(task) > ? "
+            "SELECT task FROM ("
+            + _INPUT_TEXTS_SELECT
+            + f"WHERE task GLOB ? AND LENGTH(task) > ? "
             f"AND {_HISTORY_NOT_SUBAGENT} "
-            "GROUP BY task "
-            "ORDER BY MAX(timestamp) DESC, MAX(rowid) DESC LIMIT ?",
-            (escaped + "*", len(query), limit),
+            "UNION ALL "
+            "SELECT text AS task, timestamp, 0 AS rid FROM steer_inputs "
+            "WHERE text GLOB ? AND LENGTH(text) > ?"
+            ") GROUP BY task "
+            "ORDER BY MAX(timestamp) DESC, MAX(rid) DESC LIMIT ?",
+            (pattern, len(query), pattern, len(query), limit),
         ).fetchall()
     return [row["task"] for row in rows]
+
+
+def _load_input_history() -> list[str]:
+    """Return every distinct text the user ever typed into the composer.
+
+    Combines the listable ``task_history`` rows (sub-agent rows
+    excluded) with the ``steer_inputs`` table, most recent first —
+    a text's position is that of its most recent use in either
+    table.  Feeds the composer's ArrowUp history.  Thread-safe.
+    """
+    with _rw_lock.read_lock():
+        db = _get_db()
+        rows = db.execute(
+            "SELECT task FROM ("
+            + _INPUT_TEXTS_SELECT
+            + f"WHERE {_HISTORY_NOT_SUBAGENT} "
+            "UNION ALL "
+            "SELECT text AS task, timestamp, 0 AS rid FROM steer_inputs"
+            ") GROUP BY task "
+            "ORDER BY MAX(timestamp) DESC, MAX(rid) DESC",
+        ).fetchall()
+    return [row["task"] for row in rows]
+
+
+def _record_steer_input(text: str) -> None:
+    """Remember *text* typed into a running task's composer.
+
+    Upserts the ``steer_inputs`` row so a repeated message only
+    refreshes its ``timestamp``.  The table is capped at
+    :data:`_MAX_STEER_INPUTS` rows: inserting a new text beyond the cap
+    first evicts the oldest row, inside the same ``BEGIN IMMEDIATE``
+    transaction (two processes could otherwise both see "under the
+    cap" and both insert).
+
+    Args:
+        text: The message as typed.  Blank strings are ignored.
+    """
+    if not text.strip():
+        return
+    db = _get_db()
+    now = time.time()
+    with _rw_lock.write_lock(), _immediate_txn(db):
+        existing = db.execute(
+            "SELECT 1 FROM steer_inputs WHERE text = ?", (text,),
+        ).fetchone()
+        if existing is None:
+            row = db.execute("SELECT COUNT(*) FROM steer_inputs").fetchone()
+            if row[0] >= _MAX_STEER_INPUTS:
+                db.execute(
+                    "DELETE FROM steer_inputs WHERE text = "
+                    "(SELECT text FROM steer_inputs "
+                    "ORDER BY timestamp ASC LIMIT 1)"
+                )
+        db.execute(
+            "INSERT INTO steer_inputs (text, timestamp) VALUES (?, ?) "
+            "ON CONFLICT(text) DO UPDATE SET timestamp = ?",
+            (text, now, now),
+        )
 
 
 def _search_history(

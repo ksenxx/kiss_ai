@@ -42,6 +42,7 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
     _load_frequent_tasks,
     _load_history,
+    _load_input_history,
     _load_last_model,
     _load_latest_chat_events_by_chat_id,
     _load_model_usage,
@@ -1284,22 +1285,22 @@ class VSCodeServer(
         self._broadcast_to_conn(event, conn_id)
 
     def _get_input_history(self, conn_id: str = "") -> None:
-        """Send deduplicated task texts for arrow-key cycling.
+        """Send deduplicated composer texts for arrow-key cycling.
 
-        Loads the full persisted history so ArrowUp can traverse every
-        distinct task stored in ``sorcar.db``, not just an arbitrary
-        recent subset.  Stamped with the requesting connection's
-        ``conn_id`` (when non-empty) so the reply reaches only the
-        window that asked.
+        Loads the full persisted history — every task stored in
+        ``sorcar.db`` plus every message typed into a running task
+        (``steer_inputs``) — so ArrowUp can traverse each distinct
+        text, not just an arbitrary recent subset.  Stamped with the
+        requesting connection's ``conn_id`` (when non-empty) so the
+        reply reaches only the window that asked.
 
         Args:
             conn_id: Requesting connection id (``""`` for direct callers).
         """
-        entries = _load_history()
         seen: set[str] = set()
         tasks: list[str] = []
-        for e in entries:
-            task = str(e.get("task", "")).strip()
+        for raw in _load_input_history():
+            task = raw.strip()
             if task and task not in seen:
                 seen.add(task)
                 tasks.append(task)
