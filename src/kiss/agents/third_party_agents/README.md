@@ -136,29 +136,43 @@ conversation:
 Each channel's `check_<service>_auth` returns setup instructions when unconfigured,
 and several channels go further with a guided sign-in. Three styles exist, and in
 every one the sign-in itself stays in your hands — the agent never types or asks for
-your password or 2FA code:
+your password or 2FA code. In every style the agent first does what it can by itself:
+when it runs on your machine (the usual kiss-web / VS Code setup) it opens the sign-in
+page or developer portal in your **default browser**, so you only approve or copy a
+token; and it always shows you the URL (plus the short code, where the provider uses
+one) in the chat, so you can finish by hand when no window appeared — the agent runs
+on a remote or headless host, say. `$BROWSER` picks the browser; `KISS_HEADLESS=1`
+turns the automatic opening off.
 
 - **Connect-style browser sign-in** (GitHub, Twitch, Microsoft Teams, Nextcloud Talk,
-  Matrix, Signal). `authenticate_<service>` without a token returns a sign-in link —
-  for Signal, a QR code to scan like Signal Desktop — that you open and approve in
-  your *own* browser or on your phone, while the agent polls in the background;
-  `finish_<service>_auth` collects the credential (answering `pending` until your
-  approval lands). WhatsApp has its own variant of this: `start_whatsapp_bridge` +
-  `get_whatsapp_qr_code` show a pairing QR that you scan from the phone, and
-  `wait_for_whatsapp_pairing` waits for the scan.
-- **Consent paste-back** (Gmail and the five other Google agents). On a desktop,
-  `authenticate_<service>` simply opens Google's consent window locally; on a
-  headless machine it hands you the authorization URL to open in your own browser —
-  you approve access and paste the resulting `localhost` redirect URL back into the
-  chat, and `finish_<service>_auth` stores the token. (Creating the OAuth client
-  itself is separate: `start_gmail_browser_setup` / `start_<service>_browser_setup`
-  walks the Google Cloud Console credential setup — Google Chat, whose check tool
-  gives the setup instructions instead, has no such tool.)
-- **Portal walkthrough with token paste-back** (Slack, Discord).
-  `start_slack_browser_auth` / `start_discord_browser_auth` drive the provider's
-  developer portal in the built-in browser while its pages load cleanly; at any login
-  screen, captcha, or page failure the agent stops and asks you to create the app in
-  your own browser and paste the bot token back.
+  Matrix, Signal). `authenticate_<service>` without a token starts the sign-in, opens
+  the link in your default browser when it can, and returns it — for Signal, a QR code
+  to scan like Signal Desktop, also opened as a black-on-white page — that you open
+  and approve in your *own* browser or on your phone, while the agent polls in the
+  background; `finish_<service>_auth` collects the credential (answering `pending`
+  until your approval lands). WhatsApp has its own variant of this:
+  `start_whatsapp_bridge` + `get_whatsapp_qr_code` open a pairing QR page that you
+  scan from the phone, and `wait_for_whatsapp_pairing` waits for the scan.
+  Where the flow first needs an OAuth app of your own (GitHub, Twitch, Microsoft
+  Teams), calling `authenticate_<service>` without the client ID opens the provider's
+  app-registration page for you and says what to copy back.
+- **Consent hand-off** (Gmail and the five other Google agents).
+  `authenticate_<service>` starts a loopback consent server, opens Google's consent
+  page in your default browser when it can, and hands you the authorization URL
+  either way. Approving on the same machine completes by itself; approving from
+  another device ends on a `localhost` redirect URL that you paste back into the chat
+  for the agent to replay locally. `finish_<service>_auth` stores the token. (Creating
+  the OAuth client itself is separate: `start_gmail_browser_setup` /
+  `start_<service>_browser_setup` opens the Google Cloud Console credentials page for
+  you and lists the steps — Google Chat, whose check tool opens the console and gives
+  the setup instructions instead, has no such tool.)
+- **Portal hand-off with token paste-back** (Slack, Discord, and the API-key channels
+  such as Brave, Notion, Firecrawl, Twilio, LINE, Feishu, QQ, Weixin, Zalo, Telegram).
+  `start_slack_browser_auth` / `start_discord_browser_auth` — or, for the API-key
+  channels, `check_<service>_auth` itself — open the provider's developer portal in
+  your default browser and tell the agent the steps to relay; you create the app in
+  your own browser and paste the token back. The agent never drives the portal with
+  its built-in browser.
 
 Do interactive auth from a chat surface — the agent may need to ask you questions,
 and the chat panel is where you answer them.

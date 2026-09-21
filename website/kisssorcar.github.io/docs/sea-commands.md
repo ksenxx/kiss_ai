@@ -52,7 +52,7 @@ $WORK/agents           # agents shared by the team
 
 ### Precedence when two folders define the same name
 
-Later lines override earlier ones: the folder at the bottom of `SEAS.md` beats the folder at the top. The bundled `third_party_agents/` and `seas/` folders beat every `SEAS.md` folder. In the example above, if `~/my-seas` and `/opt/agents/experimental` both contain `deploy_sea.py`, `/deploy` runs the experimental one; if either contains `slack_sea.py`, `/slack` still runs the bundled Slack agent.
+Later lines override earlier ones: the folder at the bottom of `SEAS.md` beats the folder at the top. The bundled `third_party_agents/` folder beats every `SEAS.md` folder, and every `SEAS.md` folder beats the bundled `seas/` folder (the Sorcar-extending agents such as `/merge`). In the example above, if `~/my-seas` and `/opt/agents/experimental` both contain `deploy_sea.py`, `/deploy` runs the experimental one; if either contains `slack_sea.py`, `/slack` still runs the bundled Slack agent; if either contains `merge_sea.py`, `/merge` runs your copy instead of the bundled one.
 
 ### Changes take effect while the daemon runs
 

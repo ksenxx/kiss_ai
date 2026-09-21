@@ -304,6 +304,9 @@ _BIND_RETRYABLE_ERRNOS: frozenset[int] = frozenset({
 })
 
 _VERSION_CHECK_INTERVAL: float = 3600
+# How often an armed "Update when idle" re-checks the agent registry for
+# in-flight tasks before launching the installer.
+_IDLE_UPDATE_POLL_S: float = 5.0
 
 _PYPI_LATEST_URL = "https://pypi.org/pypi/kiss-agent-framework/json"
 
@@ -4615,6 +4618,13 @@ class RemoteAccessServer:
         self._update_proc: subprocess.Popen[bytes] | None = None
         self._update_starting = False
         self._update_watch_task: asyncio.Task[None] | None = None
+        # "Update when idle": ``_update_when_idle_task`` polls the agent
+        # registry and runs the installer once no task is in flight.  It
+        # stays tracked (for shutdown) until it finishes; ``_armed`` is
+        # True only while it is still waiting for idle, i.e. while a
+        # Cancel can still call it off.
+        self._update_when_idle_task: asyncio.Task[None] | None = None
+        self._update_when_idle_armed = False
         self._update_models_log_path: Path = (
             _kiss_home_dir() / "update_models.log"
         )
@@ -5246,10 +5256,7 @@ class RemoteAccessServer:
         """
         loop = self._loop
         assert loop is not None
-        if self._update_starting or (
-            self._update_proc is not None
-            and self._update_proc.poll() is None
-        ):
+        if self._update_in_progress():
             # Single-flight guard (F4-13): two windows clicking
             # "Update" concurrently must not launch two installers
             # that fetch/reset/overwrite the same tree in parallel.
@@ -5262,6 +5269,12 @@ class RemoteAccessServer:
             }, conn_id)
             return
         self._update_starting = True
+        # A direct "Update" supersedes an armed "Update when idle": the
+        # idle poller must not launch a second installer later.  The
+        # poller itself disarms before calling here, so this never
+        # cancels the running task.
+        if self._cancel_update_when_idle():
+            await self._broadcast_update_available()
         # When the clone (or its install.sh) is missing — the extension
         # was installed from a .vsix, or ~/.kiss/kiss_ai was deleted —
         # fall back to the public curl bootstrap, which recreates the
@@ -7393,7 +7406,82 @@ class RemoteAccessServer:
             "latest": latest,
             "current": current,
             "snoozed": snoozed,
+            "pendingIdle": self._update_when_idle_armed,
         })
+
+    def _update_in_progress(self) -> bool:
+        """Return whether an installer is being spawned or still running."""
+        return self._update_starting or (
+            self._update_proc is not None and self._update_proc.poll() is None
+        )
+
+    def _cancel_update_when_idle(self) -> bool:
+        """Disarm an "Update when idle" still waiting for idle.
+
+        Returns:
+            Whether one was armed.  A poller that has already detected
+            idle and is launching the installer is left alone: the
+            update is under way and the single-flight guard in
+            :meth:`_handle_run_update` covers any concurrent request.
+        """
+        if not self._update_when_idle_armed:
+            return False
+        self._update_when_idle_armed = False
+        assert self._update_when_idle_task is not None
+        self._update_when_idle_task.cancel()
+        self._update_when_idle_task = None
+        return True
+
+    async def _handle_update_when_idle(self, cancel: bool = False) -> None:
+        """Arm (or cancel) an update that runs once no task is running.
+
+        Server-side handler for the update toast's "Update when idle"
+        and "Cancel" actions.  Arming starts :meth:`_run_update_when_idle`
+        (idempotent while one is pending); either way the
+        ``update_available`` state is rebroadcast with ``pendingIdle``
+        so every chat window's toast shows the armed state.
+
+        Args:
+            cancel: ``True`` disarms a pending idle update instead of
+                arming one.
+        """
+        if cancel:
+            self._cancel_update_when_idle()
+        elif (
+            self._update_when_idle_task is None
+            and not self._update_in_progress()
+        ):
+            # No poller at all — neither armed nor still finishing its
+            # handoff after a fast installer exit — so a second one
+            # cannot overwrite (and orphan) a live task.
+            self._update_when_idle_armed = True
+            self._update_when_idle_task = asyncio.create_task(
+                self._run_update_when_idle(),
+            )
+        await self._broadcast_update_available()
+
+    async def _run_update_when_idle(self) -> None:
+        """Wait until no task is in flight, then launch the installer.
+
+        Polls :func:`_snapshot_active_tabs` (off-thread: it takes the
+        registry lock) every :data:`_IDLE_UPDATE_POLL_S` seconds.  Once
+        idle it disarms itself and, without yielding to the loop in
+        between, runs :meth:`_handle_run_update` for every window
+        (``conn_id=""``): the click that armed it may be long gone by
+        the time the update starts, so its notices must not be confined
+        to one connection.  The task stays tracked on
+        :attr:`_update_when_idle_task` until it returns so
+        :meth:`stop_async` can cancel it mid-handoff too.
+        """
+        try:
+            while await asyncio.to_thread(_snapshot_active_tabs):
+                await asyncio.sleep(_IDLE_UPDATE_POLL_S)
+            self._update_when_idle_armed = False
+            await self._handle_run_update("")
+            await self._broadcast_update_available()
+        finally:
+            if self._update_when_idle_task is asyncio.current_task():
+                self._update_when_idle_task = None
 
     async def _handle_snooze_update(self, latest: str = "") -> None:
         """Record a 24h "Remind me later" snooze and rebroadcast.
@@ -9719,6 +9807,9 @@ class RemoteAccessServer:
             self._version_check_task = None
             await _cancel_task(self._update_watch_task)
             self._update_watch_task = None
+            self._update_when_idle_armed = False
+            await _cancel_task(self._update_when_idle_task)
+            self._update_when_idle_task = None
             await _cancel_task(self._update_models_watch_task)
             self._update_models_watch_task = None
             if self._ws_server is not None:

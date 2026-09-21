@@ -32,6 +32,7 @@ from urllib.parse import quote, urlparse
 
 import requests
 
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -561,6 +562,8 @@ class FirecrawlAgent(BaseChannelAgent):
                     "You need an API key from https://www.firecrawl.dev "
                     "(sign up, then copy the key from the dashboard). "
                     "Optionally pass base_url for a self-hosted instance."
+                    + "\n"
+                    + portal_handoff("https://www.firecrawl.dev")
                 )
             return json.dumps({"ok": True, "base_url": agent._backend._base_url})
 

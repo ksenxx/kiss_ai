@@ -17,11 +17,10 @@ Deliberately untested branches (unreachable without test doubles):
   loaded via ``Credentials.from_authorized_user_file`` carry the
   hard-coded ``https://oauth2.googleapis.com/token`` endpoint, so
   exercising that refresh would require real network access to Google.
-* ``run_google_oauth_flow`` with a credentials.json present: it starts
-  ``InstalledAppFlow.run_local_server``, which blocks on an interactive
-  browser consent that no automated test can complete.  The
-  authenticate-success branch of ``make_google_auth_tools`` depends on
-  that same interactive flow returning credentials.
+* The consent-success path of ``start_google_consent`` /
+  ``finish_<service>_auth`` needs Google to issue a real authorization
+  code; ``test_muse_auth.py`` drives the loopback redirect with a
+  forged code instead and checks the error path.
 """
 
 from __future__ import annotations
@@ -48,8 +47,8 @@ from kiss.agents.third_party_agents._google_workspace_utils import (
     google_service_dir,
     load_google_credentials,
     make_google_auth_tools,
-    run_google_oauth_flow,
     save_google_credentials,
+    start_google_consent,
     token_path,
 )
 from kiss.agents.third_party_agents.gcal_sea import (
@@ -255,9 +254,9 @@ def test_fresh_access_token_returns_empty_when_refresh_fails(isolated_kiss_home)
     assert fresh_access_token(creds) == ""
 
 
-def test_run_google_oauth_flow_without_credentials_json(isolated_kiss_home) -> None:
-    """run_google_oauth_flow returns None when no credentials.json exists."""
-    assert run_google_oauth_flow(_SERVICE, _SCOPES) is None
+def test_start_google_consent_without_credentials_json(isolated_kiss_home) -> None:
+    """start_google_consent returns None when no credentials.json exists."""
+    assert start_google_consent(_SERVICE, "Google Calendar", _SCOPES) is None
 
 
 def test_make_google_auth_tools_names_and_docstrings(isolated_kiss_home) -> None:
