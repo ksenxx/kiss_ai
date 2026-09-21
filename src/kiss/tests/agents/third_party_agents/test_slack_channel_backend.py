@@ -49,9 +49,15 @@ def _restore(backup: str | None) -> None:
 
 
 class _InvalidAuthHandler(BaseHTTPRequestHandler):
-    """Slack Web API emulator answering ``invalid_auth`` to every call."""
+    """Slack Web API emulator answering ``invalid_auth`` to every call.
+
+    Records the path of every request in ``server.requests``.
+    """
+
+    server: Any
 
     def _respond(self) -> None:
+        self.server.requests.append(self.path.split("?", 1)[0])
         length = int(self.headers.get("Content-Length") or 0)
         if length:
             self.rfile.read(length)
@@ -83,6 +89,7 @@ class TestSlackChannelBackendMethods:
     @classmethod
     def setup_class(cls) -> None:
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _InvalidAuthHandler)
+        cls.server.requests = []  # type: ignore[attr-defined]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
 
@@ -94,6 +101,7 @@ class TestSlackChannelBackendMethods:
 
     def setup_method(self) -> None:
         self._backup = _backup_and_clear()
+        self.server.requests.clear()  # type: ignore[attr-defined]
         _save_token("xoxb-invalid-test-token-for-methods")
         port = self.server.server_address[1]
         self.backend = SlackChannelBackend()
@@ -117,15 +125,21 @@ class TestSlackChannelBackendMethods:
         with pytest.raises(SlackApiError):
             self.backend.find_user("nobody")
 
-    def test_find_channel_passes_conversation_id_through(self) -> None:
-        """find_channel returns a conversation ID as-is without any API call.
+    def test_find_channel_unverifiable_id_falls_back_to_name_lookup(self) -> None:
+        """An ID-shaped name that conversations.info rejects is looked up by name.
 
-        The server answers invalid_auth to every call, so getting the ID
-        back (instead of SlackApiError) proves no request was made.
+        The server answers invalid_auth to every call: the verification
+        error is swallowed and the fallback conversations.list call raises.
+        The recorded request sequence proves both calls were made.
         """
-        assert self.backend.find_channel("C0AKYSNLB7W") == "C0AKYSNLB7W"
-        assert self.backend.find_channel("G012ABCDEFG") == "G012ABCDEFG"
-        assert self.backend.find_channel("D012ABCDEFG") == "D012ABCDEFG"
+        for ident in ("C0AKYSNLB7W", "G012ABCDEFG", "D012ABCDEFG"):
+            self.server.requests.clear()  # type: ignore[attr-defined]
+            with pytest.raises(SlackApiError):
+                self.backend.find_channel(ident)
+            assert self.server.requests == [  # type: ignore[attr-defined]
+                "/conversations.info",
+                "/conversations.list",
+            ]
 
     def test_find_user_passes_user_id_through(self) -> None:
         """find_user returns a user ID as-is without any API call.

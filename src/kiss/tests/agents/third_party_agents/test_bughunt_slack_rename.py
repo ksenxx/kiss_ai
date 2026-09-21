@@ -149,6 +149,14 @@ class TestSlackRenameBugs:
         assert self.backend.find_channel("general") == "C1"
         paths = [r["path"] for r in self._requests()]
         assert any(p.endswith("/conversations.list") for p in paths)
+        assert not any(p.endswith("/conversations.info") for p in paths)
+
+    def test_find_channel_verifies_conversation_id_via_info(self) -> None:
+        """An ID-shaped name is confirmed with conversations.info, not listed."""
+        assert self.backend.find_channel("C0AKYSNLB7W") == "C0AKYSNLB7W"
+        paths = [r["path"] for r in self._requests()]
+        assert any(p.endswith("/conversations.info") for p in paths)
+        assert not any(p.endswith("/conversations.list") for p in paths)
 
     def test_list_channels_tool_returns_channels(self) -> None:
         """The list-channels tool must surface channels from the API response."""
