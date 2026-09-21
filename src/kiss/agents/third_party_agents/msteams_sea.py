@@ -32,6 +32,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -61,6 +62,10 @@ _DEFAULT_DELEGATED_SCOPES = (
     "offline_access User.Read Team.ReadBasic.All Channel.ReadBasic.All "
     "ChannelMessage.Read.All ChannelMessage.Send Chat.ReadWrite TeamMember.Read.All"
 )
+_ENTRA_APP_REGISTRATIONS_URL = (
+    "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
+)
+
 _NOT_AUTHENTICATED = (
     "Not authenticated with MS Teams. Call authenticate_msteams(tenant_id=..., "
     "client_id=...) to sign in the way the Muse app connects: it returns "
@@ -963,7 +968,12 @@ class MSTeamsAgent(BaseChannelAgent):
             """
             for val, name in [(tenant_id, "tenant_id"), (client_id, "client_id")]:
                 if not val.strip():  # pragma: no branch
-                    return f"{name} cannot be empty."
+                    return (
+                        f"{name} cannot be empty. Both come from the app registration "
+                        "in Microsoft Entra (Overview shows the Directory (tenant) ID "
+                        "and the Application (client) ID). "
+                        + portal_handoff(_ENTRA_APP_REGISTRATIONS_URL)
+                    )
             tenant_id, client_id = tenant_id.strip(), client_id.strip()
             from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 

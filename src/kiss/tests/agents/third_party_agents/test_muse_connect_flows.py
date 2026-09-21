@@ -856,7 +856,9 @@ def test_twitch_device_code_grant_and_refresh(
     agent = TwitchAgent()
     agent._backend._helix_base = f"{auth_server.base()}/helix"
     tools = auth_tools(agent)
-    assert tools["authenticate_twitch"]("  ") == "client_id cannot be empty."
+    empty = tools["authenticate_twitch"]("  ")
+    assert empty.startswith("client_id cannot be empty.")
+    assert "https://dev.twitch.tv/console/apps" in empty and "ask_user_question" in empty
     unauth = tools["check_twitch_auth"]()
     assert "twitch.tv/activate" in unauth and "finish_twitch_auth" in unauth
 
@@ -966,7 +968,9 @@ def test_msteams_device_code_delegated_token(
     tools = auth_tools(agent)
     unauth = tools["check_msteams_auth"]()
     assert "microsoft.com/devicelogin" in unauth and "finish_msteams_auth" in unauth
-    assert tools["authenticate_msteams"]("", "c") == "tenant_id cannot be empty."
+    empty = tools["authenticate_msteams"]("", "c")
+    assert empty.startswith("tenant_id cannot be empty.")
+    assert "portal.azure.com" in empty and "ask_user_question" in empty
     assert "GUID or verified domain" in tools["authenticate_msteams"]("bad/tenant", "c")
     assert "control characters" in tools["authenticate_msteams"](_MS_TENANT, "c\nid")
 

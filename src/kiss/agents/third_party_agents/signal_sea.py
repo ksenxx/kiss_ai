@@ -34,6 +34,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.third_party_agents._browser_handoff import open_in_default_browser
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -336,23 +337,35 @@ def _single_account(signal_cli: str) -> str:
     return numbers[0] if len(numbers) == 1 else ""
 
 
-def _link_instructions(session: SignalLinkSession) -> str:
+def _link_instructions(session: SignalLinkSession, browser_opened: bool = False) -> str:
     """Build the agent-facing hand-off text for a started link session.
 
     The QR code is included as a fenced code block so that Markdown
     renderers keep it monospaced and its rows intact.
+
+    Args:
+        session: The pending link session.
+        browser_opened: Whether the black-on-white QR page was already
+            opened in the user's default browser on this machine.
     """
+    if browser_opened:
+        opened = (
+            f"The QR page {session.page} has just been opened in the user's default "
+            "browser on this machine, black on white and ready to scan. "
+        )
+    else:
+        opened = ""
     return (
         "Connect Signal the way Signal Desktop links: the USER scans a QR code "
         "with their phone; you only relay it. Never ask for the user's phone "
-        "number, PIN, or a verification code. Steps: 1) Call ask_user_question() "
-        "showing the user the QR code below EXACTLY as given, inside the same "
-        "fenced code block (it must stay monospaced with every row intact; if the "
-        "chat uses a dark theme and the phone cannot read it, tell the user to open "
-        f"{session.page} on this computer, which shows it black on white). Ask them "
-        "to open Signal on their phone > Settings > Linked devices > Link new "
-        "device, scan the code, and reply here when done (the code is valid for "
-        f"about {max(session.expires_in // 60, 1)} minutes). 2) Call "
+        f"number, PIN, or a verification code. {opened}Steps: 1) Call "
+        "ask_user_question() showing the user the QR code below EXACTLY as given, "
+        "inside the same fenced code block (it must stay monospaced with every row "
+        "intact; if the chat uses a dark theme and the phone cannot read it, tell "
+        f"the user to open {session.page} on this computer, which shows it black on "
+        "white). Ask them to open Signal on their phone > Settings > Linked devices "
+        "> Link new device, scan the code, and reply here when done (the code is "
+        f"valid for about {max(session.expires_in // 60, 1)} minutes). 2) Call "
         "finish_signal_auth(); if it returns 'pending', wait a few seconds and call "
         "it again. Nothing has to be pasted back.\n\n```text\n" + session.qr_text + "\n```"
     )
@@ -612,7 +625,8 @@ class SignalAgent(BaseChannelAgent):
         "re-run authentication over a working configuration.\n"
         "2. To connect, call authenticate_signal() with no phone number. It runs "
         "`signal-cli link` and returns status 'consent_required' with a QR code "
-        "(monospace text, also written to link-qr.html) and its sgnl:// URI.\n"
+        "(monospace text, also written to link-qr.html, which it opens in the user's "
+        "default browser on this machine when it can) and its sgnl:// URI.\n"
         "3. The USER completes the linking, exactly like linking Signal Desktop: call "
         "ask_user_question() showing the QR code, telling them to open Signal on their "
         "phone > Settings > Linked devices > Link new device, scan it, and reply when "
@@ -716,6 +730,7 @@ class SignalAgent(BaseChannelAgent):
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
             session.register()
+            browser_opened = open_in_default_browser(session.page.as_uri())
             return json.dumps(
                 {
                     "ok": True,
@@ -724,7 +739,8 @@ class SignalAgent(BaseChannelAgent):
                     "qr_page": str(session.page),
                     "qr_text": session.qr_text,
                     "expires_in": session.expires_in,
-                    "instructions": _link_instructions(session),
+                    "browser_opened": browser_opened,
+                    "instructions": _link_instructions(session, browser_opened),
                 }
             )
 

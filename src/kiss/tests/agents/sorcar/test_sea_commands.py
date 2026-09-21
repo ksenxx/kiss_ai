@@ -7,8 +7,9 @@
 Covers the module in :mod:`kiss.agents.sorcar.sea_commands`:
 
 * the registry precedence rule (bundled ``third_party_agents`` beats
-  every user folder, and SEAS.md folders lower in the file override
-  higher ones);
+  every user folder, SEAS.md folders lower in the file override
+  higher ones, and every user folder beats the bundled ``seas``
+  package);
 * live-reload behaviour when ``~/.kiss/SEAS.md`` or a watched folder
   changes;
 * the slash-command prompt rewriter that turns ``/xxx text`` into an
@@ -107,6 +108,26 @@ def test_third_party_dir_beats_seas_md(tmp_path: Path) -> None:
     slack_path = sea_commands.get_command("slack")
     assert slack_path is not None
     assert slack_path.parent.name == "third_party_agents"
+
+
+def test_seas_md_beats_bundled_seas_dir(tmp_path: Path) -> None:
+    """The bundled ``seas/`` package has the LOWEST precedence.
+
+    Without any ``SEAS.md`` entry ``/merge`` resolves to the bundled
+    ``kiss/agents/seas/merge_sea.py``.  Once a user folder listed in
+    ``SEAS.md`` ships its own ``merge_sea.py``, that copy MUST win.
+    """
+    _write_seas_md([])
+    sea_commands.refresh_registry()
+    bundled = sea_commands.get_command("merge")
+    assert bundled is not None
+    assert bundled.parent.name == "seas"
+
+    user = tmp_path / "override"
+    user_merge = _touch_sea(user, "merge")
+    _write_seas_md([str(user)])
+    sea_commands.refresh_registry()
+    assert sea_commands.get_command("merge") == user_merge.resolve()
 
 
 def test_seas_md_ignores_blanks_comments_and_expands_env(
