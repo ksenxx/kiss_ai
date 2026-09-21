@@ -49,8 +49,7 @@ function makeWebview() {
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
   return {win, posted};
 }
@@ -63,16 +62,9 @@ function taskInput(win) {
   return win.document.getElementById('task-input');
 }
 
-function modal(win) {
-  return win.document.getElementById('ask-user-modal');
-}
-
-function askInput(win) {
-  return modal(win).querySelector('.ask-user-input');
-}
-
-function askMic(win) {
-  return modal(win).querySelector('.ask-user-mic');
+// The composer is in answer mode while the tab on screen has a question.
+function answering(win) {
+  return win.document.body.classList.contains('ask-answering');
 }
 
 let passed = 0;
@@ -90,23 +82,14 @@ function test(name, fn) {
   }
 }
 
-test('the ask-user panel shows a mic button along with question/input/submit', () => {
+test('a pending question puts the composer into answer mode', () => {
   const {win} = makeWebview();
   send(win, {type: 'askUser', question: 'Which color?'});
-  assert.strictEqual(modal(win).style.display, 'flex');
-  assert.ok(
-    modal(win).querySelector('.ask-user-question'),
-    'question element must stay',
+  assert.ok(answering(win), 'body.ask-answering must be set');
+  assert.strictEqual(
+    taskInput(win).placeholder,
+    'Type your answer and press Enter',
   );
-  assert.ok(askInput(win), 'answer textarea must stay');
-  assert.ok(
-    modal(win).querySelector('.ask-user-submit'),
-    'submit button must stay',
-  );
-  const mic = askMic(win);
-  assert.ok(mic, 'ask-user panel must contain a .ask-user-mic button');
-  assert.strictEqual(mic.tagName, 'BUTTON');
-  assert.ok(mic.querySelector('svg'), 'mic button must show the mic icon');
 });
 
 test('speech while a question is pending is sent as the userAnswer', () => {
@@ -129,8 +112,12 @@ test('speech while a question is pending is sent as the userAnswer', () => {
     0,
     'the answer must NOT be submitted as a task: ' + JSON.stringify(posted),
   );
-  assert.strictEqual(taskInput(win).value, '', 'task input must stay empty');
-  assert.strictEqual(modal(win).style.display, 'none', 'modal must close');
+  assert.strictEqual(
+    taskInput(win).value,
+    '',
+    'composer is cleared after the answer',
+  );
+  assert.ok(!answering(win), 'answer mode must end');
 });
 
 test('speech without a pending question still submits a task (regression)', () => {
@@ -143,10 +130,10 @@ test('speech without a pending question still submits a task (regression)', () =
   assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 0);
 });
 
-test('an empty translation never answers and keeps the modal open', () => {
+test('an empty translation never answers and keeps the question open', () => {
   const {win, posted} = makeWebview();
   send(win, {type: 'askUser', question: 'Which color?'});
-  askInput(win).value = 'precious draft';
+  taskInput(win).value = 'precious draft';
   posted.length = 0;
   send(win, {type: 'voiceWake'});
   send(win, {type: 'voiceSpeech', text: '   ', speaker: 1});
@@ -160,14 +147,14 @@ test('an empty translation never answers and keeps the modal open', () => {
     0,
     JSON.stringify(posted),
   );
-  assert.strictEqual(modal(win).style.display, 'flex', 'modal must stay open');
-  assert.strictEqual(askInput(win).value, 'precious draft');
+  assert.ok(answering(win), 'the question must stay open');
+  assert.strictEqual(taskInput(win).value, 'precious draft');
 });
 
-test('spoken answer merges with a typed draft in the answer box', () => {
+test('spoken answer merges with a typed draft in the composer', () => {
   const {win, posted} = makeWebview();
   send(win, {type: 'askUser', question: 'Which color?'});
-  askInput(win).value = 'partial';
+  taskInput(win).value = 'partial';
   posted.length = 0;
   send(win, {type: 'voiceSpeech', text: 'and blue', speaker: 2});
   const answers = posted.filter(m => m.type === 'userAnswer');
@@ -188,66 +175,14 @@ test('speech without a speaker answers with the raw text', () => {
   assert.strictEqual(answers[0].answer, 'plain answer');
 });
 
-test('clicking the ask-user mic toggles wake-word listening like the main mic', () => {
-  const {win, posted} = makeWebview();
-  send(win, {type: 'askUser', question: 'Which color?'});
-  posted.length = 0;
-  askMic(win).click();
-  let toggles = posted.filter(m => m.type === 'voiceToggle');
-  assert.strictEqual(toggles.length, 1, JSON.stringify(posted));
-  assert.strictEqual(toggles[0].enabled, false);
-  posted.length = 0;
-  askMic(win).click();
-  toggles = posted.filter(m => m.type === 'voiceToggle');
-  assert.strictEqual(toggles.length, 1, JSON.stringify(posted));
-  assert.strictEqual(toggles[0].enabled, true);
-});
-
-test('the ask-user mic mirrors listening / wake / transcribing states', () => {
-  const {win} = makeWebview();
-  send(win, {type: 'askUser', question: 'Which color?'});
-  const btn = win.document.getElementById('voice-btn');
-  const mic = askMic(win);
-  send(win, {type: 'voiceState', listening: true});
-  assert.ok(btn.classList.contains('voice-listening'));
-  assert.ok(
-    mic.classList.contains('voice-listening'),
-    'ask mic must mirror voice-listening',
-  );
-  send(win, {type: 'voiceWake'});
-  assert.ok(btn.classList.contains('voice-triggered'));
-  assert.ok(
-    mic.classList.contains('voice-triggered'),
-    'ask mic must mirror the red wake flash',
-  );
-  send(win, {type: 'voiceTranscribing'});
-  assert.ok(btn.classList.contains('voice-transcribing'));
-  assert.ok(
-    mic.classList.contains('voice-transcribing'),
-    'ask mic must mirror the yellow transcribing flash',
-  );
-  assert.ok(!mic.classList.contains('voice-triggered'));
-});
-
-test('a mic mounted after the state changed still shows the current state', () => {
-  const {win} = makeWebview();
-  send(win, {type: 'voiceState', listening: true});
-  send(win, {type: 'askUser', question: 'Which color?'});
-  const mic = askMic(win);
-  assert.ok(
-    mic.classList.contains('voice-listening'),
-    'a late-mounted ask mic must sync to the live voice state',
-  );
-});
-
-test('the wake word focuses the answer box while a question is pending', () => {
+test('the wake word focuses the composer while a question is pending', () => {
   const {win} = makeWebview();
   send(win, {type: 'askUser', question: 'Which color?'});
   send(win, {type: 'voiceWake'});
   assert.strictEqual(
     win.document.activeElement,
-    askInput(win),
-    'wake must focus the ask-user answer box, not the task input',
+    taskInput(win),
+    'wake must focus the composer, which is the answer box',
   );
 });
 
@@ -255,7 +190,8 @@ test('after askUserDone later speech goes back to the task input path', () => {
   const {win, posted} = makeWebview();
   send(win, {type: 'askUser', question: 'Which color?'});
   send(win, {type: 'askUserDone'});
-  assert.strictEqual(modal(win).style.display, 'none');
+  assert.ok(!answering(win));
+  assert.strictEqual(taskInput(win).placeholder, '');
   posted.length = 0;
   send(win, {type: 'voiceSpeech', text: 'next task', speaker: 1});
   const submits = posted.filter(m => m.type === 'submit');

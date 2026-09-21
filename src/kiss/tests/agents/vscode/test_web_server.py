@@ -42,7 +42,7 @@ class TestBuildHtml(unittest.TestCase):
         self.assertIn('id="sidebar"', html)
         self.assertIn('id="settings-panel"', html)
         self.assertIn('id="frequent-panel"', html)
-        self.assertIn('id="ask-user-modal"', html)
+        self.assertNotIn('id="ask-user-modal"', html)
         self.assertIn('id="send-btn"', html)
         self.assertIn('id="stop-btn"', html)
 

@@ -16,7 +16,7 @@
 //   * while the daemon is down the user's posts are held back — the
 //     prompt stays in the composer (also when the drop happens while a
 //     photo attachment is still converting), the answer stays in the
-//     ask-user modal and a dirty file tab stays dirty — instead of
+//     composer too and a dirty file tab stays dirty — instead of
 //     being queued and then dropped by the reload that follows the
 //     reconnect;
 //   * the composer draft is persisted on `pagehide` and shown again by
@@ -316,24 +316,26 @@ function testAskAnswerHeldBackWhileDaemonDown() {
   send(win, {type: 'daemonStatus', connected: true});
   const tabId = win._testApi.getActiveTabId();
   send(win, {type: 'askUser', tabId, question: 'Proceed?'});
-  const input = win.document.querySelector('.ask-user-input');
-  const submit = win.document.querySelector('.ask-user-submit');
-  assert.ok(input && submit, 'the ask-user modal is on screen');
+  const input = win.document.getElementById('task-input');
+  assert.ok(
+    win.document.body.classList.contains('ask-answering'),
+    'the composer is in answer mode',
+  );
   input.value = 'yes, go ahead';
   send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
   posted.length = 0;
-  click(win, submit);
+  clickSend(win);
   assert.ok(
     !posted.some(m => m.type === 'userAnswer'),
     'no userAnswer may be posted while the daemon is down',
   );
   assert.strictEqual(
-    win.document.querySelector('.ask-user-input').value,
+    input.value,
     'yes, go ahead',
-    'the answer stays in the modal',
+    'the answer stays in the composer',
   );
   send(win, {type: 'daemonStatus', connected: true});
-  click(win, win.document.querySelector('.ask-user-submit'));
+  clickSend(win);
   const answers = posted.filter(m => m.type === 'userAnswer');
   assert.deepStrictEqual(
     answers.map(a => [a.answer, a.tabId]),
@@ -624,8 +626,8 @@ function testBackgroundTabUnackedValuesArePersisted() {
   win.document.getElementById('task-input').value = 'prompt from t1';
   clickSend(win);
   send(win, {type: 'askUser', tabId: 't1', question: 'Sure?'});
-  win.document.querySelector('.ask-user-input').value = 'answer from t1';
-  click(win, win.document.querySelector('.ask-user-submit'));
+  win.document.getElementById('task-input').value = 'answer from t1';
+  clickSend(win);
   activateTab(win, 't2');
   win.dispatchEvent(new win.Event('pagehide'));
   assert.deepStrictEqual(draftsOf(getState), [['t1', 'prompt from t1']]);
@@ -636,11 +638,12 @@ function testBackgroundTabUnackedValuesArePersisted() {
   console.log('PASS background-tab unacknowledged values are persisted');
 }
 
-// The same for the ask-user answer: it is persisted until the daemon's
-// askUserDone confirms it, and the reloaded page shows it again only if
-// the daemon re-asks that tab's question (an answered question is
-// never re-asked).
-function testUnacknowledgedAnswerComesBackInTheModal() {
+// The same for the ask-user answer: typed or sent-but-unconfirmed, it is
+// persisted with its question until the daemon's askUserDone confirms
+// it, and the reloaded page puts it back into the composer only if the
+// daemon re-asks that tab's question (an answered question is never
+// re-asked).
+function testUnacknowledgedAnswerComesBackInTheComposer() {
   const first = makeWebview();
   send(first.win, {type: 'daemonStatus', connected: true});
   send(first.win, {
@@ -648,24 +651,27 @@ function testUnacknowledgedAnswerComesBackInTheModal() {
     tabs: [{tabId: 't1', chatId: 'c1', title: 't1', workDir: ''}],
   });
   send(first.win, {type: 'askUser', tabId: 't1', question: 'Deploy?'});
-  first.win.document.querySelector('.ask-user-input').value = 'yes, to staging';
-  // Typed but not yet sent: persisted as is.
+  first.win.document.getElementById('task-input').value = 'yes, to staging';
+  // Typed but not yet sent: persisted with its question, not as a
+  // prompt draft (the composer is the answer box right now).
   first.win.dispatchEvent(new first.win.Event('pagehide'));
+  assert.deepStrictEqual(draftsOf(first.getState), []);
   assert.deepStrictEqual(askDraftsOf(first.getState), [
     ['t1', 'Deploy?', 'yes, to staging'],
   ]);
-  click(first.win, first.win.document.querySelector('.ask-user-submit'));
+  clickSend(first.win);
   assert.ok(
     first.posted.some(
       m => m.type === 'userAnswer' && m.answer === 'yes, to staging',
     ),
   );
   assert.ok(
-    !first.win.document.querySelector('.ask-user-input'),
-    'the modal closes on submit as before',
+    !first.win.document.body.classList.contains('ask-answering'),
+    'answer mode ends on send as before',
   );
   first.win.dispatchEvent(new first.win.Event('pagehide'));
   const persisted = first.getState();
+  assert.deepStrictEqual(draftsOf(first.getState), []);
   assert.deepStrictEqual(
     askDraftsOf(first.getState),
     [['t1', 'Deploy?', 'yes, to staging']],
@@ -679,27 +685,25 @@ function testUnacknowledgedAnswerComesBackInTheModal() {
   first.win.close();
 
   // Reloaded page: the daemon still has the question -> the answer is
-  // back in the modal, once.
+  // back in the composer, once.
   const second = makeWebview(persisted);
   send(second.win, {type: 'daemonStatus', connected: true});
   send(second.win, {
     type: 'tabs_state',
     tabs: [{tabId: 't1', chatId: 'c1', title: 't1', workDir: ''}],
   });
+  const inp2 = second.win.document.getElementById('task-input');
   send(second.win, {type: 'askUser', tabId: 't2', question: 'Other tab?'});
   send(second.win, {type: 'askUser', tabId: 't1', question: 'Deploy?'});
   assert.strictEqual(
-    second.win.document.querySelector('.ask-user-input').value,
+    inp2.value,
     'yes, to staging',
     'the unconfirmed answer is shown again',
   );
+  inp2.value = '';
   send(second.win, {type: 'askUserDone', tabId: 't1'});
   send(second.win, {type: 'askUser', tabId: 't1', question: 'Again?'});
-  assert.strictEqual(
-    second.win.document.querySelector('.ask-user-input').value,
-    '',
-    'the draft is handed out once',
-  );
+  assert.strictEqual(inp2.value, '', 'the draft is handed out once');
   second.win.close();
 
   // Reloaded page where the daemon asks that tab a DIFFERENT question:
@@ -710,21 +714,19 @@ function testUnacknowledgedAnswerComesBackInTheModal() {
     type: 'tabs_state',
     tabs: [{tabId: 't1', chatId: 'c1', title: 't1', workDir: ''}],
   });
+  const inpOther = other.win.document.getElementById('task-input');
   send(other.win, {type: 'askUser', tabId: 't1', question: 'Something new?'});
-  assert.strictEqual(
-    other.win.document.querySelector('.ask-user-input').value,
-    '',
-  );
+  assert.strictEqual(inpOther.value, '');
   send(other.win, {type: 'askUserDone', tabId: 't1'});
   send(other.win, {type: 'askUser', tabId: 't1', question: 'Deploy?'});
   assert.strictEqual(
-    other.win.document.querySelector('.ask-user-input').value,
+    inpOther.value,
     '',
     'a different question drops the draft for good',
   );
   other.win.close();
 
-  // Reloaded page for another tab: the draft stays out of its modal.
+  // Reloaded page for another tab: the draft stays out of its composer.
   const third = makeWebview(persisted);
   send(third.win, {type: 'daemonStatus', connected: true});
   send(third.win, {
@@ -732,19 +734,16 @@ function testUnacknowledgedAnswerComesBackInTheModal() {
     tabs: [{tabId: 't9', chatId: 'c9', title: 't9', workDir: ''}],
   });
   send(third.win, {type: 'askUser', tabId: 't9', question: 'Deploy?'});
-  assert.strictEqual(
-    third.win.document.querySelector('.ask-user-input').value,
-    '',
-  );
+  assert.strictEqual(third.win.document.getElementById('task-input').value, '');
   third.win.close();
-  console.log('PASS an unacknowledged answer comes back in the modal');
+  console.log('PASS an unacknowledged answer comes back in the composer');
 }
 
 async function main() {
   testReconnectingKeepsAppVisibleUnderBanner();
   testUnacknowledgedPromptComesBackAsDraft();
   testBackgroundTabUnackedValuesArePersisted();
-  testUnacknowledgedAnswerComesBackInTheModal();
+  testUnacknowledgedAnswerComesBackInTheComposer();
   testPlainDisconnectStillHidesApp();
   testColdStartIgnoresNonBooleanReconnecting();
   testSendHeldBackWhileDaemonDown();

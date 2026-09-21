@@ -439,7 +439,6 @@ body.remote-chat .config-update-btn {
   border-radius: 999px;
 }
 
-body.remote-chat #ask-user-modal .modal-content,
 body.remote-chat #auth-modal .auth-modal-content,
 body.remote-chat .server-reset-confirm-content {
   background: var(--surface2);

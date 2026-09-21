@@ -895,8 +895,9 @@
       lastTaskFailed: false,
       hasRunTask: false,
       askPendingQuestion: null,
-      askQuestionEl: null,
-      askInputEl: null,
+      // The prompt the user was composing when the question arrived:
+      // parked while the composer is the answer box, back afterwards.
+      promptDraft: '',
     };
   }
 
@@ -1310,7 +1311,7 @@
     }
     updateInputDisabled();
     resetAdjacentState();
-    syncAskModalToActiveTab();
+    syncAskComposer();
     // visibletask-coverage:start
     // The transcript comes back where the reader left it, which may well
     // be inside a neighbouring task, so the panel is derived from the
@@ -1737,6 +1738,9 @@
       }
       activateAdjacentTab(successor);
     }
+    // A closed chat may have been the one whose question the composer
+    // was answering (its file tab, if that stays on screen, is not).
+    syncAskComposer();
     reportSurvivingChatTab();
     renderTabBar();
     persistTabState();
@@ -1810,6 +1814,8 @@
     if (newTab.isContentTab) {
       activeTabId = newTab.id;
       showContentTab(newTab);
+      // The chat tab just left may have been answering a question.
+      syncAskComposer();
       return;
     }
     restoreTab(newTab);
@@ -3242,15 +3248,15 @@
     const askDrafts = {};
     tabs.forEach(t => {
       const typed = t === active ? composer && composer.value : t.inputValue;
-      const draft = typed || t.unackedPrompt;
+      // While the composer is the answer box the prompt is the parked
+      // one (enterAnswerMode) and what is typed is the answer.
+      const asked = t.askPendingQuestion !== null;
+      const draft = (asked ? t.promptDraft : typed) || t.unackedPrompt;
       if (draft) inputDrafts[t.id] = draft;
       // Likewise the answer typed into (or sent from, but never
-      // confirmed) a tab's ask-user modal, with its question: it comes
-      // back when the daemon asks that same question again after the
-      // reload.
-      const asked = t.askPendingQuestion !== null;
-      const answer =
-        asked && t.askInputEl ? t.askInputEl.value : t.unackedAnswer;
+      // confirmed) the composer, with its question: it comes back when
+      // the daemon asks that same question again after the reload.
+      const answer = asked ? typed : t.unackedAnswer;
       const question = asked ? t.askPendingQuestion : t.unackedQuestion;
       if (answer && typeof question === 'string') {
         askDrafts[t.id] = {question, answer};
@@ -3811,6 +3817,9 @@
   const O = document.getElementById('output');
   const welcome = document.getElementById('welcome');
   const inp = document.getElementById('task-input');
+  // The placeholder the composer goes back to once a pending
+  // ask_user_question is answered (syncAskComposer).
+  inp.dataset.defaultPlaceholder = inp.placeholder;
   // Pending deferred composer focus retries (focusInputWithRetry).
   let inputFocusRetryTimers = [];
   const sendBtn = document.getElementById('send-btn');
@@ -3834,8 +3843,6 @@
   const historySearchClear = document.getElementById('history-search-clear');
   const historyList = document.getElementById('history-list');
   const autocomplete = document.getElementById('autocomplete');
-  const askUserModal = document.getElementById('ask-user-modal');
-  const askUserSlot = document.getElementById('ask-user-slot');
 
   const settingsPanel = document.getElementById('settings-panel');
   const settingsOverlay = document.getElementById('settings-overlay');
@@ -8164,6 +8171,9 @@
   }
 
   function cycleHistoryUp() {
+    // The history holds prompts; while the composer is the answer box
+    // none of them is an answer.
+    if (document.body.classList.contains('ask-answering')) return false;
     if (histCache.length > 0 && (histIdx >= 0 || !inp.value)) {
       histIdx = Math.min(histIdx + 1, histCache.length - 1);
       inp.value = histCache[histIdx];
@@ -9521,6 +9531,8 @@
       // while the task keeps streaming: the next event must not fold it
       // away.  The user collapses it by hand (its header) when done.
       if (p.classList.contains('ask-answer')) continue;
+      // A question the user has not answered yet must stay readable.
+      if (p.classList.contains('tc-question-pending')) continue;
       if (panelShowsImage(p)) continue;
       if (p.classList.contains('tc-run-parallel'))
         rpAdoptOpenSubagents(p, tabId);
@@ -10124,6 +10136,17 @@
           hdr.classList.add('tc-h-bash');
           c.classList.add('tc-bash');
         }
+        // An ask_user_question call is the "Question" panel: the
+        // question reads as prose, the answer typed into the composer
+        // lands inside it with the tool_result (see the tool_result
+        // case), and the daemon's live askUser event marks it pending
+        // while the composer is in answer mode.
+        const isQuestion = ev.name === 'ask_user_question';
+        if (isQuestion) {
+          hdr.textContent = 'Question';
+          hdr.classList.add('tc-h-question');
+          c.classList.add('tc-question');
+        }
         // A run_agent dispatch is a fan-out too: the daemon runs its
         // child under the run_parallel sub-agent contract (nested tab,
         // subagentDone, a history row under this task), so its panel
@@ -10219,7 +10242,20 @@
         tcBody.innerHTML =
           b || '<em style="color:var(--dim)">No arguments</em>';
         c.appendChild(hdr);
-        if (isSummary) {
+        if (isQuestion) {
+          const qd = mkEl('div', 'tc-question-body');
+          const rawQ = (ev.extras && ev.extras.question) || '';
+          if (typeof marked !== 'undefined' && rawQ) {
+            qd.classList.add('md-body');
+            qd.innerHTML = kissSanitize(marked.parse(rawQ));
+            hlBlock(qd);
+            linkifyFilePaths(qd, evWorkDir, evOwnerTab);
+          } else {
+            qd.textContent = rawQ;
+          }
+          qd.dataset.rawText = rawQ;
+          c.appendChild(qd);
+        } else if (isSummary) {
           const sd = mkEl('div', 'tc-summary-desc');
           const rawDesc = ev.description || '';
           if (typeof marked !== 'undefined' && rawDesc) {
@@ -10378,6 +10414,22 @@
           resultTarget.appendChild(r);
           const trBody = r.querySelector('.tr-content');
           if (trBody) linkifyFilePaths(trBody, evWorkDir, evOwnerTab);
+        } else if (
+          tState.lastToolCallEl &&
+          tState.lastToolCallEl.classList.contains('tc-question')
+        ) {
+          // The user's answer, read back from the tool's return value
+          // so a replay shows it under its question too.
+          const ans = mkEl('div', 'tc-question-answer');
+          const lbl = mkEl('span', 'tc-question-answer-label');
+          lbl.textContent = 'Answer';
+          const txt = mkEl('div', 'tc-question-answer-text');
+          txt.textContent = ev.content || '';
+          ans.appendChild(lbl);
+          ans.appendChild(txt);
+          ans.dataset.rawText = 'Answer: ' + (ev.content || '');
+          resultTarget.appendChild(ans);
+          setQuestionPanelPending(resultTarget, false);
         } else {
           const op = mkEl('div', 'bash-panel');
           const opContent = mkEl('div', 'bash-panel-content');
@@ -12242,17 +12294,17 @@
         // another client reloaded; a genuinely new question always
         // follows an askUserDone, which resets the state to null.
         if (askTab.askPendingQuestion === askQuestion) break;
-        askTab.askPendingQuestion = askQuestion;
-        showAskForTab(askTab);
+        enterAnswerMode(askTab, askQuestion);
         const draft = savedAskDrafts && savedAskDrafts[askTab.id];
         if (draft) {
-          // The same question is still open: the answer goes back in.
-          // A different one means the old answer was taken.
-          if (draft.question === askQuestion && askTab.askInputEl) {
-            askTab.askInputEl.value = draft.answer;
-          }
+          // The same question is still open: the answer goes back into
+          // the (now empty) composer. A different one means the old
+          // answer was taken.
+          if (draft.question === askQuestion)
+            setComposerTextOf(askTab, draft.answer);
           delete savedAskDrafts[askTab.id];
         }
+        syncAskComposer();
         renderTabBar();
         break;
       }
@@ -13368,8 +13420,11 @@
   function updateInputDisabled() {
     inp.disabled = false;
     // A photo still being converted must not be raced by a send: block the
-    // button until every attachment slot holds real bytes.
-    sendBtn.disabled = hasPendingAttachments();
+    // button until every attachment slot holds real bytes. An answer to a
+    // pending question is text only and never waits for one.
+    sendBtn.disabled =
+      hasPendingAttachments() &&
+      !document.body.classList.contains('ask-answering');
   }
 
   /**
@@ -16094,12 +16149,6 @@
       }
       sendMessage();
     });
-
-    window.addEventListener('kiss-voice-answer', event => {
-      if (!isFromSpeechTab(event)) return;
-      const tab = getTab(chatTargetTabId());
-      if (tab && tab.askPendingQuestion !== null) submitAskForTab(tab);
-    });
     // tableak-coverage:end
   }
 
@@ -16504,6 +16553,24 @@
     // losing it silently; the user sends it once the banner is gone.
     if (daemonWasDown) return;
 
+    // The agent is blocked in ask_user_question: the composer text is
+    // its answer, not a new prompt, and photos are not part of it (they
+    // stay attached for the next prompt). Decided here, before any
+    // wait, so a question arriving or being answered elsewhere mid-send
+    // cannot change what this text was.
+    // An answer is not prompt history either (ArrowUp must not offer it
+    // as a prompt later). Emptying the composer through the input event
+    // settles its height, ghost text, history index and clear button;
+    // the parked prompt then comes back the same way (retireAskForTab).
+    const askTab = getTab(activeTabId);
+    if (askTab && !askTab.isContentTab && askTab.askPendingQuestion !== null) {
+      setComposerTextOf(askTab, '');
+      clearGhost();
+      submitAskForTab(askTab, prompt);
+      updateInputDisabled();
+      return;
+    }
+
     // Enter and the voice trigger bypass the disabled send button, so a photo
     // that is still being converted has to be waited for rather than lost.
     // With nothing to wait for, no await runs and the send stays synchronous:
@@ -16524,8 +16591,17 @@
       // A conversion that failed leaves its error chip in place: sending the
       // prompt without the photo is exactly the silent loss to avoid.  A tab
       // switch means this submission no longer matches what the user sees.
-      // The connection may have dropped during the wait: re-check.
-      if (!ready || activeTabId !== waitTab.id || daemonWasDown) return;
+      // The connection may have dropped during the wait: re-check.  A
+      // question that arrived meanwhile parked the prompt (enterAnswerMode)
+      // and made the composer the answer box: nothing here is a prompt any
+      // more, and the parked text comes back once the question is answered.
+      if (
+        !ready ||
+        activeTabId !== waitTab.id ||
+        daemonWasDown ||
+        waitTab.askPendingQuestion !== null
+      )
+        return;
       // attachlatch-coverage:end
       // The composer may have been edited during the wait.
       prompt = inp.value.trim();
@@ -16582,90 +16658,95 @@
     resetComposerAfterSend();
   }
 
-  function ensureAskElementsForTab(tab) {
-    if (tab.askQuestionEl) return;
-    const q = document.createElement('div');
-    q.className = 'ask-user-question';
-    const i = document.createElement('textarea');
-    i.className = 'ask-user-input';
-    i.placeholder = 'Your answer...';
-    const s = document.createElement('button');
-    s.className = 'ask-user-submit';
-    s.setAttribute('data-tooltip', 'Submit answer');
-    s.textContent = 'Submit';
-    s.addEventListener('click', () => {
-      submitAskForTab(tab);
-    });
-    i.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        submitAskForTab(tab);
-      }
-    });
-    const m = document.createElement('button');
-    m.className = 'ask-user-mic';
-    m.setAttribute(
-      'data-tooltip',
-      "Voice trigger: listen for the word 'Sorcar'",
-    );
-    m.innerHTML =
-      '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" ' +
-      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
-      'stroke-linejoin="round">' +
-      '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>' +
-      '<path d="M19 10v2a7 7 0 0 1-14 0v-2"/>' +
-      '<line x1="12" y1="19" x2="12" y2="23"/>' +
-      '<line x1="8" y1="23" x2="16" y2="23"/></svg>';
-    const row = document.createElement('div');
-    row.className = 'ask-user-actions';
-    row.appendChild(s);
-    row.appendChild(m);
-    tab.askQuestionEl = q;
-    tab.askInputEl = i;
-    tab.askActionsEl = row;
+  // The "Question" panel of an ask_user_question call (see the tool_call
+  // case) is the tab's newest one: the daemon broadcasts the tool_call
+  // before the live askUser event, and one call blocks the agent until
+  // it is answered.
+  function lastQuestionPanel(tab) {
+    const root = tab.id === activeTabId ? O : tab.outputFragment;
+    if (!root || !root.querySelectorAll) return null;
+    const panels = root.querySelectorAll('.tc-question');
+    return panels.length ? panels[panels.length - 1] : null;
   }
 
-  function setAskQuestionTextForTab(tab, text) {
-    const t = text || '';
-    if (typeof marked !== 'undefined') {
-      tab.askQuestionEl.innerHTML = kissSanitize(marked.parse(t));
-      tab.askQuestionEl.classList.add('md-body');
-      hlBlock(tab.askQuestionEl);
+  function setQuestionPanelPending(panel, pending) {
+    panel.classList.toggle('tc-question-pending', pending);
+    const hdr = panel.querySelector(':scope > .tc-h');
+    if (!hdr) return;
+    let hint = hdr.querySelector('.tc-question-hint');
+    if (pending && !hint) {
+      hint = mkEl('span', 'tc-question-hint');
+      hint.textContent = ' (answer in the chat box below)';
+      hint.dataset.rawText = '';
+      hdr.appendChild(hint);
+    } else if (!pending && hint) {
+      hdr.removeChild(hint);
+    }
+  }
+
+  // The composer doubles as the answer box while the chat tab on screen
+  // has a question outstanding: sendMessage() then posts its text as the
+  // userAnswer instead of a prompt. A file/webview tab hides the text
+  // box (body.content-tab-open), so it is never in answer mode even
+  // when the chat it belongs to is asking.
+  function syncAskComposer() {
+    const tab = getTab(activeTabId);
+    const answering =
+      !!tab && !tab.isContentTab && tab.askPendingQuestion !== null;
+    document.body.classList.toggle('ask-answering', answering);
+    inp.placeholder = answering
+      ? 'Type your answer and press Enter'
+      : inp.dataset.defaultPlaceholder;
+    updateInputDisabled();
+    if (answering) inp.focus();
+  }
+
+  // The text in a tab's composer: the live textarea for the tab on
+  // screen, the parked copy (tab.inputValue) for every other tab.
+  function composerTextOf(tab) {
+    return tab.id === activeTabId ? inp.value : tab.inputValue || '';
+  }
+
+  function setComposerTextOf(tab, text) {
+    if (tab.id === activeTabId) {
+      inp.value = text;
+      inp.dispatchEvent(new Event('input', {bubbles: true}));
     } else {
-      tab.askQuestionEl.textContent = t;
+      tab.inputValue = text;
     }
   }
 
-  function clearAskSlot() {
-    if (!askUserSlot) return;
-    while (askUserSlot.firstChild)
-      askUserSlot.removeChild(askUserSlot.firstChild);
-    if (askUserModal) askUserModal.style.display = 'none';
-  }
-
-  function mountAskForTab(tab) {
-    if (!askUserSlot) return;
-    while (askUserSlot.firstChild)
-      askUserSlot.removeChild(askUserSlot.firstChild);
-    askUserSlot.appendChild(tab.askQuestionEl);
-    askUserSlot.appendChild(tab.askInputEl);
-    askUserSlot.appendChild(tab.askActionsEl);
-    askUserModal.style.display = 'flex';
-    window.dispatchEvent(new CustomEvent('kiss-ask-mic-mounted'));
-    setTimeout(() => {
-      if (tab.id === activeTabId && tab.askInputEl) tab.askInputEl.focus();
-    }, 0);
-  }
-
-  function showAskForTab(tab) {
-    if (tab.askPendingQuestion === null) {
-      if (tab.id === activeTabId) clearAskSlot();
-      return;
+  // Entering answer mode: whatever the user had typed was a prompt, so it
+  // is parked in tab.promptDraft and the composer starts empty for the
+  // answer. Text typed before a question is never sent as its answer.
+  function enterAnswerMode(tab, question) {
+    tab.askPendingQuestion = question;
+    const typed = composerTextOf(tab);
+    if (typed) {
+      tab.promptDraft = typed;
+      setComposerTextOf(tab, '');
     }
-    ensureAskElementsForTab(tab);
-    setAskQuestionTextForTab(tab, tab.askPendingQuestion);
-    tab.askInputEl.value = '';
-    if (tab.id === activeTabId) mountAskForTab(tab);
+    // A history entry being cycled through was a prompt too.
+    if (tab.id === activeTabId) histIdx = -1;
+    const panel = lastQuestionPanel(tab);
+    if (panel) setQuestionPanelPending(panel, true);
+  }
+
+  // Leaving answer mode (answer sent, answered elsewhere, task ended):
+  // the parked prompt comes back. An answer still being typed is kept
+  // too, above it, so nothing the user wrote is lost.
+  function retireAskForTab(tab) {
+    tab.askPendingQuestion = null;
+    const panel = lastQuestionPanel(tab);
+    if (panel) setQuestionPanelPending(panel, false);
+    if (tab.promptDraft) {
+      const typed = composerTextOf(tab);
+      setComposerTextOf(
+        tab,
+        typed ? typed + '\n' + tab.promptDraft : tab.promptDraft,
+      );
+      tab.promptDraft = '';
+    }
   }
 
   function isAskSameChatTab(sourceTab, candidate) {
@@ -16675,50 +16756,29 @@
     return !!chatId && String(candidate.backendChatId || '') === chatId;
   }
 
-  // Retire the question of exactly one tab. Returns true when the retired
-  // question was the one on screen, so callers can drop the modal once.
-  function retireAskForTab(tab) {
-    tab.askPendingQuestion = null;
-    if (tab.askInputEl) tab.askInputEl.value = '';
-    return tab.id === activeTabId;
-  }
-
   // A tab's own task ended, so only its question dies. Sibling tabs sharing
   // the backend chat run their own tasks and may still be waiting on answers.
   function clearAskForTab(tab) {
-    if (retireAskForTab(tab)) clearAskSlot();
+    retireAskForTab(tab);
+    syncAskComposer();
     renderTabBar();
   }
 
   function clearAskForMatchingChatTabs(sourceTab) {
-    let shouldClearSlot = false;
     for (let i = 0; i < tabs.length; i++) {
       const tab = tabs[i];
-      if (!isAskSameChatTab(sourceTab, tab)) continue;
-      if (retireAskForTab(tab)) shouldClearSlot = true;
+      if (isAskSameChatTab(sourceTab, tab)) retireAskForTab(tab);
     }
-    if (shouldClearSlot) clearAskSlot();
+    syncAskComposer();
     renderTabBar();
   }
 
-  function submitAskForTab(tab) {
-    // While the daemon is unreachable the answer stays in the modal:
-    // a post made now would never arrive (see sendMessage).
-    if (daemonWasDown) return;
-    const answer = tab.askInputEl ? tab.askInputEl.value : '';
+  function submitAskForTab(tab, answer) {
     const question = tab.askPendingQuestion;
     api.userAnswer({answer: answer, tabId: tab.id});
     clearAskForMatchingChatTabs(tab);
     tab.unackedAnswer = answer;
     tab.unackedQuestion = question;
-  }
-
-  function syncAskModalToActiveTab() {
-    clearAskSlot();
-    const tab = getTab(activeTabId);
-    if (!tab || tab.askPendingQuestion === null) return;
-    ensureAskElementsForTab(tab);
-    mountAskForTab(tab);
   }
 
   function handleFileSelect(e) {

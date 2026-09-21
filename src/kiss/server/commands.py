@@ -960,7 +960,7 @@ class _CommandsMixin:
     def _user_answer_clear_tabs(
         self, ans_tab: str, answered_task_id: str,
     ) -> list[str]:
-        """Return every tab whose ask-user modal should close.
+        """Return every tab whose pending ask-user question should close.
 
         A submitted answer resolves one pending question for exactly one
         running task/chat, regardless of which subscribed tab supplied it.
@@ -1011,7 +1011,7 @@ class _CommandsMixin:
         2. Otherwise, the state of any task that ``ans_tab`` is
            subscribed to.  This covers the multi-viewer case where one
            tab (e.g. a browser viewer of a chat owned by the VS Code
-           extension's tab) renders the askUser modal and submits the
+           extension's tab) renders the askUser question and submits the
            answer: the broadcast was fan-stamped with the viewer's tab
            id, but the live ``user_answer_queue`` lives on the state
            of the task itself.  Resolving through the task id makes a

@@ -919,6 +919,49 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .tc-h:hover { color: var(--fg); }
 
+/* ask_user_question renders as the "Question" panel: translucent red
+   header, the question as prose, the answer typed into the composer. */
+.tc-h.tc-h-question {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--red) 22%, transparent);
+  border-radius: 4px 4px 0 0;
+}
+
+.tc-question-pending > .tc-h.tc-h-question {
+  background: color-mix(in srgb, var(--red) 34%, transparent);
+}
+
+.tc-question-hint {
+  font-weight: 400; text-transform: none; letter-spacing: 0;
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+}
+
+.tc-question-body {
+  font-size: var(--fs-lg); line-height: 1.5; padding: 6px 4px;
+  color: color-mix(in srgb, var(--fg) 88%, transparent);
+  overflow-wrap: anywhere; word-break: break-word;
+}
+
+.tc-question-answer {
+  margin-top: 6px; padding: 6px 8px; border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border-left: 3px solid color-mix(in srgb, var(--red) 55%, transparent);
+  overflow-wrap: anywhere; word-break: break-word;
+}
+
+.tc-question-answer-label {
+  display: block; font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.4px;
+  text-transform: uppercase; color: color-mix(in srgb, var(--fg) 60%, transparent);
+  margin-bottom: 2px;
+}
+
+.tc-question-answer-text { font-size: var(--fs-lg); line-height: 1.5; white-space: pre-wrap; }
+
+body.ask-answering #input-container {
+  border-color: color-mix(in srgb, var(--red) 60%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 30%, transparent);
+}
+
 .tc-h.tc-h-bash {
   background: color-mix(in srgb, var(--cyan) 8%, transparent); color: var(--cyan);
 }
@@ -1447,15 +1490,15 @@ body.content-tab-open #send-btn { display: none !important; }
 
 #share-btn.share-ok { color: var(--green); }
 #share-btn.share-err { color: var(--red); }
-#voice-btn.voice-loading, .ask-user-mic.voice-loading { opacity: 0.5; }
-#voice-btn.voice-listening, .ask-user-mic.voice-listening { animation: voice-pulse 1.6s ease-in-out infinite; }
-#voice-btn.voice-error, .ask-user-mic.voice-error { color: var(--error, #f48771); }
+#voice-btn.voice-loading { opacity: 0.5; }
+#voice-btn.voice-listening { animation: voice-pulse 1.6s ease-in-out infinite; }
+#voice-btn.voice-error { color: var(--error, #f48771); }
 
 /* Calm non-error state: neither this window nor the machine running KISS
    can capture audio (see voice.js 'unavailable'); dimmed, not red. */
-#voice-btn.voice-unavailable, .ask-user-mic.voice-unavailable { opacity: 0.4; }
-#voice-btn.voice-triggered, .ask-user-mic.voice-triggered { color: var(--red, #f48771); animation: voice-flash 0.8s ease-in-out infinite; }
-#voice-btn.voice-transcribing, .ask-user-mic.voice-transcribing { color: var(--warning, #e5c07b); animation: voice-flash 0.8s ease-in-out infinite; }
+#voice-btn.voice-unavailable { opacity: 0.4; }
+#voice-btn.voice-triggered { color: var(--red, #f48771); animation: voice-flash 0.8s ease-in-out infinite; }
+#voice-btn.voice-transcribing { color: var(--warning, #e5c07b); animation: voice-flash 0.8s ease-in-out infinite; }
 
 @keyframes voice-pulse {
   0%, 100% { opacity: 1; }
@@ -3461,59 +3504,6 @@ body.remote-chat .running-item.history-active-task:hover {
   filter: brightness(0.9); border-color: color-mix(in srgb, var(--fg) 15%, transparent);
 }
 .sidebar-empty { font-size: var(--fs-base); color: color-mix(in srgb, var(--fg) 50%, transparent); padding: 8px 0; }
-
-#ask-user-modal {
-  position: fixed; inset: 0; background: rgb(0 0 0 / 70%);
-  display: flex; align-items: center; justify-content: center; z-index: 300;
-  padding: 16px; box-sizing: border-box;
-}
-
-.modal-content {
-  background: var(--bg2); border: 1px solid var(--border);
-  border-radius: 12px; padding: 20px; width: 90%; max-width: 400px;
-  max-height: 85vh; box-sizing: border-box;
-  display: flex; flex-direction: column; min-height: 0;
-}
-.modal-title { font-size: var(--fs-xl); font-weight: 600; color: var(--fg); margin-bottom: 12px; flex: 0 0 auto; }
-
-#ask-user-slot {
-  display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto;
-}
-
-.ask-user-question {
-  font-size: var(--fs-lg); color: color-mix(in srgb, var(--fg) 83%, transparent);
-  margin-bottom: 12px; line-height: 1.5;
-  flex: 0 1 auto; min-height: 0; overflow-y: auto;
-  padding-right: 4px;
-  overflow-wrap: anywhere; word-break: break-word;
-}
-
-.ask-user-input {
-  width: 100%; background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border);
-  border-radius: 6px; color: var(--fg); font-size: var(--fs-lg); padding: 10px;
-  resize: none; outline: none; min-height: 80px; margin-bottom: 12px;
-  box-sizing: border-box; flex: 0 0 auto;
-}
-.ask-user-input:focus { border-color: var(--accent); }
-
-.ask-user-submit {
-  background: var(--accent); border: none; border-radius: 6px; color: var(--vscode-button-foreground);
-  font-size: var(--fs-lg); font-weight: 500; padding: 8px 16px; cursor: pointer; transition: opacity 0.15s;
-  flex: 0 0 auto; align-self: flex-start;
-}
-.ask-user-submit:hover { opacity: 0.9; }
-
-.ask-user-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
-
-.ask-user-mic {
-  background: none; border: none;
-  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 4px; transition: color 0.15s, opacity 0.15s;
-  display: flex; align-items: center; position: relative;
-}
-.ask-user-mic:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
-.ask-user-mic.active { color: var(--accent); }
-.ask-user-mic svg { width: 16px; height: 16px; }
 
 #auth-modal {
   position: fixed; inset: 0; background: rgb(0 0 0 / 70%);

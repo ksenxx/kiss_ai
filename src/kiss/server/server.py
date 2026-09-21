@@ -2124,7 +2124,7 @@ class VSCodeServer(
         """Re-broadcast a still-pending ask-user question to *tab_id*.
 
         Session replays (``resumeSession``) repaint a tab's transcript
-        but the ``askUser`` modal is a live event: a client that
+        but the ``askUser`` prompt is a live event: a client that
         connects or reloads while the tab's task is blocked inside
         ``ask_user_question`` would otherwise never see the question.
         Called after every ``task_events`` replay broadcast so such
