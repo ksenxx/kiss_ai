@@ -294,16 +294,13 @@ class SlackChannelBackend(ToolMethodBackend):
     def find_channel(self, name: str) -> str | None:
         """Find a Slack channel ID by name or ID.
 
-        A conversation ID (e.g. ``C0AKYSNLB7W``) is verified via
-        ``conversations.info`` and returned directly, which also covers
-        private channels the bot is a member of. Otherwise the public
-        and private channel lists are searched by name.
-
         A *name* that is already a Slack conversation ID (``C…``, ``G…``
-        or ``D…``) is returned unchanged, so private channels and DMs —
-        which name lookup cannot list without extra scopes — can be
-        addressed directly by ID.  Name lookup searches both public and
-        private channels visible to the bot token.
+        or ``D…``, e.g. ``C0AKYSNLB7W``) is verified via
+        ``conversations.info`` and returned directly, so private channels
+        and DMs — which name lookup cannot list without extra scopes — can
+        be addressed by ID.  If verification fails the value is treated as
+        a plain name and the public and private channel lists visible to
+        the bot token are searched.
 
         Args:
             name: Channel name without '#', or a conversation ID.
@@ -312,10 +309,6 @@ class SlackChannelBackend(ToolMethodBackend):
             Channel ID string, or None if not found.
         """
         assert self._client is not None
-<<<<<<< Updated upstream
-        if re.fullmatch(r"[CGD][A-Z0-9]{7,}", name):
-            return name
-=======
         if re.fullmatch(r"[CGD][A-Z0-9]{8,}", name):
             try:
                 resp = self._client.conversations_info(channel=name)
@@ -323,7 +316,6 @@ class SlackChannelBackend(ToolMethodBackend):
                     return name
             except SlackApiError:
                 pass
->>>>>>> Stashed changes
         cursor = ""
         while True:
             kwargs: dict[str, Any] = {
