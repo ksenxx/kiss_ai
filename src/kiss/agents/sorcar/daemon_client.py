@@ -239,10 +239,12 @@ def _resolve_py_file(
             type_error.format(type=type(value).__name__, value=repr(value))
         )
     path = Path(value).expanduser().resolve()
+    # Quote the path literally rather than via repr(): repr doubles every
+    # backslash of a Windows path, which misleads the reader.
     if path.suffix != ".py":
-        raise ValueError(f"{what} {str(path)!r} is not a Python (.py) file")
+        raise ValueError(f"{what} '{path}' is not a Python (.py) file")
     if not path.is_file():
-        raise ValueError(f"{what} {str(path)!r} does not exist")
+        raise ValueError(f"{what} '{path}' does not exist")
     return str(path)
 
 
@@ -354,6 +356,7 @@ def run(
     scope_work_dir: str = "",
     parent_task_id: str = "",
     parent_tab_id: str = "",
+    parent_reviewer: bool = False,
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -416,6 +419,14 @@ def run(
             cascade-close).  Only meaningful with *parent_task_id*;
             empty spawns a parentless sub-agent tab, exactly like a
             headless ``run_parallel`` fan-out.  No agent-script getter.
+        parent_reviewer: Whether the dispatched run belongs to a
+            reviewer's sub-tree — the caller is a reviewer sub-agent,
+            or *prompt* itself is a review task (see
+            :mod:`kiss.agents.sorcar.fanout_guard`).  Stamped on the
+            child's ``_subagent_info`` so its own ``run_parallel``
+            refuses to spawn further reviewers.  Only meaningful with
+            *parent_task_id*; no agent-script getter, for the same
+            reason as *parent_task_id*.
         model: Model name; the daemon's selected default when empty.
         chat_id: Optional existing chat session id to continue.  Pass
             the ``chat_id`` of a previous :class:`TaskResult` to run
@@ -606,10 +617,10 @@ def run(
             returned by the *tools* file's ``get_tools()`` — so the
             *use_web_tools* and *is_parallel* toggles have no tools left
             to act on.  The default system prompt (``SYSTEM.md``)
-            assumes the basic toolset (e.g. it mandates a first
-            ``Read("./SORCAR.md")`` call), so a restricted run should
-            usually pass a *system_prompt* written for the tools it
-            actually has.
+            assumes the basic toolset (its workflow rules name ``Read``,
+            ``Edit``, ``Bash`` and the browser tools), so a restricted
+            run should usually pass a *system_prompt* written for the
+            tools it actually has.
         append_to_system_prompt: Extra text appended to the run's
             system prompt when the agent is executed — after the
             default ``SYSTEM.md`` prompt (or the *system_prompt*
@@ -717,8 +728,17 @@ def run(
     # a late stop must never kill a newer run that reused the tab.
     run_token = uuid.uuid4().hex
     deadline = None if timeout is None else time.monotonic() + timeout
+    if not hasattr(socket, "AF_UNIX"):
+        # CPython on Windows has no Unix-domain sockets, and the daemon's
+        # local API is served only over one: report it as the same kind
+        # of connection failure callers already handle, naming the path.
+        raise ConnectionError(
+            f"Cannot connect to the sorcar daemon at {path}: Unix-domain "
+            f"sockets are unavailable on this platform."
+        )
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     aborted: BaseException | None = None
+    connected = False
     try:
         sock.settimeout(10.0 if timeout is None else min(timeout, 10.0))
         try:
@@ -728,6 +748,7 @@ def run(
                 f"Cannot connect to the sorcar daemon at {path}: {exc} "
                 f"— start it with `kiss-web`."
             ) from exc
+        connected = True
         cmd = {
             "type": "run",
             "prompt": prompt,
@@ -738,6 +759,7 @@ def run(
             "tabScopeWorkDir": scope_work_dir,
             "parentTaskId": parent_task_id,
             "parentTabId": parent_tab_id,
+            "parentReviewer": parent_reviewer,
             "model": model,
             "systemPrompt": system_prompt,
             "toolsFile": tools_file,
@@ -935,7 +957,13 @@ def run(
         aborted = exc
         raise
     finally:
-        if aborted is not None and not isinstance(aborted, TimeoutError):
+        # Nothing to cascade or close when the connect itself failed:
+        # there is no task and no tab on the daemon's side.  Sending on
+        # the never-connected socket is not merely pointless -- on macOS
+        # ``poll()`` never reports such a socket writable, so each of
+        # the two bounded sends below would burn its full 5-second
+        # timeout and a "daemon is down" error surfaced only after 10 s.
+        if connected and aborted is not None and not isinstance(aborted, TimeoutError):
             # The wait was aborted — typically by the KeyboardInterrupt
             # injected when the CALLING task is stopped while blocked
             # here.  Cascade the stop to the dispatched task: without
@@ -961,16 +989,16 @@ def run(
         # exit path.  For a still-running task (timeout) this merely
         # flips ``frontend_closed`` and the state is disposed when the
         # task ends; for a finished task it is disposed immediately.
-        # Best-effort: the daemon may be gone or the connect may have
-        # failed.
-        try:
-            sock.settimeout(5.0)
-            sock.sendall(
-                json.dumps({"type": "closeTab", "tabId": tab_id})
-                .encode("utf-8") + b"\n",
-            )
-        except OSError:
-            pass
+        # Best-effort: the daemon may be gone.
+        if connected:
+            try:
+                sock.settimeout(5.0)
+                sock.sendall(
+                    json.dumps({"type": "closeTab", "tabId": tab_id})
+                    .encode("utf-8") + b"\n",
+                )
+            except OSError:
+                pass
         try:
             sock.close()
         except OSError:

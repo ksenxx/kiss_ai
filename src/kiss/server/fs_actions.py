@@ -350,10 +350,14 @@ def _run_capped(cmd: list[str], cwd: str | None, limit: int, timeout: float) -> 
 def find_in_folder(folder: str, query: str) -> dict[str, Any]:
     """Search *folder* recursively for the literal text *query*.
 
-    Runs ``grep -rnI -F`` (binary files and VCS folders skipped) and
-    returns the matches as ``relative/path:line: text`` lines — the
-    same information VS Code's search results tree shows — capped at
-    :data:`FIND_MAX_MATCHES`.
+    Runs ``git grep --no-index -n -I -F`` (binary files, VCS and
+    dependency folders and ``.gitignore``d files skipped) and returns
+    the matches as ``relative/path:line: text`` lines — the same
+    information VS Code's search results tree shows — capped at
+    :data:`FIND_MAX_MATCHES`.  ``git`` is used instead of ``grep``
+    because it is the one search tool present on every platform the
+    daemon runs on (Windows ships no ``grep``); ``--no-index`` makes it
+    walk *folder* directly, so it works outside a repository too.
 
     Returns:
         ``{"ok": True, "path": folder, "query": query, "text": <lines>,
@@ -363,17 +367,22 @@ def find_in_folder(folder: str, query: str) -> dict[str, Any]:
         return {"error": f"Not a folder: {folder}"}
     if not query:
         return {"error": "Nothing to search for"}
-    cmd = ["grep", "-rnI", "-F", "--", query, "."]
-    for d in _FIND_EXCLUDED_DIRS:
-        cmd.insert(1, f"--exclude-dir={d}")
+    # ``--no-color --no-column --no-full-name`` pin the ``path:line:text``
+    # shape the parser below relies on; a user's ``[color]``/``[grep]``
+    # git config would otherwise change it.
+    cmd = [
+        "git", "grep", "--no-index", "--exclude-standard", "--no-color", "--no-column",
+        "--no-full-name", "-n", "-I", "-F", "-e", query, "--", ".",
+    ]
+    cmd += [f":(exclude,glob)**/{d}/**" for d in _FIND_EXCLUDED_DIRS]
     try:
         proc = _run_capped(cmd, folder, TEXT_MAX_BYTES, _FIND_TIMEOUT_S)
     except OSError as exc:
-        return {"error": f"grep failed: {exc}"}
+        return {"error": f"git grep failed: {exc}"}
     if proc.timed_out:
         return {"error": "Search timed out"}
     if not proc.truncated and proc.returncode not in (0, 1):
-        return {"error": proc.stderr.strip() or "grep failed"}
+        return {"error": proc.stderr.strip() or "git grep failed"}
     # A stream cut mid-line ends with a partial match: drop it.
     raw = proc.stdout
     if proc.truncated:

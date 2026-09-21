@@ -44,6 +44,7 @@ import unittest
 from pathlib import Path
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+from kiss.core.file_lock import lock_exclusive, unlock
 
 _RACE_DELAY_ENV = "KISS_RACE_DELAY"
 _RECLAIM_MARKER = "Auto-merged by orphan-worktree reclaim"
@@ -231,14 +232,12 @@ class TestCrossProcessReclaim(unittest.TestCase):
         # holds <git_common_dir>/kiss-reclaim.lock, a reclaim must
         # BLOCK — pre-fix code (no cross-process lock) reclaims
         # immediately and this test fails.
-        import fcntl
-
         branch = "kiss/wt-203-block"
         wt_dir = _plant_orphan_worktree(self.repo, branch)
         lock_path = self.repo / ".git" / "kiss-reclaim.lock"
         handle = open(lock_path, "a+", encoding="utf-8")
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            lock_exclusive(handle)
             ctx = multiprocessing.get_context()
             barrier = ctx.Barrier(1)
             out_queue = ctx.Queue()
@@ -253,7 +252,7 @@ class TestCrossProcessReclaim(unittest.TestCase):
             self.assertTrue(out_queue.empty())
             self.assertTrue(wt_dir.exists())
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            unlock(handle)
             handle.close()
         self.assertEqual(out_queue.get(timeout=120), 1)
         proc.join(timeout=60)

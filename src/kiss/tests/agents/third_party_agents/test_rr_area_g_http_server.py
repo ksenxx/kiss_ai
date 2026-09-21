@@ -151,12 +151,12 @@ class TestStartHttpServerHelper:
 
 def _port_arg_backends() -> list[tuple[Any, str]]:
     """Backends whose start method takes the port as an argument."""
-    from kiss.agents.third_party_agents.dingtalk_agent import DingTalkChannelBackend
-    from kiss.agents.third_party_agents.line_agent import LineChannelBackend
-    from kiss.agents.third_party_agents.synology_chat_agent import (
+    from kiss.agents.third_party_agents.dingtalk_sea import DingTalkChannelBackend
+    from kiss.agents.third_party_agents.line_sea import LineChannelBackend
+    from kiss.agents.third_party_agents.synology_sea import (
         SynologyChatChannelBackend,
     )
-    from kiss.agents.third_party_agents.zalo_agent import ZaloChannelBackend
+    from kiss.agents.third_party_agents.zalo_sea import ZaloChannelBackend
 
     return [
         (ZaloChannelBackend, "Zalo webhook bind failed: "),
@@ -203,7 +203,7 @@ class TestAttributePortBackends:
 
     def test_weixin_start_and_bad_port(self) -> None:
         """Weixin starts on an ephemeral port; a garbage port is caught."""
-        from kiss.agents.third_party_agents.weixin_agent import WeixinChannelBackend
+        from kiss.agents.third_party_agents.weixin_sea import WeixinChannelBackend
 
         backend = WeixinChannelBackend()
         backend._port = "0"
@@ -219,7 +219,7 @@ class TestAttributePortBackends:
 
     def test_qq_start_and_bad_port(self) -> None:
         """QQ starts on an ephemeral port; a garbage port is caught."""
-        from kiss.agents.third_party_agents.qq_agent import QQChannelBackend
+        from kiss.agents.third_party_agents.qq_sea import QQChannelBackend
 
         backend = QQChannelBackend()
         backend._port = "0"
@@ -235,7 +235,7 @@ class TestAttributePortBackends:
 
     def test_openai_compat_start_and_bind_conflict(self) -> None:
         """The API server reports its bound port in connection_info."""
-        from kiss.agents.third_party_agents.openai_compat_agent import (
+        from kiss.agents.third_party_agents.oai_sea import (
             OpenAICompatChannelBackend,
         )
 
@@ -266,7 +266,7 @@ class TestAttributePortBackends:
 
     def test_a2a_start_and_bad_port(self) -> None:
         """The A2A server starts from string config and catches bad ports."""
-        from kiss.agents.third_party_agents.a2a_agent import A2AChannelBackend
+        from kiss.agents.third_party_agents.a2a_sea import A2AChannelBackend
 
         backend = A2AChannelBackend()
         backend._bind_host = "127.0.0.1"
@@ -283,7 +283,7 @@ class TestAttributePortBackends:
 
     def test_webhook_start_and_bad_port(self) -> None:
         """The webhook server records its bound port and route count."""
-        from kiss.agents.third_party_agents.webhook_agent import WebhookChannelBackend
+        from kiss.agents.third_party_agents.webhook_sea import WebhookChannelBackend
 
         backend = WebhookChannelBackend()
         backend._port = "0"

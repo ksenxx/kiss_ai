@@ -32,6 +32,11 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.tests.conftest import IS_WINDOWS
+
+# Git bash prints MSYS paths (``/tmp/...``) for ``pwd``; ``-W`` asks for the
+# Windows spelling so the output can be compared with ``Path``.
+_PWD = "pwd -W" if IS_WINDOWS else "pwd"
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -80,7 +85,7 @@ def test_bash_refuses_a_parent_repo_path(repo_with_worktree):
     """F1: Bash refuses to mutate the user's main checkout."""
     repo, wt = repo_with_worktree
     tools = UsefulTools(work_dir=str(wt))
-    result = tools.Bash(f"echo x > {repo}/leaked.txt", "leak")
+    result = tools.Bash(f"echo x > {repo.as_posix()}/leaked.txt", "leak")
     assert "outside the active worktree" in result
     assert not (repo / "leaked.txt").exists()
 
@@ -89,7 +94,7 @@ def test_bash_allows_a_worktree_path(repo_with_worktree):
     """F1: the guard does not block legitimate writes inside the worktree."""
     repo, wt = repo_with_worktree
     tools = UsefulTools(work_dir=str(wt))
-    tools.Bash(f"echo x > {wt}/inside.txt", "inside")
+    tools.Bash(f"echo x > {wt.as_posix()}/inside.txt", "inside")
     assert (wt / "inside.txt").is_file()
     assert not (repo / "inside.txt").exists()
 
@@ -133,8 +138,8 @@ def test_bash_from_a_stale_worktree_runs_in_the_parent_repo(stale_worktree):
     """With the worktree gone the guard stands down and Bash still works."""
     repo, wt = stale_worktree
     tools = UsefulTools(work_dir=str(wt))
-    assert str(repo) in tools.Bash("pwd", "where am i")
-    result = tools.Bash(f"echo x > {repo}/allowed.txt", "write to parent")
+    assert Path(tools.Bash(_PWD, "where am i").strip()) == repo
+    result = tools.Bash(f"echo x > {repo.as_posix()}/allowed.txt", "write to parent")
     assert "outside the active worktree" not in result
     assert (repo / "allowed.txt").is_file()
 
@@ -148,7 +153,7 @@ def test_plain_work_dir_is_never_remapped_or_refused(tmp_path):
     assert "Successfully wrote" in tools.Write(str(target), "hi")
     assert target.read_text(encoding="utf-8") == "hi"
     assert "outside the active worktree" not in tools.Bash(
-        f"echo ok > {tmp_path}/plain_ok.txt", "write",
+        f"echo ok > {tmp_path.as_posix()}/plain_ok.txt", "write",
     )
     assert (tmp_path / "plain_ok.txt").is_file()
 

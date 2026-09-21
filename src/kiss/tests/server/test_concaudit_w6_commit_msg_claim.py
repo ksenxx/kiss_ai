@@ -19,58 +19,33 @@ No mocks or patches are involved.
 
 from __future__ import annotations
 
-import os
-import resource
 import tempfile
-import threading
 import time
 import unittest
 
 import pytest
 
 from kiss.server.server import VSCodeServer
+from kiss.tests.conftest import (
+    nproc_limit_lowered_to_one,
+    thread_start_can_be_starved,
+)
 from kiss.tests.server._memory_printer import MemoryPrinter
-
-
-def _thread_start_can_be_starved() -> bool:
-    """True when lowering RLIMIT_NPROC actually makes Thread.start fail here."""
-    if os.getuid() == 0:
-        return False
-    soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-    try:
-        resource.setrlimit(resource.RLIMIT_NPROC, (1, hard))
-    except (ValueError, OSError):
-        return False
-    try:
-        probe = threading.Thread(target=lambda: None)
-        try:
-            probe.start()
-        except RuntimeError:
-            return True
-        probe.join()
-        return False
-    finally:
-        resource.setrlimit(resource.RLIMIT_NPROC, (soft, hard))
 
 
 class TestCommitMessageClaimReleasedOnSpawnFailure(unittest.TestCase):
     """A failed worker spawn must not wedge the tab's commit-message button."""
 
     def test_claim_released_when_thread_start_raises(self) -> None:
-        if not _thread_start_can_be_starved():
+        if not thread_start_can_be_starved():
             pytest.skip("RLIMIT_NPROC cannot starve Thread.start on this host")
         printer = MemoryPrinter()
         server = VSCodeServer(printer=printer)
         tab_id = "TAB-W6-COMMIT"
-        soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-        resource.setrlimit(resource.RLIMIT_NPROC, (1, hard))
-        try:
-            with self.assertRaises(RuntimeError):
-                server._cmd_generate_commit_message({
-                    "type": "generateCommitMessage", "tabId": tab_id,
-                })
-        finally:
-            resource.setrlimit(resource.RLIMIT_NPROC, (soft, hard))
+        with nproc_limit_lowered_to_one(), self.assertRaises(RuntimeError):
+            server._cmd_generate_commit_message({
+                "type": "generateCommitMessage", "tabId": tab_id,
+            })
 
         with server._state_lock:
             self.assertNotIn(tab_id, server._commit_msg_tabs)

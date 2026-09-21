@@ -43,6 +43,7 @@ import kiss.server.merge_flow as _merge_flow_module
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
+from kiss.tests.conftest import posix_only
 
 _COMMIT_MSG = "test: deterministic cross-repo commit message"
 
@@ -490,6 +491,7 @@ class TestCrossRepoAutoCommit(_TwoRepoBase):
         assert _head_sha(self.other) != pre
         assert _head_files(self.other) == ["made-by-task.txt"]
 
+    @posix_only("'*' is not a valid NTFS file-name character")
     def test_glob_filename_cannot_match_other_files(self) -> None:
         """A recorded filename containing pathspec magic (``*``) must
         match itself literally, never other dirty files."""

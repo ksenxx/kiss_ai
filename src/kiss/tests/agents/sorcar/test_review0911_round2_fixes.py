@@ -54,6 +54,7 @@ import pytest
 import kiss.agents.sorcar.persistence as persistence
 from kiss.agents.sorcar import worktree_pool
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.tests.conftest import posix_only
 
 # ---------------------------------------------------------------------------
 # Finding 1: _RWLock vs. a REAL PyThreadState_SetAsyncExc injection
@@ -365,6 +366,7 @@ def _database_refusing_writes() -> Iterator[None]:
 class TestJournalOrderAcrossFailedReplays:
     """Finding 2: chronology must survive failed replays + appends."""
 
+    @posix_only("replacing a SQLite file another connection holds open")
     def test_failed_replay_then_later_appends_keep_chronology(
         self, journal_home: Path,
     ) -> None:
@@ -503,21 +505,22 @@ def _reclaim_lock_path(repo: Path) -> Path:
 
 
 _FLOCK_HOLDER_SCRIPT = """
-import fcntl
 import os
 import sys
 import time
 
+from kiss.core.file_lock import lock_exclusive, unlock
+
 lock_path, held_marker, release_marker = sys.argv[1], sys.argv[2], sys.argv[3]
 handle = open(lock_path, "a+")
-fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+lock_exclusive(handle)
 open(held_marker, "w").close()
 deadline = time.monotonic() + 120
 while time.monotonic() < deadline:
     if os.path.exists(release_marker):
         break
     time.sleep(0.02)
-fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+unlock(handle)
 handle.close()
 """
 

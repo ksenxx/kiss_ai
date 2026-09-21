@@ -22,14 +22,14 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 import requests
 
-import kiss.agents.third_party_agents.ntfy_agent as ntfy_agent_mod
+import kiss.agents.third_party_agents.ntfy_sea as ntfy_agent_mod
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
-from kiss.agents.third_party_agents.ntfy_agent import (
+from kiss.agents.third_party_agents.ntfy_sea import (
     NtfyAgent,
     NtfyChannelBackend,
     _config,
 )
-from kiss.agents.third_party_agents.ntfy_agent import (
+from kiss.agents.third_party_agents.ntfy_sea import (
     tools as module_tools,
 )
 from kiss.core.config import kiss_home

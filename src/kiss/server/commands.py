@@ -27,6 +27,9 @@ from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
 )
+from kiss.agents.sorcar.sea_commands import (
+    list_commands as list_sea_commands,
+)
 from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
@@ -137,46 +140,36 @@ def _task_accepts_input(state: AgentState | None) -> bool:
     return state.is_task_active or state.thread_alive()
 
 
-def _route_prompt_to_owner(owner: AgentState, prompt: str) -> None:
-    """Queue a mid-run user *prompt* on the right list of *owner*.
+# Prefix that flags an ``appendUserMessage`` as a live-side-channel
+# /ask query.  Kept identical to the SEA registry stem so a
+# ``list_commands`` reader and the interceptor agree on the name.
+_ASK_COMMAND_PREFIX = "/ask"
 
-    A plain message is appended to ``pending_user_messages`` — the
-    live agent's pre-step hook drains it into the model conversation
-    as a steering instruction.  A message wrapped in
-    ``<task>...</task>`` tags is instead split into its task blocks
-    and appended to ``queued_followup_tasks``: the task runner's
-    per-subtask loop drains that list once the CURRENT task finishes
-    and runs each block one-by-one as further sequential subtasks, so
-    a task list typed mid-run never steers the running task.
 
-    Only server-owned states take the queued-tasks path: the drain
-    lives in ``TaskRunner._run_task_inner``, which executes only
-    UI-launched runs.  A sub-agent or standalone state has no such
-    loop, so a ``<task>`` message sent to one would sit undrained
-    forever — it falls back to live steering injection instead.  The
-    same fallback applies once the run's ``followup_queue_closed``
-    flag is up (the loop passed its final drain, a subtask failed, or
-    the run is finalizing): a task queued then would be echoed to the
-    user and silently discarded by the end-of-run cleanup.  The flag
-    is raised under the same :data:`agent_state.STATE_LOCK` this
-    helper runs under, so a message either lands in the queue before
-    the final drain (and runs) or takes the steering path — never the
-    accepted-then-dropped middle ground.
+def _split_ask_command(prompt: str) -> str | None:
+    """Return the question text of a ``/ask <question>`` prompt.
 
-    MUST be called while holding :data:`agent_state.STATE_LOCK`.
+    Returns the question with surrounding whitespace stripped when
+    *prompt* begins with ``/ask`` followed by whitespace and at least
+    one non-whitespace character; otherwise returns ``None``.  A bare
+    ``/ask`` or ``/ask   `` returns ``None`` (no question to answer),
+    and a prompt whose ``/ask`` prefix is glued to more text
+    (``/askme``) does not match — the same word-boundary rule the
+    general SEA slash-command parser uses.
 
     Args:
-        owner: The running-task state that accepted the prompt.
-        prompt: The user's message (non-empty).
+        prompt: The raw user message.
+
+    Returns:
+        The question text, or ``None``.
     """
-    if (
-        owner.server_owned
-        and not owner.followup_queue_closed
-        and contains_task_tags(prompt)
-    ):
-        owner.queued_followup_tasks.extend(parse_task_tags(prompt))
-    else:
-        owner.pending_user_messages.append(prompt)
+    if not prompt.startswith(_ASK_COMMAND_PREFIX):
+        return None
+    tail = prompt[len(_ASK_COMMAND_PREFIX):]
+    if not tail or not tail[:1].isspace():
+        return None
+    question = tail.strip()
+    return question or None
 
 
 def _restart_kiss_web_daemon() -> bool:
@@ -199,13 +192,23 @@ def _restart_kiss_web_daemon() -> bool:
 
     Returns:
         True when a restart was dispatched; False when skipped because
-        ``KISS_HOME`` points at a non-default location.
+        ``KISS_HOME`` points at a non-default location or because the
+        platform has no managed kiss-web daemon (Windows: the VS Code
+        extension installs no service there, so there is nothing to
+        kick).
     """
     if not _kiss_home_is_default():
         logger.warning(
             "Skipping kiss-web daemon restart: KISS_HOME=%r is not the "
             "default ~/.kiss — the system daemon serves a different home",
             os.environ.get("KISS_HOME", ""),
+        )
+        return False
+    if sys.platform not in ("darwin", "linux"):
+        logger.info(
+            "Skipping kiss-web daemon restart: no launchd/systemd-managed "
+            "kiss-web daemon on %s",
+            sys.platform,
         )
         return False
 
@@ -388,10 +391,12 @@ class _CommandsMixin:
         def _handle_worktree_action(
             self, action: str, tab_id: str = "", *,
             internal: bool = False, already_claimed: bool = False,
+            resolve_conflicts: bool = False,
         ) -> dict[str, Any]: ...
         def _handle_main_tree_action(
             self, action: str, work_dir: str,
         ) -> dict[str, Any]: ...
+        def _merge_deferred_worktrees(self, repo: Path | None) -> None: ...
         def _handle_delete_frequent_task(self, task: str) -> None: ...
         def _handle_set_favorite(
             self, task_id: str, is_favorite: bool,
@@ -469,8 +474,23 @@ class _CommandsMixin:
         thread: threading.Thread | None = None
         state: AgentState | None = None
         chat_id = ""
+        prompt = cmd.get("prompt", "")
+        typed = isinstance(prompt, str) and bool(prompt.strip())
         with self._state_lock:
             prev = agent_state.find_by_tab(tab_id)
+            # A plain message typed into a tab that only VIEWS a task
+            # whose agent is blocked in ``ask_user_question`` (a
+            # client-local sub-agent tab, or a stale viewer that sent
+            # ``run`` instead of ``appendUserMessage``) is that
+            # question's answer — not a new task.  A ``<task>`` message
+            # still starts a new task in the tab, as before.
+            asked: AgentState | None = None
+            if (
+                typed
+                and (prev is None or prev.task_thread is None)
+                and not contains_task_tags(prompt)
+            ):
+                asked = self._viewer_awaiting_answer(tab_id)
             if prev is not None and prev.is_merging:
                 # An in-flight merge/discard owns the tab's state (and
                 # its worktree agent); replacing it would orphan the
@@ -493,19 +513,22 @@ class _CommandsMixin:
                 )
                 return
             if prev is not None and prev.task_thread is not None:
-                prompt = cmd.get("prompt", "")
                 # S3-05: queue the prompt whenever a task thread is
                 # installed.  The worker sets ``is_task_active`` only
                 # AFTER the thread starts, so gating on the flag (or on
                 # thread death) silently dropped a second ``run``
                 # submitted during the startup window in which the
                 # thread was alive but the flag not yet raised.
-                if isinstance(prompt, str) and prompt.strip():
-                    _route_prompt_to_owner(prev, prompt)
+                if typed:
+                    self._route_prompt_to_owner(prev, prompt, tab_id)
                     inject_prompt = prompt
                     inject_task = _owner_task_id(prev)
                     if not inject_task:
                         prev.unattributed_prompt_echoes.append(prompt)
+            elif asked is not None:
+                self._route_prompt_to_owner(asked, prompt, tab_id)
+                inject_prompt = prompt
+                inject_task = _owner_task_id(asked)
             else:
                 requested_chat_id = cmd.get("chatId", "")
                 resumed_chat_id = self._tab_chat_views.get(tab_id, "")
@@ -872,14 +895,9 @@ class _CommandsMixin:
     def _cmd_user_answer(self, cmd: dict[str, Any]) -> None:
         """Route a user answer to the correct tab's queue.
 
-        The drain-then-put sequence is held under ``_state_lock`` so
-        two concurrent ``userAnswer`` commands cannot both observe
-        the queue as empty, both call ``q.put`` on the ``maxsize=1``
-        queue, and wedge the second handler thread forever.  Using
-        ``put_nowait`` after the drain — combined with the lock —
-        guarantees the call never blocks: the queue is guaranteed
-        empty by the just-completed drain, and any concurrent
-        ``userAnswer`` is serialised behind us.
+        Resolving the waiting state and delivering the answer (see
+        :meth:`_deliver_user_answer`) form one critical section under
+        ``_state_lock``.
         """
         ans_tab = cmd.get("tabId", "")
         with self._state_lock:
@@ -888,32 +906,155 @@ class _CommandsMixin:
             if owner is None or q is None:
                 logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
                 return
-            answered_task_id = owner.task_id
-            # The question is no longer pending the moment its answer
-            # is consumed: clearing under ``_state_lock`` guarantees a
-            # concurrent session replay (``_emit_pending_ask``) can
-            # never re-show an already-answered modal.
-            owner.pending_ask_question = ""
-            while not q.empty():
-                try:
-                    q.get_nowait()
-                except queue.Empty:  # pragma: no cover — race guard
-                    break
             answer = cmd.get("answer", "")
             if not isinstance(answer, str):
                 answer = "" if answer is None else str(answer)
+            self._deliver_user_answer(owner, q, answer, ans_tab)
+
+    def _deliver_user_answer(
+        self,
+        owner: AgentState,
+        q: queue.Queue[str],
+        answer: str,
+        ans_tab: str,
+    ) -> None:
+        """Hand *answer* to the ``ask_user_question`` blocked on *q* and close it.
+
+        The question is no longer pending the moment its answer is
+        consumed: clearing ``pending_ask_question`` under the lock
+        guarantees a concurrent session replay (``_emit_pending_ask``)
+        can never re-show an already-answered modal.  The drain-then-put
+        sequence under the same lock means two concurrent deliveries
+        cannot both observe the ``maxsize=1`` queue as empty, both
+        ``put`` and wedge the second handler thread forever; with the
+        queue guaranteed empty by the drain, ``put_nowait`` never blocks.
+
+        The ``askUserDone`` broadcast belongs to the SAME critical
+        section: the ``put`` wakes the agent thread, which may return
+        from the tool and publish its NEXT question at once —
+        ``_ask_user_question`` takes this lock to do so — and a close
+        sent after the lock is released could reach the clients after
+        that second ``askUser`` and dismiss it (clients clear whatever
+        question is showing; a close carries no question identity).
+        Broadcasting before the lock is released orders every
+        ``askUserDone`` ahead of the next ``askUser``.  ``STATE_LOCK`` →
+        printer-lock is the established nesting order (the
+        ``askUser`` broadcast itself is made under this lock).
+
+        MUST be called while holding :data:`agent_state.STATE_LOCK`.
+
+        Args:
+            owner: The state whose agent thread is waiting on *q*.
+            q: The owner's live ``user_answer_queue``.
+            answer: The user's answer text.
+            ans_tab: Frontend tab id the answer was typed into (see
+                :meth:`_user_answer_clear_tabs`).
+        """
+        owner.pending_ask_question = ""
+        while not q.empty():
             try:
-                q.put_nowait(answer)
-            except queue.Full:  # pragma: no cover — drained immediately above
-                pass
-        clear_tabs = self._user_answer_clear_tabs(ans_tab, answered_task_id)
-        for tab_id in clear_tabs:
+                q.get_nowait()
+            except queue.Empty:  # pragma: no cover — race guard
+                break
+        try:
+            q.put_nowait(answer)
+        except queue.Full:  # pragma: no cover — drained immediately above
+            pass
+        for tab_id in self._user_answer_clear_tabs(ans_tab, owner.task_id):
             self.printer.broadcast({"type": "askUserDone", "tabId": tab_id})
+
+    def _route_prompt_to_owner(
+        self, owner: AgentState, prompt: str, tab_id: str,
+    ) -> None:
+        """Queue a mid-run user *prompt* on the right list of *owner*.
+
+        A plain message is appended to ``pending_user_messages`` — the
+        live agent's pre-step hook drains it into the model conversation
+        as a steering instruction.  A message wrapped in
+        ``<task>...</task>`` tags is instead split into its task blocks
+        and appended to ``queued_followup_tasks``: the task runner's
+        per-subtask loop drains that list once the CURRENT task finishes
+        and runs each block one-by-one as further sequential subtasks, so
+        a task list typed mid-run never steers the running task.
+
+        Exception — a pending ``ask_user_question``: while the agent
+        thread is blocked inside that tool (``owner.pending_ask_question``
+        is set and the state holds a live ``user_answer_queue``) it never
+        reaches the pre-step hook, so a steering message would sit
+        undrained and the agent would hang until the task is stopped
+        (sorcar.db task ``e8a8407967d645c28c87750eda7a6cc0``: the user
+        typed the reply into the chat box instead of the answer box).  A
+        plain message typed then IS the answer and is delivered through
+        :meth:`_deliver_user_answer`, exactly like a ``userAnswer``
+        command.  A ``<task>`` message keeps its follow-up semantics even
+        then — it is an explicit "run this afterwards", not a reply.
+
+        Only server-owned states take the queued-tasks path: the drain
+        lives in ``TaskRunner._run_task_inner``, which executes only
+        UI-launched runs.  A sub-agent or standalone state has no such
+        loop, so a ``<task>`` message sent to one would sit undrained
+        forever — it falls back to live steering injection instead.  The
+        same fallback applies once the run's ``followup_queue_closed``
+        flag is up (the loop passed its final drain, a subtask failed, or
+        the run is finalizing): a task queued then would be echoed to the
+        user and silently discarded by the end-of-run cleanup.  The flag
+        is raised under the same :data:`agent_state.STATE_LOCK` this
+        helper runs under, so a message either lands in the queue before
+        the final drain (and runs) or takes the steering path — never the
+        accepted-then-dropped middle ground.
+
+        MUST be called while holding :data:`agent_state.STATE_LOCK`.
+
+        Args:
+            owner: The running-task state that accepted the prompt.
+            prompt: The user's message (non-empty).
+            tab_id: Frontend tab id the message was typed into.
+        """
+        if (
+            owner.server_owned
+            and not owner.followup_queue_closed
+            and contains_task_tags(prompt)
+        ):
+            owner.queued_followup_tasks.extend(parse_task_tags(prompt))
+        elif owner.pending_ask_question and owner.user_answer_queue is not None:
+            self._deliver_user_answer(
+                owner, owner.user_answer_queue, prompt, tab_id,
+            )
+        else:
+            owner.pending_user_messages.append(prompt)
+
+    def _viewer_awaiting_answer(self, tab_id: str) -> AgentState | None:
+        """Return the task *tab_id* views whose agent is blocked in ``ask_user_question``.
+
+        A daemon-dispatched sub-agent (``run_agent``) keeps its
+        server-side ``api-…`` source tab on its state, while every
+        client renders it in a client-local ``<parent>__sub_<task>``
+        tab that is merely SUBSCRIBED to the task — so
+        ``agent_state.find_by_tab`` never resolves that tab to the
+        running task.  A ``run`` typed there while the sub-agent waits
+        for an answer must reach that waiter (see
+        :meth:`_route_prompt_to_owner`) rather than start an unrelated
+        new task in the tab while the sub-agent hangs; the same holds
+        for a stale history viewer of a running task.
+
+        MUST be called while holding :data:`agent_state.STATE_LOCK`.
+
+        Args:
+            tab_id: The frontend tab id the message was typed into.
+
+        Returns:
+            The first viewed state with a pending question and a live
+            answer queue, or ``None``.
+        """
+        for state in self._find_viewer_task_states(tab_id):
+            if state.pending_ask_question and state.user_answer_queue is not None:
+                return state
+        return None
 
     def _user_answer_clear_tabs(
         self, ans_tab: str, answered_task_id: str,
     ) -> list[str]:
-        """Return every tab whose ask-user modal should close.
+        """Return every tab whose pending ask-user question should close.
 
         A submitted answer resolves one pending question for exactly one
         running task/chat, regardless of which subscribed tab supplied it.
@@ -964,7 +1105,7 @@ class _CommandsMixin:
         2. Otherwise, the state of any task that ``ans_tab`` is
            subscribed to.  This covers the multi-viewer case where one
            tab (e.g. a browser viewer of a chat owned by the VS Code
-           extension's tab) renders the askUser modal and submits the
+           extension's tab) renders the askUser question and submits the
            answer: the broadcast was fan-stamped with the viewer's tab
            id, but the live ``user_answer_queue`` lives on the state
            of the task itself.  Resolving through the task id makes a
@@ -1045,6 +1186,149 @@ class _CommandsMixin:
             echo["taskId"] = owner_task
         self.printer.broadcast(echo)
 
+    def _dispatch_ask_side_channel(
+        self, *, tab_id: str, owner_task_id: str, chat_id: str, question: str,
+    ) -> None:
+        """Fire a background ``ask_sea`` dispatch for a live ``/ask`` query.
+
+        Spawns a daemon thread that calls
+        :func:`daemon_client.run` with the resolved ``ask_sea`` script
+        as ``extension_agent_path``: the daemon accepts the run over
+        its own Unix socket and runs it as a sub-agent of
+        *owner_task_id*.  The frontend then renders the answering
+        session as a nested sub-agent tab under the running task's
+        tab — same webview, no interaction with the outer agent's
+        (possibly blocked) tool call.
+
+        The nested tab is closed by the frontend the moment the
+        answering session ends, so the answer itself is delivered
+        separately: when :func:`daemon_client.run` returns (or
+        raises), the worker broadcasts a persisted ``ask_answer``
+        event into the OWNER task's transcript via
+        :meth:`_broadcast_ask_answer`, and the running task's tab
+        renders it as a distinct "Answer" panel that survives replays.
+
+        The ``<task_id>`` placeholder is substituted HERE so the
+        answering session receives the OWNER's task id even when it
+        would end up as the answering task's own parent id (which is
+        the same value; kept explicit for clarity).
+
+        Args:
+            tab_id: The frontend tab whose ``/ask`` produced this
+                dispatch.  Threaded as ``parent_tab_id`` so the
+                nested sub-agent tab renders inside it.
+            owner_task_id: The persisted task id of the running task
+                the user is asking about.  Empty means the running
+                task has not allocated its row yet (rare — the
+                narrow window between ``run()`` entry and
+                ``_add_task``); the dispatch still fires but the
+                answering agent will see an empty task id and report
+                that no events exist.
+            chat_id: The chat the running task belongs to; passed so
+                the answering sub-agent joins the same chat's
+                history.
+            question: The user's question, already stripped of the
+                ``/ask`` prefix and surrounding whitespace.
+        """
+        from kiss.agents.sorcar import daemon_client, sea_commands
+        from kiss.agents.sorcar.agent_dispatch import _daemon_sock_path
+        from kiss.agents.third_party_agents import ask_sea
+
+        sea_path = sea_commands.get_command("ask")
+        if sea_path is None:
+            logger.warning(
+                "/ask received on tab %s but ask_sea is not registered",
+                tab_id,
+            )
+            return
+        append_to_prompt = (
+            f"Read the events of the task {owner_task_id} from "
+            f"~/.kiss/sorcar.db and answer the user question above."
+        )
+        append_to_system_prompt = ask_sea.append_to_system_prompt()
+        sock_path = _daemon_sock_path()
+
+        def _run() -> None:
+            try:
+                result = daemon_client.run(
+                    question,
+                    extension_agent_path=str(sea_path),
+                    append_to_prompt=append_to_prompt,
+                    append_to_system_prompt=append_to_system_prompt,
+                    parent_task_id=owner_task_id,
+                    parent_tab_id=tab_id,
+                    chat_id=chat_id,
+                    use_worktree=False,
+                    auto_commit=False,
+                    sock_path=sock_path,
+                    timeout=600.0,
+                    stop_on_timeout=True,
+                )
+                text, success = result.text, result.success
+            except Exception as exc:
+                # A crashed side-channel MUST NOT bring down the
+                # daemon: the interactive tab keeps running.  The
+                # exception goes to the daemon log for triage, and
+                # the user gets a failed answer panel instead of
+                # waiting on a reply that will never come.
+                logger.exception(
+                    "/ask side-channel dispatch failed for tab %s", tab_id,
+                )
+                text, success = f"The /ask agent failed: {exc}", False
+            self._broadcast_ask_answer(
+                tab_id=tab_id,
+                owner_task_id=owner_task_id,
+                question=question,
+                text=text,
+                success=success,
+            )
+
+        threading.Thread(
+            target=_run, daemon=True, name="kiss-ask-sidechannel",
+        ).start()
+
+    def _broadcast_ask_answer(
+        self,
+        *,
+        tab_id: str,
+        owner_task_id: str,
+        question: str,
+        text: str,
+        success: bool,
+    ) -> None:
+        """Deliver a finished ``/ask`` answer into the running task's transcript.
+
+        Broadcasts an ``ask_answer`` event stamped with the asking
+        *tab_id* and, when known, the OWNER task's id.  The stamp makes
+        :meth:`WebPrinter.broadcast` treat it like the ``/ask`` prompt
+        echo (see :meth:`_echo_injected_prompt`): it is rendered live
+        in the tab, appended to the owner task's in-memory recording
+        (so a viewer attaching to the still-running task replays it)
+        and persisted into the task's ``events`` rows (so it survives
+        a history reopen).  Without *owner_task_id* the event is a
+        transient targeted broadcast — shown once, not replayed.
+
+        Args:
+            tab_id: The frontend tab the ``/ask`` was typed into.
+            owner_task_id: The running task's persisted id, or ``""``
+                when its row was not allocated at dispatch time.
+            question: The user's question, ``/ask`` prefix stripped.
+            text: The answering agent's final summary (HTML from
+                ``finish(summary_in_html=...)``), or the failure text
+                when the dispatch itself failed.
+            success: Whether the answering agent reported success.
+        """
+        event: dict[str, Any] = {
+            "type": "ask_answer",
+            "question": question,
+            "text": text,
+            "success": success,
+            "tabId": tab_id,
+        }
+        if owner_task_id:
+            event["taskId"] = owner_task_id
+        self.printer.broadcast(event)
+
     def _cmd_append_user_message(self, cmd: dict[str, Any]) -> None:
         """Queue a user message to be injected into the running agent's context.
 
@@ -1056,12 +1340,16 @@ class _CommandsMixin:
         pre-step hook can drain and inject the messages into the model
         conversation before the next model call.
 
-        Exception (see :func:`_route_prompt_to_owner`): a message
+        Exception (see :meth:`_route_prompt_to_owner`): a message
         wrapped in ``<task>...</task>`` tags is NOT injected into the
         running task.  Its task blocks are queued on
         :attr:`AgentState.queued_followup_tasks` instead, and the task
         runner executes them one-by-one as further sequential subtasks
-        once the current task finishes.
+        once the current task finishes.  And while the running agent
+        is blocked inside ``ask_user_question``, a plain message is
+        delivered as that question's answer (the agent cannot drain
+        steering input until the tool returns) and every viewer tab
+        receives ``askUserDone``, exactly as for a ``userAnswer``.
 
         When the tab itself has no live task (the common case for a
         VIEWER tab opened from the history sidebar while a task runs
@@ -1103,10 +1391,54 @@ class _CommandsMixin:
                     tab_id,
                 )
                 return
-            _route_prompt_to_owner(owner, prompt)
+            # ``/ask <question>`` is a live side-channel Q&A over the
+            # running task's persisted events: routed to a background
+            # ``ask_sea`` dispatch instead of ``pending_user_messages``
+            # so the answering session runs independently of the outer
+            # agent (which may be blocked inside a long tool call).
+            # The captured id is the SAME task id the message was
+            # queued against — the state lock is still held here, so
+            # a successor task cannot have re-armed the tab yet.  The
+            # SEA parser (``sea_commands._split_slash_command``) is
+            # word-boundary strict at character zero (no leading
+            # whitespace), and this helper matches it: passing
+            # ``prompt`` without pre-stripping keeps ``  /ask q``
+            # (leading spaces) OUT of the side channel so it flows
+            # through the normal steering queue like any other typed
+            # message.
+            question = _split_ask_command(prompt)
             owner_task = _owner_task_id(owner)
-            if not owner_task:
-                owner.unattributed_prompt_echoes.append(prompt)
+            # An empty ``owner_task`` means the running task has not
+            # allocated its ``task_history`` row yet (the narrow
+            # window between ``run()`` entry and ``_add_task``): the
+            # answering session would receive an empty task id and
+            # be unable to read any events, so bail out of the side
+            # channel and let the normal queue path handle the
+            # ``/ask …`` line as a steering message instead — that
+            # path already handles the pre-allocation window through
+            # ``unattributed_prompt_echoes``.
+            ask_question: str | None = None
+            owner_chat_id = owner.chat_id
+            if question is not None and owner_task:
+                ask_question = question
+            else:
+                self._route_prompt_to_owner(owner, prompt, tab_id)
+                if not owner_task:
+                    owner.unattributed_prompt_echoes.append(prompt)
+        if ask_question is not None:
+            # Echo the raw ``/ask …`` line the user typed, then hand
+            # off to the side-channel worker.  The echo carries the
+            # OWNER's task id (not a fresh one) so the message appears
+            # in the running task's history stream, right where the
+            # answer will land.
+            self._echo_injected_prompt(tab_id, prompt, owner_task)
+            self._dispatch_ask_side_channel(
+                tab_id=tab_id,
+                owner_task_id=owner_task,
+                chat_id=owner_chat_id,
+                question=ask_question,
+            )
+            return
         self._echo_injected_prompt(tab_id, prompt, owner_task)
 
     def _cmd_resume_session(self, cmd: dict[str, Any]) -> None:
@@ -1265,6 +1597,21 @@ class _CommandsMixin:
     def _cmd_get_input_history(self, cmd: dict[str, Any]) -> None:
         """Send deduplicated task texts for arrow-key cycling."""
         self._get_input_history(cmd.get("connId", ""))
+
+    def _cmd_get_sea_commands(self, cmd: dict[str, Any]) -> None:
+        """Send the slash-command list built from every SEA folder.
+
+        Sent as a ``seaCommands`` event scoped to the requesting
+        connection: ``{type: "seaCommands", commands: [...]}``.  The
+        chat webview uses the list to render the autocomplete popup
+        when the user types ``/`` at the start of the composer.
+        """
+        commands = list_sea_commands()
+        event: dict[str, Any] = {
+            "type": "seaCommands",
+            "commands": commands,
+        }
+        self._broadcast_to_conn(event, cmd.get("connId", ""))
 
     def _cmd_get_adjacent_task(self, cmd: dict[str, Any]) -> None:
         """Send events for the adjacent task in the same chat session.
@@ -1496,6 +1843,9 @@ class _CommandsMixin:
                 self._autocommit_tabs.discard(tab_id)
                 for claim in dispatch_claims or []:
                     self._release_main_tree_claim(claim)
+        # The main tree is committed (and its claim released): merge
+        # the worktrees whose merge waited for exactly this commit.
+        self._merge_deferred_worktrees(repo)
 
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""
@@ -1532,6 +1882,12 @@ class _CommandsMixin:
         self.printer.broadcast(
             {"type": "main_tree_result", "tabId": tab_id, **result},
         )
+        if action == "discard" and result.get("success"):
+            # The task's uncommitted main-tree changes are gone, so the
+            # tree is back at its committed state: merge the worktrees
+            # whose merge waited for that.  ("Do nothing" leaves the
+            # tree dirty; a later Git Commit triggers them instead.)
+            self._merge_deferred_worktrees(_effective_commit_repo(work_dir))
 
     def _cmd_get_config(self, cmd: dict[str, Any]) -> None:
         """Send the current configuration to the frontend.
@@ -1708,12 +2064,12 @@ class _CommandsMixin:
             logger.warning("saveMyModel failed", exc_info=True)
             error = f"Could not write ~/.kiss/MY_MODELS.json: {e}"
         if error:
-            self._send_my_models_error(error, cmd)
+            self._send_error_to_sender(error, cmd)
             return
         self._broadcast_my_models()
 
-    def _send_my_models_error(self, error: str, cmd: dict[str, Any]) -> None:
-        """Answer a failed custom-model mutation with an ``error`` event.
+    def _send_error_to_sender(self, error: str, cmd: dict[str, Any]) -> None:
+        """Answer a failed ``~/.kiss`` file mutation with an ``error`` event.
 
         Stamped with the sender's ``connId`` when present so the banner
         pops only in the window that clicked.
@@ -1741,9 +2097,35 @@ class _CommandsMixin:
                 logger.warning("deleteMyModel failed", exc_info=True)
                 error = f"Could not write ~/.kiss/MY_MODELS.json: {e}"
         if error:
-            self._send_my_models_error(error, cmd)
+            self._send_error_to_sender(error, cmd)
             return
         self._broadcast_my_models()
+
+    def _cmd_add_trick(self, cmd: dict[str, Any]) -> None:
+        """Append a promptlet to ``~/.kiss/MY_INJECTION.md``.
+
+        Services the Inject promptlet panel's Add button.  ``text`` is
+        the promptlet body; a rejected body (empty, duplicate, or one
+        that would start a new ``##`` section) or a failed write
+        answers the sender with an ``error`` event.  Success
+        rebroadcasts the full list as an UNstamped ``tricksData`` event
+        — the file is shared by every window, so every open panel
+        repaints, not only the one that clicked.
+        """
+        from kiss.server.tricks import append_my_injection_trick, read_tricks
+
+        text = cmd.get("text", "")
+        try:
+            error = append_my_injection_trick(
+                text if isinstance(text, str) else ""
+            )
+        except OSError as e:
+            logger.warning("addTrick failed", exc_info=True)
+            error = f"Could not write ~/.kiss/MY_INJECTION.md: {e}"
+        if error:
+            self._send_error_to_sender(error, cmd)
+            return
+        self.printer.broadcast({"type": "tricksData", "tricks": read_tricks()})
 
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
         """Update the server's *fallback* working directory.
@@ -1808,6 +2190,7 @@ class _CommandsMixin:
         "newChat": _cmd_new_chat,
         "complete": _cmd_complete,
         "getInputHistory": _cmd_get_input_history,
+        "getSeaCommands": _cmd_get_sea_commands,
         "getAdjacentTask": _cmd_get_adjacent_task,
         "generateCommitMessage": _cmd_generate_commit_message,
         "autocommitAction": _cmd_autocommit_action,
@@ -1819,4 +2202,5 @@ class _CommandsMixin:
         "getMyModels": _cmd_get_my_models,
         "saveMyModel": _cmd_save_my_model,
         "deleteMyModel": _cmd_delete_my_model,
+        "addTrick": _cmd_add_trick,
     }

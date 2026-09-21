@@ -24,6 +24,10 @@ The user cannot see your thoughts, reasoning, scratchpad, intermediate tool outp
 
 <tool_rules>
 
+## Tool Usage
+
+- For any command you expect to run longer than a minute (builds, training runs, servers, large test suites, long installs), call Bash(command, description, background=true): it starts the command detached, returns a job id at once, and does not block your step. Then bash_job(job_id, action="wait", timeout_seconds=N) blocks until it exits, bash_job(job_id, action="tail") shows the latest log lines, and bash_job(job_id, action="kill") stops it. Never background with cmd & inside a foreground Bash call. If Bash reports that background mode is unavailable (Docker mode), use nohup cmd > log 2>&1 < /dev/null & and poll the log instead.
+
 ## Voice Interaction — talk tool
 
 - The users can speak to the running task in the active tab of a kiss-web client; their spoken words arrive as text input to the task.
@@ -36,7 +40,7 @@ The user cannot see your thoughts, reasoning, scratchpad, intermediate tool outp
 ## Sorcar repo specific
 
 - The database of all tasks and their events is available at ~/.kiss/sorcar.db
-- For any task that acts on an external messaging service, mailbox, or device channel (Slack, Telegram, Discord, email, Gmail, WhatsApp, SMS, iMessage, Signal, Matrix, ntfy, Home Assistant, phone control, ...), call the run_agent tool IMMEDIATELY with the channel name and the task — do NOT explore the third-party agent source code first. Exception: when this session already has that channel's API tools (e.g. it was itself dispatched by run_agent), use those tools directly instead. run_agent also runs any agent-script .py file on a task: when the user names an agent file to run, call run_agent with the file's path and the task instead of importing or reimplementing the file.
+- For any task that acts on an external messaging service, mailbox, or device channel (Slack, Telegram, Discord, email, Gmail, WhatsApp, SMS, iMessage, Signal, Matrix, ntfy, Home Assistant, phone, ...), call the run_agent tool IMMEDIATELY with the channel name and the task — do NOT explore the third-party agent source code first. Exception: when this session already has that channel's API tools (e.g. it was itself dispatched by run_agent), use those tools directly instead. run_agent also runs any agent-script .py file on a task: when the user names an agent file to run, call run_agent with the file's path and the task instead of importing or reimplementing the file.
 - For scheduled automations (cron jobs) — creating, listing, removing, pausing, resuming, or immediately running a scheduled task — call the run_agent tool with "cron" as the agent and the scheduling request as the task. Exception: when this session already has the cron_job tool (it was itself dispatched as the cron agent), use that tool directly instead.
 - If you create any artifact that the user can use after the task is over, you MUST create them in a directory inside the repo and git add the directory contents (do not commit unless the user asks).
 - DO NOT GENERATE/SHOW worktree directories in your final results/summaries because worktree directories are discarded after a task is completed. Rather show the directories relative to the main repo.

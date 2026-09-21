@@ -23,8 +23,8 @@ import re
 import pytest
 
 from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent
-from kiss.agents.third_party_agents.discord_agent import DiscordAgent
-from kiss.agents.third_party_agents.slack_agent import SlackAgent
+from kiss.agents.third_party_agents.discord_sea import DiscordAgent
+from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
 _CASES: list[tuple[type[BaseChannelAgent], str, str, str, str]] = [
     (

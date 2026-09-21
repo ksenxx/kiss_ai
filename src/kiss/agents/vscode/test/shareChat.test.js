@@ -435,9 +435,11 @@ async function run() {
       'a header click must toggle the collapsed state',
     );
     if (panel.classList.contains('collapsed')) {
+      // The first panel is the Bash call; its preview is the command it
+      // ran (its streamed output is not part of the preview text).
       const prev = panel.querySelector('.collapse-preview');
       assert.ok(
-        prev.textContent.includes('file-one.txt'),
+        prev.textContent.includes('ls -la'),
         'a collapsed panel must preview its content text',
       );
     }
@@ -1116,9 +1118,12 @@ async function run() {
     const wv = makeWebview();
     const win = wv.win;
     const TAB = runSmallTask(wv, 'chat-huge', 'task-huge');
+    // Bigger than SHARE_MAX_HTML_JSON_BYTES (56 MiB) on its own: the
+    // panel is open while the task streams, so its text is serialized
+    // once (a collapsed panel repeats it in the collapse preview).
     send(win, {
       type: 'tool_result',
-      content: 'x'.repeat(41 * 1024 * 1024),
+      content: 'x'.repeat(57 * 1024 * 1024),
       tool_name: 'Bash',
       tabId: TAB,
       taskId: 'task-huge',

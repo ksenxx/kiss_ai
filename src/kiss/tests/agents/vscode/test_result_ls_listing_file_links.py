@@ -57,6 +57,13 @@ def _ls_listing(harness) -> str:
     )
 
 
+def _path_sel(path: str) -> str:
+    """CSS selector for the link span of *path* (backslashes escaped: a
+    Windows path inside an attribute string would otherwise be parsed
+    as CSS escapes)."""
+    return f'#output .rc-body pre code [data-path="{path.replace(chr(92), chr(92) * 2)}"]'
+
+
 def _deliver_result(page, summary_html: str) -> None:
     """Deliver a ``result`` frame the way the remote shim does."""
     page.evaluate(
@@ -91,10 +98,7 @@ class TestResultLsListingFileLinks:
             html_file = str(harness.work_dir / "page.html")
             missing = str(harness.work_dir / "missing.lock")
 
-            page.wait_for_selector(
-                f'#output .rc-body pre code [data-path="{sample}"]',
-                timeout=30000,
-            )
+            page.wait_for_selector(_path_sel(sample), timeout=30000)
             code = page.locator("#output .rc-body pre code")
             # Highlighting is kept: the block is a Swift-tokenized hljs block.
             assert "hljs" in (code.get_attribute("class") or "")
@@ -115,7 +119,7 @@ class TestResultLsListingFileLinks:
             missing_state = page.evaluate(
                 """(p) => {
                      const el = document.querySelector(
-                       '#output [data-path-missing="' + p + '"]');
+                       '#output [data-path-missing="' + CSS.escape(p) + '"]');
                      return el ? el.textContent : null;
                    }""",
                 missing,
@@ -127,7 +131,7 @@ class TestResultLsListingFileLinks:
                 ".chat-tab:not(.chat-tab-add):not(.chat-tab-settings)",
             )
             n_before = real_tabs.count()
-            page.click(f'#output .rc-body pre code [data-path="{notes}"]')
+            page.click(_path_sel(notes))
             page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
             assert real_tabs.count() == n_before + 1
             label = page.locator(".chat-tab.content-tab .chat-tab-label")

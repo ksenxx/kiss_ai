@@ -208,6 +208,7 @@ class FakePanelManager {
   enterMode() {}
   closeAll() {}
   setMetaSink() {}
+  setActiveTaskSink() {}
   markShutdown() {}
   dispose() {}
 }

@@ -81,8 +81,12 @@ def repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
 
     wt_dir = repo / ".kiss-worktrees" / "kiss_wt-test-deadbeef"
     _run(
-        "git", "worktree", "add",
-        "-b", "kiss/wt-test-deadbeef", str(wt_dir),
+        "git",
+        "worktree",
+        "add",
+        "-b",
+        "kiss/wt-test-deadbeef",
+        str(wt_dir),
         cwd=repo,
     )
     return repo, wt_dir
@@ -100,6 +104,7 @@ def test_edit_via_main_repo_path_lands_in_worktree(repo_with_worktree) -> None:
     repo, wt_dir = repo_with_worktree
     tools = UsefulTools(work_dir=str(wt_dir))
 
+    tools.Read(str(repo / "README.md"))
     out = tools.Edit(str(repo / "README.md"), "MAIN README v1", "EDITED v2")
 
     assert "Successfully replaced" in out, out
@@ -148,6 +153,7 @@ def test_remap_preserves_subdirectory_paths(repo_with_worktree) -> None:
     repo, wt_dir = repo_with_worktree
     tools = UsefulTools(work_dir=str(wt_dir))
 
+    tools.Read(str(repo / "src" / "app.py"))
     out = tools.Edit(str(repo / "src" / "app.py"), "# main app", "# patched")
 
     assert "Successfully replaced" in out, out
@@ -156,7 +162,8 @@ def test_remap_preserves_subdirectory_paths(repo_with_worktree) -> None:
 
 
 def test_remap_does_not_touch_paths_outside_main_repo(
-    repo_with_worktree, tmp_path: Path,
+    repo_with_worktree,
+    tmp_path: Path,
 ) -> None:
     """Absolute paths *outside* the main repo are read/written verbatim.
 
@@ -180,6 +187,7 @@ def test_remap_leaves_worktree_paths_alone(repo_with_worktree) -> None:
     repo, wt_dir = repo_with_worktree
     tools = UsefulTools(work_dir=str(wt_dir))
 
+    tools.Read(str(wt_dir / "README.md"))
     out = tools.Edit(str(wt_dir / "README.md"), "MAIN README v1", "WT v2")
 
     assert "Successfully replaced" in out, out
@@ -197,8 +205,12 @@ def test_remap_leaves_other_worktree_paths_alone(repo_with_worktree) -> None:
     repo, wt_dir = repo_with_worktree
     other_wt = repo / ".kiss-worktrees" / "kiss_wt-other-abcd1234"
     _run(
-        "git", "worktree", "add",
-        "-b", "kiss/wt-other-abcd1234", str(other_wt),
+        "git",
+        "worktree",
+        "add",
+        "-b",
+        "kiss/wt-other-abcd1234",
+        str(other_wt),
         cwd=repo,
     )
     (other_wt / "README.md").write_text("OTHER WT v1\n")
@@ -220,6 +232,7 @@ def test_remap_keeps_auto_commit_working(repo_with_worktree) -> None:
     repo, wt_dir = repo_with_worktree
     tools = UsefulTools(work_dir=str(wt_dir))
 
+    tools.Read(str(repo / "README.md"))
     tools.Edit(str(repo / "README.md"), "MAIN README v1", "DONE\n")
 
     assert GitWorktreeOps.has_uncommitted_changes(wt_dir)

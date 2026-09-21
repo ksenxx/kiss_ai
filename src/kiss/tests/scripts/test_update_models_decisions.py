@@ -285,7 +285,7 @@ def test_apply_and_readme_sync_record_decisions_models(
     readme = tmp_path / "README.md"
     shutil.copy(_README, readme)
     assert sync_readme_catalog(readme, catalog) is True
-    text = readme.read_text()
+    text = readme.read_text(encoding="utf-8")  # the README is UTF-8, not the Windows code page
     assert "- **1** generation-capable models" in text
     assert "- **0** embedding models" in text
     assert "- **2** decision models" in text

@@ -18,7 +18,7 @@ import pytest
 
 _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
     {
-        "module": "kiss.agents.third_party_agents.telegram_agent",
+        "module": "kiss.agents.third_party_agents.telegram_sea",
         "agent_class": "TelegramAgent",
         "backend_class": "TelegramChannelBackend",
         "agent_name": "Telegram Agent",
@@ -27,7 +27,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_telegram_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.discord_agent",
+        "module": "kiss.agents.third_party_agents.discord_sea",
         "agent_class": "DiscordAgent",
         "backend_class": "DiscordChannelBackend",
         "agent_name": "Discord Agent",
@@ -36,7 +36,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_discord_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.googlechat_agent",
+        "module": "kiss.agents.third_party_agents.googlechat_sea",
         "agent_class": "GoogleChatAgent",
         "backend_class": "GoogleChatChannelBackend",
         "agent_name": "Google Chat Agent",
@@ -45,7 +45,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_googlechat_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.signal_agent",
+        "module": "kiss.agents.third_party_agents.signal_sea",
         "agent_class": "SignalAgent",
         "backend_class": "SignalChannelBackend",
         "agent_name": "Signal Agent",
@@ -54,7 +54,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_signal_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.msteams_agent",
+        "module": "kiss.agents.third_party_agents.msteams_sea",
         "agent_class": "MSTeamsAgent",
         "backend_class": "MSTeamsChannelBackend",
         "agent_name": "MS Teams Agent",
@@ -63,7 +63,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_msteams_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.matrix_agent",
+        "module": "kiss.agents.third_party_agents.matrix_sea",
         "agent_class": "MatrixAgent",
         "backend_class": "MatrixChannelBackend",
         "agent_name": "Matrix Agent",
@@ -72,7 +72,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_matrix_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.feishu_agent",
+        "module": "kiss.agents.third_party_agents.feishu_sea",
         "agent_class": "FeishuAgent",
         "backend_class": "FeishuChannelBackend",
         "agent_name": "Feishu Agent",
@@ -81,7 +81,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_feishu_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.line_agent",
+        "module": "kiss.agents.third_party_agents.line_sea",
         "agent_class": "LineAgent",
         "backend_class": "LineChannelBackend",
         "agent_name": "LINE Agent",
@@ -90,7 +90,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_line_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.mattermost_agent",
+        "module": "kiss.agents.third_party_agents.mattermost_sea",
         "agent_class": "MattermostAgent",
         "backend_class": "MattermostChannelBackend",
         "agent_name": "Mattermost Agent",
@@ -99,7 +99,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_mattermost_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.irc_agent",
+        "module": "kiss.agents.third_party_agents.irc_sea",
         "agent_class": "IRCAgent",
         "backend_class": "IRCChannelBackend",
         "agent_name": "IRC Agent",
@@ -108,7 +108,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_irc_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.bluebubbles_agent",
+        "module": "kiss.agents.third_party_agents.bluebubbles_sea",
         "agent_class": "BlueBubblesAgent",
         "backend_class": "BlueBubblesChannelBackend",
         "agent_name": "BlueBubbles Agent",
@@ -118,7 +118,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "macos_only": True,
     },
     {
-        "module": "kiss.agents.third_party_agents.imessage_agent",
+        "module": "kiss.agents.third_party_agents.imessage_sea",
         "agent_class": "IMessageAgent",
         "backend_class": "IMessageChannelBackend",
         "agent_name": "iMessage Agent",
@@ -128,7 +128,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "macos_only": True,
     },
     {
-        "module": "kiss.agents.third_party_agents.nextcloud_talk_agent",
+        "module": "kiss.agents.third_party_agents.nextcloud_sea",
         "agent_class": "NextcloudTalkAgent",
         "backend_class": "NextcloudTalkChannelBackend",
         "agent_name": "Nextcloud Talk Agent",
@@ -137,7 +137,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_nextcloud_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.nostr_agent",
+        "module": "kiss.agents.third_party_agents.nostr_sea",
         "agent_class": "NostrAgent",
         "backend_class": "NostrChannelBackend",
         "agent_name": "Nostr Agent",
@@ -146,7 +146,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_nostr_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.synology_chat_agent",
+        "module": "kiss.agents.third_party_agents.synology_sea",
         "agent_class": "SynologyChatAgent",
         "backend_class": "SynologyChatChannelBackend",
         "agent_name": "Synology Chat Agent",
@@ -155,7 +155,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_synology_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.tlon_agent",
+        "module": "kiss.agents.third_party_agents.tlon_sea",
         "agent_class": "TlonAgent",
         "backend_class": "TlonChannelBackend",
         "agent_name": "Tlon Agent",
@@ -164,7 +164,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_tlon_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.twitch_agent",
+        "module": "kiss.agents.third_party_agents.twitch_sea",
         "agent_class": "TwitchAgent",
         "backend_class": "TwitchChannelBackend",
         "agent_name": "Twitch Agent",
@@ -173,7 +173,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_twitch_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.zalo_agent",
+        "module": "kiss.agents.third_party_agents.zalo_sea",
         "agent_class": "ZaloAgent",
         "backend_class": "ZaloChannelBackend",
         "agent_name": "Zalo Agent",
@@ -182,7 +182,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_zalo_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.phone_control_agent",
+        "module": "kiss.agents.third_party_agents.phone_sea",
         "agent_class": "PhoneControlAgent",
         "backend_class": "PhoneControlChannelBackend",
         "agent_name": "Phone Control Agent",
@@ -191,7 +191,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_phone_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.sms_agent",
+        "module": "kiss.agents.third_party_agents.sms_sea",
         "agent_class": "SMSAgent",
         "backend_class": "SMSChannelBackend",
         "agent_name": "SMS Agent",
@@ -200,7 +200,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_sms_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.email_agent",
+        "module": "kiss.agents.third_party_agents.email_sea",
         "agent_class": "EmailAgent",
         "backend_class": "EmailChannelBackend",
         "agent_name": "Email Agent",
@@ -209,7 +209,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_email_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.ntfy_agent",
+        "module": "kiss.agents.third_party_agents.ntfy_sea",
         "agent_class": "NtfyAgent",
         "backend_class": "NtfyChannelBackend",
         "agent_name": "Ntfy Agent",
@@ -218,7 +218,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_ntfy_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.webhook_agent",
+        "module": "kiss.agents.third_party_agents.webhook_sea",
         "agent_class": "WebhookAgent",
         "backend_class": "WebhookChannelBackend",
         "agent_name": "Webhook Agent",
@@ -227,7 +227,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_webhook_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.a2a_agent",
+        "module": "kiss.agents.third_party_agents.a2a_sea",
         "agent_class": "A2AAgent",
         "backend_class": "A2AChannelBackend",
         "agent_name": "A2A Agent",
@@ -236,7 +236,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_a2a_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.homeassistant_agent",
+        "module": "kiss.agents.third_party_agents.homeassistant_sea",
         "agent_class": "HomeAssistantAgent",
         "backend_class": "HomeAssistantChannelBackend",
         "agent_name": "Home Assistant Agent",
@@ -245,7 +245,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_homeassistant_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.dingtalk_agent",
+        "module": "kiss.agents.third_party_agents.dingtalk_sea",
         "agent_class": "DingTalkAgent",
         "backend_class": "DingTalkChannelBackend",
         "agent_name": "DingTalk Agent",
@@ -254,7 +254,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_dingtalk_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.wecom_agent",
+        "module": "kiss.agents.third_party_agents.wecom_sea",
         "agent_class": "WeComAgent",
         "backend_class": "WeComChannelBackend",
         "agent_name": "WeCom Agent",
@@ -263,7 +263,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_wecom_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.weixin_agent",
+        "module": "kiss.agents.third_party_agents.weixin_sea",
         "agent_class": "WeixinAgent",
         "backend_class": "WeixinChannelBackend",
         "agent_name": "Weixin Agent",
@@ -272,7 +272,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_weixin_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.qq_agent",
+        "module": "kiss.agents.third_party_agents.qq_sea",
         "agent_class": "QQAgent",
         "backend_class": "QQChannelBackend",
         "agent_name": "QQ Agent",
@@ -281,7 +281,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_qq_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.simplex_agent",
+        "module": "kiss.agents.third_party_agents.simplex_sea",
         "agent_class": "SimpleXAgent",
         "backend_class": "SimpleXChannelBackend",
         "agent_name": "SimpleX Agent",
@@ -290,7 +290,7 @@ _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
         "auth_clear": "clear_simplex_auth",
     },
     {
-        "module": "kiss.agents.third_party_agents.openai_compat_agent",
+        "module": "kiss.agents.third_party_agents.oai_sea",
         "agent_class": "OpenAICompatAgent",
         "backend_class": "OpenAICompatChannelBackend",
         "agent_name": "OpenAI-compatible API Agent",

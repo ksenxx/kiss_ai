@@ -330,16 +330,26 @@ class TestKissToolsPromptNote:
         warning that KISS tools are not native tools (appended to the task
         after ``CLI_SYSTEM_PROMPT_HEADER``, never as a ``--system-prompt``
         argument); the model_config is restored afterwards."""
-        import pathlib
+        import os
         import subprocess
-        import tempfile
+        import threading
         from typing import Any
 
         captured_args: list[list[str]] = []
         # The prompt writer works at the file-descriptor level
-        # (fileno()/os.write), so capture stdin in a real file.
-        stdin_capture = tempfile.NamedTemporaryFile(delete=False)
-        stdin_capture.close()
+        # (fileno()/os.set_blocking/os.write) and, like the real stdin
+        # pipe, needs a pipe: on Windows set_blocking rejects a regular
+        # file.  Drain the read end on a thread so the writer never blocks.
+        read_end, write_end = os.pipe()
+        prompt_chunks: list[bytes] = []
+
+        def drain_prompt() -> None:
+            while chunk := os.read(read_end, 65536):
+                prompt_chunks.append(chunk)
+            os.close(read_end)
+
+        drainer = threading.Thread(target=drain_prompt)
+        drainer.start()
         stream_data = json.dumps(
             {"type": "result", "result": "ok", "usage": {}}
         ) + "\n"
@@ -369,7 +379,11 @@ class TestKissToolsPromptNote:
             def __init__(self, args: list[str], *a: Any, **kw: Any) -> None:
                 captured_args.append(list(args))
                 self.returncode = 0
-                self.stdin = open(stdin_capture.name, "wb")
+                # No OS process backs this fake; pid 0 never names one, so
+                # _CLIProcess.close() on Windows gets ProcessLookupError from
+                # kill_process_group instead of taskkill-ing a stranger.
+                self.pid = 0
+                self.stdin = os.fdopen(write_end, "wb")
                 self.stdout = _FakeStdout(stream_data)
                 self.stderr = _FakeStdout("")
 
@@ -399,7 +413,9 @@ class TestKissToolsPromptNote:
         assert captured_args, "CLI was never invoked"
         args = captured_args[0]
         assert "--system-prompt" not in args
-        prompt = pathlib.Path(stdin_capture.name).read_text()
+        drainer.join(timeout=30)
+        assert not drainer.is_alive(), "the prompt pipe was never closed"
+        prompt = b"".join(prompt_chunks).decode("utf-8")
         assert "# You new system prompt follows:" in prompt
         assert "NOT part of your native tool set" in prompt
         assert "finish" in prompt

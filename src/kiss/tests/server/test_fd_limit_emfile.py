@@ -9,11 +9,12 @@ succeeds.  Real ``resource`` syscalls and real files are used — no
 mocks.
 """
 
-import resource
-
 import pytest
 
 from kiss.server.web_server import _raise_open_file_limit
+
+# The resource module (RLIMIT_*) only exists on POSIX; Windows skips.
+resource = pytest.importorskip("resource")
 
 
 @pytest.fixture()

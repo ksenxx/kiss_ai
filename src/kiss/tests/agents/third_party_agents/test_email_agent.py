@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-import kiss.agents.third_party_agents.email_agent as email_agent_mod
-from kiss.agents.third_party_agents.email_agent import (
+import kiss.agents.third_party_agents.email_sea as email_agent_mod
+from kiss.agents.third_party_agents.email_sea import (
     EmailAgent,
     EmailChannelBackend,
     _build_outbound,
@@ -28,7 +28,7 @@ from kiss.agents.third_party_agents.email_agent import (
     _is_automated_mail,
     _normalize_mail,
 )
-from kiss.agents.third_party_agents.email_agent import (
+from kiss.agents.third_party_agents.email_sea import (
     tools as module_tools,
 )
 

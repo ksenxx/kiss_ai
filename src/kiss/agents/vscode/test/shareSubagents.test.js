@@ -401,8 +401,8 @@ async function run() {
       'sub-agent tabs carry the webview tab class',
     );
     assert.ok(
-      subTab.querySelector('.subagent-indicator.done'),
-      'an exported sub-agent is finished, so its indicator is solid',
+      subTab.querySelector('.subagent-indicator.done.status-tick'),
+      'an exported sub-agent is finished, so its indicator is the tick',
     );
     assert.ok(
       subTab.querySelector('.chat-tab-close'),

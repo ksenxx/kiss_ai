@@ -37,6 +37,7 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_context_text,
     _save_task_result,
 )
+from kiss.tests.conftest import posix_only
 
 
 class _TempDbTestBase:
@@ -57,6 +58,7 @@ class _TempDbTestBase:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
+@posix_only("unlinking a SQLite file another connection holds open")
 class TestChatContextCacheDbReplace(_TempDbTestBase):
     """The stale-cache-after-external-DB-removal bug and its guard rails."""
 

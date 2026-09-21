@@ -234,21 +234,17 @@ def main(argv: list[str]) -> None:
     # environment: import the canonical ``$KISS_HOME/api_keys.env``
     # (the Muse-auth ``KISS_MUSE_AUTH`` opt-out, API keys) before any
     # Muse-mode check or credential migration, exactly like
-    # ``channel_main()``.  ``vscode_config`` needs POSIX ``fcntl``, so
-    # the CLI keeps working where that module cannot import (Windows).
+    # ``channel_main()``.
+    from kiss.core.vscode_config import load_api_keys, load_api_keys_readonly
+
+    # A read-only $KISS_HOME (the store's lock file cannot be
+    # created) must neither stop the CLI nor drop a canonical
+    # KISS_MUSE_AUTH=0 opt-out: fall back to the lock-free,
+    # write-free import.
     try:
-        from kiss.core.vscode_config import load_api_keys, load_api_keys_readonly
-    except ImportError:
-        pass
-    else:
-        # A read-only $KISS_HOME (the store's lock file cannot be
-        # created) must neither stop the CLI nor drop a canonical
-        # KISS_MUSE_AUTH=0 opt-out: fall back to the lock-free,
-        # write-free import.
-        try:
-            load_api_keys()
-        except OSError:
-            load_api_keys_readonly()
+        load_api_keys()
+    except OSError:
+        load_api_keys_readonly()
     if len(argv) < 2:
         print(__doc__)
         return

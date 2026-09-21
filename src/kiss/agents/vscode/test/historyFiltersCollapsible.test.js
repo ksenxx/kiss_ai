@@ -46,8 +46,7 @@ function makeWebview(preSetup) {
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -155,7 +154,12 @@ function testFiltersPanelMarkup() {
 
   const historyPanel = doc.getElementById('sidebar-tab-history-panel');
   const kids = Array.from(historyPanel.children);
-  const searchIdx = kids.findIndex(el => el.classList.contains('search-wrap'));
+  // The search box (with the view toggle beside it) sits in its own row.
+  const searchIdx = kids.findIndex(
+    el =>
+      el.classList.contains('history-search-row') &&
+      el.querySelector('.search-wrap #history-search'),
+  );
   const panelIdx = kids.indexOf(panel);
   const listIdx = kids.findIndex(el => el.id === 'history-list');
   assert.ok(

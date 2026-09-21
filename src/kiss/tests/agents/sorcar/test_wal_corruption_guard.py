@@ -35,6 +35,7 @@ from pathlib import Path
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.conftest import is_root, posix_only
 
 
 def _redirect(tmpdir: str):
@@ -75,6 +76,7 @@ class TestWalCorruptionGuard:
         th._flush_chat_events()
         return task_id
 
+    @posix_only("chmod 000 directory permission denial")
     def test_transient_stat_failure_keeps_cached_connection(self):
         """EACCES on the db directory must not tear down healthy conns.
 
@@ -85,7 +87,7 @@ class TestWalCorruptionGuard:
         connection keeps serving reads and writes throughout the
         outage.
         """
-        if os.geteuid() == 0:
+        if is_root():
             pytest.skip("permission checks are bypassed for root")
         task_id = self._seed_task()
         kiss_dir = Path(self.tmpdir) / ".kiss"
@@ -111,6 +113,7 @@ class TestWalCorruptionGuard:
         # The sidecars of the healthy database were never unlinked.
         assert os.path.exists(str(th._DB_PATH) + "-wal")
 
+    @posix_only("renaming an open SQLite file and planting a symlink")
     def test_wal_not_unlinked_while_other_thread_holds_connection(self):
         """A confirmed-missing db file must not cost another thread its WAL.
 
@@ -181,6 +184,7 @@ class TestWalCorruptionGuard:
             a.join(timeout=30)
         assert not a.is_alive()
 
+    @posix_only("unlinking a SQLite file another connection holds open")
     def test_sqlite_heals_stale_sidecars_without_manual_unlink(self):
         """A deleted db with leftover sidecars must heal without unlink.
 

@@ -51,6 +51,7 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
+from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -640,6 +641,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
         assert stt_b is not None
         self.assertEqual(stt_b.get("text"), "Mirror this task text")
 
+    @requires_unix_sockets
     async def test_api_run_task_text_arrives_after_tab_adoption(self) -> None:
         """[3b] A run that CREATES its tab re-echoes ``setTaskText``.
 
@@ -721,6 +723,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
             except Exception:
                 pass
 
+    @requires_unix_sockets
     async def test_ready_replay_carries_prompt_before_history_row(
         self,
     ) -> None:
@@ -838,10 +841,8 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
         finally:
             cfg.OPENAI_API_KEY = saved_key
 
-    @unittest.skipIf(
-        hasattr(os, "geteuid") and os.geteuid() == 0,
-        "root bypasses directory permissions",
-    )
+    @unittest.skipIf(is_root(), "root bypasses directory permissions")
+    @posix_only("chmod-based directory permission denial")
     async def test_persist_failure_is_flushed_at_shutdown(self) -> None:
         """[4] Live mirroring survives an unwritable KISS dir, and the
         registry is re-persisted at shutdown once the dir is writable.
@@ -923,10 +924,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
         )
 
 
-@unittest.skipIf(
-    hasattr(os, "geteuid") and os.geteuid() == 0,
-    "root bypasses directory permissions",
-)
+@unittest.skipIf(is_root(), "root bypasses directory permissions")
 class TestTabRegistryPersistenceFailure(unittest.TestCase):
     """[4] The registry must survive persistence failures loudly."""
 
@@ -940,6 +938,7 @@ class TestTabRegistryPersistenceFailure(unittest.TestCase):
     def tearDown(self) -> None:
         os.chmod(self.reg_dir, 0o755)
 
+    @posix_only("chmod-based directory permission denial")
     def test_mutations_survive_and_recover_from_unwritable_dir(self) -> None:
         """Failed persists log ONE error, keep serving the in-memory
         state, and re-persist on the next mutation / flush."""

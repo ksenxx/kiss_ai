@@ -26,12 +26,12 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 
-from kiss.agents.third_party_agents import bluebubbles_agent as bb_mod
-from kiss.agents.third_party_agents import nextcloud_talk_agent as nc_mod
-from kiss.agents.third_party_agents import synology_chat_agent as syno_mod
-from kiss.agents.third_party_agents.bluebubbles_agent import BlueBubblesChannelBackend
-from kiss.agents.third_party_agents.nextcloud_talk_agent import NextcloudTalkChannelBackend
-from kiss.agents.third_party_agents.synology_chat_agent import SynologyChatChannelBackend
+from kiss.agents.third_party_agents import bluebubbles_sea as bb_mod
+from kiss.agents.third_party_agents import nextcloud_sea as nc_mod
+from kiss.agents.third_party_agents import synology_sea as syno_mod
+from kiss.agents.third_party_agents.bluebubbles_sea import BlueBubblesChannelBackend
+from kiss.agents.third_party_agents.nextcloud_sea import NextcloudTalkChannelBackend
+from kiss.agents.third_party_agents.synology_sea import SynologyChatChannelBackend
 
 Responder = Callable[[str, str, dict[str, list[str]], bytes], tuple[int, dict[str, Any]]]
 

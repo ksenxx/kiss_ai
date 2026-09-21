@@ -23,7 +23,7 @@ from typing import Any
 
 import yaml
 
-from kiss.core.utils import atomic_write_text
+from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
 
 # Page filenames: ASCII lowercase letters, digits and hyphens, starting and
 # ending with a letter or digit (memoryfield spec, "Pages").
@@ -71,10 +71,13 @@ class Page:
 def read_page_text(path: Path) -> str:
     """Read a page as UTF-8, replacing undecodable bytes so a damaged page stays usable.
 
+    Pages are shared between agents and rewritten atomically, so the read
+    waits out a concurrent ``os.replace`` on Windows instead of failing.
+
     Args:
         path: The page file.
     """
-    return path.read_bytes().decode("utf-8", errors="replace")
+    return read_bytes_waiting_for_writer(path).decode("utf-8", errors="replace")
 
 
 def now_iso() -> str:
@@ -285,8 +288,13 @@ class MemoryDir:
         if not body.strip():
             raise ValueError("Refusing to write an empty page.")
         frontmatter: dict[str, Any] = {}
-        if path.exists():
-            frontmatter = split_frontmatter(read_page_text(path))[0]
+        try:
+            existing = read_page_text(path)
+        except FileNotFoundError:
+            # Missing, or deleted by another process just now: create semantics.
+            existing = ""
+        if existing:
+            frontmatter = split_frontmatter(existing)[0]
             for identity_key in ("uuid", "created"):
                 if identity_key in frontmatter:
                     incoming.pop(identity_key, None)

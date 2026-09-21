@@ -36,7 +36,6 @@ through a FIFO gate, and "is the lock held?" is probed with a real
 ``flock(LOCK_EX | LOCK_NB)`` attempt from this process.
 """
 
-import fcntl
 import os
 import shutil
 import signal
@@ -45,6 +44,11 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+
+import pytest
+
+# The whole module drives the real bash install.sh and probes its flock.
+fcntl = pytest.importorskip("fcntl", reason="POSIX-only: bash install.sh and flock")
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "install.sh"

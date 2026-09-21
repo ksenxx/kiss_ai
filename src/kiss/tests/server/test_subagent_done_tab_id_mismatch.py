@@ -15,7 +15,7 @@ frontend-generated tab id.  But ``subagentDone`` (broadcast from
 ``_run_single``'s ``finally`` block) was using the backend's
 ``sub_tab_id``, which doesn't match the frontend tab id — so the
 frontend handler ``tabs.find(t => t.id === ev.tab_id)`` returned
-``undefined`` and ``isDone`` was never set, leaving the purple ◉
+``undefined`` and ``isDone`` was never set, leaving the spinner
 indicator permanently pulsing.
 
 Fix
@@ -128,7 +128,7 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
             f"'{_FRONTEND_TAB_ID}', but only broadcast for tab_ids: "
             f"{done_tab_ids}. The frontend handler uses ev.tab_id to find "
             f"the tab and set isDone=true — if the id doesn't match, the "
-            f"purple ◉ indicator keeps pulsing forever.",
+            f"spinner keeps spinning forever.",
         )
 
     def test_subagent_done_includes_backend_tab_id_as_fallback(self) -> None:

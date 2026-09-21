@@ -43,6 +43,9 @@ from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import vscode_config
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
+
+pytestmark = requires_unix_sockets
 
 PARENT_TAB_ID = "webtab-parent-1"
 VIEWER_SUB_TAB_ID = "webtab-parent-1__sub_child"
@@ -579,3 +582,96 @@ class RunAgentSubagentTabTest(unittest.TestCase):
         assert leaked == [], (
             f"parentless dispatch leaked sub-agent broadcasts: {leaked!r}"
         )
+
+    def test_parent_reviewer_wire_field_marks_child_reviewer(self) -> None:
+        """``parent_reviewer=True`` survives the daemon round trip.
+
+        The dispatched child's reconstructed ``_subagent_info`` must
+        carry the reviewer marker (see
+        :mod:`kiss.agents.sorcar.fanout_guard`), which puts the child on
+        the ``review`` tool profile: ``run_parallel`` is not built at
+        all, so it cannot spawn further reviewers.  A control dispatch
+        without the flag stays unmarked and keeps the full tool set.
+        """
+        reviewer_marker = "reviewer wire child zq9"
+        control_marker = "control wire child zq9"
+        # No parentReviewer flag, but the prompt itself is a review
+        # task: the daemon must mark it from the EFFECTIVE prompt (the
+        # path an agent script's prompt() override would take).
+        worded_marker = "wire child zq9, inspect it for defects"
+        recorded: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            prompt = str(kwargs.get("prompt_template", ""))
+            for marker in (reviewer_marker, control_marker, worded_marker):
+                if marker in prompt:
+                    recorded[marker] = {
+                        "info": dict(self_agent._subagent_info or {}),
+                        "is_reviewer": self_agent._is_reviewer_subagent(),
+                        "profile": self_agent._tool_profile(),
+                        "tool_names": {
+                            getattr(t, "__name__", "")
+                            for t in self_agent._get_tools()
+                        },
+                    }
+            self_agent.total_tokens_used = 1
+            self_agent.budget_used = 0.0001
+            self_agent.total_steps = 1
+            raw = "success: true\nis_continue: false\nsummary: done\n"
+            printer = kwargs.get("printer") or getattr(
+                self_agent, "printer", None,
+            )
+            if printer is not None:  # pragma: no branch
+                printer.print(
+                    raw, type="result", step_count=1,
+                    total_tokens=1, cost="$0.0001",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+        self._open_viewer()
+
+        parent = daemon_client.run(
+            "parent seed task",
+            work_dir=self.repo,
+            use_worktree=False,
+            auto_commit=False,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert parent.success is True
+
+        for marker, parent_reviewer in (
+            (reviewer_marker, True),
+            (control_marker, False),
+            (worded_marker, False),
+        ):
+            child = daemon_client.run(
+                marker,
+                work_dir=self.repo,
+                use_worktree=False,
+                auto_commit=False,
+                use_web_tools=False,
+                parent_task_id=parent.task_id,
+                parent_tab_id=PARENT_TAB_ID,
+                parent_reviewer=parent_reviewer,
+                sock_path=self.sock_path,
+                timeout=60,
+            )
+            assert child.success is True
+
+        reviewer = recorded[reviewer_marker]
+        assert reviewer["info"]["reviewer"] is True
+        assert reviewer["is_reviewer"] is True
+        assert reviewer["profile"] == "review"
+        assert "run_parallel" not in reviewer["tool_names"]
+        control = recorded[control_marker]
+        assert control["info"]["reviewer"] is False
+        assert control["is_reviewer"] is False
+        assert control["profile"] == "full"
+        assert "run_parallel" in control["tool_names"]
+        worded = recorded[worded_marker]
+        assert worded["info"]["reviewer"] is True
+        assert worded["is_reviewer"] is True
+        assert worded["profile"] == "review"
+        assert "run_parallel" not in worded["tool_names"]

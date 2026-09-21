@@ -964,6 +964,9 @@ function testUnregisteredTabAdoptsIntoNewestPanelOnly() {
   });
   send(win, {type: 'tool_result', tabId: l1[0], content: 'c1 done'});
   send(win, {type: 'tool_call', name: 'run_parallel', tabId: l1[0]});
+  // The stream keeps its newest two panels open, so a third panel is
+  // what folds call #1 while call #2 is still running.
+  send(win, {type: 'tool_call', name: 'Bash', tabId: l1[0]});
   send(win, {type: 'result', tabId: l1[0], summary: 'done', success: true});
   assert.ok(
     subagentTabEls(win).some(el => el.dataset.tabId === g.tabId),

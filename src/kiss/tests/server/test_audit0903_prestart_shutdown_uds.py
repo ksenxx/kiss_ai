@@ -69,6 +69,9 @@ from unittest import TestCase
 from kiss.server import agent_state
 from kiss.server.tab_registry import TabRegistry
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
+
+pytestmark = requires_unix_sockets
 
 _STOP_LABEL = "Task stopped by user"
 _SHUTDOWN_LABEL = "Task interrupted by server restart/shutdown"

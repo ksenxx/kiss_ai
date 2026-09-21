@@ -4,6 +4,7 @@
 # add your name here
 """Tests for CodexModel — Codex CLI backend."""
 
+import os
 import shutil
 import stat
 from pathlib import Path
@@ -20,6 +21,7 @@ from kiss.core.models.model import CLI_SYSTEM_PROMPT_HEADER
 from kiss.core.models.model_info import MODEL_INFO, model
 from kiss.scripts.update_models import SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
+from kiss.tests.conftest import IS_WINDOWS, posix_only
 
 _has_codex = shutil.which("codex") is not None
 
@@ -57,6 +59,7 @@ class TestFindInCandidatePaths:
         nonexistent = tmp_path / "missing-codex"
         assert _find_in_candidate_paths([str(nonexistent)]) is None
 
+    @posix_only("Windows has no executable bit: every existing file passes X_OK")
     def test_skips_non_executable_files(self, tmp_path: Path) -> None:
         non_exec = tmp_path / "codex-noexec"
         non_exec.write_text("#!/bin/sh\necho hi\n")
@@ -82,11 +85,13 @@ class TestFindInCandidatePaths:
 
     def test_expands_user_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # what expanduser reads on Windows
         bin_path = tmp_path / "codex-home"
         bin_path.write_text("#!/bin/sh\necho hi\n")
         bin_path.chmod(0o755)
         result = _find_in_candidate_paths(["~/codex-home"])
-        assert result == str(bin_path)
+        assert result is not None
+        assert Path(result) == bin_path  # expanduser keeps the "/" on Windows
 
 
 class TestFindCodexExecutable:
@@ -95,7 +100,8 @@ class TestFindCodexExecutable:
     def test_prefers_path_when_available(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        path_codex = tmp_path / "codex"
+        # shutil.which only returns PATHEXT names on Windows, as for npm's codex.cmd.
+        path_codex = tmp_path / ("codex.cmd" if IS_WINDOWS else "codex")
         path_codex.write_text("#!/bin/sh\necho hi\n")
         path_codex.chmod(0o755)
         monkeypatch.setenv("PATH", str(tmp_path))
@@ -103,7 +109,10 @@ class TestFindCodexExecutable:
         ui_codex.write_text("#!/bin/sh\necho hi\n")
         ui_codex.chmod(0o755)
         monkeypatch.setattr(codex_module, "_UI_CANDIDATE_PATHS", (str(ui_codex),))
-        assert find_codex_executable() == str(path_codex)
+        found = find_codex_executable()
+        assert found is not None
+        # shutil.which spells the extension the way PATHEXT does (``.CMD``).
+        assert os.path.normcase(found) == os.path.normcase(str(path_codex))
 
     def test_falls_back_to_ui_when_not_on_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

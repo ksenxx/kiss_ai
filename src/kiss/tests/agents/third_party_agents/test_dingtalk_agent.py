@@ -27,13 +27,13 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 import requests
 
-import kiss.agents.third_party_agents.dingtalk_agent as dingtalk_mod
+import kiss.agents.third_party_agents.dingtalk_sea as dingtalk_mod
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
-from kiss.agents.third_party_agents.dingtalk_agent import (
+from kiss.agents.third_party_agents.dingtalk_sea import (
     DingTalkAgent,
     DingTalkChannelBackend,
 )
-from kiss.agents.third_party_agents.dingtalk_agent import (
+from kiss.agents.third_party_agents.dingtalk_sea import (
     tools as module_tools,
 )
 

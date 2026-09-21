@@ -34,10 +34,12 @@ class TestEditCrlfPreservation(unittest.TestCase):
         """Editing one line must not strip CRLF from untouched lines."""
         p = self.dir / "f.txt"
         p.write_bytes(b"line one\r\nline two\r\nline three\r\n")
+        self.tools.Read(str(p))
         result = self.tools.Edit(str(p), "line two", "LINE 2")
         self.assertIn("Successfully replaced 1", result)
         self.assertEqual(
-            p.read_bytes(), b"line one\r\nLINE 2\r\nline three\r\n",
+            p.read_bytes(),
+            b"line one\r\nLINE 2\r\nline three\r\n",
         )
 
     def test_multiline_lf_old_string_matches_crlf_file(self) -> None:
@@ -45,16 +47,19 @@ class TestEditCrlfPreservation(unittest.TestCase):
         CRLF file, and the replacement must be written with CRLF."""
         p = self.dir / "f.txt"
         p.write_bytes(b"alpha\r\nbeta\r\ngamma\r\ndelta\r\n")
+        self.tools.Read(str(p))
         result = self.tools.Edit(str(p), "beta\ngamma", "BETA\nGAMMA")
         self.assertIn("Successfully replaced 1", result)
         self.assertEqual(
-            p.read_bytes(), b"alpha\r\nBETA\r\nGAMMA\r\ndelta\r\n",
+            p.read_bytes(),
+            b"alpha\r\nBETA\r\nGAMMA\r\ndelta\r\n",
         )
 
     def test_replace_all_preserves_crlf(self) -> None:
         """replace_all on a CRLF file must keep CRLF everywhere."""
         p = self.dir / "f.txt"
         p.write_bytes(b"x = 1\r\ny = 1\r\nz = 1\r\n")
+        self.tools.Read(str(p))
         result = self.tools.Edit(str(p), "= 1", "= 2", replace_all=True)
         self.assertIn("Successfully replaced 3", result)
         self.assertEqual(p.read_bytes(), b"x = 2\r\ny = 2\r\nz = 2\r\n")
@@ -64,6 +69,7 @@ class TestEditCrlfPreservation(unittest.TestCase):
         still trigger the not-unique error (not 'not found')."""
         p = self.dir / "f.txt"
         p.write_bytes(b"a\r\nb\r\nc\r\na\r\nb\r\n")
+        self.tools.Read(str(p))
         result = self.tools.Edit(str(p), "a\nb", "X")
         self.assertIn("appears 2 times", result)
         self.assertEqual(p.read_bytes(), b"a\r\nb\r\nc\r\na\r\nb\r\n")
@@ -72,6 +78,7 @@ class TestEditCrlfPreservation(unittest.TestCase):
         """Plain-LF files behave exactly as before."""
         p = self.dir / "f.txt"
         p.write_bytes(b"one\ntwo\nthree\n")
+        self.tools.Read(str(p))
         result = self.tools.Edit(str(p), "two", "TWO")
         self.assertIn("Successfully replaced 1", result)
         self.assertEqual(p.read_bytes(), b"one\nTWO\nthree\n")
@@ -81,6 +88,7 @@ class TestEditCrlfPreservation(unittest.TestCase):
         directly (no normalisation needed)."""
         p = self.dir / "f.txt"
         p.write_bytes(b"one\r\ntwo\r\nthree\r\n")
+        self.tools.Read(str(p))
         result = self.tools.Edit(str(p), "one\r\ntwo", "ONE\r\nTWO")
         self.assertIn("Successfully replaced 1", result)
         self.assertEqual(p.read_bytes(), b"ONE\r\nTWO\r\nthree\r\n")
@@ -90,6 +98,7 @@ class TestEditCrlfPreservation(unittest.TestCase):
         into \\r\\r\\n by the CRLF normalisation."""
         p = self.dir / "f.txt"
         p.write_bytes(b"start\r\nmiddle\r\nend\r\n")
+        self.tools.Read(str(p))
         result = self.tools.Edit(str(p), "middle\nend", "MID\r\nEND")
         self.assertIn("Successfully replaced 1", result)
         self.assertEqual(p.read_bytes(), b"start\r\nMID\r\nEND\r\n")
@@ -98,10 +107,12 @@ class TestEditCrlfPreservation(unittest.TestCase):
         """A file with mixed LF/CRLF endings keeps every untouched byte."""
         p = self.dir / "f.txt"
         p.write_bytes(b"lf line\ncrlf line\r\nanother lf\n")
+        self.tools.Read(str(p))
         result = self.tools.Edit(str(p), "another lf", "ANOTHER LF")
         self.assertIn("Successfully replaced 1", result)
         self.assertEqual(
-            p.read_bytes(), b"lf line\ncrlf line\r\nANOTHER LF\n",
+            p.read_bytes(),
+            b"lf line\ncrlf line\r\nANOTHER LF\n",
         )
 
 

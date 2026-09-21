@@ -33,6 +33,7 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as ws
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -183,6 +184,7 @@ class TestUpdateAvailableBroadcast(_UpdateCheckTestBase):
     PYPI_VERSION = "2099.1.1"
     PYPI_PAYLOAD = {"info": {"version": "2099.1.1"}}
 
+    @requires_unix_sockets
     async def test_update_available_broadcast_to_new_client(self) -> None:
         """A client that connects gets an ``update_available`` event."""
         reader, writer = await self._connect_uds()
@@ -221,6 +223,7 @@ class TestUpdateAvailableSameVersion(_UpdateCheckTestBase):
         type(self).PYPI_PAYLOAD = {"info": {"version": __version__}}
         await super().asyncSetUp()
 
+    @requires_unix_sockets
     async def test_event_marks_not_available_when_current(self) -> None:
         reader, writer = await self._connect_uds()
         try:
@@ -241,6 +244,7 @@ class TestUpdateCheckHandlesNetworkErrors(_UpdateCheckTestBase):
     PYPI_PAYLOAD = None
     PYPI_STATUS = 500
 
+    @requires_unix_sockets
     async def test_failing_pypi_does_not_break_server(self) -> None:
         await asyncio.sleep(1.0)
         reader, writer = await self._connect_uds()
@@ -342,6 +346,7 @@ class TestUpdateAvailableUsesLatestInstalledExtension(_UpdateCheckTestBase):
             ws._INSTALLED_EXTENSIONS_ROOT = self._saved_ext_root
             shutil.rmtree(self._ext_root_tmp, ignore_errors=True)
 
+    @requires_unix_sockets
     async def test_stale_daemon_reports_latest_installed_version(
         self,
     ) -> None:
@@ -402,6 +407,7 @@ class TestUpdateAvailableEmptyExtensionsRootFallback(_UpdateCheckTestBase):
             ws._INSTALLED_EXTENSIONS_ROOT = self._saved_ext_root
             shutil.rmtree(self._ext_root_tmp, ignore_errors=True)
 
+    @requires_unix_sockets
     async def test_bundled_version_used_when_no_installed_extensions(
         self,
     ) -> None:

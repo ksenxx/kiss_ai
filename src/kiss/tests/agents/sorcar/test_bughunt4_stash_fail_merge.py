@@ -21,7 +21,6 @@ These integration tests use real on-disk git repos (no mocks).
 
 from __future__ import annotations
 
-import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -30,6 +29,7 @@ import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, _git
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.tests.conftest import is_root, posix_only
 
 
 def _make_repo(path: Path) -> Path:
@@ -87,7 +87,8 @@ def _dirty_main_with_unstashable_state(repo: Path) -> Path:
     return unreadable
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can read mode-000 files")
+@posix_only("chmod 000 permission denial")
+@pytest.mark.skipif(is_root(), reason="root can read mode-000 files")
 class TestStashFailureAbortsMerge:
     """A dirty main tree that cannot be stashed must abort the merge."""
 

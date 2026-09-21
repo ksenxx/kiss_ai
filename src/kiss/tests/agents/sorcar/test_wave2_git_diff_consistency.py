@@ -36,6 +36,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _porcelain_entries,
 )
+from kiss.tests.conftest import posix_only
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -45,6 +46,7 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
         cwd=repo,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -71,6 +73,7 @@ def _make_worktree_checkout(repo: Path, tmp_path: Path) -> Path:
     return wt_dir
 
 
+@posix_only("Windows strips trailing spaces from file names")
 def test_diff_name_only_preserves_leading_and_trailing_spaces(
     tmp_path: Path,
 ) -> None:
@@ -93,6 +96,7 @@ def test_diff_name_only_preserves_leading_and_trailing_spaces(
     assert GitWorktreeOps._diff_name_only(repo, "--cached") == [filename]
 
 
+@posix_only("Windows strips trailing spaces from file names")
 def test_diff_name_only_multiple_files_with_spaces_and_flags(
     tmp_path: Path,
 ) -> None:
@@ -111,6 +115,7 @@ def test_diff_name_only_multiple_files_with_spaces_and_flags(
     )
 
 
+@posix_only("double quotes are illegal in Windows file names")
 def test_diff_name_only_does_not_unquote_z_output(tmp_path: Path) -> None:
     """``-z`` output is never C-quoted; a quote-wrapped name stays raw.
 
@@ -200,6 +205,7 @@ def test_porcelain_entries_rename_and_line_separator(tmp_path: Path) -> None:
         cwd=repo,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     assert status.returncode == 0

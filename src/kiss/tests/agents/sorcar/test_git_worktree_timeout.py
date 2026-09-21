@@ -27,6 +27,7 @@ import pytest
 
 from kiss.agents.sorcar import git_worktree
 from kiss.agents.sorcar.git_worktree import _git
+from kiss.tests.conftest import posix_only
 
 
 def _install_hanging_git(tmp_path: Path) -> Path:
@@ -42,6 +43,7 @@ def _install_hanging_git(tmp_path: Path) -> Path:
 class TestGitTimeout:
     """``_git`` returns a synthesized failure instead of hanging."""
 
+    @posix_only("shebang git shim on PATH cannot shadow git.exe on Windows")
     def test_hanging_git_returns_timeout_completedprocess(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

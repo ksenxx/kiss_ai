@@ -131,11 +131,20 @@ function testLiveStreamKeepsImagePanelOpen() {
     tool_name: 'Read',
     tabId: TAB,
   });
-  // Panel 4 arrives too, so panel 3 (no image) is also folded.
+  // Panels 4 and 5 arrive too: the stream keeps its newest two panels
+  // open, so panel 3 (no image) is now folded as well.
   send(win, {type: 'tool_call', name: 'Read', path: 'c.txt', tabId: TAB});
+  send(win, {
+    type: 'tool_result',
+    content: 'ccc',
+    is_error: false,
+    tool_name: 'Read',
+    tabId: TAB,
+  });
+  send(win, {type: 'tool_call', name: 'Read', path: 'd.txt', tabId: TAB});
 
   const panels = toolPanels(win);
-  assert.strictEqual(panels.length, 4, 'four tool panels must render');
+  assert.strictEqual(panels.length, 5, 'five tool panels must render');
   assert.ok(panels[1].querySelector('img.tr-img'), 'panel 2 shows the image');
   assert.ok(
     panels[0].classList.contains('collapsed'),

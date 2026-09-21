@@ -20,34 +20,29 @@ non-root uid).  No mocks or patches.
 
 from __future__ import annotations
 
-import resource
 import time
 import unittest
 
 import pytest
 
 from kiss.server.server import VSCodeServer
-from kiss.tests.server._memory_printer import MemoryPrinter
-from kiss.tests.server.test_concaudit_w6_commit_msg_claim import (
-    _thread_start_can_be_starved,
+from kiss.tests.conftest import (
+    nproc_limit_lowered_to_one,
+    thread_start_can_be_starved,
 )
+from kiss.tests.server._memory_printer import MemoryPrinter
 
 
 class TestAutocompleteWorkerSpawnFailure(unittest.TestCase):
     """The worker is published only once it is actually running."""
 
     def test_retry_after_failed_spawn_serves_requests(self) -> None:
-        if not _thread_start_can_be_starved():
+        if not thread_start_can_be_starved():
             pytest.skip("RLIMIT_NPROC cannot starve Thread.start on this host")
         printer = MemoryPrinter()
         server = VSCodeServer(printer=printer)
-        soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-        resource.setrlimit(resource.RLIMIT_NPROC, (1, hard))
-        try:
-            with self.assertRaises(RuntimeError):
-                server._ensure_complete_worker()
-        finally:
-            resource.setrlimit(resource.RLIMIT_NPROC, (soft, hard))
+        with nproc_limit_lowered_to_one(), self.assertRaises(RuntimeError):
+            server._ensure_complete_worker()
         self.assertIsNone(
             server._complete_worker,
             "a worker that never started must not be published",

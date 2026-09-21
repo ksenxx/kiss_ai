@@ -39,7 +39,6 @@ Branch-coverage notes (unreachable-without-doubles exceptions):
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import os
 import shutil
 import stat as stat_mod
@@ -48,8 +47,15 @@ import unittest
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
+
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.tests.conftest import is_root
+
+# The sidecar lock is fcntl.flock on the UDS path: POSIX only, like the
+# Unix-domain socket it guards.
+fcntl = pytest.importorskip("fcntl")
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -201,7 +207,7 @@ class TestUdsCleanupSidecarLock(IsolatedAsyncioTestCase):
         finally:
             self.lock_path.rmdir()
 
-    @unittest.skipIf(os.geteuid() == 0, "root bypasses directory permissions")
+    @unittest.skipIf(is_root(), "root bypasses directory permissions")
     async def test_cleanup_logs_and_survives_an_unlink_error(self) -> None:
         """EACCES on the unlink itself is swallowed (path left behind)."""
         await self._close_own_listener()

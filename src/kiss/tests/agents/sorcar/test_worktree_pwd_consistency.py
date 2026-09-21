@@ -21,6 +21,7 @@ from pathlib import Path
 
 from kiss.agents.sorcar.relentless_agent import (
     IMPORTANT_INSTRUCTIONS,
+    WORK_DIR_LINE,
     RelentlessAgent,
 )
 
@@ -108,7 +109,7 @@ class TestImportantInstructionsRendering(unittest.TestCase):
         """The real worktree path must appear in IMPORTANT_INSTRUCTIONS."""
         wt = "/Users/x/repo/.kiss-worktrees/kiss_wt-abc-123"
         rendered = IMPORTANT_INSTRUCTIONS.format(
-            work_dir=wt,
+            work_dir_line=WORK_DIR_LINE.format(work_dir=wt),
             current_pid="1",
         )
         self.assertIn(wt, rendered)
