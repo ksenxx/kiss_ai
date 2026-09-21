@@ -17,6 +17,7 @@ import logging
 import shlex
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,11 @@ from kiss.agents.sorcar.sorcar_agent import (
 from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
+
+MergeConflictResolver = Callable[[Any, GitWorktree, str | None, str | None], MergeResult]
+"""``(agent, wt, user_prompt, task_result) -> MergeResult``: completes a
+conflicted merge of ``wt.branch`` into the clean, checked-out original
+branch (see :meth:`WorktreeSorcarAgent._do_merge`)."""
 
 
 class _WorktreeCleanupOutcome(enum.Enum):
@@ -216,7 +222,9 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         self._task_start_ms: int = 0
         self._pending_review: bool = False
         self._last_preserve_outcome: _WorktreeCleanupOutcome | None = None
-
+        # Set by ``_do_merge``: the last merge conflicted and the merge
+        # SEA resolved it (``merge`` reports this in its message).
+        self._last_merge_resolved_by_agent: bool = False
 
     @property
     def _repo_root(self) -> Path | None:
@@ -583,6 +591,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     def _do_merge(
         self,
         wt: GitWorktree,
+        conflict_resolver: MergeConflictResolver | None = None,
     ) -> tuple[MergeResult, str, str]:
         """Stash, checkout, squash-merge, pop for a worktree branch.
 
@@ -591,6 +600,16 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
 
         Args:
             wt: The worktree state to merge.
+            conflict_resolver: Called as ``(self, wt, user_prompt,
+                task_result)`` when the squash merge conflicts, with
+                the main tree clean and checked out on the original
+                branch, still under the merge locks; it must leave the
+                tree clean again unless it returns
+                :attr:`MergeResult.SUCCESS` with the merge committed.
+                The server passes the merge SEA
+                (:mod:`kiss.server.merge_conflict_resolver`), whose
+                spend is attributed to this agent.
+                ``_last_merge_resolved_by_agent`` records a success.
 
         Returns:
             ``(result, stash_warning, cleanup_warning)`` where *result*
@@ -612,6 +631,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         """
         stash_warning = ""
         cleanup_warning = ""
+        self._last_merge_resolved_by_agent = False
         if wt.original_branch is None:
             return (MergeResult.CHECKOUT_FAILED, "", "")
         # ``repo_lock`` serialises threads of THIS process only.  The
@@ -676,6 +696,23 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                     user_prompt=user_prompt,
                     task_result=task_result,
                 )
+            if result == MergeResult.CONFLICT and conflict_resolver is not None:
+                try:
+                    result = conflict_resolver(self, wt, user_prompt, task_result)
+                except BaseException:
+                    # The resolver runs an agent for minutes, so a user
+                    # stop lands here.  It restored the clean tree
+                    # before re-raising; give the user's stashed edits
+                    # back now, because nothing below runs.
+                    if did_stash and not GitWorktreeOps.stash_pop(wt.repo_root):
+                        self._set_warnings(stash=(
+                            "Your uncommitted changes were stashed before "
+                            "the interrupted merge and could not be "
+                            "auto-restored. Run 'git stash pop' to "
+                            "recover them."
+                        ))
+                    raise
+                self._last_merge_resolved_by_agent = result == MergeResult.SUCCESS
             if did_stash:
                 if result == MergeResult.SUCCESS:
                     if not GitWorktreeOps.stash_pop(wt.repo_root):
@@ -1634,7 +1671,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             )
 
 
-    def merge(self) -> str:
+    def merge(self, conflict_resolver: MergeConflictResolver | None = None) -> str:
         """Merge the task branch into the original branch.
 
         Every step is idempotent — safe to re-run after a crash.
@@ -1642,6 +1679,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         merging.  If the main working tree has uncommitted changes,
         they are stashed before the merge and restored afterward so
         user edits don't block the merge.
+
+        Args:
+            conflict_resolver: Resolves a merge conflict and completes
+                the merge (see :meth:`_do_merge`) instead of this method
+                returning the manual-resolution steps.  The auto-commit
+                paths pass the merge SEA; a conflict it cannot resolve
+                still returns those steps.
 
         Returns:
             Success message, or error message if merge fails.
@@ -1690,10 +1734,14 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 "Then retry: agent.merge()"
             )
 
-        result, stash_warning, cleanup_warning = self._do_merge(wt)
+        result, stash_warning, cleanup_warning = self._do_merge(
+            wt, conflict_resolver=conflict_resolver,
+        )
         stash_suffix = ""
+        if self._last_merge_resolved_by_agent:
+            stash_suffix = " The merge agent resolved the conflicts."
         if stash_warning:
-            stash_suffix = "\n\n⚠️  " + stash_warning
+            stash_suffix += "\n\n⚠️  " + stash_warning
         if cleanup_warning:
             # Branch cleanup failed after a successful merge: put it in
             # the immediate response so the caller/UI never reports an

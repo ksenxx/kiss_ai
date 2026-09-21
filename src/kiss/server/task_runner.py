@@ -708,6 +708,7 @@ class _TaskRunnerMixin:
             *,
             internal: bool = False,
             already_claimed: bool = False,
+            resolve_conflicts: bool = False,
         ) -> dict[str, Any]: ...
         def _present_pending_worktree(
             self,
@@ -2119,6 +2120,7 @@ class _TaskRunnerMixin:
                                 action,
                                 tab_id,
                                 internal=True,
+                                resolve_conflicts=True,
                             )
                             self.printer.broadcast(
                                 {

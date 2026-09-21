@@ -433,6 +433,7 @@ class _CommandsMixin:
         def _handle_worktree_action(
             self, action: str, tab_id: str = "", *,
             internal: bool = False, already_claimed: bool = False,
+            resolve_conflicts: bool = False,
         ) -> dict[str, Any]: ...
         def _handle_main_tree_action(
             self, action: str, work_dir: str,
