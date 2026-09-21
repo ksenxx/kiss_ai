@@ -125,6 +125,36 @@ invisibly.  Work the sub-task completed before the stop (side
 effects, spend) is not reported back to the calling task.
 """
 
+
+
+def stop_unconfirmed_error(name: str, timeout: float) -> str:
+    """Return the ``run_agent`` error string for an unconfirmed stop.
+
+    Returned by the tool exactly when the dispatch timed out AND the
+    daemon never confirmed the requested stop
+    (``daemon_client.StopUnconfirmedTimeoutError``), so the sub-task may
+    still be running.  Programmatic callers of the tool
+    (``cron_agent._run_prompt_job``) compare the reply against this
+    exact string — never a substring, which unrelated text such as a
+    socket path in a connection error could contain — to keep the run's
+    scratch directory instead of deleting it under a possibly live task.
+
+    Args:
+        name: The dispatched agent's display name (the script's stem or
+            the channel name).
+        timeout: The wait bound in seconds that expired.
+
+    Returns:
+        The complete error string.
+    """
+    return (
+        f"Error: the {name} agent task did not finish within "
+        f"{timeout:g}s; a stop was requested but the daemon never "
+        f"confirmed it, so the task MAY STILL BE RUNNING (and "
+        f"spending) on the daemon. Check what it already did "
+        f"before retrying with a larger `timeout` argument."
+    )
+
 _NON_CHANNEL_MODULES = frozenset({"a2a_sea", "ask_sea", "oai_sea"})
 """Modules matching ``*_sea.py`` that are not user-facing channels.
 
@@ -689,13 +719,7 @@ def _dispatch_reserved(
             sock_path=_daemon_sock_path(),
         )
     except daemon_client.StopUnconfirmedTimeoutError:
-        return (
-            f"Error: the {name} agent task did not finish within "
-            f"{timeout:g}s; a stop was requested but the daemon never "
-            f"confirmed it, so the task MAY STILL BE RUNNING (and "
-            f"spending) on the daemon. Check what it already did "
-            f"before retrying with a larger `timeout` argument."
-        ), 0.0
+        return stop_unconfirmed_error(name, timeout), 0.0
     except TimeoutError:
         return (
             f"Error: the {name} agent task did not finish within "
