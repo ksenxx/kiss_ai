@@ -21,6 +21,7 @@ Key facts for assistants and coding agents:
 - [Python API reference](https://kisssorcar.github.io/docs/api.md): KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, and GitWorktreeOps
 - [Supported models](https://kisssorcar.github.io/docs/models.md): 661-model catalog across 9 provider categories with capability totals
 - [Messaging & third-party agents](https://kisssorcar.github.io/docs/messaging-agents.md): The 32 messaging-channel agents, 9 service agents, infrastructure agents, the Govee smart-home CLI, and Muse-auth credential isolation
+- [Slash commands for SEAs](https://kisssorcar.github.io/docs/sea-commands.md): Every `xxx_sea.py` becomes a chat command `/xxx`; the `~/.kiss/SEAS.md` folder-list syntax, name precedence, live reload, and the run_agent dispatch flow
 - [Sample tasks](https://kisssorcar.github.io/docs/sample-tasks.md): Ready-to-use example prompts, including AI discovery, optimization, and GEPA
 - [Prompt tricks](https://kisssorcar.github.io/docs/prompt-tricks.md): Reusable prompt snippets ("tricks") that boost result quality
 - [Tips](https://kisssorcar.github.io/docs/tips.md): Practical tips for getting the highest-quality work from KISS Sorcar

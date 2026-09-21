@@ -14,7 +14,6 @@ to (:func:`save_api_key`).
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import logging
 import math
@@ -25,11 +24,14 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kiss.core.config import DEFAULT_MAX_BUDGET, kiss_home
+from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.core.processes import kill_process_group, popen_process_group
 from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -236,12 +238,30 @@ def _read_stored_config(cfg_path: Path) -> dict[str, Any]:
     if not cfg_path.exists():
         return {}
     try:
-        with open(cfg_path, encoding="utf-8") as f:
-            stored = json.load(f)
+        stored = json.loads(_read_text_waiting_for_replace(cfg_path))
     except (ValueError, OSError):
         logger.debug("Failed to read config %s", cfg_path, exc_info=True)
         return {}
     return stored if isinstance(stored, dict) else {}
+
+
+def _read_text_waiting_for_replace(path: Path) -> str:
+    """Read *path* as UTF-8, waiting out a concurrent Windows ``os.replace``.
+
+    On Windows a file being replaced by another writer is briefly
+    inaccessible (``PermissionError``) while the rename swaps it out;
+    POSIX readers never see that window.  A few short retries keep a
+    concurrent :func:`save_config` from making the reader fall back to
+    an empty config.  Any other error, or a persistent denial, propagates.
+    """
+    for attempt in range(20):
+        try:
+            return path.read_text(encoding="utf-8")
+        except PermissionError:
+            if os.name != "nt" or attempt == 19:
+                raise
+            time.sleep(0.005)
+    raise AssertionError("unreachable")
 
 
 def load_config() -> dict[str, Any]:
@@ -286,7 +306,7 @@ def save_config(data: dict[str, Any]) -> None:
         _config_lock,
         open(cfg_dir / ".config.lock", "w", encoding="utf-8") as lock_file,
     ):
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        lock_exclusive(lock_file)
         try:
             existing = _read_stored_config(cfg_path)
             for k, v in data.items():
@@ -304,7 +324,7 @@ def save_config(data: dict[str, Any]) -> None:
             # repairs a config.json a prior release published as 0644.
             atomic_write_text(cfg_path, json.dumps(existing, indent=2), mode=0o600)
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            unlock(lock_file)
 
 
 def _get_user_shell() -> str:
@@ -539,7 +559,7 @@ def _remove_systemd_mirror() -> None:
 def _api_keys_store_flock() -> Iterator[None]:
     """Hold the cross-process flock guarding the canonical key store.
 
-    An ``fcntl`` flock on a sidecar ``.api_keys.env.kiss.lock`` in the
+    A :mod:`kiss.core.file_lock` lock on a sidecar ``.api_keys.env.kiss.lock`` in the
     store's directory, so two writers (two daemon threads, or two
     processes sharing one ``$KISS_HOME``) cannot both read the same
     snapshot and silently drop each other's key.  The sidecar is
@@ -558,11 +578,11 @@ def _api_keys_store_flock() -> Iterator[None]:
     env_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = env_path.with_name("." + env_path.name + ".kiss.lock")
     with open(lock_path, "w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        lock_exclusive(lock_file)
         try:
             yield
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            unlock(lock_file)
 
 
 def _edit_api_keys_env_file_locked(mutations: dict[str, str | None]) -> None:
@@ -658,7 +678,7 @@ def save_api_key(key_name: str, key_value: str) -> None:
     process — otherwise the migration could read a not-yet-scrubbed RC
     after this function's store edit and resurrect the deleted key.
     Lock order is store flock → RC flock, everywhere.  Each RC
-    read-modify-replace additionally takes an ``fcntl`` flock on a
+    read-modify-replace additionally takes a :mod:`kiss.core.file_lock` lock on a
     sidecar ``<rc>.kiss.lock`` beside the RC.  The
     sidecar lives beside the RC rather than in ``$KISS_HOME`` because
     the RC is selected from ``$HOME``: two daemons sharing one HOME but
@@ -716,13 +736,13 @@ def save_api_key(key_name: str, key_value: str) -> None:
             rc.parent.mkdir(parents=True, exist_ok=True)
             rc_lock = rc.with_name(rc.name + ".kiss.lock")
             with open(rc_lock, "w", encoding="utf-8") as lock_file:
-                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                lock_exclusive(lock_file)
                 try:
                     _update_rc_for_key(
                         rc, shell, key_name, install_hook=install_hook,
                     )
                 finally:
-                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+                    unlock(lock_file)
         if key_value:
             os.environ[key_name] = key_value
         else:
@@ -1086,7 +1106,7 @@ def _source_rc_for_keys(wanted: set[str]) -> dict[str, str]:
         cmd = f"source {rc_q} 2>/dev/null; {{ env -0 2>/dev/null || env; }}"
     stdout = ""
     try:
-        with subprocess.Popen(
+        with popen_process_group(
             [shell_path, "-c", cmd],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -1095,16 +1115,15 @@ def _source_rc_for_keys(wanted: set[str]) -> dict[str, str]:
             encoding="utf-8",
             errors="replace",
             env=clean_env,
-            start_new_session=True,
         ) as proc:
             try:
                 stdout, _stderr = proc.communicate(timeout=_MIGRATION_TIMEOUT_S)
             except subprocess.TimeoutExpired:
-                # Kill the whole session: proc.kill() alone leaves RC
+                # Kill the whole group: proc.kill() alone leaves RC
                 # descendants holding the pipes, and the follow-up
                 # communicate() would block on them without a timeout.
                 try:
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    kill_process_group(proc.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
                 except (ProcessLookupError, PermissionError, OSError):
                     proc.kill()
                 logger.warning(

@@ -68,6 +68,9 @@ from websockets.asyncio.client import connect
 import kiss.agents.sorcar.persistence as th
 from kiss.server import talk_player
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
+
+pytestmark = requires_unix_sockets
 
 MP3_BYTES = b"ID3\x03\x00fake-mp3-frames-" + bytes(range(64))
 MP3_B64 = base64.b64encode(MP3_BYTES).decode("ascii")

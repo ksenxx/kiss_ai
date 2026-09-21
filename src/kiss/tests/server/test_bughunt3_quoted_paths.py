@@ -34,6 +34,12 @@ from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.diff_merge import _capture_untracked
 from kiss.server.server import VSCodeServer
+from kiss.tests.conftest import posix_only
+
+# With ``core.quotepath=false`` (which the project sets) git C-quotes only
+# names containing ``"``, ``\\`` or control characters; none of those is a
+# legal NTFS file-name character, so the fixture cannot exist on Windows.
+pytestmark = posix_only("git C-quoted file names are impossible on NTFS")
 
 QUOTED_NAME = 'qu"ote.txt'
 

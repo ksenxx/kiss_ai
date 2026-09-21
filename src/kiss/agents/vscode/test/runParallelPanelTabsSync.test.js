@@ -525,6 +525,9 @@ function testRunParallelFinishAutoCollapseClosesSubTabs() {
   send(win, {type: 'thinking_start', tabId: parentId});
   send(win, {type: 'thinking_delta', tabId: parentId, text: 'wrapping up'});
   send(win, {type: 'thinking_end', tabId: parentId});
+  // The stream keeps its newest two panels open, so the agent has to
+  // move on by one more panel before the fan-out folds.
+  send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: parentId});
 
   assert.ok(
     panel.classList.contains('collapsed'),

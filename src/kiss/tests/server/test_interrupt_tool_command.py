@@ -413,12 +413,20 @@ class TestInjectKeyboardInterruptStillWorks(unittest.TestCase):
         caught: list[BaseException] = []
         ready = threading.Event()
 
+        def spin(deadline: float) -> None:
+            while time.monotonic() < deadline:
+                pass
+
         def target() -> None:
             ready.set()
             try:
-                deadline = time.monotonic() + 10
-                while time.monotonic() < deadline:
-                    pass
+                # The busy loop lives in its own function: on CPython
+                # 3.13 an async exception delivered at the back-edge of a
+                # ``while`` loop written directly inside the ``try`` can
+                # bypass the enclosing ``except`` (eval-breaker bug,
+                # python/cpython#139622; reproduced on Linux 3.13.12 and
+                # Windows 3.13.15, never on 3.14).
+                spin(time.monotonic() + 10)
             except KeyboardInterrupt as exc:
                 caught.append(exc)
 

@@ -37,6 +37,10 @@ import time
 import unittest
 from pathlib import Path
 
+from kiss.tests.conftest import posix_only
+
+pytestmark = posix_only("SIGTERM must reach a live handler; Windows only terminates")
+
 _DRIVER = r"""
 import os, signal, subprocess, sys, time
 from pathlib import Path

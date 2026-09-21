@@ -593,8 +593,14 @@ async function ensureDependenciesImpl(): Promise<void> {
           });
           uvPath = await installUv();
           if (!uvPath) {
+            // uv's official one-liners: PowerShell on Windows, curl | sh
+            // elsewhere.
+            const manual =
+              process.platform === 'win32'
+                ? 'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"'
+                : 'curl -LsSf https://astral.sh/uv/install.sh | sh';
             showErrorNotification(
-              'KISS Sorcar: Failed to install uv. Install manually: curl -LsSf https://astral.sh/uv/install.sh | sh',
+              `KISS Sorcar: Failed to install uv. Install manually: ${manual}`,
             );
             return {success: false, apiKeysReady: false};
           }

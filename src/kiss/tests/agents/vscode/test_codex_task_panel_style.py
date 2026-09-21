@@ -14,11 +14,14 @@ Features on the remote webapp (served by ``RemoteAccessServer``):
    the extension's main.css typography — that extension-parity
    contract is pinned end to end by
    ``test_remote_panels_match_extension.py``.
-2. History rows (``.running-item``) carry NO per-chat color at all any
-   more — no pastel background, no colored left border, no
-   ``--task-color`` custom property: task panels are neutral on every
-   surface (the remote page and the VS Code webview), and main.js
-   writes no inline colors on them.
+2. History rows (``.running-item``) are neutral in the grouped view
+   (no pastel background, no colored left border, no ``--task-color``
+   custom property, no inline colors) on every surface.  Only the
+   legacy flat list (``#history-list.legacy-view``, toggled by the
+   button right of the search box) stamps ``--task-color`` per row and
+   paints it as a narrow bar on the row's RIGHT edge.  The chat-panel
+   headers of the grouped view sit on a sky-blue tint, show one line
+   of text and carry no tooltip.
 3. ALL task metadata (steps, tok, cost, duration, time, work dir,
    model, wt, parallel, auto-commit, chat id, task id) renders as ONE
    wrapping line instead of three separately-clipped lines.  Field
@@ -104,14 +107,13 @@ def _find_rule(css: str, selector: str) -> str:
     return _resolve_palette_vars("\n".join(bodies), _dark_palette(css))
 
 
-def test_main_js_history_rows_carry_no_colors() -> None:
-    """renderHistory must write NO per-chat colors on history rows —
-    neither inline styles nor the --task-color custom property.  (The
-    Frequent tab's renderer is out of scope and keeps its own inline
-    colors.)"""
+def test_main_js_history_rows_color_only_in_legacy_view() -> None:
+    """renderHistory writes no inline colors on history rows; the
+    per-chat --task-color property is stamped only on the legacy flat
+    list's rows (the ``historyLegacyView`` branch)."""
     js = MAIN_JS.read_text(encoding="utf-8")
     start = js.index("function renderHistory(")
-    end = js.index("function openCustomDatePicker(")
+    end = js.index("function applyHistoryViewToggle(")
     body = js[start:end]
     assert "style.backgroundColor" not in body, (
         "renderHistory must not set an inline background color on "
@@ -120,19 +122,21 @@ def test_main_js_history_rows_carry_no_colors() -> None:
     assert "style.color = '#1a1a1a'" not in body, (
         "renderHistory must not set an inline text color on history rows"
     )
-    assert "--task-color" not in body, (
-        "renderHistory must not set the per-chat --task-color property: "
-        "task panels are colorless now"
+    assert body.count("--task-color") == 1, (
+        "renderHistory stamps --task-color in exactly one place"
     )
-    assert "chatIdBgColor" not in body, (
-        "renderHistory must not derive per-chat colors at all"
+    stamp = body.index("--task-color")
+    branch = body.rindex("if (historyLegacyView) {", 0, stamp)
+    assert "historyGroupFor(" not in body[branch:stamp], (
+        "the --task-color stamp belongs to the flat-list branch, before "
+        "the grouped branch"
     )
 
 
 def test_main_css_webview_rows_are_neutral() -> None:
     """The VS Code webview's task panels are neutral: no pastel
-    background, theme foreground text, no --task-color anywhere in
-    main.css."""
+    background, theme foreground text; --task-color is read by main.css
+    in exactly one rule — the legacy flat list's right-edge bar."""
     css = MAIN_CSS.read_text(encoding="utf-8")
     m = re.search(r"\n\.running-item\s*\{([^}]*)\}", css)
     assert m, ".running-item rule missing from main.css"
@@ -146,9 +150,62 @@ def test_main_css_webview_rows_are_neutral() -> None:
     assert "color: var(--fg)" in rule, (
         f".running-item must use the theme foreground; got: {rule!r}"
     )
-    assert "--task-color" not in css, (
-        "main.css must not reference --task-color anywhere"
+    legacy = re.search(
+        r"#history-list\.legacy-view > \.running-item\s*\{([^}]*)\}", css
     )
+    assert legacy, "the legacy flat list's color-bar rule is missing"
+    assert "border-right: 4px solid var(--task-color" in legacy.group(1), (
+        f"the legacy bar is a 4px right border in the chat color; got: {legacy.group(1)!r}"
+    )
+    assert "background" not in legacy.group(1), "no pastel background in the legacy view"
+    assert css.count("var(--task-color") == 1, (
+        "main.css reads --task-color only for the legacy right-edge bar"
+    )
+
+
+def test_main_css_chat_header_cyan_single_line() -> None:
+    """The grouped view's chat-panel header sits on a clearly visible
+    cyan tint (the Bash tool-call header's hue, at least 25% strong)
+    and shows its title on one ellipsized line."""
+    css = MAIN_CSS.read_text(encoding="utf-8")
+    header = re.search(r"\n\.history-chat-header\s*\{([^}]*)\}", css)
+    assert header, ".history-chat-header rule missing"
+    tint = re.search(
+        r"background:\s*color-mix\(in srgb, var\(--cyan\) (\d+)%, transparent\)",
+        header.group(1),
+    )
+    assert tint, f"the header background must be a --cyan tint; got: {header.group(1)!r}"
+    assert int(tint.group(1)) >= 25, f"the header tint is barely visible: {tint.group(0)}"
+    title = re.search(r"\n\.history-chat-title\s*\{([^}]*)\}", css)
+    assert title, ".history-chat-title rule missing"
+    assert "white-space: nowrap" in title.group(1)
+    assert "text-overflow: ellipsis" in title.group(1)
+    assert "line-clamp" not in title.group(1)
+
+
+def _hue_of(rgba: str) -> float:
+    """The HSL hue (degrees) of a computed ``rgb(...)`` / ``rgba(...)``
+    color string."""
+    nums = re.findall(r"[\d.]+", rgba)
+    r, g, b = (float(n) / 255 for n in nums[:3])
+    hi, lo = max(r, g, b), min(r, g, b)
+    if hi == lo:
+        return 0.0
+    d = hi - lo
+    if hi == r:
+        h = ((g - b) / d) % 6
+    elif hi == g:
+        h = (b - r) / d + 2
+    else:
+        h = (r - g) / d + 4
+    return h * 60
+
+
+def _alpha_of(rgba: str) -> float:
+    """The alpha (0..1) of a computed ``rgb(...)`` / ``rgba(...)`` /
+    ``color(srgb ...)`` color string; 1 when the color is opaque."""
+    nums = re.findall(r"[\d.]+", rgba.replace("srgb", ""))
+    return float(nums[3]) if len(nums) > 3 else 1.0
 
 
 def test_remote_history_row_is_neutral() -> None:
@@ -489,6 +546,39 @@ _PROBE_STYLES_JS = r"""(() => {
 })()"""
 
 
+_LEGACY_VIEW_PROBE_JS = r"""(() => {
+  const toggle = document.getElementById('history-view-toggle');
+  const search = document.getElementById('history-search');
+  const tBox = toggle.getBoundingClientRect();
+  const sBox = search.getBoundingClientRect();
+  toggle.click();
+  const list = document.getElementById('history-list');
+  const row = list.querySelector(':scope > .running-item');
+  const cs = getComputedStyle(row);
+  // Resolve the row's --task-color the way the browser does for the
+  // border: paint it on a probe element and read the computed color.
+  const probe = document.createElement('div');
+  probe.style.color = row.style.getPropertyValue('--task-color');
+  document.body.appendChild(probe);
+  const taskColorComputed = getComputedStyle(probe).color;
+  probe.remove();
+  const out = {
+    toggleVisible: tBox.width > 0 && tBox.height > 0,
+    toggleLeft: tBox.left,
+    searchRight: sBox.right,
+    legacyClass: list.classList.contains('legacy-view'),
+    groups: list.querySelectorAll('.history-chat-group').length,
+    borderRightWidth: cs.borderRightWidth,
+    borderLeftWidth: cs.borderLeftWidth,
+    borderRightColor: cs.borderRightColor,
+    taskColorComputed,
+  };
+  toggle.click();
+  out.restoredGroups = list.querySelectorAll('.history-chat-group').length;
+  return out;
+})()"""
+
+
 def _start_live_server(
     tmp_path: Path,
     ready: threading.Event,
@@ -613,9 +703,26 @@ def test_live_task_panel_typography_and_history_rows(
                             headerText: g.querySelector(
                                 '.history-chat-title'
                             ).textContent,
-                            lineClamp: getComputedStyle(
+                            whiteSpace: getComputedStyle(
                                 g.querySelector('.history-chat-title')
-                            ).webkitLineClamp,
+                            ).whiteSpace,
+                            headerBg: getComputedStyle(
+                                g.querySelector('.history-chat-header')
+                            ).backgroundColor,
+                            cyan: (() => {
+                                const probe = document.createElement('i');
+                                probe.style.color = 'var(--cyan)';
+                                document.body.appendChild(probe);
+                                const c = getComputedStyle(probe).color;
+                                probe.remove();
+                                return c;
+                            })(),
+                            headerTooltip: g.querySelector(
+                                '.history-chat-header'
+                            ).hasAttribute('data-tooltip'),
+                            headerTitleAttr: g.querySelector(
+                                '.history-chat-header'
+                            ).hasAttribute('title'),
                             rowHidden: row.offsetParent === null,
                         };
                     }"""
@@ -629,8 +736,20 @@ def test_live_task_panel_typography_and_history_rows(
                 assert group_probe["headerText"] == "Test task preview", (
                     "the chat header shows the chat's first task text: " + repr(group_probe)
                 )
-                assert group_probe["lineClamp"] == "3", (
-                    "the chat header clamps to 3 lines: " + repr(group_probe)
+                assert group_probe["whiteSpace"] == "nowrap", (
+                    "the chat header shows one line of text: " + repr(group_probe)
+                )
+                assert _hue_of(group_probe["headerBg"]) == pytest.approx(
+                    _hue_of(group_probe["cyan"]), abs=2
+                ), "the chat header background has the page's cyan hue: " + repr(group_probe)
+                assert _alpha_of(group_probe["headerBg"]) >= 0.25, (
+                    "the chat header tint must be clearly visible: " + repr(group_probe)
+                )
+                assert group_probe["headerTooltip"] is False, (
+                    "the chat header carries no tooltip: " + repr(group_probe)
+                )
+                assert group_probe["headerTitleAttr"] is False, (
+                    "the chat header carries no title attribute: " + repr(group_probe)
                 )
                 page.evaluate(_EXPAND_GROUP_JS)
                 page.wait_for_selector(
@@ -818,12 +937,37 @@ def test_live_task_panel_typography_and_history_rows(
                     timeout=10000,
                 )
                 probes = page.evaluate(_PROBE_STYLES_JS)
+                # The legacy flat list: the toggle right of the search
+                # box switches to it, and the row then paints its chat's
+                # color as a 4px bar on its RIGHT edge (computed style,
+                # not just the declaration).
+                legacy = page.evaluate(_LEGACY_VIEW_PROBE_JS)
             finally:
                 browser.close()
     finally:
         done.set()
         thread.join(timeout=30)
     assert not thread.is_alive(), "RemoteAccessServer failed to stop"
+
+    assert legacy["toggleVisible"] is True, repr(legacy)
+    assert legacy["toggleLeft"] >= legacy["searchRight"], (
+        "the view toggle sits to the right of the search box: " + repr(legacy)
+    )
+    assert legacy["legacyClass"] is True and legacy["groups"] == 0, (
+        "the legacy view is a flat list: " + repr(legacy)
+    )
+    assert legacy["borderRightWidth"] == "4px", (
+        "the legacy row paints a 4px right bar: " + repr(legacy)
+    )
+    assert legacy["borderLeftWidth"] == "1px", (
+        "the bar is on the right only: " + repr(legacy)
+    )
+    assert legacy["borderRightColor"] == legacy["taskColorComputed"], (
+        "the bar is the row's --task-color: " + repr(legacy)
+    )
+    assert legacy["restoredGroups"] >= 1, (
+        "toggling back restores the chat panels: " + repr(legacy)
+    )
     thread_error = state.get("error")
     if isinstance(thread_error, BaseException):
         raise AssertionError("RemoteAccessServer thread failed") from thread_error

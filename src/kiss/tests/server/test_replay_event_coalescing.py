@@ -32,6 +32,7 @@ from pathlib import Path
 import kiss.agents.sorcar.persistence as th
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import WebPrinter
+from kiss.tests.conftest import requires_unix_sockets
 
 
 def _redirect(tmpdir: str) -> tuple[Path, object, Path]:
@@ -251,6 +252,7 @@ class TestReplayCoalescing:
         assert got[1]["text"] == "only"
 
 
+@requires_unix_sockets
 class TestFanoutSingleSerialization:
     """The spliced fan-out payload decodes to ``{**event, "tabId": tab}``
     for every subscribed tab, over a real UDS transport."""

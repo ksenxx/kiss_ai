@@ -24,12 +24,12 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from kiss.agents.third_party_agents.weixin_agent import (
+from kiss.agents.third_party_agents.weixin_sea import (
     WeixinAgent,
     WeixinChannelBackend,
     _config,
 )
-from kiss.agents.third_party_agents.weixin_agent import (
+from kiss.agents.third_party_agents.weixin_sea import (
     tools as module_tools,
 )
 

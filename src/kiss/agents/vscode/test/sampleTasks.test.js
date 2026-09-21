@@ -258,8 +258,15 @@ test('skips user chips when ~/.kiss/ is unwritable (ensureUserAssetFromDefault r
     return;
   }
   withTempKissHome((ext, kissHome) => {
-    fs.mkdirSync(kissHome, {recursive: true});
-    fs.chmodSync(kissHome, 0o500);
+    // Windows ignores mode bits, so there a plain file squats on the
+    // ~/.kiss/ path instead; both make the seed's mkdir/write fail.
+    if (process.platform === 'win32') {
+      fs.rmSync(kissHome, {recursive: true, force: true});
+      fs.writeFileSync(kissHome, '');
+    } else {
+      fs.mkdirSync(kissHome, {recursive: true});
+      fs.chmodSync(kissHome, 0o500);
+    }
     try {
       writePackageSampleTasks(ext, '## Task\n\nOnly bundled\n');
       assert.deepStrictEqual(readSampleTasks(ext), [{text: 'Only bundled'}]);
@@ -268,7 +275,7 @@ test('skips user chips when ~/.kiss/ is unwritable (ensureUserAssetFromDefault r
         'seed file must not be created on read-only ~/.kiss/',
       );
     } finally {
-      fs.chmodSync(kissHome, 0o700);
+      if (process.platform !== 'win32') fs.chmodSync(kissHome, 0o700);
     }
   });
 });

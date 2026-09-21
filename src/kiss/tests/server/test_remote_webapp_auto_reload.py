@@ -93,7 +93,9 @@ def _build_test_page() -> str:
     // Mock WebSocket: every constructor call records the instance
     // and stores it on ``__openSocket`` so the test can fire
     // ``onopen`` / ``onmessage`` / ``onclose`` on demand.  The mock
-    // also remembers everything ``send()`` was called with.
+    // also remembers everything ``send()`` was called with, and, like
+    // the server, answers the shim's ``ping`` probe with ``pong`` once
+    // the earlier commands have been "taken" (next tick).
     var _MockWS = function(url) {{
       this.url = url;
       this.readyState = 0; // CONNECTING
@@ -105,7 +107,17 @@ def _build_test_page() -> str:
       window.__sockets.push(this);
       window.__openSocket = this;
     }};
-    _MockWS.prototype.send = function(data) {{ this.sent.push(data); }};
+    _MockWS.prototype.send = function(data) {{
+      this.sent.push(data);
+      var ws = this;
+      if (JSON.parse(data).type === 'ping') {{
+        setTimeout(function() {{
+          if (ws.readyState === 1 && ws.onmessage) {{
+            ws.onmessage({{data: JSON.stringify({{type: 'pong'}})}});
+          }}
+        }}, 0);
+      }}
+    }};
     _MockWS.prototype.close = function() {{
       this.readyState = 3;
       if (this.onclose) this.onclose({{}});

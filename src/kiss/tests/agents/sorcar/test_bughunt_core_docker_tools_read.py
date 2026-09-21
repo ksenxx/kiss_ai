@@ -23,13 +23,14 @@ import subprocess
 from pathlib import Path
 
 from kiss.agents.sorcar.docker_tools import DockerTools
+from kiss.agents.sorcar.useful_tools import _popen_kwargs
 
 
 def _local_bash(command: str, description: str) -> str:
-    """Execute *command* with real bash, mirroring DockerManager.Bash output."""
+    """Execute *command* with a real shell, mirroring DockerManager.Bash output."""
     del description
     completed = subprocess.run(
-        ["/bin/bash", "-c", command],
+        **_popen_kwargs(command),
         capture_output=True,
         text=True,
         timeout=30,

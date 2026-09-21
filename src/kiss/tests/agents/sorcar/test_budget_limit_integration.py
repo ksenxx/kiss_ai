@@ -18,6 +18,7 @@ No mocks, patches, fakes, or test doubles.
 
 from __future__ import annotations
 
+import itertools
 import json
 import tempfile
 import threading
@@ -30,11 +31,24 @@ from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.core.kiss_error import KISSError
 
 
-def _continue_response(tokens: int = 200_000) -> dict:
-    """Response that calls finish(success=False, is_continue=True, summary='...')."""
-    args = json.dumps(
-        {"success": False, "is_continue": True, "summary_in_html": "did some work"}
-    )
+def note(text: str) -> str:
+    """Record *text*: the tool each scripted session calls before continuing.
+
+    A continuation that only calls ``finish`` is a zero-progress session
+    (``relentless_agent.MAX_ZERO_PROGRESS_SESSIONS``); these tests need the
+    loop to keep going until the *budget* ends it, so every session first
+    makes one real tool call.
+    """
+    return f"noted: {text}"
+
+
+def _tool_call_response(name: str, arguments: dict, tokens: int = 40_000) -> dict:
+    """Response that calls tool *name* with *arguments* and reports large token usage.
+
+    80k tokens per call (about $0.03 at gpt-4o-mini prices) burns the budget
+    within a few sessions yet stays under KISSAgent's context-window limit
+    (70% of 128k), which would otherwise end the session before ``finish``.
+    """
     return {
         "id": "chatcmpl-cont",
         "object": "chat.completion",
@@ -47,9 +61,9 @@ def _continue_response(tokens: int = 200_000) -> dict:
                     "content": "",
                     "tool_calls": [
                         {
-                            "id": "call_c",
+                            "id": f"call_{name}",
                             "type": "function",
-                            "function": {"name": "finish", "arguments": args},
+                            "function": {"name": name, "arguments": json.dumps(arguments)},
                         }
                     ],
                 },
@@ -65,13 +79,29 @@ def _continue_response(tokens: int = 200_000) -> dict:
 
 
 class _ContinueHandler(BaseHTTPRequestHandler):
-    """Returns finish(is_continue=True) with large token usage."""
+    """Drives every sub-session as ``note`` then ``finish(is_continue=True)``.
+
+    The reply depends only on the request: a session whose last message is
+    not yet a tool result gets the ``note`` call; the request carrying
+    ``note``'s result gets a continuation whose summary is numbered, so no
+    two sessions look identical to the zero-progress guard.  Each reply
+    carries large token usage so the budget, not the session count or the
+    guard, ends the run.
+    """
+
+    continuations = itertools.count(1)
 
     def do_POST(self) -> None:  # noqa: N802
         cl = int(self.headers.get("Content-Length", 0))
-        if cl:
-            self.rfile.read(cl)
-        body = json.dumps(_continue_response()).encode()
+        messages = json.loads(self.rfile.read(cl)).get("messages", []) if cl else []
+        if messages and messages[-1].get("role") == "tool":
+            summary = f"did some work (continuation {next(self.continuations)})"
+            response = _tool_call_response(
+                "finish", {"success": False, "is_continue": True, "summary_in_html": summary}
+            )
+        else:
+            response = _tool_call_response("note", {"text": "working"})
+        body = json.dumps(response).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -84,7 +114,7 @@ class _ContinueHandler(BaseHTTPRequestHandler):
 
 @pytest.fixture(scope="module")
 def continue_server() -> Generator[str]:
-    """HTTP server that always returns finish(is_continue=True)."""
+    """HTTP server that drives every sub-session as ``note`` then finish(is_continue=True)."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ContinueHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -101,14 +131,13 @@ class TestRelentlessAgentBudgetAcrossSubSessions:
     """
 
     def test_total_budget_not_exceeded(self, continue_server: str) -> None:
-        """With max_budget=$0.10, each sub-session costs ~$0.15 (200k
-        input + 200k output at gpt-4o-mini rates). The first sub-session
-        spends ~$0.15 which exceeds $0.10, so the second sub-session
-        should get remaining_budget <= 0 and RelentlessAgent should
-        raise KISSError before starting it.
+        """With max_budget=$0.10, each sub-session costs ~$0.06 (two calls
+        of 40k input + 40k output at gpt-4o-mini rates). The second
+        sub-session's spend pushes the total past $0.10, so RelentlessAgent
+        must raise KISSError during it — after ~$0.12, not many sessions later.
 
-        Before the fix, the second sub-session would also get max_budget=$0.10
-        and happily run, accumulating total cost > $0.10.
+        Before the fix, every sub-session would get max_budget=$0.10 of its
+        own and happily run, accumulating total cost far above $0.10.
         """
         agent = RelentlessAgent("budget-cross-session")
         with tempfile.TemporaryDirectory() as td:
@@ -121,6 +150,7 @@ class TestRelentlessAgentBudgetAcrossSubSessions:
                     max_sub_sessions=10,
                     work_dir=td,
                     verbose=False,
+                    tools=[note],
                     model_config={
                         "base_url": continue_server,
                         "api_key": "test-key",
@@ -149,6 +179,7 @@ class TestRelentlessAgentBudgetAcrossSubSessions:
                     max_sub_sessions=20,
                     work_dir=td,
                     verbose=False,
+                    tools=[note],
                     model_config={
                         "base_url": continue_server,
                         "api_key": "test-key",

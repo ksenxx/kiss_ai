@@ -28,9 +28,11 @@ regression end-to-end with real subprocesses (no mocks).
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.tests.conftest import IS_WINDOWS
 
 
 class TestFreshAgentBashTool:
@@ -59,11 +61,11 @@ class TestFreshAgentBashTool:
         agent = SorcarAgent("repro")
         bash_tool = agent._get_tools()[0]
         result = bash_tool(
-            command="pwd",
+            command="pwd -W" if IS_WINDOWS else "pwd",  # Git bash prints MSYS paths
             description="repro: fresh-agent pwd",
             timeout_seconds=10,
         )
-        assert os.getcwd() in result
+        assert Path(result.strip()) == Path(os.getcwd())
 
 
 class TestUsefulToolsEmptyWorkDir:

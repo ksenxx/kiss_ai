@@ -92,7 +92,6 @@ from __future__ import annotations
 
 import argparse
 import array
-import fcntl
 import io
 import json
 import math
@@ -110,6 +109,7 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kiss.core.file_lock import lock_exclusive
 from kiss.core.speech_synthesis import (  # noqa: F401 — re-exported
     DEFAULT_AUDIO_TIMEOUT_SECONDS,
     _env_timeout_seconds,
@@ -1059,7 +1059,7 @@ def _ensure_downloaded_model(
     PROCESSES sharing ``~/.kiss/models`` (two VS Code windows, or the
     wake-model download at startup racing the speaker-model lazy
     download in the worker).  The whole check → download → extract
-    sequence is serialised via an exclusive ``fcntl.flock`` on a lock
+    sequence is serialised via an exclusive file lock on a lock
     file next to the model, the download uses a per-PID temp name (no
     interleaved writes to a shared temp file), and the model directory
     appears ATOMICALLY via extract-to-temp + ``rename`` — so no caller
@@ -1081,7 +1081,7 @@ def _ensure_downloaded_model(
     models_dir.mkdir(parents=True, exist_ok=True)
     lock_path = models_dir / f".{model_name}.lock"
     with open(lock_path, "w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        lock_exclusive(lock_file)
         if model_dir.is_dir():
             return model_dir
         if url is None:
@@ -1583,7 +1583,13 @@ def open_mic_stream(
         channels=1,
         callback=on_audio,
     )
-    stream.start()
+    try:
+        stream.start()
+    except Exception:
+        # The PortAudio stream is already open; the watchdog reopen
+        # path retries, so an un-closed stream would leak per attempt.
+        stream.close(ignore_errors=True)
+        raise
     return stream
 
 

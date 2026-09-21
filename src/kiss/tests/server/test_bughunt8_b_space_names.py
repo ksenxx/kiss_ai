@@ -39,6 +39,7 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.diff_merge import _capture_untracked
 from kiss.server.server import VSCodeServer
+from kiss.tests.conftest import IS_WINDOWS
 
 
 def _git(cwd: str | Path, *args: str) -> str:
@@ -68,14 +69,21 @@ class TestUntrackedSpaceNames(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_capture_untracked_preserves_space_names(self) -> None:
-        """``_capture_untracked`` must return the exact on-disk names."""
-        (self.repo / "trail ").write_text("agent\n")
+        """``_capture_untracked`` must return the exact on-disk names.
+
+        Win32 silently strips trailing spaces when creating a file
+        (``"trail "`` lands on disk as ``trail``), so only the
+        leading-space name can be verified on Windows.
+        """
+        if not IS_WINDOWS:
+            (self.repo / "trail ").write_text("agent\n")
         (self.repo / " lead.txt").write_text("agent\n")
         captured = _capture_untracked(str(self.repo))
-        self.assertIn(
-            "trail ", captured,
-            f"trailing-space name mangled by capture: {sorted(captured)}",
-        )
+        if not IS_WINDOWS:
+            self.assertIn(
+                "trail ", captured,
+                f"trailing-space name mangled by capture: {sorted(captured)}",
+            )
         self.assertIn(
             " lead.txt", captured,
             f"leading-space name mangled by capture: {sorted(captured)}",

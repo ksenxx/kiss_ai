@@ -35,7 +35,7 @@
 // VS Code send Ctrl+C (clearing what core believes is leftover prompt
 // input, see microsoft/vscode#287139) followed by ` source .../activate`,
 // which cancelled the update command at the zsh prompt before it ever ran.
-// runUpdate() now creates the terminal with shellPath='/bin/bash' and
+// runUpdate() now creates the terminal with shellPath=bash (/bin/bash on POSIX) and
 // shellArgs=['-c', guarded] so the installer IS the terminal process:
 // there is no prompt to stomp on, the command starts with
 // `trap '' INT TERM HUP` so a stray \x03 cannot SIGINT the install, and a
@@ -224,7 +224,13 @@ function installerCommandOf(terminal) {
     0,
     `update must not sendText into a shell prompt: ${JSON.stringify(terminal.sent)}`,
   );
-  assert.strictEqual(terminal.shellPath, '/bin/bash');
+  // POSIX: /bin/bash.  Windows: the Git for Windows bash.exe that
+  // updateShellPath() resolved (asserted to exist by the caller that runs it).
+  if (process.platform === 'win32') {
+    assert.ok(/\\bash\.exe$/i.test(terminal.shellPath), terminal.shellPath);
+  } else {
+    assert.strictEqual(terminal.shellPath, '/bin/bash');
+  }
   assert.ok(Array.isArray(terminal.shellArgs), 'shellArgs must be an array');
   assert.strictEqual(terminal.shellArgs[0], '-c');
   const guarded = terminal.shellArgs[1];
@@ -316,15 +322,20 @@ async function testMissingInstallScriptRunsCurlBootstrap() {
   // to prove it works end to end.
   const {view, posted} = makeSidebar();
   fs.rmSync(path.join(installRoot, 'install.sh'));
-  const marker = path.join(tmpHome, 'bootstrap-ran.marker');
-  const fakeBootstrap = path.join(tmpHome, 'fake-bootstrap.sh');
+  // Forward slashes: the paths are embedded in a bash command line and a
+  // file:// URL, which Git bash and curl accept on Windows too.
+  const marker = path.join(tmpHome, 'bootstrap-ran.marker').replace(/\\/g, '/');
+  const fakeBootstrap = path
+    .join(tmpHome, 'fake-bootstrap.sh')
+    .replace(/\\/g, '/');
   fs.writeFileSync(
     fakeBootstrap,
     '#!/bin/bash\n' +
       `echo "home=$KISS_HOME nonint=$KISS_NONINTERACTIVE" > '${marker}'\n`,
   );
   const savedBootstrapUrl = process.env.KISS_UPDATE_BOOTSTRAP_URL;
-  process.env.KISS_UPDATE_BOOTSTRAP_URL = `file://${fakeBootstrap}`;
+  process.env.KISS_UPDATE_BOOTSTRAP_URL =
+    (process.platform === 'win32' ? 'file:///' : 'file://') + fakeBootstrap;
   try {
     const before = terminals.length;
     view.runUpdate();
@@ -356,7 +367,12 @@ async function testMissingInstallScriptRunsCurlBootstrap() {
     assert.strictEqual(started.length, 1);
     // Execute the exact terminal PROCESS (shellPath + shellArgs, guard and
     // tail included): the fake bootstrap must run with KISS_HOME and
-    // KISS_NONINTERACTIVE set.
+    // KISS_NONINTERACTIVE set.  On Windows shellPath is the Git for
+    // Windows bash resolved by updateShellPath().
+    assert.ok(
+      term.shellPath && fs.existsSync(term.shellPath),
+      `update terminal needs an existing bash: ${term.shellPath}`,
+    );
     childProcess.execFileSync(term.shellPath, term.shellArgs);
     assert.ok(fs.existsSync(marker), 'the curl bootstrap did not run');
     assert.strictEqual(
@@ -382,7 +398,7 @@ function testLockedBootstrapIsPreferred() {
   const legacyCmd = installerCommandOf(terminals[terminals.length - 1]);
   assert.ok(
     /git reset --hard/.test(legacyCmd) &&
-      /bash '[^']*\/install\.sh' --non-interactive$/.test(legacyCmd),
+      /bash '[^']*[\/\\]install\.sh' --non-interactive$/.test(legacyCmd),
     `old clone must keep the preflight + install.sh: ${legacyCmd}`,
   );
   // install.sh writes the .extension-updated marker into $KISS_HOME and
@@ -390,7 +406,7 @@ function testLockedBootstrapIsPreferred() {
   // pin that value so an inherited environment carrying a different
   // KISS_HOME cannot send the marker where no watcher looks.
   assert.ok(
-    /KISS_HOME='[^']*' bash '[^']*\/install\.sh' --non-interactive$/.test(
+    /KISS_HOME='[^']*' bash '[^']*[\/\\]install\.sh' --non-interactive$/.test(
       legacyCmd,
     ),
     `legacy preflight must pin the extension host's KISS_HOME: ${legacyCmd}`,

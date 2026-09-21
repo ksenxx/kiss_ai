@@ -115,6 +115,6 @@ def test_migration_toggles_foreign_keys_off_during_rename() -> None:
     ``ALTER TABLE __new RENAME TO task_history`` does not leave a
     stale FK target on SQLite < 3.26.
     """
-    src = Path("src/kiss/agents/sorcar/persistence.py").read_text()
+    src = Path("src/kiss/agents/sorcar/persistence.py").read_text(encoding="utf-8")
     assert "PRAGMA foreign_keys=OFF" in src
     assert src.count("PRAGMA foreign_keys=ON") >= 2

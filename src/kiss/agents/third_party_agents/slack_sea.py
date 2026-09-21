@@ -272,7 +272,7 @@ class SlackChannelBackend(ToolMethodBackend):
                 self._connection_info = (
                     "No Slack token found. Please store a bot token first.\n"
                     "Run: uv run python -m kiss.agents.third_party_agents"
-                    ".slack_agent --task 'check auth'\n"
+                    ".slack_sea --task 'check auth'\n"
                     "Or manually save token to "
                     f"~/.kiss/third_party_agents/slack/{self._workspace}/token.json"
                 )
@@ -292,18 +292,35 @@ class SlackChannelBackend(ToolMethodBackend):
             return False
 
     def find_channel(self, name: str) -> str | None:
-        """Find a Slack channel ID by name.
+        """Find a Slack channel ID by name or ID.
+
+        A *name* that is already a Slack conversation ID (``C…``, ``G…``
+        or ``D…``, e.g. ``C0AKYSNLB7W``) is verified via
+        ``conversations.info`` and returned directly, so private channels
+        and DMs — which name lookup cannot list without extra scopes — can
+        be addressed by ID.  If verification fails the value is treated as
+        a plain name and the public and private channel lists visible to
+        the bot token are searched.
 
         Args:
-            name: Channel name without '#'.
+            name: Channel name without '#', or a conversation ID.
 
         Returns:
             Channel ID string, or None if not found.
         """
         assert self._client is not None
+        if re.fullmatch(r"[CGD][A-Z0-9]{8,}", name):
+            try:
+                self._client.conversations_info(channel=name)
+                return name
+            except SlackApiError:
+                pass
         cursor = ""
         while True:
-            kwargs: dict[str, Any] = {"types": "public_channel", "limit": 200}
+            kwargs: dict[str, Any] = {
+                "types": "public_channel,private_channel",
+                "limit": 200,
+            }
             if cursor:  # pragma: no branch
                 kwargs["cursor"] = cursor
             resp = self._client.conversations_list(**kwargs)
@@ -318,13 +335,19 @@ class SlackChannelBackend(ToolMethodBackend):
     def find_user(self, username: str) -> str | None:
         """Find a Slack user ID by display name or username.
 
+        A *username* that is already a Slack user ID (``U…`` or ``W…``)
+        is returned unchanged, avoiding a full ``users.list``
+        pagination (rate-limited on large workspaces).
+
         Args:
-            username: Slack username (without @).
+            username: Slack username (without @), or a user ID.
 
         Returns:
             User ID string, or None if not found.
         """
         assert self._client is not None
+        if re.fullmatch(r"[UW][A-Z0-9]{7,}", username):
+            return username
         cursor = ""
         while True:
             kwargs: dict[str, Any] = {"limit": 200}

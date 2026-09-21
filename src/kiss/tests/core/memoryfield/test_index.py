@@ -14,6 +14,7 @@ from kiss.core.memoryfield.index import (
     DEFAULT_EMBEDDING_MODEL,
     HASHED_EMBEDDING_MODEL_CODE,
     ModelEmbedder,
+    SyncReport,
     VectorIndex,
     default_embedder,
     deserialize_float32,
@@ -204,11 +205,14 @@ def test_old_input_format_rows_are_reembedded(tmp_path: Path) -> None:
 
 
 def test_pre_column_index_schema_is_migrated_and_reembedded(tmp_path: Path) -> None:
-    """An index file created before the input_format column existed is upgraded.
+    """An index file created before the input_format/revision columns is upgraded.
 
-    Connecting adds the column with default ``'1'``, which marks every
-    existing row as embedded under the old whole-raw-file mapping, so the
-    next sync re-embeds all pages.
+    Connecting adds the missing columns.  ``input_format`` defaults to
+    ``'1'``, which marks every existing row as embedded under the old
+    whole-raw-file mapping, so the next sync re-embeds all pages;
+    ``revision`` defaults to ``0`` and is replaced by the next values of
+    the index-wide counter (which the baseline sync left at 2) on that
+    first rewrite.
     """
     memory = MemoryDir(tmp_path)
     memory.write("woks", "Carbon fibre woks conduct heat.")
@@ -217,10 +221,17 @@ def test_pre_column_index_schema_is_migrated_and_reembedded(tmp_path: Path) -> N
     assert index.sync().added == 2
     with closing(sqlite3.connect(index.path)) as conn, conn:
         conn.execute("ALTER TABLE pages DROP COLUMN input_format")  # simulate the old schema
+        conn.execute("ALTER TABLE pages DROP COLUMN revision")
 
     report = index.sync()
     assert (report.added, report.updated, report.removed, report.unchanged) == (0, 2, 0, 0)
+    with closing(sqlite3.connect(index.path)) as conn:
+        revisions = [row[0] for row in conn.execute("SELECT revision FROM pages ORDER BY revision")]
+        counter = conn.execute("SELECT value FROM meta WHERE key = 'revision'").fetchone()[0]
+    assert revisions == [3, 4] and counter == "4"
     assert index.sync().unchanged == 2
+    with closing(sqlite3.connect(index.path)) as conn:  # a no-op sync does not burn revisions
+        assert conn.execute("SELECT value FROM meta WHERE key = 'revision'").fetchone()[0] == "4"
     assert index.search("Finnish DVV", k=1)[0].name == "dvv"
 
 
@@ -370,3 +381,145 @@ def test_model_embedder_live_search(tmp_path: Path) -> None:
     hits = index.search("how should I look after a new wok made of carbon fiber?", k=2)
     assert hits[0].name == "cookware"
     assert len(embedder("hello")) == 1536
+
+
+# --- concurrent syncs (optimistic compare-and-swap) ------------------------
+
+
+def _row_state(index: VectorIndex, filename: str) -> tuple[bytes, bytes] | None:
+    with closing(sqlite3.connect(index.path)) as conn:
+        row = conn.execute(
+            "SELECT sha256, embedding FROM pages WHERE filename = ?", (filename,)
+        ).fetchone()
+    return None if row is None else (bytes(row[0]), bytes(row[1]))
+
+
+def test_concurrent_sync_does_not_overwrite_fresher_rows(tmp_path: Path) -> None:
+    """A slow sync must not clobber rows a faster concurrent sync refreshed.
+
+    Sync A snapshots the index, embeds page ``a`` (v1) and passes the
+    post-embed re-read check, then keeps embedding page ``c``.  Meanwhile
+    page ``a`` is rewritten to v2 and a second sync B indexes ``a`` (v2)
+    and inserts the new page ``c``.  When A finally writes, its stale
+    ``a`` (v1) row and duplicate ``c`` row must be dropped in favour of B's.
+    """
+    memory = MemoryDir(tmp_path)
+    memory.write("a", "alpha v0")
+    memory.write("b", "beta v0")
+    VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync()
+    memory.write("a", "alpha v1")
+    memory.write("c", "gamma new")
+    path_a = memory.page_path("a")
+
+    def embed_and_race(text: str) -> list[float]:
+        if "gamma new" in text:  # page a's v1 row is already built and verified
+            path_a.write_text(path_a.read_text().replace("alpha v1", "alpha v2"))
+            assert VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync() == (
+                SyncReport(added=1, updated=1, removed=0, unchanged=1)
+            )
+        return hashed_embedding(text)
+
+    slow = VectorIndex(memory, embed=embed_and_race, model_code="cas")
+    v0_row = _row_state(slow, "a.md")
+    report = slow.sync()
+    assert (report.added, report.updated, report.removed, report.unchanged) == (0, 0, 0, 1)
+    assert _row_state(slow, "a.md") != v0_row  # B's v2 row is in place ...
+    assert _row_state(slow, "a.md")[0] == hashlib.sha256(path_a.read_bytes()).digest()  # type: ignore[index]
+    assert slow.count() == 3
+    # ... and the index has converged: nothing left to heal.
+    assert VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync().unchanged == 3
+    assert slow.search("alpha v2", min_score=0.1)[0].name == "a"
+
+
+def test_concurrent_sync_does_not_delete_recreated_page_row(tmp_path: Path) -> None:
+    """A stale-row delete computed before a page was recreated must not fire.
+
+    Sync A lists the pages after ``a`` was deleted, so it plans to drop
+    ``a``'s row.  While A embeds ``b``, page ``a`` is recreated and a
+    concurrent sync B refreshes its row.  A's delete must leave B's row.
+    """
+    memory = MemoryDir(tmp_path)
+    memory.write("a", "alpha v0")
+    memory.write("b", "beta v0")
+    VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync()
+    memory.delete("a")
+    memory.write("b", "beta v1")
+
+    def embed_and_recreate(text: str) -> list[float]:
+        if "beta v1" in text:
+            memory.write("a", "alpha reborn")
+            VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync()
+        return hashed_embedding(text)
+
+    slow = VectorIndex(memory, embed=embed_and_recreate, model_code="cas")
+    report = slow.sync()
+    assert (report.added, report.updated, report.removed, report.unchanged) == (0, 0, 0, 0)
+    assert slow.count() == 2
+    assert slow.search("alpha reborn", min_score=0.1)[0].name == "a"
+    assert VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync().unchanged == 2
+
+
+def test_concurrent_sync_cas_survives_byte_identical_rewrite(tmp_path: Path) -> None:
+    """The CAS token must not repeat when a page cycles back to identical bytes.
+
+    Sync A snapshots ``a`` (v0), embeds v1 and pauses on page ``c``.  Sync B
+    then indexes v2, the exact v0 bytes are restored, and sync C indexes v0
+    again.  A's snapshot ``(sha256, input_format)`` now matches C's fresh
+    row byte for byte, so a content-keyed CAS would let A overwrite it with
+    stale v1; the per-write ``revision`` token must reject the write.
+    """
+    memory = MemoryDir(tmp_path)
+    memory.write("a", "alpha v0")
+    memory.write("b", "beta v0")
+    VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync()
+    path_a = memory.page_path("a")
+    v0_bytes = path_a.read_bytes()
+    path_a.write_bytes(v0_bytes.replace(b"alpha v0", b"alpha v1"))
+    memory.write("c", "gamma new")
+
+    def embed_and_cycle(text: str) -> list[float]:
+        if "gamma new" in text:  # A's stale v1 row for `a` is already built
+            path_a.write_bytes(v0_bytes.replace(b"alpha v0", b"alpha v2"))
+            assert VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync().updated == 1
+            path_a.write_bytes(v0_bytes)
+            assert VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync().updated == 1
+        return hashed_embedding(text)
+
+    slow = VectorIndex(memory, embed=embed_and_cycle, model_code="cas")
+    report = slow.sync()
+    assert (report.added, report.updated, report.removed, report.unchanged) == (0, 0, 0, 1)
+    assert _row_state(slow, "a.md")[0] == hashlib.sha256(v0_bytes).digest()  # type: ignore[index]
+    assert VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync().unchanged == 3
+
+
+def test_concurrent_sync_cas_survives_byte_identical_recreation(tmp_path: Path) -> None:
+    """A planned stale delete must not fire on a byte-identical re-inserted row.
+
+    Sync A snapshots ``a`` and finds it gone from disk, so it plans to drop
+    the row.  While A embeds ``b``, sync B drops the row, the exact original
+    bytes of ``a`` are restored, and sync C inserts a fresh row for it whose
+    ``(sha256, input_format)`` equals A's snapshot.  A's conditional delete
+    must miss because C's row carries a new ``revision``.
+    """
+    memory = MemoryDir(tmp_path)
+    memory.write("a", "alpha v0")
+    memory.write("b", "beta v0")
+    VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync()
+    path_a = memory.page_path("a")
+    v0_bytes = path_a.read_bytes()
+    path_a.unlink()
+    memory.write("b", "beta v1")
+
+    def embed_and_recreate(text: str) -> list[float]:
+        if "beta v1" in text:
+            assert VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync().removed == 1
+            path_a.write_bytes(v0_bytes)
+            assert VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync().added == 1
+        return hashed_embedding(text)
+
+    slow = VectorIndex(memory, embed=embed_and_recreate, model_code="cas")
+    report = slow.sync()
+    assert (report.added, report.updated, report.removed, report.unchanged) == (0, 0, 0, 0)
+    assert slow.count() == 2
+    assert _row_state(slow, "a.md")[0] == hashlib.sha256(v0_bytes).digest()  # type: ignore[index]
+    assert VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync().unchanged == 2

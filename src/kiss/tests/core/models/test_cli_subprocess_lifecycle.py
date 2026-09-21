@@ -40,8 +40,14 @@ from kiss.core.models import codex_model as cx_module
 from kiss.core.models.claude_code_model import ClaudeCodeModel, _find_claude_cli
 from kiss.core.models.codex_model import CodexModel, _find_codex_cli
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
+from kiss.tests.conftest import IS_WINDOWS, install_cli_script, posix_only
 
 _PS = "/bin/ps"
+# Windows has no ``ps``; CIM lists every process with its parent pid.
+_LIST_CHILDREN_PS1 = (
+    "Get-CimInstance Win32_Process -Filter 'ParentProcessId={me}'"
+    " | ForEach-Object ProcessId"
+)
 
 
 def install_cli(
@@ -63,9 +69,10 @@ def install_cli(
         The path of the installed executable.
     """
     script = tmp_path / name
-    script.write_text(f"#!{sys.executable}\n" + textwrap.dedent(body))
-    script.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tmp_path))
+    install_cli_script(script, f"#!{sys.executable}\n" + textwrap.dedent(body))
+    # Prepended, not replaced: the stand-in still wins the lookup, and the
+    # supervisor's Windows tree kill (``taskkill``) stays reachable.
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     if name == "claude":
         monkeypatch.setattr(cc_module, "_find_claude_cli", _find_claude_cli)
     else:
@@ -82,12 +89,20 @@ def child_pids() -> set[int]:
         listed by ``ps`` until somebody reaps it, which is exactly the
         leak C2 describes.
     """
+    me = os.getpid()
+    if IS_WINDOWS:
+        lister = subprocess.Popen(
+            ["powershell", "-NoProfile", "-Command", _LIST_CHILDREN_PS1.format(me=me)],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        listing, _ = lister.communicate()
+        return {int(pid) for pid in listing.split() if pid.isdigit()} - {lister.pid}
     lister = subprocess.Popen(
         [_PS, "-o", "pid=,ppid=", "-ax"], stdout=subprocess.PIPE, text=True
     )
     listing, _ = lister.communicate()
     pids: set[int] = set()
-    me = os.getpid()
     for line in listing.splitlines():
         fields = line.split()
         if len(fields) >= 2 and fields[1].isdigit() and int(fields[1]) == me:
@@ -257,6 +272,10 @@ class TestC3StderrIsDrained:
         assert elapsed < 15, f"the run blocked for {elapsed:.1f}s on a full stderr pipe"
 
 
+@posix_only(
+    "closing fd 1 is only EOF when the CLI is the sole writer; behind the "
+    "Windows .cmd shim cmd.exe holds the pipe too, so this is a stall there"
+)
 class TestC4LingeringChild:
     """A child that outlives its own stdout must not crash the step."""
 

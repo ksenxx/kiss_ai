@@ -14,6 +14,10 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import git_worktree, web_use_tool
+from kiss.tests.conftest import posix_only
+
+
+@posix_only("Chromium's SingletonLock symlink is the POSIX profile lock")
 
 
 def test_profile_permission_denied_lock_is_conservatively_in_use(
@@ -38,6 +42,7 @@ def test_profile_permission_denied_lock_is_conservatively_in_use(
     assert web_use_tool._is_profile_in_use(str(profile)) is True
 
 
+@posix_only("shebang git shim on PATH cannot shadow git.exe on Windows")
 def test_git_timeout_kills_hook_descendants_holding_capture_pipes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

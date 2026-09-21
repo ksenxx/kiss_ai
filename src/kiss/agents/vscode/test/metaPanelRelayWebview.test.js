@@ -121,50 +121,88 @@ const HISTORY_ATTRS =
   ' data-kiss-tab-id="history-panel"';
 
 async function main() {
-  await test(
-    'a chat editor panel reports its task-info values as metaUpdate',
-    async () => {
-      const wv = makeWebview(PANEL_ATTRS);
-      const win = wv.win;
-      // The startup report seeds the host cache with the placeholders.
-      await sleep(300);
-      const first = lastMetaUpdate(wv);
-      assert.ok(first, 'a metaUpdate must be posted at startup');
-      assert.strictEqual(first.values.tokens, EMDASH);
-      assert.strictEqual(first.values.workdir, EMDASH);
-      assert.strictEqual(first.progressMd, '');
+  await test('a chat editor panel reports its task-info values as metaUpdate', async () => {
+    const wv = makeWebview(PANEL_ATTRS);
+    const win = wv.win;
+    // The startup report seeds the host cache with the placeholders.
+    await sleep(300);
+    const first = lastMetaUpdate(wv);
+    assert.ok(first, 'a metaUpdate must be posted at startup');
+    assert.strictEqual(first.values.tokens, EMDASH);
+    assert.strictEqual(first.values.workdir, EMDASH);
+    assert.strictEqual(first.progressMd, '');
 
-      send(win, {
-        type: 'configData',
-        config: {work_dir: '/cfg/dir', max_budget: 42},
-        apiKeys: {},
-      });
-      send(win, {
-        type: 'usage_info',
-        total_tokens: 12345,
-        cost: 0.5,
-        total_steps: 7,
-        tabId: ROOT,
-      });
-      await sleep(300);
-      const upd = lastMetaUpdate(wv);
-      assert.strictEqual(upd.values.tokens, '12.3K');
-      assert.strictEqual(upd.values.cost, '$0.50');
-      assert.strictEqual(upd.values.steps, '7');
-      assert.strictEqual(upd.values.workdir, '/cfg/dir');
-      assert.strictEqual(upd.values.maxBudget, '$42.00');
+    send(win, {
+      type: 'configData',
+      config: {work_dir: '/cfg/dir', max_budget: 42},
+      apiKeys: {},
+    });
+    send(win, {
+      type: 'usage_info',
+      total_tokens: 12345,
+      cost: 0.5,
+      total_steps: 7,
+      tabId: ROOT,
+    });
+    await sleep(300);
+    const upd = lastMetaUpdate(wv);
+    assert.strictEqual(upd.values.tokens, '12.3K');
+    assert.strictEqual(upd.values.cost, '$0.50');
+    assert.strictEqual(upd.values.steps, '7');
+    assert.strictEqual(upd.values.workdir, '/cfg/dir');
+    assert.strictEqual(upd.values.maxBudget, '$42.00');
 
-      // The machine name (configData) is mirrored too.
-      send(win, {
-        type: 'configData',
-        config: {work_dir: '/cfg/dir', max_budget: 42},
-        apiKeys: {},
-        machine: 'buildbox',
-      });
-      await sleep(300);
-      assert.strictEqual(lastMetaUpdate(wv).values.machine, 'buildbox');
-    },
-  );
+    // The machine name (configData) is mirrored too.
+    send(win, {
+      type: 'configData',
+      config: {work_dir: '/cfg/dir', max_budget: 42},
+      apiKeys: {},
+      machine: 'buildbox',
+    });
+    await sleep(300);
+    assert.strictEqual(lastMetaUpdate(wv).values.machine, 'buildbox');
+
+    // The task's own settings rows ride along: date, base model, the
+    // two modes, chat / task ids and (when the task has one) the parent.
+    const startTs = Date.UTC(2026, 8, 19, 17, 40);
+    send(win, {
+      type: 'task_settings',
+      tabId: ROOT,
+      taskId: 'task-77',
+      settings: {
+        model: 'model-z',
+        work_dir: '/task/dir',
+        is_worktree: false,
+        is_parallel: true,
+        max_budget: 9,
+        start_ts: startTs,
+        chat_id: 'chat-9',
+        task_id: 'task-77',
+        is_subagent: true,
+        parent_task_id: 'task-70',
+      },
+    });
+    await sleep(300);
+    const withSettings = lastMetaUpdate(wv).values;
+    assert.strictEqual(
+      withSettings.date,
+      new Date(startTs).toLocaleString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+    );
+    assert.strictEqual(withSettings.model, 'model-z');
+    assert.strictEqual(withSettings.worktree, 'no worktree');
+    assert.strictEqual(withSettings.parallel, 'parallel');
+    assert.strictEqual(withSettings.chatId, 'chat-9');
+    assert.strictEqual(withSettings.taskId, 'task-77 (subagent)');
+    assert.strictEqual(withSettings.parentTask, 'task-70');
+    assert.strictEqual(withSettings.workdir, '/task/dir');
+    assert.strictEqual(withSettings.maxBudget, '$9.00');
+  });
 
   await test(
     'a running task starts the getInfoFile poll and relays progressMd; ' +
@@ -341,10 +379,29 @@ async function main() {
           machine: 'buildbox',
           workdir: '/task/dir',
           maxBudget: '$50.00',
+          date: 'Sep 19, 2026, 05:40 PM',
+          model: 'model-z',
+          worktree: 'worktree',
+          parallel: 'sequential',
+          chatId: 'chat-9',
+          taskId: 'task-77 (subagent)',
+          parentTask: 'task-70',
         },
         progressMd: '# Plan\n\nnext is **tests**\n',
       });
       assert.strictEqual(rowText(win, 'meta-tokens'), '9.99K');
+      assert.strictEqual(rowText(win, 'meta-date'), 'Sep 19, 2026, 05:40 PM');
+      assert.strictEqual(rowText(win, 'meta-model'), 'model-z');
+      assert.strictEqual(rowText(win, 'meta-worktree'), 'worktree');
+      assert.strictEqual(rowText(win, 'meta-parallel'), 'sequential');
+      assert.strictEqual(rowText(win, 'meta-chat-id'), 'chat-9');
+      assert.strictEqual(rowText(win, 'meta-task-id'), 'task-77 (subagent)');
+      assert.strictEqual(rowText(win, 'meta-parent-id'), 'task-70');
+      assert.strictEqual(
+        win.document.getElementById('meta-parent-item').hidden,
+        false,
+        'the Parent task row shows for a relayed subagent task',
+      );
       assert.strictEqual(rowText(win, 'meta-cost'), '$1.25');
       assert.strictEqual(rowText(win, 'meta-steps'), '42');
       assert.strictEqual(rowText(win, 'meta-time'), '3m 2.0s');
@@ -383,10 +440,26 @@ async function main() {
         'the Task Info view must not poll getInfoFile',
       );
 
+      // A relay from an older panel build (no settings keys) shows
+      // dashes for the settings rows and hides the parent row.
+      send(win, {
+        type: 'metaState',
+        values: {tokens: '1', workdir: '/x'},
+        progressMd: '',
+      });
+      assert.strictEqual(rowText(win, 'meta-model'), EMDASH);
+      assert.strictEqual(rowText(win, 'meta-parent-id'), EMDASH);
+      assert.strictEqual(
+        win.document.getElementById('meta-parent-item').hidden,
+        true,
+      );
+
       // No panel reporting: back to the placeholders.
       send(win, {type: 'metaState', values: null, progressMd: ''});
       assert.strictEqual(rowText(win, 'meta-tokens'), EMDASH);
       assert.strictEqual(rowText(win, 'meta-workdir'), EMDASH);
+      assert.strictEqual(rowText(win, 'meta-date'), EMDASH);
+      assert.strictEqual(rowText(win, 'meta-task-id'), EMDASH);
       assert.strictEqual(rowText(win, 'meta-time'), 'Ready');
       assert.strictEqual(
         win.document.getElementById('meta-time').style.color,

@@ -76,7 +76,7 @@ def test_available_channels_discovery() -> None:
     for expected in ("slack", "telegram", "discord", "email", "ntfy"):
         assert expected in channels
     # Infrastructure and private modules are not user-facing channels.
-    for hidden in ("a2a", "openai_compat", "channel_cli", "backend_utils"):
+    for hidden in ("a2a", "oai", "channel_cli", "backend_utils"):
         assert hidden not in channels
     assert channels == sorted(channels)
 
@@ -124,7 +124,7 @@ def test_channel_alias_normalization() -> None:
     # case, spaces, hyphens, and underscores must all resolve.
     for alias, canonical in (
         ("Home Assistant", "homeassistant"),
-        ("phone control", "phone_control"),
+        ("home_assistant", "homeassistant"),
         ("SLACK", "slack"),
     ):
         out = run_agent(alias, "say hi")
@@ -137,10 +137,10 @@ def test_channel_alias_normalization() -> None:
 def test_hyphenated_alias_is_a_channel_not_a_path() -> None:
     # A hyphen is a channel-name separator, not a path marker: the
     # alias resolves to the channel even though "-" appears in it.
-    out = run_agent("nextcloud-talk", "say hi")
+    out = run_agent("home-assistant", "say hi")
     assert "unknown agent" not in out
     assert out.startswith(
-        "Error: the nextcloud_talk agent task could not run:"
+        "Error: the homeassistant agent task could not run:"
     )
 
 
@@ -245,7 +245,7 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
     the worktree pin is safe because a verdict can only demote a
     requested worktree run, never promote a pinned-off one
     (``WorktreeSorcarAgent.run``).  Only cron — an unattended
-    automation that runs repeatedly — pins ``classify_tasks=False``.
+    automation that runs repeatedly — defaults ``classify_tasks`` to ``False``.
     A path-mode agent script keeps the standard lifecycle: it operates
     on the calling project unless its own getters say otherwise.  The
     real dispatch path is exercised up to the daemon-client boundary;
@@ -276,7 +276,9 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
 
     # Cron mode: the module getters already return False for
     # use_worktree/auto_commit, the wire fields agree with them, and
-    # classification is pinned off — cron never classifies.
+    # classification defaults off (an explicit ``classify_tasks``
+    # argument can turn it on; see
+    # ``test_run_options_are_forwarded_to_daemon``).
     captured.clear()
     tool("cron", "run 'echo hi' every 5 minutes")
     assert captured[0]["use_worktree"] is False
@@ -292,6 +294,184 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
     assert captured[0]["use_worktree"] is True
     assert captured[0]["auto_commit"] is True
     assert captured[0]["classify_tasks"] is None
+
+
+def test_run_option_parse_errors(tmp_path: Path) -> None:
+    """Malformed optional arguments fail before any daemon contact.
+
+    Every optional argument of ``run_agent`` mirrors a keyword option
+    of ``kiss.server.sorcar.run``; a value the daemon could not honour
+    is reported by name with the offending text.
+    """
+    for name in (
+        "use_worktree", "auto_commit", "use_web_tools", "classify_tasks",
+        "use_memory", "is_parallel", "append_basic_tools",
+    ):
+        out = run_agent("ntfy", "say hi", **{name: "maybe"})
+        assert out == f"Error: {name} must be 'true' or 'false', got 'maybe'."
+    assert run_agent("ntfy", "say hi", model_config="[1, 2]") == (
+        "Error: model_config must be a JSON object, got '[1, 2]'."
+    )
+    out = run_agent("ntfy", "say hi", model_config="{not json")
+    assert out.startswith(
+        "Error: model_config must be a JSON object, got '{not json': "
+    )
+    missing = tmp_path / "no_such_tools.py"
+    out = run_agent("ntfy", "say hi", tools=str(missing))
+    assert out == f"Error: tools file '{missing}' does not exist"
+    not_py = tmp_path / "tools.txt"
+    not_py.write_text("")
+    out = run_agent("ntfy", "say hi", tools=str(not_py))
+    assert out == f"Error: tools file '{not_py}' is not a Python (.py) file"
+
+
+def test_channel_and_cron_refuse_worktree_and_auto_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The channel/cron git-lifecycle pin cannot be overridden.
+
+    A channel or cron sub-task runs in a scratch directory outside any
+    project, where a worktree would copy whatever repository encloses
+    ``$HOME`` (see ``test_channel_and_cron_dispatch_skip_git_lifecycle``),
+    so asking for one is refused; an explicit ``"false"`` agrees with
+    the pin and dispatches normally.
+    """
+    from kiss.agents.sorcar import daemon_client
+
+    captured: list[dict[str, Any]] = []
+
+    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        captured.append(kwargs)
+        return daemon_client.TaskResult(
+            text="ok", success=True, cost=0.0, tokens=0, steps=0,
+        )
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
+
+    refused = (
+        "agent task always runs without a git worktree or auto-commit"
+    )
+    for agent in ("ntfy", "cron"):
+        for kwargs in (
+            {"use_worktree": "true"},
+            {"auto_commit": "TRUE"},
+            {"use_worktree": "false", "auto_commit": "true"},
+        ):
+            out = run_agent(agent, "say hi", **kwargs)
+            assert out.startswith(f"Error: the {agent} {refused}"), out
+    assert captured == []
+
+    run_agent("ntfy", "say hi", use_worktree="false", auto_commit=" False ")
+    assert captured[0]["use_worktree"] is False
+    assert captured[0]["auto_commit"] is False
+
+
+def test_run_options_are_forwarded_to_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The optional arguments reach ``daemon_client.run`` as its keyword options.
+
+    Empty arguments forward the option's default (``None`` for the
+    tri-state daemon-decides options, ``True`` for ``is_parallel`` /
+    ``append_basic_tools``); explicit values are parsed and forwarded
+    verbatim.  A relative ``tools`` path resolves against the CALLING
+    task's work directory (the tool runs in the daemon process, whose
+    working directory is unrelated).  The real dispatch path is
+    exercised up to the daemon-client boundary; only that boundary
+    call is captured.
+    """
+    from kiss.agents.sorcar import daemon_client
+
+    captured: list[dict[str, Any]] = []
+
+    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        captured.append(kwargs)
+        return daemon_client.TaskResult(
+            text="ok", success=True, cost=0.0, tokens=0, steps=0,
+        )
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
+
+    caller = tmp_path / "caller_project"
+    caller.mkdir()
+    script = caller / "helper.py"
+    script.write_text("def model() -> str:\n    return 'm'\n")
+    tools_file = caller / "extra_tools.py"
+    tools_file.write_text("def get_tools():\n    return []\n")
+    tool = make_run_agent_tool(str(caller))
+
+    # Nothing passed: the daemon's defaults decide.
+    tool(str(script), "say hi")
+    defaults = captured[0]
+    assert defaults["chat_id"] == ""
+    assert defaults["system_prompt"] == ""
+    assert defaults["tools"] is None
+    assert defaults["model_config"] is None
+    assert defaults["use_web_tools"] is None
+    assert defaults["use_memory"] is None
+    assert defaults["is_parallel"] is True
+    assert defaults["append_basic_tools"] is True
+    assert defaults["append_to_system_prompt"] == ""
+    assert defaults["append_to_prompt"] == ""
+
+    # Everything passed, in path mode: parsed and forwarded, with the
+    # explicit git-lifecycle values replacing the path-mode defaults.
+    captured.clear()
+    tool(
+        str(script), "say hi",
+        chat_id=" chat-123 ",
+        system_prompt="You are a terse helper.",
+        tools="extra_tools.py",
+        model_config='{"base_url": "http://localhost:8000/v1"}',
+        use_worktree="false",
+        auto_commit="False",
+        use_web_tools="true",
+        classify_tasks="false",
+        use_memory="true",
+        is_parallel="false",
+        append_basic_tools="false",
+        append_to_system_prompt="Answer in French.",
+        append_to_prompt="Cite sources.",
+    )
+    sent = captured[0]
+    assert sent["chat_id"] == "chat-123"
+    assert sent["system_prompt"] == "You are a terse helper."
+    assert sent["tools"] == str(tools_file)
+    assert sent["model_config"] == {"base_url": "http://localhost:8000/v1"}
+    assert sent["use_worktree"] is False
+    assert sent["auto_commit"] is False
+    assert sent["use_web_tools"] is True
+    assert sent["classify_tasks"] is False
+    assert sent["use_memory"] is True
+    assert sent["is_parallel"] is False
+    assert sent["append_basic_tools"] is False
+    assert sent["append_to_system_prompt"] == "Answer in French."
+    assert sent["append_to_prompt"] == "Cite sources."
+
+    # An absolute tools path is kept as given (resolved); path mode
+    # honours an explicit worktree request too.
+    captured.clear()
+    tool(str(script), "say hi", tools=str(tools_file), use_worktree="true")
+    assert captured[0]["tools"] == str(tools_file)
+    assert captured[0]["use_worktree"] is True
+
+    # The standalone tool (no calling work dir) resolves a relative
+    # tools path against the process working directory.
+    monkeypatch.chdir(caller)
+    captured.clear()
+    run_agent(str(script), "say hi", tools="extra_tools.py")
+    assert captured[0]["tools"] == str(tools_file)
+
+    # An explicit classify_tasks overrides the mode default in every
+    # mode: cron's pinned-off classification and the channel/path
+    # "daemon decides" default alike.
+    captured.clear()
+    tool("cron", "run 'echo hi' every 5 minutes", classify_tasks="true")
+    assert captured[0]["classify_tasks"] is True
+    captured.clear()
+    tool("ntfy", "say hi", classify_tasks="False", use_memory="false")
+    assert captured[0]["classify_tasks"] is False
+    assert captured[0]["use_memory"] is False
 
 
 def test_dispatch_forwards_parent_identity(
@@ -430,7 +610,7 @@ def test_path_mode_detected_by_py_suffix_and_separator(
     tmp_path: Path,
 ) -> None:
     # ".py" suffix without a separator is path mode, not a channel.
-    out = run_agent("slack_agent.py", "say hi")
+    out = run_agent("slack_sea.py", "say hi")
     assert out.startswith("Error: agent script")
     # A separator without a ".py" suffix is path mode too — rejected
     # with the loader's .py diagnostic rather than "unknown agent".
@@ -545,9 +725,9 @@ def test_dispatch_uses_recorded_daemon_socket(
 
 
 def test_agent_class_resolution() -> None:
-    import kiss.agents.third_party_agents.slack_agent as slack_agent
+    import kiss.agents.third_party_agents.slack_sea as slack_sea
 
-    cls = _agent_class(slack_agent)
+    cls = _agent_class(slack_sea)
     assert cls is not None and cls.__name__ == "SlackAgent"
     # A module defining no BaseChannelAgent subclass of its own
     # (imported classes do not count) resolves to None.
@@ -559,7 +739,7 @@ def test_every_channel_module_is_dispatchable() -> None:
 
     for channel in available_channels():
         module = importlib.import_module(
-            f"kiss.agents.third_party_agents.{channel}_agent"
+            f"kiss.agents.third_party_agents.{channel}_sea"
         )
         cls = _agent_class(module)
         assert cls is not None, channel
@@ -574,12 +754,12 @@ def test_channel_module_is_a_valid_agent_script() -> None:
     # The exact contract the dispatch relies on: passing a channel
     # module as ``extension_agent_path`` makes the daemon use the module as its
     # own tools file (its ``tools()`` returns the tool list).
-    import kiss.agents.third_party_agents.ntfy_agent as ntfy_agent
+    import kiss.agents.third_party_agents.ntfy_sea as ntfy_sea
 
-    cmd = {"agentPath": ntfy_agent.__file__, "toolsFile": ""}
+    cmd = {"agentPath": ntfy_sea.__file__, "toolsFile": ""}
     overridden = apply_agent_overrides(cmd)
     assert overridden == {"toolsFile"}
-    assert cmd["toolsFile"] == ntfy_agent.__file__
+    assert cmd["toolsFile"] == ntfy_sea.__file__
 
 
 def test_get_tools_and_sorcar_wiring() -> None:
@@ -590,7 +770,7 @@ def test_get_tools_and_sorcar_wiring() -> None:
     # The module lives in the sorcar package and never imports from
     # kiss.agents.third_party_agents at module scope (soft plugin).
     source_text = Path(agent_dispatch.__file__).read_text(encoding="utf-8")
-    assert "/agents/sorcar/" in agent_dispatch.__file__
+    assert Path(agent_dispatch.__file__).parent.parts[-2:] == ("agents", "sorcar")
     for line in source_text.splitlines():
         assert not line.startswith("from kiss.agents.third_party_agents")
         assert not line.startswith("import kiss.agents.third_party_agents")

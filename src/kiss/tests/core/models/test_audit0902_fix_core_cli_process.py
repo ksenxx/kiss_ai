@@ -44,6 +44,8 @@ from kiss.core import stop_signal
 from kiss.core.models import claude_code_model as cc_module
 from kiss.core.models.claude_code_model import ClaudeCodeModel, _find_claude_cli
 from kiss.core.models.model import _CLIProcess
+from kiss.core.processes import pid_alive
+from kiss.tests.conftest import install_cli_script
 
 # Well past the 64 KiB pipe buffer, so an unread prompt blocks a naive writer.
 _BIG_PROMPT = "x" * (300 * 1024)
@@ -56,9 +58,10 @@ _TURN_TIMEOUT = 30
 def _install_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> Path:
     """Install an executable stand-in ``claude`` and let the adapter discover it."""
     script = tmp_path / "claude"
-    script.write_text(f"#!{sys.executable}\n" + textwrap.dedent(body))
-    script.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tmp_path))
+    install_cli_script(script, f"#!{sys.executable}\n" + textwrap.dedent(body))
+    # Prepended, not replaced: the stand-in still wins the lookup, and the
+    # supervisor's Windows tree kill (``taskkill``) stays reachable.
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setattr(cc_module, "_find_claude_cli", _find_claude_cli)
     return script
 
@@ -66,8 +69,13 @@ def _install_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) 
 def _kill(pid_file: Path) -> None:
     """Kill the grandchild whose pid the stand-in recorded in *pid_file*."""
     if pid_file.exists():
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+        pid = int(pid_file.read_text())
+        # Windows has no SIGKILL (os.kill(pid, SIGTERM) is TerminateProcess
+        # there) and refuses, with PermissionError, to open a pid that has
+        # already exited -- hence the liveness probe first.
+        if pid_alive(pid):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
 
 
 def _grandchild_holds_stdin(pid_file: Path) -> str:
@@ -185,7 +193,7 @@ class TestWriterIsCancelledAndStdinReleased:
             assert elapsed < _TURN_TIMEOUT / 2, f"turn took {elapsed:.1f}s"
             assert pid_file.exists(), "the stand-in never recorded its grandchild"
             # The grandchild is still alive: only cancellation could have freed us.
-            os.kill(int(pid_file.read_text()), 0)
+            assert pid_alive(int(pid_file.read_text()))
         finally:
             _kill(pid_file)
 

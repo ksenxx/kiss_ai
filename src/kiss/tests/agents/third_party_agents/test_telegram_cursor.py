@@ -27,7 +27,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
-from kiss.agents.third_party_agents.telegram_agent import (
+from kiss.agents.third_party_agents.telegram_sea import (
     TelegramChannelBackend,
     _config,
 )

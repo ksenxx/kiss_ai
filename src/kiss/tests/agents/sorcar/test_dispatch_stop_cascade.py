@@ -49,6 +49,10 @@ import pytest
 
 from kiss.agents.sorcar import daemon_client
 from kiss.server.task_runner import inject_keyboard_interrupt
+from kiss.tests.conftest import requires_unix_sockets
+
+pytestmark = requires_unix_sockets  # the Sorcar daemon speaks over a UDS
+
 
 
 class _RecordingDaemon:

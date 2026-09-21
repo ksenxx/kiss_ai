@@ -26,8 +26,8 @@ from pathlib import Path
 import pytest
 import requests
 
-from kiss.agents.third_party_agents import openai_compat_agent as oai_mod
-from kiss.agents.third_party_agents.openai_compat_agent import (
+from kiss.agents.third_party_agents import oai_sea as oai_mod
+from kiss.agents.third_party_agents.oai_sea import (
     _MAX_BODY_BYTES,
     OpenAICompatAgent,
     OpenAICompatChannelBackend,

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from pathlib import Path
 
 from kiss.server.user_assets import ensure_user_asset_from_default
@@ -48,6 +49,15 @@ _SENTENCE_BOUNDARY = re.compile(r"[.!?]\s+")
 # in ``SorcarTab.ts``, so the two parsers can never disagree on which
 # ``\X`` sequences are decoration and which are literal text.
 _MARKDOWN_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>|~\"'$%&,/:;=?@^])")
+# The inverse for writing: a backslash that *would* be read as an
+# escape is doubled so the body round-trips through the parser above.
+_MARKDOWN_ESCAPABLE_BACKSLASH = re.compile(
+    r"\\(?=[\\`*_{}\[\]()#+\-.!<>|~\"'$%&,/:;=?@^])"
+)
+# Serialises the read-check-append of the Add button: the daemon runs
+# client commands on a thread pool, so two windows adding at once must
+# not both pass the duplicate check.
+_APPEND_LOCK = threading.Lock()
 
 MY_INJECTION_DEFAULT_BODY = (
     "Write end-to-end 100% coverage tests for the feature first."
@@ -146,6 +156,55 @@ def read_tricks() -> list[str]:
         bundled.
     """
     return _read_my_injection_tricks() + _read_bundled_tricks()
+
+
+def append_my_injection_trick(text: str) -> str | None:
+    """Append *text* as a new ``## Trick`` section of ``~/.kiss/MY_INJECTION.md``.
+
+    Services the "Add" button of the Inject promptlet panel.  The file
+    is seeded first when missing (so the user's default trick is never
+    lost), then the new section is appended after the existing ones —
+    the panel and the ghost-text completions list it in file order.
+
+    The body is stored Markdown-escaped (backslashes that the reader
+    would strip are doubled), so the panel shows exactly what the user
+    typed after the reload.  The whole read-check-append runs under a
+    process-wide lock: commands from different windows execute
+    concurrently on the daemon's thread pool.
+
+    Args:
+        text: The promptlet body.  Surrounding whitespace is trimmed.
+
+    Returns:
+        ``None`` on success, else a user-facing error message: an
+        empty body, a body that would itself start a new ``##``
+        section (which the parser would split), a duplicate of a
+        trick already in the file, an unwritable ``~/.kiss/``, or a
+        file that is not UTF-8 text.  ``OSError`` from the read or
+        write propagates to the caller.
+    """
+    body = text.strip()
+    if not body:
+        return "Promptlet must not be empty"
+    if re.search(r"^##\s", body, flags=re.MULTILINE):
+        return "Promptlet must not contain a line starting with '## '"
+    with _APPEND_LOCK:
+        user_path = ensure_user_asset_from_default(
+            "MY_INJECTION.md", DEFAULT_MY_INJECTION,
+        )
+        if user_path is None:
+            return "Could not write ~/.kiss/MY_INJECTION.md"
+        try:
+            existing = user_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return "~/.kiss/MY_INJECTION.md is not UTF-8 text"
+        if body in _parse_trick_sections(existing):
+            return "That promptlet is already in ~/.kiss/MY_INJECTION.md"
+        escaped = _MARKDOWN_ESCAPABLE_BACKSLASH.sub(r"\\\\", body)
+        separator = "" if existing == "" or existing.endswith("\n") else "\n"
+        with user_path.open("a", encoding="utf-8") as fh:
+            fh.write(separator + "\n## Trick\n\n" + escaped + "\n")
+    return None
 
 
 def current_sentence_partial(query: str) -> str:

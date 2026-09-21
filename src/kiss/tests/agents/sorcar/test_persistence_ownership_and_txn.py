@@ -43,6 +43,7 @@ import uuid
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.conftest import posix_only
 
 _RACE_DELAY_ENV = "KISS_RACE_DELAY"
 
@@ -413,6 +414,7 @@ class FailedEventReplayTest(_PersistenceTestCase):
         self.assertEqual(self._event_count(task_id), 1)
         self.assertFalse(sidecar.exists())
 
+    @posix_only("renaming a SQLite file another connection holds open")
     def test_reconnect_failure_does_not_cache_a_closed_connection(self) -> None:
         """A temporarily unopenable database recovers on the next call."""
         th._get_db()
@@ -723,9 +725,17 @@ class ModuleInternalsTest(_PersistenceTestCase):
         )
 
     def test_marker_is_removed_when_its_owner_exits_normally(self) -> None:
-        """A process that simply finishes leaves no marker behind."""
-        out_queue: multiprocessing.Queue[str] = multiprocessing.Queue()
-        proc = multiprocessing.Process(
+        """A process that simply finishes leaves no marker behind.
+
+        The child is a ``spawn`` process: a fresh interpreter that
+        finishes through ``sys.exit`` and so runs ``atexit`` hooks, like
+        a real daemon or CLI run.  A ``fork`` child would leave through
+        ``os._exit`` in ``multiprocessing``'s bootstrap, which skips
+        ``atexit`` and cannot exercise :func:`_release_owner_marker`.
+        """
+        ctx = multiprocessing.get_context("spawn")
+        out_queue = ctx.Queue()
+        proc = ctx.Process(
             target=_clean_exit_owner_worker,
             args=(str(self.kiss_dir), out_queue),
         )
@@ -745,6 +755,7 @@ class ModuleInternalsTest(_PersistenceTestCase):
         )
         self.assertFalse(th._owner_is_alive(token))
 
+    @posix_only("chmod 500 directory write denial")
     def test_owner_token_is_empty_when_the_marker_cannot_be_written(
         self,
     ) -> None:

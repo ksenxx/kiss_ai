@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for Google Chat's atomic OAuth-token persistence.
 
-Review finding: ``googlechat_agent.py`` still wrote the OAuth token with
+Review finding: ``googlechat_sea.py`` still wrote the OAuth token with
 ``write_text`` + ``chmod`` — the exact truncate-then-chmod pattern the
 audit replaced for gmail — exposing a brief world-readable window and
 torn reads to concurrent processes.  Both token-write sites now
@@ -30,6 +30,8 @@ import threading
 from pathlib import Path
 
 import pytest
+
+from kiss.tests.conftest import TRANSIENT_REPLACE_READ_ERRORS
 
 _IS_POSIX = sys.platform != "win32"
 
@@ -60,7 +62,7 @@ class TestGoogleChatSaveToken:
     ) -> None:
         """A real google Credentials object persists to a private file."""
         monkeypatch.setenv("KISS_HOME", str(tmp_path / "kiss_home"))
-        from kiss.agents.third_party_agents.googlechat_agent import (
+        from kiss.agents.third_party_agents.googlechat_sea import (
             _save_token,
             _token_path,
         )
@@ -84,7 +86,7 @@ class TestGoogleChatSaveToken:
         with atomic replace every read is one complete private payload.
         """
         monkeypatch.setenv("KISS_HOME", str(tmp_path / "kiss_home"))
-        from kiss.agents.third_party_agents.googlechat_agent import (
+        from kiss.agents.third_party_agents.googlechat_sea import (
             _save_token,
             _token_path,
         )
@@ -98,6 +100,8 @@ class TestGoogleChatSaveToken:
             while not stop.is_set():
                 try:
                     data = json.loads(token_file.read_text(encoding="utf-8"))
+                except TRANSIENT_REPLACE_READ_ERRORS:
+                    continue
                 except (json.JSONDecodeError, OSError) as e:  # pragma: no cover
                     errors.append(f"torn read: {e}")
                     return
@@ -110,7 +114,14 @@ class TestGoogleChatSaveToken:
 
         def writer(idx: int) -> None:
             for i in range(100):
-                _save_token(_make_creds(f"token-{idx}-{i}"))
+                try:
+                    _save_token(_make_creds(f"token-{idx}-{i}"))
+                except OSError as e:  # pragma: no cover
+                    # A bare os.replace under a Windows reader raises
+                    # PermissionError; recorded so the test fails
+                    # instead of merely warning about a dead thread.
+                    errors.append(f"writer {idx} failed: {e}")
+                    return
 
         observer = threading.Thread(target=reader, daemon=True)
         writers = [threading.Thread(target=writer, args=(i,), daemon=True) for i in range(4)]

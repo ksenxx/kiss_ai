@@ -71,6 +71,10 @@ from kiss.server.task_runner import inject_keyboard_interrupt
 from kiss.tests.agents.sorcar.test_dispatch_stop_cascade import (
     _RecordingDaemon,
 )
+from kiss.tests.conftest import requires_unix_sockets
+
+pytestmark = requires_unix_sockets  # the Sorcar daemon speaks over a UDS
+
 
 
 @pytest.fixture(autouse=True)

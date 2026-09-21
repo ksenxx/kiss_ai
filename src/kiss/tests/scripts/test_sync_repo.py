@@ -28,7 +28,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from kiss.tests.conftest import posix_only
+
 _SCRIPT = Path(__file__).resolve().parents[4] / "scripts" / "sync-repo.sh"
+
+pytestmark = posix_only("runs the bash sync-repo.sh with a bash ssh stand-in")
 
 _FAKE_SSH = """#!/bin/bash
 # Stand-in for ssh: run the command locally, keeping stdin (the script the

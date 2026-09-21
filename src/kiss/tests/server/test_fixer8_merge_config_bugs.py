@@ -40,6 +40,7 @@ from kiss.server.autocomplete import _AutocompleteMixin, _ghost_suffix
 from kiss.server.diff_merge import _git, _scan_files
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.merge_flow import _MergeFlowMixin
+from kiss.tests.conftest import posix_only
 
 
 def _run_git(repo: Path, *args: str) -> None:
@@ -216,6 +217,7 @@ class TestPorcelainPathsFallbackParser:
 
         assert files == ["b.txt"]
 
+    @posix_only('a double quote is not a valid NTFS file-name character')
     def test_quoted_path_unquoted_once(self, tmp_path: Path) -> None:
         from kiss.server.merge_flow import _porcelain_paths
 

@@ -45,6 +45,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from kiss.tests.conftest import IS_WINDOWS, posix_only
+
 
 class _FakePrinter:
     """Collects broadcast events emitted by the command handler."""
@@ -153,6 +155,7 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
         )
         assert not self._restart_invoked(timeout=1.5)
 
+    @posix_only("kiss-web runs as a launchd/systemd daemon only on macOS/Linux")
     def test_helper_restarts_under_default_home(self) -> None:
         """Control: with the default ``~/.kiss`` home the restart still
         dispatches (observed via the PATH stub, never the real daemon)."""
@@ -165,6 +168,7 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
             "restart subprocess was not spawned under the default home"
         )
 
+    @posix_only("kiss-web runs as a launchd/systemd daemon only on macOS/Linux")
     def test_helper_restarts_when_kiss_home_unset(self) -> None:
         """Control: an unset ``KISS_HOME`` means the default home."""
         from kiss.server.commands import _restart_kiss_web_daemon
@@ -173,6 +177,20 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
         dispatched = _restart_kiss_web_daemon()
         assert dispatched is True
         assert self._restart_invoked(timeout=8.0)
+
+    @unittest.skipUnless(IS_WINDOWS, "Windows has no managed kiss-web daemon")
+    def test_helper_reports_no_managed_daemon_on_windows(self) -> None:
+        """Windows: even under the default home nothing is dispatched.
+
+        The VS Code extension installs no kiss-web service on Windows,
+        so the helper must report ``False`` instead of claiming a
+        restart it cannot perform.
+        """
+        from kiss.server.commands import _restart_kiss_web_daemon
+
+        os.environ.pop("KISS_HOME", None)
+        assert _restart_kiss_web_daemon() is False
+        assert not self._restart_invoked(timeout=1.0)
 
 
 if __name__ == "__main__":

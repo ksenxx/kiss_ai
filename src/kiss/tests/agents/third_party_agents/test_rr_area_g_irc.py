@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.third_party_agents.irc_agent import IRCChannelBackend, _config
+from kiss.agents.third_party_agents.irc_sea import IRCChannelBackend, _config
 
 
 @pytest.fixture(autouse=True)

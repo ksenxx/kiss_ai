@@ -22,6 +22,7 @@ created under ``tmp_path``.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -334,9 +335,10 @@ class TestPureHelpers:
         )
 
     def test_merge_fix_steps(self) -> None:
-        steps = _merge_fix_steps(self._wt(None), "    git commit\n")
+        wt = self._wt(None)
+        steps = _merge_fix_steps(wt, "    git commit\n")
         assert steps == (
-            "    cd /repo\n"
+            f"    cd {shlex.quote(str(wt.repo_root))}\n"  # ``\repo`` on Windows
             "    git checkout main\n"
             "    git merge --squash kiss/wt-x\n"
             "    git commit\n"

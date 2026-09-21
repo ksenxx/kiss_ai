@@ -138,7 +138,9 @@ def test_load_past_tasks_filters_failed_and_child_rows(tmp_path: Path) -> None:
 
 
 def test_load_past_tasks_handles_special_characters_in_path(tmp_path: Path) -> None:
-    db = make_db(tmp_path / "history?copy #1.db")
+    # Space, "#" and "%" are URI-significant yet legal in file names on every
+    # platform ("?" is not a valid NTFS file name character).
+    db = make_db(tmp_path / "history copy #1 %2.db")
     assert len(load_past_tasks(db, limit=10, min_result_chars=10)) == 5
 
 

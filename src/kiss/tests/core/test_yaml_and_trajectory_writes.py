@@ -34,7 +34,13 @@ import yaml
 
 import kiss.core.config as config_module
 from kiss.core.base import Base
-from kiss.core.utils import _try_chmod, atomic_write_text, finish
+from kiss.core.utils import (
+    _try_chmod,
+    atomic_write_text,
+    finish,
+    read_bytes_waiting_for_writer,
+)
+from kiss.tests.conftest import posix_only
 
 # The alphabetically last top-level key of a trajectory document: a
 # reader that cannot see it is looking at a truncated file.
@@ -163,6 +169,7 @@ else:
 """
 
 
+@posix_only("RLIMIT_FSIZE / SIGXFSZ short-write provocation")
 def test_a_short_write_never_publishes_truncated_content(tmp_path: Path) -> None:
     """F6: a partial ``write(2)`` must fail loudly, not publish a stub.
 
@@ -195,6 +202,7 @@ def test_a_short_write_never_publishes_truncated_content(tmp_path: Path) -> None
     assert sorted(p.name for p in tmp_path.iterdir()) == ["probe.py", "trajectory.yaml"]
 
 
+@posix_only("0o600 mode bits; Windows chmod only toggles read-only")
 def test_atomic_write_applies_the_requested_mode(tmp_path: Path) -> None:
     """F6: the secure variant used for shell RC files keeps 0600."""
     target = tmp_path / "rc"
@@ -230,7 +238,9 @@ def test_a_reader_never_sees_a_partial_trajectory(artifact_dir: Path) -> None:
     def reader() -> None:
         while not stop.is_set():
             try:
-                raw = path.read_text(encoding="utf-8")
+                # On Windows a plain open racing os.replace is denied for a
+                # few ms; the helper waits that out (a torn read would not).
+                raw = read_bytes_waiting_for_writer(path).decode("utf-8")
             except FileNotFoundError:
                 bad.append("trajectory disappeared")
                 continue

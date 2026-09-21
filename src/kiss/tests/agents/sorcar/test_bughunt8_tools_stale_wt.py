@@ -41,13 +41,7 @@ def repo(tmp_path: Path) -> Path:
 
 
 def _stale_path(repo: Path) -> Path:
-    return (
-        repo
-        / ".kiss-worktrees"
-        / "kiss_wt-abc123-1700000000"
-        / "src"
-        / "module.py"
-    )
+    return repo / ".kiss-worktrees" / "kiss_wt-abc123-1700000000" / "src" / "module.py"
 
 
 def test_edit_stale_worktree_path_falls_back_to_repo(repo: Path) -> None:
@@ -87,6 +81,7 @@ def test_write_stale_worktree_path_does_not_resurrect_zombie_worktree(
     tools = UsefulTools()
     stale = _stale_path(repo)
 
+    tools.Read(str(stale))
     out = tools.Write(str(stale), "NEW CONTENT\n")
 
     assert "Successfully wrote" in out, out

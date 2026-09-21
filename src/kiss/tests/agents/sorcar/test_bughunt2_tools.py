@@ -71,30 +71,23 @@ class TestVanishedWorktreeFallback:
         result = tools.Read(str(repo / "f.txt"))
         assert result == "hello parent\n", result
 
-    def test_write_parent_path_does_not_resurrect_zombie_worktree(
-        self, stale_worktree_setup
-    ):
+    def test_write_parent_path_does_not_resurrect_zombie_worktree(self, stale_worktree_setup):
         """Write must land in the parent repo, not a resurrected zombie dir."""
         repo, stale_wt, tools = stale_worktree_setup
         result = tools.Write(str(repo / "new.txt"), "data")
         assert result.startswith("Successfully wrote"), result
-        assert (repo / "new.txt").exists(), (
-            "Write did not land in the parent repo"
-        )
-        assert not stale_wt.exists(), (
-            "Write resurrected the torn-down worktree directory"
-        )
+        assert (repo / "new.txt").exists(), "Write did not land in the parent repo"
+        assert not stale_wt.exists(), "Write resurrected the torn-down worktree directory"
 
     def test_edit_parent_path_after_worktree_vanished(self, stale_worktree_setup):
         """Edit of an existing parent-repo file must apply the edit."""
         repo, _stale_wt, tools = stale_worktree_setup
+        tools.Read(str(repo / "f.txt"))
         result = tools.Edit(str(repo / "f.txt"), "hello", "bye")
         assert result.startswith("Successfully replaced"), result
         assert (repo / "f.txt").read_text() == "bye parent\n"
 
-    def test_bash_guard_allows_parent_path_after_worktree_vanished(
-        self, stale_worktree_setup
-    ):
+    def test_bash_guard_allows_parent_path_after_worktree_vanished(self, stale_worktree_setup):
         """Bash must run a parent-repo-path command (consistent with _spawn).
 
         ``_spawn`` already falls back to running with cwd = parent repo
@@ -102,7 +95,7 @@ class TestVanishedWorktreeFallback:
         the model to use the (nonexistent) worktree path is a dead end.
         """
         repo, _stale_wt, tools = stale_worktree_setup
-        result = tools.Bash(f"cat {repo}/f.txt", "read file")
+        result = tools.Bash(f"cat {repo.as_posix()}/f.txt", "read file")
         assert "hello parent" in result, result
 
     def test_live_worktree_still_remaps_and_guards(self, tmp_path):
@@ -118,10 +111,9 @@ class TestVanishedWorktreeFallback:
         tools.Write(str(repo / "n.txt"), "x")
         assert (wt / "n.txt").exists()
         assert not (repo / "n.txt").exists()
-        out = tools.Bash(f"echo hi > {repo}/f.txt", "write file")
+        out = tools.Bash(f"echo hi > {repo.as_posix()}/f.txt", "write file")
         assert "parent-repo path" in out, out
         assert (repo / "f.txt").read_text() == "main content\n"
-
 
 
 class TestAriaSnapshotNameExtraction:
@@ -179,8 +171,7 @@ class TestAriaSnapshotNameExtraction:
                 browser = p.chromium.launch(headless=True)
                 page = browser.new_page()
                 page.set_content(
-                    '<button onclick="this.textContent=\'done\'">'
-                    'Say "hi" now</button>'
+                    '<button onclick="this.textContent=\'done\'">Say "hi" now</button>'
                 )
                 tool._playwright = p
                 tool._browser = browser

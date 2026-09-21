@@ -237,7 +237,7 @@ export interface ChatWebviewHost {
 export type PanelEvent =
   // The root chat tab renamed itself or its task's status changed;
   // retitle the editor tab. `state` is '' (no task yet), 'running',
-  // 'ok' or 'fail' — the internal tab strip's status dot.
+  // 'ok' or 'fail' — the internal tab strip's status icon.
   | {kind: 'title'; title: string; state?: string}
   // A task in the panel just finished; bring the editor tab forward.
   | {kind: 'reveal'}
@@ -342,6 +342,10 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   getMyModels: [],
   saveMyModel: ['name', 'endpoint', 'apiKey', 'headers', 'originalName'],
   deleteMyModel: ['name'],
+  // The Inject promptlet panel's Add button: the daemon owns
+  // ~/.kiss/MY_INJECTION.md and answers with an unstamped `tricksData`
+  // list that every window's panel repaints from.
+  addTrick: ['text'],
   // The daemon builds and writes the shared chat page for both the
   // extension and the remote webapp, so the webview's serialized
   // transcript travels through whole; the daemon answers with a
@@ -379,6 +383,33 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   voiceTranscribe: ['audio', 'wakePrefixed', 'wakeSamples'],
 };
 
+/**
+ * The bash that runs the Update terminal: `/bin/bash` on POSIX; on Windows
+ * the Git for Windows bash (`Git\\bin\\bash.exe` under Program Files, the
+ * per-user Git install, or the MinGit the extension installed), never
+ * `System32\\bash.exe`, which is the WSL launcher and would run install.sh
+ * inside a different filesystem.  Returns null when no bash exists.
+ */
+export function updateShellPath(): string | null {
+  if (process.platform !== 'win32') return '/bin/bash';
+  const homeDir = process.env.USERPROFILE || os.homedir();
+  const roots = [
+    process.env.ProgramFiles,
+    process.env['ProgramFiles(x86)'],
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs'),
+  ];
+  const candidates = roots
+    .filter((r): r is string => !!r)
+    .map(r => path.join(r, 'Git', 'bin', 'bash.exe'));
+  candidates.push(path.join(homeDir, '.local', 'git', 'bin', 'bash.exe'));
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (dir && !/\\System32$/i.test(dir)) {
+      candidates.push(path.join(dir, 'bash.exe'));
+    }
+  }
+  return candidates.find(c => fs.existsSync(c)) ?? null;
+}
+
 export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _view?: ChatWebviewHost;
   private _panelHooks?: PanelHooks;
@@ -394,6 +425,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   // kept so a webview that resolves (or reloads) after the relay can
   // be brought up to date on its `ready`.
   private _lastMetaState?: Extract<ToWebviewMessage, {type: 'metaState'}>;
+  // History panel only (history-panel-mode): the last relayed
+  // activeTask, replayed on `ready` for the same reason.
+  private _lastActiveTask?: Extract<ToWebviewMessage, {type: 'activeTask'}>;
+  /**
+   * Called with the raw chat / task ids of the task this view's chat
+   * webview shows whenever they change (its `activeTask` message). The
+   * panel manager sets it on every editor panel's controller and
+   * extension.ts on the sidebar chat view, so the ids of the surface
+   * on screen reach the primary-sidebar history panel (postActiveTask).
+   */
+  public onActiveTask?: (chatId: string, taskId: string) => void;
   private _extensionUri: vscode.Uri;
   private _selectedModel: string;
   private _runningTabs: Set<string> = new Set();
@@ -1211,20 +1253,34 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _tryReadAndSendUrl(urlFile: string): void {
     let tunnel = '';
     let local = '';
+    let loopback = '';
+    let lanUrls: string[] = [];
     try {
       const data = JSON.parse(fs.readFileSync(urlFile, 'utf-8'));
       tunnel = data.tunnel || '';
       local = data.local || '';
+      loopback = data.loopback || '';
+      if (Array.isArray(data.lan)) {
+        lanUrls = data.lan.filter((u: unknown) => typeof u === 'string');
+      }
     } catch {}
     const tunnelActive = !!tunnel;
     const url = tunnel || local || '';
     const ntfyUrl = this._getNtfyUrl();
-    const key = `${tunnelActive ? '1' : '0'}|${url}|${ntfyUrl}`;
+    const key =
+      `${tunnelActive ? '1' : '0'}|${url}|${ntfyUrl}|` +
+      `${loopback}|${lanUrls.join(',')}`;
     if (key === this._lastSentUrl) return;
     this._lastSentUrl = key;
     const msg: ToWebviewMessage = {type: 'remote_url', url, tunnelActive};
     if (ntfyUrl) {
       msg.ntfyUrl = ntfyUrl;
+    }
+    if (loopback) {
+      msg.loopbackUrl = loopback;
+    }
+    if (lanUrls.length > 0) {
+      msg.lanUrls = lanUrls;
     }
     this._sendToWebview(msg);
   }
@@ -1382,6 +1438,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // before the webview loaded — or lost to a webview reload —
         // must not leave the panel on its placeholder dashes.
         if (this._lastMetaState) this._sendToWebview(this._lastMetaState);
+        if (this._lastActiveTask) this._sendToWebview(this._lastActiveTask);
         // The daemon owns the canonical tab registry, so `ready` is
         // forwarded whole: the daemon fans out the connId-scoped init
         // replies (models / input history / config), merges any legacy
@@ -1787,6 +1844,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         });
         break;
 
+      case 'activeTask':
+        this.onActiveTask?.(message.chatId, message.taskId);
+        break;
+
       case 'revealPanel':
         this._panelHooks?.onEvent({kind: 'reveal'});
         break;
@@ -1863,7 +1924,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   /**
    * Open a visible "KISS Sorcar Update" terminal whose terminal PROCESS is
-   * `/bin/bash -c <command>` (plus a signal guard and a hold-open tail),
+   * `bash -c <command>` (see {@link updateShellPath}; plus a signal guard
+   * and a hold-open tail),
    * instead of typing the command into an interactive shell with
    * `sendText`.
    *
@@ -1900,6 +1962,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * .extension-updated marker and the window reloads anyway.
    */
   private _openUpdateTerminal(cwd: string, command: string): void {
+    const shellPath = updateShellPath();
+    if (shellPath === null) {
+      vscode.window.showErrorMessage(
+        'Updating KISS Sorcar runs install.sh under bash, which was not found. ' +
+          'Install Git for Windows (it ships bash.exe) and try again.',
+      );
+      return;
+    }
     // audit0902-coverage:start
     const guarded =
       "trap '' INT TERM HUP; " +
@@ -1915,7 +1985,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     const terminal = vscode.window.createTerminal({
       name: 'KISS Sorcar Update',
       cwd,
-      shellPath: '/bin/bash',
+      shellPath,
       shellArgs: ['-c', guarded],
     });
     terminal.show();
@@ -2161,6 +2231,20 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   ): void {
     this._lastMetaState = {type: 'metaState', values, progressMd};
     this._sendToWebview(this._lastMetaState);
+  }
+
+  /**
+   * History panel (history-panel-mode): relay the chat / task ids of
+   * the chat surface on screen, so the panel highlights that task's
+   * row and scrolls it into view. Remembered so a webview that
+   * resolves after the relay catches up on `ready`.
+   *
+   * @param chatId The chat's id, '' when no surface reports one.
+   * @param taskId The task's id, '' when unknown.
+   */
+  public postActiveTask(chatId: string, taskId: string): void {
+    this._lastActiveTask = {type: 'activeTask', chatId, taskId};
+    this._sendToWebview(this._lastActiveTask);
   }
 
   private _measureSidebar(

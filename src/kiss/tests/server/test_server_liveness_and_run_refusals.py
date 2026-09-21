@@ -73,6 +73,7 @@ from kiss.server.web_server import (
     _generate_self_signed_cert,
     _snapshot_active_tabs,
 )
+from kiss.tests.conftest import requires_unix_sockets
 
 _UNAVAILABLE_MODEL = "kiss-test-no-such-model"
 """Model name guaranteed to be absent from ``get_available_models()``.
@@ -125,6 +126,7 @@ def _git(cwd: Path, *args: str) -> None:
     )
 
 
+@requires_unix_sockets
 class _ServerHarness(IsolatedAsyncioTestCase):
     """Real ``RemoteAccessServer`` on a temp UDS + ephemeral port."""
 

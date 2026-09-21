@@ -31,7 +31,10 @@ from pathlib import Path
 from typing import Any
 
 from kiss.server import sorcar
+from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
+
+pytestmark = requires_unix_sockets
 
 
 class AgentScriptHooksApiTest(DaemonRunApiHarness):

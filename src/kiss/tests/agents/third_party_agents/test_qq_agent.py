@@ -24,13 +24,13 @@ from typing import Any
 import requests
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from kiss.agents.third_party_agents.qq_agent import (
+from kiss.agents.third_party_agents.qq_sea import (
     QQAgent,
     QQChannelBackend,
     _config,
     _derive_signing_key,
 )
-from kiss.agents.third_party_agents.qq_agent import (
+from kiss.agents.third_party_agents.qq_sea import (
     tools as module_tools,
 )
 

@@ -28,6 +28,7 @@ from kiss.server.json_printer import (
     JsonPrinter,
     _extract_image_path_candidates,
 )
+from kiss.tests.conftest import is_root, posix_only
 
 # A real, valid 1x1 transparent PNG (67 bytes).
 _PNG_1PX = base64.b64decode(
@@ -268,8 +269,9 @@ class TestResultImagesFiltered:
         )
         assert "images" not in ev
 
+    @posix_only("chmod-based permission denial")
     def test_unreadable_file_skipped(self, tmp_path):
-        if os.geteuid() == 0:
+        if is_root():
             import pytest
 
             pytest.skip("permission bits are ignored when running as root")

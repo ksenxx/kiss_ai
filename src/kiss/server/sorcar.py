@@ -250,6 +250,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("deleteFrequentTask", required=("task",)),
     ApiCommand("setFavorite", required=("taskId", "isFavorite")),
     ApiCommand("getInputHistory"),
+    ApiCommand("getSeaCommands"),
     ApiCommand(
         "getWelcomeSuggestions", handler="get_welcome_suggestions"
     ),
@@ -261,6 +262,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("getMyModels"),
     ApiCommand("saveMyModel", required=("name",)),
     ApiCommand("deleteMyModel", required=("name",)),
+    ApiCommand("addTrick", required=("text",)),
     ApiCommand("getDefaultModel", handler="get_default_model"),
     ApiCommand("readKissConfig", handler="read_kiss_config"),
     ApiCommand(
@@ -298,6 +300,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("runUpdate", handler="run_update"),
     ApiCommand("updateModels", handler="update_models"),
     ApiCommand("snoozeUpdate", handler="snooze_update"),
+    ApiCommand("ping", handler="ping"),
     ApiCommand("serverReset", handler="server_reset"),
     ApiCommand(
         "voiceTranscribe", required=("audio",), handler="voice_transcribe"
@@ -1447,6 +1450,27 @@ class ServerApi:
         latest = cmd.get("latest")
         await self._backend._handle_snooze_update(
             latest if isinstance(latest, str) else "",
+        )
+
+    async def ping(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Answer a client's ordering probe with a direct ``pong``.
+
+        A connection's commands are dispatched one after another, so
+        the ``pong`` reaches the sender only once every command it sent
+        before the ``ping`` has been taken.  The remote webapp's
+        WebSocket shim (``kiss.server.web_server._WS_SHIM_JS``) relies
+        on that: after a lost session it flushes the commands the user
+        issued during the outage, sends ``ping`` and reloads the page
+        only when ``pong`` arrives, so nothing the reload discards was
+        still owed to the server.
+
+        Args:
+            cmd: The ``ping`` command (no fields are used).
+            ctx: The transport context of the current call; the reply
+                goes to this sender only.
+        """
+        await self._backend._endpoint_send(
+            ctx.endpoint, json.dumps({"type": "pong"}),
         )
 
     async def server_reset(

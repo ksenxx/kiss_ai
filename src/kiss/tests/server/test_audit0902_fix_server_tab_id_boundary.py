@@ -37,6 +37,7 @@ from websockets.asyncio.client import connect
 import kiss.core.vscode_config as vc
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.tests.conftest import requires_unix_sockets
 
 RAW_TAB = "  tab-1 "
 CANON_TAB = "tab-1"
@@ -210,6 +211,7 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             self.assertEqual(reply["tabId"], "")
         self._assert_no_backend_trace()
 
+    @requires_unix_sockets
     async def test_uds_padded_tab_id_registers_one_local_tab(self) -> None:
         reader, writer = await asyncio.open_unix_connection(str(self.uds_path))
 

@@ -11,11 +11,9 @@ import hashlib
 import json
 import logging
 import math
-import os
 import re
 import secrets
 import sys
-import tempfile
 import time as _time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -24,6 +22,8 @@ from typing import Any
 import yaml
 
 from kiss.core.config import kiss_home
+from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +206,7 @@ def load_json_config(path: Path, required_keys: tuple[str, ...]) -> dict[str, st
 def config_file_lock(path: Path) -> Iterator[None]:
     """Serialize read-modify-write cycles on a config file.
 
-    Acquires an exclusive ``fcntl.flock`` on a ``<name>.lock`` sibling
+    Acquires an exclusive file lock on a ``<name>.lock`` sibling
     of *path*, shared by every config writer across threads AND
     processes: :func:`save_json_config` and :func:`clear_json_config`
     take it around each write, and read-modify-write helpers (the
@@ -216,7 +216,7 @@ def config_file_lock(path: Path) -> Iterator[None]:
     the cycle's read (so the comparison sees it) or after its write
     (so it survives), never in between.
 
-    ``flock`` is NOT reentrant across separate opens, even in one
+    The lock is NOT reentrant across separate opens, even in one
     thread: code already holding this lock must write with the raw
     primitives (:func:`write_private_file`, ``Path.unlink``), never via
     :func:`save_json_config`/:func:`clear_json_config`.
@@ -227,40 +227,32 @@ def config_file_lock(path: Path) -> Iterator[None]:
     Yields:
         None while the lock is held.
     """
-    import fcntl
-
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.parent / (path.name + ".lock"), "a+b") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        lock_exclusive(lock_file)
         try:
             yield
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            unlock(lock_file)
 
 
 def write_private_file(path: Path, content: str) -> None:
     """Write *content* to *path* atomically with owner-only permissions.
 
-    Writes to a uniquely named temporary sibling file (created
-    ``0o600`` by :func:`tempfile.mkstemp`), then renames it over
-    *path*, so concurrent readers never observe a torn file, concurrent
-    writers never clobber each other's temp file, and secret content is
-    never even briefly world-readable.
+    Delegates to :func:`kiss.core.utils.atomic_write_text` with
+    ``mode=0o600``: the content is staged in a uniquely named sibling
+    file (created ``0o600`` by :func:`tempfile.mkstemp`) and renamed
+    over *path*, so concurrent readers never observe a torn file,
+    concurrent writers never clobber each other's temp file, and secret
+    content is never even briefly world-readable.  On Windows the
+    rename waits out a concurrent reader holding *path* open, where a
+    bare ``os.replace`` raises ``PermissionError``.
 
     Args:
         path: Destination file path.
         content: Full text content to persist.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fp:
-            fp.write(content)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    atomic_write_text(path, content, mode=0o600)
 
 
 def save_json_config(path: Path, data: dict[str, str]) -> None:
@@ -371,20 +363,30 @@ class ChannelConfig:
         metadata keys survive (readable via :meth:`load_metadata`) and
         the file is deleted when nothing but the secrets was stored.
 
+        The whole read-filter-write cycle runs under
+        :func:`config_file_lock`, so a concurrent :meth:`save` can never
+        land between the read and the write and be overwritten by the
+        stale filtered copy.  The lock is not reentrant, hence the raw
+        :func:`write_private_file` / ``unlink`` calls inside the block.
+
         Args:
             secret_keys: Keys holding real credentials (e.g. ``("token",)``).
         """
-        try:
-            cfg = json.loads(self.path.read_text())
-        except (OSError, ValueError):
-            return
-        if not isinstance(cfg, dict) or not any(k in cfg for k in secret_keys):
-            return
-        kept = {str(k): str(v) for k, v in cfg.items() if k not in secret_keys and v}
-        if kept:
-            save_json_config(self.path, kept)
-        else:
-            self.clear()
+        with config_file_lock(self.path):
+            try:
+                cfg = json.loads(self.path.read_text())
+            except (OSError, ValueError):
+                return
+            if not isinstance(cfg, dict) or not any(k in cfg for k in secret_keys):
+                return
+            kept = {str(k): str(v) for k, v in cfg.items() if k not in secret_keys and v}
+            if kept:
+                write_private_file(self.path, json.dumps(kept, indent=2))
+            else:
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    pass
 
 
 _BREAKER_FAILURE_LIMIT = 5
@@ -598,13 +600,12 @@ def save_channel_state(path: Path, state: dict[str, Any]) -> None:
 
 @contextlib.contextmanager
 def channel_state_lock(state_path: Path, blocking: bool) -> Iterator[Any | None]:
-    """Acquire the per-channel ``flock`` guarding a state file.
+    """Acquire the per-channel file lock guarding a state file.
 
     The same lock serializes the runner's tick (non-blocking: an
     overlapping tick skips) and the pairing admin's read-modify-write
-    (blocking: the admin waits for a running tick to finish), so an
-    approval can never be overwritten by a stale in-memory save.  On
-    platforms without ``fcntl`` the lock file is opened but not locked.
+    (polled with a deadline via :func:`_channel_state_lock_with_deadline`),
+    so an approval can never be overwritten by a stale in-memory save.
 
     Args:
         state_path: The state file whose sibling ``.lock`` file to lock.
@@ -619,20 +620,51 @@ def channel_state_lock(state_path: Path, blocking: bool) -> Iterator[Any | None]
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fp = lock_path.open("a+", encoding="utf-8")
     try:
-        try:
-            import fcntl
-        except ImportError:  # pragma: no cover - non-Unix platforms
-            yield fp
-            return
-        flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-        try:
-            fcntl.flock(fp.fileno(), flags)
-        except BlockingIOError:
+        if not lock_exclusive(fp, blocking=blocking):
             yield None
             return
         yield fp
     finally:
         fp.close()
+
+
+_ADMIN_LOCK_TIMEOUT_SECONDS = 30.0
+_ADMIN_LOCK_POLL_SECONDS = 0.25
+
+
+@contextlib.contextmanager
+def _channel_state_lock_with_deadline(state_path: Path, timeout: float) -> Iterator[None]:
+    """Hold the channel state lock, giving up after *timeout* seconds.
+
+    The tick holds the state lock for its whole duration, including the
+    launched agent's run, which has no upper bound.  A blocking acquire
+    would therefore make ``--approve`` / ``--list-pending`` appear hung
+    for hours; this polls the non-blocking lock against a monotonic
+    deadline and exits with an actionable message instead.
+
+    Args:
+        state_path: The state file whose sibling ``.lock`` file to lock.
+        timeout: Seconds to keep retrying before giving up.
+
+    Yields:
+        None while the lock is held.
+
+    Raises:
+        SystemExit: Nonzero when the lock is still held at the deadline.
+    """
+    deadline = _time.monotonic() + timeout
+    while True:
+        with channel_state_lock(state_path, blocking=False) as lock_fp:
+            if lock_fp is not None:
+                yield
+                return
+        if _time.monotonic() >= deadline:
+            print(
+                f"Error: the channel tick is still running (state lock held for "
+                f"{timeout:.0f}s); retry once the current run finishes"
+            )
+            sys.exit(1)
+        _time.sleep(_ADMIN_LOCK_POLL_SECONDS)
 
 
 def sanitize_state_component(name: str) -> str:
@@ -1762,10 +1794,13 @@ def _handle_pairing_admin(
     and exits nonzero.  Both flags require ``--channel`` (the state is
     per-channel).
 
-    The entire read-modify-write runs under the channel's state lock
-    (blocking mode), so an approval issued while a tick is running
-    waits for the tick to finish instead of being overwritten by the
-    runner's stale in-memory save.
+    The entire read-modify-write runs under the channel's state lock,
+    so an approval issued while a tick is running waits for the tick
+    to finish instead of being overwritten by the runner's stale
+    in-memory save.  The wait is bounded (``_ADMIN_LOCK_TIMEOUT_SECONDS``):
+    a tick that is mid-launch can hold the lock for the whole agent
+    run, so past the deadline the command exits nonzero asking the
+    operator to retry rather than hanging.
 
     Args:
         agent_cls: The channel agent class (for state-path derivation).
@@ -1783,7 +1818,7 @@ def _handle_pairing_admin(
         print("Error: --approve and --list-pending require --channel")
         sys.exit(1)
     state_path = derive_state_path(agent_cls, agent_label, workspace, channel)
-    with channel_state_lock(state_path, blocking=True):
+    with _channel_state_lock_with_deadline(state_path, _ADMIN_LOCK_TIMEOUT_SECONDS):
         state = load_channel_state(state_path)
         pending = state.get("pending_pairing", {})
         if list_pending:
@@ -1826,6 +1861,9 @@ def channel_main(
     ``channel_model_name`` / ``channel_max_budget`` config overrides
     when ``-m`` / ``-b`` are not passed, and supports the pairing admin
     flags ``--pairing``, ``--approve CODE``, and ``--list-pending``.
+    ``--quiet`` makes a poll tick print nothing unless it processed at
+    least one message, so a tick scheduled as a cron command job (an
+    always-on gateway) is silent when there is nothing to report.
 
     Args:
         agent_cls: The channel Agent class to instantiate (e.g. ``SlackAgent``).
@@ -1847,28 +1885,22 @@ def channel_main(
         _build_run_kwargs,
         _print_run_stats,
     )
+    from kiss.core.vscode_config import load_api_keys, load_api_keys_readonly
+
     # Import the canonical key store before any backend or connector
     # code runs: a direct CLI invocation does not inherit the kiss-web
     # daemon's environment, so ``KISS_MUSE_AUTH`` (the Muse-auth
     # opt-out) and channel tokens in ``$KISS_HOME/api_keys.env`` must
     # reach ``os.environ`` before the first ``muse_auth_enabled()``
     # check or credential migration — not when the API server happens
-    # to start later.  ``vscode_config`` needs POSIX file locking; on
-    # platforms without ``fcntl`` (Windows) there is no daemon-written
-    # canonical store to import, so the CLI must keep working without it.
+    # to start later.  A read-only $KISS_HOME (the store's lock file cannot be
+    # created) must neither stop the CLI nor drop a canonical
+    # KISS_MUSE_AUTH=0 opt-out: fall back to the lock-free,
+    # write-free import.
     try:
-        from kiss.core.vscode_config import load_api_keys, load_api_keys_readonly
-    except ImportError:
-        pass
-    else:
-        # A read-only $KISS_HOME (the store's lock file cannot be
-        # created) must neither stop the CLI nor drop a canonical
-        # KISS_MUSE_AUTH=0 opt-out: fall back to the lock-free,
-        # write-free import.
-        try:
-            load_api_keys()
-        except OSError:
-            load_api_keys_readonly()
+        load_api_keys()
+    except OSError:
+        load_api_keys_readonly()
 
     if len(sys.argv) <= 1:  # pragma: no branch
         parts = [f"Usage: {cli_name} [-m MODEL] [-e ENDPOINT] [-b BUDGET]"]
@@ -1876,7 +1908,7 @@ def channel_main(
         parts.append("[--workspace WS]")
         if make_backend is not None:
             parts.append("[--channel CH]")
-            parts.append("[--pairing] [--approve CODE] [--list-pending]")
+            parts.append("[--pairing] [--quiet] [--approve CODE] [--list-pending]")
         if extra_usage:
             parts.append(extra_usage)
         print(" ".join(parts))
@@ -1900,6 +1932,12 @@ def channel_main(
             action="store_true",
             default=False,
             help="Enable DM pairing: unapproved senders get a one-time approval code",
+        )
+        parser.add_argument(
+            "--quiet",
+            action="store_true",
+            default=False,
+            help="Print nothing unless the poll tick processed at least one message",
         )
         parser.add_argument(
             "--approve",
@@ -1937,6 +1975,7 @@ def channel_main(
             backend = make_backend(workspace=workspace)
         else:
             backend = make_backend()
+        quiet = bool(args.quiet)
         allow_users_raw = [u.strip() for u in args.allow_users.split(",") if u.strip()]
         allow_users: list[str] | None = None
         if allow_users_raw:
@@ -1944,7 +1983,7 @@ def channel_main(
             for raw in allow_users_raw:
                 resolved = backend.find_user(raw)
                 if resolved:
-                    if resolved != raw:
+                    if resolved != raw and not quiet:
                         print(f"  Resolved user {raw!r} -> {resolved}")
                     allow_users.append(resolved)
                 else:
@@ -1975,9 +2014,11 @@ def channel_main(
             dm_pairing=getattr(args, "pairing", False),
             cli_name=cli_name,
         )
-        print(f"Checking {channel_name} channel for pending messages...")
+        if not quiet:
+            print(f"Checking {channel_name} channel for pending messages...")
         count = runner.run_once()
-        print(f"Processed {count} message(s).")
+        if count or not quiet:
+            print(f"Processed {count} message(s).")
         return
 
     sig = inspect.signature(agent_cls)

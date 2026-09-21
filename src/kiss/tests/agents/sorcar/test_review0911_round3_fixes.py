@@ -221,14 +221,10 @@ class TestReclaimMarkerFlockConsistency:
                 sys.executable,
                 "-c",
                 (
-                    "import fcntl, sys\n"
+                    "import sys\n"
+                    "from kiss.core.file_lock import lock_exclusive\n"
                     "h = open(sys.argv[1], 'a+')\n"
-                    "try:\n"
-                    "    fcntl.flock(h.fileno(), "
-                    "fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
-                    "except OSError:\n"
-                    "    sys.exit(3)\n"
-                    "sys.exit(0)\n"
+                    "sys.exit(0 if lock_exclusive(h, blocking=False) else 3)\n"
                 ),
                 str(lock_path),
             ],

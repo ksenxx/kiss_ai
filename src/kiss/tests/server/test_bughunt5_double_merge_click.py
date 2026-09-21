@@ -53,7 +53,7 @@ class _BlockingMergeAgent(WorktreeSorcarAgent):
         self.merge_calls = 0
         self._calls_lock = threading.Lock()
 
-    def merge(self) -> str:
+    def merge(self, conflict_resolver: Any = None) -> str:
         """Simulate a slow merge (LLM commit-message + git squash-merge)."""
         with self._calls_lock:
             self.merge_calls += 1

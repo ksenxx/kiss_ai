@@ -6,7 +6,7 @@
 // A question is only answerable while its task is alive. The server emits
 // `askUserDone` only after an answer is accepted, so a task that ends while a
 // question is outstanding (error, stop, interrupt, or a plain done) would
-// otherwise leave a dead modal on screen and a '?' badge that never clears.
+// otherwise leave the composer stuck in answer mode and a '?' badge that never clears.
 
 'use strict';
 
@@ -72,9 +72,9 @@ function clickTab(win, tabId) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
+// The composer is in answer mode while the tab on screen has a question.
 function askModalVisible(win) {
-  const modal = win.document.getElementById('ask-user-modal');
-  return !!modal && modal.style.display === 'flex';
+  return win.document.body.classList.contains('ask-answering');
 }
 
 function attentionGlyph(win, tabId) {
@@ -91,7 +91,7 @@ const TERMINAL_EVENTS = [
   'task_stopped',
 ];
 
-// A task that ends while its own tab is on screen must take its modal away.
+// A task that ends while its own tab is on screen must take the composer out of answer mode.
 function testActiveTabAskClearedOnEachTerminalEvent() {
   for (const type of TERMINAL_EVENTS) {
     const win = makeWebview();
@@ -109,7 +109,7 @@ function testActiveTabAskClearedOnEachTerminalEvent() {
     assert.strictEqual(
       askModalVisible(win),
       false,
-      `${type} must take the dead question modal away`,
+      `${type} must take the composer out of answer mode`,
     );
     assert.strictEqual(
       attentionGlyph(win, tabId),
@@ -149,7 +149,7 @@ function testBackgroundAskClearedOnEachTerminalEvent() {
     assert.strictEqual(
       askModalVisible(win),
       false,
-      `${type} must not pop a modal over the tab the user is on`,
+      `${type} must not put the composer of the tab the user is on into answer mode`,
     );
 
     clickTab(win, askTab);
@@ -253,10 +253,10 @@ function testSameChatIdSiblingKeepsItsQuestion() {
     askModalVisible(win),
     "the sibling's question must still be answerable",
   );
-  const modal = win.document.getElementById('ask-user-modal');
-  assert.ok(
-    modal.textContent.includes('Which remote?'),
-    'the sibling must still show its own question text',
+  assert.strictEqual(
+    attentionGlyph(win, siblingTab),
+    '',
+    'the sibling question is on screen, so its badge is gone',
   );
 
   clickTab(win, doneTab);
@@ -284,9 +284,8 @@ function testSubmittingAnswerStillClearsSameChatIdSiblings() {
   send(win, {type: 'askUser', question: 'Which branch?', tabId: firstTab});
   send(win, {type: 'askUser', question: 'Which remote?', tabId: secondTab});
 
-  const modal = win.document.getElementById('ask-user-modal');
-  modal.querySelector('.ask-user-input').value = 'origin';
-  modal.querySelector('.ask-user-submit').click();
+  win.document.getElementById('task-input').value = 'origin';
+  win.document.getElementById('send-btn').click();
 
   assert.strictEqual(
     attentionGlyph(win, firstTab),
@@ -323,7 +322,7 @@ function testTerminalEventWithoutQuestionIsHarmless() {
   assert.strictEqual(
     askModalVisible(win),
     false,
-    'no modal may appear for a tab with no question',
+    'the composer stays a prompt box for a tab with no question',
   );
 
   send(win, {type: 'task_done', success: true});

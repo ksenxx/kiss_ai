@@ -41,11 +41,13 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
 from kiss.core import config as config_module
 from kiss.core import vscode_config
+from kiss.core.processes import pid_alive
 from kiss.server import agent_state
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
+from kiss.tests.conftest import requires_unix_sockets
 
 #: A real MCP server: it records its pid, then serves the stdio
 #: transport for real.  Used to prove the daemon reaps its children.
@@ -79,25 +81,14 @@ def _find_free_port() -> int:
         return port
 
 
-def _pid_alive(pid: int) -> bool:
-    """Return True while *pid* still names a live process."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:  # pragma: no cover — foreign-owned pid
-        return True
-    return True
-
-
 def _wait_pid_dead(pid: int, timeout: float) -> bool:
     """Poll until *pid* is gone or *timeout* seconds elapse."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not _pid_alive(pid):
+        if not pid_alive(pid):
             return True
         time.sleep(0.1)
-    return not _pid_alive(pid)
+    return not pid_alive(pid)
 
 
 class _DaemonHarness(IsolatedAsyncioTestCase):
@@ -184,6 +175,7 @@ class TestStartupAppliesPersistedConfig(_DaemonHarness):
             "closed the settings panel",
         )
 
+    @requires_unix_sockets
     async def test_startup_and_save_config_agree(self) -> None:
         """The start-up path and the ``saveConfig`` path apply the same value."""
         await self.server.start_async()
@@ -237,7 +229,7 @@ class TestShutdownReapsMcpChildren(_DaemonHarness):
 
     async def asyncTearDown(self) -> None:
         MCPManager.instance().shutdown()
-        if self._mcp_pid and _pid_alive(self._mcp_pid):  # pragma: no cover
+        if self._mcp_pid and pid_alive(self._mcp_pid):  # pragma: no cover
             os.kill(self._mcp_pid, 9)
         await super().asyncTearDown()
 
@@ -264,7 +256,7 @@ class TestShutdownReapsMcpChildren(_DaemonHarness):
         self.assertFalse(conn.error, f"MCP handshake failed: {conn.error}")
         self._mcp_pid = int(pidfile.read_text(encoding="utf-8"))
         self.assertTrue(
-            _pid_alive(self._mcp_pid), "the MCP child died before shutdown",
+            pid_alive(self._mcp_pid), "the MCP child died before shutdown",
         )
 
         await self._stop()

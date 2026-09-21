@@ -112,8 +112,14 @@ class TestDockerBashToolExposesBothLimits(unittest.TestCase):
         parameters = inspect.signature(self._bash_tool()).parameters
         self.assertEqual(
             list(parameters),
-            ["command", "description", "timeout_seconds", "max_output_chars"],
+            ["command", "description", "timeout_seconds", "max_output_chars", "background"],
         )
+
+    def test_background_is_refused_with_the_nohup_fallback(self) -> None:
+        """Docker mode has no job registry; the model is told what to do instead."""
+        result = self._bash_tool()("sleep 30", "would be a background job", background=True)
+        self.assertTrue(result.startswith("Error:"), result)
+        self.assertIn("nohup", result)
 
     def test_docker_bash_without_a_manager_still_raises(self) -> None:
         """The widened forwarder keeps the base class's guard."""

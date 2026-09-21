@@ -54,7 +54,6 @@ import os
 import re
 import ssl
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -169,6 +168,43 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_DECISIONS_MODELS_URL = f"{OPENROUTER_MODELS_URL}?output_modalities=decisions"
 
 
+_OPENROUTER_CACHE_PRICE_FIELDS = (
+    ("input_cache_read", "cache_read_price_per_1M"),
+    ("input_cache_write", "cache_write_price_per_1M"),
+)
+_CACHE_PRICE_CATALOG_FIELDS = tuple(field for _api, field in _OPENROUTER_CACHE_PRICE_FIELDS)
+
+
+def openrouter_cache_prices(pricing: dict[str, Any]) -> dict[str, float]:
+    """Convert OpenRouter per-token cache prices to catalog per-1M fields.
+
+    OpenRouter publishes ``pricing.input_cache_read`` and
+    ``pricing.input_cache_write`` (USD per token, as strings) for every
+    model whose upstream bills cache hits / cache writes at a rate other
+    than the plain input price.  They are the billing authority for
+    ``openrouter/*`` models, so the catalog stores them verbatim as
+    ``cache_read_price_per_1M`` / ``cache_write_price_per_1M`` and
+    ``model_info._apply_cache_pricing`` leaves such entries alone.  A
+    field OpenRouter omits (``None`` / ``""``) is left out of the result
+    so ``calculate_cost`` falls back to the input price for it.
+
+    Args:
+        pricing: The ``pricing`` object of one ``/api/v1/models`` entry.
+
+    Returns:
+        Zero, one or two catalog fields, rounded to 6 decimals per 1M
+        tokens (sub-cent cache rates such as $0.0083/M need the extra
+        precision that the 3-decimal input/output rounding would drop).
+    """
+    prices: dict[str, float] = {}
+    for api_field, catalog_field in _OPENROUTER_CACHE_PRICE_FIELDS:
+        raw = pricing.get(api_field)
+        if raw is None or raw == "":
+            continue
+        prices[catalog_field] = round(float(raw) * 1_000_000, 6)
+    return prices
+
+
 def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
     """Fetch all models from OpenRouter (public API, no auth).
 
@@ -217,6 +253,7 @@ def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
                 "output_price_per_1M": round(completion_per_tok * 1_000_000, 3),
                 "source": "openrouter",
                 "decisions": decisions,
+                **openrouter_cache_prices(pricing),
             }
     if verbose:  # pragma: no branch
         print(f"    Found {len(models)} models ({skipped_deprecated} deprecated filtered out)")
@@ -386,10 +423,21 @@ def fetch_openai(verbose: bool = False) -> dict[str, dict]:
 
 
 def get_current_model_info() -> dict[str, dict]:
+    """Return the loaded catalog as plain dicts keyed like MODEL_INFO.json.
+
+    Cache prices are taken from the on-disk JSON rather than from
+    ``ModelInfo``, because ``model_info._apply_cache_pricing`` fills
+    unpublished entries with provider defaults at load time; comparing
+    those derived values with OpenRouter's listing would make
+    ``compute_changes`` re-emit (or wrongly remove) cache prices on every
+    run.  Only explicitly stored fields count as "current".
+    """
     from kiss.core.models.model_info import MODEL_INFO
 
-    return {
-        name: {
+    on_disk = _read_model_info_json(MODEL_INFO_PATH) if MODEL_INFO_PATH.exists() else {}
+    current: dict[str, dict] = {}
+    for name, info in MODEL_INFO.items():
+        entry = {
             "context_length": info.context_length,
             "input_price_per_1M": info.input_price_per_1M,
             "output_price_per_1M": info.output_price_per_1M,
@@ -401,8 +449,12 @@ def get_current_model_info() -> dict[str, dict]:
             "alias_of": info.alias_of,
             "use_responses_api": info.use_responses_api,
         }
-        for name, info in MODEL_INFO.items()
-    }
+        raw = on_disk.get(name, {})
+        for _api_field, catalog_field in _OPENROUTER_CACHE_PRICE_FIELDS:
+            if catalog_field in raw:
+                entry[catalog_field] = raw[catalog_field]
+        current[name] = entry
+    return current
 
 
 def _noop_token_callback(_token: str) -> None:
@@ -1359,6 +1411,38 @@ def _lookup_openrouter_pricing(
     return None
 
 
+def _cache_price_changes(cur: dict[str, Any], fetched: dict[str, Any]) -> dict[str, float | None]:
+    """Return the cache-price fields of ``fetched`` that differ from ``cur``.
+
+    Compares ``cache_read_price_per_1M`` / ``cache_write_price_per_1M``
+    (see :func:`openrouter_cache_prices`) with the catalog entry ``cur``
+    (``{}`` for a brand-new model) and returns the fields whose values
+    differ by more than a tenth of a cent per 1M tokens, so a sub-cent
+    DeepSeek cache rate still registers while float noise does not.  A
+    price the catalog stores but OpenRouter no longer publishes is
+    returned as ``None`` so :func:`apply_updates_to_file` drops the field
+    and the model reverts to the input-price fallback.
+
+    Args:
+        cur: The current catalog entry, or ``{}`` when the model is new.
+        fetched: One entry of :func:`fetch_openrouter`'s result.
+
+    Returns:
+        The changed fields, ready to merge into an ``updates`` ``changes``
+        dict or a ``new_models`` entry.
+    """
+    changed: dict[str, float | None] = {}
+    for _api_field, catalog_field in _OPENROUTER_CACHE_PRICE_FIELDS:
+        value = fetched.get(catalog_field)
+        current_value = cur.get(catalog_field)
+        if value is None:
+            if current_value is not None:
+                changed[catalog_field] = None
+        elif current_value is None or abs(value - current_value) > 0.0001:
+            changed[catalog_field] = value
+    return changed
+
+
 def compute_changes(
     current: dict[str, dict],
     openrouter: dict[str, dict],
@@ -1392,6 +1476,7 @@ def compute_changes(
             out_delta = abs(fetched["output_price_per_1M"] - cur["output_price_per_1M"])
             if out_delta > 0.005:  # pragma: no branch
                 changed["output_price_per_1M"] = fetched["output_price_per_1M"]
+            changed.update(_cache_price_changes(cur, fetched))
             if changed:  # pragma: no branch
                 updates.append({"name": name, "changes": changed, "source": "openrouter"})
         else:
@@ -1411,6 +1496,7 @@ def compute_changes(
                         "source": "openrouter",
                         "needs_pricing": not has_pricing,
                         "is_decisions": fetched.get("decisions", False),
+                        **_cache_price_changes({}, fetched),
                     }
                 )
 
@@ -1872,17 +1958,12 @@ def _write_model_info_json(path: Path, data: dict[str, dict]) -> None:
         path: The catalog file to publish.
         data: The catalog contents, mutated in place by the context cap.
     """
+    from kiss.core.utils import atomic_write_text
+
     _normalize_context_caps(data)
     sorted_data = dict(sorted(data.items()))
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, staged = tempfile.mkstemp(prefix=f".{path.name}-", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(sorted_data, indent=2) + "\n")
-        os.replace(staged, path)
-    except BaseException:
-        Path(staged).unlink(missing_ok=True)
-        raise
+    atomic_write_text(path, json.dumps(sorted_data, indent=2) + "\n")
 
 
 def apply_updates_to_file(
@@ -1901,14 +1982,16 @@ def apply_updates_to_file(
     Args:
         updates: ``[{"name": str, "changes": {field: value, ...}}]``.
             ``changes`` may target ``context_length``, ``input_price_per_1M``,
-            ``output_price_per_1M``, ``fc``, ``emb``, ``gen``, ``thinking``,
-            ``use_responses_api``, ``dec``.  A ``thinking`` value of ``None``
-            and a falsy ``use_responses_api`` / ``dec`` value remove their
-            field.
+            ``output_price_per_1M``, ``cache_read_price_per_1M``,
+            ``cache_write_price_per_1M``, ``fc``, ``emb``, ``gen``,
+            ``thinking``, ``use_responses_api``, ``dec``.  A ``thinking``
+            or cache-price value of ``None`` and a falsy
+            ``use_responses_api`` / ``dec`` value remove their field.
         new_models: Each entry must carry at minimum ``name``,
             ``context_length``, ``input_price_per_1M``, ``output_price_per_1M``.
             Optional flags: ``fc`` (default True), ``emb`` (False),
-            ``gen`` (True), ``dec`` (False), ``thinking``, ``needs_pricing``.
+            ``gen`` (True), ``dec`` (False), ``thinking``, ``needs_pricing``,
+            ``cache_read_price_per_1M``, ``cache_write_price_per_1M``.
         deprecated: ``[{"name": str, "reason": str}]``; removed by name.
         current: Snapshot of the pre-update ``MODEL_INFO`` (used to
             preserve unchanged fields when applying updates to models that
@@ -1952,6 +2035,8 @@ def apply_updates_to_file(
                 entry.pop("thinking", None)
             elif field in ("use_responses_api", "dec") and not value:
                 entry.pop(field, None)
+            elif field in _CACHE_PRICE_CATALOG_FIELDS and value is None:
+                entry.pop(field, None)
             else:
                 entry[field] = value
         if entry.get("comment") == "NEW: needs pricing" and entry["input_price_per_1M"] > 0:
@@ -1979,6 +2064,7 @@ def apply_updates_to_file(
             use_responses_api=nm.get("use_responses_api", False),
             dec=nm.get("dec", False),
         )
+        entry.update(_cache_price_changes({}, nm))
         _write_entry_with_thinking_split(data, nm["name"], entry)
         added += 1
 

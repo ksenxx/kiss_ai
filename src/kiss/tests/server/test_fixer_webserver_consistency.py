@@ -40,8 +40,10 @@ from kiss.server.web_server import (
     _parse_version_py,
     _version_tuple,
 )
+from kiss.tests.conftest import requires_unix_sockets
 
 
+@requires_unix_sockets
 class _UdsHarness(unittest.TestCase):
     """Shared UDS harness: RemoteAccessServer on a temp unix socket.
 

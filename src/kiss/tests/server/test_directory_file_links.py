@@ -39,6 +39,7 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
+from kiss.tests.conftest import is_root, posix_only
 
 
 def _free_port() -> int:
@@ -148,7 +149,9 @@ class TestDirectoryFileLinks(IsolatedAsyncioTestCase):
 
     async def test_file_reply_has_no_directory_flag(self) -> None:
         """Regular-file replies carry no isDirectory marker."""
-        (self.work_dir / "plain.txt").write_text("x\n")
+        # newline="\n": the reply echoes the bytes on disk (Windows text
+        # mode would otherwise store "\r\n").
+        (self.work_dir / "plain.txt").write_text("x\n", newline="\n")
         reply = await self._open("plain.txt")
         self.assertNotIn("error", reply)
         self.assertEqual(reply["content"], "x\n")
@@ -192,6 +195,7 @@ class TestDirectoryFileLinks(IsolatedAsyncioTestCase):
         # header + blank + capped entries + note
         self.assertEqual(len(lines), 2 + _DIR_LISTING_MAX_ENTRIES + 1)
 
+    @posix_only("245-character entry names exceed the Windows MAX_PATH limit")
     async def test_long_entry_names_hit_character_cap(self) -> None:
         """The character cap truncates before the entry cap when lines
         are long, keeping one click's reply bounded in bytes."""
@@ -218,10 +222,13 @@ class TestDirectoryFileLinks(IsolatedAsyncioTestCase):
         """Path("/").name is empty; the reply falls back to the path."""
         reply = await self._open("/")
         self.assertNotIn("error", reply)
-        self.assertEqual(reply["name"], "/")
-        self.assertTrue(reply["content"].startswith("/:\n"))
+        # "/" resolves to the current drive's root ("C:\\") on Windows.
+        root = str(Path("/").resolve())
+        self.assertEqual(reply["name"], root)
+        self.assertTrue(reply["content"].startswith(f"{root}:\n"))
 
-    @skipIf(os.geteuid() == 0, "root ignores directory permissions")
+    @posix_only("chmod permission bits")
+    @skipIf(is_root(), "root ignores directory permissions")
     async def test_unreadable_directory_replies_error(self) -> None:
         """A directory that cannot be listed produces an error reply."""
         locked = self.work_dir / "locked"
@@ -231,7 +238,8 @@ class TestDirectoryFileLinks(IsolatedAsyncioTestCase):
         self.assertIn("error", reply)
         self.assertIn("Failed to read", reply["error"])
 
-    @skipIf(os.geteuid() == 0, "root ignores directory permissions")
+    @posix_only("chmod permission bits")
+    @skipIf(is_root(), "root ignores directory permissions")
     async def test_unstatable_entry_is_listed_as_file(self) -> None:
         """An entry whose type cannot be stat'ed still shows up (no /).
 

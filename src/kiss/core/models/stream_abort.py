@@ -20,6 +20,7 @@ then closes.
 """
 
 import logging
+import os
 import socket
 import threading
 import time
@@ -190,6 +191,14 @@ class StreamAbortWatchdog:
         just leaves the close fallback in :meth:`_abort` to do what it
         can.
 
+        On Windows the socket is closed as well: Winsock's ``shutdown``
+        does not wake a ``recv()`` already blocked in another thread
+        (measured: the reader stays parked until the SDK's read timeout),
+        whereas ``closesocket`` makes it return ``WSAENOTSOCK`` at once.
+        The descriptor-reuse hazard that keeps ``close()`` out of the
+        POSIX path does not arise there: the woken reader gets an error
+        instead of polling a recycled descriptor.
+
         Returns:
             ``True`` when the socket was found and shut down.
         """
@@ -203,6 +212,8 @@ class StreamAbortWatchdog:
             )
             if sock is not None:
                 sock.shutdown(socket.SHUT_RDWR)
+                if os.name == "nt":  # pragma: no cover — Windows-only branch
+                    sock.close()
                 return True
         except Exception:
             logger.debug("Exception caught", exc_info=True)

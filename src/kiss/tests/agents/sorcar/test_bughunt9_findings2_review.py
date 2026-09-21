@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import pty
 import shutil
 import stat
 import subprocess
@@ -48,6 +47,7 @@ from kiss.agents.sorcar.mcp_servers import (
     make_mcp_tools,
 )
 from kiss.agents.sorcar.persistence import _add_task
+from kiss.tests.conftest import posix_only
 
 
 class _TempDbTestBase:
@@ -175,6 +175,7 @@ class TestTokenFileCaseAndReservedNames:
                 "con", "nul", "com1", "lpt9",
             ), f"{name!r} produced reserved basename {file_name!r}"
 
+    @posix_only("POSIX mode bits")
     def test_existing_world_readable_auth_dir_is_tightened(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -233,8 +234,9 @@ def real_stdin(
     captured std streams have no ``fileno()``, which the MCP stdio
     transport requires to spawn the real server subprocess.
     """
-    master_fd, slave_fd = pty.openpty()
-    stdin_stream = os.fdopen(slave_fd, "r", closefd=True)
+    # ``os.devnull`` has a real descriptor on every platform (Windows has
+    # no pty) and nothing reads stdin while the client talks to the child.
+    stdin_stream = open(os.devnull, encoding="utf-8")
     errlog = (tmp_path / "mcp_errlog.txt").open("w", encoding="utf-8")
     monkeypatch.setattr(sys, "stdin", stdin_stream)
     monkeypatch.setattr(sys, "stderr", errlog)
@@ -248,7 +250,6 @@ def real_stdin(
     finally:
         errlog.close()
         stdin_stream.close()
-        os.close(master_fd)
 
 
 class TestBuiltinNameCollision:

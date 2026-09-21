@@ -32,12 +32,14 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.conftest import IS_WINDOWS, posix_only
 
 _ROOT = Path(__file__).resolve().parents[4]
 _INSTALL_KEYS = _ROOT / "scripts" / "install-api-keys.sh"
@@ -85,6 +87,7 @@ def _run(
     )
 
 
+@posix_only("drives the bash install-api-keys.sh against a ~/.bashrc")
 class InstallApiKeysTest(unittest.TestCase):
     """The remote's own ~/.bashrc has to survive being wired up."""
 
@@ -243,7 +246,7 @@ class RemoteConfigTest(unittest.TestCase):
 
     def _configure(self, *args: str) -> subprocess.CompletedProcess[str]:
         """Run the real script over the sandbox configuration file."""
-        done = _run("python3", str(_REMOTE_CONFIG), str(self.config), *args)
+        done = _run(sys.executable, str(_REMOTE_CONFIG), str(self.config), *args)
         self.assertEqual(done.returncode, 0, done.stderr)
         return done
 
@@ -306,12 +309,13 @@ class RemoteConfigTest(unittest.TestCase):
         self.assertEqual(saved["work_dir"], _SERVER)
         self.assertFalse((real.parent / "config.json.sorcar-new").exists())
 
+    @posix_only("a directory mode of 0o500 does not block file creation on Windows")
     def test_a_file_that_cannot_be_kept_is_not_replaced_either(self) -> None:
         """Stopping the deploy beats destroying the only copy of the settings."""
         self.config.write_text("{not json")
         self.tmp.chmod(0o500)                      # nothing new can be created here
         try:
-            done = _run("python3", str(_REMOTE_CONFIG), str(self.config), _SERVER)
+            done = _run(sys.executable, str(_REMOTE_CONFIG), str(self.config), _SERVER)
         finally:
             self.tmp.chmod(0o700)
 
@@ -336,7 +340,8 @@ class RemoteConfigTest(unittest.TestCase):
         self.assertGreaterEqual(len(password), 12)
         self.assertEqual(
             json.loads(self.config.read_text())["remote_password"], password)
-        self.assertEqual(self.config.stat().st_mode & 0o077, 0)
+        if not IS_WINDOWS:  # Windows chmod carries no group/other bits
+            self.assertEqual(self.config.stat().st_mode & 0o077, 0)
 
     def test_no_half_written_file_is_left_behind(self) -> None:
         """The new content is renamed over the old one, never poured into it.
@@ -388,7 +393,7 @@ class RunningTasksTest(unittest.TestCase):
 
     def _count(self, *args: str) -> tuple[int, str]:
         """Run the real script and return the count it printed and its output."""
-        done = _run("python3", str(_RUNNING_TASKS), str(self.db), *args)
+        done = _run(sys.executable, str(_RUNNING_TASKS), str(self.db), *args)
         self.assertEqual(done.returncode, 0, done.stderr)
         return int(done.stdout.splitlines()[0]), done.stdout
 
@@ -432,16 +437,16 @@ class RunningTasksTest(unittest.TestCase):
         # query fails -- so nothing can be said about what runs out of it.
         self.db.write_bytes(b"SQLite format 3\x00" + b"\x00" * 512)
 
-        done = _run("python3", str(_RUNNING_TASKS), str(self.db), "300")
+        done = _run(sys.executable, str(_RUNNING_TASKS), str(self.db), "300")
 
         self.assertEqual(done.returncode, 1)
         self.assertEqual(done.stdout.splitlines()[0], "unknown")
 
     def test_the_wrong_number_of_arguments_is_a_usage_error(self) -> None:
         """A silent 0 would read as "nothing is running"."""
-        done = _run("python3", str(_RUNNING_TASKS))
+        done = _run(sys.executable, str(_RUNNING_TASKS))
         self.assertEqual(done.returncode, 2)
-        done = _run("python3", str(_RUNNING_TASKS), str(self.db), "soon")
+        done = _run(sys.executable, str(_RUNNING_TASKS), str(self.db), "soon")
         self.assertEqual(done.returncode, 2)
 
 
@@ -467,7 +472,7 @@ class FingerprintTest(unittest.TestCase):
 
     def _fingerprint(self) -> str:
         """Return the fingerprint the real script prints."""
-        done = _run("python3", str(_FINGERPRINT), str(self.db))
+        done = _run(sys.executable, str(_FINGERPRINT), str(self.db))
         self.assertEqual(done.returncode, 0, done.stderr)
         return done.stdout.strip()
 
@@ -550,14 +555,14 @@ class FingerprintTest(unittest.TestCase):
         """An empty answer must never read as "nothing changed"."""
         self.db.write_bytes(b"not a database")
 
-        done = _run("python3", str(_FINGERPRINT), str(self.db))
+        done = _run(sys.executable, str(_FINGERPRINT), str(self.db))
 
         self.assertEqual(done.returncode, 1)
         self.assertEqual(done.stdout.strip(), "")
 
     def test_the_wrong_number_of_arguments_is_a_usage_error(self) -> None:
         """A blank line would compare equal to another blank line."""
-        self.assertEqual(_run("python3", str(_FINGERPRINT)).returncode, 2)
+        self.assertEqual(_run(sys.executable, str(_FINGERPRINT)).returncode, 2)
 
 
 class CarryOverTablesTest(unittest.TestCase):
@@ -594,7 +599,7 @@ class CarryOverTablesTest(unittest.TestCase):
 
     def _carry(self) -> subprocess.CompletedProcess[str]:
         """Run the real script and require it to succeed."""
-        done = _run("python3", str(_CARRY_OVER), str(self.old), str(self.new))
+        done = _run(sys.executable, str(_CARRY_OVER), str(self.old), str(self.new))
         self.assertEqual(done.returncode, 0, done.stderr)
         return done
 
@@ -690,7 +695,7 @@ class CarryOverTablesTest(unittest.TestCase):
         self._make(self.new, {})
         self.new.chmod(0o444)
         try:
-            done = _run("python3", str(_CARRY_OVER), str(self.old), str(self.new))
+            done = _run(sys.executable, str(_CARRY_OVER), str(self.old), str(self.new))
         finally:
             self.new.chmod(0o644)
 
@@ -698,9 +703,10 @@ class CarryOverTablesTest(unittest.TestCase):
 
     def test_the_wrong_number_of_arguments_is_a_usage_error(self) -> None:
         """Silence would look like a successful carry-over."""
-        self.assertEqual(_run("python3", str(_CARRY_OVER)).returncode, 2)
+        self.assertEqual(_run(sys.executable, str(_CARRY_OVER)).returncode, 2)
 
 
+@posix_only("drives the bash sync-task-db.sh with a bash ssh stand-in")
 class ReplacementNeverLosesTest(unittest.TestCase):
     """The one destructive step of a deploy, held to its promise."""
 

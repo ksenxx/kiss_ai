@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for gmail_agent — no mocks or test doubles.
+"""Integration tests for gmail_sea — no mocks or test doubles.
 
 Tests token persistence, tool creation, GmailAgent construction,
 authentication workflows, body extraction, and tool function signatures.
@@ -26,7 +26,7 @@ from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents.gmail_agent import (
+from kiss.agents.third_party_agents.gmail_sea import (
     GmailAgent,
     GmailChannelBackend,
     _credentials_path,
@@ -36,6 +36,7 @@ from kiss.agents.third_party_agents.gmail_agent import (
     _token_path,
     main,
 )
+from kiss.tests.conftest import IS_WINDOWS
 
 
 def _backup_and_clear() -> tuple[str | None, str | None]:
@@ -84,9 +85,11 @@ class TestTokenPersistence:
         creds = Credentials(token="fake-perm-test")
         _save_credentials(creds)
         path = _token_path()
+        assert path.exists()
+        # NTFS has no POSIX mode bits: chmod(0o600) is a no-op there.
         mode = path.stat().st_mode
-        assert mode & stat.S_IRWXG == 0
-        assert mode & stat.S_IRWXO == 0
+        assert IS_WINDOWS or mode & stat.S_IRWXG == 0
+        assert IS_WINDOWS or mode & stat.S_IRWXO == 0
 
 
 class TestBodyExtraction:
@@ -393,7 +396,7 @@ class TestCLIMain:
         import sys
 
         original_argv = sys.argv
-        sys.argv = ["gmail_agent"]
+        sys.argv = ["gmail_sea"]
         try:
             main()
             assert False, "Should have raised SystemExit"

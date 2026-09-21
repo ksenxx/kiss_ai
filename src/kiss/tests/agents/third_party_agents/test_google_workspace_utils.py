@@ -52,7 +52,7 @@ from kiss.agents.third_party_agents._google_workspace_utils import (
     save_google_credentials,
     token_path,
 )
-from kiss.agents.third_party_agents.google_calendar_agent import (
+from kiss.agents.third_party_agents.gcal_sea import (
     _SCOPES,
     _SERVICE,
     GoogleCalendarAgent,
@@ -138,9 +138,9 @@ def test_load_credentials_wrong_shape_json_returns_none(isolated_kiss_home) -> N
 
 def test_tools_survives_wrong_shape_token_files(isolated_kiss_home) -> None:
     """Each Google agent module's tools() works with a wrong-shape token.json."""
-    import kiss.agents.third_party_agents.google_calendar_agent as gcal_mod
-    import kiss.agents.third_party_agents.google_docs_agent as gdocs_mod
-    import kiss.agents.third_party_agents.google_drive_agent as gdrive_mod
+    import kiss.agents.third_party_agents.gcal_sea as gcal_mod
+    import kiss.agents.third_party_agents.gdocs_sea as gdocs_mod
+    import kiss.agents.third_party_agents.gdrive_sea as gdrive_mod
 
     modules = {
         "google_calendar": gcal_mod,

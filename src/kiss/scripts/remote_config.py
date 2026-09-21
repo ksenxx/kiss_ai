@@ -37,7 +37,6 @@ than relying on the checkout there being new enough to have it.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import secrets
@@ -46,7 +45,54 @@ import string
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import IO, Any
+
+# Self-contained on purpose (see the module docstring): this file travels
+# alone to the machine it configures, so it cannot use kiss.core.file_lock.
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — Windows has no fcntl
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt  # type: ignore[import-not-found]
+except ImportError:  # POSIX has no msvcrt
+    msvcrt = None  # type: ignore[assignment]
+
+
+def _lock_exclusive(lock_file: IO[str]) -> None:
+    """Take an exclusive lock on *lock_file*: ``flock`` on POSIX, ``msvcrt`` on Windows."""
+    if fcntl is not None:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+    elif msvcrt is not None:  # pragma: no cover — Windows-only branch
+        while True:
+            lock_file.seek(0)
+            try:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
+                return
+            except OSError:
+                time.sleep(0.05)
+
+
+def _replace_waiting_for_readers(source: str, target: str) -> None:
+    """``os.replace`` that waits out a Windows reader holding *target* open (up to 1 s)."""
+    deadline = time.monotonic() + 1.0
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if msvcrt is None or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
+def _unlock(lock_file: IO[str]) -> None:
+    """Release the lock :func:`_lock_exclusive` took on *lock_file*."""
+    if fcntl is not None:
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+    elif msvcrt is not None:  # pragma: no cover — Windows-only branch
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
 
 PASSWORD_LENGTH = 12
 PASSWORD_ALPHABET = string.ascii_lowercase + string.digits
@@ -133,7 +179,7 @@ def configure(path: str, work_dir: str, password: str = "") -> str:
     with open(
         os.path.join(lock_directory, ".config.lock"), "w", encoding="utf-8"
     ) as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        _lock_exclusive(lock_file)
         try:
             config = load_config(path)
             configured = config.get("remote_password")
@@ -153,7 +199,7 @@ def configure(path: str, work_dir: str, password: str = "") -> str:
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.chmod(temporary, 0o600)
-                os.replace(temporary, path)
+                _replace_waiting_for_readers(temporary, path)
             except BaseException:
                 try:
                     os.unlink(temporary)
@@ -161,7 +207,7 @@ def configure(path: str, work_dir: str, password: str = "") -> str:
                     pass
                 raise
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            _unlock(lock_file)
     return chosen
 
 

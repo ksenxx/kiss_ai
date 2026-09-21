@@ -38,12 +38,12 @@ from kiss.agents.third_party_agents._device_auth import (
     TokenGrant,
     consent_instructions,
 )
-from kiss.agents.third_party_agents.github_agent import GitHubAgent
-from kiss.agents.third_party_agents.github_agent import _config as gh_config
-from kiss.agents.third_party_agents.matrix_agent import MatrixAgent, MatrixChannelBackend
-from kiss.agents.third_party_agents.matrix_agent import _config as mx_config
-from kiss.agents.third_party_agents.msteams_agent import MSTeamsAgent
-from kiss.agents.third_party_agents.msteams_agent import _config as ms_config
+from kiss.agents.third_party_agents.github_sea import GitHubAgent
+from kiss.agents.third_party_agents.github_sea import _config as gh_config
+from kiss.agents.third_party_agents.matrix_sea import MatrixAgent, MatrixChannelBackend
+from kiss.agents.third_party_agents.matrix_sea import _config as mx_config
+from kiss.agents.third_party_agents.msteams_sea import MSTeamsAgent
+from kiss.agents.third_party_agents.msteams_sea import _config as ms_config
 from kiss.agents.third_party_agents.muse_auth._common import muse_auth_dir
 from kiss.agents.third_party_agents.muse_auth.client import (
     MuseAuthError,
@@ -52,17 +52,18 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     store_credentials,
     vault_has_credentials,
 )
-from kiss.agents.third_party_agents.nextcloud_talk_agent import NextcloudTalkAgent
-from kiss.agents.third_party_agents.nextcloud_talk_agent import _config as nc_config
-from kiss.agents.third_party_agents.signal_agent import SignalAgent, SignalLinkSession
-from kiss.agents.third_party_agents.signal_agent import _config as sg_config
-from kiss.agents.third_party_agents.twitch_agent import TwitchAgent
-from kiss.agents.third_party_agents.twitch_agent import _config as tw_config
+from kiss.agents.third_party_agents.nextcloud_sea import NextcloudTalkAgent
+from kiss.agents.third_party_agents.nextcloud_sea import _config as nc_config
+from kiss.agents.third_party_agents.signal_sea import SignalAgent, SignalLinkSession
+from kiss.agents.third_party_agents.signal_sea import _config as sg_config
+from kiss.agents.third_party_agents.twitch_sea import TwitchAgent
+from kiss.agents.third_party_agents.twitch_sea import _config as tw_config
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
     setup_muse_env,
     teardown_muse_env,
 )
+from kiss.tests.conftest import IS_WINDOWS, install_cli_script
 
 _MS_TENANT = "contoso.onmicrosoft.com"
 
@@ -2002,29 +2003,50 @@ def test_matrix_without_oauth_api_and_failure_paths(
 
 # ------------------------------------------------------------------- Signal
 
-_FAKE_SIGNAL_CLI = """#!/bin/sh
+# A Python program (not a shell script) so the same stand-in runs on
+# Windows, where ``install_cli_script`` adds the ``.cmd`` shim.
+_FAKE_SIGNAL_CLI = """#!/usr/bin/env python3
 # Scripted stand-in for signal-cli: ``link`` prints the provisioning URI,
 # waits for the phone (a marker file), then announces the linked account.
-state_dir="$(dirname "$0")"
-if [ "$1" = "link" ]; then
-  [ "$2" = "-n" ] || { echo "expected -n" >&2; exit 2; }
-  echo "$3" > "$state_dir/device-name"
-  if [ -f "$state_dir/no-uri" ]; then echo "Failed to link" >&2; exit 3; fi
-  echo "sgnl://linkdevice?uuid=abc-123&pub_key=BQ%2Fkey"
-  if [ -f "$state_dir/noisy" ]; then head -c 2097152 /dev/zero | tr '\\0' 'x' >&2; fi
-  while [ ! -f "$state_dir/scanned" ]; do
-    if [ -f "$state_dir/fail" ]; then echo "Link request timed out" >&2; exit 1; fi
-    sleep 0.1
-  done
-  if [ ! -f "$state_dir/silent" ]; then echo "Associated with: +15550001111"; fi
-  exit 0
-fi
-if [ "$1" = "listAccounts" ]; then
-  if [ -f "$state_dir/silent" ]; then echo "Number: +15550009999"; fi
-  exit 0
-fi
-echo "unknown command $1" >&2
-exit 4
+import os
+import sys
+import time
+
+state_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+args = sys.argv[1:]
+
+
+def marker(name):
+    return os.path.exists(os.path.join(state_dir, name))
+
+
+if args[:1] == ["link"]:
+    if args[1:2] != ["-n"]:
+        print("expected -n", file=sys.stderr)
+        sys.exit(2)
+    with open(os.path.join(state_dir, "device-name"), "w") as fh:
+        fh.write(args[2] + "\\n")
+    if marker("no-uri"):
+        print("Failed to link", file=sys.stderr)
+        sys.exit(3)
+    print("sgnl://linkdevice?uuid=abc-123&pub_key=BQ%2Fkey", flush=True)
+    if marker("noisy"):
+        sys.stderr.write("x" * 2097152)
+        sys.stderr.flush()
+    while not marker("scanned"):
+        if marker("fail"):
+            print("Link request timed out", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.1)
+    if not marker("silent"):
+        print("Associated with: +15550001111")
+    sys.exit(0)
+if args[:1] == ["listAccounts"]:
+    if marker("silent"):
+        print("Number: +15550009999")
+    sys.exit(0)
+print("unknown command " + " ".join(args[:1]), file=sys.stderr)
+sys.exit(4)
 """
 
 
@@ -2032,8 +2054,7 @@ exit 4
 def fake_signal_cli(tmp_path: Path) -> Path:
     """Install the scripted signal-cli stand-in and return its path."""
     binary = tmp_path / "signal-cli"
-    binary.write_text(_FAKE_SIGNAL_CLI)
-    binary.chmod(0o700)
+    install_cli_script(binary, _FAKE_SIGNAL_CLI)
     return binary
 
 
@@ -2058,13 +2079,15 @@ def test_signal_link_flow_renders_qr_and_records_linked_account(
     assert len(qr_text.splitlines()) >= 10 and set(qr_text) <= set(" \u2580\u2584\u2588\n")
     assert qr_text in started["instructions"]
     page = Path(started["qr_page"])
-    assert page.name == "link-qr.html" and (page.stat().st_mode & 0o777) == 0o600
+    assert page.name == "link-qr.html"
+    # NTFS has no POSIX mode bits: chmod(0o600) is a no-op there.
+    assert IS_WINDOWS or (page.stat().st_mode & 0o777) == 0o600
     html = page.read_text()
     assert "<svg" in html and "uuid=abc-123&amp;pub_key=BQ%2Fkey" in html
     assert "Linked devices" in started["instructions"]
     assert "PIN" in started["instructions"] and "verification code" in started["instructions"]
     # The QR decodes back to the URI (module matrix round trip).
-    from kiss.agents.third_party_agents.signal_agent import _qr_rows, _qr_text
+    from kiss.agents.third_party_agents.signal_sea import _qr_rows, _qr_text
 
     assert _qr_text(_qr_rows(uri)) == qr_text
     assert not sg_config.path.exists()

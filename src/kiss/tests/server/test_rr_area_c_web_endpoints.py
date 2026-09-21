@@ -26,13 +26,18 @@ Real sockets, real event loop, real file locks — no mocks.
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import socket
 import tempfile
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
+
 from kiss.server.web_server import RemoteAccessServer
+
+# The sidecar lock is fcntl.flock on the UDS path: POSIX only, like the
+# Unix-domain socket it guards.
+fcntl = pytest.importorskip("fcntl")
 
 
 def _free_port() -> int:

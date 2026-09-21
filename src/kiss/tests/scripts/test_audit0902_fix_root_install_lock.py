@@ -53,7 +53,6 @@ So no test can install anything, modify this repository or touch the real
 ``~/.kiss``.
 """
 
-import fcntl
 import os
 import shutil
 import signal
@@ -62,6 +61,11 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+
+import pytest
+
+# The whole module drives the real bash install.sh and holds its flock.
+fcntl = pytest.importorskip("fcntl", reason="POSIX-only: bash install.sh and flock")
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "install.sh"

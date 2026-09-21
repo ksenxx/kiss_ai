@@ -49,6 +49,15 @@
 
 'use strict';
 
+// Every scenario is about the POSIX shell integration: the
+// ~/.local/bin/sorcar bash wrapper (installCliScript writes sorcar.cmd
+// on Windows), 0o755/0o600 permission bits, a symlinked dotfile and a
+// ':'-separated PATH shim.  None of that exists on Windows.
+if (process.platform === 'win32') {
+  console.log('  skipped on win32 (POSIX shell wrapper, rc dotfile and mode-bit semantics)');
+  process.exit(0);
+}
+
 const assert = require('assert');
 const {spawn, spawnSync} = require('child_process');
 const fs = require('fs');

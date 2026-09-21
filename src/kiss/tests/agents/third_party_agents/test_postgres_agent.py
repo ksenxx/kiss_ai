@@ -26,8 +26,8 @@ import uuid
 import psycopg
 import pytest
 
-import kiss.agents.third_party_agents.postgres_agent as pg_mod
-from kiss.agents.third_party_agents.postgres_agent import (
+import kiss.agents.third_party_agents.postgres_sea as pg_mod
+from kiss.agents.third_party_agents.postgres_sea import (
     PostgresAgent,
     PostgresChannelBackend,
     _config,

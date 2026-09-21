@@ -17,6 +17,7 @@ Before the fix, loading the UTF-8 system prompt in this environment
 raised ``UnicodeDecodeError``; after the fix it must succeed.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -44,6 +45,11 @@ def _run_in_c_locale(script: str, cwd: Path) -> subprocess.CompletedProcess[str]
         "PYTHONUTF8": "0",
         "PYTHONPATH": src_dir,
         "HOME": str(cwd),
+        # Path.home() reads USERPROFILE on Windows, and the interpreter
+        # itself needs SYSTEMROOT there (the legacy locale is cp1252, still
+        # not UTF-8, so the test keeps its point).
+        "USERPROFILE": str(cwd),
+        **{k: os.environ[k] for k in ("SYSTEMROOT",) if k in os.environ},
     }
     return subprocess.run(
         [sys.executable, "-c", script],

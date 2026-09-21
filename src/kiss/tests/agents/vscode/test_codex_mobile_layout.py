@@ -158,8 +158,6 @@ CONTROL_IDS = [
     "server-reset-confirm-cancel",
     "server-reset-confirm-ok",
     "settings-overlay",
-    "ask-user-modal",
-    "ask-user-slot",
     "auth-modal",
     "auth-modal-input",
     "auth-modal-cancel",

@@ -5,41 +5,61 @@
 """Useful tools for agents: file editing and bash execution."""
 
 import difflib
+import functools
+import hashlib
 import logging
 import mimetypes
 import os
 import queue
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-try:
-    import msvcrt  # type: ignore[import-not-found]
-except ImportError:  # POSIX has no msvcrt
-    msvcrt = None  # type: ignore[assignment]
-
-from kiss.agents.sorcar._concurrency import _fcntl as fcntl
+from kiss.agents.sorcar.fanout_guard import parse_tasks_json
 from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SLUG_PREFIX,
     _WORKTREE_SUBDIR,
 )
 from kiss.core import tool_interrupt
+from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.models.model import (
     READ_TOOL_BINARY_MIME_TYPES,
     encode_binary_attachment,
+)
+from kiss.core.processes import (
+    SIGKILL,
+    kill_process_group,
+    pid_alive,
+    popen_process_group,
 )
 
 logger = logging.getLogger(__name__)
 
 _MAX_BINARY_READ_BYTES = 20 * 1024 * 1024
+_OUTLINE_SYMBOL_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:async\s+)?def\s+\w+|class\s+\w+"  # Python
+    r"|(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?\s+\w+|class\s+\w+)"  # JS/TS
+    r"|(?:export\s+)?(?:const|let|var)\s+\w+\s*=\s*(?:async\s*)?(?:\([^)]*\)\s*=>|function\b)"
+    r"|(?:pub\s+)?(?:fn|struct|enum|impl|trait)\s+\w+"  # Rust
+    r"|func\s+(?:\([^)]*\)\s*)?\w+"  # Go
+    r")"
+)
+_OUTLINE_HEADING_RE = re.compile(r"^#{1,6}\s+\S")
+_MARKDOWN_SUFFIXES = frozenset({".md", ".markdown", ".mdx"})
+_OUTLINE_MAX_ENTRIES = 400
+_OUTLINE_MIN_ENTRIES = 5
 
 
 @contextmanager
@@ -52,12 +72,8 @@ def _file_lock(lock_path: Path, blocking: bool = True) -> Any:
     daemons, CLI runs, channel-agent processes, and event loops.  A
     ``threading`` lock cannot do this: the resources live on disk, not
     in one process.  The lock file itself is created mode ``0600``.
-
-    Cross-platform: ``fcntl.flock`` on POSIX, ``msvcrt.locking`` on
-    Windows (where ``fcntl`` does not exist — an unconditional import
-    would make every dependent feature unavailable there).  When
-    neither primitive exists the lock degrades to a best-effort no-op
-    rather than breaking the caller entirely.
+    The locking primitive is :mod:`kiss.core.file_lock` (``fcntl`` on
+    POSIX, ``msvcrt`` on Windows).
 
     Args:
         lock_path: The lock file to hold; parent directories are created.
@@ -66,60 +82,19 @@ def _file_lock(lock_path: Path, blocking: bool = True) -> Any:
             scheduler's overlapping-tick skip) instead of waiting.
 
     Yields:
-        ``True`` while the lock is held (including the degraded no-op
-        case), or ``None`` when *blocking* is ``False`` and another
-        process holds the lock.
+        ``True`` while the lock is held, or ``None`` when *blocking* is
+        ``False`` and another process holds the lock.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     locked = False
     try:
-        if fcntl is not None:
-            flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-            try:
-                fcntl.flock(descriptor, flags)
-                locked = True
-            except BlockingIOError:
-                pass
-        elif msvcrt is not None:  # pragma: no cover — Windows-only branch
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            if blocking:
-                while True:
-                    try:
-                        msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
-                            descriptor,
-                            msvcrt.LK_LOCK,  # pyright: ignore[reportAttributeAccessIssue]
-                            1,
-                        )
-                        locked = True
-                        break
-                    except OSError:
-                        time.sleep(0.05)
-            else:
-                try:
-                    msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
-                        descriptor,
-                        msvcrt.LK_NBLCK,  # pyright: ignore[reportAttributeAccessIssue]
-                        1,
-                    )
-                    locked = True
-                except OSError:
-                    pass
-        else:  # pragma: no cover — platform without either primitive
-            locked = True
+        locked = lock_exclusive(descriptor, blocking=blocking)
         yield True if locked else None
     finally:
         try:
-            if locked and fcntl is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            elif locked and msvcrt is not None:  # pragma: no cover — Windows-only branch
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                with suppress(OSError):
-                    msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
-                        descriptor,
-                        msvcrt.LK_UNLCK,  # pyright: ignore[reportAttributeAccessIssue]
-                        1,
-                    )
+            if locked:
+                unlock(descriptor)
         finally:
             os.close(descriptor)
 
@@ -323,6 +298,84 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
     return None
 
 
+def _worktree_roots(work_dir: str | None) -> list[tuple[str, str]]:
+    """Return ``(main_repo, wt_root)`` for each spelling of an active worktree *work_dir*.
+
+    Empty when *work_dir* is not inside a live ``.kiss-worktrees/kiss_wt-*``
+    worktree.  Both the given and the resolved spelling are returned when
+    they differ (symlinked checkouts).
+    """
+    if not work_dir:
+        return []
+    roots: list[tuple[str, str]] = []
+    for wd_parts in (Path(work_dir).parts, Path(work_dir).resolve().parts):
+        i = _worktree_index(wd_parts)
+        if i is None:
+            continue
+        main_repo, wt_root = str(Path(*wd_parts[:i])), str(Path(*wd_parts[: i + 2]))
+        if not os.path.isdir(wt_root):
+            continue
+        # Git bash on Windows accepts ``C:/repo`` as well as ``C:\repo``,
+        # so both separator spellings are returned there (one on POSIX).
+        for pair in (
+            (main_repo, wt_root),
+            (main_repo.replace(os.sep, "/"), wt_root.replace(os.sep, "/")),
+        ):
+            if pair not in roots:
+                roots.append(pair)
+    return roots
+
+
+# Windows paths are case-insensitive, so the parent-repo guard must not be
+# bypassable by re-casing ``C:\Repo`` as ``c:\repo`` (or ``C:\Répo`` as
+# ``c:\répo``: NTFS folds non-ASCII letters too, so the folding is the
+# full Unicode one — a guard may refuse too much, never too little).
+# POSIX stays exact.  Likewise only Windows treats ``\`` as a separator.
+_PATH_RE_FLAGS = re.IGNORECASE if sys.platform == "win32" else 0
+_PATH_SEPARATOR_CLASS = r"[/\\]" if sys.platform == "win32" else "/"
+
+
+def rewrite_parent_repo_paths(text: str, work_dir: str | None) -> str:
+    """Rewrite absolute parent-repo paths in *text* to the active worktree's.
+
+    Sub-agent tasks written by a parent running in a worktree kept
+    naming files under the parent repository (134 refused Bash commands
+    in the 7-day audit of 2026-09-19).  Every ``<main_repo>/...`` path
+    that is not already inside a ``.kiss-worktrees`` directory becomes
+    ``<wt_root>/...``; the bare repo path itself is rewritten too.
+
+    The rewrite is textual: prose that deliberately names the parent
+    repository ("do not touch <main_repo>") is rewritten too.  A parent
+    that needs the child to act on the main checkout must say so
+    without an absolute path (the worktree is the only tree a
+    sub-agent's tools may modify anyway).
+
+    Args:
+        text: A task description or shell command.
+        work_dir: The dispatching agent's working directory.
+
+    Returns:
+        *text* with the paths rewritten, or unchanged when *work_dir*
+        is not inside a live worktree.
+    """
+    for main_repo, wt_root in _worktree_roots(work_dir):
+        pattern = re.escape(main_repo) + rf"(?={_PATH_SEPARATOR_CLASS}|[\s'\";|&<>()`,:]|$)"
+        text = re.sub(
+            pattern, functools.partial(_swap_root, wt_root=wt_root), text, flags=_PATH_RE_FLAGS
+        )
+    return text
+
+
+def _swap_root(match: re.Match[str], wt_root: str) -> str:
+    """Replace one matched repo root unless it already names a worktree."""
+    rest = match.string[match.end():]
+    if rest[:1] in ("/", "\\") and re.match(
+        re.escape(_WORKTREE_SUBDIR), rest[1:], flags=_PATH_RE_FLAGS
+    ):
+        return match.group(0)
+    return wt_root
+
+
 def _parent_repo_guard_for_parts(
     command: str, wd_parts: tuple[str, ...]
 ) -> str | None:
@@ -343,23 +396,28 @@ def _parent_repo_guard_for_parts(
     wt_root = str(Path(*wd_parts[: i + 2]))
     if not os.path.isdir(wt_root):
         return None
-    pattern = re.escape(main_repo) + r"(?=/|[\s'\";|&<>()`]|$)"
-    for m in re.finditer(pattern, command):
-        tail_start = m.start()
-        end = tail_start + len(main_repo)
-        while end < len(command) and command[end] not in " \t\n'\";|&<>()`":
-            end += 1
-        hit = command[tail_start:end]
-        if hit == wt_root or hit.startswith(wt_root + os.sep):
-            continue
-        return (
-            f"Error: command references the parent-repo path "
-            f"{hit!r}, which is outside the active worktree "
-            f"{wt_root!r}.  Rewrite the command to use the "
-            f"worktree path (or a path relative to it) so the "
-            f"change is captured by the framework's auto-commit "
-            f"and does not mutate the user's main checkout."
-        )
+    # Git bash on Windows accepts ``C:/repo`` as well as ``C:\repo``, so
+    # the guard matches both separator spellings there (one on POSIX).
+    for spelled in dict.fromkeys((main_repo, main_repo.replace(os.sep, "/"))):
+        pattern = re.escape(spelled) + rf"(?={_PATH_SEPARATOR_CLASS}|[\s'\";|&<>()`]|$)"
+        for m in re.finditer(pattern, command, flags=_PATH_RE_FLAGS):
+            tail_start = m.start()
+            end = tail_start + len(spelled)
+            while end < len(command) and command[end] not in " \t\n'\";|&<>()`":
+                end += 1
+            hit = command[tail_start:end]
+            if Path(hit) == Path(wt_root) or Path(hit).is_relative_to(wt_root):
+                continue
+            suggested = rewrite_parent_repo_paths(command, wt_root)
+            return (
+                f"Error: command references the parent-repo path "
+                f"{hit!r}, which is outside the active worktree "
+                f"{wt_root!r}.  Rewrite the command to use the "
+                f"worktree path (or a path relative to it) so the "
+                f"change is captured by the framework's auto-commit "
+                f"and does not mutate the user's main checkout. "
+                f"Suggested command: {suggested[:2000]}"
+            )
     return None
 
 
@@ -393,6 +451,44 @@ def _suggest_close_path(resolved: Path) -> str:
     return ""
 
 
+def _outline(file_path: str, lines: list[str], size: int) -> str | None:
+    """Build the outline a whole-file ``Read`` of a long file returns.
+
+    Args:
+        file_path: The path as the model passed it (for the header).
+        lines: The file's lines.
+        size: The file size in characters.
+
+    Returns:
+        The line count plus a ``line: symbol`` list of definitions and
+        headings and how to read a range, or ``None`` when the file has
+        too few recognisable symbols for an outline to be useful (the
+        caller then returns the first window as before).
+    """
+    pattern = (
+        _OUTLINE_HEADING_RE
+        if Path(file_path).suffix.lower() in _MARKDOWN_SUFFIXES
+        else _OUTLINE_SYMBOL_RE
+    )
+    entries = [
+        f"{number}: {line.strip()}"
+        for number, line in enumerate(lines, 1)
+        if pattern.match(line)
+    ]
+    if len(entries) < _OUTLINE_MIN_ENTRIES:
+        return None
+    shown = entries[:_OUTLINE_MAX_ENTRIES]
+    more = len(entries) - len(shown)
+    return (
+        f"{file_path}: {len(lines):,} lines, {size:,} chars. Too long to send "
+        f"whole; outline of its {len(entries)} definitions/headings (line: text):\n"
+        + "\n".join(shown)
+        + (f"\n... {more} more entries" if more else "")
+        + "\n\nRead a range with Read(file_path, start_line=N, max_lines=M), or "
+        "locate text with Bash(\"grep -n PATTERN FILE\")."
+    )
+
+
 def _find_windows_bash() -> str | None:  # pragma: no cover — Windows only
     """Find bash.exe on Windows (Git for Windows, WSL, etc.)."""
     found = shutil.which("bash")
@@ -414,9 +510,11 @@ _WINDOWS_BASH: str | None = _find_windows_bash() if sys.platform == "win32" else
 def _popen_kwargs(command: str) -> dict[str, Any]:
     """Return Popen kwargs appropriate for the current platform.
 
-    On Unix, uses ``shell=True`` with ``start_new_session=True``.
-    On Windows with bash available, invokes bash directly.
-    On Windows without bash, falls back to PowerShell.
+    On Unix, uses ``shell=True``; on Windows with Git bash available,
+    invokes bash directly; on Windows without bash, falls back to
+    PowerShell.  Spawn with :func:`popen_process_group` so
+    :func:`kill_process_group` can stop the child together with
+    everything it spawned.
 
     Args:
         command: The command string to execute.
@@ -425,22 +523,11 @@ def _popen_kwargs(command: str) -> dict[str, Any]:
         Dict of keyword arguments for ``subprocess.Popen``.
     """
     if sys.platform != "win32":
-        return {
-            "args": command,
-            "shell": True,
-            "start_new_session": True,
-        }
-    else:  # pragma: no cover — Windows only
-        if _WINDOWS_BASH:
-            return {
-                "args": [_WINDOWS_BASH, "-c", command],
-                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
-            }
-        ps = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
-        return {
-            "args": [ps, "-NoProfile", "-Command", command],
-            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
-        }
+        return {"args": command, "shell": True}
+    if _WINDOWS_BASH:  # pragma: no cover — Windows only
+        return {"args": [_WINDOWS_BASH, "-c", command]}
+    ps = shutil.which("pwsh") or shutil.which("powershell") or "powershell"  # pragma: no cover
+    return {"args": [ps, "-NoProfile", "-Command", command]}
 
 
 def _truncate_output(output: str, max_chars: int) -> str:
@@ -497,6 +584,128 @@ def _format_bash_result(returncode: int, output: str, max_output_chars: int) -> 
     return _truncate_output(output, max_output_chars)
 
 
+def _run_one_command(
+    command: str, cancel: threading.Event, work_dir: str | None, timeout_seconds: float,
+) -> tuple[int | None, str, float]:
+    """Run one host ``run_commands_parallel`` command on a worker thread.
+
+    Args:
+        command: The shell command.
+        cancel: The fan-out's stop event; setting it kills the shell.
+        work_dir: The agent's working directory (worktree guard + cwd).
+        timeout_seconds: Deadline for the shell.
+
+    Returns:
+        ``(returncode, output, seconds)``: the exit code (``None`` on
+        timeout, ``-1`` when the command was refused or failed to
+        launch), the combined output, and the wall time spent.
+    """
+    guard = _bash_parent_repo_guard(command, work_dir)
+    if guard is not None:
+        return -1, guard, 0.0
+    started = time.monotonic()
+    try:
+        # Stream-less: printers attribute output by thread-local task
+        # id, so a callback from this worker thread would detach the
+        # output from the task.
+        runner = UsefulTools(stop_event=cancel, work_dir=work_dir)
+        returncode, output = runner._bash_streaming(command, timeout_seconds)
+    except Exception as e:
+        logger.debug("Exception caught", exc_info=True)
+        returncode, output = -1, f"Error: {e}"
+    return returncode, output, time.monotonic() - started
+
+
+CommandRunner = Callable[[str, threading.Event], tuple[int | None, str, float]]
+
+NOT_STARTED = "Not started: the task was stopped."
+
+
+def run_commands_pool(
+    commands: list[str],
+    run_one: CommandRunner,
+    max_workers: int,
+    stop_event: threading.Event | None,
+    max_output_chars: int,
+) -> str:
+    """Run *commands* concurrently through *run_one* and render the report.
+
+    The one engine behind both ``run_commands_parallel`` tools (host
+    shell and Docker container).  The workers watch ONE cancel event,
+    set here when the task's *stop_event* or the tool panel's Stop
+    (:func:`kiss.core.tool_interrupt.current_tool_interrupt_event`,
+    thread-local and therefore invisible to workers) fires; queued
+    commands are cancelled at the same time so a stop never starts
+    work.  An exception injected into the waiting thread (a task Stop's
+    ``KeyboardInterrupt``, a forced ``ToolCallInterrupted``) also
+    cancels everything before propagating.
+
+    Args:
+        commands: The shell commands, already validated.
+        run_one: ``run_one(command, cancel) -> (exit_code, output,
+            seconds)``; must not raise.
+        max_workers: Concurrency bound; ``0`` runs all commands at once.
+        stop_event: The task's stop event, or ``None``.
+        max_output_chars: Per-command output cap in the report.
+
+    Returns:
+        The report (see :func:`_format_parallel_report`).
+
+    Raises:
+        ToolCallInterrupted: When the tool panel's Stop was pressed.
+    """
+    cancel = threading.Event()
+    interrupt = tool_interrupt.current_tool_interrupt_event()
+    watched = [e for e in (stop_event, interrupt) if e is not None]
+    pool = ThreadPoolExecutor(max_workers=max_workers or len(commands))
+    try:
+        futures = [pool.submit(run_one, command, cancel) for command in commands]
+        while not all(f.done() for f in futures):
+            if any(e.is_set() for e in watched):
+                cancel.set()
+                for f in futures:
+                    f.cancel()
+            # Short slices keep this loop in Python, where an injected
+            # KeyboardInterrupt / ToolCallInterrupted lands.
+            wait(futures, timeout=0.2)
+    except BaseException:
+        cancel.set()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
+    tool_interrupt.raise_if_interrupted()
+    results = [(-1, NOT_STARTED, 0.0) if f.cancelled() else f.result() for f in futures]
+    return _format_parallel_report(commands, results, max_output_chars)
+
+
+def _format_parallel_report(
+    commands: list[str],
+    results: list[tuple[int | None, str, float]],
+    max_output_chars: int,
+) -> str:
+    """Render the ``run_commands_parallel`` report: a tally, then one section per command."""
+    codes = [code for code, _, _ in results]
+    succeeded = sum(1 for code in codes if code == 0)
+    timed_out = sum(1 for code in codes if code is None)
+    failed = len(codes) - succeeded - timed_out
+    lines = [
+        f"{len(commands)} commands: {succeeded} succeeded, {failed} failed, "
+        f"{timed_out} timed out."
+    ]
+    for index, (command, (code, output, seconds)) in enumerate(
+        zip(commands, results, strict=True), start=1
+    ):
+        if code is None:
+            status = f"TIMED OUT after {seconds:.1f}s"
+        elif code < -1:
+            status = f"killed by signal {-code} in {seconds:.1f}s"
+        else:
+            status = f"exit {code} in {seconds:.1f}s"
+        lines.append(f"\n### [{index}/{len(commands)}] {status}\n$ {command}")
+        lines.append(_truncate_output(output.rstrip("\n"), max_output_chars) or "(no output)")
+    return "\n".join(lines)
+
+
 def _kill_process_group(process: subprocess.Popen) -> None:
     """Kill a subprocess and all its children.
 
@@ -533,7 +742,7 @@ def _kill_process_group(process: subprocess.Popen) -> None:
             # ``_process_identity``.
             return
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            kill_process_group(process.pid, SIGKILL)
         except OSError:
             try:
                 process.kill()
@@ -543,6 +752,106 @@ def _kill_process_group(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:  # pragma: no cover — unreachable after SIGKILL
         pass
+
+
+@dataclass
+class BackgroundJob:
+    """A detached command started by ``Bash(background=True)``.
+
+    Attributes:
+        job_id: Short id the model passes to ``bash_job``.
+        command: The shell command.
+        log_path: File receiving the job's combined stdout and stderr.
+        process: The job's shell; ``process.poll()`` is its liveness.
+        started: ``time.monotonic()`` at launch.
+    """
+
+    job_id: str
+    command: str
+    log_path: Path
+    process: subprocess.Popen
+    started: float
+
+    def status(self) -> str:
+        """Return ``running (pid N, Ts)`` or ``exited with code N``."""
+        returncode = self.process.poll()
+        if returncode is None:
+            elapsed = time.monotonic() - self.started
+            return f"running (pid {self.process.pid}, {elapsed:.0f}s)"
+        if returncode < 0:
+            return f"killed by signal {-returncode}"
+        return f"exited with code {returncode}"
+
+
+def _tail_lines(path: Path, lines: int, max_bytes: int) -> str:
+    """Return the last *lines* lines of *path*, reading at most *max_bytes* from its end.
+
+    A build or training log can be gigabytes long, so only the tail is
+    read; when the read starts mid-file the partial first line is
+    dropped.  Invalid UTF-8 is replaced.
+    """
+    if lines <= 0 or max_bytes <= 0:
+        return ""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            start = max(0, f.tell() - max_bytes)
+            # One byte before the window tells whether the window starts
+            # on a line boundary (that byte is "\n") or mid-line.
+            f.seek(max(0, start - 1))
+            data = f.read()
+    except OSError as e:
+        return f"(log unreadable: {e})"
+    if start > 0:
+        data = data.partition(b"\n")[2]
+    text = data.decode("utf-8", errors="replace")
+    return "".join(text.splitlines(keepends=True)[-lines:])
+
+
+def _format_job_report(job: BackgroundJob, tail_lines: int, max_output_chars: int) -> str:
+    """Return the ``bash_job`` result: status, command, log path and log tail."""
+    report = (
+        f"Job {job.job_id}: {job.status()}\n"
+        f"Command: {job.command}\n"
+        f"Log: {job.log_path}\n"
+        f"--- last {tail_lines} log lines ---\n"
+    )
+    tail = _tail_lines(job.log_path, tail_lines, max_output_chars - len(report))
+    return _truncate_output(report + tail, max_output_chars)
+
+
+def _kill_job_group(process: subprocess.Popen) -> None:
+    """Kill a background job's shell *process* and everything left in its process group.
+
+    A running shell is killed with its group.  A shell that has already
+    exited may have left daemonized descendants behind (``sh -c "server
+    &"``), still in the group named after its pid; those are killed too,
+    unless that pid is alive again — the shell was reaped, so a live pid
+    means the number was recycled and the group is a stranger's.  (POSIX
+    fork() never hands out a pid equal to an ACTIVE process group id, so
+    while our orphans live the number cannot become a new group.)
+    """
+    if process.poll() is None:
+        _kill_process_group(process)
+    elif not pid_alive(process.pid):
+        with suppress(OSError):
+            kill_process_group(process.pid, SIGKILL)
+
+
+def _watch_job(stop_event: threading.Event | None, process: subprocess.Popen) -> None:
+    """Reap the background job *process* when it exits; kill its group if *stop_event* fires.
+
+    Runs on a daemon thread per job.  Reaping promptly (rather than at
+    the next ``bash_job`` call) keeps a finished job from lingering as a
+    zombie; the kill mirrors what a task Stop does to a foreground command.
+    """
+    if stop_event is None:
+        process.wait()
+        return
+    while process.poll() is None:
+        if stop_event.wait(timeout=0.5):
+            _kill_process_group(process)
+            return
 
 
 def _stop_monitor(
@@ -572,6 +881,7 @@ class UsefulTools:
         stream_callback: Callable[[str], None] | None = None,
         stop_event: threading.Event | None = None,
         work_dir: str | None = None,
+        jobs: dict[str, BackgroundJob] | None = None,
     ) -> None:
         """Initialise the tools.
 
@@ -586,10 +896,43 @@ class UsefulTools:
                 ``KISS_WORKDIR`` env var is forced to ``work_dir`` so
                 project scripts that derive a "project root" from it
                 stay inside the worktree the agent is operating on.
+            jobs: Registry of background jobs (job id ->
+                :class:`BackgroundJob`) shared with the host agent, so
+                jobs started by an earlier tool instance stay addressable
+                through ``bash_job``.  A fresh private registry when
+                ``None``.
         """
         self.stream_callback = stream_callback
         self.stop_event = stop_event
         self.work_dir = work_dir
+        # Background jobs started by ``Bash(background=True)``, by job id.
+        self._jobs: dict[str, BackgroundJob] = {} if jobs is None else jobs
+        # Read dedupe: (path, start_line, max_lines) -> sha of the file text
+        # the model was last shown for that window (see :meth:`Read`).
+        self._reads_shown: dict[tuple[str, int, int], str] = {}
+        # Files this instance has shown the model (Read) or written itself
+        # (Write, Edit).  Edit and Write refuse an existing file that is not
+        # in this set, so the read-before-modify rule of SYSTEM.md is
+        # enforced by the tools and not only requested by the prompt.
+        self.read_files: set[Path] = set()
+
+    def forget_reads(self) -> None:
+        """Forget which file windows the model has already been shown.
+
+        Called by the agent when earlier tool outputs left the model's
+        context (compaction, a new session), so the next ``Read`` of an
+        unchanged file returns its content instead of the dedupe stub.
+        ``read_files`` is kept: the model has still seen the file once in
+        this task, so Edit and Write stay permitted on it.
+        """
+        self._reads_shown.clear()
+
+    def _unread_error(self, file_path: str, verb: str) -> str:
+        """Return the error text for modifying a file the model has not read."""
+        return (
+            f"Error: {file_path} has not been read in this session. "
+            f"Call Read on it before {verb} it."
+        )
 
     def _spawn(self, command: str) -> subprocess.Popen:
         """Launch *command* with the shared Popen configuration.
@@ -623,37 +966,120 @@ class UsefulTools:
         Returns:
             The started subprocess.
         """
-        cwd: str | None = self.work_dir or None
-        env_work_dir: str | None = self.work_dir
-        if cwd is not None and not os.path.isdir(cwd):
-            fallback = _stale_worktree_fallback(Path(cwd))
-            if fallback is not None and fallback.is_dir():
-                logger.warning(
-                    "Bash work_dir %r vanished mid-task; "
-                    "falling back to parent repo root %r",
-                    cwd,
-                    str(fallback),
-                )
-                cwd = str(fallback)
-                env_work_dir = cwd
-            else:
-                logger.warning(
-                    "Bash work_dir %r vanished mid-task and no "
-                    "fallback parent exists; running without cwd",
-                    cwd,
-                )
-                cwd = None
-                env_work_dir = None
-        return subprocess.Popen(
+        cwd = self._resolve_cwd()
+        return popen_process_group(
             **_popen_kwargs(command),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_clean_env(env_work_dir),
+            env=_clean_env(cwd),
             cwd=cwd,
         )
+
+    def _resolve_cwd(self) -> str | None:
+        """Return the directory Bash children run in (see :meth:`_spawn`).
+
+        ``self.work_dir`` when it exists, its parent repository root when
+        the worktree vanished mid-task, ``None`` (inherit the agent's
+        cwd) when neither exists or no ``work_dir`` was set.
+        """
+        cwd: str | None = self.work_dir or None
+        if cwd is None or os.path.isdir(cwd):
+            return cwd
+        fallback = _stale_worktree_fallback(Path(cwd))
+        if fallback is not None and fallback.is_dir():
+            logger.warning(
+                "Bash work_dir %r vanished mid-task; "
+                "falling back to parent repo root %r",
+                cwd,
+                str(fallback),
+            )
+            return str(fallback)
+        logger.warning(
+            "Bash work_dir %r vanished mid-task and no "
+            "fallback parent exists; running without cwd",
+            cwd,
+        )
+        return None
+
+    def _start_background_job(self, command: str) -> str:
+        """Start *command* detached and register it as a background job.
+
+        Equivalent to ``nohup command > log 2>&1 < /dev/null &``: the
+        child runs in its own session (so no terminal SIGHUP can reach
+        it), reads stdin from ``/dev/null`` and writes stdout and stderr
+        to ``<cwd>/tmp/bash_jobs/<job_id>.log``.  Unlike a shell ``&``
+        the tool keeps the ``Popen`` handle, so :meth:`bash_job` can
+        report the exit code and a task Stop kills the job's process
+        group like it kills a foreground command.
+
+        Args:
+            command: The shell command to run.
+
+        Returns:
+            The job id, pid and log path, plus how to follow the job; a
+            string starting with ``Error:`` when it could not be started.
+        """
+        cwd = self._resolve_cwd()
+        job_id = "j" + uuid.uuid4().hex[:8]
+        log_path = Path(cwd or os.getcwd()) / "tmp" / "bash_jobs" / f"{job_id}.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, "wb") as log_file:
+                process = popen_process_group(
+                    **_popen_kwargs(command),
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    env=_clean_env(cwd),
+                    cwd=cwd,
+                )
+        except OSError as e:
+            logger.debug("Exception caught", exc_info=True)
+            return f"Error: could not start background job: {e}"
+        try:
+            threading.Thread(
+                target=_watch_job, args=(self.stop_event, process), daemon=True,
+            ).start()
+        except BaseException:
+            # Thread exhaustion or a stop injected inside ``Thread.start``:
+            # the shell is already running and would otherwise be left
+            # behind with no watcher and no job id anyone could kill it by.
+            _kill_job_group(process)
+            raise
+        self._jobs[job_id] = BackgroundJob(
+            job_id, command, log_path, process, time.monotonic(),
+        )
+        return (
+            f"Started background job {job_id} (pid {process.pid}).\n"
+            f"Log: {log_path}\n"
+            f"Follow it with bash_job({job_id!r}, action=\"tail\") or block on it with "
+            f"bash_job({job_id!r}, action=\"wait\", timeout_seconds=...); "
+            f"bash_job({job_id!r}, action=\"kill\") stops it."
+        )
+
+    def _wait_for_job(self, job: BackgroundJob, timeout_seconds: float) -> None:
+        """Block until *job* exits, *timeout_seconds* pass, or a stop lands.
+
+        Polls in 0.2 s slices so the task Stop event and the tool
+        panel's interrupt event are observed promptly; a tool-panel
+        Stop raises :class:`~kiss.core.tool_interrupt.ToolCallInterrupted`
+        after the loop, exactly like a foreground :meth:`Bash`.
+        """
+        deadline = time.monotonic() + timeout_seconds
+        interrupt = tool_interrupt.current_tool_interrupt_event()
+        while job.process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if self.stop_event is not None and self.stop_event.is_set():
+                break
+            if interrupt is not None and interrupt.is_set():
+                break
+            time.sleep(min(remaining, 0.2))
+        tool_interrupt.raise_if_interrupted()
 
     def _start_stop_monitor(
         self, process: subprocess.Popen, done: threading.Event,
@@ -688,8 +1114,9 @@ class UsefulTools:
         file_path: str,
         max_lines: int = 2000,
         start_line: int = 1,
+        force: bool = False,
     ) -> str:
-        """Read file contents.
+        """Read file contents; a long file with no line range returns its outline first.
 
         Args:
             file_path: Absolute path to file.
@@ -700,6 +1127,9 @@ class UsefulTools:
                 less than 1 are rejected; values beyond EOF return an
                 explicit sentinel rather than empty content so the
                 model is not misled into thinking the file is empty.
+            force: Re-send a window that is unchanged since an earlier
+                Read in this task (by default such a Read returns a
+                one-line "unchanged" note instead of the content).
         """
         if start_line < 1:
             return (
@@ -735,11 +1165,15 @@ class UsefulTools:
                 text = resolved.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 logger.debug("Binary file detected", exc_info=True)
-                return self._read_binary(file_path, resolved)
+                shown = self._read_binary(file_path, resolved)
+                if not shown.startswith("Error:"):
+                    self.read_files.add(resolved)
+                return shown
             except FileNotFoundError:
                 suggestion = _suggest_close_path(resolved)
                 return f"Error: File not found: {file_path}.{suggestion}"
 
+            self.read_files.add(resolved)
             if text == "":
                 return "(file is empty)"
 
@@ -750,11 +1184,33 @@ class UsefulTools:
                     f"Error: start_line={start_line} is past EOF "
                     f"(file has {total} line{'s' if total != 1 else ''})."
                 )
+            outline_limit = DEFAULT_CONFIG.read_outline_lines
+            whole_file_requested = start_line == 1 and max_lines >= 2000
+            outline = (
+                _outline(file_path, lines, len(text))
+                if whole_file_requested and 0 < outline_limit < total else None
+            )
             window = lines[start_line - 1 : start_line - 1 + max_lines]
-            remaining = total - (start_line - 1) - len(window)
-            if remaining > 0:
-                return "".join(window) + f"\n[truncated: {remaining} more lines]"
-            return "".join(window)
+            last = start_line - 1 + len(window)
+            remaining = total - last
+            if outline is not None:
+                content, shown = outline, "outline"
+                key = (str(resolved), 0, 0)
+            else:
+                content = "".join(window)
+                if remaining > 0:
+                    content += f"\n[truncated: {remaining} more lines]"
+                shown = f"lines {start_line}-{last} of {total}"
+                key = (str(resolved), start_line, max_lines)
+            digest = hashlib.sha1(text.encode("utf-8", "surrogatepass")).hexdigest()
+            if DEFAULT_CONFIG.read_dedupe and not force and self._reads_shown.get(key) == digest:
+                return (
+                    f"Unchanged since your earlier Read of {file_path} ({shown}): the "
+                    f"content is already in your context above. Pass force=True to "
+                    f"re-read it."
+                )
+            self._reads_shown[key] = digest
+            return content
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
@@ -834,8 +1290,11 @@ class UsefulTools:
                     f"Error: {file_path} exists and is not a regular file "
                     f"(directory/FIFO/device/socket); refusing to write to it."
                 )
+            if resolved.is_file() and resolved not in self.read_files:
+                return self._unread_error(file_path, "overwriting")
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding="utf-8", newline="")
+            self.read_files.add(resolved)
             return f"Successfully wrote {len(content)} characters to {file_path}"
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
@@ -871,6 +1330,8 @@ class UsefulTools:
                     resolved = fallback.resolve()
             if not resolved.is_file():
                 return f"Error: File not found: {file_path}"
+            if resolved not in self.read_files:
+                return self._unread_error(file_path, "editing")
             if old_string == new_string:
                 return "Error: new_string must be different from old_string"
             if old_string == "":
@@ -908,17 +1369,29 @@ class UsefulTools:
         description: str,
         timeout_seconds: float = 300,
         max_output_chars: int = 50000,
+        background: bool = False,
     ) -> str:
         """Runs a bash command and returns its output.
+
+        With ``background=True`` the command is started detached (like
+        ``nohup cmd > log 2>&1 < /dev/null &``) and the call returns at
+        once with a job id; follow the job with ``bash_job``.  Use it for
+        anything expected to run longer than about a minute (builds,
+        training runs, servers, large test suites).
 
         Args:
             command: The bash command to run.
             description: A brief description of the command.
-            timeout_seconds: Timeout in seconds for the command.
+            timeout_seconds: Timeout in seconds for the command.  Ignored
+                when ``background`` is true; put the deadline on the
+                ``bash_job`` wait instead.
             max_output_chars: Maximum characters in output before truncation.
+            background: Start the command in the background and return a
+                job id immediately instead of waiting for it.
 
         Returns:
-            The output of the command.
+            The output of the command, or for a background job its job
+            id, pid and log file path.
         """
         del description
 
@@ -926,17 +1399,116 @@ class UsefulTools:
         if guard is not None:
             return guard
 
+        if background:
+            return self._start_background_job(command)
+
         if self.stream_callback:
             # Contract (see test_bash_background_pipe_hang): an exception
             # raised by the caller-supplied stream callback must PROPAGATE
             # out of Bash (after the process group is killed), not be
             # swallowed into an "Error:" string like internal failures are.
-            return self._bash_streaming(command, timeout_seconds, max_output_chars)
+            returncode, output = self._bash_streaming(command, timeout_seconds)
+        else:
+            try:
+                returncode, output = self._bash_streaming(command, timeout_seconds)
+            except Exception as e:  # pragma: no cover
+                logger.debug("Exception caught", exc_info=True)
+                return f"Error: {e}"
+        if returncode is None:
+            return "Error: Command execution timeout"
+        return _format_bash_result(returncode, output, max_output_chars)
+
+    def bash_job(
+        self,
+        job_id: str,
+        action: str = "tail",
+        timeout_seconds: float = 300,
+        tail_lines: int = 50,
+        max_output_chars: int = 50000,
+    ) -> str:
+        """Wait for, tail, or kill a background job started by ``Bash(background=True)``.
+
+        Every action returns the same report: the job's status (running
+        with its pid and elapsed time, or its exit code), the command,
+        the log file path and the last ``tail_lines`` lines of the log.
+        The full log stays on disk at the reported path.
+
+        Args:
+            job_id: The id returned by ``Bash(background=True)``.
+            action: ``"tail"`` (default) reports the current status and
+                log tail at once; ``"wait"`` blocks until the job exits or
+                ``timeout_seconds`` pass, then reports (a still-running
+                status means the wait timed out, not that the job failed);
+                ``"kill"`` kills the job's whole process group, then reports.
+            timeout_seconds: How long ``"wait"`` blocks at most.  Prefer
+                one long wait over many short polls; the wait ends early
+                on the task's Stop button.
+            tail_lines: Number of trailing log lines to include.
+            max_output_chars: Maximum characters in the report before truncation.
+
+        Returns:
+            The job report, or a string starting with ``Error:`` for an
+            unknown job id or action.
+        """
+        job = self._jobs.get(job_id)
+        if job is None:
+            known = ", ".join(self._jobs) or "none"
+            return f"Error: unknown job id {job_id!r}. Known jobs: {known}."
+        if action == "wait":
+            self._wait_for_job(job, timeout_seconds)
+        elif action == "kill":
+            _kill_job_group(job.process)
+        elif action != "tail":
+            return f"Error: action must be one of wait, tail, kill; got {action!r}."
+        return _format_job_report(job, tail_lines, max_output_chars)
+
+    def run_commands_parallel(
+        self,
+        commands: str,
+        max_workers: int = 0,
+        timeout_seconds: float = 1800,
+        max_output_chars: int = 5000,
+    ) -> str:
+        """Run several independent shell commands concurrently, with no LLM sub-agents.
+
+        Use this instead of ``run_parallel`` whenever the parallel work is
+        just shell commands whose output you read once they finish: test
+        splits (one ``pytest`` invocation per split), builds, linters,
+        benchmarks, batch conversions.  Each command runs in its own
+        thread under the same rules as ``Bash`` (working directory,
+        environment, worktree guard, Stop button); output is not streamed
+        live, the combined report is returned when the last command ends.
+
+        Args:
+            commands: A JSON-encoded list of shell command strings, e.g.
+                ``'["uv run pytest tests/a.py", "uv run pytest tests/b.py"]'``.
+                Shell substitutions such as ``"$(cat cmds.json)"`` are not
+                expanded and are rejected.
+            max_workers: Maximum number of commands running at once.  ``0``
+                (default) runs all of them at once.
+            timeout_seconds: Timeout in seconds applied to EACH command.
+            max_output_chars: Maximum characters of each command's output
+                kept in the report (head and tail are kept when truncating).
+
+        Returns:
+            A report starting with a tally line
+            (``N commands: K succeeded, F failed, T timed out``) followed by
+            one section per command, in input order, giving its exit code,
+            wall time and (truncated) output.  A string starting with
+            ``Error:`` when the arguments were invalid.
+        """
         try:
-            return self._bash_streaming(command, timeout_seconds, max_output_chars)
-        except Exception as e:  # pragma: no cover
-            logger.debug("Exception caught", exc_info=True)
-            return f"Error: {e}"
+            command_list = parse_tasks_json(commands, name="commands")
+        except ValueError as e:
+            return f"Error: {e.args[0]}"
+        if max_workers < 0:
+            return f"Error: max_workers must be 0 or a positive integer, got {max_workers}."
+        run_one = functools.partial(
+            _run_one_command, work_dir=self.work_dir, timeout_seconds=timeout_seconds,
+        )
+        return run_commands_pool(
+            command_list, run_one, max_workers, self.stop_event, max_output_chars,
+        )
 
     def _consume_stream(
         self,
@@ -998,12 +1570,17 @@ class UsefulTools:
             if self.stream_callback is not None:
                 self.stream_callback(line)
 
-    def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:
+    def _bash_streaming(
+        self, command: str, timeout_seconds: float,
+    ) -> tuple[int | None, str]:
         """Run *command* through a reader thread, bounded by *timeout_seconds*.
 
-        Single engine behind :meth:`Bash` for both the streaming and the
-        non-streaming case (``stream_callback`` may be ``None``).  The
-        timeout is a deadline on the SHELL, not on its descendants:
+        Single engine behind :meth:`Bash` and :meth:`run_commands_parallel`
+        for both the streaming and the non-streaming case
+        (``stream_callback`` may be ``None``).  Returns the shell's exit
+        code — ``None`` for a genuine timeout — and its combined
+        stdout/stderr, untruncated.  The timeout is a deadline on the
+        SHELL, not on its descendants:
 
         * Shell still running at the deadline — genuine timeout.  The
           whole process group is killed and the timeout error returned.
@@ -1108,7 +1685,5 @@ class UsefulTools:
         tool_interrupt.raise_if_interrupted()
 
         if timed_out:
-            return "Error: Command execution timeout"
-
-        output = "".join(chunks)
-        return _format_bash_result(process.returncode, output, max_output_chars)
+            return None, ""
+        return process.returncode, "".join(chunks)

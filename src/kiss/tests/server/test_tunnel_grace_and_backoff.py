@@ -32,6 +32,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -47,6 +48,11 @@ from kiss.server.web_server import (
     _TUNNEL_STARTUP_GRACE,
     RemoteAccessServer,
     _tunnel_backoff_delay,
+)
+from kiss.tests.conftest import posix_only
+
+_FAKE_CLOUDFLARED_IS_A_SHELL_SCRIPT = posix_only(
+    "the fake cloudflared on PATH is a /bin/sh script"
 )
 
 
@@ -114,7 +120,7 @@ class TestStartupGracePeriod(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._loop = asyncio.get_event_loop()
         self._proc = subprocess.Popen(
-            ["sleep", "5"],
+            [sys.executable, "-c", "import time; time.sleep(5)"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -273,6 +279,7 @@ class TestSuccessfulRestartResetsBackoff(unittest.IsolatedAsyncioTestCase):
         else:
             CONFIG_PATH.write_text(self._orig_config)
 
+    @_FAKE_CLOUDFLARED_IS_A_SHELL_SCRIPT
     async def test_success_resets_failure_count(self) -> None:
         """After a successful tunnel start, failure count returns to 0."""
         _write_fake_cloudflared(
@@ -313,6 +320,7 @@ class TestStartedAtSetByStartHelpers(unittest.TestCase):
         os.environ["PATH"] = self._old_path
         self._tmp.cleanup()
 
+    @_FAKE_CLOUDFLARED_IS_A_SHELL_SCRIPT
     def test_quick_tunnel_records_start_time(self) -> None:
         """_start_quick_tunnel sets _tunnel_started_at to a recent time."""
         _write_fake_cloudflared(
@@ -333,6 +341,7 @@ class TestStartedAtSetByStartHelpers(unittest.TestCase):
         finally:
             srv._stop_tunnel()
 
+    @_FAKE_CLOUDFLARED_IS_A_SHELL_SCRIPT
     def test_named_tunnel_records_start_time(self) -> None:
         """_start_named_tunnel sets _tunnel_started_at to a recent time."""
         _write_fake_cloudflared(

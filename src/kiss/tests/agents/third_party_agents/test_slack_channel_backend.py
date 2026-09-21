@@ -23,7 +23,7 @@ import pytest
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from kiss.agents.third_party_agents.slack_agent import (
+from kiss.agents.third_party_agents.slack_sea import (
     SlackChannelBackend,
     _save_token,
     _token_path,
@@ -49,9 +49,15 @@ def _restore(backup: str | None) -> None:
 
 
 class _InvalidAuthHandler(BaseHTTPRequestHandler):
-    """Slack Web API emulator answering ``invalid_auth`` to every call."""
+    """Slack Web API emulator answering ``invalid_auth`` to every call.
+
+    Records the path of every request in ``server.requests``.
+    """
+
+    server: Any
 
     def _respond(self) -> None:
+        self.server.requests.append(self.path.split("?", 1)[0])
         length = int(self.headers.get("Content-Length") or 0)
         if length:
             self.rfile.read(length)
@@ -74,6 +80,19 @@ class _InvalidAuthHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
+def _send_json(handler: BaseHTTPRequestHandler, payload: dict[str, Any]) -> None:
+    """Consume the request body and answer *payload* as JSON."""
+    length = int(handler.headers.get("Content-Length") or 0)
+    if length:
+        handler.rfile.read(length)
+    data = json.dumps(payload).encode()
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
 class TestSlackChannelBackendMethods:
     """Tests for SlackChannelBackend methods with invalid token."""
 
@@ -83,6 +102,7 @@ class TestSlackChannelBackendMethods:
     @classmethod
     def setup_class(cls) -> None:
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _InvalidAuthHandler)
+        cls.server.requests = []  # type: ignore[attr-defined]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
 
@@ -94,6 +114,7 @@ class TestSlackChannelBackendMethods:
 
     def setup_method(self) -> None:
         self._backup = _backup_and_clear()
+        self.server.requests.clear()  # type: ignore[attr-defined]
         _save_token("xoxb-invalid-test-token-for-methods")
         port = self.server.server_address[1]
         self.backend = SlackChannelBackend()
@@ -116,6 +137,115 @@ class TestSlackChannelBackendMethods:
         """find_user raises SlackApiError with invalid token."""
         with pytest.raises(SlackApiError):
             self.backend.find_user("nobody")
+
+    @staticmethod
+    def _serve(
+        handler: type[BaseHTTPRequestHandler],
+    ) -> tuple[ThreadingHTTPServer, threading.Thread]:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, thread
+
+    @staticmethod
+    def _stop(server: ThreadingHTTPServer, thread: threading.Thread) -> None:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    def _use_server(self, server: ThreadingHTTPServer) -> None:
+        self.backend._client = WebClient(
+            token="xoxb-invalid-test-token-for-methods",
+            base_url=f"http://127.0.0.1:{server.server_address[1]}/",
+            retry_handlers=[],
+        )
+
+    def test_find_channel_verifies_conversation_id(self) -> None:
+        """find_channel returns a conversation ID once conversations.info is ok.
+
+        A dedicated local server answers ``ok:true`` to ``conversations.info``
+        and ``invalid_auth`` to everything else, so getting the ID back
+        proves the direct-by-ID path was taken without a name lookup.
+        """
+        requests: list[str] = []
+
+        class _InfoOkHandler(_InvalidAuthHandler):
+            def _respond(self) -> None:
+                method = self.path.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+                requests.append(method)
+                if method != "conversations.info":
+                    super()._respond()
+                    return
+                _send_json(self, {"ok": True, "channel": {"id": "x"}})
+
+        server, thread = self._serve(_InfoOkHandler)
+        try:
+            self._use_server(server)
+            assert self.backend.find_channel("C0AKYSNLB7W") == "C0AKYSNLB7W"
+            assert self.backend.find_channel("G012ABCDEFG") == "G012ABCDEFG"
+            assert self.backend.find_channel("D012ABCDEFG") == "D012ABCDEFG"
+        finally:
+            self._stop(server, thread)
+        assert requests == ["conversations.info"] * 3
+
+    def test_find_channel_unverifiable_id_falls_back_to_name_lookup(self) -> None:
+        """An ID that conversations.info rejects is looked up by name instead.
+
+        The local server rejects ``conversations.info`` (``channel_not_found``)
+        but lists a channel literally named like the ID, so the returned ID
+        and the recorded request order prove the fallback name lookup ran.
+        """
+        requests: list[str] = []
+
+        class _InfoFailsListOkHandler(_InvalidAuthHandler):
+            def _respond(self) -> None:
+                method = self.path.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+                requests.append(method)
+                if method == "conversations.info":
+                    _send_json(self, {"ok": False, "error": "channel_not_found"})
+                elif method == "conversations.list":
+                    _send_json(
+                        self,
+                        {
+                            "ok": True,
+                            "channels": [{"id": "C_BY_NAME", "name": "C0AKYSNLB7W"}],
+                            "response_metadata": {"next_cursor": ""},
+                        },
+                    )
+                else:
+                    super()._respond()
+
+        server, thread = self._serve(_InfoFailsListOkHandler)
+        try:
+            self._use_server(server)
+            assert self.backend.find_channel("C0AKYSNLB7W") == "C_BY_NAME"
+        finally:
+            self._stop(server, thread)
+        assert requests == ["conversations.info", "conversations.list"]
+
+    def test_find_channel_unverifiable_id_raises_when_name_lookup_fails(self) -> None:
+        """With every call rejected, the fallback name lookup raises.
+
+        The recorded request sequence proves ``conversations.info`` was
+        tried first and ``conversations.list`` second for each ID prefix.
+        """
+        for ident in ("C0AKYSNLB7W", "G012ABCDEFG", "D012ABCDEFG"):
+            self.server.requests.clear()  # type: ignore[attr-defined]
+            with pytest.raises(SlackApiError):
+                self.backend.find_channel(ident)
+            assert self.server.requests == [  # type: ignore[attr-defined]
+                "/conversations.info",
+                "/conversations.list",
+            ]
+
+    def test_find_user_passes_user_id_through(self) -> None:
+        """find_user returns a user ID as-is without any API call.
+
+        The server answers invalid_auth to every call, so getting the ID
+        back (instead of SlackApiError) proves no request was made.
+        """
+        assert self.backend.find_user("UD7PM70GG") == "UD7PM70GG"
+        assert self.backend.find_user("W012ABCDEFG") == "W012ABCDEFG"
 
     def test_join_channel_swallows_api_error(self) -> None:
         """join_channel silently ignores SlackApiError."""

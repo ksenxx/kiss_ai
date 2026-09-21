@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for whatsapp_agent — no mocks or test doubles.
+"""Integration tests for whatsapp_sea — no mocks or test doubles.
 
 The agent wraps the lharries/whatsapp-mcp Go bridge (QR-paired personal
 WhatsApp).  These tests exercise the real code paths end to end:
@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.third_party_agents.whatsapp_agent import (
+from kiss.agents.third_party_agents.whatsapp_sea import (
     WhatsAppAgent,
     WhatsAppChannelBackend,
     _bridge_log_path,

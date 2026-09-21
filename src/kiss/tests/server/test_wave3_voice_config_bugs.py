@@ -36,7 +36,6 @@ Covers, over REAL objects (no mocks, patches, or fakes):
 
 from __future__ import annotations
 
-import fcntl
 import http.server
 import io
 import threading
@@ -48,6 +47,7 @@ from typing import Any, cast
 import pytest
 
 import kiss.server.voice_wake as voice_wake
+from kiss.core.file_lock import lock_exclusive, unlock
 
 _STALL_WINDOW_SECONDS = 30.0
 
@@ -121,8 +121,10 @@ class TestD1DownloadTimeout:
             )
             assert _non_lock_leftovers(models_dir) == []
             with open(models_dir / ".stall-model.lock", "w") as lock_file:
-                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.flock(lock_file, fcntl.LOCK_UN)
+                assert lock_exclusive(lock_file, blocking=False), (
+                    "the download lock was not released"
+                )
+                unlock(lock_file)
         finally:
             cast(Any, httpd).release.set()
             httpd.shutdown()

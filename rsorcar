@@ -133,7 +133,10 @@
 # Environment overrides:
 #   SORCAR_REMOTE_DIR   name of the remote folder (default: project name)
 #   SORCAR_WEB_PORT     port kiss-web listens on remotely (default: 8787)
-#   SORCAR_PASSWORD     web app password (default: reuse existing, else random)
+#   SORCAR_PASSWORD     web app password (default: this machine's own web app
+#                       password from ~/.kiss/config.json, so both machines
+#                       share one password; falls back to the remote's existing
+#                       password, else a fresh random one)
 #   SORCAR_GITHUB_USER  GitHub account used on the remote (default: ksenxx)
 #   SORCAR_GIT_BRANCH   branch to deploy (default: the main repository's
 #                       branch, which is this one unless this is a worktree)
@@ -506,7 +509,19 @@ bash "$SCRIPT_DIR/scripts/sync-task-db.sh" "$TARGET" "$MAIN_REPO" "$REMOTE_DIR" 
 # the environment on the ssh command line.  A pseudo-terminal (-t) is not used
 # because install.sh must not block on prompts.
 # ---------------------------------------------------------------------------
-PASSWORD="${SORCAR_PASSWORD:-}"
+# Default the remote's web app password to this machine's own, so both
+# machines share one password (a caller can still override with
+# SORCAR_PASSWORD).  The local password lives in ~/.kiss/config.json under
+# ``remote_password``; if this file is missing, unreadable, or holds no
+# password, PASSWORD stays empty and remote_config.py falls back to whatever
+# password is already on the remote (else generates a fresh random one).
+LOCAL_PASSWORD="$(python3 -c 'import json,sys
+try:
+    with open(sys.argv[1]) as f:
+        print(json.load(f).get("remote_password","") or "")
+except Exception:
+    pass' "$HOME/.kiss/config.json" 2>/dev/null || true)"
+PASSWORD="${SORCAR_PASSWORD-$LOCAL_PASSWORD}"
 
 # The ntfy topic is the stable half of the web app's URL: the UI shows
 # https://ntfy.sh/<topic>, where kiss-web posts its current tunnel URL, so

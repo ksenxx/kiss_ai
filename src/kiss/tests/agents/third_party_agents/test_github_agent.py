@@ -14,7 +14,7 @@ Config state is isolated per pytest process because the session
 conftest points ``KISS_HOME`` at a temporary directory and
 ``ChannelConfig.path`` resolves ``$KISS_HOME`` lazily.
 
-Branch-coverage note: every branch of ``github_agent`` is reachable
+Branch-coverage note: every branch of ``github_sea`` is reachable
 end-to-end with this emulator (validation, read-only gating, HTTP
 errors, connection refusal, non-JSON responses), so no branch needed a
 test double.
@@ -35,12 +35,12 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-import kiss.agents.third_party_agents.github_agent as gh_mod
+import kiss.agents.third_party_agents.github_sea as gh_mod
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents.github_agent import (
+from kiss.agents.third_party_agents.github_sea import (
     GitHubAgent,
     GitHubChannelBackend,
     _config,
@@ -1072,7 +1072,7 @@ def test_main_without_args_prints_usage() -> None:
     line shows as uncovered in the report despite being tested here.
     """
     proc = subprocess.run(
-        [sys.executable, "-m", "kiss.agents.third_party_agents.github_agent"],
+        [sys.executable, "-m", "kiss.agents.third_party_agents.github_sea"],
         capture_output=True,
         text=True,
         timeout=120,

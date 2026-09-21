@@ -34,15 +34,21 @@ from swedefend.pipeline import SWEDefendPipeline
 from swedefend.swexploit import AttackPayload, SWExploitHarness, default_payloads
 
 
+def _is_venv_local(binary: str, name: str) -> bool:
+    """True when *binary* is ``.venv/bin/<name>`` (``.venv\\Scripts\\<name>.exe`` on Windows)."""
+    path = Path(binary)
+    return path.stem == name and path.parts[-3:-1] in ((".venv", "bin"), (".venv", "Scripts"))
+
+
 class TestVerifiedScannerBinaries:
     """The task requires wiring the venv-local scanners; confirm they resolve."""
 
     def test_bandit_binary_is_venv_local(self) -> None:
-        assert BANDIT_BIN.endswith("/.venv/bin/bandit") or BANDIT_BIN == "bandit"
+        assert _is_venv_local(BANDIT_BIN, "bandit") or BANDIT_BIN == "bandit"
         assert Path(BANDIT_BIN).is_file()
 
     def test_semgrep_binary_is_venv_local(self) -> None:
-        assert SEMGREP_BIN.endswith("/.venv/bin/semgrep") or SEMGREP_BIN == "semgrep"
+        assert _is_venv_local(SEMGREP_BIN, "semgrep") or SEMGREP_BIN == "semgrep"
         assert Path(SEMGREP_BIN).is_file()
 
 

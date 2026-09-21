@@ -44,6 +44,8 @@ from kiss.core.models import codex_model as cx_module
 from kiss.core.models.claude_code_model import ClaudeCodeModel, _find_claude_cli
 from kiss.core.models.codex_model import CodexModel, _find_codex_cli
 from kiss.core.models.model import _CLIProcess
+from kiss.core.processes import pid_alive
+from kiss.tests.conftest import install_cli_script, posix_only
 
 # Well past the 64 KiB pipe buffer, so an unread prompt blocks the writer.
 _BIG_PROMPT = "x" * (300 * 1024)
@@ -64,14 +66,16 @@ def _install_cli(
 ) -> None:
     """Install an executable stand-in CLI and let the adapter discover it."""
     script = tmp_path / name
-    script.write_text(
+    install_cli_script(
+        script,
         f"#!{sys.executable}\n"
         + textwrap.dedent(body).replace(
             _GRANDCHILD_PID_FILE, repr(str(tmp_path / "grandchild.pid"))
-        )
+        ),
     )
-    script.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tmp_path))
+    # Prepended, not replaced: the stand-in still wins the lookup, and the
+    # supervisor's Windows tree kill (``taskkill``) stays reachable.
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     if name == "claude":
         monkeypatch.setattr(cc_module, "_find_claude_cli", _find_claude_cli)
     else:
@@ -104,8 +108,13 @@ def _grandchild_pid(tmp_path: Path) -> int:
 def _kill_grandchild(tmp_path: Path) -> None:
     """Kill the recorded grandchild, if it is still around."""
     if (tmp_path / "grandchild.pid").exists():
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(_grandchild_pid(tmp_path), signal.SIGKILL)
+        pid = _grandchild_pid(tmp_path)
+        # Windows has no SIGKILL (os.kill(pid, SIGTERM) is TerminateProcess
+        # there) and refuses, with PermissionError, to open a pid that has
+        # already exited -- hence the liveness probe first.
+        if pid_alive(pid):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
 
 
 def _writer_threads() -> list[threading.Thread]:
@@ -192,7 +201,7 @@ class TestWriterThreadDoesNotHoldTheTurnHostage:
         )
         # Explicit child event: the grandchild was recorded before the reply
         # and is still alive, so only cancellation can have freed the writer.
-        os.kill(_grandchild_pid(tmp_path), 0)
+        assert pid_alive(_grandchild_pid(tmp_path))
         assert not _writer_threads(), (
             "generate() returned with the stdin writer still parked in write(2)"
         )
@@ -233,6 +242,7 @@ class TestCloseBeforeAnyPromptWasSent:
         assert proc._proc.stderr is not None and proc._proc.stderr.closed
 
 
+@posix_only("death by signal is reported as a negative exit status")
 class TestSigtermIsAFailureOnBothAdapters:
     """A CLI killed by SIGTERM mid-turn must not pass its partial text off as done."""
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import socket
 import ssl
 import subprocess
@@ -49,6 +50,8 @@ from kiss.server.web_server import (
     _save_url_file,
     _translate_webview_command,
 )
+from kiss.tests.conftest import posix_only
+from kiss.tests.server._blocking_start import close_leaked_listeners
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
 
 
@@ -197,9 +200,10 @@ class TestWebappServerLoadingOverlay(unittest.TestCase):
         the user must see the overlay again instead of a frozen #app.
         """
         html = _build_html()
-        marker = "_ws.onclose = function()"
+        self.assertIn("_ws.onclose = _onSocketClosed;", html)
+        marker = "function _onSocketClosed()"
         self.assertIn(marker, html)
-        onclose_branch = html.split(marker, 1)[1].split("};", 1)[0]
+        onclose_branch = html.split(marker, 1)[1].split("\n  }\n", 1)[0]
         self.assertIn("daemonStatus", onclose_branch)
         self.assertIn("connected: false", onclose_branch)
         self.assertIn("_dispatchToApp", onclose_branch)
@@ -997,7 +1001,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         wt_dir = Path(work_dir) / ".kiss-worktrees" / "kiss_wt-1"
         (wt_dir / "reports").mkdir(parents=True)
         report = wt_dir / "reports" / "analysis.html"
-        report.write_text("<h1>report</h1>\n")
+        report.write_text("<h1>report</h1>\n", newline="\n")
 
         # The daemon announces the finished task's pending worktree
         # with the tab already stamped (merge_flow's worktree_done).
@@ -1094,7 +1098,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         wt_work_dir = wt_root / "packages" / "app"
         report = wt_work_dir / "reports" / "analysis.html"
         report.parent.mkdir(parents=True)
-        report.write_text("<h1>nested report</h1>\n")
+        report.write_text("<h1>nested report</h1>\n", newline="\n")
 
         self.server._printer.broadcast(
             {
@@ -1961,7 +1965,7 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
         # The class teardown restores the original config.
         save_config({"remote_password": "test-secret-tunnel"})
         proc = subprocess.Popen(
-            ["sleep", "60"],
+            [sys.executable, "-c", "import time; time.sleep(60)"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -1977,7 +1981,7 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
     async def test_watchdog_restarts_dead_process(self) -> None:
         """A dead tunnel process triggers restart (which fails without cloudflared)."""
         proc = subprocess.Popen(
-            ["true"],
+            [sys.executable, "-c", "pass"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -2997,14 +3001,19 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
             except asyncio.CancelledError:
                 pass
             await ws.send(json.dumps({"type": "getModels"}))
+            # Every watchdog round also pushed a ``heartbeat`` frame (the
+            # shim's proof of life); the reply follows them.
             resp: dict[str, object] = {}
-            for _ in range(10):
+            seen: list[object] = []
+            for _ in range(2000):
                 resp = json.loads(
                     await asyncio.wait_for(ws.recv(), timeout=5),
                 )
+                seen.append(resp.get("type"))
                 if resp.get("type") == "models":
                     break
             self.assertEqual(resp["type"], "models")
+            self.assertIn("heartbeat", seen)
         finally:
             ws_mod.TUNNEL_CHECK_INTERVAL = original_interval
             await ws.close()
@@ -3075,7 +3084,7 @@ class TestCheckAndRestartTunnel(IsolatedAsyncioTestCase):
     async def test_restart_dead_tunnel_updates_url(self) -> None:
         """When tunnel dies, _check_and_restart_tunnel updates URL file."""
         proc = subprocess.Popen(
-            ["true"],
+            [sys.executable, "-c", "pass"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -3240,7 +3249,7 @@ class TestStopTunnel(IsolatedAsyncioTestCase):
     async def test_stop_tunnel_terminates_process(self) -> None:
         """_stop_tunnel terminates a running tunnel process."""
         proc = subprocess.Popen(
-            ["sleep", "60"],
+            [sys.executable, "-c", "import time; time.sleep(60)"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -3275,6 +3284,12 @@ class TestStopTunnel(IsolatedAsyncioTestCase):
         self.assertIsNone(self.server._tunnel_proc)
 
 
+# Fake ``cloudflared``/``pgrep`` executables are shebang scripts dropped on
+# PATH; Windows' CreateProcess only resolves ``.exe`` files there.
+_FAKE_SCRIPT_ON_PATH = posix_only("fake cloudflared on PATH is a shebang script")
+
+
+@_FAKE_SCRIPT_ON_PATH
 class TestStartNamedTunnel(IsolatedAsyncioTestCase):
     """Test _start_named_tunnel with a fake cloudflared on PATH."""
 
@@ -3706,7 +3721,7 @@ class TestCheckAndRestartTunnelFailedRestart(IsolatedAsyncioTestCase):
     async def test_restart_fails_logs_warning(self) -> None:
         """When restart fails, logs warning and updates URL to local."""
         proc = subprocess.Popen(
-            ["true"],
+            [sys.executable, "-c", "pass"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -4192,6 +4207,7 @@ class TestStartMethodLifecycle(unittest.TestCase):
 
         t.join(timeout=10)
         self.assertFalse(t.is_alive())
+        close_leaked_listeners(server)
 
         if orig_config is not None:
             CONFIG_PATH.write_text(orig_config)
@@ -4462,6 +4478,11 @@ class TestWatchdogWSPingWithConnections(IsolatedAsyncioTestCase):
         for conn in connections:
             await self.server._ping_one_ws(conn)
 
+        # A successful ping is followed by the app-level heartbeat frame
+        # the remote webapp's shim uses to detect half-open sockets.
+        beat = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        self.assertEqual(beat, {"type": "heartbeat"})
+
         await ws.send(json.dumps({"type": "getModels"}))
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
         self.assertEqual(resp["type"], "models")
@@ -4636,6 +4657,7 @@ class TestStartTunnelGenericException(IsolatedAsyncioTestCase):
         self.assertIsNone(result)
 
 
+@_FAKE_SCRIPT_ON_PATH
 class TestQuickTunnelUrlFromStderr(IsolatedAsyncioTestCase):
     """Test _start_quick_tunnel finds URL in stderr output."""
 
@@ -4729,6 +4751,7 @@ class TestNamedTunnelProcessDies(IsolatedAsyncioTestCase):
         self.assertIsNone(result)
 
 
+@_FAKE_SCRIPT_ON_PATH
 class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
     """Test tunnel restart when _start_tunnel succeeds."""
 
@@ -4771,7 +4794,7 @@ class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
 
         dead: subprocess.Popen[str] = subprocess.Popen(
-            ["true"], text=True,
+            [sys.executable, "-c", "pass"], text=True,
         )
         dead.wait()
         self.server._tunnel_proc = dead
@@ -4920,111 +4943,87 @@ class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
             self.assertTrue(found)
 
 
+@_FAKE_SCRIPT_ON_PATH
 class TestStartWithTunnel(unittest.TestCase):
     """Test start() with tunnel enabled using fake cloudflared."""
 
-    @pytest.mark.slow
+    def _start_with_fake_cloudflared(self, script: str) -> tuple[str | None, str]:
+        """Run ``start()`` on a thread with *script* as ``cloudflared`` on PATH.
+
+        Returns ``(active_url, local_url)`` as they were once
+        ``_setup_server`` had decided the tunnel outcome (shutdown resets
+        ``_active_url``), after the server has been stopped again.
+        """
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        cf = os.path.join(tmpdir, "cloudflared")
+        with open(cf, "w") as f:
+            f.write(script)
+        os.chmod(cf, 0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = tmpdir + ":" + old_path
+        self.addCleanup(os.environ.__setitem__, "PATH", old_path)
+
+        # A real password: with an empty one ``_setup_server`` waits 30 s
+        # for a password and then refuses the tunnel without ever
+        # running cloudflared.
+        save_config({"remote_password": "test-secret"})
+        server = RemoteAccessServer(
+            host="127.0.0.1",
+            port=_find_free_port(),
+            use_tunnel=True,
+            ntfy_base_url=unroutable_base_url(),
+        )
+
+        started = threading.Event()
+
+        def _run() -> None:
+            orig_setup = server._setup_server
+
+            async def _patched_setup() -> None:
+                await orig_setup()
+                started.set()
+
+            server._setup_server = _patched_setup  # type: ignore[method-assign]
+            try:
+                server.start()
+            except RuntimeError:  # asyncio.run: loop stopped before Future completed
+                pass
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        self.assertTrue(started.wait(timeout=60), "server setup did not finish")
+        active_url, local_url = server._active_url, server._local_url
+
+        time.sleep(0.5)
+        if server._tunnel_proc is not None:
+            server._tunnel_proc.terminate()
+            try:
+                server._tunnel_proc.wait(timeout=5)
+            except Exception:
+                server._tunnel_proc.kill()
+            server._tunnel_proc = None
+        if server._loop is not None:
+            server._loop.call_soon_threadsafe(server._loop.stop)
+        t.join(timeout=10)
+        self.assertFalse(t.is_alive())
+        close_leaked_listeners(server)
+        return active_url, local_url
+
     def test_start_with_tunnel_success(self) -> None:
-        """start() with tunnel prints tunnel URL (lines 1715, 1730)."""
-        tmpdir = tempfile.mkdtemp()
-        old_path = os.environ.get("PATH", "")
-        try:
-            cf = os.path.join(tmpdir, "cloudflared")
-            with open(cf, "w") as f:
-                f.write(
-                    "#!/bin/bash\n"
-                    'echo "INF https://start-test.trycloudflare.com" >&2\n'
-                    "sleep 300\n"
-                )
-            os.chmod(cf, 0o755)
-            os.environ["PATH"] = tmpdir + ":" + old_path
+        """start() with a working tunnel publishes the tunnel URL."""
+        # ``exec`` so terminating the recorded PID kills the sleeper too.
+        active_url, _local_url = self._start_with_fake_cloudflared(
+            "#!/bin/bash\n"
+            'echo "INF https://start-test.trycloudflare.com" >&2\n'
+            "exec sleep 300\n"
+        )
+        self.assertEqual(active_url, "https://start-test.trycloudflare.com")
 
-            save_config({"remote_password": ""})
-            port = _find_free_port()
-            server = RemoteAccessServer(
-                host="127.0.0.1",
-                port=port,
-                use_tunnel=True,
-                ntfy_base_url=unroutable_base_url(),
-            )
-
-            started = threading.Event()
-
-            def _run() -> None:
-                orig_setup = server._setup_server
-
-                async def _patched_setup() -> None:
-                    await orig_setup()
-                    started.set()
-
-                server._setup_server = _patched_setup  # type: ignore[method-assign]
-                server.start()
-
-            t = threading.Thread(target=_run, daemon=True)
-            t.start()
-            started.wait(timeout=60)
-
-            time.sleep(0.5)
-            if server._tunnel_proc is not None:
-                server._tunnel_proc.terminate()
-                try:
-                    server._tunnel_proc.wait(timeout=5)
-                except Exception:
-                    server._tunnel_proc.kill()
-                server._tunnel_proc = None
-            if server._ws_server is not None:
-                server._ws_server.close()
-            t.join(timeout=10)
-        finally:
-            os.environ["PATH"] = old_path
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    @pytest.mark.slow
     def test_start_with_tunnel_failure(self) -> None:
-        """start() with tunnel failure prints warning (line 1732)."""
-        tmpdir = tempfile.mkdtemp()
-        old_path = os.environ.get("PATH", "")
-        try:
-            cf = os.path.join(tmpdir, "cloudflared")
-            with open(cf, "w") as f:
-                f.write("#!/bin/bash\nexit 1\n")
-            os.chmod(cf, 0o755)
-            os.environ["PATH"] = tmpdir + ":" + old_path
-
-            save_config({"remote_password": ""})
-            port = _find_free_port()
-            server = RemoteAccessServer(
-                host="127.0.0.1",
-                port=port,
-                use_tunnel=True,
-                ntfy_base_url=unroutable_base_url(),
-            )
-
-            started = threading.Event()
-
-            def _run() -> None:
-                orig_setup = server._setup_server
-
-                async def _patched_setup() -> None:
-                    await orig_setup()
-                    started.set()
-
-                server._setup_server = _patched_setup  # type: ignore[method-assign]
-                server.start()
-
-            t = threading.Thread(target=_run, daemon=True)
-            t.start()
-            started.wait(timeout=60)
-
-            time.sleep(0.5)
-            if server._ws_server is not None:
-                server._ws_server.close()
-            t.join(timeout=10)
-        finally:
-            os.environ["PATH"] = old_path
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        """start() with a failing cloudflared falls back to the local URL."""
+        active_url, local_url = self._start_with_fake_cloudflared("#!/bin/bash\nexit 1\n")
+        self.assertEqual(active_url, local_url)
 
 
 class TestStopAsyncWaitClosedTimeout(IsolatedAsyncioTestCase):
@@ -5054,6 +5053,7 @@ class TestStopAsyncWaitClosedTimeout(IsolatedAsyncioTestCase):
             pass
 
 
+@_FAKE_SCRIPT_ON_PATH
 class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
     """Test _start_quick_tunnel fallback that discovers URL from metrics."""
 
@@ -5196,6 +5196,7 @@ class TestQuickTunnelProcessPoll(IsolatedAsyncioTestCase):
 class TestRemoveUrlFileReadOnly(unittest.TestCase):
     """Test _remove_url_file OSError path (lines 364-365)."""
 
+    @posix_only("chmod-based directory permission denial")
     def test_remove_oserror_from_readonly_dir(self) -> None:
         """_remove_url_file swallows OSError from read-only directory."""
         import kiss.server.web_server as ws_mod
@@ -5399,7 +5400,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
         await self.server.start_async()
         self.server.use_tunnel = True
         self.fake_proc = subprocess.Popen(
-            ["sleep", "120"],
+            [sys.executable, "-c", "import time; time.sleep(120)"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -5513,7 +5514,7 @@ class TestDeadProcessClearsMetricsState(IsolatedAsyncioTestCase):
         invariants we care about.
         """
         proc = subprocess.Popen(
-            ["true"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            [sys.executable, "-c", "pass"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         proc.wait()
         sentinel_port = 65530

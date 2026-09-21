@@ -55,6 +55,8 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.conftest import IS_WINDOWS, posix_only
+
 REPO = Path(__file__).resolve().parents[4]
 INSTALL_SCRIPT = REPO / "install.sh"
 RELEASE_SCRIPTS = [
@@ -282,10 +284,15 @@ def _run_npm_ci(flags: list[str], tmp_path: Path, name: str) -> Path:
         encoding="utf-8",
     )
     marker = proj / "lifecycle-script-ran"
-    env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path)}
     npm = shutil.which("npm")
     assert npm is not None
-    env["PATH"] = f"{Path(npm).parent}:{env['PATH']}"
+    if IS_WINDOWS:
+        # npm.cmd needs the system environment (SystemRoot, APPDATA, ...);
+        # the sandboxed home is what keeps its config out of the user's.
+        env = {**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}
+    else:
+        env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path)}
+        env["PATH"] = f"{Path(npm).parent}:{env['PATH']}"
     subprocess.run(
         [npm, "install", "--package-lock-only", "--no-audit", "--no-fund"],
         cwd=proj,
@@ -368,6 +375,7 @@ def _wait_for_log_text(log: Path, needle: str, timeout: float = 10.0) -> str:
 
 
 @pytest.mark.process_killer
+@posix_only("runs the bash heartbeat helpers and sends SIGINT")
 def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
     """A single stray SIGINT must NOT kill the wrapped command.
 
@@ -458,6 +466,7 @@ def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
 
 
 @pytest.mark.process_killer
+@posix_only("runs the bash heartbeat helpers and sends SIGINT")
 def test_run_with_heartbeat_double_sigint_aborts(tmp_path: Path) -> None:
     """A confirmed double-Ctrl+C must still abort the install.
 

@@ -25,7 +25,6 @@ real signals, real file locks held by a real second process.  No mocks.
 from __future__ import annotations
 
 import os
-import pty
 import subprocess
 import sys
 import threading
@@ -41,6 +40,7 @@ from kiss.agents.sorcar.mcp_servers import (
     MCPServerConfig,
     _connection_key,
 )
+from kiss.core.processes import pid_alive
 
 _SERVER_SCRIPT = '''
 import os, sys, time
@@ -97,14 +97,15 @@ def real_stdin(
 
     Under pytest the std streams are capture objects whose ``fileno()``
     raises, which stops the MCP stdio transport from spawning a server at
-    all.  A real pty and a real file restore them for the test.
+    all.  ``os.devnull`` and a real file restore them for the test.
 
     Only ``sys.stderr`` needs replacing: ``_enter_transport`` resolves the
     child's stderr through ``_child_errlog()`` on every spawn, so it picks
     this file up without the transport's import-time default being touched.
     """
-    master_fd, slave_fd = pty.openpty()
-    stdin_stream = os.fdopen(slave_fd, "r", closefd=True)
+    # ``os.devnull`` has a real descriptor on every platform (Windows has
+    # no pty) and nothing reads stdin while the client talks to the child.
+    stdin_stream = open(os.devnull, encoding="utf-8")
     errlog = (tmp_path / "mcp_errlog.txt").open("w", encoding="utf-8")
     monkeypatch.setattr(sys, "stdin", stdin_stream)
     monkeypatch.setattr(sys, "stderr", errlog)
@@ -113,7 +114,6 @@ def real_stdin(
     finally:
         errlog.close()
         stdin_stream.close()
-        os.close(master_fd)
 
 
 @pytest.fixture
@@ -147,11 +147,7 @@ def _wait_for_pid_file(pid_file: Path, timeout: float = 30) -> int:
 
 def _alive(pid: int) -> bool:
     """Return True while *pid* still exists."""
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+    return pid_alive(pid)
 
 
 def _wait_until_dead(pid: int, timeout: float = 20) -> bool:
@@ -411,8 +407,9 @@ def test_spawn_survives_a_closed_stderr(
     This drives the real transport with a genuinely closed
     ``sys.stderr`` and requires a real FastMCP child to come up anyway.
     """
-    master_fd, slave_fd = pty.openpty()
-    stdin_stream = os.fdopen(slave_fd, "r", closefd=True)
+    # ``os.devnull`` has a real descriptor on every platform (Windows has
+    # no pty) and nothing reads stdin while the client talks to the child.
+    stdin_stream = open(os.devnull, encoding="utf-8")
     dead = (tmp_path / "dead_errlog.txt").open("w", encoding="utf-8")
     dead.close()
     monkeypatch.setattr(sys, "stdin", stdin_stream)
@@ -424,4 +421,3 @@ def test_spawn_survives_a_closed_stderr(
         assert _alive(_wait_for_pid_file(pid_file))
     finally:
         stdin_stream.close()
-        os.close(master_fd)

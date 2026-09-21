@@ -13,6 +13,7 @@ import re
 import stat
 import string
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import IO, Any, cast
@@ -143,10 +144,63 @@ def atomic_write_text(
         # mode included, so a second chmod on the target would be a no-op.
         if preserved is not None:
             _try_chmod(tmp, preserved)
-        os.replace(tmp, target)
+        replace_waiting_for_readers(tmp, target)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def replace_waiting_for_readers(tmp: str | Path, target: Path) -> None:
+    """``os.replace`` that, on Windows, waits out a reader holding *target*.
+
+    Windows refuses to replace a file while another handle opened without
+    ``FILE_SHARE_DELETE`` is on it -- and Python's ``open`` never sets
+    that flag -- so a concurrent ``read_bytes`` of the target makes
+    ``os.replace`` raise ``PermissionError`` for the few milliseconds the
+    read lasts.  Retrying for up to a second gives callers the POSIX
+    semantics they rely on; a holder that never lets go still raises.
+    """
+    deadline = time.monotonic() + 1.0
+    while True:
+        try:
+            os.replace(tmp, target)
+            return
+        except PermissionError:
+            if os.name != "nt" or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.005)
+
+
+def read_bytes_waiting_for_writer(path: Path) -> bytes:
+    """``Path.read_bytes`` that, on Windows, waits out an in-flight replace.
+
+    The mirror image of :func:`atomic_write_text`'s publish step: while
+    ``os.replace`` is swapping *path* to its new content, Windows denies
+    a concurrent ``open`` of the name with ``PermissionError`` for a few
+    milliseconds -- so a reader racing the writer would fail instead of
+    seeing either the old or the new document, which is the very
+    guarantee the atomic write exists to give.  On POSIX ``open`` never
+    fails that way and the first attempt is the only one.
+
+    Args:
+        path: The file to read.
+
+    Returns:
+        The file's bytes.
+
+    Raises:
+        PermissionError: If the file stays unopenable for a second (a
+            real permission problem, not a replace in progress).
+        OSError: Any other read failure, unchanged.
+    """
+    deadline = time.monotonic() + 1.0
+    while True:
+        try:
+            return path.read_bytes()
+        except PermissionError:
+            if os.name != "nt" or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.005)
 
 
 def _open_staging_file(target: Path, create_mode: int) -> tuple[int, str]:

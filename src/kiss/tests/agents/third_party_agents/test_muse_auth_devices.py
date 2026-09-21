@@ -22,11 +22,11 @@ and refused when the host is merely allowlisted.
 Branch-coverage notes (unreachable without test doubles, so documented
 instead of mocked):
 
-* ``discord_agent._muse_authenticate``'s ``except Exception`` rollback
-  and ``homeassistant_agent``/``ntfy_agent``'s ``MuseAuthError``
+* ``discord_sea._muse_authenticate``'s ``except Exception`` rollback
+  and ``homeassistant_sea``/``ntfy_sea``'s ``MuseAuthError``
   handlers in their authenticate tools need the daemon to die between
   the enrollment and the validation call (a cross-process race).
-* ``ntfy_agent._wire_muse``'s empty-surrogate return after
+* ``ntfy_sea._wire_muse``'s empty-surrogate return after
   ``bearer_surrogate`` needs the vault cleared between the store and
   the mint (a cross-process race); the tokenless return is covered.
 * ``govee._muse_session``'s cached-return branch is covered, but the
@@ -68,10 +68,10 @@ import requests
 
 from kiss.agents.third_party_agents import govee
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
-from kiss.agents.third_party_agents.discord_agent import DiscordChannelBackend
-from kiss.agents.third_party_agents.discord_agent import _config as discord_config
-from kiss.agents.third_party_agents.homeassistant_agent import HomeAssistantChannelBackend
-from kiss.agents.third_party_agents.homeassistant_agent import _config as ha_config
+from kiss.agents.third_party_agents.discord_sea import DiscordChannelBackend
+from kiss.agents.third_party_agents.discord_sea import _config as discord_config
+from kiss.agents.third_party_agents.homeassistant_sea import HomeAssistantChannelBackend
+from kiss.agents.third_party_agents.homeassistant_sea import _config as ha_config
 from kiss.agents.third_party_agents.muse_auth import __main__ as muse_cli
 from kiss.agents.third_party_agents.muse_auth._common import (
     builtin_hosts,
@@ -86,10 +86,11 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     store_credentials,
     vault_has_credentials,
 )
-from kiss.agents.third_party_agents.ntfy_agent import NtfyChannelBackend
-from kiss.agents.third_party_agents.ntfy_agent import _config as ntfy_config
+from kiss.agents.third_party_agents.ntfy_sea import NtfyChannelBackend
+from kiss.agents.third_party_agents.ntfy_sea import _config as ntfy_config
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
+    requires_muse_daemon,
     setup_muse_env,
     teardown_muse_env,
     wait_daemon_stopped,
@@ -394,7 +395,7 @@ def test_discord_vault_first_and_make_backend(
     muse_env: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Vault-first connects survive config removal; poll mode is vault-aware."""
-    from kiss.agents.third_party_agents.discord_agent import _make_backend
+    from kiss.agents.third_party_agents.discord_sea import _make_backend
 
     monkeypatch.setenv(
         "DISCORD_API_BASE", f"http://127.0.0.1:{api_server.server_address[1]}/api/v10"
@@ -427,7 +428,7 @@ def test_discord_authenticate_rotation_rollback_clear(
     muse_env: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """authenticate_discord enrolls, validates, rolls back, and rotates."""
-    from kiss.agents.third_party_agents.discord_agent import DiscordAgent
+    from kiss.agents.third_party_agents.discord_sea import DiscordAgent
 
     monkeypatch.setenv(
         "DISCORD_API_BASE", f"http://127.0.0.1:{api_server.server_address[1]}/api/v10"
@@ -536,7 +537,7 @@ def test_homeassistant_authenticate_and_clear_tools(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """authenticate_homeassistant re-enrolls rotated tokens; clear wipes."""
-    from kiss.agents.third_party_agents.homeassistant_agent import HomeAssistantAgent
+    from kiss.agents.third_party_agents.homeassistant_sea import HomeAssistantAgent
 
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     agent = HomeAssistantAgent()
@@ -610,7 +611,7 @@ def test_ntfy_tokenless_stays_legacy_and_rotation(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """Tokenless ntfy has no credential to protect and skips the boundary."""
-    from kiss.agents.third_party_agents.ntfy_agent import NtfyAgent
+    from kiss.agents.third_party_agents.ntfy_sea import NtfyAgent
 
     server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     agent = NtfyAgent()
@@ -751,7 +752,7 @@ def test_cli_import_devices(
 
     # Firecrawl cloud-only import (no base_url) must still enroll the
     # cloud origin, or the migrated key cannot reach api.firecrawl.dev.
-    from kiss.agents.third_party_agents.firecrawl_agent import _config as firecrawl_config
+    from kiss.agents.third_party_agents.firecrawl_sea import _config as firecrawl_config
     from kiss.agents.third_party_agents.muse_auth.daemon import MuseAuthDaemon
 
     firecrawl_config.save({"api_key": "fc-cloud-key"})
@@ -786,7 +787,7 @@ def test_cli_import_devices(
 
     # Firecrawl plain-HTTP self-host bases enroll their consent-scoped
     # insecure host through the same import path.
-    from kiss.agents.third_party_agents.firecrawl_agent import _insecure_extra_hosts
+    from kiss.agents.third_party_agents.firecrawl_sea import _insecure_extra_hosts
 
     assert _insecure_extra_hosts("http://firecrawl.lan:3002") == ("firecrawl.lan:3002",)
     assert _insecure_extra_hosts("https://firecrawl.lan:3002") == ()
@@ -799,14 +800,14 @@ def test_cli_import_devices(
 
 def test_scrub_helpers_tolerate_malformed_configs(muse_env: Path) -> None:
     """The metadata readers and scrubbers never crash on odd files."""
-    from kiss.agents.third_party_agents.discord_agent import (
+    from kiss.agents.third_party_agents.discord_sea import (
         _scrub_config_token as discord_scrub,
     )
-    from kiss.agents.third_party_agents.homeassistant_agent import _read_base_url
-    from kiss.agents.third_party_agents.homeassistant_agent import (
+    from kiss.agents.third_party_agents.homeassistant_sea import _read_base_url
+    from kiss.agents.third_party_agents.homeassistant_sea import (
         _scrub_config_token as ha_scrub,
     )
-    from kiss.agents.third_party_agents.ntfy_agent import _scrub_config_token as ntfy_scrub
+    from kiss.agents.third_party_agents.ntfy_sea import _scrub_config_token as ntfy_scrub
 
     # Absent files: every helper is a no-op.
     discord_scrub()
@@ -862,7 +863,7 @@ def test_scrub_helpers_tolerate_malformed_configs(muse_env: Path) -> None:
     # Poll-mode startup resolves model/budget overrides from a scrubbed
     # config through the same tolerant reader.
     from kiss.agents.third_party_agents._channel_agent_utils import channel_override_config
-    from kiss.agents.third_party_agents.discord_agent import DiscordAgent
+    from kiss.agents.third_party_agents.discord_sea import DiscordAgent
 
     overrides = {"application_id": "app9", "channel_model_name": "model-x"}
     discord_config.path.write_text(json.dumps(overrides))
@@ -875,7 +876,7 @@ def test_discord_legacy_mode_unchanged(
     isolated_kiss_home: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With Muse-auth off, Discord keeps its plaintext-config behavior."""
-    from kiss.agents.third_party_agents.discord_agent import DiscordAgent, _make_backend
+    from kiss.agents.third_party_agents.discord_sea import DiscordAgent, _make_backend
 
     monkeypatch.setenv("KISS_MUSE_AUTH", "0")
     monkeypatch.setenv(
@@ -922,7 +923,7 @@ def test_homeassistant_no_credential_and_bad_host(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """Vault-less connects fail cleanly; malformed hosts fail enrollment."""
-    from kiss.agents.third_party_agents.homeassistant_agent import HomeAssistantAgent
+    from kiss.agents.third_party_agents.homeassistant_sea import HomeAssistantAgent
 
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     # A base_url without any token (config or vault) cannot connect.
@@ -944,7 +945,7 @@ def test_homeassistant_no_credential_and_bad_host(
 
 def test_ntfy_enrollment_host_helpers_and_bad_host(muse_env: Path) -> None:
     """Host helpers skip the public server; bad hosts surface cleanly."""
-    from kiss.agents.third_party_agents.ntfy_agent import (
+    from kiss.agents.third_party_agents.ntfy_sea import (
         NtfyAgent,
         _extra_hosts,
         _insecure_extra_hosts,
@@ -1013,8 +1014,8 @@ def test_failed_enrollment_is_transactional(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """A rejected enrollment leaves the old credential and config intact."""
-    from kiss.agents.third_party_agents.homeassistant_agent import HomeAssistantAgent
-    from kiss.agents.third_party_agents.ntfy_agent import NtfyAgent
+    from kiss.agents.third_party_agents.homeassistant_sea import HomeAssistantAgent
+    from kiss.agents.third_party_agents.ntfy_sea import NtfyAgent
 
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     ha_agent = HomeAssistantAgent()
@@ -1044,6 +1045,7 @@ def test_failed_enrollment_is_transactional(
     assert api_server.header("Authorization") == "Bearer tk-good"
 
 
+@requires_muse_daemon
 def test_boundary_ignores_ambient_proxy_env(
     isolated_kiss_home: Path,
     api_server: _DeviceApiServer,
@@ -1081,7 +1083,7 @@ def test_rotation_invalidates_old_surrogates(
     muse_env: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Replacing a credential kills surrogates minted for the old one."""
-    from kiss.agents.third_party_agents.discord_agent import DiscordAgent
+    from kiss.agents.third_party_agents.discord_sea import DiscordAgent
 
     monkeypatch.setenv(
         "DISCORD_API_BASE", f"http://127.0.0.1:{api_server.server_address[1]}/api/v10"
@@ -1308,9 +1310,9 @@ def test_rotation_mid_request_aborts_header_kind_hop(
 
 def test_authenticate_rejects_malformed_ports(muse_env: Path) -> None:
     """A non-numeric or out-of-range port is refused before any state change."""
-    from kiss.agents.third_party_agents.firecrawl_agent import FirecrawlAgent
-    from kiss.agents.third_party_agents.homeassistant_agent import HomeAssistantAgent
-    from kiss.agents.third_party_agents.ntfy_agent import NtfyAgent
+    from kiss.agents.third_party_agents.firecrawl_sea import FirecrawlAgent
+    from kiss.agents.third_party_agents.homeassistant_sea import HomeAssistantAgent
+    from kiss.agents.third_party_agents.ntfy_sea import NtfyAgent
 
     ha_tools = auth_tools(HomeAssistantAgent())
     assert "valid port" in ha_tools["authenticate_homeassistant"](
@@ -1324,7 +1326,7 @@ def test_authenticate_rejects_malformed_ports(muse_env: Path) -> None:
 
     # Firecrawl rejects the bad port BEFORE writing any plaintext key or
     # clearing a prior vault entry (no destructive partial migration).
-    from kiss.agents.third_party_agents.firecrawl_agent import _config as firecrawl_config
+    from kiss.agents.third_party_agents.firecrawl_sea import _config as firecrawl_config
     from kiss.agents.third_party_agents.muse_auth.client import store_credentials
 
     store_credentials("firecrawl", {"kind": "bearer", "token": "fc-old"}, [])
@@ -1415,7 +1417,7 @@ def test_ntfy_wiring_failure_hides_backend_tools(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """A failed Muse wiring hides the backend tools (no tokenless egress)."""
-    from kiss.agents.third_party_agents.ntfy_agent import NtfyAgent
+    from kiss.agents.third_party_agents.ntfy_sea import NtfyAgent
 
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     ntfy_config.save({"topic": "t1", "server": base_url, "token": "bad\ntoken"})
@@ -1431,7 +1433,7 @@ def test_ntfy_wiring_failure_hides_backend_tools(
 
 def test_valid_http_url_rejects_userinfo_and_accepts_ipv4_mapped(muse_env: Path) -> None:
     """URL validation rejects userinfo and accepts IPv4-mapped IPv6 end to end."""
-    from kiss.agents.third_party_agents.homeassistant_agent import HomeAssistantAgent
+    from kiss.agents.third_party_agents.homeassistant_sea import HomeAssistantAgent
     from kiss.agents.third_party_agents.muse_auth._common import valid_http_url
     from kiss.agents.third_party_agents.muse_auth.daemon import _invalid_hosts_reason
 
@@ -1480,7 +1482,7 @@ def test_valid_http_url_rejects_userinfo_and_accepts_ipv4_mapped(muse_env: Path)
 
 def test_firecrawl_is_origin_bound(muse_env: Path) -> None:
     """A self-hosted Firecrawl key is never authorized for the cloud API."""
-    from kiss.agents.third_party_agents.firecrawl_agent import _extra_hosts
+    from kiss.agents.third_party_agents.firecrawl_sea import _extra_hosts
     from kiss.agents.third_party_agents.muse_auth._common import builtin_hosts
     from kiss.agents.third_party_agents.muse_auth.daemon import MuseAuthDaemon
 
@@ -1629,7 +1631,7 @@ def test_authenticate_accepts_terminal_dot_host(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """A fully-qualified hostname with a trailing dot is canonicalized."""
-    from kiss.agents.third_party_agents.homeassistant_agent import HomeAssistantAgent
+    from kiss.agents.third_party_agents.homeassistant_sea import HomeAssistantAgent
 
     # 127.0.0.1. is the loopback address written fully-qualified; it
     # must be accepted (canonicalized to 127.0.0.1), not rejected.
@@ -1647,9 +1649,9 @@ def test_wiring_failure_leaves_agents_constructible(
     muse_env: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A daemon-rejected config token fails closed but keeps tools alive."""
-    from kiss.agents.third_party_agents.discord_agent import DiscordAgent
-    from kiss.agents.third_party_agents.homeassistant_agent import HomeAssistantAgent
-    from kiss.agents.third_party_agents.ntfy_agent import NtfyAgent
+    from kiss.agents.third_party_agents.discord_sea import DiscordAgent
+    from kiss.agents.third_party_agents.homeassistant_sea import HomeAssistantAgent
+    from kiss.agents.third_party_agents.ntfy_sea import NtfyAgent
 
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     monkeypatch.setenv("DISCORD_API_BASE", f"{base_url}/api/v10")
@@ -1680,8 +1682,8 @@ def test_wiring_failure_leaves_agents_constructible(
 
 def test_authenticate_rejects_malformed_urls(muse_env: Path) -> None:
     """Base URLs without an http(s) scheme or hostname are refused early."""
-    from kiss.agents.third_party_agents.homeassistant_agent import HomeAssistantAgent
-    from kiss.agents.third_party_agents.ntfy_agent import NtfyAgent
+    from kiss.agents.third_party_agents.homeassistant_sea import HomeAssistantAgent
+    from kiss.agents.third_party_agents.ntfy_sea import NtfyAgent
 
     ha_tools = auth_tools(HomeAssistantAgent())
     result = ha_tools["authenticate_homeassistant"]("homeassistant.local:8123", "tok")
@@ -1799,7 +1801,7 @@ def test_cli_import_url_requirements(
     falsy JSON values (false, 0, []) are malformed configs, not "use
     the default".
     """
-    from kiss.agents.third_party_agents.firecrawl_agent import _config as firecrawl_config
+    from kiss.agents.third_party_agents.firecrawl_sea import _config as firecrawl_config
     from kiss.agents.third_party_agents.muse_auth.daemon import MuseAuthDaemon
 
     # ntfy with a null server: import succeeds and enrolls ntfy.sh:443,
@@ -1851,8 +1853,8 @@ def test_connect_rejects_malformed_legacy_urls(muse_env: Path) -> None:
     scope Sentinel can never match, and must not scrub the plaintext
     copy: the backend fails closed with an actionable message instead.
     """
-    from kiss.agents.third_party_agents.firecrawl_agent import FirecrawlChannelBackend
-    from kiss.agents.third_party_agents.firecrawl_agent import _config as firecrawl_config
+    from kiss.agents.third_party_agents.firecrawl_sea import FirecrawlChannelBackend
+    from kiss.agents.third_party_agents.firecrawl_sea import _config as firecrawl_config
 
     ha_config.path.parent.mkdir(parents=True, exist_ok=True)
     ha_config.path.write_text(

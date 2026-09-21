@@ -19,9 +19,9 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.third_party_agents.mattermost_agent import MattermostChannelBackend
-from kiss.agents.third_party_agents.mattermost_agent import _config as _mm_config
-from kiss.agents.third_party_agents.msteams_agent import MSTeamsChannelBackend
+from kiss.agents.third_party_agents.mattermost_sea import MattermostChannelBackend
+from kiss.agents.third_party_agents.mattermost_sea import _config as _mm_config
+from kiss.agents.third_party_agents.msteams_sea import MSTeamsChannelBackend
 
 _GRAPH_MESSAGE = {
     "id": "MSG1",

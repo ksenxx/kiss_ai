@@ -534,3 +534,37 @@ def test_scheduler_thread_survives_tick_failure(tmp_path: Path) -> None:
         assert thread is not None and thread.is_alive()
     finally:
         _stop_scheduler(stop_event)
+
+
+def test_until_delivered_job_disables_itself_after_first_news(tmp_path: Path) -> None:
+    """A "notify me when ..." poll stops after its first non-silent delivery."""
+    flag = tmp_path / "released"
+    job = _create(cron_job(
+        "create", name="release poll", schedule="every 1m",
+        command=f"test -f {flag.as_posix()} && echo 'released!'", until_delivered=True,
+    ))
+    assert job["until_delivered"] is True
+    _set_job_fields(job["id"], next_run_at=1.0)
+    # Nothing to report yet (the command fails/exits 1 → error status, not
+    # a delivery); an error is recorded but does not retire the job.
+    assert tick(2.0) == 1
+    stored = load_jobs()[0]
+    assert stored["enabled"] is True and stored["last_status"] == "error"
+    _set_job_fields(job["id"], next_run_at=1.0)
+    flag.write_text("yes")
+    assert tick(3.0) == 1
+    stored = load_jobs()[0]
+    assert stored["last_status"] == "ok" and stored["last_summary"] == "released!"
+    assert stored["enabled"] is False and stored["next_run_at"] is None
+    assert tick(4.0) == 0
+
+
+def test_repeating_job_without_until_delivered_keeps_running() -> None:
+    job = _create(cron_job(
+        "create", name="heartbeat", schedule="every 1m", command="echo beat",
+    ))
+    assert job["until_delivered"] is False
+    _set_job_fields(job["id"], next_run_at=1.0)
+    assert tick(2.0) == 1
+    stored = load_jobs()[0]
+    assert stored["enabled"] is True and stored["next_run_at"] is not None

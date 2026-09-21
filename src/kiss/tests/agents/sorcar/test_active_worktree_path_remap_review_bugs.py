@@ -47,7 +47,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools, _popen_kwargs
 
 
 def _run(*args: str, cwd: Path) -> None:
@@ -92,15 +92,21 @@ def repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
 
     wt_dir = repo / ".kiss-worktrees" / "kiss_wt-test-cafebabe"
     _run(
-        "git", "worktree", "add",
-        "-b", "kiss/wt-test-cafebabe", str(wt_dir),
+        "git",
+        "worktree",
+        "add",
+        "-b",
+        "kiss/wt-test-cafebabe",
+        str(wt_dir),
         cwd=repo,
     )
     return repo, wt_dir
 
 
 def test_relative_path_edit_lands_in_worktree_even_when_host_cwd_unrelated(
-    repo_with_worktree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    repo_with_worktree,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``Edit("README.md", ...)`` from a worktree task must hit the
     worktree's README regardless of the host process's ``os.getcwd()``.
@@ -118,6 +124,7 @@ def test_relative_path_edit_lands_in_worktree_even_when_host_cwd_unrelated(
     monkeypatch.chdir(unrelated)
     tools = UsefulTools(work_dir=str(wt_dir))
 
+    tools.Read("README.md")
     out = tools.Edit("README.md", "MAIN README v1", "EDITED v2")
 
     assert "Successfully replaced" in out, out
@@ -127,7 +134,9 @@ def test_relative_path_edit_lands_in_worktree_even_when_host_cwd_unrelated(
 
 
 def test_relative_path_write_lands_in_worktree_even_when_host_cwd_unrelated(
-    repo_with_worktree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    repo_with_worktree,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Same as above for ``Write`` of a brand-new file."""
     repo, wt_dir = repo_with_worktree
@@ -145,7 +154,9 @@ def test_relative_path_write_lands_in_worktree_even_when_host_cwd_unrelated(
 
 
 def test_relative_path_read_returns_worktree_content(
-    repo_with_worktree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    repo_with_worktree,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``Read("README.md")`` must return the worktree's content."""
     repo, wt_dir = repo_with_worktree
@@ -223,7 +234,7 @@ def test_bash_output_redirection_to_main_repo_is_refused(
     tools = UsefulTools(work_dir=str(wt_dir))
 
     tools.Bash(
-        f"echo PWNED > {target}",
+        f"echo PWNED > {target.as_posix()}",
         description="evil",
     )
 
@@ -239,10 +250,11 @@ def test_bash_sed_inplace_against_main_repo_is_refused(
     before = target.read_text()
     tools = UsefulTools(work_dir=str(wt_dir))
 
-    if subprocess.run(["sed", "--version"], capture_output=True).returncode == 0:
-        cmd = f"sed -i 's/MAIN/PWNED/' {target}"
+    gnu_sed = subprocess.run(**_popen_kwargs("sed --version"), capture_output=True)
+    if gnu_sed.returncode == 0:
+        cmd = f"sed -i 's/MAIN/PWNED/' {target.as_posix()}"
     else:
-        cmd = f"sed -i '' 's/MAIN/PWNED/' {target}"
+        cmd = f"sed -i '' 's/MAIN/PWNED/' {target.as_posix()}"
     tools.Bash(cmd, description="evil")
 
     assert target.read_text() == before
@@ -257,7 +269,7 @@ def test_bash_rm_against_main_repo_is_refused(
     assert sentinel.exists()
     tools = UsefulTools(work_dir=str(wt_dir))
 
-    tools.Bash(f"rm -f {sentinel}", description="evil")
+    tools.Bash(f"rm -f {sentinel.as_posix()}", description="evil")
 
     assert sentinel.exists()
 
@@ -273,7 +285,7 @@ def test_bash_inside_worktree_still_works(repo_with_worktree) -> None:
     tools = UsefulTools(work_dir=str(wt_dir))
 
     out = tools.Bash(
-        f"echo WT_OK > {wt_dir / 'notes.md'}",
+        f"echo WT_OK > {(wt_dir / 'notes.md').as_posix()}",
         description="legit",
     )
 
@@ -282,14 +294,15 @@ def test_bash_inside_worktree_still_works(repo_with_worktree) -> None:
 
 
 def test_bash_on_paths_outside_repo_still_works(
-    repo_with_worktree, tmp_path: Path,
+    repo_with_worktree,
+    tmp_path: Path,
 ) -> None:
     """Commands targeting paths unrelated to the parent repo must succeed."""
     repo, wt_dir = repo_with_worktree
     scratch = tmp_path / "scratch.txt"
     tools = UsefulTools(work_dir=str(wt_dir))
 
-    tools.Bash(f"echo HELLO > {scratch}", description="scratch")
+    tools.Bash(f"echo HELLO > {scratch.as_posix()}", description="scratch")
 
     assert scratch.read_text() == "HELLO\n"
 
@@ -311,6 +324,7 @@ def test_remap_actually_advances_main_via_squash_merge(
     baseline = main_head_before
     tools = UsefulTools(work_dir=str(wt_dir))
 
+    tools.Read(str(repo / "README.md"))
     tools.Edit(str(repo / "README.md"), "MAIN README v1", "MERGED")
 
     assert GitWorktreeOps.has_uncommitted_changes(wt_dir)
@@ -318,7 +332,9 @@ def test_remap_actually_advances_main_via_squash_merge(
     assert committed
 
     result = GitWorktreeOps.squash_merge_from_baseline(
-        repo, branch, baseline,
+        repo,
+        branch,
+        baseline,
     )
     main_head_after = _stdout("git", "rev-parse", "main", cwd=repo)
     assert main_head_after != main_head_before, (

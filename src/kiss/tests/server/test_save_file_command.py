@@ -28,6 +28,7 @@ from websockets.asyncio.client import connect
 
 from kiss.server.sorcar import API, validate_command
 from kiss.server.web_server import _file_version
+from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
 from kiss.tests.server.test_content_tab_file_links import (
     _PY_SOURCE,
     _no_verify_ssl,
@@ -288,6 +289,7 @@ class TestSaveFile:
         assert got[0]["path"] == str(target)
         assert target.read_text() == "w\n"
 
+    @posix_only("executable permission bits")
     def test_executable_bit_survives_the_atomic_replace(self, harness) -> None:
         script = harness.work_dir / "tool.sh"
         script.write_text("#!/bin/sh\necho hi\n")
@@ -324,8 +326,9 @@ class TestSaveFile:
         assert real.read_text() == "via link\n"
         assert link.is_symlink()
 
+    @posix_only("chmod permission bits")
     def test_unwritable_directory_replies_error(self, harness) -> None:
-        if os.geteuid() == 0:
+        if is_root():
             # root ignores directory permission bits; nothing to test.
             return
         locked = harness.work_dir / "locked"
@@ -429,6 +432,7 @@ class TestSaveFile:
         assert target.read_text() == "g\n"
 
 
+@requires_unix_sockets
 class TestUdsDropGate:
     """A VS Code window (UDS) edits files in real editors: its
     ``saveFile`` is dropped and never touches the disk."""

@@ -69,12 +69,10 @@ def _run_task(model_name: str, task: str) -> str:
 def _internet_urls() -> list[str]:
     """Return the visited URLs that are actual Internet fetches.
 
-    SYSTEM.md mandates reading ``./SORCAR.md`` as the very first
-    action; with ``go_to_url`` as the only tool some models comply via
-    a ``file://`` URL or a loopback URL such as
-    ``http://localhost/SORCAR.md``.  Such local reads are policy
-    compliance, not Internet searches, so only ``http(s)://`` visits to
-    non-loopback hosts count.
+    With ``go_to_url`` as the only tool some models open a ``file://``
+    URL or a loopback URL such as ``http://localhost/README.md`` to
+    look at local files first.  Such local reads are not Internet
+    searches, so only ``http(s)://`` visits to non-loopback hosts count.
     """
     urls: list[str] = []
     for u in VISITED_URLS:

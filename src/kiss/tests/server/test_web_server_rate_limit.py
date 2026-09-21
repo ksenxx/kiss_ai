@@ -40,6 +40,7 @@ import asyncio
 import inspect
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -58,6 +59,7 @@ from kiss.server.web_server import (
     _stderr_reader_loop,
     _tunnel_backoff_delay,
 )
+from kiss.tests.conftest import posix_only
 
 
 def _find_free_port() -> int:
@@ -199,18 +201,28 @@ class TestStderrReaderLoopSignature(unittest.TestCase):
 class TestReadUrlFromStderrFlag(unittest.TestCase):
     """End-to-end: ``_read_url_from_stderr`` sets the flag from stderr."""
 
-    def _spawn_bash(self, body: str) -> subprocess.Popen[str]:
+    def _spawn_stderr_writer(
+        self, lines: list[str], linger: float,
+    ) -> subprocess.Popen[str]:
+        """Start a child that prints *lines* to stderr, then sleeps *linger*."""
+        script = (
+            "import sys, time\n"
+            f"for line in {lines!r}:\n"
+            "    sys.stderr.write(line + '\\n')\n"
+            "sys.stderr.flush()\n"
+            f"time.sleep({linger!r})\n"
+        )
         return subprocess.Popen(
-            ["/bin/bash", "-c", body],
+            [sys.executable, "-c", script],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
         )
 
     def test_flag_set_on_rate_limit_line_no_url(self) -> None:
-        proc = self._spawn_bash(
-            'echo "ERR error code: 1015 status_code=\\"429 Too Many '
-            'Requests\\"" >&2; sleep 0.05',
+        proc = self._spawn_stderr_writer(
+            ['ERR error code: 1015 status_code="429 Too Many Requests"'],
+            linger=0.05,
         )
         try:
             flag = [False]
@@ -225,10 +237,8 @@ class TestReadUrlFromStderrFlag(unittest.TestCase):
             proc.wait(timeout=2)
 
     def test_flag_clear_on_clean_failure_no_url(self) -> None:
-        proc = self._spawn_bash(
-            'echo "INF starting tunnel" >&2; '
-            'echo "ERR connection refused" >&2; '
-            'sleep 0.05',
+        proc = self._spawn_stderr_writer(
+            ["INF starting tunnel", "ERR connection refused"], linger=0.05,
         )
         try:
             flag = [False]
@@ -243,10 +253,12 @@ class TestReadUrlFromStderrFlag(unittest.TestCase):
             proc.wait(timeout=2)
 
     def test_flag_set_then_url_found(self) -> None:
-        proc = self._spawn_bash(
-            'echo "ERR error code: 1015 transient" >&2; '
-            'echo "INF |  https://example-tunnel.trycloudflare.com  |" '
-            ">&2; sleep 1",
+        proc = self._spawn_stderr_writer(
+            [
+                "ERR error code: 1015 transient",
+                "INF |  https://example-tunnel.trycloudflare.com  |",
+            ],
+            linger=1,
         )
         try:
             flag = [False]
@@ -263,8 +275,8 @@ class TestReadUrlFromStderrFlag(unittest.TestCase):
             proc.wait(timeout=2)
 
     def test_no_flag_arg_does_not_break_existing_callers(self) -> None:
-        proc = self._spawn_bash(
-            'echo "INF |  https://nf.trycloudflare.com  |" >&2; sleep 1',
+        proc = self._spawn_stderr_writer(
+            ["INF |  https://nf.trycloudflare.com  |"], linger=1,
         )
         try:
             url = _read_url_from_stderr(
@@ -352,6 +364,7 @@ class TestStartQuickTunnelMarksRateLimit(IsolatedAsyncioTestCase):
             "non-rate-limit failure must not mark _tunnel_rate_limited",
         )
 
+    @posix_only("fake cloudflared on PATH is a bash script")
     async def test_successful_start_does_not_mark_server(self) -> None:
         self._install_fake_cloudflared(
             'echo "INF |  https://ok-1234.trycloudflare.com  |" >&2\n'

@@ -75,6 +75,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state, talk_player
 from kiss.server.agent_state import AgentState
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_talk_endpoint_muting import (
     _find_free_port,
     _redirect_persistence,
@@ -135,6 +136,7 @@ class _ParkingCall:
         return self._real(*args, **kwargs)
 
 
+@requires_unix_sockets
 class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
     """The three documented races plus the retained sub-agent behaviour."""
 

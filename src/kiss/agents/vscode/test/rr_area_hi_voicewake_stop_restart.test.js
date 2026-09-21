@@ -102,17 +102,20 @@ const pidFile = path.join(tmpHome, 'pids.txt');
 // The fake listener: grabs the exclusive "microphone", releases it only
 // 300ms AFTER receiving SIGTERM (a dying real listener does not release
 // the capture device instantly), and records any instance that found
-// the microphone already taken.
+// the microphone already taken.  The TERM trap is installed BEFORE the
+// lock is taken: the tests start stopping as soon as the lock directory
+// appears, and a SIGTERM that lands between mkdir and trap would kill
+// the shell with the default disposition, leaving the lock behind.
 fs.writeFileSync(
   path.join(binDir, 'uv'),
   '#!/bin/sh\n' +
+    `on_term() { sleep 0.3; rmdir "${lockDir}" 2>/dev/null; exit 0; }\n` +
+    'trap on_term TERM\n' +
     `if ! mkdir "${lockDir}" 2>/dev/null; then\n` +
     `  echo overlap >> "${overlapFile}"\n` +
     '  exit 1\n' +
     'fi\n' +
     `echo "$$" >> "${pidFile}"\n` +
-    `on_term() { sleep 0.3; rmdir "${lockDir}" 2>/dev/null; exit 0; }\n` +
-    'trap on_term TERM\n' +
     'echo READY\n' +
     'while :; do sleep 0.1; done\n',
   {mode: 0o755},

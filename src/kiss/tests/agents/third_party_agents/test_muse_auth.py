@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -52,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import requests
 
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents._google_workspace_utils import (
@@ -61,9 +63,9 @@ from kiss.agents.third_party_agents._google_workspace_utils import (
     load_google_credentials,
     save_google_credentials,
 )
-from kiss.agents.third_party_agents.github_agent import GitHubChannelBackend
-from kiss.agents.third_party_agents.gmail_agent import _build_service, _load_credentials
-from kiss.agents.third_party_agents.google_drive_agent import GoogleDriveChannelBackend
+from kiss.agents.third_party_agents.gdrive_sea import GoogleDriveChannelBackend
+from kiss.agents.third_party_agents.github_sea import GitHubChannelBackend
+from kiss.agents.third_party_agents.gmail_sea import _build_service, _load_credentials
 from kiss.agents.third_party_agents.muse_auth import __main__ as muse_cli
 from kiss.agents.third_party_agents.muse_auth import client as muse_client
 from kiss.agents.third_party_agents.muse_auth._common import (
@@ -476,8 +478,6 @@ def test_legacy_mode_untouched(isolated_kiss_home: Path,
     """With KISS_MUSE_AUTH=0, the legacy paths are fully preserved."""
     monkeypatch.setenv("KISS_MUSE_AUTH", "0")
     assert not muse_auth_enabled()
-    import requests
-
     assert google_api_session("google_drive") is requests
     backend = GoogleDriveChannelBackend()
     assert backend._http is requests
@@ -487,20 +487,38 @@ def test_legacy_mode_untouched(isolated_kiss_home: Path,
 
 def test_muse_auth_enabled_by_default(isolated_kiss_home: Path,
                                       monkeypatch: pytest.MonkeyPatch) -> None:
-    """Muse-auth is on unless KISS_MUSE_AUTH is an explicit falsy string."""
+    """Muse-auth defaults on where the daemon can run, unless explicitly off.
+
+    The platform default is ``platform_supports_muse_daemon()``: True on
+    Linux (``SO_PEERCRED`` exists), False on Windows and macOS, so both
+    branches are exercised for real by running the suite on each OS.
+    """
+    from kiss.agents.third_party_agents.muse_auth._common import platform_supports_muse_daemon
     from kiss.agents.third_party_agents.muse_auth.client import MuseBoundarySession
+
+    default_on = platform_supports_muse_daemon()
+    assert default_on == hasattr(socket, "SO_PEERCRED")
 
     # Unset (the production default when nobody exports the var).
     monkeypatch.delenv("KISS_MUSE_AUTH", raising=False)
-    assert muse_auth_enabled()
+    assert muse_auth_enabled() == default_on
     session = google_api_session("google_drive")
-    assert isinstance(session, MuseBoundarySession)
-    assert session.service == "google_drive"
     backend = GoogleDriveChannelBackend()
-    assert isinstance(backend._http, MuseBoundarySession)
+    if default_on:
+        assert isinstance(session, MuseBoundarySession)
+        assert session.service == "google_drive"
+        assert isinstance(backend._http, MuseBoundarySession)
+    else:
+        assert session is requests
+        assert backend._http is requests
 
-    # Empty, truthy, and unrecognized values all keep the secure default.
-    for value in ("", "1", "true", " YES ", "on", "definitely"):
+    # Empty and unrecognized values keep the platform default.
+    for value in ("", "definitely"):
+        monkeypatch.setenv("KISS_MUSE_AUTH", value)
+        assert muse_auth_enabled() == default_on, value
+
+    # Explicit truthy strings force Muse-auth on everywhere.
+    for value in ("1", "true", " YES ", "on"):
         monkeypatch.setenv("KISS_MUSE_AUTH", value)
         assert muse_auth_enabled(), value
 
@@ -509,20 +527,12 @@ def test_muse_auth_enabled_by_default(isolated_kiss_home: Path,
         monkeypatch.setenv("KISS_MUSE_AUTH", value)
         assert not muse_auth_enabled(), value
 
-    # This suite runs on Linux, where the daemon's prerequisites
-    # (fcntl + SO_PEERCRED) exist; the False branches of
-    # platform_supports_muse_daemon need Windows/macOS and are
-    # documented rather than faked.
-    from kiss.agents.third_party_agents.muse_auth._common import platform_supports_muse_daemon
-
-    assert platform_supports_muse_daemon()
-
 
 def test_default_on_migrates_google_token_json(
     muse_env: Path, api_server: _ApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An upgrade with a working legacy token.json keeps working by default."""
-    from kiss.agents.third_party_agents.google_drive_agent import _SCOPES as DRIVE_SCOPES
+    from kiss.agents.third_party_agents.gdrive_sea import _SCOPES as DRIVE_SCOPES
 
     # The true production default: no env var set at all.
     monkeypatch.delenv("KISS_MUSE_AUTH")
@@ -665,10 +675,10 @@ def test_export_cli_recovers_vault_credential(
 
 def test_bearer_connect_scrubs_plaintext_config(muse_env: Path) -> None:
     """notion/brave connects move the token to the vault and scrub the config."""
-    from kiss.agents.third_party_agents.brave_search_agent import BraveSearchChannelBackend
-    from kiss.agents.third_party_agents.brave_search_agent import _config as brave_config
-    from kiss.agents.third_party_agents.notion_agent import NotionChannelBackend
-    from kiss.agents.third_party_agents.notion_agent import _config as notion_config
+    from kiss.agents.third_party_agents.brave_sea import BraveSearchChannelBackend
+    from kiss.agents.third_party_agents.brave_sea import _config as brave_config
+    from kiss.agents.third_party_agents.notion_sea import NotionChannelBackend
+    from kiss.agents.third_party_agents.notion_sea import _config as notion_config
 
     notion_config.save({"token": "ntn_scrub_me", "workspace_hint": "acme"})
     backend = NotionChannelBackend()
@@ -697,7 +707,7 @@ def test_channel_main_loads_api_keys_env_first(
     ``muse_auth_enabled()`` or migrate credentials.
     """
     from kiss.agents.third_party_agents._channel_agent_utils import channel_main
-    from kiss.agents.third_party_agents.notion_agent import NotionAgent
+    from kiss.agents.third_party_agents.notion_sea import NotionAgent
 
     monkeypatch.delenv("KISS_MUSE_AUTH", raising=False)
     isolated_kiss_home.mkdir(parents=True, exist_ok=True)
@@ -731,7 +741,7 @@ def test_govee_cli_loads_api_keys_env_first(
     # model keys from the store are not silently blanked.
     from kiss.core import config as core_config
 
-    monkeypatch.setenv("KISS_MUSE_AUTH", "")  # empty means enabled
+    monkeypatch.setenv("KISS_MUSE_AUTH", "1")  # forced on, so the file must switch it off
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(core_config.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "")
     assert muse_auth_enabled()
@@ -753,17 +763,12 @@ def test_govee_cli_loads_api_keys_env_first(
 def test_cli_entrypoints_survive_missing_fcntl(isolated_kiss_home: Path) -> None:
     """The govee CLI keeps working where fcntl is unavailable (Windows).
 
-    ``vscode_config`` imports POSIX-only ``fcntl`` at module level, so
-    the new canonical-env import in the CLI entry points must degrade
-    gracefully instead of dying with ModuleNotFoundError before
-    argument parsing.  Emulated by halting the ``fcntl`` import in a
-    fresh interpreter (the standard platform-equivalence probe).
-
-    ``channel_main()`` carries the same guard, but it cannot be probed
-    this way: its pre-existing ``_channel_cli`` import pulls in
-    ``kiss.core.models.model_info``, which imports ``fcntl`` at module
-    level at HEAD — a limitation that predates (and is untouched by)
-    the Muse-auth default flip.
+    Every file lock goes through ``kiss.core.file_lock``, which falls
+    back from ``fcntl`` to ``msvcrt`` (or to a no-op), so the
+    canonical-env import in the CLI entry points must not die with
+    ModuleNotFoundError before argument parsing.  Emulated by halting
+    the ``fcntl`` import in a fresh interpreter (the standard
+    platform-equivalence probe).
     """
     import subprocess
 
@@ -848,7 +853,7 @@ def test_github_read_only_survives_token_migration(
 
 def test_googlechat_legacy_token_migrates_into_vault(muse_env: Path) -> None:
     """In Muse mode a leftover Chat token.json is vaulted, never used raw."""
-    from kiss.agents.third_party_agents.googlechat_agent import _load_service
+    from kiss.agents.third_party_agents.googlechat_sea import _load_service
 
     chat_dir = muse_env / "third_party_agents" / "googlechat"
     chat_dir.mkdir(parents=True, exist_ok=True)
@@ -934,10 +939,10 @@ def test_remote_oauth_paste_back_consent_flow(
     the same machine, and the pasted loopback redirect URL is replayed
     against the session's real WSGI consent server.
     """
-    from kiss.agents.third_party_agents.google_calendar_agent import (
+    from kiss.agents.third_party_agents.gcal_sea import (
         _SCOPES as CAL_SCOPES,
     )
-    from kiss.agents.third_party_agents.google_calendar_agent import (
+    from kiss.agents.third_party_agents.gcal_sea import (
         GoogleCalendarAgent,
     )
 
@@ -1000,7 +1005,7 @@ def test_remote_oauth_legacy_mode_writes_token_json(
 ) -> None:
     """Without Muse mode the remote consent flow persists token.json."""
     from kiss.agents.third_party_agents._google_workspace_utils import RemoteOAuthSession
-    from kiss.agents.third_party_agents.google_calendar_agent import (
+    from kiss.agents.third_party_agents.gcal_sea import (
         _SCOPES as CAL_SCOPES,
     )
 
@@ -1282,7 +1287,7 @@ def test_boundary_strips_token_on_cross_host_redirect(muse_env: Path) -> None:
 
 def test_github_token_rotation_via_authenticate(muse_env: Path, api_server: _ApiServer) -> None:
     """Re-authenticating replaces the enrolled vault token, not keeps the old one."""
-    from kiss.agents.third_party_agents.github_agent import GitHubAgent
+    from kiss.agents.third_party_agents.github_sea import GitHubAgent
 
     agent = GitHubAgent()
     tools = auth_tools(agent)

@@ -167,6 +167,11 @@ export function activate(context: vscode.ExtensionContext): void {
   // one-time widening below; its focus handoff then goes back to the
   // chat instead of the editor group.
   let refocusChatAfterWiden = false;
+  // The chat / task ids the sidebar chat view last reported showing
+  // (see the activeTask wiring below): the OFF branch replays them
+  // into the history panel, whose highlight the closing editor panels
+  // would otherwise leave on the last ACTIVE panel's task.
+  let sidebarActiveTask = {chatId: '', taskId: ''};
   if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
     context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration(e => {
@@ -210,6 +215,10 @@ export function activate(context: vscode.ExtensionContext): void {
           });
         } else {
           panelManager!.closeAll();
+          historyView?.postActiveTask(
+            sidebarActiveTask.chatId,
+            sidebarActiveTask.taskId,
+          );
           // focusChatInput runs kissSorcar.chatViewSecondary.focus
           // (the view is contributable again — its `when` clause just
           // flipped true), which opens the secondary sidebar on the
@@ -358,6 +367,19 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
   );
   context.subscriptions.push({dispose: () => historyView?.dispose()});
+  // The history panel highlights (and scrolls to) the row of the task
+  // the chat surface on screen shows: in editor-tabs mode the panel
+  // manager relays the ACTIVE editor panel's ids, in sidebar mode the
+  // secondary sidebar's chat view reports its own visible tab. Each
+  // relay is gated on its mode so the hidden surface cannot override
+  // the one the user is looking at.
+  panelManager.setActiveTaskSink((chatId, taskId) => {
+    if (editorTabsMode()) historyView?.postActiveTask(chatId, taskId);
+  });
+  sidebarView.onActiveTask = (chatId, taskId) => {
+    sidebarActiveTask = {chatId, taskId};
+    if (!editorTabsMode()) historyView?.postActiveTask(chatId, taskId);
+  };
 
   // The KS button: show the history panel in the primary sidebar —
   // the same surface in both modes. Editor-tabs mode also makes sure

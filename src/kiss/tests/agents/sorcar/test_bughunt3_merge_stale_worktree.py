@@ -72,7 +72,7 @@ def _create_worktree(repo: Path, branch: str) -> Path:
 def _is_registered_worktree(repo: Path, wt_dir: Path) -> bool:
     """True if *wt_dir* is still in ``git worktree list`` bookkeeping."""
     result = _git("worktree", "list", "--porcelain", cwd=repo)
-    return str(wt_dir) in result.stdout
+    return wt_dir.as_posix() in result.stdout  # git prints forward slashes everywhere
 
 
 class TestMergeWithStaleWorktreeRegistration:

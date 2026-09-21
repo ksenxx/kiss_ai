@@ -7,10 +7,11 @@
 
 // The server re-emits a still-pending askUser question on every session
 // replay so a client that connects or reloads mid-question also shows the
-// modal.  Already-connected clients receive that duplicate too: it must be
-// idempotent — re-initializing the modal would wipe the answer the user is
+// composer.  Already-connected clients receive that duplicate too: it must be
+// idempotent — resetting the answer mode would wipe the answer the user is
 // typing just because another client reloaded.  A genuinely new question
-// (which always follows an askUserDone) must still replace the modal.
+// (which always follows an askUserDone) must still put the composer back
+// into answer mode.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -63,6 +64,10 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+function answering(win) {
+  return win.document.body.classList.contains('ask-answering');
+}
+
 function testDuplicateAskPreservesTypedDraft() {
   const {win} = makeWebview();
   const api = win._testApi;
@@ -70,24 +75,20 @@ function testDuplicateAskPreservesTypedDraft() {
   const tabId = api.getActiveTabId();
 
   send(win, {type: 'askUser', question: 'Deploy to production?', tabId});
-  const modal = win.document.getElementById('ask-user-modal');
-  assert.strictEqual(modal.style.display, 'flex', 'modal must open');
-  const input = modal.querySelector('.ask-user-input');
-  assert.ok(input, 'ask-user input must be mounted');
+  assert.ok(answering(win), 'the composer must enter answer mode');
+  const input = win.document.getElementById('task-input');
   input.value = 'yes, but only eu-west';
 
   // Another client reloads: its ready pipeline replays the session and the
   // server re-broadcasts the same pending question to every client.
   send(win, {type: 'askUser', question: 'Deploy to production?', tabId});
 
-  assert.strictEqual(
-    modal.style.display,
-    'flex',
-    'modal must stay open after a duplicate replay delivery',
+  assert.ok(
+    answering(win),
+    'the composer must stay in answer mode after a duplicate replay delivery',
   );
-  const inputAfter = modal.querySelector('.ask-user-input');
   assert.strictEqual(
-    inputAfter.value,
+    input.value,
     'yes, but only eu-west',
     'BUG: a duplicate askUser replay must not wipe the typed draft',
   );
@@ -102,30 +103,27 @@ function testNewQuestionAfterDoneReplacesModal() {
   const tabId = api.getActiveTabId();
 
   send(win, {type: 'askUser', question: 'First question?', tabId});
-  const modal = win.document.getElementById('ask-user-modal');
-  const input = modal.querySelector('.ask-user-input');
+  const input = win.document.getElementById('task-input');
   input.value = 'draft for the first question';
   send(win, {type: 'askUserDone', tabId});
-  assert.notStrictEqual(
-    modal.style.display,
-    'flex',
-    'askUserDone must close the modal',
+  assert.ok(
+    !answering(win),
+    'askUserDone must take the composer out of answer mode',
+  );
+  assert.strictEqual(
+    input.value,
+    'draft for the first question',
+    'text the user typed is theirs: another client answering must not wipe it',
   );
 
   send(win, {type: 'askUser', question: 'First question?', tabId});
-  assert.strictEqual(
-    modal.style.display,
-    'flex',
+  assert.ok(
+    answering(win),
     'a repeated question after askUserDone is a NEW question and must show',
-  );
-  assert.strictEqual(
-    modal.querySelector('.ask-user-input').value,
-    '',
-    'a new question must start with an empty answer box',
   );
 
   win.close();
-  console.log('  ok - identical question after askUserDone shows a fresh modal');
+  console.log('  ok - identical question after askUserDone asks again');
 }
 
 function runTests() {

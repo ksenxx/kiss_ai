@@ -78,6 +78,9 @@ import yaml
 
 from kiss.agents.sorcar import cron_agent, daemon_client
 from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
+from kiss.tests.conftest import requires_unix_sockets
+
+pytestmark = requires_unix_sockets  # the fake daemons below are AF_UNIX servers
 
 
 @pytest.fixture(autouse=True)

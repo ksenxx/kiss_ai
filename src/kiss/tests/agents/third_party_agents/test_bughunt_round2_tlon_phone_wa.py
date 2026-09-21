@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Round-2 integration tests for tlon_agent and phone_control_agent.
+"""Round-2 integration tests for tlon_sea and phone_sea.
 
 Runs real in-process HTTP servers that record request method/path/body and
 return service-shaped JSON. No mocks, patches, or test doubles.
@@ -30,10 +30,10 @@ from urllib.parse import urlparse
 
 import pytest
 
-from kiss.agents.third_party_agents.phone_control_agent import PhoneControlChannelBackend
-from kiss.agents.third_party_agents.phone_control_agent import _config as _phone_config
-from kiss.agents.third_party_agents.tlon_agent import TlonChannelBackend
-from kiss.agents.third_party_agents.tlon_agent import _config as _tlon_config
+from kiss.agents.third_party_agents.phone_sea import PhoneControlChannelBackend
+from kiss.agents.third_party_agents.phone_sea import _config as _phone_config
+from kiss.agents.third_party_agents.tlon_sea import TlonChannelBackend
+from kiss.agents.third_party_agents.tlon_sea import _config as _tlon_config
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):

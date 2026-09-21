@@ -6,7 +6,7 @@
 from the history panel must accept follow-up user input WHILE the task
 is running (the typed text must reach the live agent, not be silently
 dropped), and the viewer tab must transition out of the running state
-when the task finishes (so the pulsing green circle in the tab title
+when the task finishes (so the spinner in the tab title
 disappears and the next user message starts a NEW task instead of
 being lost forever).
 
@@ -29,7 +29,7 @@ Reproduces and pins two bugs in the multi-viewer routing layer:
    event already carries a ``tabId`` the transport routes it verbatim
    without consulting the per-task subscriber map, so the viewer tab
    never observes the running→idle transition.  Symptoms: the pulsing
-   green circle in the viewer tab's title pulses forever, the input
+   spinner in the viewer tab's title spins forever, the input
    box stays in "queue follow-up" mode, and the next user message is
    routed as an ``appendUserMessage`` against an already-finished
    task — getting dropped again.
@@ -280,7 +280,7 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
     ) -> None:
         """When the live task finishes, the viewer tab must receive a
         ``status running=false`` stamped with the viewer's own tabId so
-        the pulsing green indicator in its tab title turns off."""
+        the spinner in its tab title turns off."""
         tab_launcher, tab_viewer = "tab-launcher", "tab-viewer"
         self._start_blocking_task(tab_launcher, "long running task")
         launcher_state = agent_state.find_by_tab(tab_launcher)
@@ -313,7 +313,7 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
         ]
         assert running_false_viewer, (
             "viewer tab missing status running=False at task end — "
-            "the pulsing green indicator in the tab title would pulse "
+            "the spinner in the tab title would spin "
             "forever and the input box would stay in 'queue follow-up' "
             f"mode.  Got events for viewer tab: "
             f"{[e for e in after_end if e.get('tabId') == tab_viewer]!r}"
