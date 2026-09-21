@@ -294,12 +294,12 @@ class SlackChannelBackend(ToolMethodBackend):
     def find_channel(self, name: str) -> str | None:
         """Find a Slack channel ID by name or ID.
 
-        A *name* that looks like a Slack conversation ID (``C…``, ``G…``
+        A *name* that is already a Slack conversation ID (``C…``, ``G…``
         or ``D…``, e.g. ``C0AKYSNLB7W``) is verified via
         ``conversations.info`` and returned directly, so private channels
         and DMs — which name lookup cannot list without extra scopes — can
-        be addressed by ID. If verification fails the value is treated as
-        a channel name and the public and private channel lists visible to
+        be addressed by ID.  If verification fails the value is treated as
+        a plain name and the public and private channel lists visible to
         the bot token are searched.
 
         Args:

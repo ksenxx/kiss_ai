@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import socket
 import ssl
 import subprocess
@@ -50,6 +51,7 @@ from kiss.server.web_server import (
     _translate_webview_command,
 )
 from kiss.tests.conftest import posix_only
+from kiss.tests.server._blocking_start import close_leaked_listeners
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
 
 
@@ -4205,6 +4207,7 @@ class TestStartMethodLifecycle(unittest.TestCase):
 
         t.join(timeout=10)
         self.assertFalse(t.is_alive())
+        close_leaked_listeners(server)
 
         if orig_config is not None:
             CONFIG_PATH.write_text(orig_config)
@@ -4940,112 +4943,87 @@ class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
             self.assertTrue(found)
 
 
+@_FAKE_SCRIPT_ON_PATH
 class TestStartWithTunnel(unittest.TestCase):
     """Test start() with tunnel enabled using fake cloudflared."""
 
-    @pytest.mark.slow
-    @_FAKE_SCRIPT_ON_PATH
+    def _start_with_fake_cloudflared(self, script: str) -> tuple[str | None, str]:
+        """Run ``start()`` on a thread with *script* as ``cloudflared`` on PATH.
+
+        Returns ``(active_url, local_url)`` as they were once
+        ``_setup_server`` had decided the tunnel outcome (shutdown resets
+        ``_active_url``), after the server has been stopped again.
+        """
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        cf = os.path.join(tmpdir, "cloudflared")
+        with open(cf, "w") as f:
+            f.write(script)
+        os.chmod(cf, 0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = tmpdir + ":" + old_path
+        self.addCleanup(os.environ.__setitem__, "PATH", old_path)
+
+        # A real password: with an empty one ``_setup_server`` waits 30 s
+        # for a password and then refuses the tunnel without ever
+        # running cloudflared.
+        save_config({"remote_password": "test-secret"})
+        server = RemoteAccessServer(
+            host="127.0.0.1",
+            port=_find_free_port(),
+            use_tunnel=True,
+            ntfy_base_url=unroutable_base_url(),
+        )
+
+        started = threading.Event()
+
+        def _run() -> None:
+            orig_setup = server._setup_server
+
+            async def _patched_setup() -> None:
+                await orig_setup()
+                started.set()
+
+            server._setup_server = _patched_setup  # type: ignore[method-assign]
+            try:
+                server.start()
+            except RuntimeError:  # asyncio.run: loop stopped before Future completed
+                pass
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        self.assertTrue(started.wait(timeout=60), "server setup did not finish")
+        active_url, local_url = server._active_url, server._local_url
+
+        time.sleep(0.5)
+        if server._tunnel_proc is not None:
+            server._tunnel_proc.terminate()
+            try:
+                server._tunnel_proc.wait(timeout=5)
+            except Exception:
+                server._tunnel_proc.kill()
+            server._tunnel_proc = None
+        if server._loop is not None:
+            server._loop.call_soon_threadsafe(server._loop.stop)
+        t.join(timeout=10)
+        self.assertFalse(t.is_alive())
+        close_leaked_listeners(server)
+        return active_url, local_url
+
     def test_start_with_tunnel_success(self) -> None:
-        """start() with tunnel prints tunnel URL (lines 1715, 1730)."""
-        tmpdir = tempfile.mkdtemp()
-        old_path = os.environ.get("PATH", "")
-        try:
-            cf = os.path.join(tmpdir, "cloudflared")
-            with open(cf, "w") as f:
-                f.write(
-                    "#!/bin/bash\n"
-                    'echo "INF https://start-test.trycloudflare.com" >&2\n'
-                    "sleep 300\n"
-                )
-            os.chmod(cf, 0o755)
-            os.environ["PATH"] = tmpdir + ":" + old_path
+        """start() with a working tunnel publishes the tunnel URL."""
+        # ``exec`` so terminating the recorded PID kills the sleeper too.
+        active_url, _local_url = self._start_with_fake_cloudflared(
+            "#!/bin/bash\n"
+            'echo "INF https://start-test.trycloudflare.com" >&2\n'
+            "exec sleep 300\n"
+        )
+        self.assertEqual(active_url, "https://start-test.trycloudflare.com")
 
-            save_config({"remote_password": ""})
-            port = _find_free_port()
-            server = RemoteAccessServer(
-                host="127.0.0.1",
-                port=port,
-                use_tunnel=True,
-                ntfy_base_url=unroutable_base_url(),
-            )
-
-            started = threading.Event()
-
-            def _run() -> None:
-                orig_setup = server._setup_server
-
-                async def _patched_setup() -> None:
-                    await orig_setup()
-                    started.set()
-
-                server._setup_server = _patched_setup  # type: ignore[method-assign]
-                server.start()
-
-            t = threading.Thread(target=_run, daemon=True)
-            t.start()
-            started.wait(timeout=60)
-
-            time.sleep(0.5)
-            if server._tunnel_proc is not None:
-                server._tunnel_proc.terminate()
-                try:
-                    server._tunnel_proc.wait(timeout=5)
-                except Exception:
-                    server._tunnel_proc.kill()
-                server._tunnel_proc = None
-            if server._ws_server is not None:
-                server._ws_server.close()
-            t.join(timeout=10)
-        finally:
-            os.environ["PATH"] = old_path
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    @pytest.mark.slow
     def test_start_with_tunnel_failure(self) -> None:
-        """start() with tunnel failure prints warning (line 1732)."""
-        tmpdir = tempfile.mkdtemp()
-        old_path = os.environ.get("PATH", "")
-        try:
-            cf = os.path.join(tmpdir, "cloudflared")
-            with open(cf, "w") as f:
-                f.write("#!/bin/bash\nexit 1\n")
-            os.chmod(cf, 0o755)
-            os.environ["PATH"] = tmpdir + ":" + old_path
-
-            save_config({"remote_password": ""})
-            port = _find_free_port()
-            server = RemoteAccessServer(
-                host="127.0.0.1",
-                port=port,
-                use_tunnel=True,
-                ntfy_base_url=unroutable_base_url(),
-            )
-
-            started = threading.Event()
-
-            def _run() -> None:
-                orig_setup = server._setup_server
-
-                async def _patched_setup() -> None:
-                    await orig_setup()
-                    started.set()
-
-                server._setup_server = _patched_setup  # type: ignore[method-assign]
-                server.start()
-
-            t = threading.Thread(target=_run, daemon=True)
-            t.start()
-            started.wait(timeout=60)
-
-            time.sleep(0.5)
-            if server._ws_server is not None:
-                server._ws_server.close()
-            t.join(timeout=10)
-        finally:
-            os.environ["PATH"] = old_path
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        """start() with a failing cloudflared falls back to the local URL."""
+        active_url, local_url = self._start_with_fake_cloudflared("#!/bin/bash\nexit 1\n")
+        self.assertEqual(active_url, local_url)
 
 
 class TestStopAsyncWaitClosedTimeout(IsolatedAsyncioTestCase):
