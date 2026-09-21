@@ -157,6 +157,7 @@ except `append_basic_tools`, whose getter is
 | `classify_tasks()`       | `bool` or `None`                | `None` (daemon default)   | `classifyTasks`     |
 | `use_memory()`           | `bool` or `None`                | `None` (daemon default)   | `useMemory`         |
 | `is_parallel()`          | `bool`                          | `True`                    | `useParallel`       |
+| `tool_profile()`         | `str`                           | `""` (daemon's choice)    | `toolProfile`       |
 
 When a getter is absent, the caller's value is used (which is the
 `run()` default when the caller did not pass one).
@@ -231,6 +232,14 @@ The parameters without getters:
   `True`.
 - **`is_parallel()`** — whether the agent may spawn parallel
   sub-agents (`run_parallel`).
+- **`tool_profile()`** — the name of the tool profile the run's
+  built-in toolset is cut down to: `"full"` (everything), `"review"`
+  (read and run, no editing, browser or dispatch), `"shell"` (`Bash`,
+  `bash_job`, `Read`, `run_commands_parallel`) or `"bash"` (`Bash`
+  only — the bundled `/sh` agent's choice); `finish` is always added.
+  `""` keeps the daemon's usual choice.  An unknown name fails the
+  task when it starts.  Ignored when `if_append_basic_tools()` is
+  `False`, which builds no built-in toolset at all.
 
 ### Hook getters (no `run()` parameter)
 
