@@ -31,10 +31,16 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-from kiss.agents.third_party_agents._backend_utils import is_headless_environment
+from kiss.agents.third_party_agents._browser_handoff import (
+    open_in_default_browser,
+    portal_handoff,
+)
 from kiss.agents.third_party_agents._channel_agent_utils import write_private_file
 from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 from kiss.core.config import kiss_home
+
+# Where the user creates the OAuth "Desktop app" client (credentials.json).
+CLOUD_CONSOLE_URL = "https://console.cloud.google.com/apis/credentials"
 
 
 def google_service_dir(service: str) -> Path:
@@ -177,35 +183,54 @@ def clear_google_credentials(service: str) -> None:
         clear_credentials(service)
 
 
-def run_google_oauth_flow(service: str, scopes: list[str]) -> Credentials | None:
-    """Run the OAuth2 installed-app flow and persist the new token.
+def start_google_consent(service: str, label: str, scopes: list[str]) -> str | None:
+    """Start the OAuth consent for *service* and hand it to the user.
 
-    In headless environments the local-server flow runs with
-    ``open_browser=False`` so the auth URL is printed for manual
-    visiting instead of a browser window being opened.
+    The loopback consent server starts in the background
+    (:class:`RemoteOAuthSession`), the Google consent page is opened in
+    the user's default browser when this machine has one, and the
+    ``authenticate_<service>()`` answer carries the URL for the user to
+    open by hand otherwise.  ``finish_<service>_auth()`` completes it.
 
     Args:
         service: Service directory name the token is stored under.
+        label: Human-readable service label.
         scopes: OAuth scopes to request.
 
     Returns:
-        New :class:`Credentials`, or ``None`` when no
-        ``credentials.json`` is available (see :func:`credentials_path`).
+        The JSON answer of ``authenticate_<service>()``: ``status:
+        consent_required`` with ``auth_url``, ``browser_opened`` and
+        ``instructions``, or ``ok: False`` with an ``error`` when the
+        session could not start; ``None`` when no ``credentials.json``
+        exists for the service.
     """
-    creds_path = credentials_path(service)
-    if not creds_path.exists():
+    try:
+        session = RemoteOAuthSession.start(service, scopes)
+    except Exception as e:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": (
+                    f"OAuth flow failed for {label}: {e}. The credentials.json at "
+                    f"{credentials_path(service)} may be malformed; re-download it "
+                    "from Google Cloud Console."
+                ),
+            }
+        )
+    if session is None:
         return None
-    flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), scopes)
-    if is_headless_environment():
-        creds = cast(Credentials, flow.run_local_server(port=0, open_browser=False))
-    else:
-        creds = cast(Credentials, flow.run_local_server(port=0))
-    save_google_credentials(service, creds)
-    if muse_auth_enabled():
-        # The real credential now lives in the daemon vault; hand the
-        # caller a surrogate so no real token stays in agent memory.
-        return load_google_credentials(service, scopes)
-    return creds
+    browser_opened = open_in_default_browser(session.auth_url)
+    return json.dumps(
+        {
+            "ok": True,
+            "status": "consent_required",
+            "auth_url": session.auth_url,
+            "browser_opened": browser_opened,
+            "instructions": remote_oauth_instructions(
+                service, label, session.auth_url, browser_opened
+            ),
+        }
+    )
 
 
 def fresh_access_token(creds: Any) -> str:
@@ -263,12 +288,15 @@ def make_google_auth_tools(
             if creds_file.exists():
                 return (
                     f"Not authenticated with {label}. A credentials.json exists at "
-                    f"{creds_file}. Call authenticate_{service}() to run the OAuth2 flow."
+                    f"{creds_file}. Call authenticate_{service}() to start the OAuth2 "
+                    "consent; it opens the consent page in the user's default browser "
+                    "when it can and returns the auth_url to show the user."
                 )
             return (
                 f"Not authenticated with {label}. Call start_{service}_browser_setup() "
-                "to create OAuth credentials in Google Cloud Console, then "
-                f"authenticate_{service}() to complete the OAuth2 flow."
+                "to open Google Cloud Console in the user's default browser so they "
+                f"can create OAuth credentials, then authenticate_{service}() to "
+                "start the OAuth2 consent."
             )
         return json.dumps({"ok": True, "message": f"{label} credentials are configured."})
 
@@ -281,46 +309,11 @@ def make_google_auth_tools(
         "all Google agents)."
     )
 
-    def flow_failed(e: Exception) -> str:
-        return json.dumps(
-            {
-                "ok": False,
-                "error": (
-                    f"OAuth flow failed for {label}: {e}. The credentials.json at "
-                    f"{credentials_path(service)} may be malformed; re-download it "
-                    "from Google Cloud Console."
-                ),
-            }
-        )
-
     def authenticate() -> str:
-        if is_headless_environment():
-            # Remote machine: hand back the consent URL for the user to
-            # approve in their own browser; the pasted redirect URL is
-            # replayed against the local consent server, then
-            # finish_<service>_auth() completes the exchange.
-            try:
-                session = RemoteOAuthSession.start(service, scopes)
-            except Exception as e:
-                return flow_failed(e)
-            if session is None:
-                return missing_credentials_message
-            return json.dumps(
-                {
-                    "ok": True,
-                    "status": "consent_required",
-                    "auth_url": session.auth_url,
-                    "instructions": remote_oauth_instructions(service, label, session.auth_url),
-                }
-            )
-        try:
-            creds = run_google_oauth_flow(service, scopes)
-        except Exception as e:
-            return flow_failed(e)
-        if creds is None:
+        answer = start_google_consent(service, label, scopes)
+        if answer is None:
             return missing_credentials_message
-        on_credentials(creds)
-        return json.dumps({"ok": True, "message": f"{label} authentication successful."})
+        return answer
 
     def finish_auth() -> str:
         creds, status = RemoteOAuthSession.finish(service, scopes)
@@ -345,14 +338,16 @@ def make_google_auth_tools(
 
     def start_browser_setup() -> str:
         return (
-            "Open https://console.cloud.google.com/apis/credentials with your "
-            "go_to_url browser tool and complete these steps autonomously: "
-            f"1. Create or select a project. 2. Enable the {label} API "
-            "(APIs & Services > Enable APIs). 3. Credentials > Create Credentials "
-            "> OAuth client ID > Desktop app. 4. Download the JSON and save it to "
-            f"{google_service_dir(service) / 'credentials.json'}. "
-            f"5. Call authenticate_{service}() to finish the OAuth consent flow. "
-            "Use ask_user_question() only if stuck on a Google login screen."
+            f"The user creates the OAuth client themselves. {portal_handoff(CLOUD_CONSOLE_URL)} "
+            "Ask them to: 1. Create or select a project. 2. Enable the "
+            f"{label} API (APIs & Services > Enable APIs). 3. Credentials > Create "
+            "Credentials > OAuth client ID > Desktop app. 4. Download the JSON and "
+            "either paste its content back or save it to "
+            f"{google_service_dir(service) / 'credentials.json'}. Write pasted "
+            "content to that path yourself, then call "
+            f"authenticate_{service}() to start the OAuth consent. Do not drive "
+            "Google Cloud Console or any Google sign-in page with your built-in "
+            "browser, and never ask for the user's Google password or 2FA code."
         )
 
     check_auth.__name__ = f"check_{service}_auth"
@@ -363,13 +358,16 @@ def make_google_auth_tools(
     )
     authenticate.__name__ = f"authenticate_{service}"
     authenticate.__doc__ = (
-        f"Run the {label} OAuth2 installed-app flow and store the token.\n\n"
-        "Opens a browser window (or prints an auth URL when headless) for the\n"
-        "user to authorize access. Requires a credentials.json from Google\n"
-        "Cloud Console.\n\n"
+        f"Start the {label} OAuth2 consent flow.\n\n"
+        "Starts the loopback consent server, opens the Google consent page in\n"
+        "the user's default browser when this machine has one, and returns the\n"
+        "auth_url for the user to open by hand otherwise. Requires a\n"
+        "credentials.json from Google Cloud Console. Complete the flow with\n"
+        f"finish_{service}_auth().\n\n"
         "Returns:\n"
-        "    Authentication result, instructions when credentials.json is missing,\n"
-        "    or an {\"ok\": false, \"error\": ...} JSON string when the OAuth flow\n"
+        "    status 'consent_required' with auth_url, browser_opened and\n"
+        "    instructions; instructions when credentials.json is missing; or an\n"
+        "    {\"ok\": false, \"error\": ...} JSON string when the OAuth flow\n"
         "    fails (e.g. a malformed credentials.json)."
     )
     clear_auth.__name__ = f"clear_{service}_auth"
@@ -378,17 +376,20 @@ def make_google_auth_tools(
     )
     start_browser_setup.__name__ = f"start_{service}_browser_setup"
     start_browser_setup.__doc__ = (
-        f"Begin automated {label} API credential setup via the browser.\n\n"
+        f"Open Google Cloud Console for the user to create {label} OAuth credentials.\n\n"
+        "Opens the Credentials page in the user's default browser when this\n"
+        "machine has one and returns the steps to relay to the user.\n\n"
         "Returns:\n"
-        "    Step-by-step instructions for navigating Google Cloud Console."
+        "    The console URL and step-by-step instructions for the user."
     )
     finish_auth.__name__ = f"finish_{service}_auth"
     finish_auth.__doc__ = (
-        f"Complete a remote {label} OAuth consent started by "
+        f"Complete the {label} OAuth consent started by "
         f"authenticate_{service}().\n\n"
-        "Call after the user has approved consent in their own browser and\n"
-        "the pasted redirect URL has been delivered to the local consent\n"
-        "server (``curl -s '<pasted redirect URL>'``).\n\n"
+        "Call after the user has approved consent in their own browser (and,\n"
+        "when they did so on another machine, after the pasted redirect URL\n"
+        "has been delivered to the local consent server with\n"
+        "``curl -s '<pasted redirect URL>'``).\n\n"
         "Returns:\n"
         "    Authentication result, a pending status when consent is not\n"
         "    finished, or an error message."
@@ -445,20 +446,23 @@ class _OAuthCallbackApp:
 
 
 class RemoteOAuthSession:
-    """OAuth consent flow split for remote/headless machines.
+    """Non-blocking OAuth consent: loopback server now, credentials later.
 
     ``InstalledAppFlow.run_local_server`` blocks until a browser
-    completes consent — useless on a remote machine where the user
-    cannot see a local browser window.  This session starts the
-    loopback redirect server in a background thread and hands back the
-    authorization URL for the USER to open in their own browser (agent
-    browsers frequently cannot reach ``accounts.google.com``, and the
-    sign-in belongs to the user).  The user's browser then lands on a
+    completes consent, which stalls the agent's tool call and is
+    useless on a remote machine where the user cannot see a local
+    browser window.  This session starts the loopback redirect server
+    in a background thread and hands back the authorization URL; the
+    caller opens it in the user's default browser when it can and shows
+    it to the USER in any case (agent browsers frequently cannot reach
+    ``accounts.google.com``, and the sign-in belongs to the user).  An
+    approval in a browser on this machine lands on the loopback server
+    directly.  From another device the user's browser lands on a
     ``http://localhost:PORT/?state=...&code=...`` URL that fails to
-    load on their machine; the user pastes that URL back and the agent
-    replays it against the loopback server here (``curl <url>``) so
-    the exchange completes locally.  ``finish`` collects the resulting
-    credentials once the redirect has been delivered.
+    load there; the user pastes that URL back and the agent replays it
+    against the loopback server here (``curl <url>``) so the exchange
+    completes locally.  ``finish`` collects the resulting credentials
+    once the redirect has been delivered.
     """
 
     _active: dict[str, RemoteOAuthSession] = {}
@@ -581,33 +585,84 @@ class RemoteOAuthSession:
         return session.credentials, "ok"
 
 
-def remote_oauth_instructions(service: str, label: str, auth_url: str) -> str:
-    """Build the agent-facing instructions for a remote consent session.
+def remote_oauth_instructions(
+    service: str, label: str, auth_url: str, browser_opened: bool = False
+) -> str:
+    """Build the agent-facing instructions for a started consent session.
 
     Args:
         service: Service directory name (used in the finish tool name).
         label: Human-readable service label.
         auth_url: The authorization URL to hand to the user.
+        browser_opened: Whether the consent page was already opened in
+            the user's default browser on this machine.
 
     Returns:
         Step-by-step instructions for the user-driven consent hand-off:
-        the user authorizes in their own browser and pastes back the
-        loopback redirect URL, which the agent replays locally.
+        the user authorizes in their own browser (already open when
+        *browser_opened*; the loopback redirect then completes by itself)
+        and otherwise pastes back the loopback redirect URL, which the
+        agent replays locally.
     """
+    if browser_opened:
+        opened = (
+            "The consent page has just been opened in the user's default browser "
+            "on this machine, where the loopback consent server also runs, so an "
+            "approval in that window completes by itself. Still show the URL: "
+        )
+    else:
+        opened = "No browser could be opened from this machine (headless or remote). "
     return (
         f"Complete the {label} consent WITHOUT driving Google sign-in pages "
         "yourself: do NOT open accounts.google.com or this auth URL in your "
         "built-in browser (it is often blocked with net::ERR_FAILED), and "
-        "never ask for or type the user's Google password or 2FA code. "
+        f"never ask for or type the user's Google password or 2FA code. {opened}"
         "Steps: 1) Call ask_user_question() giving the user this exact URL "
-        f"to open in their OWN browser: {auth_url} — tell them to approve "
-        "access and paste back the complete redirect URL from the address "
-        "bar (it looks like http://localhost:PORT/?state=...&code=... and "
-        "shows a connection error page, which is expected). 2) The loopback "
-        "consent server runs on THIS machine: deliver the pasted URL to it "
-        "with Bash: curl -s '<pasted redirect URL>' (quote it; it contains "
-        f"& characters). 3) Call finish_{service}_auth() to store the "
-        "token; if it returns 'pending', wait 2 seconds and call it once "
-        "more. If any Google page fails to load in the browser, do not "
-        "retry — use this hand-off."
+        f"to open in their OWN browser if no window appeared: {auth_url} — tell "
+        "them to approve access and reply when done; if their browser ends on a "
+        "connection error page at http://localhost:PORT/?state=...&code=... "
+        "(it does when they used another device), ask them to paste back that "
+        "complete redirect URL. 2) Only if a URL was pasted back: the loopback "
+        "consent server runs on THIS machine, so deliver it with Bash: "
+        "curl -s '<pasted redirect URL>' (quote it; it contains & characters). "
+        f"3) Call finish_{service}_auth() to store the token; if it returns "
+        "'pending', wait 2 seconds and call it once more. If any Google page "
+        "fails to load in the browser, do not retry — use this hand-off."
+    )
+
+
+def google_consent_steps(service: str) -> str:
+    """Build the consent hand-off paragraph shared by the Google agent prompts.
+
+    Args:
+        service: Service directory name (used in the tool names).
+
+    Returns:
+        The prompt text that follows ``authenticate_<service>()``: the tool
+        opens the consent page in the user's default browser when it can,
+        the agent always shows the auth_url, never drives Google pages,
+        replays a pasted redirect URL when there is one, and finishes with
+        ``finish_<service>_auth()``.
+    """
+    return (
+        f"When authenticate_{service}() returns status 'consent_required' with an "
+        "auth_url, it has already tried to open that URL in the user's default "
+        "browser on this machine ('browser_opened' says whether it could); do NOT "
+        "open the auth_url or any accounts.google.com page in your own browser, "
+        "and never ask for or type the user's Google password or 2FA code: Google "
+        "sign-in pages are often blocked in the built-in browser (net::ERR_FAILED), "
+        "and the sign-in belongs to the user. Hand off consent instead:\n"
+        "1. ALWAYS call ask_user_question() with the full auth_url, asking the user "
+        "to open it in their OWN browser if no window appeared, approve access, and "
+        "reply when done; if their browser ends on a connection error page at "
+        "http://localhost:PORT/?state=...&code=... (it does when they approved on "
+        "another device), ask them to paste back the complete redirect URL from the "
+        "address bar.\n"
+        "2. Only if a redirect URL was pasted back: the loopback consent server runs "
+        "on THIS machine, so deliver the pasted URL to it with Bash: curl -s "
+        "'<pasted redirect URL>' (quote the URL; it contains & characters).\n"
+        f"3. Call finish_{service}_auth(); if it returns 'pending', wait 2 seconds "
+        "and call it once more.\n"
+        "If any browser navigation to a Google page fails, do not retry it or "
+        "relaunch the browser — switch to this hand-off immediately."
     )

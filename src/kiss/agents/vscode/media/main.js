@@ -12554,6 +12554,7 @@
           ev.latest || '',
           ev.current || '',
           !!ev.snoozed,
+          !!ev.pendingIdle,
         );
         break;
       case 'followup_suggestion': {
@@ -14254,11 +14255,26 @@
     '<line x1="12" y1="15" x2="12" y2="3"/>' +
     '</svg>';
 
-  function renderUpdateAvailable(available, latest, current, snoozed) {
+  function renderUpdateAvailable(
+    available,
+    latest,
+    current,
+    snoozed,
+    pendingIdle,
+  ) {
     // A "Remind me later" snooze silences the sticky toast but keeps
-    // the passive settings-button badge visible.
+    // the passive settings-button badge visible.  An armed "Update
+    // when idle" keeps the toast up (with its Cancel action) even
+    // when snoozed.  The History (left) and Task Info (right) side
+    // panels never show the toast: it belongs to chat webviews only.
     renderUpdateAvailableBadge(available, latest, current);
-    renderUpdateAvailableNotification(available && !snoozed, latest, current);
+    if (HISTORY_PANEL_MODE || META_PANEL_MODE) return;
+    renderUpdateAvailableNotification(
+      available && (!snoozed || pendingIdle),
+      latest,
+      current,
+      pendingIdle,
+    );
   }
 
   function renderUpdateAvailableBadge(available, latest, current) {
@@ -14281,29 +14297,70 @@
     btn.insertAdjacentHTML('afterbegin', UPDATE_BADGE_SVG);
   }
 
-  function renderUpdateAvailableNotification(available, latest, current) {
+  function renderUpdateAvailableNotification(
+    available,
+    latest,
+    current,
+    pendingIdle,
+  ) {
     if (!available) {
       removeNotification(UPDATE_NOTIFICATION_ID, undefined, false);
       return;
     }
-    const message =
+    const release =
       latest && current
         ? `KISS Sorcar ${latest} is available (you have ${current}).`
         : 'A new KISS Sorcar release is available.';
+    const updateNow = {
+      label: pendingIdle ? 'Update now' : 'Update',
+      ariaLabel: latest
+        ? `Update KISS Sorcar to ${latest}`
+        : 'Update KISS Sorcar',
+      svg: UPDATE_DOWNLOAD_SVG,
+      onClick: () => {
+        // In VS Code, runUpdate runs the installer in the extension host
+        // and never reaches the daemon, so an armed idle update must be
+        // called off explicitly; the webapp's daemon-side runUpdate
+        // would disarm it anyway.
+        if (pendingIdle) api.updateWhenIdle({cancel: true});
+        api.runUpdate();
+      },
+    };
+    if (pendingIdle) {
+      // The daemon polls its task registry and runs the installer the
+      // first time no task is in flight; it rebroadcasts this state to
+      // every window, so the toast reads the same everywhere.
+      showNotification({
+        id: UPDATE_NOTIFICATION_ID,
+        severity: 'info',
+        message: release + ' It will be installed when no task is running.',
+        sticky: true,
+        actions: [
+          updateNow,
+          {
+            label: 'Cancel',
+            ariaLabel:
+              'Cancel the update scheduled for when no task is running',
+            onClick: () => {
+              api.updateWhenIdle({cancel: true});
+            },
+          },
+        ],
+      });
+      return;
+    }
     showNotification({
       id: UPDATE_NOTIFICATION_ID,
       severity: 'info',
-      message,
+      message: release,
       sticky: true,
       actions: [
+        updateNow,
         {
-          label: 'Update',
-          ariaLabel: latest
-            ? `Update KISS Sorcar to ${latest}`
-            : 'Update KISS Sorcar',
-          svg: UPDATE_DOWNLOAD_SVG,
+          label: 'Update when idle',
+          ariaLabel: 'Install the update once no task is running',
           onClick: () => {
-            api.runUpdate();
+            api.updateWhenIdle({});
           },
         },
         {

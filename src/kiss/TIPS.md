@@ -1,5 +1,11 @@
 # Tip
 
+You can ask a question about the current task by prefixing the question with the command /ask. 
+
+# Tip
+
+KISS Sorcar supports commands prefixed with /. Type / in the chat textbox to see all available commands. To build your own command say /xyz, write a Sorcar Extension Agent (or a SEA) in a folder /path/to/seas and append the folder to the file ~/.kiss/SEAS.md.  Coammnd /xyz will then be availble to KISS Sorcar UI.  More information on Sorcar Extension Agents (SEAs) can be found at [https://github.com/ksenxx/kiss_ai/blob/main/README.md](https://github.com/ksenxx/kiss_ai/blob/main/README.md).
+
 ## Update button in the settings
 
 If the Update button in settings fails, run the full installation command again.  It will not delete your history.

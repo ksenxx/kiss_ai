@@ -363,6 +363,10 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // update-check cache shared with this extension host, and
   // rebroadcasts so every window's toast disappears.
   snoozeUpdate: ['latest'],
+  // "Update when idle" / "Cancel" on the same toast: the daemon arms a
+  // poller that runs install.sh once no task is in flight, and
+  // rebroadcasts update_available with `pendingIdle`.
+  updateWhenIdle: ['cancel'],
   // The 1s tmp/PROGRESS.md poll of a RUNNING task (metainfo block in
   // main.js): the daemon resolves the tab's task and answers with a
   // direct `infoFile` that the client-listener relay passes back.
@@ -1990,6 +1994,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
     terminal.show();
     // audit0902-coverage:end
+  }
+
+  /**
+   * Ask the daemon to install the available update once no task is
+   * running.  The daemon arms its idle poller and rebroadcasts
+   * `update_available` with `pendingIdle`, so every chat window's toast
+   * shows the armed state ("Update now" / "Cancel").
+   */
+  public updateWhenIdle(): void {
+    this._getApi().forward({type: 'updateWhenIdle'});
   }
 
   public runUpdate(): void {

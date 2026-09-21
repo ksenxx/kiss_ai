@@ -30,6 +30,7 @@ from urllib.parse import quote
 
 import requests
 
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -820,6 +821,8 @@ class NotionAgent(BaseChannelAgent):
                     "https://www.notion.so/profile/integrations, copy its "
                     "secret token, and share the pages or databases you want "
                     "the agent to access with that integration."
+                    + "\n"
+                    + portal_handoff("https://www.notion.so/profile/integrations")
                 )
             return json.dumps({"ok": True, "message": "Notion integration token is configured."})
 

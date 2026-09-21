@@ -22,6 +22,19 @@ import pytest
 import kiss.agents.third_party_agents.slack_sea as slack_agent_mod
 
 
+@pytest.fixture(autouse=True)
+def no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the auth hand-off from opening the developer's real browser.
+
+    Unauthenticated ``check_*_auth()`` / ``authenticate_*()`` calls open
+    the provider's sign-in page in the default browser when the process
+    has a display; under pytest that page would pop up on a desktop dev
+    machine.  Tests that exercise the launcher install a scripted
+    ``$BROWSER`` and set ``KISS_HEADLESS=0`` themselves.
+    """
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+
+
 @pytest.fixture
 def isolated_kiss_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point ``KISS_HOME`` at a per-test temp dir so ``~/.kiss`` is never touched.

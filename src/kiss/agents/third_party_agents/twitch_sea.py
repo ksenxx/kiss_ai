@@ -29,6 +29,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -681,7 +682,12 @@ class TwitchAgent(BaseChannelAgent):
                 error message.
             """
             if not client_id.strip():  # pragma: no branch
-                return "client_id cannot be empty."
+                return (
+                    "client_id cannot be empty. The user registers an app once at "
+                    "https://dev.twitch.tv/console/apps (client type Public, any "
+                    "redirect URL) and hands you its Client ID. "
+                    + portal_handoff("https://dev.twitch.tv/console/apps")
+                )
             from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
             if access_token.strip():

@@ -47,6 +47,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.third_party_agents._browser_handoff import open_in_default_browser
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -1060,6 +1061,42 @@ def _write_qr_html(qr_text: str) -> Path:
     return path
 
 
+def _qr_handoff(page: Path) -> dict[str, Any]:
+    """Open the QR pairing page for the user and describe the next step.
+
+    The page is opened in the user's default browser when this machine
+    has one; the agent is told either way where the page is and how to
+    show it (``show_browser()`` + ``go_to_url``) when no window appeared.
+
+    Args:
+        page: Path of the written QR pairing page.
+
+    Returns:
+        ``qr_page``, ``browser_opened`` and an agent-facing ``message``.
+    """
+    opened = open_in_default_browser(page.as_uri())
+    if opened:
+        shown = (
+            f"The QR page file://{page} has just been opened in the user's default "
+            "browser on this machine. If the user says no window appeared, call "
+            f"show_browser() and open it with go_to_url('file://{page}')."
+        )
+    else:
+        shown = (
+            "No browser could be opened from this machine, so call show_browser() "
+            f"and open the QR page with go_to_url('file://{page}') for the user."
+        )
+    return {
+        "qr_page": str(page),
+        "browser_opened": opened,
+        "message": (
+            f"Pairing needed. {shown} Ask the user to scan the QR code with WhatsApp "
+            "on their phone (Settings -> Linked devices -> Link a device), then "
+            "call wait_for_whatsapp_pairing()."
+        ),
+    }
+
+
 def _write_paired_html() -> None:
     """Overwrite the QR page with a success message (shown after pairing)."""
     path = _qr_html_path()
@@ -1101,11 +1138,13 @@ class WhatsAppAgent(BaseChannelAgent):
         "\n\n## WhatsApp Pairing\n"
         "WhatsApp pairing flow (only when check_whatsapp_auth() reports "
         "not paired): call authenticate_whatsapp() to clone and build the "
-        "bridge, then start_whatsapp_bridge(). If it reports a QR page, "
-        "call show_browser(), open the page with go_to_url('file://...'), "
-        "ask the user to scan the QR code with their phone (WhatsApp -> "
-        "Settings -> Linked devices -> Link a device), and call "
-        "wait_for_whatsapp_pairing() until it reports success. Message "
+        "bridge, then start_whatsapp_bridge(). If it reports a QR page, it has "
+        "already tried to open that page in the user's default browser on this "
+        "machine ('browser_opened'); when it could not, or the user sees no "
+        "window, call show_browser() and open the page with "
+        "go_to_url('file://...'). Ask the user to scan the QR code with their "
+        "phone (WhatsApp -> Settings -> Linked devices -> Link a device), and "
+        "call wait_for_whatsapp_pairing() until it reports success. Message "
         "history syncs for a few minutes after first pairing."
     )
 
@@ -1315,16 +1354,7 @@ class WhatsAppAgent(BaseChannelAgent):
                 if qr:
                     page = _write_qr_html(qr)
                     return json.dumps(
-                        {
-                            "ok": True,
-                            "pairing_needed": True,
-                            "qr_page": str(page),
-                            "message": "Pairing needed. Call show_browser(), open "
-                            f"go_to_url('file://{page}'), ask the user to scan the "
-                            "QR code with WhatsApp on their phone (Settings -> "
-                            "Linked devices -> Link a device), then call "
-                            "wait_for_whatsapp_pairing().",
-                        }
+                        {"ok": True, "pairing_needed": True, **_qr_handoff(page)}
                     )
                 if "Client outdated" in text:
                     with contextlib.suppress(OSError):
@@ -1384,14 +1414,7 @@ class WhatsAppAgent(BaseChannelAgent):
                     }
                 )
             page = _write_qr_html(qr)
-            return json.dumps(
-                {
-                    "ok": True,
-                    "qr_page": str(page),
-                    "message": f"Open file://{page} in the browser and ask the user "
-                    "to scan it with WhatsApp on their phone.",
-                }
-            )
+            return json.dumps({"ok": True, **_qr_handoff(page)})
 
         def wait_for_whatsapp_pairing(timeout: int = 120) -> str:
             """Wait for the user to scan the QR code and complete pairing.

@@ -59,6 +59,7 @@
     'runUpdate',
     'updateModels',
     'snoozeUpdate',
+    'updateWhenIdle',
     'serverReset',
     'voiceTranscribe',
     'voiceToggle',
