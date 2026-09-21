@@ -11,11 +11,13 @@ by whitespace and free-form text — the daemon rewrites the prompt so
 the agent immediately calls ``run_agent`` with the absolute path of
 the resolved ``xxx_sea.py`` and the trailing text as the sub-task.
 
-The registry is built from two sources, in decreasing precedence:
+The registry is built from three sources, in decreasing precedence:
 
 1. ``src/kiss/agents/third_party_agents/`` (highest precedence,
    discovered through the ``kiss.agents.third_party_agents`` package).
-2. The folders listed one per line in ``~/.kiss/SEAS.md`` (or
+2. ``src/kiss/agents/seas/`` (the bundled SEAs that extend Sorcar
+   itself, e.g. ``/merge``; discovered through ``kiss.agents.seas``).
+3. The folders listed one per line in ``~/.kiss/SEAS.md`` (or
    ``$KISS_HOME/SEAS.md``).  Later lines in the file override earlier
    lines — i.e. the folder at the bottom of ``SEAS.md`` beats the one
    at the top when both contain the same command name.  Blank lines
@@ -85,22 +87,33 @@ def seas_md_path() -> Path:
     return kiss_home() / "SEAS.md"
 
 
-def _third_party_dir() -> Path | None:
-    """Return the on-disk path of the bundled third-party agents dir.
+def _package_dir(package: str) -> Path | None:
+    """Return the on-disk path of a bundled SEA package.
 
     Located through the import system so an editable install or a
     zipped install both work; returns ``None`` when the package is
     absent (test harnesses that trim optional packages).
+
+    Args:
+        package: Dotted package name, e.g. ``"kiss.agents.seas"``.
     """
     try:
-        import importlib.util
-
-        spec = importlib.util.find_spec("kiss.agents.third_party_agents")
+        spec = importlib.util.find_spec(package)
     except (ImportError, ValueError):
         return None
     if spec is None or not spec.submodule_search_locations:
         return None
     return Path(next(iter(spec.submodule_search_locations)))
+
+
+def _third_party_dir() -> Path | None:
+    """Return the on-disk path of the bundled third-party agents dir."""
+    return _package_dir("kiss.agents.third_party_agents")
+
+
+def _seas_dir() -> Path | None:
+    """Return the on-disk path of the bundled ``kiss.agents.seas`` dir."""
+    return _package_dir("kiss.agents.seas")
 
 
 def _scan_folder(folder: Path) -> dict[str, Path]:
@@ -197,8 +210,9 @@ def refresh_registry() -> list[str]:
 
     Precedence (highest wins):
 
-    1. ``src/kiss/agents/third_party_agents/`` (the bundled SEAs).
-    2. Folders in ``~/.kiss/SEAS.md``, from bottom line to top line.
+    1. ``src/kiss/agents/third_party_agents/`` (the bundled channel SEAs).
+    2. ``src/kiss/agents/seas/`` (the bundled Sorcar-extending SEAs).
+    3. Folders in ``~/.kiss/SEAS.md``, from bottom line to top line.
 
     Concretely: the merge walks the sources from LOWEST precedence to
     HIGHEST (top-of-file SEAS.md entries first, third-party last) and
@@ -217,10 +231,10 @@ def refresh_registry() -> list[str]:
     # iterate top-first and let the bottom entries overwrite.
     for folder in _read_seas_md_folders():
         sources.append(_scan_folder(folder))
-    # Bundled third-party agents override everything.
-    tp = _third_party_dir()
-    if tp is not None:
-        sources.append(_scan_folder(tp))
+    # Bundled packages override everything, third-party agents last.
+    for bundled in (_seas_dir(), _third_party_dir()):
+        if bundled is not None:
+            sources.append(_scan_folder(bundled))
 
     merged: dict[str, Path] = {}
     for src in sources:

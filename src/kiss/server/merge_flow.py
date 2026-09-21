@@ -27,13 +27,19 @@ from kiss.agents.sorcar.git_worktree import (
     _unquote_git_path,
     repo_lock,
 )
-from kiss.agents.sorcar.persistence import _append_chat_event
-from kiss.agents.sorcar.sorcar_agent import _commit_subject
+from kiss.agents.sorcar.persistence import _add_task_usage, _append_chat_event
+from kiss.agents.sorcar.sorcar_agent import (
+    _agent_usage,
+    _commit_subject,
+    _persisted_task_id,
+)
 from kiss.agents.sorcar.useful_tools import _stale_worktree_fallback
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.diff_merge import _capture_untracked, _git
 from kiss.server.helpers import generate_commit_message_from_diff
+from kiss.server.json_printer import stamp_event_ts
+from kiss.server.merge_conflict_resolver import resolve_merge_conflict
 
 if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
@@ -1144,7 +1150,7 @@ class _MergeFlowMixin:
             changed = self._get_worktree_changed_files(tab_id)
             action = "merge" if changed else "discard"
             result = self._handle_worktree_action(
-                action, tab_id, already_claimed=True,
+                action, tab_id, already_claimed=True, resolve_conflicts=True,
             )
         finally:
             with self._state_lock:
@@ -1622,7 +1628,11 @@ class _MergeFlowMixin:
             return
         with self._state_lock:
             candidates = [
-                state
+                (
+                    state,
+                    state.auto_commit_mode
+                    and not state.agent._pending_review,
+                )
                 for state in agent_state.snapshot()
                 if state.tab_id
                 and state.wt_merge_deferred_branch is not None
@@ -1631,8 +1641,15 @@ class _MergeFlowMixin:
                 and state.agent._wt_branch == state.wt_merge_deferred_branch
                 and _same_repo(repo, state.agent._repo_root)
             ]
-        for state in candidates:
-            result = self._handle_worktree_action("merge", state.tab_id)
+        for state, auto_commit in candidates:
+            # This retry IS the automatic post-task merge, only delayed:
+            # when the finalize path would have merged the branch
+            # unattended (auto-commit on, task not left for review) a
+            # conflict is handed to the merge SEA exactly as
+            # ``_finalize_pending_worktree`` does.
+            result = self._handle_worktree_action(
+                "merge", state.tab_id, resolve_conflicts=auto_commit,
+            )
             with self._state_lock:
                 # ``_handle_worktree_action`` clears the marker only
                 # once it owns the worktree; a marker still set means a
@@ -1653,6 +1670,7 @@ class _MergeFlowMixin:
         *,
         internal: bool = False,
         already_claimed: bool = False,
+        resolve_conflicts: bool = False,
     ) -> dict[str, Any]:
         """Execute a worktree merge/discard/manual action.
 
@@ -1683,6 +1701,11 @@ class _MergeFlowMixin:
                 so would punch a hole in the caller's claim exactly
                 where :meth:`_finalize_pending_worktree` needs it to be
                 continuous.  The main-tree guard still applies.
+            resolve_conflicts: For a ``"merge"`` in auto-commit mode:
+                let the merge SEA resolve a merge conflict and complete
+                the merge (:meth:`WorktreeSorcarAgent.merge`), and add
+                its spend to the persisted usage of the task whose
+                merge it fixed (:meth:`_persist_merge_agent_usage`).
 
         Returns:
             Dict with ``success`` bool and ``message`` string.
@@ -1821,7 +1844,17 @@ class _MergeFlowMixin:
                     if tab_id:
                         progress_event["tabId"] = tab_id
                     self.printer.broadcast(progress_event)
-                    msg = wt.merge()
+                    if resolve_conflicts:
+                        usage_before = _agent_usage(wt)
+                        try:
+                            msg = wt.merge(conflict_resolver=resolve_merge_conflict)
+                        finally:
+                            # Also on a user stop that unwinds the merge
+                            # agent: its spend was attributed to the
+                            # live agent and must reach the row.
+                            self._persist_merge_agent_usage(wt, usage_before, tab_id)
+                    else:
+                        msg = wt.merge()
                     success = "Successfully merged" in msg
                     return {"success": success, "message": msg}
                 # Only the AUTOMATIC discard (post-task finalize /
@@ -1859,6 +1892,60 @@ class _MergeFlowMixin:
                 # tab busy and deferred disposal; without this call the
                 # backend tab state would leak indefinitely (F4-23).
                 self._dispose_if_closed(tab_id)
+
+    def _persist_merge_agent_usage(
+        self,
+        agent: Any,
+        usage_before: tuple[float, int, int],
+        tab_id: str,
+    ) -> None:
+        """Charge the merge agent's spend to the task whose merge it fixed.
+
+        The merge SEA runs after the task's history row (tokens, cost,
+        steps) was persisted, as a sub-agent whose spend
+        :func:`~kiss.agents.sorcar.sorcar_agent._attribute_sub_usage`
+        has already added to *agent*'s live counters.  The difference
+        between those counters before and after the merge is added to
+        the task's row, and the new totals are pushed to the tab as a
+        ``usage_info`` event — persisted on the task so a replay shows
+        them, and tab-stamped so the live status row updates now.
+
+        Args:
+            agent: The worktree agent that ran the merge.
+            usage_before: ``(budget, tokens, steps)`` of *agent* before
+                the merge, from :func:`_agent_usage`.
+            tab_id: The tab whose status row to refresh.
+        """
+        budget, tokens, steps = _agent_usage(agent)
+        d_budget = budget - usage_before[0]
+        d_tokens = tokens - usage_before[1]
+        d_steps = steps - usage_before[2]
+        if d_budget <= 0 and d_tokens <= 0 and d_steps <= 0:
+            return
+        task_id = _persisted_task_id(agent)
+        if not task_id:
+            return
+        try:
+            totals = _add_task_usage(task_id, d_tokens, d_budget, d_steps)
+        except Exception:
+            logger.warning(
+                "Could not add merge agent usage to task %s", task_id, exc_info=True,
+            )
+            return
+        if totals is None:
+            return
+        new_tokens, new_cost, new_steps = totals
+        event: dict[str, Any] = {
+            "type": "usage_info",
+            "text": "",
+            "total_tokens": new_tokens,
+            "cost": f"${new_cost:.4f}",
+            "total_steps": new_steps,
+        }
+        stamp_event_ts(event)
+        self.printer.broadcast_transient(event, task_id=task_id, tab_id=tab_id)
+        _append_chat_event(dict(event), task_id=task_id)
+        self.printer.broadcast({"type": "tasks_updated"})
 
     def _handle_main_tree_action(
         self, action: str, work_dir: str,

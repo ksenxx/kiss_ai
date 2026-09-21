@@ -2515,6 +2515,45 @@ def _set_task_favorite(task_id: str, is_favorite: bool) -> bool:
         return (cursor.rowcount or 0) > 0
 
 
+def _add_task_usage(
+    task_id: str, tokens: int, cost: float, steps: int,
+) -> tuple[int, float, int] | None:
+    """Add post-run spend to a task row's ``tokens`` / ``cost`` / ``steps``.
+
+    Used when work done on the task's behalf AFTER its row was persisted
+    (the merge agent that resolves its auto-merge conflicts) must count
+    towards the task.  The add is one atomic ``UPDATE`` on the stored
+    values, so it is correct whether or not the live agent counters
+    still hold the task's own totals.
+
+    Args:
+        task_id: Primary key of the ``task_history`` row to update.
+        tokens: Tokens to add.
+        cost: USD to add.
+        steps: Steps to add.
+
+    Returns:
+        The row's new ``(tokens, cost, steps)``, or ``None`` when no
+        such row exists.
+    """
+    _flush_chat_events(task_id)
+    db = _get_db()
+    with _rw_lock.write_lock(), _immediate_txn(db):
+        cursor = db.execute(
+            "UPDATE task_history SET tokens = COALESCE(tokens, 0) + ?, "
+            "cost = COALESCE(cost, 0.0) + ?, steps = COALESCE(steps, 0) + ? "
+            "WHERE id = ?",
+            (int(tokens), float(cost), int(steps), task_id),
+        )
+        if (cursor.rowcount or 0) == 0:
+            return None
+        row = db.execute(
+            "SELECT tokens, cost, steps FROM task_history WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+    return (_safe_int(row[0]), _safe_float(row[1]), _safe_int(row[2]))
+
+
 _EXTRA_COL_MAP: dict[str, tuple[str, object, object]] = {
     "model": ("model", str, ""),
     "work_dir": ("work_dir", str, ""),

@@ -417,3 +417,67 @@ class TestDeferredMergeGuards(_DeferredMergeBase):
         result = self.server._handle_worktree_action("discard", _WT_TAB)
         assert result["success"], result
         assert self._wt_state().wt_merge_deferred_branch is None
+
+
+class TestDeferredMergeResolvesConflicts(_DeferredMergeBase):
+    """The deferred retry is the automatic post-task merge, only delayed:
+    it hands a conflict to the merge SEA (``resolve_conflicts=True``)
+    exactly when ``_finalize_pending_worktree`` would have — auto-commit
+    on and the task not left for review — and never otherwise."""
+
+    def _spy_worktree_action(self) -> list[dict[str, object]]:
+        calls: list[dict[str, object]] = []
+        real = self.server._handle_worktree_action
+
+        def spy(action: str, tab_id: str = "", **kwargs: object) -> dict[str, object]:
+            calls.append({"action": action, "tab_id": tab_id, **kwargs})
+            return real(action, tab_id, **kwargs)  # type: ignore[arg-type]
+
+        self.server._handle_worktree_action = spy  # type: ignore[method-assign]
+        self.addCleanup(
+            setattr, self.server, "_handle_worktree_action", real,
+        )
+        return calls
+
+    def test_auto_commit_retry_lets_the_merge_sea_resolve(self) -> None:
+        self._strand_worktree()
+        assert self._wt_state().auto_commit_mode
+        calls = self._spy_worktree_action()
+
+        self.server._merge_deferred_worktrees(Path(self.repo))
+
+        self._assert_merged()
+        merges = [c for c in calls if c["action"] == "merge"]
+        assert merges == [
+            {"action": "merge", "tab_id": _WT_TAB, "resolve_conflicts": True},
+        ], calls
+
+    def test_retry_without_auto_commit_does_not_resolve(self) -> None:
+        self._strand_worktree()
+        state = self._wt_state()
+        with self.server._state_lock:
+            state.auto_commit_mode = False
+        calls = self._spy_worktree_action()
+
+        self.server._merge_deferred_worktrees(Path(self.repo))
+
+        self._assert_merged()
+        merges = [c for c in calls if c["action"] == "merge"]
+        assert merges == [
+            {"action": "merge", "tab_id": _WT_TAB, "resolve_conflicts": False},
+        ], calls
+
+    def test_retry_of_a_task_left_for_review_does_not_resolve(self) -> None:
+        self._strand_worktree()
+        state = self._wt_state()
+        assert state.agent is not None
+        state.agent._pending_review = True
+        calls = self._spy_worktree_action()
+
+        self.server._merge_deferred_worktrees(Path(self.repo))
+
+        self._assert_merged()
+        merges = [c for c in calls if c["action"] == "merge"]
+        assert merges == [
+            {"action": "merge", "tab_id": _WT_TAB, "resolve_conflicts": False},
+        ], calls
