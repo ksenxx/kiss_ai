@@ -625,7 +625,7 @@ def test_cli_nothing_to_do(
 
 
 def test_agent_script_getters(tmp_path: Path) -> None:
-    # The agent-script contract used by run_agent("cron", ...): the
+    # The agent-script contract used by run_agent(agent="cron", ...): the
     # dispatched session runs in ~/.kiss/cron/work with no git
     # lifecycle.
     work_dir = cron_agent.work_dir()

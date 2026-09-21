@@ -38,7 +38,7 @@ from kiss.tests.agents.sorcar.test_cron_agent import (  # noqa: F401
 def test_tools_file_loaded_run_now_uses_daemon_sock_path(
     tmp_path: Path,
 ) -> None:
-    # A run_agent("cron", ...) session gets its cron_job tool from a
+    # A run_agent(agent="cron", ...) session gets its cron_job tool from a
     # FRESH synthetic module (the daemon's tools-file loader re-executes
     # this file), whose own _daemon_sock_path global is never set:
     # run_now must still target the socket recorded in the canonical

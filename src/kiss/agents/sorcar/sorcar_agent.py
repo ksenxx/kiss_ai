@@ -2209,7 +2209,7 @@ class SorcarAgent(RelentlessAgent):
         from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
 
         # Scheduled automations (cron) are not a built-in tool: the
-        # agent dispatches them via run_agent("cron", ...), which runs
+        # agent dispatches them via run_agent(agent="cron", ...), which runs
         # kiss.agents.sorcar.cron_agent as an agent script.  Passing
         # self makes each dispatched sub-task's cost/tokens/steps fold
         # into THIS task's accounting, so the end-of-task cost shown

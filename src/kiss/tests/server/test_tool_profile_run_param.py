@@ -359,7 +359,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         try:
             tool = make_run_agent_tool(self.repo, None)
             text = tool(
-                script, "run with the bash profile",
+                "run with the bash profile", script,
                 use_worktree="false", tool_profile="bash",
             )
         finally:

@@ -105,6 +105,19 @@ stop-confirmation grace (``daemon_client._STOP_CONFIRM_GRACE_SECONDS``,
 20 s) — before returning.
 """
 
+DEFAULT_AGENT_PATH = str(
+    Path(__file__).resolve().parents[1] / "seas" / "dummy_sea.py"
+)
+"""Agent script run when the ``run_agent`` tool's ``agent`` is empty.
+
+The bundled ``src/kiss/agents/seas/dummy_sea.py`` — an SEA that defines
+no getters, so the sub-task is a plain Sorcar session on the given task
+in the calling task's work directory (path mode, with the standard
+worktree/auto-commit lifecycle).  Held as the absolute path of the
+installed file so the default works from any work directory, not only
+a checkout of this repository.
+"""
+
 DEFAULT_DISPATCH_TIMEOUT_SECONDS = 300.0
 """Default bound on the wait for a dispatched sub-task's result.
 
@@ -779,7 +792,9 @@ def _run_agent(
             loaded directly as a tools file) resolves relative paths
             against the process working directory and runs path-mode
             sub-tasks in ``~/.kiss/agent_work``.
-        agent: Channel name or agent-script path (see the tool doc).
+        agent: Channel name or agent-script path (see the tool doc);
+            empty or whitespace runs :data:`DEFAULT_AGENT_PATH`, the
+            bundled plain-session SEA, in path mode.
         task: The task for the agent.
         workspace: Workspace/account identifier for multi-account
             channels; ignored in path mode.
@@ -833,7 +848,7 @@ def _run_agent(
         )
     except ValueError as e:
         return f"Error: {e}"
-    requested = agent.strip()
+    requested = agent.strip() or DEFAULT_AGENT_PATH
     if requested.endswith(".py") or "/" in requested or "\\" in requested:
         # Path mode: any agent-script file.  The task is passed through
         # unchanged — no channel preamble or workspace handling; the
@@ -1010,8 +1025,8 @@ def make_run_agent_tool(
     """
 
     def run_agent(
-        agent: str,
         task: str,
+        agent: str = "",
         workspace: str = "default",
         model_name: str = "",
         max_budget: str = "",
@@ -1082,8 +1097,12 @@ def make_run_agent_tool(
         before the sub-task starts.
 
         Args:
-            agent: WHICH agent to run — an installed channel name,
-                e.g. ``"slack"``, ``"telegram"``, ``"discord"``,
+            task: The task for the agent, e.g. "Send 'hello' to the
+                #sorcar channel".  A path-named agent script's
+                ``prompt()``, if defined, replaces it.
+            agent: Optional; empty (default) runs a plain Sorcar sub-agent (dummy_sea.py).
+                Otherwise WHICH agent to run — an installed channel
+                name, e.g. ``"slack"``, ``"telegram"``, ``"discord"``,
                 ``"email"``, ``"whatsapp"`` (case, spaces, hyphens,
                 and underscores are ignored: "Home Assistant" resolves
                 to ``homeassistant``); or ``"cron"`` for the
@@ -1091,10 +1110,10 @@ def make_run_agent_tool(
                 agent-script file, e.g. ``"agents/researcher.py"``
                 (recognized by its ``.py`` suffix or a path separator;
                 must exist; a relative path is resolved against this
-                task's work directory).
-            task: The task for the agent, e.g. "Send 'hello' to the
-                #sorcar channel".  A path-named agent script's
-                ``prompt()``, if defined, replaces it.
+                task's work directory).  The default is the bundled
+                ``src/kiss/agents/seas/dummy_sea.py``, an SEA with no
+                getters: a plain Sorcar session with the standard
+                tools on ``task`` in this task's work directory.
             workspace: Workspace/account identifier for multi-account
                 channels (default ``"default"``).  Ignored for
                 path-named agent scripts.
