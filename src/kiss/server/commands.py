@@ -439,6 +439,12 @@ class _CommandsMixin:
                 self._file_cache = {}
             if hasattr(self.printer, "work_dir"):
                 setattr(self.printer, "work_dir", new_dir)
+        # Every surface's "Working directory" panel lists the directories
+        # opened so far (most recent first); this is the one place every
+        # adopted directory passes through.
+        from kiss.core.vscode_config import record_recent_work_dir
+
+        record_recent_work_dir(new_dir)
 
     def _cmd_run(self, cmd: dict[str, Any]) -> None:
         """Start an agent task in a background thread.
@@ -1933,11 +1939,18 @@ class _CommandsMixin:
         directory that will actually be used by *this* instance, not
         whichever folder another instance persisted last.
         """
-        from kiss.core.vscode_config import get_current_api_keys, load_config
+        from kiss.core.vscode_config import (
+            get_current_api_keys,
+            load_config,
+            recent_work_dirs,
+        )
 
         cfg = load_config()
         if cmd.get("workDir"):
             cfg["work_dir"] = cmd["workDir"]
+        # Only directories that still exist, most recently opened first
+        # (the raw stored list may hold deleted or malformed entries).
+        cfg["recent_work_dirs"] = recent_work_dirs()
         api_keys = get_current_api_keys()
         event: dict[str, Any] = {
             "type": "configData", "config": cfg, "apiKeys": api_keys,

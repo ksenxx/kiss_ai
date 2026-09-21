@@ -7256,6 +7256,241 @@
     explorerRoot = '';
     scmWorkDir = '';
     refreshSidebarDataViews(true);
+    closeWorkDirPanel();
+  }
+
+  // ---- The "Working directory" panel ("..." menu) ----------------------
+  // The directories opened so far as the daemon reports them in
+  // configData.recent_work_dirs: {path, ts} rows, ts = epoch seconds of
+  // the last open, kept most recently opened first.
+  let recentWorkDirs = [];
+  // Sequence of the remote surface's pending listDir check (token
+  // 'workdir:<seq>') and the directory it is checking.
+  let workDirCheckSeq = 0;
+  let workDirCheckPath = '';
+
+  function openWorkDirPanel() {
+    const panel = document.getElementById('workdir-panel');
+    if (!panel) return;
+    setPanelOpen(panel, document.getElementById('workdir-overlay'), true);
+    // The closed sheet is only slid off-screen; `inert` keeps its
+    // controls out of the tab order and the accessibility tree.
+    panel.removeAttribute('inert');
+    panel.setAttribute('aria-hidden', 'false');
+    setWorkDirError('');
+    const input = document.getElementById('workdir-input');
+    if (input) {
+      input.value = '';
+      syncWorkDirOpenBtn();
+    }
+    renderRecentWorkDirs();
+    // Another window may have opened a folder since the last reply.
+    api.getConfig();
+    window.setTimeout(() => {
+      if (input && panel.classList.contains('open')) input.focus();
+    }, 0);
+  }
+
+  function closeWorkDirPanel() {
+    // A check still in flight belongs to the closed panel.
+    workDirCheckSeq++;
+    workDirCheckPath = '';
+    const panel = document.getElementById('workdir-panel');
+    if (!panel || !panel.classList.contains('open')) return;
+    // Focus must not be stranded inside the sheet that just went inert;
+    // it goes back to the "..." button the sheet was opened from.
+    if (panel.contains(document.activeElement)) {
+      const moreBtn = document.getElementById('more-btn');
+      try {
+        if (moreBtn) moreBtn.focus();
+        else document.activeElement.blur();
+      } catch (_e) {}
+    }
+    panel.setAttribute('inert', '');
+    panel.setAttribute('aria-hidden', 'true');
+    setPanelOpen(panel, document.getElementById('workdir-overlay'), false);
+  }
+
+  function setWorkDirError(text) {
+    const el = document.getElementById('workdir-error');
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = !text;
+  }
+
+  /** Enable the panel's Open button only while its box holds text. */
+  function syncWorkDirOpenBtn() {
+    const btn = document.getElementById('workdir-open-btn');
+    const input = document.getElementById('workdir-input');
+    if (btn && input) btn.disabled = !input.value.trim();
+  }
+
+  /**
+   * Remember the daemon's list of opened working directories and
+   * repaint the panel's list when it is on screen.
+   *
+   * @param {Array} rows configData.recent_work_dirs ({path, ts} rows).
+   */
+  function setRecentWorkDirs(rows) {
+    recentWorkDirs = (Array.isArray(rows) ? rows : [])
+      .filter(
+        r =>
+          r &&
+          typeof r.path === 'string' &&
+          r.path &&
+          Number.isFinite(Number(r.ts)),
+      )
+      .map(r => ({path: r.path, ts: Number(r.ts)}))
+      .sort((a, b) => b.ts - a.ts);
+    const panel = document.getElementById('workdir-panel');
+    if (panel && panel.classList.contains('open')) renderRecentWorkDirs();
+  }
+
+  function renderRecentWorkDirs() {
+    const list = document.getElementById('workdir-list');
+    if (!list) return;
+    list.textContent = '';
+    if (!recentWorkDirs.length) {
+      const empty = document.createElement('div');
+      empty.id = 'workdir-empty';
+      empty.textContent = 'No working directory opened yet.';
+      list.appendChild(empty);
+      return;
+    }
+    const now = Date.now();
+    recentWorkDirs.forEach(entry => {
+      const item = document.createElement('div');
+      item.className = 'workdir-item';
+      item.setAttribute('role', 'listitem');
+      item.tabIndex = 0;
+      item.dataset.path = entry.path;
+      item.title = 'Open ' + entry.path;
+      const pathEl = document.createElement('span');
+      pathEl.className = 'workdir-item-path';
+      pathEl.textContent = entry.path;
+      const ago = document.createElement('span');
+      ago.className = 'workdir-item-ago';
+      ago.textContent = 'opened ' + taskLaunchedAgoText(entry.ts * 1000, now);
+      item.appendChild(pathEl);
+      item.appendChild(ago);
+      list.appendChild(item);
+    });
+  }
+
+  /**
+   * Make *dir* the working directory.
+   *
+   * In a VS Code webview the working directory is the window's folder,
+   * so the host is asked to open *dir* there (openWorkDir ->
+   * vscode.openFolder; it answers workDirError when *dir* is not a
+   * folder).  On the remote webapp the daemon lists *dir* first
+   * (listDir with a 'workdir:' token): a real folder is adopted through
+   * applyPickedWorkDir, anything else is reported in the panel.
+   *
+   * @param {string} dir The typed, chosen or previously opened path.
+   */
+  function openWorkDir(dir) {
+    dir = String(dir || '').trim();
+    if (!dir) return;
+    if (isRootDir(dir)) {
+      setWorkDirError(
+        'A file-system root cannot be the working directory; pick a folder.',
+      );
+      return;
+    }
+    setWorkDirError('');
+    if (!document.body.classList.contains('remote-chat')) {
+      postToHost({type: 'openWorkDir', path: dir});
+      return;
+    }
+    workDirCheckSeq++;
+    workDirCheckPath = dir;
+    api.listDir({
+      path: dir,
+      workDir: dir,
+      tabId: activeTabId,
+      token: 'workdir:' + workDirCheckSeq,
+    });
+  }
+
+  /** The daemon's answer to openWorkDir's listDir check (remote). */
+  function handleWorkDirListing(ev) {
+    if (String(ev.token) !== 'workdir:' + workDirCheckSeq) return;
+    if (ev.error) {
+      setWorkDirError(String(ev.error));
+      return;
+    }
+    // The daemon listed the path, so it is a real folder; adopt its
+    // canonical spelling -- unless that spelling (say of "/tmp/..")
+    // turns out to be a root the lexical check above could not see.
+    const dir = ev.path || workDirCheckPath;
+    if (isRootDir(dir)) {
+      setWorkDirError(
+        'A file-system root cannot be the working directory; pick a folder.',
+      );
+      return;
+    }
+    applyPickedWorkDir(dir);
+  }
+
+  /** Wire the "Working directory" menu item and its panel. */
+  function setupWorkDirPanel() {
+    const btn = document.getElementById('workdir-btn');
+    const input = document.getElementById('workdir-input');
+    const openBtn = document.getElementById('workdir-open-btn');
+    const pickBtn = document.getElementById('workdir-pick-btn');
+    const list = document.getElementById('workdir-list');
+    if (btn) btn.addEventListener('click', openWorkDirPanel);
+    const close = document.getElementById('workdir-panel-close');
+    if (close) close.addEventListener('click', closeWorkDirPanel);
+    const overlay = document.getElementById('workdir-overlay');
+    if (overlay) overlay.addEventListener('click', closeWorkDirPanel);
+    document.addEventListener('keydown', e => {
+      // Escape closes the sheet -- unless the folder browser is open on
+      // top of it, in which case Escape is the browser's to handle.
+      const panel = document.getElementById('workdir-panel');
+      if (e.key !== 'Escape' || !panel || !panel.classList.contains('open'))
+        return;
+      if (folderPickerEl && !folderPickerEl.hidden) return;
+      closeWorkDirPanel();
+    });
+    if (input) {
+      input.addEventListener('input', syncWorkDirOpenBtn);
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          openWorkDir(input.value);
+        }
+      });
+    }
+    if (openBtn && input) {
+      openBtn.addEventListener('click', () => openWorkDir(input.value));
+    }
+    if (pickBtn) {
+      pickBtn.addEventListener('click', () => {
+        // The in-page folder browser lists folders through the daemon's
+        // listDir, which only the remote webapp's connection relays; a
+        // VS Code window uses the editor's own folder dialog.
+        if (document.body.classList.contains('remote-chat')) {
+          openFolderPicker('workdir');
+        } else {
+          postToHost({type: 'pickWorkDir'});
+        }
+      });
+    }
+    if (list) {
+      list.addEventListener('click', e => {
+        const item = e.target.closest('.workdir-item');
+        if (item) openWorkDir(item.dataset.path);
+      });
+      list.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const item = e.target.closest('.workdir-item');
+        if (!item) return;
+        e.preventDefault();
+        openWorkDir(item.dataset.path);
+      });
+    }
   }
 
   /** Wire the activity bar, the Explorer and the Source Control view. */
@@ -12026,6 +12261,10 @@
           handleFolderPickerListing(ev);
           return;
         }
+        if (String(ev.token || '').indexOf('workdir:') === 0) {
+          handleWorkDirListing(ev);
+          return;
+        }
         handleDirListing(ev);
         return;
       case 'gitShow':
@@ -12236,6 +12475,14 @@
           if (statusMachine) statusMachine.textContent = ev.machine;
         }
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
+        if (ev.config && Array.isArray(ev.config.recent_work_dirs)) {
+          setRecentWorkDirs(ev.config.recent_work_dirs);
+        }
+        break;
+      case 'workDirError':
+        // The VS Code host could not open the folder asked for by
+        // openWorkDir / pickWorkDir; the panel is still on screen.
+        setWorkDirError(String(ev.text || ''));
         break;
       case 'myModelsData':
         myModels = Array.isArray(ev.models) ? ev.models : [];
@@ -15527,8 +15774,8 @@
         createNewTab();
       });
     }
-    // The "..." overflow menu: mic, share, attach, git commit, settings
-    // and (remote only) the theme toggle live here.
+    // The "..." overflow menu: working directory, mic, share, attach,
+    // git commit, settings and (remote only) the theme toggle live here.
     const moreBtn = document.getElementById('more-btn');
     const moreMenu = document.getElementById('more-menu');
     function closeMoreMenu() {
@@ -15621,6 +15868,7 @@
       });
     }
     setupActivityBar();
+    setupWorkDirPanel();
     applyRemoteTheme(getSavedRemoteTheme());
     if (SIDEBAR_CHAT_MODE) {
       // The sidebar chat's task-info drawer starts closed AND inert:

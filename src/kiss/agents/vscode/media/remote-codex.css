@@ -381,7 +381,8 @@ body.remote-chat .suggestion-chip:hover {
 
 body.remote-chat #sidebar,
 body.remote-chat #frequent-panel,
-body.remote-chat #tricks-panel {
+body.remote-chat #tricks-panel,
+body.remote-chat #workdir-panel {
   background: var(--surface);
   border-right: 1px solid var(--border-8);
 }

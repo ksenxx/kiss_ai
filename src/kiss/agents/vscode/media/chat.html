@@ -91,6 +91,10 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
               </button>
               <div id="more-menu" role="menu" aria-label="More actions">
+                <button id="workdir-btn" class="more-menu-item" role="menuitem" data-tooltip="Working directory: open another folder">
+                  <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
+                  <span class="more-item-label">Working directory</span>
+                </button>
                 <button id="voice-btn" class="toggle-btn more-menu-item" role="menuitem" data-tooltip="Voice trigger: listen for the word 'Sorcar'">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></span>
                   <span class="more-item-label">Voice trigger</span>
@@ -316,6 +320,27 @@
       </div>
     </div>
     <div id="tricks-overlay"></div>
+
+    <!-- The "Working directory" panel ("..." menu): type a directory or
+         choose one with the folder button, or reopen one of the
+         directories opened so far (most recently opened first). -->
+    <div id="workdir-panel" role="dialog" aria-labelledby="workdir-panel-hdr" aria-hidden="true" inert>
+      <button id="workdir-panel-close" aria-label="Close">&times;</button>
+      <div class="sidebar-section sidebar-tab-panel">
+        <div class="sidebar-hdr" id="workdir-panel-hdr">Working directory</div>
+        <div id="workdir-open-row">
+          <input type="text" id="workdir-input" placeholder="Path of a working directory..." aria-label="Working directory path" autocomplete="off" spellcheck="false">
+          <button type="button" id="workdir-open-btn" class="config-update-btn" disabled>Open</button>
+          <button type="button" id="workdir-pick-btn" class="config-update-btn" data-tooltip="Choose a folder" aria-label="Choose a folder">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          </button>
+        </div>
+        <div id="workdir-error" role="alert" hidden></div>
+        <div class="sidebar-hdr">Opened so far</div>
+        <div id="workdir-list" role="list"></div>
+      </div>
+    </div>
+    <div id="workdir-overlay"></div>
 
     <div id="settings-panel">
       <button id="settings-panel-close">&times;</button>

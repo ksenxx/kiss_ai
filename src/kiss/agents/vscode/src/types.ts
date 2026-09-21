@@ -305,6 +305,14 @@ export type FromWebviewMessage =
   | {type: 'closePanel'; retire?: boolean}
   // The settings UI's editor-tabs toggle (both modes).
   | {type: 'setEditorTabsMode'; enabled: boolean}
+  // The "Working directory" panel ("..." menu): open `path` as this
+  // window's folder (vscode.openFolder) -- a VS Code window's working
+  // directory IS its workspace folder.  The host answers a path that
+  // is not a directory with `workDirError`.
+  | {type: 'openWorkDir'; path: string}
+  // The panel's folder button: the editor's own folder dialog, then
+  // the same open.
+  | {type: 'pickWorkDir'}
   // The tmp/PROGRESS.md poll of the visible tab's RUNNING task
   // (metainfo block in main.js): forwarded whole to the daemon, which
   // answers with a direct `infoFile` reply.
@@ -857,6 +865,9 @@ type ToWebviewMessageBody =
   // The window's workspace folder changed; the webview re-scopes its
   // workspace-filtered surfaces (tab bar, history) to this directory.
   | {type: 'workspaceWorkDir'; workDir: string}
+  // The "Working directory" panel's openWorkDir / pickWorkDir could not
+  // open the folder; shown inside the panel.
+  | {type: 'workDirError'; text: string}
   | {
       // Canonical shared-tab snapshot broadcast by the daemon after
       // every tab-registry mutation; clients reconcile against it.
