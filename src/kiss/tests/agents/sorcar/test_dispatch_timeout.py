@@ -356,7 +356,7 @@ def test_run_agent_tool_waits_past_delayed_result(
     script.write_text("def model() -> str:\n    return 'm'\n")
     try:
         out = make_run_agent_tool(str(tmp_path))(
-            str(script), "say hi slowly", timeout=timeout_arg,
+            "say hi slowly", str(script), timeout=timeout_arg,
         )
         parsed = yaml.safe_load(out)
         assert parsed == {"success": True, "summary": "slow but done"}
@@ -439,7 +439,7 @@ def test_run_agent_tool_times_out_and_stops_the_task(
     script.write_text("def model() -> str:\n    return 'm'\n")
     try:
         out = make_run_agent_tool(str(tmp_path))(
-            str(script), "never finishes", timeout="0.5",
+            "never finishes", str(script), timeout="0.5",
         )
         assert "did not finish within 0.5s" in out
         assert "was stopped" in out
@@ -471,7 +471,7 @@ def test_run_agent_tool_reports_unconfirmed_stop(
     script.write_text("def model() -> str:\n    return 'm'\n")
     try:
         out = make_run_agent_tool(str(tmp_path))(
-            str(script), "never finishes", timeout="0.5",
+            "never finishes", str(script), timeout="0.5",
         )
         assert "did not finish within 0.5s" in out
         assert "MAY STILL BE RUNNING" in out
@@ -610,7 +610,7 @@ def test_empty_timeout_applies_the_default_constant(
     script = tmp_path / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     try:
-        out = make_run_agent_tool(str(tmp_path))(str(script), "never finishes")
+        out = make_run_agent_tool(str(tmp_path))("never finishes", str(script))
         assert "did not finish within 0.3s" in out
         assert "was stopped" in out
     finally:
@@ -625,5 +625,5 @@ def test_invalid_timeout_rejected_before_dispatch(bad: str) -> None:
     from the tool's argument validation, before any path resolution or
     dispatch (the agent path passed here does not even exist).
     """
-    out = make_run_agent_tool("")("no_such_agent.py", "task", timeout=bad)
+    out = make_run_agent_tool("")("task", "no_such_agent.py", timeout=bad)
     assert out.startswith("Error: timeout must be")

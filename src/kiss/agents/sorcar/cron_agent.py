@@ -16,7 +16,7 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
 - The Sorcar agent does not carry the :func:`cron_job` tool itself:
   this module is an *agent script* (``kiss.server.sorcar.run``'s
   ``extension_agent_path`` contract), and a scheduling request is dispatched to
-  it with the ``run_agent`` tool as ``run_agent("cron", task)`` — the
+  it with the ``run_agent`` tool as ``run_agent(task, agent="cron")`` — the
   dispatched session gets the :func:`cron_job` tool from
   :func:`tools` and runs in ``~/.kiss/cron/work`` without a
   worktree (:func:`work_dir`, :func:`use_worktree`,
@@ -1535,7 +1535,7 @@ def work_dir() -> str:
     """Return the work directory for dispatched cron-management sessions.
 
     Agent-script getter (``kiss.server.sorcar.run``'s
-    ``extension_agent_path`` contract): a ``run_agent("cron", ...)`` session manages the job
+    ``extension_agent_path`` contract): a ``run_agent(agent="cron", ...)`` session manages the job
     store under ``~/.kiss/cron`` and never touches the calling
     project, so it runs in the cron state directory — the same
     directory :func:`_run_prompt_job` uses for scheduled runs.
