@@ -38,6 +38,32 @@ def run_command(cmd: list[str], description: str) -> bool:
     return True
 
 
+def run_checks(checks: list[tuple[list[str], str]]) -> list[str]:
+    """Run every check and return the descriptions of the ones that failed.
+
+    Every stage runs even after an earlier one fails, so a single
+    invocation reports ruff, mypy, pyright and extension errors together
+    instead of revealing them one stage per run (each re-run used to cost
+    an agent a full step and about a minute).  The only prerequisite is
+    ``uv sync``: without the dependencies every later stage would fail
+    spuriously, so a failed sync stops the run.
+
+    Args:
+        checks: ``(command, description)`` pairs, run in order.
+
+    Returns:
+        The descriptions of the failed checks, in run order; empty when
+        everything passed.
+    """
+    failed: list[str] = []
+    for cmd, description in checks:
+        if not run_command(cmd, description):
+            failed.append(description)
+            if cmd[:2] == ["uv", "sync"]:
+                break
+    return failed
+
+
 def _should_skip_path(path: Path) -> bool:
     """Check if a path should be skipped by consulting ``.gitignore`` rules.
 
@@ -215,22 +241,18 @@ def main() -> int:
 
     print("\n🔍 Running all code quality checks...\n")
 
-    all_passed = True
-    for cmd, description in checks:
-        if not run_command(cmd, description):
-            all_passed = False
-            break
-
-    if all_passed:
+    failed = run_checks(checks)
+    if not failed:
         print("\n" + "=" * 60)
         print("✅ All checks passed!")
         print("=" * 60 + "\n")
         return 0
-    else:
-        print("\n" + "=" * 60)
-        print("❌ Some checks failed. Please fix the errors above.")
-        print("=" * 60 + "\n")
-        return 1
+    print("\n" + "=" * 60)
+    print("❌ Some checks failed. Please fix the errors above.")
+    for description in failed:
+        print(f"   ❌ {description}")
+    print("=" * 60 + "\n")
+    return 1
 
 
 if __name__ == "__main__":

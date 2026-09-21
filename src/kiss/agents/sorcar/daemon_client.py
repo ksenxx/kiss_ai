@@ -373,6 +373,7 @@ def run(
     append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
+    tool_profile: str = "",
     timeout: float | None = 3600.0,
     stop_on_timeout: bool = False,
     sock_path: str | Path | None = None,
@@ -497,6 +498,7 @@ def run(
                 def classify_tasks() -> bool | None: ...
                 def use_memory() -> bool | None: ...
                 def is_parallel() -> bool: ...
+                def tool_profile() -> str: ...
 
             The script may also define two hook getters with no
             corresponding parameter on this function (a callable
@@ -636,6 +638,16 @@ def run(
             actually runs with, so it is also what the chat history
             records and what follow-up tasks of the same chat see as
             context.  Empty (default) appends nothing.
+        tool_profile: Name of the tool profile the task's built-in
+            toolset is cut down to — one of ``"full"``, ``"review"``,
+            ``"shell"``, ``"bash"`` (the keys of
+            :data:`kiss.agents.sorcar.sorcar_agent.TOOL_PROFILES`;
+            ``bash`` is the single-command runner of the bundled
+            ``/sh`` agent: ``Bash`` and ``finish`` only).  Empty (the
+            default) keeps the daemon's usual choice (the full toolset).
+            An unknown name stops the task with a diagnostic error.
+            Ignored when *append_basic_tools* is False, which builds
+            no built-in toolset at all.
         timeout: Maximum seconds to wait for the task to finish;
             ``None`` waits indefinitely.
         stop_on_timeout: Whether a *timeout* expiry also STOPS the
@@ -775,6 +787,7 @@ def run(
             "appendBasicTools": append_basic_tools,
             "appendToSystemPrompt": append_to_system_prompt,
             "appendToPrompt": append_to_prompt,
+            "toolProfile": tool_profile,
         }
         sock.sendall(json.dumps(cmd).encode("utf-8") + b"\n")
         # Newline-framed events are assembled by hand from ``recv``
