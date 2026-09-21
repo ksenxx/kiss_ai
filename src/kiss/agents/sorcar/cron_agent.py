@@ -1352,7 +1352,11 @@ CRON_DISPATCH_PREAMBLE = (
     "refuses a job whose prompt/command, schedule and delivery match an "
     "existing scheduled or paused job: report that to the user instead "
     "of retrying under a different name.  Never call run_agent here: it "
-    "would just recurse into another session like this one.\n\n"
+    "would just recurse into another session like this one.  Act only "
+    "through cron_job and gateway_command: never edit source files, run "
+    "test suites or debug the channel CLI — when the scheduled command "
+    "itself is broken, report the failing command and its output in your "
+    "result so it is fixed in a normal development task.\n\n"
 )
 """Preamble prepended to every task dispatched to this agent script.
 

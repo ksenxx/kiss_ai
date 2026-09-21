@@ -862,7 +862,10 @@ def _run_agent(
         f"the authenticated {channel} API tools — use them directly and "
         "immediately, without exploring any source code.  Never call "
         "run_agent here: it would just recurse into another session "
-        "like this one.\n\n"
+        "like this one.  Act only through those tools: never edit "
+        "source files or run test suites — when a tool or the channel "
+        "CLI is broken, report the failure in your result so it is "
+        "fixed in a normal development task.\n\n"
     )
     workspace = workspace.strip() or "default"
     guidance = str(getattr(agent_cls, "channel_system_prompt", "")).strip()
