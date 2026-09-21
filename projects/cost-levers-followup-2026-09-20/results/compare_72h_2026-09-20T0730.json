@@ -1,0 +1,239 @@
+{
+  "ran_at": "2026-09-20 07:17 UTC",
+  "hours": 72.0,
+  "baseline": {
+    "tasks": 562,
+    "top_level_tasks": 54,
+    "subagents": 508,
+    "cost_usd": 1486.4228,
+    "tokens": 1144852104,
+    "steps": 17176,
+    "sorcar_md_reads": 306,
+    "reads": 1542,
+    "repeat_reads": 578,
+    "repeat_read_ratio": 0.3748,
+    "steps_by_context_bucket": {
+      "<50k": 3181,
+      "50-100k": 2141,
+      "100-200k": 1759,
+      "200-300k": 582,
+      ">300k": 100
+    },
+    "cost_by_context_bucket": {
+      "<50k": 465.9094,
+      "50-100k": 340.5052,
+      "100-200k": 457.4144,
+      "200-300k": 228.5068,
+      ">300k": 100.7322
+    },
+    "steps_over_200k_ratio": 0.0879,
+    "subagent_step1_context_avg": 14131,
+    "context_handoffs": 2,
+    "session_restarts": 14,
+    "reviewer_trees": 22,
+    "reviewer_share_max": 1.0,
+    "reviewer_trees_over_half": 7,
+    "reviewer_nesting_max": 3,
+    "shell_wrapper_subagents": 258,
+    "shell_wrapper_cost_usd": 74.8994,
+    "cache_field_steps": 0,
+    "cache_hit_ratio": null
+  },
+  "raw": {
+    "tasks": 1944,
+    "top_level_tasks": 132,
+    "subagents": 1812,
+    "cost_usd": 4061.1161,
+    "tokens": 2423092354,
+    "steps": 28296,
+    "sorcar_md_reads": 883,
+    "reads": 4584,
+    "repeat_reads": 1421,
+    "repeat_read_ratio": 0.31,
+    "steps_by_context_bucket": {
+      "<50k": 8059,
+      "50-100k": 5430,
+      "100-200k": 6799,
+      "200-300k": 2127,
+      ">300k": 643
+    },
+    "cost_by_context_bucket": {
+      "<50k": 536.05,
+      "50-100k": 689.6788,
+      "100-200k": 1357.625,
+      "200-300k": 652.1026,
+      ">300k": 318.4457
+    },
+    "steps_over_200k_ratio": 0.1201,
+    "subagent_step1_context_avg": 13728,
+    "context_handoffs": 12,
+    "session_restarts": 46,
+    "reviewer_trees": 298,
+    "reviewer_share_max": 1.0,
+    "reviewer_trees_over_half": 274,
+    "reviewer_nesting_max": 3,
+    "shell_wrapper_subagents": 692,
+    "shell_wrapper_cost_usd": 182.7224,
+    "cache_field_steps": 4012,
+    "cache_hit_ratio": 0.9691
+  },
+  "filtered": {
+    "tasks": 55,
+    "top_level_tasks": 44,
+    "subagents": 11,
+    "cost_usd": 887.5068,
+    "tokens": 523977309,
+    "steps": 4288,
+    "sorcar_md_reads": 0,
+    "reads": 220,
+    "repeat_reads": 78,
+    "repeat_read_ratio": 0.3545,
+    "steps_by_context_bucket": {
+      "<50k": 537,
+      "50-100k": 1086,
+      "100-200k": 1852,
+      "200-300k": 453,
+      ">300k": 101
+    },
+    "cost_by_context_bucket": {
+      "<50k": 46.8009,
+      "50-100k": 148.8149,
+      "100-200k": 459.8477,
+      "200-300k": 161.714,
+      ">300k": 42.9524
+    },
+    "steps_over_200k_ratio": 0.1375,
+    "subagent_step1_context_avg": 15370,
+    "context_handoffs": 2,
+    "session_restarts": 15,
+    "reviewer_trees": 0,
+    "reviewer_share_max": 0.0,
+    "reviewer_trees_over_half": 0,
+    "reviewer_nesting_max": 0,
+    "shell_wrapper_subagents": 0,
+    "shell_wrapper_cost_usd": 0,
+    "cache_field_steps": 4012,
+    "cache_hit_ratio": 0.9691
+  },
+  "step_type_breakdown": {
+    "claude-fable-5-1": {
+      "steps": 3728,
+      "cost_usd": 1193.34,
+      "own_cost_per_step": 0.2219,
+      "normal_step_cost": 0.176,
+      "normal_step_ctx_avg": 129686,
+      "by_type": {
+        "normal step": {
+          "steps": 3561,
+          "cost_usd": 626.86,
+          "cost_share": 0.525,
+          "cost_per_step": 0.176,
+          "ctx_avg": 129686
+        },
+        "fan-out step (children's cost folded in)": {
+          "steps": 14,
+          "cost_usd": 369.25,
+          "cost_share": 0.309,
+          "cost_per_step": 26.3748,
+          "ctx_avg": 217255
+        },
+        "cache miss: compaction": {
+          "steps": 56,
+          "cost_usd": 93.92,
+          "cost_share": 0.079,
+          "cost_per_step": 1.6771,
+          "ctx_avg": 132112
+        },
+        "cache miss: >=5 min gap (TTL expiry)": {
+          "steps": 40,
+          "cost_usd": 87.58,
+          "cost_share": 0.073,
+          "cost_per_step": 2.1896,
+          "ctx_avg": 173934
+        },
+        "first step of a session": {
+          "steps": 56,
+          "cost_usd": 14.46,
+          "cost_share": 0.012,
+          "cost_per_step": 0.2583,
+          "ctx_avg": 24832
+        },
+        "cache miss: other": {
+          "steps": 1,
+          "cost_usd": 1.27,
+          "cost_share": 0.001,
+          "cost_per_step": 1.2685,
+          "ctx_avg": 101162
+        }
+      }
+    },
+    "claude-fable-5": {
+      "steps": 269,
+      "cost_usd": 43.64,
+      "own_cost_per_step": 0.1428,
+      "normal_step_cost": 0.1019,
+      "normal_step_ctx_avg": 118789,
+      "by_type": {
+        "normal step": {
+          "steps": 257,
+          "cost_usd": 26.19,
+          "cost_share": 0.6,
+          "cost_per_step": 0.1019,
+          "ctx_avg": 118789
+        },
+        "cache miss: compaction": {
+          "steps": 4,
+          "cost_usd": 5.99,
+          "cost_share": 0.137,
+          "cost_per_step": 1.4976,
+          "ctx_avg": 117809
+        },
+        "fan-out step (children's cost folded in)": {
+          "steps": 2,
+          "cost_usd": 5.52,
+          "cost_share": 0.126,
+          "cost_per_step": 2.7597,
+          "ctx_avg": 203534
+        },
+        "cache miss: >=5 min gap (TTL expiry)": {
+          "steps": 2,
+          "cost_usd": 4.99,
+          "cost_share": 0.114,
+          "cost_per_step": 2.4931,
+          "ctx_avg": 198650
+        },
+        "first step of a session": {
+          "steps": 4,
+          "cost_usd": 0.95,
+          "cost_share": 0.022,
+          "cost_per_step": 0.2376,
+          "ctx_avg": 30075
+        }
+      }
+    },
+    "claude-opus-4-8": {
+      "steps": 70,
+      "cost_usd": 4.2,
+      "own_cost_per_step": 0.06,
+      "normal_step_cost": 0.0589,
+      "normal_step_ctx_avg": 39965,
+      "by_type": {
+        "normal step": {
+          "steps": 62,
+          "cost_usd": 3.65,
+          "cost_share": 0.869,
+          "cost_per_step": 0.0589,
+          "ctx_avg": 39965
+        },
+        "first step of a session": {
+          "steps": 8,
+          "cost_usd": 0.55,
+          "cost_share": 0.131,
+          "cost_per_step": 0.0687,
+          "ctx_avg": 10328
+        }
+      }
+    }
+  },
+  "excluded_ablation_tasks": 495
+}

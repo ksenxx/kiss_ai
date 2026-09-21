@@ -93,6 +93,9 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
         self._install_blocking_hook()
         self.offline = OfflineFastModel()
         self.offline.__enter__()
+        # A failure later in this setUp skips asyncTearDown; the trimmed
+        # PATH must never leak into the rest of the pytest process.
+        self.addCleanup(self.offline.__exit__, None, None, None)
 
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -116,7 +119,6 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
-        self.offline.__exit__(None, None, None)
         self._leave_isolated_home()
         shutil.rmtree(self.tmp, ignore_errors=True)
 

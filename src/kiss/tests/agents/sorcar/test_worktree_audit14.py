@@ -256,7 +256,7 @@ class TestRed8ManualMergeBranchDeadCode:
         for py in src.rglob("*.py"):
             if py.name == "git_worktree.py" or "test" in py.name.lower():
                 continue
-            text = py.read_text()
+            text = py.read_text(encoding="utf-8")
             if re.search(r"\bmanual_merge_branch\b", text) or re.search(
                 r"\bManualMergeResult\b", text
             ):

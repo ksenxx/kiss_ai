@@ -59,6 +59,7 @@ from kiss.tests.agents.sorcar.test_worktree_ignored_file_rescue import (
     _git,
     _make_repo,
 )
+from kiss.tests.conftest import is_root, posix_only
 
 
 class TestRescuedSiblingStaysIgnored:
@@ -185,6 +186,7 @@ class TestRescuedSiblingStaysIgnored:
         lines = self._exclude_file().read_text().splitlines()
         assert lines.count("*.kiss-rescued-*") == 1
 
+    @posix_only("chmod 555 directory write denial")
     def test_rescue_survives_unwritable_exclude(
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -198,7 +200,7 @@ class TestRescuedSiblingStaysIgnored:
         the ``.env`` sibling matches nothing and is warned about, and
         the collision-free ``notes.log`` landing is never checked.
         """
-        if os.geteuid() == 0:  # pragma: no cover — CI runs unprivileged
+        if is_root():  # pragma: no cover — CI runs unprivileged
             pytest.skip("root ignores directory write permissions")
         (self.repo / ".env").write_text("SECRET=users\n")
         (self.wt_dir / ".env").write_text("SECRET=agents\n")
@@ -294,9 +296,10 @@ class TestLandRescuedFileReturnPaths:
         assert os.readlink(siblings[0]) == "ours"
         assert list(self.repo.glob("same.kiss-rescued-*")) == []
 
+    @posix_only("chmod 555 directory write denial")
     def test_unwritable_destination_dir_fails_closed(self) -> None:
         """A landing ``OSError`` marks the rescue failed (ok=False)."""
-        if os.geteuid() == 0:  # pragma: no cover — CI runs unprivileged
+        if is_root():  # pragma: no cover — CI runs unprivileged
             pytest.skip("root ignores directory write permissions")
         (self.wt_dir / "sub").mkdir()
         (self.wt_dir / "sub" / "err.log").write_text("unlandable\n")

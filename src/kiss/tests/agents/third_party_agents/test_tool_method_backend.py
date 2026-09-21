@@ -14,29 +14,29 @@ from __future__ import annotations
 import pytest
 
 from kiss.agents.third_party_agents._channel_agent_utils import ToolMethodBackend
-from kiss.agents.third_party_agents.bluebubbles_agent import BlueBubblesChannelBackend
-from kiss.agents.third_party_agents.discord_agent import DiscordChannelBackend
-from kiss.agents.third_party_agents.feishu_agent import FeishuChannelBackend
-from kiss.agents.third_party_agents.gmail_agent import GmailChannelBackend
-from kiss.agents.third_party_agents.googlechat_agent import GoogleChatChannelBackend
-from kiss.agents.third_party_agents.imessage_agent import IMessageChannelBackend
-from kiss.agents.third_party_agents.irc_agent import IRCChannelBackend
-from kiss.agents.third_party_agents.line_agent import LineChannelBackend
-from kiss.agents.third_party_agents.matrix_agent import MatrixChannelBackend
-from kiss.agents.third_party_agents.mattermost_agent import MattermostChannelBackend
-from kiss.agents.third_party_agents.msteams_agent import MSTeamsChannelBackend
-from kiss.agents.third_party_agents.nextcloud_talk_agent import NextcloudTalkChannelBackend
-from kiss.agents.third_party_agents.nostr_agent import NostrChannelBackend
-from kiss.agents.third_party_agents.phone_control_agent import PhoneControlChannelBackend
-from kiss.agents.third_party_agents.signal_agent import SignalChannelBackend
-from kiss.agents.third_party_agents.slack_agent import SlackChannelBackend
-from kiss.agents.third_party_agents.sms_agent import SMSChannelBackend
-from kiss.agents.third_party_agents.synology_chat_agent import SynologyChatChannelBackend
-from kiss.agents.third_party_agents.telegram_agent import TelegramChannelBackend
-from kiss.agents.third_party_agents.tlon_agent import TlonChannelBackend
-from kiss.agents.third_party_agents.twitch_agent import TwitchChannelBackend
-from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
-from kiss.agents.third_party_agents.zalo_agent import ZaloChannelBackend
+from kiss.agents.third_party_agents.bluebubbles_sea import BlueBubblesChannelBackend
+from kiss.agents.third_party_agents.discord_sea import DiscordChannelBackend
+from kiss.agents.third_party_agents.feishu_sea import FeishuChannelBackend
+from kiss.agents.third_party_agents.gmail_sea import GmailChannelBackend
+from kiss.agents.third_party_agents.googlechat_sea import GoogleChatChannelBackend
+from kiss.agents.third_party_agents.imessage_sea import IMessageChannelBackend
+from kiss.agents.third_party_agents.irc_sea import IRCChannelBackend
+from kiss.agents.third_party_agents.line_sea import LineChannelBackend
+from kiss.agents.third_party_agents.matrix_sea import MatrixChannelBackend
+from kiss.agents.third_party_agents.mattermost_sea import MattermostChannelBackend
+from kiss.agents.third_party_agents.msteams_sea import MSTeamsChannelBackend
+from kiss.agents.third_party_agents.nextcloud_sea import NextcloudTalkChannelBackend
+from kiss.agents.third_party_agents.nostr_sea import NostrChannelBackend
+from kiss.agents.third_party_agents.phone_sea import PhoneControlChannelBackend
+from kiss.agents.third_party_agents.signal_sea import SignalChannelBackend
+from kiss.agents.third_party_agents.slack_sea import SlackChannelBackend
+from kiss.agents.third_party_agents.sms_sea import SMSChannelBackend
+from kiss.agents.third_party_agents.synology_sea import SynologyChatChannelBackend
+from kiss.agents.third_party_agents.telegram_sea import TelegramChannelBackend
+from kiss.agents.third_party_agents.tlon_sea import TlonChannelBackend
+from kiss.agents.third_party_agents.twitch_sea import TwitchChannelBackend
+from kiss.agents.third_party_agents.whatsapp_sea import WhatsAppChannelBackend
+from kiss.agents.third_party_agents.zalo_sea import ZaloChannelBackend
 
 ALL_BACKENDS = [
     BlueBubblesChannelBackend,

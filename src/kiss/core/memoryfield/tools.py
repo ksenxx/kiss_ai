@@ -10,6 +10,7 @@ runs an incremental index sync, so pages written by any process (the agent,
 a human in an editor, git pull) are searchable without a separate reindex.
 """
 
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -29,12 +30,18 @@ search index. Follow this protocol:
    file paths so the fact can be re-verified later. Prefer updating an existing
    page over creating a near-duplicate.
 3. Do not store secrets, credentials or raw transcripts. Delete pages that turn
-   out to be wrong or obsolete with `memory_delete`.
+   out to be wrong or obsolete with `memory_delete`. Per-round or per-session
+   working notes (review round N findings, fix lists, progress) are not durable
+   knowledge: keep them in `./tmp/PROGRESS.md`, not in memory.
 4. When search results look redundant or outdated, call `memory_refresh`: it
    re-indexes pages edited outside the agent and lists near-duplicate and stale
    pages. Merge duplicates with `memory_write` + `memory_delete`, and re-verify
    or delete stale pages.
 """
+
+_EPHEMERAL_NAME_RE = re.compile(r"(^|-)(round|session|iteration|pass)-?\d+(-|$)")
+"""Page names such as ``muse-auth-round4-review`` or ``server-fixes-round-7``
+are per-round working notes (36 of 260 pages in the 2026-09-19 audit)."""
 
 # Cap on characters returned by memory_pull so a broad query cannot flood the context.
 PULL_CHAR_LIMIT = 24_000
@@ -111,8 +118,14 @@ class MemoryTools:
             return "No memory pages yet." if self.index.count() == 0 else "No matches."
         chunks: list[str] = []
         used = 0
+        vanished = 0
         for hit in hits:
-            raw = self.memory.read(hit.name).raw
+            try:
+                raw = self.memory.read(hit.name).raw
+            except FileNotFoundError:
+                # Another process deleted the page after sync() indexed it.
+                vanished += 1
+                continue
             chunk = f"### {hit.name}.md  (score {hit.score:.3f})\n{raw}"
             if used + len(chunk) > PULL_CHAR_LIMIT:
                 if not chunks:
@@ -120,12 +133,14 @@ class MemoryTools:
                         chunk[:PULL_CHAR_LIMIT] + "\n[page truncated; use memory_read for the rest]"
                     )
                     chunks.append(chunk)
-                omitted = len(hits) - len(chunks)
+                omitted = len(hits) - vanished - len(chunks)
                 if omitted:
                     chunks.append(f"[{omitted} more page(s) omitted; lower k or refine the query]")
                 break
             chunks.append(chunk)
             used += len(chunk)
+        if not chunks:
+            return "No matches."
         return "\n\n".join(chunks)
 
     def memory_read(self, name: str) -> str:
@@ -157,8 +172,14 @@ class MemoryTools:
         size = len(page.raw.encode("utf-8"))
         embedded = len(embedding_text(page.raw).encode("utf-8"))
         note = ""
-        if embedded > MAX_PAGE_BYTES:
+        if _EPHEMERAL_NAME_RE.search(name):
             note = (
+                " Warning: the name looks like a per-round/per-session note; such "
+                "notes belong in ./tmp/PROGRESS.md, not in durable memory. Consider "
+                "memory_delete once the task is over."
+            )
+        if embedded > MAX_PAGE_BYTES:
+            note += (
                 f" Warning: the page's searchable text (title, summary and body) is "
                 f"{embedded} bytes; only the first {MAX_PAGE_BYTES} bytes are embedded. "
                 "Split it into several pages."
@@ -172,7 +193,11 @@ class MemoryTools:
             return "No memory pages yet."
         lines = []
         for name in names:
-            page = self.memory.read(name)
+            try:
+                page = self.memory.read(name)
+            except FileNotFoundError:
+                # Deleted by another process after page_names() listed it.
+                continue
             line = f"{name}  —  {page.title}"
             if page.summary:
                 line += f": {page.summary}"
@@ -224,7 +249,11 @@ class MemoryTools:
         cutoff = datetime.now(UTC) - timedelta(days=stale_days)
         stale: list[tuple[str, str]] = []
         for name in self.memory.page_names():
-            raw_updated = str(self.memory.read(name).frontmatter.get("updated", ""))
+            try:
+                raw_updated = str(self.memory.read(name).frontmatter.get("updated", ""))
+            except FileNotFoundError:
+                # Deleted by another process after page_names() listed it.
+                continue
             try:
                 updated = datetime.strptime(raw_updated, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
             except ValueError:

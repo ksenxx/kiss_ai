@@ -1,0 +1,413 @@
+{
+  "tasks": 123,
+  "sessions": 138,
+  "steps": 5585,
+  "compactions_observed": 75,
+  "compaction_raw_drop_total": 3378520,
+  "compaction_est_saved_total": 3466827,
+  "compaction_median_raw_drop": 33381,
+  "compaction_after_below_100k": 40,
+  "compaction_examples": [
+    {
+      "task": "054900b7",
+      "step": 45,
+      "before": 102102,
+      "after": 64587,
+      "raw_drop": 37515,
+      "est_saved": 38404
+    },
+    {
+      "task": "05bca266",
+      "step": 44,
+      "before": 101290,
+      "after": 62812,
+      "raw_drop": 38478,
+      "est_saved": 39690
+    },
+    {
+      "task": "05bca266",
+      "step": 101,
+      "before": 151638,
+      "after": 114994,
+      "raw_drop": 36644,
+      "est_saved": 37052
+    },
+    {
+      "task": "0affb532",
+      "step": 41,
+      "before": 100254,
+      "after": 60650,
+      "raw_drop": 39604,
+      "est_saved": 39966
+    },
+    {
+      "task": "170b1c71",
+      "step": 38,
+      "before": 176889,
+      "after": 95607,
+      "raw_drop": 81282,
+      "est_saved": 82206
+    },
+    {
+      "task": "1b7b37f4",
+      "step": 48,
+      "before": 100004,
+      "after": 64265,
+      "raw_drop": 35739,
+      "est_saved": 36290
+    },
+    {
+      "task": "1b7b37f4",
+      "step": 95,
+      "before": 150280,
+      "after": 138937,
+      "raw_drop": 11343,
+      "est_saved": 12225
+    },
+    {
+      "task": "20d8a778",
+      "step": 40,
+      "before": 108540,
+      "after": 90329,
+      "raw_drop": 18211,
+      "est_saved": 18728
+    },
+    {
+      "task": "2c9b2a8a",
+      "step": 39,
+      "before": 100937,
+      "after": 63821,
+      "raw_drop": 37116,
+      "est_saved": 37532
+    },
+    {
+      "task": "2c9b2a8a",
+      "step": 99,
+      "before": 154601,
+      "after": 113172,
+      "raw_drop": 41429,
+      "est_saved": 42762
+    },
+    {
+      "task": "2c9b2a8a",
+      "step": 174,
+      "before": 205845,
+      "after": 170045,
+      "raw_drop": 35800,
+      "est_saved": 36072
+    },
+    {
+      "task": "2cdf49aa",
+      "step": 11,
+      "before": 109612,
+      "after": 54605,
+      "raw_drop": 55007,
+      "est_saved": 55500
+    }
+  ],
+  "steps_over_100k": 3090,
+  "steps_over_100k_share": 0.5533,
+  "context_tokens_total": 673661161,
+  "context_tokens_over_100k_share": 0.7809,
+  "by_session_length": {
+    "0-20 steps": {
+      "sessions": 80,
+      "steps": 635,
+      "steps_over_100k": 34,
+      "share": 0.054,
+      "cost": 94.91,
+      "peak_ctx_avg": 48648
+    },
+    "20-50 steps": {
+      "sessions": 27,
+      "steps": 838,
+      "steps_over_100k": 218,
+      "share": 0.26,
+      "cost": 103.0,
+      "peak_ctx_avg": 109680
+    },
+    "50-100 steps": {
+      "sessions": 15,
+      "steps": 1087,
+      "steps_over_100k": 681,
+      "share": 0.626,
+      "cost": 244.43,
+      "peak_ctx_avg": 206261
+    },
+    "100-200 steps": {
+      "sessions": 8,
+      "steps": 1138,
+      "steps_over_100k": 794,
+      "share": 0.698,
+      "cost": 271.64,
+      "peak_ctx_avg": 217854
+    },
+    "200-inf steps": {
+      "sessions": 8,
+      "steps": 1887,
+      "steps_over_100k": 1363,
+      "share": 0.722,
+      "cost": 456.09,
+      "peak_ctx_avg": 247727
+    }
+  },
+  "long_sessions": [
+    {
+      "task": "74cb2a67",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 307,
+      "peak_ctx": 350842,
+      "steps_over_100k": 269,
+      "cost": 110.66,
+      "first_step_over_100k": 23,
+      "task_text": "Resume the interrupted \"make ks_assistant.tex strong accept\""
+    },
+    {
+      "task": "9d9c7c46",
+      "model": "claude-fable-5-1",
+      "session": 2,
+      "steps": 247,
+      "peak_ctx": 350539,
+      "steps_over_100k": 238,
+      "cost": 95.25,
+      "first_step_over_100k": 89,
+      "task_text": "test: Can you run all tests (python and javascript in parall"
+    },
+    {
+      "task": "41784cfc",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 246,
+      "peak_ctx": 253207,
+      "steps_over_100k": 174,
+      "cost": 61.79,
+      "first_step_over_100k": 43,
+      "task_text": "You are the `sorcar` area agent for a Windows test-triage ef"
+    },
+    {
+      "task": "69bd6c06",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 194,
+      "peak_ctx": 268898,
+      "steps_over_100k": 160,
+      "cost": 48.45,
+      "first_step_over_100k": 27,
+      "task_text": "can you thoroughly and precisely check if the cost calculati"
+    },
+    {
+      "task": "74cb2a67",
+      "model": "claude-fable-5-1",
+      "session": 1,
+      "steps": 127,
+      "peak_ctx": 202868,
+      "steps_over_100k": 81,
+      "cost": 45.55,
+      "first_step_over_100k": 372,
+      "task_text": "Resume the interrupted \"make ks_assistant.tex strong accept\""
+    },
+    {
+      "task": "e420aed3",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 225,
+      "peak_ctx": 219731,
+      "steps_over_100k": 162,
+      "cost": 45.24,
+      "first_step_over_100k": 41,
+      "task_text": "You are the `server_a` area agent for a Windows test-triage "
+    },
+    {
+      "task": "96daffa6",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 226,
+      "peak_ctx": 201422,
+      "steps_over_100k": 136,
+      "cost": 42.83,
+      "first_step_over_100k": 49,
+      "task_text": "You are the `vscode` area agent for a Windows test-triage ef"
+    },
+    {
+      "task": "caebf78a",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 207,
+      "peak_ctx": 202798,
+      "steps_over_100k": 123,
+      "cost": 38.81,
+      "first_step_over_100k": 56,
+      "task_text": "You are the `server_b` area agent for a Windows test-triage "
+    },
+    {
+      "task": "2c9b2a8a",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 197,
+      "peak_ctx": 205845,
+      "steps_over_100k": 141,
+      "cost": 38.33,
+      "first_step_over_100k": 38,
+      "task_text": "You are the `core_scripts` area agent for a Windows test-tri"
+    },
+    {
+      "task": "74cb2a67",
+      "model": "claude-fable-5-1",
+      "session": 8,
+      "steps": 112,
+      "peak_ctx": 257463,
+      "steps_over_100k": 109,
+      "cost": 37.24,
+      "first_step_over_100k": 495,
+      "task_text": "Resume the interrupted \"make ks_assistant.tex strong accept\""
+    },
+    {
+      "task": "7e3d99ba",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 221,
+      "peak_ctx": 186060,
+      "steps_over_100k": 111,
+      "cost": 34.77,
+      "first_step_over_100k": 63,
+      "task_text": "You are the `tpa` area agent for a Windows test-triage effor"
+    },
+    {
+      "task": "19803913",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 115,
+      "peak_ctx": 313937,
+      "steps_over_100k": 91,
+      "cost": 34.35,
+      "first_step_over_100k": 25,
+      "task_text": "Read the file /Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-"
+    },
+    {
+      "task": "c1ad71e6",
+      "model": "claude-fable-5",
+      "session": 0,
+      "steps": 208,
+      "peak_ctx": 217217,
+      "steps_over_100k": 150,
+      "cost": 26.74,
+      "first_step_over_100k": 39,
+      "task_text": "fix all the failures based on the diagnosis.\n\nUse 'claude-fa"
+    },
+    {
+      "task": "05bca266",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 154,
+      "peak_ctx": 169164,
+      "steps_over_100k": 84,
+      "cost": 25.53,
+      "first_step_over_100k": 43,
+      "task_text": "Across all surfaces, in the task history panel, you must sho"
+    },
+    {
+      "task": "7af3118f",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 128,
+      "peak_ctx": 163728,
+      "steps_over_100k": 85,
+      "cost": 23.11,
+      "first_step_over_100k": 28,
+      "task_text": "can you read the blog at https://harnesstax.github.io/ thoro"
+    },
+    {
+      "task": "1b7b37f4",
+      "model": "claude-fable-5-1",
+      "session": 0,
+      "steps": 111,
+      "peak_ctx": 160930,
+      "steps_over_100k": 43,
+      "cost": 19.09,
+      "first_step_over_100k": 47,
+      "task_text": "You are the `r2_server` area agent (round 2) for the Windows"
+    }
+  ],
+  "chars_added_by_category": {
+    "tool_results": 13473474,
+    "tool_call_args": 7876328,
+    "prompt": 2969126,
+    "thinking": 2213845,
+    "assistant_text": 41631
+  },
+  "tool_result_chars_by_tool": {
+    "Bash(stream)": 11308623,
+    "Read": 1146628,
+    "go_to_url": 221191,
+    "run_commands_parallel": 154058,
+    "memory_search": 153404,
+    "memory_pull": 108756,
+    "run_parallel": 66193,
+    "memory_read": 61396,
+    "click": 57968,
+    "Edit": 49562,
+    "Write": 48497,
+    "Bash": 48439
+  },
+  "tool_call_arg_chars_by_tool": {
+    "Bash": 4067120,
+    "Write": 2149932,
+    "summary": 598295,
+    "Edit": 397936,
+    "memory_write": 174782,
+    "Read": 152100,
+    "run_commands_parallel": 109738,
+    "run_parallel": 93209,
+    "decide": 50099,
+    "go_to_url": 21832,
+    "memory_search": 19371,
+    "finish": 12443
+  },
+  "tool_results": 5887,
+  "tool_result_chars": 13473474,
+  "tool_result_chars_below_min_compact": 1904801,
+  "tool_result_chars_below_min_compact_share": 0.141,
+  "tool_result_chars_protected_tools": 98059,
+  "tool_result_chars_in_sessions_reaching_100k": 11627638,
+  "tool_result_chars_in_last_20_results_of_those": 2562547,
+  "chars_per_context_token_median": 2.23,
+  "per_model": {
+    "claude-fable-5-1": {
+      "steps": 4806,
+      "cost": 1094.82,
+      "over_100k": 2778,
+      "own_steps": 4776,
+      "cost_per_step": 0.2292,
+      "over_100k_share": 0.578,
+      "ctx_avg": 125315
+    },
+    "claude-fable-5": {
+      "steps": 269,
+      "cost": 38.12,
+      "over_100k": 167,
+      "own_steps": 267,
+      "cost_per_step": 0.1428,
+      "over_100k_share": 0.621,
+      "ctx_avg": 118679
+    },
+    "gpt-5.6-sol": {
+      "steps": 440,
+      "cost": 32.94,
+      "over_100k": 145,
+      "own_steps": 440,
+      "cost_per_step": 0.0749,
+      "over_100k_share": 0.33,
+      "ctx_avg": 83895
+    },
+    "claude-opus-4-8": {
+      "steps": 70,
+      "cost": 4.2,
+      "over_100k": 0,
+      "own_steps": 70,
+      "cost_per_step": 0.06,
+      "over_100k_share": 0.0,
+      "ctx_avg": 36578
+    }
+  }
+}

@@ -40,6 +40,11 @@ from pathlib import Path
 import pytest
 
 from kiss.core.models.model_info import _seed_file_atomically
+from kiss.tests.conftest import posix_only
+
+# chmod 0o500 on a directory denies nothing on Windows (only the
+# read-only flag exists there), so the permission-denial cases are POSIX.
+_chmod_denial = posix_only("chmod 0o500 directory does not deny writes on Windows")
 
 _DURATION_S = 3.0
 _READERS = 3
@@ -51,7 +56,14 @@ from kiss.core.models.model_info import USER_MY_MODELS_PATH, _seed_my_models_fil
 deadline = time.monotonic() + float(sys.argv[1])
 rounds = 0
 while time.monotonic() < deadline:
-    USER_MY_MODELS_PATH.unlink(missing_ok=True)
+    while True:
+        try:
+            USER_MY_MODELS_PATH.unlink(missing_ok=True)
+            break
+        except PermissionError:
+            # Windows: a reader still holds the file open; retry at once
+            # (a sleep would hand the readers the file for most of the run).
+            continue
     _seed_my_models_file()
     rounds += 1
 print(rounds)
@@ -81,6 +93,7 @@ def _child(source: str, home: Path) -> subprocess.Popen[str]:
     """Start a real child process rooted at a throwaway ``HOME``."""
     env = dict(os.environ)
     env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)  # what Path.home() reads on Windows
     env["KISS_HOME"] = str(home / ".kiss")
     return subprocess.Popen(
         [sys.executable, "-c", source, str(_DURATION_S)],
@@ -109,8 +122,11 @@ class TestMyModelsSeedIsAtomic:
             results.append(json.loads(out))
 
         assert seeder.returncode == 0, seeder_err
-        assert int(seeder_out) > 100, "the seeder barely ran; test is not loading"
-        assert sum(r["seen"] for r in results) > 100, "readers never saw the file"
+        # Sanity floor only: a fully parallel suite on Windows (14 pytest
+        # processes, each seed an fsync'd write) leaves the seeder a few
+        # dozen rounds in the window, which still contends with 3 readers.
+        assert int(seeder_out) > 20, "the seeder barely ran; test is not loading"
+        assert sum(r["seen"] for r in results) > 20, "readers never saw the file"
         torn = sum(r["torn"] for r in results)
         assert torn == 0, (
             f"{torn} reads observed an existing but unparseable "
@@ -151,6 +167,7 @@ print(json.dumps({
         assert result["seeded_default"] is True
         assert result["user_entry_survived"] == ["mine/custom"]
 
+    @_chmod_denial
     def test_unwritable_home_is_survivable(self, tmp_path: Path) -> None:
         """A read-only ``~/.kiss`` must not break importing the catalog."""
         home = tmp_path / "home"
@@ -238,6 +255,7 @@ class TestAtomicSeedHelper:
 
         assert path.read_text(encoding="utf-8") == "mine"
 
+    @_chmod_denial
     def test_unwritable_parent_raises_oserror(self, tmp_path: Path) -> None:
         """The caller decides what to do — here the parent is read-only."""
         parent = tmp_path / "ro"

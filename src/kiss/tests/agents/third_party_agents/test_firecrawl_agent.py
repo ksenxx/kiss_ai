@@ -29,12 +29,12 @@ from urllib.parse import urlparse
 
 import pytest
 
-import kiss.agents.third_party_agents.firecrawl_agent as fc_mod
+import kiss.agents.third_party_agents.firecrawl_sea as fc_mod
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents.firecrawl_agent import (
+from kiss.agents.third_party_agents.firecrawl_sea import (
     _DEFAULT_BASE_URL,
     FirecrawlAgent,
     FirecrawlChannelBackend,
@@ -669,7 +669,7 @@ def test_main_prints_usage_without_args() -> None:
     the coverage tracer does not follow the child process.
     """
     proc = subprocess.run(
-        [sys.executable, "-m", "kiss.agents.third_party_agents.firecrawl_agent"],
+        [sys.executable, "-m", "kiss.agents.third_party_agents.firecrawl_sea"],
         capture_output=True,
         text=True,
         timeout=120,

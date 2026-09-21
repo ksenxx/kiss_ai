@@ -27,8 +27,8 @@ from pathlib import Path
 import pytest
 import requests
 
-import kiss.agents.third_party_agents.webhook_agent as webhook_agent_mod
-from kiss.agents.third_party_agents.webhook_agent import (
+import kiss.agents.third_party_agents.webhook_sea as webhook_agent_mod
+from kiss.agents.third_party_agents.webhook_sea import (
     _RATE_LIMIT_EVENTS,
     _RATE_LIMIT_WINDOW_SECONDS,
     WebhookAgent,
@@ -108,7 +108,7 @@ def test_auth_trio_roundtrip_and_persistence() -> None:
     assert result["ok"]
     path = _config.path
     assert path.exists()
-    assert "third_party_agents/webhook" in str(path)
+    assert path.parent.parts[-2:] == ("third_party_agents", "webhook")
     if sys.platform != "win32":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
     saved = json.loads(path.read_text())

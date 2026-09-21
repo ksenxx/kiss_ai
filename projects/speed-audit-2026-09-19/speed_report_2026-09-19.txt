@@ -1,0 +1,113 @@
+================================================================================
+Tasks 2755  top-level 252  sub-agents 2503
+window 2026-09-12 09:56:28.633267+00:00 -> 2026-09-19 08:05:14.518581+00:00
+
+## A. Top-level wall 111.4 h  median 262s
+  own LLM round trips 42.3 h 38%  steps 12489
+  tool run_parallel             37.7 h 34%
+  tool Bash                     18.3 h 16%
+  tool run_agent                 8.1 h 7%
+  tool ask_user_question         3.2 h 3%
+  tool go_to_url                 0.3 h 0%
+  tool run_commands_parallel     0.1 h 0%
+  tool memory_search             0.1 h 0%
+  tool click                     0.0 h 0%
+  unaccounted (idle/startup/stop) 1.2 h 1%
+  startup (first event -> prompt) top-level avg 0.0s  sub-agent avg 2.5s  p90 6.1s
+
+## B. Outcomes (top-level): {'success': 242, 'no result': 4, 'failed': 1, 'stopped': 5}
+  is_continue=true finishes: 0  wall 0.0 h
+  tasks with >1 prompt event (context-limit restart): 37  wall 53.0 h
+  consecutive same-chat prompt pairs 144; follow-up prompt reads as a complaint/redo: 4 (3%)
+     - In the last task why didn't the call to `run_agent` open a new subagent tab?
+     - why didn't you find https://ntfy.sh/kiss-31e7ee3ddff0e4f3ef6780754e4159ed?
+     - why jev-latest didn't get added from openrouter?  Fix ./src/kiss/scripts/update_models.py if needed.
+     - I do not see any change in projects/cost-levers-implementation-plan.md.
+
+## C. Tool-call errors (each costs one extra LLM round trip)
+  total calls 48220  errors 53 0%
+  run_parallel                45 /    432 (10%)
+  memory_write                 3 /    418 (1%)
+  Summary                      2 /      2 (100%)
+  authenticate_github          1 /      4 (25%)
+  Read                         1 /  11485 (0%)
+  Write                        1 /    833 (0%)
+  Bash error categories (sample of 0 ): {}
+  Edit error categories: {}
+  run_parallel/run_agent error categories: {'other': 45}
+     Read/Write err e.g.: Failed to call Read with {'file_path': '/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1789711631-6189b253/src/kiss/scrip
+     Read/Write err e.g.: Failed to call Write with {'file_path': '/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1789516082-4f42a9d4/tmp/gates.sh'
+
+## D. Fixed LLM latency of trivial 1-tool steps (out_chars<600) by model and context
+  model                              <25k      25-50k     50-100k    100-200k    200-300k       >300k
+  claude-fable-5                4.3s/2992   5.6s/1225   6.5s/2351   8.0s/3777   8.2s/1672    8.3s/876
+  gpt-5.6-sol                   3.6s/4242    7.1s/649   8.4s/1569    9.2s/898     9.8s/59           -
+  claude-fable-5-1               5.0s/793    6.2s/621   7.0s/1228   7.4s/2141    8.7s/784    9.8s/224
+  claude-opus-4-8                 2.8s/98    3.1s/116     6.2s/44    6.1s/113     7.3s/66     5.8s/30
+  claude-opus-4-7                       -           -           -           -           -           -
+  steps by ctx bucket: {'<25k': '11490 (16.0 h)', '25-50k': '4079 (12.2 h)', '50-100k': '7960 (33.2 h)', '100-200k': '9552 (40.2 h)', '200-300k': '3407 (14.8 h)', '>300k': '1423 (6.3 h)'}
+  output throughput (steps >3k chars): median 85 chars/s
+
+## E. Overhead-only LLM round trips
+  summary alone                          2277 steps  7.0 h
+  memory_search/pull alone               1734 steps  1.8 h
+  set_model alone                          85 steps  0.1 h
+  Read SORCAR.md alone (any step)        1661 steps  2.0 h
+  single Read step                       4770 steps  8.8 h
+  single Bash step                      15827 steps  47.9 h
+  0-tool steps (text only, not last)        9 steps  0.1 h
+  consecutive read-only steps (could be batched) 2694 steps 4.4 h
+  steps containing Write 1236 12.9 h  avg 37.5s
+  summary calls 2277 over 37911 steps = one per 16.6 steps
+
+## F. Bash
+  total 25221 50.4 h  >=60s: 874 36.6 h
+  other           18266 calls   24.4 h
+  pytest           1967 calls   11.2 h
+  sleep/poll        242 calls    5.2 h
+  npm/node         1131 calls    4.3 h
+  uv run check      143 calls    3.6 h
+  python            973 calls    1.5 h
+  ruff/lint         200 calls    0.1 h
+  git              2299 calls    0.0 h
+  identical command re-run inside same task: 89 distinct cmds, 121 repeat executions
+  task trees running `uv run check` >=3x: 19, total 2.6 h; max 14 runs
+  Bash timeouts: 0 calls, 0.0 h spent before timing out
+
+## G. run_parallel fan-out
+  calls 432  parent wait 56.1 h
+  single-child batches 127 (22.3 h);  batches>=3: straggler (max-median) 9.3 h of 25.0 h waited
+  parents with >=3 rounds: 32  rounds 155
+  reviewer sub-agents 466  wall 66.7 h  LLM 46.0 h  clean verdict ("None"/no issues) 1
+  test-shard sub-agents 1613: steps median 4, p90 6, wall median 45s, LLM share 30%
+    shards with >4 steps: 389  (extra LLM time 4.9 h)
+  sub-agents that are shell-command wrappers 1077: wall 25.3 h, of which LLM 5.0 h (pure overhead vs run_commands_parallel)
+
+## H. run_agent 65 8.1 h
+  gmail                                       8 0.2 h
+  /home/ksen/kiss/.kiss-worktrees/kiss_wt-    6 2.7 h
+  tmp/review_agent.py                         6 2.9 h
+  /home/ksen/kiss/.kiss-worktrees/kiss_wt-    5 0.6 h
+  slack                                       4 0.3 h
+  google_drive                                4 0.1 h
+  general                                     4 0.0 h
+  whatsapp                                    3 0.3 h
+
+## I. Model mix (steps, LLM hours, median step)
+  claude-fable-5                 steps  18345    62.1 h  median 7.2s  p90 24.2s
+  gpt-5.6-sol                    steps  11310    34.1 h  median 5.8s  p90 24.8s
+  claude-fable-5-1               steps   7576    25.0 h  median 7.8s  p90 23.0s
+  claude-opus-4-8                steps    676     1.6 h  median 5.6s  p90 15.4s
+  claude-opus-4-7                steps      4     0.0 h  median 4.2s  p90 5.0s
+
+## J. Longest top-level tasks
+    9.5 h steps   92 LLM  0.5 h rp  7.6 h ra  0.0 h bash  1.4 h $845 claude-fable-5     Can you precisely and thoroughly find and fix all race condi
+    7.9 h steps  321 LLM  1.4 h rp  0.2 h ra  5.6 h bash  0.7 h $275 claude-fable-5     test: Can you run all tests (python and javascript? Use `run
+    5.2 h steps  379 LLM  1.8 h rp  2.2 h ra  0.0 h bash  1.3 h $183 claude-fable-5     Extend Muse-auth to the remaining token-exchange connectors 
+    5.0 h steps  379 LLM  1.4 h rp  2.4 h ra  0.0 h bash  1.2 h $198 claude-fable-5     Extend Muse-auth to the remaining credentialed connectors th
+    3.1 h steps  116 LLM  0.3 h rp  0.0 h ra  0.0 h bash  0.0 h $18 claude-fable-5-1   can you create a git lassroom for me for the course Cs 264 I
+    3.1 h steps  297 LLM  1.1 h rp  1.0 h ra  0.0 h bash  0.9 h $115 claude-fable-5-1   # Single-task implementation plan for the Sorcar token-cost 
+    2.9 h steps  403 LLM  1.5 h rp  0.6 h ra  0.0 h bash  0.9 h $135 claude-fable-5     In the remote webapp, in the source control panel, you only 
+    2.7 h steps  262 LLM  0.9 h rp  1.3 h ra  0.0 h bash  0.5 h $145 claude-fable-5     in the remote webapp, can you add a leftmost narrow bar to t
+    2.4 h steps  310 LLM  1.2 h rp  0.8 h ra  0.0 h bash  0.4 h $136 claude-fable-5     In the Meta Muse app, to connect to a third-party app, one c
+    2.3 h steps  250 LLM  0.9 h rp  0.9 h ra  0.0 h bash  0.5 h $110 claude-fable-5     for every tool call panel across all surfaces, can you add a

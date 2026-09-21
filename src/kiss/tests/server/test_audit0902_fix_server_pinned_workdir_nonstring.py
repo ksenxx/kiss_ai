@@ -68,8 +68,10 @@ class TestPinnedWorkDirBeatsMalformedField(IsolatedAsyncioTestCase):
         self.dir_b = self.tmpdir / "window-b"
         self.dir_a.mkdir()
         self.dir_b.mkdir()
-        (self.dir_a / "only-in-a.txt").write_text("A\n", encoding="utf-8")
-        (self.dir_b / "only-in-b.txt").write_text("B\n", encoding="utf-8")
+        # newline="\n": the reply must echo the bytes on disk, so the
+        # fixture must not let Windows text mode turn "\n" into "\r\n".
+        (self.dir_a / "only-in-a.txt").write_text("A\n", encoding="utf-8", newline="\n")
+        (self.dir_b / "only-in-b.txt").write_text("B\n", encoding="utf-8", newline="\n")
         certfile, keyfile = self.tmpdir / "cert.pem", self.tmpdir / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
         self.port = _free_port()

@@ -40,6 +40,7 @@ from unittest import IsolatedAsyncioTestCase
 
 from kiss.core.vscode_config import save_config
 from kiss.server.web_server import RemoteAccessServer, _get_machine_topic
+from kiss.tests.conftest import posix_only
 from kiss.tests.server._ntfy_emulator import NtfyServerContext
 
 
@@ -167,6 +168,7 @@ class TestTunnelRestartPostsToInjectedEndpoint(IsolatedAsyncioTestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
         shutil.rmtree(self._kiss_home, ignore_errors=True)
 
+    @posix_only("the fake cloudflared is a #! shell script")
     async def test_post_lands_on_emulator_not_production_topic(self) -> None:
         """The restart-path post reaches the injected emulator on the
         isolated (non-production) topic."""

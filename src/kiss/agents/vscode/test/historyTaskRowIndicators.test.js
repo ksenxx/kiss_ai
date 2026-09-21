@@ -174,12 +174,12 @@ function testRunningTaskShowsAtTopAfterBurgerOpen() {
   const dot = r[0].querySelector('.sidebar-item-running');
   assert.ok(
     dot,
-    'first (running) row must carry .sidebar-item-running dot',
+    'first (running) row must carry .sidebar-item-running spinner',
   );
   assert.strictEqual(
     r[0].firstElementChild,
     dot,
-    'pulsing dot must be the first child of the row',
+    'spinner must be the first child of the row',
   );
 
   win.close();
@@ -229,13 +229,13 @@ function testFinishedTaskShowsSolidGreenCircle() {
     freshRow.querySelector('.sidebar-item-completed'),
     null,
     'fresh history load of a completed task MUST NOT render a ' +
-      'solid green circle — that is reserved for tasks the user ' +
+      'green tick — that is reserved for tasks the user ' +
       'just watched transition from running to completed',
   );
   assert.strictEqual(
     freshRow.querySelector('.sidebar-item-running'),
     null,
-    'fresh completed row must not render a pulsing dot either',
+    'fresh completed row must not render a spinner either',
   );
 
   const runningRow = byTitle['running task'];
@@ -284,29 +284,37 @@ function testFinishedTaskShowsSolidGreenCircle() {
   assert.ok(
     completedDot,
     'a row whose running→completed transition the session ' +
-      'witnessed MUST render a .sidebar-item-completed solid green dot',
+      'witnessed MUST render a .sidebar-item-completed green tick',
   );
   assert.strictEqual(
     transitionedRow.firstElementChild,
     completedDot,
-    'solid green circle must be the FIRST child (middle-left) of the row',
+    'green tick must be the FIRST child (middle-left) of the row',
+  );
+  assert.ok(
+    completedDot.classList.contains('status-tick'),
+    'the completed indicator must be the shared .status-tick icon',
+  );
+  assert.ok(
+    !completedDot.classList.contains('status-spinner'),
+    'the completed indicator must not be a spinner',
   );
 
   const cs = win.getComputedStyle(completedDot);
   assert.strictEqual(
-    cs.backgroundColor,
+    cs.color,
     'rgb(46, 125, 50)',
-    `solid circle background must be #2e7d32 ` +
-      `(rgb(46, 125, 50)); got: ${cs.backgroundColor}`,
+    `tick colour must be #2e7d32 (rgb(46, 125, 50)); got: ${cs.color}`,
   );
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';
   assert.ok(
-    animName.indexOf('running-pulse') < 0 &&
+    animName.indexOf('status-spin') < 0 &&
+      animShort.indexOf('status-spin') < 0 &&
+      animName.indexOf('running-pulse') < 0 &&
       animShort.indexOf('running-pulse') < 0,
-    'solid (completed) circle MUST NOT animate via ' +
-      `running-pulse; got animation-name="${animName}" ` +
-      `animation="${animShort}"`,
+    'the (completed) tick MUST NOT animate; ' +
+      `got animation-name="${animName}" animation="${animShort}"`,
   );
 
   const stillFreshRow = byTitle['fresh completed task'];
@@ -314,7 +322,7 @@ function testFinishedTaskShowsSolidGreenCircle() {
     stillFreshRow.querySelector('.sidebar-item-completed'),
     null,
     'an unrelated fresh-completed row MUST not inherit the solid ' +
-      'green circle just because another row transitioned',
+      'green tick just because another row transitioned',
   );
 
   send(win, {
@@ -326,13 +334,13 @@ function testFinishedTaskShowsSolidGreenCircle() {
   const persisted = rows(win)[1];
   assert.ok(
     persisted.querySelector('.sidebar-item-completed'),
-    'solid green circle MUST persist across subsequent ' +
+    'green tick MUST persist across subsequent ' +
       'history reloads once it has appeared',
   );
 
   win.close();
   console.log(
-    '  ok - solid green circle only after witnessed running→completed transition',
+    '  ok - green tick only after witnessed running→completed transition',
   );
 }
 
@@ -408,11 +416,20 @@ function testIndicatorsAreVerticallyCenteredInTaskPanels() {
       `row ${title} indicator must sit on the first line of the task ` +
         `text, not at the panel middle; got top=${style.top}`,
     );
+    // The offset is the `translate` property, never `transform`: the
+    // spinner's `rotate` animation is composed after `translate` but
+    // before `transform`, so a `transform` offset would make the ring
+    // orbit the point instead of turning in place.
     assert.strictEqual(
-      style.transform,
-      'translateY(-50%)',
+      style.translate,
+      '0 -50%',
       `row ${title} indicator must translate by half its own height ` +
-        `to center on that line; got transform=${style.transform}`,
+        `to center on that line; got translate=${style.translate}`,
+    );
+    assert.ok(
+      style.transform === '' || style.transform === 'none',
+      `row ${title} indicator must not be offset through transform ` +
+        `(the spinner would revolve); got transform=${style.transform}`,
     );
   });
 
@@ -426,24 +443,28 @@ function testCompletedDotKeyframesNotShared() {
   const cssText = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   assert.ok(
     /\.sidebar-item-completed\s*\{/.test(cssText),
-    'main.css must define .sidebar-item-completed for the solid ' +
-      'green finished-task circle',
+    'main.css must define .sidebar-item-completed for the green ' +
+      'finished-task tick',
   );
 
   const m = cssText.match(/\.sidebar-item-completed\s*\{([^}]*)\}/);
   assert.ok(m, 'expected a single-rule .sidebar-item-completed block');
   const body = m[1];
   assert.ok(
-    body.indexOf('running-pulse') < 0,
-    '.sidebar-item-completed MUST NOT use running-pulse; ' +
-      'the solid circle is static',
+    body.indexOf('animation') < 0,
+    '.sidebar-item-completed MUST NOT animate; the tick is static',
   );
   assert.ok(
-    /background\s*:\s*#2e7d32/i.test(body),
-    '.sidebar-item-completed MUST use the #2e7d32 green background',
+    /color\s*:\s*#2e7d32/i.test(body),
+    '.sidebar-item-completed MUST colour the tick #2e7d32 green',
+  );
+  const tick = cssText.match(/\.status-tick\s*\{([^}]*)\}/);
+  assert.ok(
+    tick && /--status-icon\s*:\s*url\(/.test(tick[1]),
+    '.status-tick must draw its shape from an SVG mask',
   );
 
-  console.log('  ok - .sidebar-item-completed is defined as solid green');
+  console.log('  ok - .sidebar-item-completed is defined as a green tick');
 }
 
 function main() {

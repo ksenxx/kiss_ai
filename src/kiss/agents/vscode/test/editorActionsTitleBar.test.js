@@ -173,6 +173,7 @@ class FakeSidebarView {
     this.hasFocus = false;
   }
   syncWorkDir() {}
+  postActiveTask() {}
   focusChatInput() {
     return Promise.resolve();
   }
@@ -225,6 +226,7 @@ class FakePanelManager {
   enterMode() {}
   closeAll() {}
   setMetaSink() {}
+  setActiveTaskSink() {}
   markShutdown() {}
   adoptRegistryTabs() {}
   activeController() {

@@ -34,6 +34,7 @@ from kiss.server.web_server import (
     _parse_quick_tunnel_url,
     _read_url_from_stderr,
 )
+from kiss.tests.conftest import posix_only
 
 _LINES_AFTER_TIMEOUT = 4000
 """4000 x ~100 B lines = ~400 KiB, several times the pipe capacity."""
@@ -142,6 +143,7 @@ class TestStderrDrainSurvivesTimeout(unittest.TestCase):
                 proc.wait(timeout=5)
 
 
+@posix_only("the fake cloudflared is a #! shell script")
 class TestDrainSurvivesInvalidUtf8(unittest.TestCase):
     """The drain must survive a non-UTF-8 byte in a cloudflared log line.
 

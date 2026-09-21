@@ -28,6 +28,10 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.conftest import is_root, posix_only
+
+pytestmark = posix_only("install.sh runs under bash with chmod-based removal failures")
+
 REPO = Path(__file__).resolve().parents[5]
 INSTALL_SCRIPT = REPO / "install.sh"
 
@@ -147,7 +151,7 @@ def test_xdg_data_home_overrides_code_server_root(tmp_path: Path) -> None:
     assert (default_root / "CachedExtensionVSIXs").is_dir()
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory write permissions")
+@pytest.mark.skipif(is_root(), reason="root ignores directory write permissions")
 def test_failed_removal_never_aborts_the_install(tmp_path: Path) -> None:
     """An undeletable cache entry is skipped best-effort under set -e (rc 0)."""
     root = tmp_path / ".config" / "Code"

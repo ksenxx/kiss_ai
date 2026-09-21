@@ -19,12 +19,12 @@ from __future__ import annotations
 import pytest
 
 from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent
-from kiss.agents.third_party_agents.gmail_agent import GmailAgent
-from kiss.agents.third_party_agents.google_calendar_agent import GoogleCalendarAgent
-from kiss.agents.third_party_agents.google_docs_agent import GoogleDocsAgent
-from kiss.agents.third_party_agents.google_drive_agent import GoogleDriveAgent
-from kiss.agents.third_party_agents.google_sheets_agent import GoogleSheetsAgent
-from kiss.agents.third_party_agents.googlechat_agent import GoogleChatAgent
+from kiss.agents.third_party_agents.gcal_sea import GoogleCalendarAgent
+from kiss.agents.third_party_agents.gdocs_sea import GoogleDocsAgent
+from kiss.agents.third_party_agents.gdrive_sea import GoogleDriveAgent
+from kiss.agents.third_party_agents.gmail_sea import GmailAgent
+from kiss.agents.third_party_agents.googlechat_sea import GoogleChatAgent
+from kiss.agents.third_party_agents.gsheets_sea import GoogleSheetsAgent
 
 _CASES = [
     (GmailAgent, "gmail", "Gmail"),

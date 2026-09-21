@@ -23,7 +23,8 @@ pages and openrouter.ai):
 
 * gpt-audio / gpt-audio-1.5 / gpt-audio-2025-08-28: text $2.50/$10.00,
   audio $32.00/$64.00 per 1M tokens.
-* gpt-audio-mini family: text $0.60/$2.40, audio $0.60/$2.40 (equal).
+* gpt-audio-mini family: text $0.60/$2.40; audio $10.00/$20.00 direct
+  (developers.openai.com pricing, 2026-09), $0.60/$2.40 via OpenRouter.
 """
 
 import pytest

@@ -22,16 +22,18 @@ from kiss.agents.sorcar.useful_tools import UsefulTools
 
 @pytest.fixture()
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point ``$HOME`` at a throwaway directory for the test process."""
+    """Point the home directory at a throwaway directory for the test process.
+
+    ``expanduser`` reads ``HOME`` on POSIX and ``USERPROFILE`` on Windows.
+    """
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     return home
 
 
-def test_write_tilde_path_targets_home_not_literal_dir(
-    fake_home: Path, tmp_path: Path
-) -> None:
+def test_write_tilde_path_targets_home_not_literal_dir(fake_home: Path, tmp_path: Path) -> None:
     work_dir = tmp_path / "wd"
     work_dir.mkdir()
     tools = UsefulTools(work_dir=str(work_dir))
@@ -54,6 +56,7 @@ def test_edit_tilde_path_edits_home_file(fake_home: Path, tmp_path: Path) -> Non
     (fake_home / "cfg.txt").write_text("OLD\n")
     tools = UsefulTools(work_dir=str(tmp_path))
 
+    tools.Read("~/cfg.txt")
     out = tools.Edit("~/cfg.txt", "OLD", "NEW")
 
     assert "Successfully replaced" in out, out
@@ -61,9 +64,7 @@ def test_edit_tilde_path_edits_home_file(fake_home: Path, tmp_path: Path) -> Non
     assert not (tmp_path / "~").exists()
 
 
-def test_plain_relative_paths_still_anchor_under_work_dir(
-    fake_home: Path, tmp_path: Path
-) -> None:
+def test_plain_relative_paths_still_anchor_under_work_dir(fake_home: Path, tmp_path: Path) -> None:
     """Regression guard: non-tilde relative paths keep work_dir anchoring."""
     work_dir = tmp_path / "wd"
     work_dir.mkdir()

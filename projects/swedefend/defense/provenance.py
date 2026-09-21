@@ -27,6 +27,7 @@ Binary invocations (verified to work in this repo):
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -35,11 +36,15 @@ from pathlib import Path
 
 # Resolve the scanners from the project virtualenv first (the "verified"
 # invocations the task requires), then fall back to whatever is on PATH.
-_VENV_BIN = Path(__file__).resolve().parents[2] / ".venv" / "bin"
+# A Windows venv keeps its entry points as ``.venv\Scripts\<name>.exe``.
+_VENV_BIN = Path(__file__).resolve().parents[2] / ".venv" / (
+    "Scripts" if os.name == "nt" else "bin"
+)
+_EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 
 
 def _resolve_binary(name: str) -> str:
-    """Return the path to scanner *name*, preferring ``./.venv/bin``.
+    """Return the path to scanner *name*, preferring the project venv.
 
     Args:
         name: The scanner executable name (``"bandit"`` or ``"semgrep"``).
@@ -48,7 +53,7 @@ def _resolve_binary(name: str) -> str:
         Absolute path to the venv binary when present, else the bare name
         (resolved via ``PATH`` at call time).
     """
-    candidate = _VENV_BIN / name
+    candidate = _VENV_BIN / f"{name}{_EXE_SUFFIX}"
     if candidate.is_file():
         return str(candidate)
     found = shutil.which(name)

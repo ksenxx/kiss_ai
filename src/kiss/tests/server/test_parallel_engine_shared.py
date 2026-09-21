@@ -147,7 +147,9 @@ def test_stopping_one_subagent_spares_its_siblings(
             return tool_call_response(
                 "Bash",
                 {
-                    "command": f"touch {victim_started}; sleep 30",
+                    # The Bash tool runs Git bash on Windows, where a
+                    # backslash path would be eaten as escapes.
+                    "command": f"touch '{victim_started.as_posix()}'; sleep 30",
                     "description": "park the victim sub-agent",
                 },
             )

@@ -4,7 +4,7 @@
 # add your name here
 """Regression tests: gmail/googlechat credential paths honour ``KISS_HOME``.
 
-Previously ``gmail_agent`` and ``googlechat_agent`` built their credential
+Previously ``gmail_sea`` and ``googlechat_sea`` built their credential
 directories from a module-level ``Path.home() / ".kiss" / ...`` constant,
 bypassing the per-process ``KISS_HOME`` isolation that
 ``src/kiss/tests/conftest.py`` sets up.  Parallel pytest processes therefore
@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from kiss.agents.third_party_agents import gmail_agent, googlechat_agent
+from kiss.agents.third_party_agents import gmail_sea, googlechat_sea
 from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
 
 
@@ -45,14 +45,14 @@ def test_gmail_paths_honour_kiss_home_lazily(tmp_path: Path) -> None:
     swap = _KissHomeSwap(tmp_path / "home_a")
     try:
         base_a = tmp_path / "home_a" / "third_party_agents" / "gmail"
-        assert gmail_agent._token_path() == base_a / "token.json"
-        assert gmail_agent._credentials_path() == base_a / "credentials.json"
+        assert gmail_sea._token_path() == base_a / "token.json"
+        assert gmail_sea._credentials_path() == base_a / "credentials.json"
 
         os.environ["KISS_HOME"] = str(tmp_path / "home_b")
         base_b = tmp_path / "home_b" / "third_party_agents" / "gmail"
-        assert gmail_agent._token_path() == base_b / "token.json"
-        assert gmail_agent._credentials_path() == base_b / "credentials.json"
-        assert not gmail_agent._token_path().exists()
+        assert gmail_sea._token_path() == base_b / "token.json"
+        assert gmail_sea._credentials_path() == base_b / "credentials.json"
+        assert not gmail_sea._token_path().exists()
     finally:
         swap.restore()
 
@@ -61,12 +61,12 @@ def test_gmail_token_save_isolated_per_kiss_home(tmp_path: Path) -> None:
     """A token written under one KISS_HOME never leaks into another."""
     swap = _KissHomeSwap(tmp_path / "home_a")
     try:
-        gmail_agent._gmail_dir().mkdir(parents=True, exist_ok=True)
-        gmail_agent._token_path().write_text('{"token": "test-isolated"}')
-        assert gmail_agent._token_path().exists()
+        gmail_sea._gmail_dir().mkdir(parents=True, exist_ok=True)
+        gmail_sea._token_path().write_text('{"token": "test-isolated"}')
+        assert gmail_sea._token_path().exists()
 
         os.environ["KISS_HOME"] = str(tmp_path / "home_b")
-        assert not gmail_agent._token_path().exists(), (
+        assert not gmail_sea._token_path().exists(), (
             "token must not leak across KISS_HOME dirs"
         )
     finally:
@@ -78,17 +78,17 @@ def test_googlechat_paths_honour_kiss_home_lazily(tmp_path: Path) -> None:
     swap = _KissHomeSwap(tmp_path / "home_a")
     try:
         base_a = tmp_path / "home_a" / "third_party_agents" / "googlechat"
-        assert googlechat_agent._token_path() == base_a / "token.json"
-        assert googlechat_agent._credentials_path() == base_a / "credentials.json"
-        assert googlechat_agent._service_account_path() == (
+        assert googlechat_sea._token_path() == base_a / "token.json"
+        assert googlechat_sea._credentials_path() == base_a / "credentials.json"
+        assert googlechat_sea._service_account_path() == (
             base_a / "service_account.json"
         )
 
         os.environ["KISS_HOME"] = str(tmp_path / "home_b")
         base_b = tmp_path / "home_b" / "third_party_agents" / "googlechat"
-        assert googlechat_agent._token_path() == base_b / "token.json"
-        assert googlechat_agent._credentials_path() == base_b / "credentials.json"
-        assert googlechat_agent._service_account_path() == (
+        assert googlechat_sea._token_path() == base_b / "token.json"
+        assert googlechat_sea._credentials_path() == base_b / "credentials.json"
+        assert googlechat_sea._service_account_path() == (
             base_b / "service_account.json"
         )
     finally:

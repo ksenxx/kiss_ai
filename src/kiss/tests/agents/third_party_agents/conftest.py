@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-import kiss.agents.third_party_agents.slack_agent as slack_agent_mod
+import kiss.agents.third_party_agents.slack_sea as slack_agent_mod
 
 
 @pytest.fixture
@@ -38,14 +38,28 @@ def isolated_kiss_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def refusing_port() -> Iterator[int]:
     """A localhost TCP port on which every connect is refused for the whole test.
 
-    The socket stays bound but never calls ``listen()``: the kernel answers
-    each connection attempt with RST, and because the port remains bound no
-    other process can start listening on it meanwhile -- unlike the
-    bind/close/reuse-the-number pattern, which races with concurrent tests.
+    The port is the local end of an *established* loopback connection
+    (``holder`` connected to ``anchor``) that lives for the whole test.  A
+    SYN from any other peer matches neither that connection nor a listener,
+    so the kernel answers RST at once (``ECONNREFUSED``); and because the
+    port is in use, no other socket can bind it or be handed it by
+    ``bind(0)`` meanwhile -- unlike the bind/close/reuse-the-number pattern,
+    which races with concurrent tests.
+
+    A socket that is merely bound and never listening -- the earlier
+    version of this fixture -- is refused only on Linux: macOS silently
+    drops SYNs aimed at a CLOSED-state socket, so connects timed out
+    instead and every "unreachable server" test failed there.
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        yield int(sock.getsockname()[1])
+    with (
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as anchor,
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder,
+    ):
+        anchor.bind(("127.0.0.1", 0))
+        anchor.listen(1)
+        holder.bind(("127.0.0.1", 0))
+        holder.connect(anchor.getsockname())
+        yield int(holder.getsockname()[1])
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +68,7 @@ def _isolated_slack_dir(
 ) -> Path:
     """Redirect Slack token storage to a per-test temporary directory.
 
-    ``slack_agent._SLACK_DIR`` is a module global built from ``Path.home()``,
+    ``slack_sea._SLACK_DIR`` is a module global built from ``Path.home()``,
     so tests that save or clear tokens would otherwise touch the real user
     token file and race with concurrent pytest processes. Some test modules
     also import ``_SLACK_DIR`` by value, so their own module binding is

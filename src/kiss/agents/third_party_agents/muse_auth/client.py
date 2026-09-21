@@ -40,6 +40,8 @@ from kiss.agents.third_party_agents.muse_auth._common import (
     socket_path,
 )
 from kiss.agents.third_party_agents.muse_auth.sentinel import grant_command
+from kiss.core.file_lock import lock_exclusive
+from kiss.core.processes import popen_process_group
 
 __all__ = [
     "MuseAuthError",
@@ -93,8 +95,12 @@ def _daemon_running() -> bool:
     """Return whether the daemon socket accepts connections.
 
     Returns:
-        True when a connect() to the socket succeeds.
+        True when a connect() to the socket succeeds; always False where
+        the platform has no Unix-domain sockets (Windows), so callers
+        such as :func:`stop_daemon` stay clean no-ops there.
     """
+    if not hasattr(socket, "AF_UNIX"):
+        return False
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         probe.connect(str(socket_path()))
@@ -113,8 +119,11 @@ def _raw_op(payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any] | 
         timeout: Socket timeout in seconds.
 
     Returns:
-        The response frame, or None when no daemon answers.
+        The response frame, or None when no daemon answers (or when the
+        platform has no Unix-domain sockets at all).
     """
+    if not hasattr(socket, "AF_UNIX"):
+        return None
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
@@ -179,9 +188,16 @@ def ensure_daemon() -> None:
     waits for a compatible daemon to accept connections.
 
     Raises:
-        MuseAuthError: When a compatible daemon does not come up within 15s.
+        MuseAuthError: When the platform has no Unix-domain sockets
+            (the daemon's only transport), or when a compatible daemon
+            does not come up within 15s.
     """
     global _verified_socket_id
+    if not hasattr(socket, "AF_UNIX"):
+        raise MuseAuthError(
+            "the muse-auth daemon needs Unix-domain sockets, which this platform lacks; "
+            "set KISS_MUSE_AUTH=0 to keep connector credentials in the agent process"
+        )
     socket_id = _socket_id()
     if socket_id is not None and socket_id == _verified_socket_id and _daemon_running():
         return
@@ -201,12 +217,11 @@ def ensure_daemon() -> None:
     with contextlib.suppress(OSError):
         directory.chmod(0o700)
     with open(directory / "daemon.log", "ab") as log:
-        subprocess.Popen(
+        popen_process_group(
             [sys.executable, "-m", "kiss.agents.third_party_agents.muse_auth.daemon"],
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=log,
-            start_new_session=True,
             env=os.environ.copy(),
         )
     deadline = time.monotonic() + 15.0
@@ -424,12 +439,10 @@ def mint_surrogate_migrating(
         # caller migrates; the rest re-mint against the finished
         # enrollment.  The empty lock file is left behind on purpose —
         # unlinking it would reopen the race it exists to close.
-        import fcntl
-
         lock_path = token_file.with_name(token_file.name + ".muse-migrate.lock")
         try:
             with open(lock_path, "w") as lock_fh:
-                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+                lock_exclusive(lock_fh)
                 handle = mint_surrogate(service)
                 if handle is None and token_file.exists():
                     info = _migratable_google_info(token_file, scopes)

@@ -51,6 +51,7 @@ from kiss.server.web_server import (
     _probe_tunnel_ready,
     _try_adopt_existing_cloudflared,
 )
+from kiss.tests.conftest import posix_only
 
 
 class _FakeCloudflaredMetrics:
@@ -220,7 +221,7 @@ class TestWatchdogRestartsDeregisteredTunnel(IsolatedAsyncioTestCase):
     """E2E: the watchdog must replace a tunnel whose ``/ready`` is 503.
 
     Reproduces the exact production incident: the cloudflared process
-    is alive (here: a real ``sleep`` subprocess) and its metrics
+    is alive (here: a real sleeping Python subprocess) and its metrics
     endpoint (here: a real HTTP server speaking real cloudflared's
     wire format) reports 503 + ``readyConnections: 0`` on every probe.
     ``_check_and_restart_tunnel`` runs with the REAL probe function —
@@ -247,7 +248,7 @@ class TestWatchdogRestartsDeregisteredTunnel(IsolatedAsyncioTestCase):
         save_config({"remote_password": "test-secret-tunnel"})
         self._metrics = _FakeCloudflaredMetrics(ready_connections=0)
         self._proc = subprocess.Popen(
-            ["sleep", "60"],
+            [sys.executable, "-c", "import time; time.sleep(60)"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -302,6 +303,7 @@ class TestWatchdogRestartsDeregisteredTunnel(IsolatedAsyncioTestCase):
         self.assertEqual(self.server._tunnel_force_restart_count, 1)
 
 
+@posix_only("a symlink named cloudflared cannot rename a Windows process image")
 class TestAdoptionWithRealCloudflaredWireFormat(unittest.TestCase):
     """E2E: startup adoption vs a metrics endpoint speaking real 503s.
 

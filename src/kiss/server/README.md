@@ -15,8 +15,9 @@ contract, error handling, and ends with a complete working example.
 ### Prerequisites
 
 - A running `kiss-web` daemon (start one with `kiss-web`).
-- At least one LLM provider API key configured (Anthropic, OpenAI,
-  Google, OpenRouter, etc.).
+- At least one model available to the daemon: an LLM provider API key
+  (Anthropic, OpenAI, Google, OpenRouter, etc.) or an installed Claude
+  Code / Codex CLI executable (`cc/*`, `codex/*` models).
 - Any Python packages your SEA imports must be available
   in the daemon's Python environment.
 
@@ -107,9 +108,10 @@ on the daemon.
 
 1. **Client side** — `sorcar.run()` validates that `extension_agent_path`
    points to an existing `.py` file, resolves it to an absolute path,
-   and sends it as `"agentPath"` on the wire.  A non-string, non-`.py`,
-   or nonexistent path raises `ValueError` immediately (before any
-   daemon connection).
+   and sends it as `"agentPath"` on the wire.  `None` or `""` means
+   no agent script; any other non-string value (including a
+   `pathlib.Path`), a non-`.py` path, or a nonexistent file raises
+   `ValueError` immediately (before any daemon connection).
 
 2. **Daemon side** — `apply_agent_overrides()` (in
    `kiss.server.agent_file`) imports the file, iterates every
@@ -129,7 +131,7 @@ on the daemon.
 ## Overridable parameters
 
 Every parameter of `sorcar.run()` except `timeout`, `stop_on_timeout`,
-`sock_path`, `parent_task_id`, `parent_tab_id`, and
+`sock_path`, `parent_task_id`, `parent_tab_id`, `parent_reviewer`, and
 `extension_agent_path` itself has a corresponding
 getter the SEA may define.  The getter is named `X()` for parameter `X`,
 except `append_basic_tools`, whose getter is
@@ -141,11 +143,11 @@ except `append_basic_tools`, whose getter is
 | `work_dir()`             | `str`                           | `""` (daemon default)     | `workDir`           |
 | `model()`                | `str`                           | `""` (daemon default)     | `model`             |
 | `chat_id()`              | `str`                           | `""` (new chat)           | `chatId`            |
-| `system_prompt()`        | `str`                           | `""` (default SYSTEM.md)  | `systemPrompt`      |
+| `system_prompt()`        | `str`                           | `""` (daemon-selected)    | `systemPrompt`      |
 | `tools()`                | `str`, `Path`, `list`, or `None`| `None` (no extra tools)   | `toolsFile`         |
 | `use_worktree()`         | `bool`                          | `True`                    | `useWorktree`       |
 | `auto_commit()`          | `bool`                          | `True`                    | `autoCommit`        |
-| `max_budget()`           | `float` (finite) or `None`      | `None` (daemon default)   | `maxBudget`         |
+| `max_budget()`           | finite `int`/`float` (not `bool`) or `None` | `None` (daemon default) | `maxBudget`  |
 | `model_config()`         | `dict` or `None`                | `None`                    | `modelConfig`       |
 | `if_append_basic_tools()` | `bool`                         | `True`                    | `appendBasicTools`  |
 | `append_to_system_prompt()` | `str`                        | `""` (append nothing)     | `appendToSystemPrompt` |
@@ -168,9 +170,11 @@ The parameters without getters:
   keeps running); a client-side choice the script must not override.
 - **`sock_path`** — selects which daemon to connect to; the script
   already runs on that daemon.
-- **`parent_task_id` / `parent_tab_id`** — the CALLING task's
-  identity (how `run_agent` nests a dispatched run under its caller),
-  which a dispatched script must not be able to forge.
+- **`parent_task_id` / `parent_tab_id` / `parent_reviewer`** — the
+  CALLING task's identity (how `run_agent` nests a dispatched run under
+  its caller) and whether that caller sits in a reviewer sub-tree
+  (so the child's `run_parallel` spawns no further reviewers), which a
+  dispatched script must not be able to forge.
 - **`extension_agent_path`** — the script cannot override its own path.
 
 ### Getter semantics
@@ -180,15 +184,21 @@ The parameters without getters:
   the daemon's available model list or the task fails.
 - **`chat_id()`** — an empty string `""` starts a fresh chat.  A
   non-empty string resumes that chat session.
-- **`system_prompt()`** — an empty or blank string uses the
-  default `SYSTEM.md` system prompt.  A non-empty string replaces it.
+- **`system_prompt()`** — an empty or blank string leaves the base
+  prompt to the daemon: with task classification enabled (the
+  default) a task classified as simple runs on the reduced
+  `SYSTEM_LITE.md`, everything else on the full `SYSTEM.md`.  A
+  non-empty string replaces that base prompt.  A
+  `model_config()["system_instruction"]` value, if present, takes
+  precedence over the composed prompt (`KISSAgent.run` only
+  `setdefault`s it).
 - **`tools()`** — **overrides** (does not append to) the caller's
   `tools` argument.  Returning `None` clears any caller-supplied tools.
 - **`if_append_basic_tools()`** — overrides the
   `append_basic_tools` parameter; `False` strips the run down to
   `finish` plus the supplied tools.
 - **`append_to_system_prompt()`** — extra text **appended** to
-  the run's system prompt (the default `SYSTEM.md` prompt or the
+  the run's system prompt (the daemon-selected base prompt or the
   `system_prompt()` replacement) when the agent is executed.
   Unlike `system_prompt()`, it does not replace anything.
 - **`append_to_prompt()`** — extra text **appended** to the
@@ -360,20 +370,28 @@ def search_database(query: str, max_results: int = 10) -> str:
 
 ## The `append_basic_tools` parameter
 
-By default (`append_basic_tools=True`) the agent gets the built-in
-KISS Sorcar toolset — `Bash`, `Read`, `Edit`, `Write`,
+By default (`append_basic_tools=True`) the agent gets `finish` (always
+present) and the built-in KISS Sorcar toolset — `Bash` (with
+`background=True` for detached jobs), `bash_job` (wait for / tail /
+kill a background job), `run_commands_parallel` (several shell
+commands at once, no LLM sub-agents), `Read`, `Edit`, `Write`,
 `ask_user_question`, `talk`, `set_model`, `summary`, `run_agent`,
 browser tools (when `use_web_tools`), `run_parallel` and
-`number_of_cores` (when `is_parallel`), and `decide` (when
-`OPENROUTER_API_KEY` is configured) — **plus** your extension tools.
+`number_of_cores` (when `is_parallel`), `decide` (when
+`OPENROUTER_API_KEY` is configured), the `memory_*` tools (when
+memory is enabled), and any configured skill and MCP-server tools —
+**plus** your extension tools.  A restricted tool profile (a reviewer
+sub-agent dispatched with `run_parallel(..., tool_profile="review")`)
+filters that built-in set, including the memory tools; extension tools
+are still appended.
 
 When `append_basic_tools=False`, the agent's **only** tools are
 `finish` and the tools from `tools()`.  This is useful for
 building focused, restricted agents.
 
-When restricting tools, the default system prompt (`SYSTEM.md`)
-assumes the full toolset (it mandates a first `Read("./SORCAR.md")`
-call, among other things).  Pass a custom `system_prompt()` that
+When restricting tools, the full default system prompt (`SYSTEM.md`)
+assumes the full toolset (its workflow rules name `Read`, `Edit`,
+`Bash` and the browser tools).  Pass a custom `system_prompt()` that
 matches the tools you provide:
 
 ```python
@@ -394,20 +412,24 @@ Errors fall into two categories depending on where they are caught:
 
 **Client-side errors** (raised as `ValueError` before connecting to
 the daemon):
-- `extension_agent_path` is not a string
-- The path is not a `.py` file
-- The file does not exist
+- `prompt` is empty or blank
+- `tools` is neither `None` nor a `str`/`Path` to an existing `.py` file
+- `extension_agent_path` is neither `None`/`""` nor a string
+- The agent-script path is not a `.py` file
+- The agent-script file does not exist
 
 **Daemon-side errors** (the task starts, then fails with
-`result.success == False` and the diagnostic in `result.text`):
+`result.success == False` and the diagnostic in `result.text`, which
+prefixes the message below with `Task failed: AgentFileError: `):
 
-| Condition | Error message |
+| Condition | `AgentFileError` message |
 |-----------|---------------|
 | File deleted between client validation and daemon import | `agent script '...' is not an existing Python (.py) file` |
 | File raises at import time | `agent script '...' failed to import: ...` |
 | `X` defined but not callable | `X of agent script '...' must be a callable, got ...` |
 | `X()` raises an exception | `X() of agent script '...' raised: ...` |
 | `X()` returns wrong type | `X() of agent script '...' must return ..., got ...` |
+| `X()` returns a value whose type check itself raises (e.g. a `str` subclass with a raising `strip`) | `X() of agent script '...' returned a broken value: ...` |
 
 Overrides are **atomic**: if any getter fails, the command keeps all
 its original values (no partial overrides).
@@ -416,7 +438,13 @@ its original values (no partial overrides).
 ## Continuing chat sessions
 
 Pass `chat_id` to continue an existing daemon chat session.  The agent
-sees all prior tasks and results as context.
+receives the chat's retained top-level context as a prefix, not
+necessarily every prior row: sub-agent rows are excluded, a history
+longer than ten entries keeps the first two and the latest eight, and
+with the default history digest older entries are shortened and only the
+newest two task/result pairs stay whole while the prefix fits in 6,000
+characters (an oversized history drops older entries first, then digests
+the newest ones too, then hard-truncates).
 
 ```python
 result1 = sorcar.run(
@@ -451,9 +479,15 @@ def model_config() -> dict:
     }
 ```
 
-When `model_config` contains a `base_url`, the daemon bypasses its
-normal model routing and creates an OpenAI-compatible model pointing
-at that URL.
+When `model_config` contains a `base_url`, the model factory bypasses
+its normal provider routing and creates an OpenAI-compatible model
+pointing at that URL.  The daemon still runs its model-availability
+preflight first: `model()` must return a generation-capable name from
+the bundled catalog or from `~/.kiss/MY_MODELS.json` whose provider is
+usable (an API key for HTTP providers, the executable on `PATH` for
+`cc/*` / `codex/*`), so replace `my-custom-model` above with such a
+name; otherwise the task fails with `No model available.  Set at least
+one API key in the environment.`
 
 
 ## Complete working example
@@ -630,6 +664,9 @@ def run(
     *,
     work_dir: str = "",
     scope_work_dir: str = "",
+    parent_task_id: str = "",
+    parent_tab_id: str = "",
+    parent_reviewer: bool = False,
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -660,8 +697,8 @@ class TaskResult:
     cost: float       # budget consumed in USD
     tokens: int       # total LLM tokens consumed
     steps: int        # total agent steps taken
-    chat_id: str      # daemon chat session id (for continuation)
-    task_id: str      # persisted task_history row id
+    chat_id: str = ""  # daemon chat session id (for continuation)
+    task_id: str = ""  # persisted task_history row id
 ```
 
 
@@ -705,3 +742,13 @@ class TaskResult:
   with the daemon user's privileges and environment.  Any libraries
   your code imports must be installed in the daemon's Python
   environment.
+- Name the file `xxx_sea.py` and put its folder in `~/.kiss/SEAS.md`
+  (one folder per line; blank lines and `#` comments are ignored) to
+  expose it as the chat command `/xxx`; `/xxx some text` runs the SEA
+  on "some text" via `run_agent`.  Bundled
+  `src/kiss/agents/third_party_agents/*_sea.py` scripts take
+  precedence over `SEAS.md` folders, and later `SEAS.md` lines beat
+  earlier ones.  Syntax, precedence and the dispatch flow are
+  documented in
+  [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md)
+  (source: `website/kisssorcar.github.io/docs/sea-commands.md`).

@@ -35,7 +35,9 @@ class TestUdsDrainTimeout(unittest.IsolatedAsyncioTestCase):
 
     async def _connect(self, printer: WebPrinter) -> tuple[socket.socket, asyncio.StreamWriter]:
         """Register one socketpair peer with *printer*; return (peer, writer)."""
-        server_sock, peer_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        # Default family: AF_UNIX on POSIX, a loopback AF_INET pair on Windows
+        # (which has no AF_UNIX).  The drain logic only sees a StreamWriter.
+        server_sock, peer_sock = socket.socketpair()
         self.addCleanup(peer_sock.close)
         _reader, writer = await asyncio.open_connection(sock=server_sock)
         self.addCleanup(writer.close)

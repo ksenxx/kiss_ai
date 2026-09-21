@@ -12,7 +12,7 @@ across contacts.
 
 These tests drive the REAL ``ChannelRunner.run_once`` tick (connect →
 poll → allow-list → handle → reply) against a REAL executable
-``signal-cli`` shell script whose ``receive`` is genuinely destructive
+``signal-cli`` stand-in program whose ``receive`` is genuinely destructive
 (it truncates its spool file) and whose ``send`` records every
 recipient.  Only ``_launch_task`` — the daemon/LLM boundary, per the
 suite convention in ``test_hermes_runner.py`` — is overridden with a
@@ -32,27 +32,30 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelRunner,
     load_channel_state,
 )
-from kiss.agents.third_party_agents.signal_agent import (
+from kiss.agents.third_party_agents.signal_sea import (
     SignalChannelBackend,
     _config,
 )
+from kiss.tests.conftest import install_cli_script
 
-_SPOOL_CLI = """#!/bin/sh
-if [ "$1" = "-u" ]; then shift 2; fi
-cmd="$1"
-shift
-if [ "$cmd" = "receive" ]; then
-  cat "$KISS_TEST_SPOOL" 2>/dev/null
-  : > "$KISS_TEST_SPOOL"
-  exit 0
-fi
-if [ "$cmd" = "send" ]; then
-  last=""
-  for arg in "$@"; do last="$arg"; done
-  echo "$last" >> "$KISS_TEST_SENDS"
-  exit 0
-fi
-exit 0
+# A Python program (not a shell script) so the same stand-in runs on
+# Windows, where ``install_cli_script`` adds the ``.cmd`` shim.
+_SPOOL_CLI = """#!/usr/bin/env python3
+import os
+import sys
+args = sys.argv[1:]
+if args[:1] == ["-u"]:
+    args = args[2:]
+cmd = args[0] if args else ""
+if cmd == "receive":
+    spool = os.environ["KISS_TEST_SPOOL"]
+    with open(spool, encoding="utf-8") as fh:
+        sys.stdout.write(fh.read())
+    open(spool, "w").close()
+elif cmd == "send":
+    with open(os.environ["KISS_TEST_SENDS"], "a", encoding="utf-8") as fh:
+        fh.write(args[-1] + "\\n")
+sys.exit(0)
 """
 
 
@@ -92,9 +95,7 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         """Install a destructive spool-based signal-cli on PATH."""
         self._tmpdir = tempfile.mkdtemp(prefix="rr-review-signal-")
         tmp = Path(self._tmpdir)
-        cli = tmp / "signal-cli"
-        cli.write_text(_SPOOL_CLI, encoding="utf-8")
-        cli.chmod(0o755)
+        install_cli_script(tmp / "signal-cli", _SPOOL_CLI)
         self._spool = tmp / "spool.jsonl"
         self._sends = tmp / "sends.log"
         self._spool.write_text("", encoding="utf-8")

@@ -4,10 +4,18 @@
 # add your name here
 """Browser automation tool for LLM agents using Playwright.
 
-Uses headless Playwright Chromium for page analysis and automation
-(accessibility tree, clicking, typing, screenshots).  ``show_browser()``
+Drives a Chromium that no window shows by default (page analysis via the
+accessibility tree, clicking, typing, screenshots).  ``show_browser()``
 switches the session to a visible window when a page needs a human
 (interactive login, CAPTCHA, bot check).
+
+Bot-protection vendors (Cloudflare, Akamai, PerimeterX, Anubis, ...)
+blocked 95 hosts in the task history, so the browser is made to look and
+behave like a person's Chrome — see :mod:`kiss.agents.sorcar.web_stealth`:
+Patchright's leak-free driver, a *headed* Chromium on a private Xvfb
+display where one is available (headless mode is the strongest bot
+signal), no fingerprint overrides, curved pointer paths, uneven typing
+cadence, and challenge pages that are waited out and reported plainly.
 """
 
 from __future__ import annotations
@@ -16,6 +24,7 @@ import atexit
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import signal
@@ -29,7 +38,9 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
+from kiss.agents.sorcar import web_stealth
 from kiss.agents.sorcar._concurrency import pid_alive as _pid_alive
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.useful_tools import (
@@ -38,6 +49,8 @@ from kiss.agents.sorcar.useful_tools import (
     _file_lock,
     _stale_worktree_fallback,
 )
+from kiss.core.processes import SIGKILL
+from kiss.core.processes import process_identity as _process_identity
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +77,16 @@ _PAGE_READ_TIMEOUT_MS = 10000
 # and then blocks the input call forever; a watchdog kills Chromium at
 # this deadline so the pending call raises instead of hanging the task.
 _INPUT_WATCHDOG_SECS = _PAGE_READ_TIMEOUT_MS / 1000 + 5.0
+
+# How long ``go_to_url`` waits for a bot-protection interstitial (Cloudflare
+# "Just a moment...", Anubis) to clear on its own before reporting it.
+# Cloudflare's managed challenge takes 3-8 s in a browser it rates human.
+_CHALLENGE_WAIT_SECS = 12.0
+
+# How long the Turnstile "Verify you are human" box must have been showing
+# before it is pressed: a person's reading/reaction time, during which the
+# pointer keeps drifting.
+_TURNSTILE_REACTION_SECS = 1.2
 
 
 def _abort_route(route: Any) -> None:
@@ -141,32 +164,6 @@ _LAUNCH_LOCK = threading.RLock()
 _BROWSER_CMD_MARKERS = ("chrom", "playwright", "headless")
 
 
-def _process_identity(pid: int) -> str | None:
-    """Return a stable identity string (start time + command) for *pid*.
-
-    Used to detect PID reuse before sending kill signals: two different
-    processes can never share both a start timestamp and a command line.
-
-    Args:
-        pid: Process id to fingerprint.
-
-    Returns:
-        The ``ps`` ``lstart``+``command`` line, or ``None`` when the
-        process is gone or ``ps`` failed.
-    """
-    try:
-        r = subprocess.run(
-            ["ps", "-ww", "-p", str(pid), "-o", "lstart=", "-o", "command="],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return r.stdout.strip() or None
-    except Exception:  # pragma: no cover — ps missing/unresponsive
-        logger.debug("Exception caught", exc_info=True)
-        return None
-
-
 def _wait_pid_exit(pid: int, timeout: float) -> bool:
     """Poll until *pid* exits, returning True if it died within *timeout*.
 
@@ -199,8 +196,7 @@ def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
         pid: Process id to terminate.
         identity: Identity string recorded when the PID was captured.
     """
-    sig_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
-    for sig in (signal.SIGTERM, sig_kill):
+    for sig in (signal.SIGTERM, SIGKILL):
         if not _pid_alive(pid):
             return
         current = _process_identity(pid)
@@ -215,7 +211,7 @@ def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
                 current,
             )
             return
-        logger.warning("Killing leaked Chromium (pid %d) with %s", pid, sig.name)
+        logger.warning("Killing leaked Chromium (pid %d) with signal %d", pid, sig)
         try:
             os.kill(pid, sig)
         except OSError:  # pragma: no cover — died between checks
@@ -343,9 +339,12 @@ def _read_lock_pid(
 def _is_profile_in_use(profile_dir: str) -> bool:
     """Check whether a Chromium profile directory is locked by a running process.
 
-    Chromium creates a ``SingletonLock`` symlink whose target is
+    On POSIX Chromium creates a ``SingletonLock`` symlink whose target is
     ``hostname-pid`` when a profile is opened.  If the symlink exists and
-    the referenced PID is alive, the profile is considered in use.
+    the referenced PID is alive, the profile is considered in use.  On
+    Windows Chromium instead holds ``lockfile`` open without write
+    sharing (delete-on-close, so a crash leaves nothing behind); the
+    profile is in use while that file cannot be opened for writing.
 
     Args:
         profile_dir: Path to the Chromium user-data directory.
@@ -353,6 +352,16 @@ def _is_profile_in_use(profile_dir: str) -> bool:
     Returns:
         True if the profile is currently locked by a live process.
     """
+    if sys.platform == "win32":  # pragma: no cover — Windows-only branch
+        try:
+            # ``r+`` never creates the file, so a probe that races the
+            # browser's delete-on-close cannot leave a stale lockfile.
+            with open(Path(profile_dir) / "lockfile", "r+"):
+                return False
+        except FileNotFoundError:
+            return False
+        except PermissionError:
+            return True
     try:
         pid = _read_lock_pid(profile_dir, propagate_permission_error=True)
     except PermissionError:
@@ -402,13 +411,17 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
 
 
 class WebUseTool:
-    """Browser automation tool using headless Playwright Chromium.
+    """Browser automation tool driving Chromium through Playwright/Patchright.
 
-    Browsing is headless by default: no window is opened, nothing steals
-    the user's focus, and screenshots still work because Chromium renders
-    off-screen exactly as it does on screen.  All browsing happens in a
-    single Chromium instance with a persistent profile, so logins survive
-    across sessions.
+    Browsing shows no window by default (``headless=True``): nothing
+    steals the user's focus, and screenshots still work because Chromium
+    renders off-screen exactly as it does on screen.  On Linux with Xvfb
+    installed that "no window" is a *headed* Chromium on a private virtual
+    display, which bot-protection vendors cannot tell from a desktop
+    browser; elsewhere Chromium's real headless mode is used.  All
+    browsing happens in a single Chromium instance with a persistent
+    profile, so logins — and the clearance cookies challenge pages hand
+    out — survive across sessions.
 
     When a page needs a human — an interactive login, a CAPTCHA, a bot
     check — :meth:`show_browser` reopens the same profile in a visible
@@ -443,18 +456,47 @@ class WebUseTool:
         self._elements: list[dict[str, str]] = []
         self._browser_pid: int | None = None
         self._browser_identity: str | None = None
+        # Chromium's ``--headless`` switch for the current launch: False
+        # when the "no window" default runs headed on a virtual display.
+        self._chromium_headless = headless
+        # Last pointer position the tool moved to; curved mouse paths
+        # start here.  ``None`` until the first move after a launch.
+        self._mouse_xy: tuple[float, float] | None = None
         atexit.register(self.close)
 
     def _context_args(self) -> dict[str, Any]:
-        return {
-            "viewport": {"width": self.viewport[0], "height": self.viewport[1]},
-            "locale": "en-US",
-            "timezone_id": "America/Los_Angeles",
-            "java_script_enabled": True,
-            "has_touch": False,
-            "is_mobile": False,
-            "device_scale_factor": 2,
-        }
+        """Return the browser-context options for the current launch mode.
+
+        No locale, timezone or device-scale override is set: Chromium then
+        reports the machine's real values, which is what a person's
+        browser does, and a fixed ``America/Los_Angeles`` next to a
+        different egress IP (or a Retina scale factor on a Linux server)
+        is exactly the inconsistency fingerprinting scripts look for.  A
+        headed window gets ``no_viewport`` so the page fills the window
+        like a desktop browser; only real headless mode, which has no
+        window, is given an explicit viewport.
+        """
+        if self._chromium_headless:
+            return {"viewport": {"width": self.viewport[0], "height": self.viewport[1]}}
+        return {"no_viewport": True}
+
+    def _viewport_size(self) -> tuple[int, int]:
+        """Return the live page viewport in CSS pixels.
+
+        Playwright reports no viewport for ``no_viewport`` contexts (the
+        headed window), so the page is asked for its inner size, with the
+        same bounded wait as :meth:`_page_title`.
+        """
+        if self._page is None:
+            return self.viewport
+        size = self._page.viewport_size
+        if size:
+            return int(size["width"]), int(size["height"])
+        handle = self._page.wait_for_function(
+            "() => [innerWidth, innerHeight]", timeout=_PAGE_READ_TIMEOUT_MS, polling=100
+        )
+        width, height = handle.json_value()
+        return int(width), int(height)
 
     def _is_alive(self) -> bool:
         """Return True iff the current page/context survived (not crashed/closed)."""
@@ -664,36 +706,47 @@ class WebUseTool:
         atexit.unregister(self.close)
         atexit.register(self.close)
         self._close_browser_only()
-        from playwright.sync_api import sync_playwright
+        api = web_stealth.playwright_api()
 
-        # A headless launch never raises a window, so there is no focus to
-        # save and restore.
+        # A launch that shows no window never raises one, so there is no
+        # focus to save and restore.
         prev_app = None if self._headless else _get_frontmost_app()
         try:
             if self._playwright is None:
-                self._playwright = sync_playwright().start()
+                self._playwright = api.sync_playwright().start()
             launcher = self._playwright.chromium
+            # "No window" is implemented as a headed Chromium on a private
+            # Xvfb display when one can be started: headless mode is the
+            # first thing bot-protection scripts detect.  Real headless
+            # is the fallback (macOS, Windows, Linux without Xvfb).
+            display = web_stealth.virtual_display() if self._headless else None
+            self._chromium_headless = self._headless and display is None
             kwargs: dict[str, Any] = {
-                "headless": self._headless,
-                # The "chromium" channel selects the full Chromium binary,
-                # which headless runs in Chrome's new headless mode: the
-                # same renderer as a headed window, so pages and
-                # screenshots look exactly as the user would see them.
-                # Without it Playwright launches chrome-headless-shell, a
-                # stripped-down binary with lower fidelity and no
-                # extension support.
-                "channel": "chromium",
+                "headless": self._chromium_headless,
+                # Google Chrome when installed; otherwise the "chromium"
+                # channel selects the full Chromium binary, which headless
+                # runs in Chrome's new headless mode (the same renderer as
+                # a headed window) instead of the stripped-down
+                # chrome-headless-shell.
+                "channel": web_stealth.chrome_channel(),
                 "args": [
                     "--disable-blink-features=AutomationControlled",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                    "--disable-infobars",
                     "--no-first-run",
                     "--no-default-browser-check",
                     "--disable-breakpad",
                     "--noerrdialogs",
                     "--disable-dev-shm-usage",
+                    f"--window-size={self.viewport[0]},{self.viewport[1]}",
+                    # Without a GPU Chromium blocklists GL and ships no
+                    # WebGL at all, which almost no human browser lacks
+                    # and challenge scripts test first.  Off the
+                    # blocklist it renders through Mesa's llvmpipe like
+                    # any Linux desktop without a GPU.
+                    "--ignore-gpu-blocklist",
                 ],
             }
+            if display is not None:
+                kwargs["env"] = {**os.environ, "DISPLAY": display}
 
             try:
                 self._launch_browser(launcher, kwargs)
@@ -702,6 +755,7 @@ class WebUseTool:
                 if (
                     "Executable doesn't exist" not in message
                     and "playwright install" not in message
+                    and "patchright install" not in message
                 ):
                     # Profile locks, missing display libraries, resource
                     # exhaustion, etc. — installing Chromium would not
@@ -710,7 +764,8 @@ class WebUseTool:
                 logger.info("Playwright Chromium not found, installing...")
                 self._close_browser_only()
                 subprocess.run(
-                    [sys.executable, "-m", "playwright", "install", "chromium"],
+                    [sys.executable, "-m", web_stealth.playwright_package(),
+                     "install", "chromium"],
                     check=True,
                     capture_output=True,
                     timeout=900,
@@ -814,6 +869,7 @@ class WebUseTool:
         self._context.route(_ACCOUNTS_GOOGLE_URL_RE, _abort_route)
         self._context.on("close", self._on_browser_lost)
         self._adopt_page(page)
+        self._mouse_xy = None
         self._mask_headless_user_agent()
 
     def _mask_headless_user_agent(self) -> None:
@@ -924,6 +980,234 @@ class WebUseTool:
         timer.daemon = True
         return _TimerGuard(timer)
 
+    def _move_mouse_to(self, x: float, y: float) -> None:
+        """Move the pointer to (*x*, *y*) along a curved, decelerating path.
+
+        Playwright's ``click()`` teleports the pointer onto the target,
+        which behavioural bot detectors score as automation.  The path
+        starts at the last position this tool moved to (or a random
+        point of the viewport right after a launch).  Callers hold
+        :meth:`_input_hang_watchdog` because ``mouse.move`` has no timeout.
+
+        Args:
+            x: Target x in viewport CSS pixels.
+            y: Target y in viewport CSS pixels.
+        """
+        if self._mouse_xy is None:
+            vw, vh = self._viewport_size()
+            self._mouse_xy = (
+                random.uniform(vw * 0.2, vw * 0.8), random.uniform(vh * 0.2, vh * 0.8)
+            )
+        for px, py in web_stealth.mouse_path(self._mouse_xy, (x, y)):
+            self._page.mouse.move(px, py, steps=2)
+        self._mouse_xy = (x, y)
+
+    def _human_click(self, locator: Any, hover_only: bool = False) -> None:
+        """Click (or only hover) *locator* the way a person does.
+
+        Scrolls the element into view, glides the pointer onto a random
+        point near its middle, pauses, then presses for 45-140 ms.  The
+        press itself goes through Playwright's ``click``/``hover`` so its
+        actionability checks (visible, stable, enabled, receives events)
+        still apply; when the chosen point is not hittable within 5 s
+        (e.g. the gap between two lines of a wrapped link) the plain
+        centre click is used, exactly as before.  An element without a
+        rendered box is clicked the plain way straight away.
+
+        Args:
+            locator: Playwright locator of the element.
+            hover_only: Move onto the element without pressing.
+        """
+        press_ms = random.randint(45, 140)
+        api = web_stealth.playwright_api()
+        try:
+            position = self._glide_onto(locator)
+        except api.Error:
+            # A navigation in flight (e.g. a site's client-side redirect
+            # right after load) destroys the element's context mid-glide;
+            # Playwright's plain click below retries through that.
+            logger.debug("pointer glide failed; falling back to plain click", exc_info=True)
+            position = None
+        if position is not None:
+            try:
+                if hover_only:
+                    locator.hover(position=position, timeout=5000)
+                else:
+                    locator.click(position=position, delay=press_ms, timeout=5000)
+                return
+            except api.TimeoutError:
+                logger.debug("point not hittable; falling back to centre click", exc_info=True)
+        if hover_only:
+            locator.hover()
+        else:
+            locator.click(delay=press_ms)
+
+    def _glide_onto(self, locator: Any) -> dict[str, float] | None:
+        """Scroll *locator* into view and glide the pointer onto it.
+
+        Args:
+            locator: Playwright locator of the element.
+
+        Returns:
+            The chosen point as an offset inside the element (for
+            ``click(position=...)``), or ``None`` when the element has no
+            rendered box.
+        """
+        locator.scroll_into_view_if_needed(timeout=_PAGE_READ_TIMEOUT_MS)
+        box = locator.bounding_box(timeout=_PAGE_READ_TIMEOUT_MS)
+        if not box or box["width"] < 1 or box["height"] < 1:  # pragma: no cover
+            # scroll_into_view_if_needed already waited for visibility;
+            # only an element removed between the two calls lands here.
+            return None
+        ox = box["width"] * random.uniform(0.35, 0.65)
+        oy = box["height"] * random.uniform(0.35, 0.65)
+        self._require_responsive_renderer()
+        with self._input_hang_watchdog():
+            self._move_mouse_to(box["x"] + ox, box["y"] + oy)
+        self._page.wait_for_timeout(random.randint(40, 160))
+        return {"x": ox, "y": oy}
+
+    def _idle_mouse(self) -> None:
+        """Nudge the pointer a little, as a person waiting on a page does."""
+        vw, vh = self._viewport_size()
+        x0, y0 = self._mouse_xy or (vw / 2, vh / 2)
+        x = min(max(x0 + random.uniform(-80, 80), 4), vw - 4)
+        y = min(max(y0 + random.uniform(-60, 60), 4), vh - 4)
+        with self._input_hang_watchdog():
+            self._move_mouse_to(x, y)
+
+    def _challenge_vendor(self) -> str | None:
+        """Return the bot-protection vendor whose interstitial is showing, if any."""
+        handle = self._page.wait_for_function(
+            "() => [document.title, document.body ? document.body.innerText.slice(0, 1500) : '']",
+            timeout=_PAGE_READ_TIMEOUT_MS,
+            polling=100,
+        )
+        title, body_head = handle.json_value()
+        return web_stealth.challenge_vendor(str(title), str(body_head))
+
+    def _turnstile_checkbox(self) -> dict[str, float] | None:
+        """Return the box of Cloudflare Turnstile's "Verify you are human" checkbox.
+
+        Cloudflare's managed challenge first runs silent checks; when they
+        do not rate the browser human enough it shows a single checkbox
+        (no puzzle) for the visitor to tick.  The box lives in a
+        cross-origin ``challenges.cloudflare.com`` iframe.  Nothing else is
+        ever solved on the user's behalf: CAPTCHA puzzles, press-and-hold
+        widgets and hard blocks are reported for :meth:`show_browser`.
+
+        Returns:
+            The checkbox's bounding box in main-frame viewport pixels, or
+            ``None`` while no widget, or only its spinner, is showing.
+        """
+        frame = next(
+            (f for f in self._page.frames if "challenges.cloudflare.com" in f.url), None
+        )
+        if frame is None:
+            return None
+        try:
+            box = frame.get_by_role("checkbox").first.bounding_box(timeout=1500)
+        except web_stealth.playwright_api().Error:
+            # Still in the spinner phase, or the frame is being replaced.
+            logger.debug("Turnstile checkbox not ready", exc_info=True)
+            return None
+        # ``None`` when rendered but hidden: the widget is still spinning.
+        return box or None
+
+    def _press_at(self, box: dict[str, float]) -> None:
+        """Press the left-hand square of the accessible element *box* like a person.
+
+        The Turnstile element spans the square and its "Verify you are
+        human" label; people press the square.  A curved approach, a short
+        pause and a held button, all by pointer coordinates because the
+        element is in a cross-origin frame.
+
+        Args:
+            box: Bounding box in main-frame viewport pixels.
+        """
+        side = min(box["width"], box["height"])
+        x = box["x"] + side * random.uniform(0.35, 0.65)
+        y = box["y"] + box["height"] * random.uniform(0.35, 0.65)
+        with self._input_hang_watchdog():
+            self._move_mouse_to(x, y)
+            self._page.wait_for_timeout(random.randint(200, 600))
+            self._page.mouse.down()
+            self._page.wait_for_timeout(random.randint(60, 140))
+            self._page.mouse.up()
+        logger.info("ticked the Cloudflare Turnstile checkbox on %s", self._page.url)
+
+    def _settle_challenge(self, response: Any) -> str:
+        """Wait out a bot-protection interstitial; describe it when it stays.
+
+        Cloudflare's managed challenge (and Anubis' proof-of-work page)
+        run their checks in the browser and then reload the real page on
+        their own — for a browser they rate as human.  Returning the
+        interstitial's accessibility tree would make the agent retry or
+        give up, so the tool waits up to :data:`_CHALLENGE_WAIT_SECS`
+        with small pointer movements for the page to clear.  A Google
+        "unusual traffic" page is not waited on: it rates the network's
+        IP, not the browser, so the same query is opened on Bing.
+
+        Args:
+            response: The navigation response from ``page.goto`` (may be
+                ``None`` for ``about:`` and same-document navigations).
+
+        Returns:
+            ``""`` when the page is content, otherwise a ``Note:`` line
+            for the agent explaining what blocked the page.
+        """
+        mitigated = response is not None and response.headers.get("cf-mitigated") == "challenge"
+        vendor = self._challenge_vendor()
+        if vendor is None and not mitigated:
+            return ""
+        deadline = time.monotonic() + _CHALLENGE_WAIT_SECS
+        box_seen_at: float | None = None
+        ticked = False
+        while (
+            vendor is not None
+            and not vendor.startswith("Google")
+            and time.monotonic() < deadline
+        ):
+            box = None
+            if vendor == "Cloudflare challenge" and not ticked:
+                box = self._turnstile_checkbox()
+            if box is not None and box_seen_at is None:
+                box_seen_at = time.monotonic()
+            if (
+                box is not None
+                and box_seen_at is not None
+                and time.monotonic() - box_seen_at >= _TURNSTILE_REACTION_SECS
+            ):
+                # A person reads the box before pressing it, moving the
+                # pointer meanwhile; a press the instant it appears, with
+                # no pointer history, is what Turnstile ignores.  The
+                # verdict then takes a few seconds.
+                self._press_at(box)
+                ticked = True
+                deadline = max(deadline, time.monotonic() + _CHALLENGE_WAIT_SECS)
+            else:
+                self._idle_mouse()
+            self._page.wait_for_timeout(random.randint(500, 900))
+            vendor = self._challenge_vendor()
+        if vendor is None:
+            self._wait_for_stable()
+            return ""
+        fallback = web_stealth.search_fallback_url(self._page.url)
+        if vendor.startswith("Google") and fallback is not None:
+            self._page.goto(fallback, wait_until="domcontentloaded", timeout=30000)
+            self._wait_for_stable()
+            return (
+                "Note: Google answered with its 'unusual traffic' page. It rates this "
+                "network's IP address as automated traffic, which no browser setting "
+                "changes, so the same query was opened on Bing instead."
+            )
+        host = urlparse(self._page.url).netloc
+        return (
+            f"Note: {host} answered with a bot-protection page ({vendor}) that did not "
+            f"clear within {_CHALLENGE_WAIT_SECS:.0f}s. Call show_browser() so the user "
+            "can complete the check, or use another source for the same information."
+        )
+
     def _get_ax_tree(self, max_chars: int = 50000) -> str:
         self._ensure_browser()
         header = f"Page: {self._page_title(self._page)}\nURL: {self._page.url}\n\n"
@@ -1026,14 +1310,12 @@ class WebUseTool:
         try:
             pages = self._context.pages
             if url == "tab:list":
-                from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-
                 lines = [f"Open tabs ({len(pages)}):"]
                 for i, page in enumerate(pages):
                     suffix = " (active)" if page == self._page else ""
                     try:
                         title = self._page_title(page)
-                    except PlaywrightTimeoutError:
+                    except web_stealth.playwright_api().TimeoutError:
                         # One unresponsive tab must not make the whole
                         # listing fail; the agent needs it to switch away.
                         logger.debug("Exception caught", exc_info=True)
@@ -1047,9 +1329,11 @@ class WebUseTool:
                     return self._get_ax_tree()
                 return f"Error: Tab index {idx} out of range (0-{len(pages) - 1})."
 
-            self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            response = self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
             self._wait_for_stable()
-            return self._get_ax_tree()
+            notice = self._settle_challenge(response)
+            tree = self._get_ax_tree()
+            return f"{notice}\n\n{tree}" if notice else tree
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error navigating to {url}: {e}"
@@ -1072,12 +1356,12 @@ class WebUseTool:
             locator = self._resolve_locator(element_id)
 
             if action == "hover":
-                locator.hover()
+                self._human_click(locator, hover_only=True)
                 self._page.wait_for_timeout(300)
                 return self._get_ax_tree()
 
             pages_before = len(self._context.pages)
-            locator.click()
+            self._human_click(locator)
             self._page.wait_for_timeout(500)
             self._wait_for_stable()
             if len(self._context.pages) > pages_before:
@@ -1105,15 +1389,19 @@ class WebUseTool:
         try:
             locator = self._resolve_locator(element_id)
             select_all = "Meta+a" if sys.platform == "darwin" else "Control+a"
-            locator.click()
-            # keyboard.type spends delay=50ms per character legitimately,
-            # so the deadline scales with the text length.
-            deadline = _INPUT_WATCHDOG_SECS + 0.05 * len(text)
+            self._human_click(locator)
+            # Typing spends up to 115 ms per character (260 ms per space)
+            # legitimately, so the deadline scales with the text.
+            chunks = web_stealth.typing_chunks(text)
+            deadline = _INPUT_WATCHDOG_SECS + web_stealth.typing_duration_secs(chunks) + 1.0
             with self._input_hang_watchdog(deadline):
                 self._page.keyboard.press(select_all)
                 self._page.keyboard.press("Backspace")
-                self._page.keyboard.type(text, delay=50)
+                for chunk, delay in chunks:
+                    self._page.keyboard.type(chunk, delay=delay)
                 if press_enter:
+                    # A person pauses before submitting.
+                    self._page.wait_for_timeout(random.randint(150, 450))
                     self._page.keyboard.press("Enter")
             if press_enter:
                 self._page.wait_for_timeout(500)
@@ -1160,16 +1448,22 @@ class WebUseTool:
             return err
         try:
             dx, dy = _SCROLL_DELTA.get(direction, (0, 300))
-            vw, vh = self.viewport[0] // 2, self.viewport[1] // 2
+            vw, vh = self._viewport_size()
             self._require_responsive_renderer()
-            # Each wheel step waits 100ms legitimately, so the deadline
-            # scales with the step count.
-            deadline = _INPUT_WATCHDOG_SECS + 0.1 * max(int(amount), 0)
+            # Each wheel step waits up to 180 ms legitimately, so the
+            # deadline scales with the step count.
+            deadline = _INPUT_WATCHDOG_SECS + 0.2 * max(int(amount), 0)
             with self._input_hang_watchdog(deadline):
-                self._page.mouse.move(vw, vh)
+                # Wheel from wherever the pointer lands in the middle
+                # of the page, with uneven notches and pauses like a
+                # person's scroll wheel.
+                self._move_mouse_to(
+                    random.uniform(vw * 0.3, vw * 0.7), random.uniform(vh * 0.3, vh * 0.7)
+                )
                 for _ in range(amount):
-                    self._page.mouse.wheel(dx, dy)
-                    self._page.wait_for_timeout(100)
+                    notch = random.uniform(0.8, 1.2)
+                    self._page.mouse.wheel(dx * notch, dy * notch)
+                    self._page.wait_for_timeout(random.randint(60, 180))
             self._page.wait_for_timeout(300)
             return self._get_ax_tree()
         except Exception as e:

@@ -44,6 +44,7 @@ import kiss.core.vscode_config as vc
 from kiss.core.utils import is_root_dir
 from kiss.server.tab_registry import TabRegistry
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -203,6 +204,7 @@ class TestTabRegistryRootWorkDir(unittest.TestCase):
         self.assertEqual(registry.snapshot()[0]["scopeWorkDir"], "")
 
 
+@requires_unix_sockets
 class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
     """Root ``workDir`` values arriving over a real UDS connection."""
 

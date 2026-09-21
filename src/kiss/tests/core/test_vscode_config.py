@@ -34,6 +34,7 @@ from kiss.core.vscode_config import (
     save_api_key,
     save_config,
 )
+from kiss.tests.conftest import IS_WINDOWS, posix_only
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +55,7 @@ def _isolate_config(
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))  # what Path.home() reads on Windows
     import kiss.core.vscode_config as _vc
 
     monkeypatch.setitem(vars(_vc), "CONFIG_DIR", fake_home / ".kiss")
@@ -330,6 +332,7 @@ class TestApiKeySave:
         save_api_key("TOGETHER_API_KEY", "tok-val")
         assert os.environ["TOGETHER_API_KEY"] == "tok-val"
 
+    @posix_only("Windows chmod carries no owner-only mode bits")
     def test_store_file_is_owner_only(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -629,6 +632,7 @@ class TestGetUserShell:
 class TestResolveShellPath:
     """Test absolute shell binary resolution."""
 
+    @posix_only("looks up sh/bash in /usr/bin:/bin")
     def test_resolve_via_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When ``PATH`` is populated, returns the ``shutil.which`` result."""
         monkeypatch.setenv("PATH", "/usr/bin:/bin")
@@ -1032,6 +1036,12 @@ class TestSaveConfigAtomicity:
                     raw = vc.CONFIG_PATH.read_bytes()
                 except FileNotFoundError:
                     bad_reads.append("FileNotFoundError")
+                    continue
+                except PermissionError:
+                    # Windows makes the target briefly inaccessible while
+                    # os.replace swaps it; that is neither empty nor partial.
+                    if not IS_WINDOWS:
+                        raise
                     continue
                 if not raw.strip():
                     bad_reads.append("empty")

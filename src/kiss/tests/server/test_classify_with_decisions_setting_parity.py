@@ -51,6 +51,7 @@ from kiss.agents.sorcar.task_classifier import (
 )
 from kiss.core import config as config_module
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 _KISS_ROOT = Path(__file__).resolve().parents[2]
@@ -124,6 +125,7 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         self.assertIsInstance(stored, dict)
         return dict(stored)
 
+    @requires_unix_sockets
     async def test_unticking_the_box_pins_the_llm_classifier(self) -> None:
         """The panel's partial saveConfig turns the decisions route off."""
         self.assertTrue(decisions_classification_enabled())
@@ -136,6 +138,7 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         # from the persisted state, not from its own click.
         self.assertIs(reply["config"]["classify_with_decisions"], False)
 
+    @requires_unix_sockets
     async def test_ticking_the_box_back_restores_the_decisions_route(self) -> None:
         """A ticked box saved after an unticked one re-enables Jev."""
         await self._request(dict(_UNTICKED_SAVE))
@@ -147,6 +150,7 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         self.assertTrue(decisions_classification_enabled())
         self.assertIs(reply["config"]["classify_with_decisions"], True)
 
+    @requires_unix_sockets
     async def test_get_config_carries_the_key_for_the_checkbox(self) -> None:
         """``getConfig`` reports the key at its default and after a save."""
         first = await self._request({"type": "getConfig"})
@@ -158,6 +162,7 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         second = await self._request({"type": "getConfig"})
         self.assertIs(second["config"]["classify_with_decisions"], False)
 
+    @requires_unix_sockets
     async def test_partial_save_leaves_the_other_settings_alone(self) -> None:
         """Only the edited key changes; the merge keeps the rest."""
         self.isolated.write_config(
@@ -173,6 +178,7 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         self.assertEqual(stored["max_budget"], 7)
         self.assertEqual(stored["memory_dir"], "/tmp/mem")
 
+    @requires_unix_sockets
     async def test_junk_value_is_coerced_like_the_other_toggles(self) -> None:
         """A non-boolean payload value is coerced, never stored raw."""
         await self._request({"type": "saveConfig", "config": {"classify_with_decisions": 0}})

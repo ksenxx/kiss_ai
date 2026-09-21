@@ -39,6 +39,11 @@ import yaml
 
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.kiss_agent import KISSAgent
+from kiss.tests.conftest import IS_WINDOWS
+
+# Git bash prints MSYS paths (``/tmp/...``) for ``pwd``; ``-W`` asks for the
+# Windows spelling so the output can be compared with ``Path``.
+_PWD = "pwd -W" if IS_WINDOWS else "pwd"
 
 
 def _init_git_repo(path: Path) -> None:
@@ -118,7 +123,7 @@ def test_worktree_disappears_mid_run_bash_falls_back(tmp_path, monkeypatch):
             })
 
         try:
-            output = bash_tool("pwd", "probe")
+            output = bash_tool(_PWD, "probe")
         except FileNotFoundError as exc:
             captured["session1_bash_exception"] = exc
             output = ""

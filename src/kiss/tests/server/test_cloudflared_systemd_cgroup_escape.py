@@ -45,6 +45,7 @@ from pathlib import Path
 
 from kiss.server import web_server as ws
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import posix_only
 
 _SERVICE_CGROUP = (
     "0::/user.slice/user-1001.slice/user@1001.service"
@@ -136,6 +137,7 @@ class TestLaunchPrefixSelection(unittest.TestCase):
         )
 
 
+@posix_only("the fake cloudflared is a #! shell script")
 class _SpawnHarness(unittest.TestCase):
     """Shared PATH/pidfile sandbox for the ``_spawn_cloudflared`` tests."""
 
@@ -348,6 +350,7 @@ class TestSpawnRetryOnImmediateExit(_SpawnHarness):
         )
 
 
+@posix_only("the fake cloudflared is a #! shell script")
 class _ShimHarness(unittest.TestCase):
     """A live stderr=PIPE child standing in for cloudflared."""
 

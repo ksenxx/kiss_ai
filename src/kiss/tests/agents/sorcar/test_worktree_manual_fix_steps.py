@@ -33,6 +33,7 @@ import tempfile
 from pathlib import Path
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, _git
+from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
@@ -109,7 +110,7 @@ def _run_fix_block(lines: list[str], resolution: str) -> None:
         script_lines.append(line)
     env = {**os.environ, "GIT_EDITOR": "true"}
     subprocess.run(
-        ["bash", "-c", "\n".join(script_lines)],
+        **_popen_kwargs("\n".join(script_lines)),
         capture_output=True,
         env=env,
         check=False,

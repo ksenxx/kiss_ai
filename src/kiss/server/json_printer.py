@@ -69,6 +69,9 @@ _DISPLAY_EVENT_TYPES = frozenset(
         "task_stopped",
         "task_interrupted",
         "followup_suggestion",
+        # The finished ``/ask`` side-channel answer, delivered into
+        # the OWNER task's transcript (``commands._broadcast_ask_answer``).
+        "ask_answer",
         "autocommit_done",
         "warning",
         # Persisted so replays repopulate the chat header's tokens/cost
@@ -83,6 +86,19 @@ _DISPLAY_EVENT_TYPES = frozenset(
         "task_settings",
     }
 )
+
+#: Event types that, when broadcast WITH an explicit ``tabId`` AND a
+#: ``taskId``, are still recorded into that task's in-memory recording
+#: and persisted into its ``events`` rows (a tabId-stripped copy, filed
+#: under the event's own ``taskId`` — see
+#: :meth:`JsonPrinter._keep_tab_stamped_task_event`).  Every other
+#: tabId-stamped event is a transient targeted broadcast.  These are the
+#: events a task's transcript must keep although they are emitted from
+#: outside the task's own thread: the ``/ask`` prompt echo
+#: (``commands._echo_injected_prompt``), its ``ask_answer`` reply
+#: (``commands._broadcast_ask_answer``) and tab-targeted ``result``
+#: events (``task_runner._broadcast_failure_result``).
+TAB_STAMPED_TASK_EVENT_TYPES = frozenset({"prompt", "result", "ask_answer"})
 
 # Tools whose ``tool_call`` event names a file the agent CHANGED (as
 # opposed to merely read).  Used to track, per task, which files the
@@ -1039,6 +1055,42 @@ class JsonPrinter(Printer):
             return {**event, "taskId": key}
         return event
 
+    def _keep_tab_stamped_task_event(self, event: dict[str, Any]) -> bool:
+        """Record and persist a ``tabId``-stamped event under its own task.
+
+        Only the :data:`TAB_STAMPED_TASK_EVENT_TYPES` that also carry a
+        ``taskId`` are kept; every other tabId-stamped event is a
+        transient targeted broadcast.  A tabId-stripped copy is appended
+        to that task's in-memory recording and queued for persistence
+        under the event's OWN ``taskId`` — the emitters of these events
+        (``commands._echo_injected_prompt``,
+        ``commands._broadcast_ask_answer``,
+        ``task_runner._broadcast_failure_result``) always stamp the
+        persisted ``task_history`` row id.  Filing by that id rather than
+        through :meth:`_persist_event` (which resolves the task's LIVE
+        agent) matters for the ``/ask`` answer: it may well arrive after
+        the task it answers has finished and its agent was cleared, and
+        it must still survive a history reopen.
+
+        Args:
+            event: The tabId-stamped event (not mutated).
+
+        Returns:
+            ``True`` when the event was recorded and persisted, ``False``
+            when it was a transient targeted broadcast.
+        """
+        if (
+            event.get("type") not in TAB_STAMPED_TASK_EVENT_TYPES
+            or not event.get("taskId")
+        ):
+            return False
+        record = {k: v for k, v in event.items() if k != "tabId"}
+        with self._lock:
+            self._record_event(record)
+        if record.get("type") in _DISPLAY_EVENT_TYPES:
+            _queue_chat_event(record, task_id=str(record["taskId"]))
+        return True
+
     def _persist_event(self, event: dict[str, Any]) -> None:
         """Persist a display event to the database if applicable.
 
@@ -1555,11 +1607,7 @@ class JsonPrinter(Printer):
         stamp_event_ts(event)
         event.pop("recordOnly", None)
         if "tabId" in event:
-            if event.get("type") in ("prompt", "result") and event.get("taskId"):
-                record = {k: v for k, v in event.items() if k != "tabId"}
-                with self._lock:
-                    self._record_event(record)
-                self._persist_event(record)
+            self._keep_tab_stamped_task_event(event)
             return
         event = self._inject_task_id(event)
         with self._lock:
@@ -1745,15 +1793,21 @@ class JsonPrinter(Printer):
             total_tokens = raw_tokens + self.tokens_offset
             total_steps = raw_steps + self.steps_offset
             total_cost = self._cost_with_offset(raw_cost)
-            self.broadcast(
-                {
-                    "type": "usage_info",
-                    "text": str(content),
-                    "total_tokens": total_tokens,
-                    "cost": total_cost,
-                    "total_steps": total_steps,
-                }
-            )
+            event: dict[str, Any] = {
+                "type": "usage_info",
+                "text": str(content),
+                "total_tokens": total_tokens,
+                "cost": total_cost,
+                "total_steps": total_steps,
+            }
+            # Per-step provenance for the cost report: the model that
+            # served the step (a ``set_model`` switch is otherwise
+            # invisible in task_history) and its prompt-cache read
+            # tokens (0 = the static prefix missed the cache).
+            for key in ("cache_read", "model"):
+                if key in kwargs:
+                    event[key] = kwargs[key]
+            self.broadcast(event)
             return ""
         if type == "result":
             self.broadcast({"type": "text_end"})

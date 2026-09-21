@@ -41,7 +41,10 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_agent_path import _init_repo
+
+pytestmark = requires_unix_sockets
 
 
 class DaemonRunApiHarness(unittest.TestCase):
@@ -538,7 +541,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             c for c in calls if "trajectory_path" in c["arguments"]
         ]
         assert len(summarizer_calls) == 1, calls
-        assert summarizer_calls[0]["tool_names"] == ["Read", "Bash"]
+        assert summarizer_calls[0]["tool_names"] == ["Read", "Bash", "bash_job"]
 
     def test_absent_wire_field_defaults_true(self) -> None:
         """A raw command without ``appendBasicTools`` keeps the basics.

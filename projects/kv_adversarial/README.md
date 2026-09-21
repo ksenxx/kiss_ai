@@ -22,6 +22,7 @@ for the raw reference-node logs.
 | `hydra_iter1_backup.cc` | Historical first-iteration engine (reference only). |
 | `KV_TASK.md`, `benchmark/TASK.md` | The original task specification. |
 | `AUDIT2.md`, `AUDIT2_FIXES.md` | Independent audit findings and their fixes. |
+| `AUDIT3_FIXES.md`, `refnode_audit3_jul21/` | July-21 external audit (delete crash-durability regression), its fixes, and the two `gpt-5.6-sol` read-only review reports. |
 | `WORKLOAD_HARDENING.md` | The 8 multi-workload bugs found+fixed (x-records, O_DIRECT EOF, shutdown flush, compactor races, recovery, tombstones). |
 | `HYDRA_PROD_AUDIT.md`, `PROD_READINESS.md`, `DISCOVERY_LOG.md` | Earlier audit / design / discovery history. |
 | `refnode_rerun_jul21/`, `refnode_workloads_jul21/` | Reference-node evidence: scored outputs, workload sweep, sanitizer matrix. |

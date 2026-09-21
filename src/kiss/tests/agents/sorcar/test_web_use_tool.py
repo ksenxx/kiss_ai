@@ -21,6 +21,7 @@ from kiss.agents.sorcar.web_use_tool import (
     _get_frontmost_app,
     _is_profile_in_use,
 )
+from kiss.tests.conftest import posix_only
 
 
 class _FailureCollector:
@@ -336,10 +337,13 @@ class TestConcurrentProfileAccess:
         """Profile without SingletonLock is not in use."""
         assert not _is_profile_in_use(str(tmp_path))
 
+    @posix_only("Chromium's SingletonLock symlink is the POSIX profile lock")
     def test_is_profile_in_use_stale_lock(self, tmp_path):
         """Profile with SingletonLock pointing to a dead PID is not in use."""
         (tmp_path / "SingletonLock").symlink_to("hostname-999999999")
         assert not _is_profile_in_use(str(tmp_path))
+
+    @posix_only("Chromium's SingletonLock symlink is the POSIX profile lock")
 
     def test_is_profile_in_use_live_lock(self, tmp_path):
         """Profile with SingletonLock pointing to this process is in use."""
@@ -347,6 +351,8 @@ class TestConcurrentProfileAccess:
 
         (tmp_path / "SingletonLock").symlink_to(f"hostname-{os.getpid()}")
         assert _is_profile_in_use(str(tmp_path))
+
+    @posix_only("Chromium's SingletonLock symlink is the POSIX profile lock")
 
     def test_resolve_skips_locked_profiles(self, tmp_path):
         """_resolve_user_data_dir skips the configured dir when it's locked."""
@@ -362,6 +368,8 @@ class TestConcurrentProfileAccess:
             assert resolved == f"{profile}_1"
         finally:
             tool.close()
+
+    @posix_only("Chromium's SingletonLock symlink is the POSIX profile lock")
 
     def test_resolve_skips_multiple_locked(self, tmp_path):
         """_resolve_user_data_dir skips numbered variants that are also locked."""

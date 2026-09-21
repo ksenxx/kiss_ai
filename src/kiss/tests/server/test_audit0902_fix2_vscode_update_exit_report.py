@@ -30,6 +30,7 @@ import asyncio
 import json
 import shutil
 import socket
+import subprocess
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -38,6 +39,9 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.tests.conftest import requires_unix_sockets
+
+pytestmark = requires_unix_sockets
 
 REFUSAL = "another KISS update is already running (pid 123); exiting."
 
@@ -57,9 +61,16 @@ echo "=== Source bootstrap complete ==="
 exit 0
 """
 
-# Blocks until the test creates the release file, then fails.
+# Blocks until the test creates the release file, then fails.  The stub
+# also gives up once its own directory is gone: it runs detached
+# (``start_new_session=True``) and outlives pytest, so a poll that misses
+# the release file because the tmpdir was already removed must not leave
+# a ``bash ... install.sh`` spinning under systemd forever.
 HELD_INSTALL_SH = """#!/bin/bash
-while [ ! -e "{release}" ]; do sleep 0.05; done
+while [ ! -e "{release}" ]; do
+    [ -d "{tmpdir}" ] || exit 5
+    sleep 0.05
+done
 exit 5
 """
 
@@ -113,6 +124,16 @@ class TestRunUpdateExitReport(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         self.release.write_text("")
+        # Reap the detached stub BEFORE the tmpdir (and with it the
+        # release file) is removed; otherwise a stub that has not polled
+        # yet never sees the release and is orphaned to systemd --user.
+        proc = self.server._update_proc
+        if proc is not None and proc.poll() is None:
+            try:
+                await asyncio.wait_for(asyncio.to_thread(proc.wait, 5), 6)
+            except (TimeoutError, subprocess.TimeoutExpired):
+                proc.kill()
+                proc.wait()
         for writer in self._writers:
             writer.close()
             try:
@@ -129,6 +150,9 @@ class TestRunUpdateExitReport(IsolatedAsyncioTestCase):
         script = self.install_root / "install.sh"
         script.write_text(body)
         script.chmod(0o755)
+
+    def _held_stub(self) -> str:
+        return HELD_INSTALL_SH.format(release=self.release, tmpdir=self.tmpdir)
 
     async def _connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         reader, writer = await asyncio.open_unix_connection(
@@ -247,7 +271,7 @@ class TestRunUpdateExitReport(IsolatedAsyncioTestCase):
     async def test_missing_log_still_reports_the_generic_failure(self) -> None:
         # The log vanishing under a running installer (a cleanup of
         # ~/.kiss) must not turn the report into an unhandled exception.
-        self._install_stub(HELD_INSTALL_SH.format(release=self.release))
+        self._install_stub(self._held_stub())
         reader_a, writer_a = await self._connect()
         await self._send(writer_a, {"type": "runUpdate"})
         await self._drain_until(reader_a, _has_type("notice"))
@@ -280,7 +304,7 @@ class TestRunUpdateExitReport(IsolatedAsyncioTestCase):
         self.assertFalse(self.server._update_starting)
 
     async def test_stop_cancels_a_pending_watcher(self) -> None:
-        self._install_stub(HELD_INSTALL_SH.format(release=self.release))
+        self._install_stub(self._held_stub())
         reader_a, writer_a = await self._connect()
         await self._send(writer_a, {"type": "runUpdate"})
         await self._drain_until(reader_a, _has_type("notice"))

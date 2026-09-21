@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -146,7 +147,9 @@ class TestUsefulToolsBranches:
         """_stop_monitor exits cleanly when done is set (line 207 exit branch)."""
         stop = threading.Event()
         done = threading.Event()
-        process = subprocess.Popen(["true"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(
+            [sys.executable, "-c", "pass"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
         process.wait()
         done.set()
         t = threading.Thread(target=_stop_monitor, args=(stop, process, done))
@@ -221,8 +224,13 @@ class TestSorcarAgentDockerBranch:
         agent = SorcarAgent("test")
 
         class FakeDockerManager:
+            stop_event = None
+
             def Bash(self, cmd: str, desc: str) -> str:  # noqa: N802
                 return "docker output"
+
+            def run_commands_parallel(self, commands: str) -> str:
+                return "docker parallel output"
 
         agent.docker_manager = FakeDockerManager()
         tools = agent._get_tools()
