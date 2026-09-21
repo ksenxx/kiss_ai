@@ -39,9 +39,11 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
 - A prompt job runs as its own Sorcar Extension Agent: every run
   writes a small SEA file into its scratch directory
   (:func:`_write_prompt_sea` — the job's prompt, model and budget as
-  ``prompt()`` / ``model()`` / ``max_budget()`` getters, plus the
-  run's ``work_dir()`` and the pinned-off ``use_worktree()`` /
-  ``auto_commit()`` / ``classify_tasks()``) and launches it with the
+  ``prompt()`` / ``model()`` / ``max_budget()`` getters, the job's
+  ``work_dir()`` / ``use_worktree()`` / ``auto_commit()`` — a job that
+  must work inside a specific project names that directory, otherwise
+  the run's scratch directory with worktree and auto-commit off — and
+  the pinned-off ``classify_tasks()``) and launches it with the
   same ``run_agent`` tool a chat task uses for any ``.py`` agent
   script (:func:`kiss.agents.sorcar.agent_dispatch.make_run_agent_tool`),
   so the whole run configuration lives in one place — the SEA — and
@@ -75,6 +77,7 @@ import contextlib
 import importlib
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -516,7 +519,35 @@ PROMPT_SEA_NAME = "cron_prompt_sea.py"
 """File name of the generated per-run SEA inside a prompt job's scratch dir."""
 
 
-def _write_prompt_sea(job: dict[str, Any], work_dir: Path) -> Path:
+def _job_work_dir(job: dict[str, Any], scratch_dir: Path) -> Path:
+    """Return the directory a run of *job* works in.
+
+    Args:
+        job: The job dict (uses the optional ``work_dir`` field).
+        scratch_dir: The run's private scratch directory.
+
+    Returns:
+        The job's ``work_dir`` when set, otherwise *scratch_dir*.
+    """
+    return Path(str(job.get("work_dir") or "") or scratch_dir)
+
+
+def _job_timeout(job: dict[str, Any], default: float) -> float:
+    """Return the per-run timeout of *job* in seconds.
+
+    Args:
+        job: The job dict (uses the optional ``timeout`` field; ``0`` or
+            missing means *default*).
+        default: :data:`COMMAND_TIMEOUT_SECONDS` or
+            :data:`PROMPT_TIMEOUT_SECONDS`.
+
+    Returns:
+        The timeout in seconds.
+    """
+    return float(job.get("timeout") or 0.0) or default
+
+
+def _write_prompt_sea(job: dict[str, Any], scratch_dir: Path) -> Path:
     """Write the Sorcar Extension Agent that configures one run of *job*.
 
     The generated file follows the SEA contract of
@@ -525,24 +556,29 @@ def _write_prompt_sea(job: dict[str, Any], work_dir: Path) -> Path:
     overriding the like-named ``run`` parameter.  ``prompt()`` returns
     the Hermes-style preamble followed by the job's prompt; ``model()``
     and ``max_budget()`` carry the job's LLM settings (``""`` / ``None``
-    mean "daemon default"); ``work_dir()`` pins the run to its private
-    scratch directory; ``use_worktree()``, ``auto_commit()`` and
-    ``classify_tasks()`` are pinned off because a scratch directory is
-    not a git repository and an unattended run must not stall on
-    classification.  Values are embedded as Python literals via
-    :func:`repr`, so any prompt text round-trips exactly.
+    mean "daemon default"); ``work_dir()`` is the job's ``work_dir``
+    when set (a prompt that must run inside a specific project) and
+    otherwise the run's private scratch directory; ``use_worktree()``
+    and ``auto_commit()`` carry the job's like-named flags (off unless
+    the job asked for them, since a scratch directory is not a git
+    repository); ``classify_tasks()`` is pinned off because an
+    unattended run must not stall on classification.  Values are
+    embedded as Python literals via :func:`repr`, so any prompt text
+    round-trips exactly.
 
     Args:
         job: The job dict (uses ``id``, ``name``, ``prompt``,
-            ``model_name``, ``max_budget``).
-        work_dir: The run's scratch directory (must exist); the SEA is
-            written there as :data:`PROMPT_SEA_NAME`.
+            ``model_name``, ``max_budget``, ``work_dir``,
+            ``use_worktree``, ``auto_commit``).
+        scratch_dir: The run's scratch directory (must exist); the SEA
+            is written there as :data:`PROMPT_SEA_NAME`.
 
     Returns:
         The path of the written SEA file.
     """
     raw_budget = job.get("max_budget")
     budget = float(raw_budget) if raw_budget else None
+    work_dir = _job_work_dir(job, scratch_dir)
     # The docstring is static: job values go only into repr() literals
     # (a name containing a triple quote would end a docstring early).
     source = (
@@ -574,17 +610,17 @@ def _write_prompt_sea(job: dict[str, Any], work_dir: Path) -> Path:
         "\n"
         "\n"
         "def use_worktree() -> bool:\n"
-        "    return False\n"
+        f"    return {bool(job.get('use_worktree'))!r}\n"
         "\n"
         "\n"
         "def auto_commit() -> bool:\n"
-        "    return False\n"
+        f"    return {bool(job.get('auto_commit'))!r}\n"
         "\n"
         "\n"
         "def classify_tasks() -> bool:\n"
         "    return False\n"
     )
-    sea_path = work_dir / PROMPT_SEA_NAME
+    sea_path = scratch_dir / PROMPT_SEA_NAME
     sea_path.write_text(source, encoding="utf-8")
     return sea_path
 
@@ -609,18 +645,20 @@ def _run_prompt_job(
 
     Args:
         job: The job dict (uses ``id``, ``name``, ``prompt``,
-            ``model_name``, ``max_budget``).
+            ``model_name``, ``max_budget``, ``work_dir``,
+            ``use_worktree``, ``auto_commit``, ``timeout``).
         work_dir: The run's private scratch directory (created by
             :func:`_execute_job`); receives the SEA file and is the
-            task's working directory.
+            task's working directory unless the job names its own
+            ``work_dir``.
 
     Returns:
         ``(status, summary)`` where status is ``"ok"``, ``"error"`` or
         ``"silent"`` (summary ``None`` — nothing to deliver).  Failures
         to reach the daemon, agent-script errors and a confirmed
-        timeout (the task was stopped after
-        :data:`PROMPT_TIMEOUT_SECONDS`) come back as ``"error"`` with
-        the ``run_agent`` error text.
+        timeout (the task was stopped after the job's ``timeout``,
+        default :data:`PROMPT_TIMEOUT_SECONDS`) come back as
+        ``"error"`` with the ``run_agent`` error text.
 
     Raises:
         TimeoutError: When the run timed out but the daemon never
@@ -636,6 +674,7 @@ def _run_prompt_job(
     )
 
     sea_path = _write_prompt_sea(job, work_dir)
+    timeout = _job_timeout(job, PROMPT_TIMEOUT_SECONDS)
     run_agent = make_run_agent_tool(str(work_dir))
     # The task text is a placeholder: the SEA's ``prompt()`` replaces
     # it on the daemon.  Every other run setting comes from the SEA
@@ -643,9 +682,9 @@ def _run_prompt_job(
     reply = run_agent(
         agent=str(sea_path),
         task=f"Run cron job {job.get('id', '')} ({job.get('name', '')}).",
-        timeout=str(PROMPT_TIMEOUT_SECONDS),
+        timeout=str(timeout),
     )
-    if reply == stop_unconfirmed_error(sea_path.stem, PROMPT_TIMEOUT_SECONDS):
+    if reply == stop_unconfirmed_error(sea_path.stem, timeout):
         raise TimeoutError(reply)
     if reply.startswith("Error:"):
         return "error", reply
@@ -812,7 +851,7 @@ def _run_command_job(
             proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:  # pragma: no cover — defensive
             proc.kill()
-        return "error", f"command timed out after {timeout:.0f}s"
+        return "error", f"command timed out after {timeout:g}s"
     output = stdout.strip()
     if proc.returncode != 0:
         detail = (output + "\n" + stderr.strip()).strip()
@@ -827,12 +866,14 @@ def _execute_job(job: dict[str, Any]) -> None:
 
     The run gets a fresh private scratch directory under
     :func:`_runs_dir` — its working directory for a command job, the
-    daemon session's ``work_dir`` for a prompt job — so jobs running
+    daemon session's ``work_dir`` for a prompt job (unless the job
+    names its own ``work_dir``, which then takes that role while the
+    scratch directory still holds the generated SEA) — so jobs running
     concurrently never share one; the directory is removed when the
     run ends, whatever the outcome, so stale run directories never
     accumulate.  The one exception is a timed-out prompt job whose
-    stop the daemon never confirmed: the task may still be running in
-    the directory, so it is kept and its path reported.
+    stop the daemon never confirmed: the task may still be running
+    from the directory, so it is kept and its path reported.
 
     Never raises: failures are recorded in the job's ``last_status`` /
     ``last_summary`` fields.  Errors are still delivered (so the user
@@ -851,7 +892,11 @@ def _execute_job(job: dict[str, Any]) -> None:
     keep_work_dir = False
     try:
         if str(job.get("command", "")).strip():
-            status, text = _run_command_job(job, work_dir=work_dir)
+            status, text = _run_command_job(
+                job,
+                timeout_seconds=_job_timeout(job, COMMAND_TIMEOUT_SECONDS),
+                work_dir=_job_work_dir(job, work_dir),
+            )
         else:
             status, text = _run_prompt_job(job, work_dir)
     except TimeoutError as e:
@@ -859,9 +904,11 @@ def _execute_job(job: dict[str, Any]) -> None:
         # (_run_prompt_job reports the confirmed-stop timeout itself).
         keep_work_dir = True
         status, text = "error", (
-            f"prompt job timed out after {PROMPT_TIMEOUT_SECONDS:.0f}s; the stop "
-            f"was not confirmed, so the task may still be running in {work_dir} "
-            f"(directory kept): {e}"
+            f"prompt job timed out after "
+            f"{_job_timeout(job, PROMPT_TIMEOUT_SECONDS):g}s; the stop "
+            f"was not confirmed, so the task may still be running in "
+            f"{_job_work_dir(job, work_dir)} (its SEA directory {work_dir} is "
+            f"kept): {e}"
         )
     except Exception as e:
         logger.error("Cron job %s failed: %s", job["id"], e, exc_info=True)
@@ -1079,6 +1126,9 @@ def _job_view(job: dict[str, Any]) -> dict[str, Any]:
         )
         if job.get(key) not in (None, "", [])
     }
+    for key in ("work_dir", "use_worktree", "auto_commit", "timeout", "model_name"):
+        if job.get(key):
+            view[key] = job[key]
     for key in ("next_run_at", "last_run_at"):
         if job.get(key):
             view[key] = datetime.fromtimestamp(float(job[key])).isoformat(
@@ -1093,8 +1143,10 @@ def _find_duplicate(
     """Return the stored job that would do the same work as ``candidate``.
 
     Two jobs are duplicates when they run the same ``prompt`` or
-    ``command`` on the same ``schedule`` with the same ``deliver``
-    targets.  The name, model and budget are ignored: the LLM picks
+    ``command`` in the same ``work_dir`` on the same ``schedule`` with
+    the same ``deliver`` targets (the same prompt scheduled for two
+    different projects is two jobs).  The name, model and budget are
+    ignored: the LLM picks
     those freely, and the user asked for the same thing to be scheduled
     only once.  Jobs that have finished for good (a one-shot that
     already ran or an ``until_delivered`` poll that fired, i.e.
@@ -1114,7 +1166,7 @@ def _find_duplicate(
             continue
         if all(
             str(job.get(key) or "").strip() == candidate[key]
-            for key in ("prompt", "command", "schedule", "deliver")
+            for key in ("prompt", "command", "work_dir", "schedule", "deliver")
         ):
             return job
     return None
@@ -1131,6 +1183,10 @@ def cron_job(
     model_name: str = "",
     max_budget: str = "",
     until_delivered: bool = False,
+    work_dir: str = "",
+    use_worktree: bool = False,
+    auto_commit: bool = False,
+    timeout: str = "",
 ) -> str:
     """Manage scheduled automations (cron jobs) stored in a local JSON file.
 
@@ -1171,6 +1227,14 @@ def cron_job(
     Jobs due at the same time run concurrently, each in its own scratch
     directory that is removed when the run ends; a job whose previous
     run is still in progress is not started again until it finishes.
+    A job that must work inside a specific project ("run the tests in
+    /home/me/proj every night and fix them") names that directory as
+    ``work_dir``; a prompt job in a git repository may additionally ask
+    for ``use_worktree`` / ``auto_commit`` so the run edits an isolated
+    worktree and merges its commits back, exactly like a chat task with
+    those toggles on.  Long runs need a larger ``timeout``: a run is
+    stopped once it exceeds it (default 3600 s for a prompt job,
+    600 s for a command).
 
     Schedule forms (local time):
 
@@ -1210,6 +1274,16 @@ def cron_job(
             string like ``"2.5"`` (create; empty uses the default).
         until_delivered: Disable the job after its first non-silent
             delivery (create; for "notify me when ..." polls).
+        work_dir: Existing directory the run works in — the command's
+            working directory or the prompt session's work directory
+            (create; empty uses a private scratch directory).
+        use_worktree: Run the prompt job in a git worktree of
+            ``work_dir`` (create; prompt jobs with ``work_dir`` only).
+        auto_commit: Auto-commit (and, with ``use_worktree``, merge)
+            the prompt job's changes (create; prompt jobs with
+            ``work_dir`` only).
+        timeout: Per-run timeout in seconds, as a string like
+            ``"21600"`` (create; empty uses the default).
 
     Returns:
         A YAML string describing the result (created job, job list,
@@ -1233,6 +1307,21 @@ def cron_job(
             budget = float(max_budget) if max_budget.strip() else 0.0
         except ValueError:
             return _dump({"error": f"max_budget {max_budget!r} is not a number"})
+        try:
+            timeout_seconds = float(timeout) if timeout.strip() else 0.0
+        except ValueError:
+            return _dump({"error": f"timeout {timeout!r} is not a number"})
+        if not (timeout_seconds >= 0 and math.isfinite(timeout_seconds)):
+            return _dump({"error": f"timeout {timeout!r} must be a positive number"})
+        run_dir = ""
+        if work_dir.strip():
+            run_dir = str(Path(work_dir.strip()).expanduser().resolve())
+            if not Path(run_dir).is_dir():
+                return _dump({"error": f"work_dir {work_dir!r} is not a directory"})
+        if (use_worktree or auto_commit) and not (run_dir and prompt.strip()):
+            return _dump({
+                "error": "use_worktree and auto_commit need a prompt job with work_dir"
+            })
         job = {
             "id": uuid.uuid4().hex[:8],
             "name": name,
@@ -1242,6 +1331,10 @@ def cron_job(
             "deliver": deliver.strip() or "local",
             "model_name": model_name.strip(),
             "max_budget": budget,
+            "work_dir": run_dir,
+            "use_worktree": bool(use_worktree),
+            "auto_commit": bool(auto_commit),
+            "timeout": timeout_seconds,
             "enabled": True,
             "one_shot": is_one_shot(schedule),
             "until_delivered": bool(until_delivered),
@@ -1401,7 +1494,13 @@ CRON_DISPATCH_PREAMBLE = (
     "chat, pairing) to convert the request into the channel CLI's tick "
     "command, THEN schedule that exact string as a command job (default "
     "schedule \"every 2m\", deliver \"none\"); never schedule a gateway "
-    "as a prompt job — it would burn tokens on every tick.  create "
+    "as a prompt job — it would burn tokens on every tick.  A job that "
+    "must work inside a specific project (\"run the tests in "
+    "/home/me/proj nightly and fix them\") gets that directory as "
+    "work_dir; for a git repository whose changes should land on its "
+    "branch pass use_worktree=True and auto_commit=True as well, and "
+    "give long runs a larger timeout (seconds; default 3600 for a "
+    "prompt job).  create "
     "refuses a job whose prompt/command, schedule and delivery match an "
     "existing scheduled or paused job: report that to the user instead "
     "of retrying under a different name.  Never call run_agent here: it "
@@ -1479,7 +1578,8 @@ def main() -> None:
         print(
             "Usage: kiss-cron (--daemon [--interval SECONDS] | --tick | --list |\n"
             "  --create NAME --schedule S (--prompt P | --command C)\n"
-            "    [--deliver TARGETS] [-m MODEL] [-b BUDGET] |\n"
+            "    [--deliver TARGETS] [-m MODEL] [-b BUDGET] [--work-dir DIR]\n"
+            "    [--worktree] [--auto-commit] [--timeout SECONDS] |\n"
             "  --remove ID | --pause ID | --resume ID | --run ID)"
         )
         sys.exit(1)
@@ -1503,6 +1603,21 @@ def main() -> None:
     parser.add_argument(
         "--until-delivered", action="store_true",
         help="Disable the job after its first non-silent delivery",
+    )
+    parser.add_argument(
+        "--work-dir", default="", metavar="DIR",
+        help="Directory the run works in (default: a private scratch directory)",
+    )
+    parser.add_argument(
+        "--worktree", action="store_true",
+        help="Run the prompt job in a git worktree of --work-dir",
+    )
+    parser.add_argument(
+        "--auto-commit", action="store_true",
+        help="Auto-commit (and merge) the prompt job's changes",
+    )
+    parser.add_argument(
+        "--timeout", default="", metavar="SECONDS", help="Per-run timeout",
     )
     parser.add_argument("--remove", default="", metavar="ID", help="Remove a job")
     parser.add_argument("--pause", default="", metavar="ID", help="Pause a job")
@@ -1530,6 +1645,10 @@ def main() -> None:
                 model_name=args.model,
                 max_budget=args.budget,
                 until_delivered=args.until_delivered,
+                work_dir=args.work_dir,
+                use_worktree=args.worktree,
+                auto_commit=args.auto_commit,
+                timeout=args.timeout,
             ),
             end="",
         )

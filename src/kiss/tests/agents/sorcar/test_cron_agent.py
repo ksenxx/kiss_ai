@@ -733,3 +733,173 @@ def test_repeating_job_without_until_delivered_keeps_running() -> None:
     assert tick(2.0) == 1
     stored = load_jobs()[0]
     assert stored["enabled"] is True and stored["next_run_at"] is not None
+
+
+def test_prompt_sea_carries_job_work_dir_worktree_and_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job with work_dir/use_worktree/auto_commit/timeout configures its SEA and run.
+
+    This is the shape of a "run the tests in my repo nightly" job: the
+    SEA's ``work_dir()`` names the project instead of the scratch
+    directory, the git toggles are on, and ``run_agent`` waits for the
+    job's own timeout instead of :data:`PROMPT_TIMEOUT_SECONDS`.
+    """
+    from kiss.agents.sorcar import daemon_client
+    from kiss.server.agent_file import apply_agent_overrides
+
+    captured: list[dict[str, object]] = []
+
+    def capture_run(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
+        captured.append({"prompt": prompt, **kwargs})
+        return daemon_client.TaskResult(
+            text="done", success=True, cost=0.0, tokens=0, steps=0,
+        )
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
+    project = tmp_path / "project"
+    project.mkdir()
+    scratch = tmp_path / "run"
+    scratch.mkdir()
+    job = _create(cron_job(
+        "create", name="nightly", prompt="run the tests", schedule="every 1d",
+        model_name="some-model", work_dir=str(project), use_worktree=True,
+        auto_commit=True, timeout="21600",
+    ))
+    assert (job["work_dir"], job["use_worktree"], job["auto_commit"]) == (
+        str(project.resolve()), True, True,
+    )
+    assert job["timeout"] == 21600.0
+    stored = load_jobs()[0]
+    assert cron_agent._run_prompt_job(stored, scratch) == ("ok", "done")
+    sea_path = scratch / cron_agent.PROMPT_SEA_NAME
+    assert captured[0]["extension_agent_path"] == str(sea_path)
+    assert captured[0]["timeout"] == 21600.0
+    cmd: dict[str, object] = {"agentPath": str(sea_path), "prompt": "x"}
+    apply_agent_overrides(cmd)
+    assert cmd["workDir"] == str(project.resolve())
+    assert cmd["useWorktree"] is True
+    assert cmd["autoCommit"] is True
+    assert cmd["classifyTasks"] is False
+    assert cmd["model"] == "some-model"
+
+
+def test_create_validates_work_dir_timeout_and_git_flags(tmp_path: Path) -> None:
+    """Bad work_dir/timeout values and misplaced git flags are refused."""
+    def create(**fields: object) -> dict:
+        return dict(yaml.safe_load(cron_job(
+            "create", name="x", schedule="every 5m", **fields,  # type: ignore[arg-type]
+        )))
+
+    assert "not a directory" in create(prompt="p", work_dir=str(tmp_path / "no"))["error"]
+    assert "not a number" in create(prompt="p", timeout="soon")["error"]
+    for bad in ("-5", "nan", "inf"):
+        assert "must be a positive number" in create(prompt="p", timeout=bad)["error"]
+    # Worktree/auto-commit need a prompt job with a work_dir.
+    assert "need a prompt job with work_dir" in create(
+        prompt="p", use_worktree=True,
+    )["error"]
+    assert "need a prompt job with work_dir" in create(
+        command="echo 1", work_dir=str(tmp_path), auto_commit=True,
+    )["error"]
+    # Without the new fields a job stores the defaults and lists none of them.
+    job = create(prompt="p")["created"]
+    assert not any(key in job for key in ("work_dir", "use_worktree", "auto_commit",
+                                           "timeout"))
+    stored = load_jobs()[0]
+    assert (stored["work_dir"], stored["use_worktree"], stored["auto_commit"],
+            stored["timeout"]) == ("", False, False, 0.0)
+    assert load_jobs() == [stored]
+
+
+def test_command_job_honours_work_dir_and_timeout(tmp_path: Path) -> None:
+    """A command job runs in its work_dir and is stopped after its own timeout."""
+    project = tmp_path / "project"
+    project.mkdir()
+    job = _create(cron_job(
+        "create", name="pwd", command="pwd", schedule="every 1m",
+        work_dir=str(project),
+    ))
+    _set_job_fields(job["id"], next_run_at=1.0)
+    assert tick(2.0) == 1
+    assert load_jobs()[0]["last_summary"] == str(project.resolve())
+    slow = _create(cron_job(
+        "create", name="slow", command="sleep 30", schedule="every 1m",
+        timeout="0.5",
+    ))
+    _set_job_fields(slow["id"], next_run_at=1.0)
+    assert tick(2.0) == 1
+    stored = {j["id"]: j for j in load_jobs()}[slow["id"]]
+    assert stored["last_status"] == "error"
+    assert "command timed out after 0.5s" in stored["last_summary"]
+
+
+def test_same_prompt_in_another_work_dir_is_not_a_duplicate(tmp_path: Path) -> None:
+    """The same prompt scheduled for two projects is two jobs, not a duplicate."""
+    def create(work_dir: Path) -> str:
+        return cron_job(
+            "create", name="tests", prompt="run the tests", schedule="every 1d",
+            work_dir=str(work_dir),
+        )
+
+    first, second = tmp_path / "a", tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    _create(create(first))
+    _create(create(second))
+    assert "duplicate" in yaml.safe_load(create(second))["error"]
+    assert len(load_jobs()) == 2
+
+
+def test_unconfirmed_prompt_timeout_names_the_job_work_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The kept-directory note points at the job's work_dir, where the task runs.
+
+    Only the SEA lives in the scratch directory; the possibly still
+    running task works in the job's ``work_dir``, so that is the
+    directory the error names, with the kept scratch directory beside it.
+    """
+    from kiss.agents.sorcar import daemon_client
+
+    def hang(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
+        raise daemon_client.StopUnconfirmedTimeoutError("no terminal status")
+
+    monkeypatch.setattr(daemon_client, "run", hang)
+    project = tmp_path / "project"
+    project.mkdir()
+    job = _create(cron_job(
+        "create", name="slow", prompt="think hard", schedule="every 1d",
+        work_dir=str(project), timeout="2.5",
+    ))
+    _set_job_fields(job["id"], next_run_at=1.0)
+    assert tick(2.0) == 1
+    stored = load_jobs()[0]
+    assert stored["last_status"] == "error"
+    assert "timed out after 2.5s" in stored["last_summary"]
+    assert f"running in {project.resolve()}" in stored["last_summary"]
+    assert "MAY STILL BE RUNNING" in stored["last_summary"]
+    kept = [p for p in (tmp_path / "cron" / "runs").iterdir() if p.is_dir()]
+    assert len(kept) == 1 and (kept[0] / cron_agent.PROMPT_SEA_NAME).exists()
+    assert f"SEA directory {kept[0]}" in stored["last_summary"]
+
+
+def test_cli_create_with_work_dir_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    """kiss-cron --create passes --work-dir/--worktree/--auto-commit/--timeout through."""
+    project = tmp_path / "project"
+    project.mkdir()
+    out = _run_cli(
+        monkeypatch, capsys, "--create", "nightly", "--schedule", "0 12 * * *",
+        "--prompt", "run the tests", "--work-dir", str(project), "--worktree",
+        "--auto-commit", "--timeout", "7200", "-m", "some-model",
+    )
+    created = yaml.safe_load(out)["created"]
+    assert created["work_dir"] == str(project.resolve())
+    assert created["use_worktree"] is True
+    assert created["auto_commit"] is True
+    assert created["timeout"] == 7200.0
+    assert created["model_name"] == "some-model"
+    listed = yaml.safe_load(_run_cli(monkeypatch, capsys, "--list"))["jobs"][0]
+    assert listed["work_dir"] == str(project.resolve())
