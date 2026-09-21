@@ -38,6 +38,7 @@ from typing import Any
 
 from kiss.server.sorcar import API, ApiCommand, validate_command
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 
 
 class TestValidateCommand(unittest.TestCase):
@@ -116,6 +117,7 @@ class TestValidateCommand(unittest.TestCase):
             cmd.name = "hacked"  # type: ignore[misc]
 
 
+@requires_unix_sockets
 class TestServerApiOverUds(unittest.TestCase):
     """The live daemon dispatcher enforces the API over a real UDS."""
 

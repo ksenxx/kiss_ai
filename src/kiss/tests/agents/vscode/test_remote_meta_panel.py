@@ -21,9 +21,12 @@ Covered behavior:
 
 * The panel is docked at the right edge and takes one fifth of the
   browser window, and ``#app`` clears it.
-* The seven meta values render as bullet items (a real ``<ul>`` with
-  ``list-style-type: disc``) with the Tokens / Cost / Steps / Time /
-  Machine / Workdir / Max budget labels.
+* The meta values render as bullet items (a real ``<ul>`` with
+  ``list-style-type: disc``): the live status values (Tokens / Cost /
+  Steps / Time / Machine / Workdir / Max budget) followed by the
+  task's own settings (Date / Base model / Worktree mode / Parallel
+  mode / Chat id / Task id / Parent task, the last hidden until a
+  parent id arrives).
 * Whatever the app writes into the status-bar spans (tokens, cost,
   steps, the running timer text and its color, the machine name) is
   mirrored live into the panel.
@@ -226,8 +229,11 @@ def test_meta_values_render_as_a_bulleted_list(
     browser: Browser,
     remote_url: str,
 ) -> None:
-    """The panel lists Tokens / Cost / Steps / Time / Machine /
-    Workdir / Max budget as real ``<ul>`` bullet items."""
+    """The panel lists the live status values (Tokens / Cost / Steps /
+    Time / Machine / Workdir / Max budget) followed by the task's own
+    settings (Date / Base model / Worktree mode / Parallel mode / Chat
+    id / Task id / Parent task) as real ``<ul>`` bullet items.  The
+    Parent-task row starts hidden until a parent id arrives."""
     page = _open_desktop_page(browser, remote_url, 1280)
     try:
         listing = page.evaluate(_META_LIST_JS)
@@ -236,7 +242,9 @@ def test_meta_values_render_as_a_bulleted_list(
             "the meta items must render as a bulleted list, got "
             f"list-style-type: {listing['listStyle']}"
         )
-        assert listing["displays"] == ["list-item"] * 7, listing
+        # Every row bar the initially-hidden Parent-task row renders as
+        # a bullet; the hidden row collapses to display:none.
+        assert listing["displays"] == ["list-item"] * 13 + ["none"], listing
         assert listing["labels"] == [
             "Tokens:",
             "Cost:",
@@ -245,6 +253,13 @@ def test_meta_values_render_as_a_bulleted_list(
             "Machine:",
             "Workdir:",
             "Max budget:",
+            "Date:",
+            "Base model:",
+            "Worktree mode:",
+            "Parallel mode:",
+            "Chat id:",
+            "Task id:",
+            "Parent task:",
         ], listing
         # Before any task ran the numeric values show the em-dash
         # placeholder and the time mirrors the "Ready" status.

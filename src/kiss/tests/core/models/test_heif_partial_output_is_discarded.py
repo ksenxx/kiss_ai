@@ -14,7 +14,7 @@ successful conversion, and the truncated image is shipped to a vision API as
 the user's photo.
 
 The converters here are real executables on a real ``PATH``: each test writes
-small shell scripts named after the entries of ``_CONVERTERS`` and prepends
+small Python programs named after the entries of ``_CONVERTERS`` and prepends
 their directory to ``PATH``, so ``shutil.which`` resolves them exactly the way
 it resolves the host's own tools.  Stand-ins are provided for *every* name in
 ``_CONVERTERS`` so the outcome does not depend on which decoders happen to be
@@ -24,11 +24,13 @@ installed on the machine running the suite.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
 from kiss.core.models.heif import _CONVERTERS, heif_to_jpeg
+from kiss.tests.conftest import IS_WINDOWS, install_cli_script
 
 _JPEG_SOI = b"\xff\xd8\xff"
 
@@ -43,19 +45,23 @@ _TINY_JPEG = bytes.fromhex(
 
 
 def _script(path: Path, body: str) -> None:
-    """Write ``body`` as an executable ``/bin/sh`` script at ``path``."""
-    path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
-    path.chmod(0o755)
+    """Write the Python statements ``body`` as an executable program at ``path``."""
+    install_cli_script(path, f"#!{sys.executable}\nimport sys\n" + body)
 
 
 def _dst_of(argv_template: tuple[str, ...]) -> str:
-    """Return the shell expression for the output path of one converter.
+    """Return the Python expression for the output path of one converter.
 
     Each ``_CONVERTERS`` entry formats ``{dst}`` into exactly one argument, so
-    the destination is the positional shell parameter at that index.
+    the destination is the ``sys.argv`` entry at that index.
     """
     index = next(i for i, arg in enumerate(argv_template) if "{dst}" in arg)
-    return f'"${index + 1}"'
+    return f"sys.argv[{index + 1}]"
+
+
+def _writes_then_exits(dst: str, data: bytes, status: int) -> str:
+    """Stand-in body that writes ``data`` to the path ``dst`` and exits ``status``."""
+    return f"open({dst}, 'wb').write({data!r})\nsys.exit({status})\n"
 
 
 def _fake_converter_dir(
@@ -65,7 +71,7 @@ def _fake_converter_dir(
 
     Args:
         tmp_path: Directory to create the ``bin`` folder in.
-        bodies: Shell body per converter name; names left out exit 0 silently
+        bodies: Python body per converter name; names left out exit 0 silently
             without producing any output file.
         monkeypatch: Fixture used to prepend the folder to ``PATH``.
 
@@ -75,7 +81,7 @@ def _fake_converter_dir(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for tool, _ in _CONVERTERS:
-        _script(bin_dir / tool, bodies.get(tool, "exit 0\n"))
+        _script(bin_dir / tool, bodies.get(tool, "sys.exit(0)\n"))
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return bin_dir
 
@@ -88,7 +94,7 @@ def test_partial_output_of_a_failed_converter_is_not_returned(
     bodies = {
         # Writes a partial JPEG (correct SOI, no EOI) and then dies, exactly
         # like a converter killed part-way through encoding.
-        "sips": f"printf '\\377\\330\\377 truncated' > {sips_dst}\nexit 1\n",
+        "sips": _writes_then_exits(sips_dst, _JPEG_SOI + b" truncated", 1),
     }
     _fake_converter_dir(tmp_path, bodies, monkeypatch)
 
@@ -102,12 +108,8 @@ def test_a_later_converter_still_supplies_the_jpeg(
     sips_dst = _dst_of(dict(_CONVERTERS)["sips"])
     convert_dst = _dst_of(dict(_CONVERTERS)["heif-convert"])
     bodies = {
-        "sips": f"printf '\\377\\330\\377 truncated' > {sips_dst}\nexit 1\n",
-        "heif-convert": (
-            "printf '"
-            + "".join(f"\\{byte:03o}" for byte in _TINY_JPEG)
-            + f"' > {convert_dst}\nexit 0\n"
-        ),
+        "sips": _writes_then_exits(sips_dst, _JPEG_SOI + b" truncated", 1),
+        "heif-convert": _writes_then_exits(convert_dst, _TINY_JPEG, 0),
     }
     _fake_converter_dir(tmp_path, bodies, monkeypatch)
 
@@ -132,12 +134,8 @@ def test_an_empty_output_file_is_treated_as_a_failure(
     sips_dst = _dst_of(dict(_CONVERTERS)["sips"])
     convert_dst = _dst_of(dict(_CONVERTERS)["heif-convert"])
     bodies = {
-        "sips": f": > {sips_dst}\nexit 0\n",
-        "heif-convert": (
-            "printf '"
-            + "".join(f"\\{byte:03o}" for byte in _TINY_JPEG)
-            + f"' > {convert_dst}\nexit 0\n"
-        ),
+        "sips": _writes_then_exits(sips_dst, b"", 0),
+        "heif-convert": _writes_then_exits(convert_dst, _TINY_JPEG, 0),
     }
     _fake_converter_dir(tmp_path, bodies, monkeypatch)
 
@@ -150,15 +148,13 @@ def test_a_converter_that_cannot_be_executed_is_skipped(
     """An OSError from exec is a converter failure, not a crash of the caller."""
     bin_dir = _fake_converter_dir(tmp_path, {}, monkeypatch)
     # Present on PATH and marked executable, but not a runnable program: the
-    # kernel refuses it with OSError rather than a non-zero exit status.
-    (bin_dir / "sips").write_bytes(b"\x7fELF garbage")
-    (bin_dir / "sips").chmod(0o755)
+    # kernel refuses it with OSError rather than a non-zero exit status.  On
+    # Windows ``shutil.which`` prefers ``.exe`` over the ``.cmd`` shim, and a
+    # non-PE ``.exe`` is refused with ``WinError 193``.
+    garbage = bin_dir / ("sips.exe" if IS_WINDOWS else "sips")
+    garbage.write_bytes(b"\x7fELF garbage")
+    garbage.chmod(0o755)
     convert_dst = _dst_of(dict(_CONVERTERS)["heif-convert"])
-    _script(
-        bin_dir / "heif-convert",
-        "printf '"
-        + "".join(f"\\{byte:03o}" for byte in _TINY_JPEG)
-        + f"' > {convert_dst}\nexit 0\n",
-    )
+    _script(bin_dir / "heif-convert", _writes_then_exits(convert_dst, _TINY_JPEG, 0))
 
     assert heif_to_jpeg(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64) == _TINY_JPEG

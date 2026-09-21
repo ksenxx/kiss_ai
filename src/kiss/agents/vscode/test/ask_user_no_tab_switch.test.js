@@ -48,8 +48,7 @@ function makeWebview() {
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -70,8 +69,26 @@ function clickTab(win, tabId) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
-function askModal(win) {
-  return win.document.getElementById('ask-user-modal');
+// The composer is in answer mode while the tab on screen has a question.
+function answering(win) {
+  return win.document.body.classList.contains('ask-answering');
+}
+
+// The question itself is the "Question" transcript panel of the
+// ask_user_question tool call, which the daemon broadcasts before askUser.
+function askQuestionCall(win, question, tabId) {
+  send(win, {
+    type: 'tool_call',
+    name: 'ask_user_question',
+    extras: {question},
+    callId: 7,
+    tabId,
+    ts: Date.now(),
+  });
+}
+
+function questionPanel(win) {
+  return win.document.querySelector('#output .tc-question');
 }
 
 function attentionGlyph(win, tabId) {
@@ -93,6 +110,7 @@ function testBackgroundAskDoesNotSwitchTabs() {
   const otherTab = api.getActiveTabId();
   assert.ok(otherTab && otherTab !== questionTab, 'second tab must be active');
 
+  askQuestionCall(win, 'Please provide the deployment token.', questionTab);
   send(win, {
     type: 'askUser',
     question: 'Please provide the deployment token.',
@@ -111,10 +129,9 @@ function testBackgroundAskDoesNotSwitchTabs() {
     otherTab,
     'the active tab DOM class must stay on the tab the user is using',
   );
-  assert.notStrictEqual(
-    askModal(win).style.display,
-    'flex',
-    'a background question must not pop a modal over the active tab',
+  assert.ok(
+    !answering(win),
+    'a background question must not put the active tab composer in answer mode',
   );
   assert.strictEqual(
     attentionGlyph(win, questionTab),
@@ -133,15 +150,19 @@ function testBackgroundAskDoesNotSwitchTabs() {
     questionTab,
     'clicking the waiting tab must switch to it',
   );
-  const modal = askModal(win);
-  assert.strictEqual(
-    modal.style.display,
-    'flex',
-    'the stored question must be shown once the user visits the tab',
+  assert.ok(
+    answering(win),
+    'the stored question must be answerable once the user visits the tab',
+  );
+  const panel = questionPanel(win);
+  assert.ok(panel, 'the Question panel must be in the visited transcript');
+  assert.ok(
+    panel.textContent.includes('Please provide the deployment token.'),
+    'the Question panel must show the original question text',
   );
   assert.ok(
-    modal.textContent.includes('Please provide the deployment token.'),
-    'the remounted modal must show the original question text',
+    panel.classList.contains('tc-question-pending'),
+    'the panel is marked pending while the answer is outstanding',
   );
   assert.strictEqual(
     attentionGlyph(win, questionTab),
@@ -149,10 +170,8 @@ function testBackgroundAskDoesNotSwitchTabs() {
     'visiting the tab must clear its attention indicator',
   );
 
-  const input = modal.querySelector('.ask-user-input');
-  assert.ok(input, 'ask-user input must be mounted for the active tab');
-  input.value = 'tok_live_123';
-  modal.querySelector('.ask-user-submit').click();
+  win.document.getElementById('task-input').value = 'tok_live_123';
+  win.document.getElementById('send-btn').click();
   assert.ok(
     posted.some(
       msg =>
@@ -160,18 +179,19 @@ function testBackgroundAskDoesNotSwitchTabs() {
         msg.tabId === questionTab &&
         msg.answer === 'tok_live_123',
     ),
-    'submitting the remounted modal must answer the question tab',
+    'sending the composer text must answer the question tab',
   );
 
   win.close();
   console.log('  ok - background askUser never steals focus');
 }
 
-function testActiveTabAskShowsModalImmediately() {
+function testActiveTabAskAnswerableImmediately() {
   const {win} = makeWebview();
   const api = win._testApi;
   const activeTab = api.getActiveTabId();
 
+  askQuestionCall(win, 'Which branch should I push?', activeTab);
   send(win, {
     type: 'askUser',
     question: 'Which branch should I push?',
@@ -183,24 +203,23 @@ function testActiveTabAskShowsModalImmediately() {
     activeTab,
     'the active tab must stay active',
   );
-  const modal = askModal(win);
-  assert.strictEqual(
-    modal.style.display,
-    'flex',
-    'askUser for the active tab must show the modal immediately',
-  );
   assert.ok(
-    modal.textContent.includes('Which branch should I push?'),
-    'the modal must show the question text',
+    answering(win),
+    'askUser for the active tab must put the composer in answer mode at once',
+  );
+  const panel = questionPanel(win);
+  assert.ok(
+    panel && panel.textContent.includes('Which branch should I push?'),
+    'the Question panel must show the question text',
   );
   assert.strictEqual(
     attentionGlyph(win, activeTab),
     '',
-    'the active tab shows the modal, so it needs no tab-bar indicator',
+    'the active tab shows the question, so it needs no tab-bar indicator',
   );
 
   win.close();
-  console.log('  ok - active-tab askUser still shows the modal at once');
+  console.log('  ok - active-tab askUser is answerable at once');
 }
 
 function testAnsweringClearsBackgroundIndicator() {
@@ -247,10 +266,9 @@ function testAskUserForUnknownTabIsIgnored() {
     activeBefore,
     'askUser for an unknown foreign tab must not switch local tabs',
   );
-  assert.notStrictEqual(
-    askModal(win).style.display,
-    'flex',
-    'askUser for an unknown foreign tab must not show a modal locally',
+  assert.ok(
+    !answering(win),
+    'askUser for an unknown foreign tab must not enter answer mode locally',
   );
 
   win.close();
@@ -259,7 +277,7 @@ function testAskUserForUnknownTabIsIgnored() {
 
 function runTests() {
   testBackgroundAskDoesNotSwitchTabs();
-  testActiveTabAskShowsModalImmediately();
+  testActiveTabAskAnswerableImmediately();
   testAnsweringClearsBackgroundIndicator();
   testAskUserForUnknownTabIsIgnored();
 }

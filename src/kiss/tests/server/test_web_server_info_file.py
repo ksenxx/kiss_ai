@@ -33,6 +33,7 @@ from websockets.asyncio.client import connect
 
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import _OPEN_FILE_MAX_BYTES, RemoteAccessServer
+from kiss.tests.conftest import posix_only, requires_unix_sockets
 
 
 def _find_free_port() -> int:
@@ -598,6 +599,7 @@ class TestGetInfoFileOverWss(IsolatedAsyncioTestCase):
         self.assertEqual(reply["content"], "")
         self.assertEqual(reply["sig"], "")
 
+    @posix_only("mkfifo")
     async def test_fifo_named_progress_md_replies_empty_without_hanging(
         self,
     ) -> None:
@@ -676,6 +678,7 @@ class TestGetInfoFileOverWss(IsolatedAsyncioTestCase):
         self.assertEqual(reply["token"], "")
 
 
+@requires_unix_sockets
 class TestGetInfoFileOverUds(unittest.TestCase):
     """A UDS-delivered ``getInfoFile`` gets a direct ``infoFile`` reply.
 

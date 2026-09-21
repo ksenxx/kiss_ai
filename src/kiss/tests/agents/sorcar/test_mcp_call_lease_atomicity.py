@@ -19,7 +19,6 @@ under test.
 from __future__ import annotations
 
 import os
-import pty
 import sys
 import threading
 import time
@@ -68,11 +67,12 @@ def real_stdin(
 
     Same plumbing as ``test_sorcar_mcp.py``: under pytest the std
     streams are in-memory capture objects whose ``.fileno()`` raises,
-    so the stdio transport cannot spawn its child.  A pty gives stdin a
-    real descriptor and a plain file serves as the child's stderr.
+    so the stdio transport cannot spawn its child.  ``os.devnull`` gives
+    stdin a real descriptor and a plain file serves as the child's stderr.
     """
-    master_fd, slave_fd = pty.openpty()
-    stdin_stream = os.fdopen(slave_fd, "r", closefd=True)
+    # ``os.devnull`` has a real descriptor on every platform (Windows has
+    # no pty) and nothing reads stdin while the client talks to the child.
+    stdin_stream = open(os.devnull, encoding="utf-8")
     errlog = (tmp_path / "mcp_errlog.txt").open("w", encoding="utf-8")
     monkeypatch.setattr(sys, "stdin", stdin_stream)
     monkeypatch.setattr(sys, "stderr", errlog)
@@ -86,7 +86,6 @@ def real_stdin(
     finally:
         errlog.close()
         stdin_stream.close()
-        os.close(master_fd)
 
 
 def _stdio_config(tmp_path: Path, name: str) -> MCPServerConfig:

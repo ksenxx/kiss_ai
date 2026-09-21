@@ -29,6 +29,7 @@ import yaml
 
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.core.kiss_error import KISSError
+from kiss.tests.conftest import posix_only
 
 FINAL_TEXT = "sorcar-run-to-completion done."
 
@@ -77,6 +78,7 @@ def _install_fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     return record_dir
 
 
+@posix_only("shebang claude shim on PATH cannot shadow the real CLI on Windows")
 def test_relentless_passes_work_dir_as_cli_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

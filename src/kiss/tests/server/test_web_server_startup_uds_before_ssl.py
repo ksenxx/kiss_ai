@@ -46,6 +46,9 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.server.web_server as _wsmod
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
+
+pytestmark = requires_unix_sockets
 
 _SSL_DELAY_SECS = 3.0
 

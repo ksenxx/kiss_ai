@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 
@@ -48,7 +49,7 @@ def test_is_pid_alive_self() -> None:
 
 
 def test_is_pid_alive_dead_pid() -> None:
-    proc = subprocess.Popen(["true"])
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
     proc.wait()
     time.sleep(0.05)
     assert ws._is_pid_alive(proc.pid) is False
@@ -119,7 +120,7 @@ def test_adopt_returns_none_when_pidfile_missing(tmp_path, monkeypatch) -> None:
 def test_adopt_returns_none_when_pid_dead(tmp_path, monkeypatch) -> None:
     pidfile = tmp_path / "cloudflared.pid"
     monkeypatch.setattr(ws, "_CLOUDFLARED_PIDFILE", pidfile)
-    proc = subprocess.Popen(["true"])
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
     proc.wait()
     time.sleep(0.05)
     ws._save_cloudflared_pidfile(proc.pid, 20240, "https://x.example.com")
@@ -139,7 +140,7 @@ def test_adopt_returns_none_when_metrics_unhealthy(
     """
     pidfile = tmp_path / "cloudflared.pid"
     monkeypatch.setattr(ws, "_CLOUDFLARED_PIDFILE", pidfile)
-    proc = subprocess.Popen(["sleep", "30"])
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         ws._save_cloudflared_pidfile(proc.pid, 1, "https://x.example.com")
         assert ws._try_adopt_existing_cloudflared() is None

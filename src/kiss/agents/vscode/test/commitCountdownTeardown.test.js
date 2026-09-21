@@ -66,6 +66,7 @@ const vscodeStub = {
   },
   Uri: {
     file: p => ({fsPath: p, scheme: 'file', toString: () => `file://${p}`}),
+    joinPath: (base, ...parts) => vscodeStub.Uri.file(path.join(base.fsPath, ...parts)),
   },
   EventEmitter: class {
     constructor() {

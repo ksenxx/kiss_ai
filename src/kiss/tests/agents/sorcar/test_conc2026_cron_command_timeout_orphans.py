@@ -33,6 +33,13 @@ import pytest
 
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar._concurrency import pid_alive
+from kiss.tests.conftest import IS_WINDOWS
+
+# The pid the tests record and probe must be an OS pid.  Under Git bash on
+# Windows ``$!`` is the MSYS-internal pid, which differs from the Windows
+# pid; ``/proc/<pid>/winpid`` maps it.  Probing (or killing) an MSYS pid
+# as if it were a Windows pid targets an unrelated process.
+_BG_PID = "$(cat /proc/$!/winpid)" if IS_WINDOWS else "$!"
 
 
 def _wait_pid_dead(pid: int, timeout_s: float = 5.0) -> bool:
@@ -46,7 +53,14 @@ def _wait_pid_dead(pid: int, timeout_s: float = 5.0) -> bool:
 
 
 def _is_zombie(pid: int) -> bool:
-    """Whether *pid* is a zombie (dead but not yet reaped by init)."""
+    """Whether *pid* is a zombie (dead but not yet reaped by init).
+
+    Without ``/proc`` (Windows, macOS) nothing can be a zombie here and
+    ``pid_alive`` alone decides; a missing ``/proc/<pid>`` where ``/proc``
+    exists means the process is gone.
+    """
+    if not os.path.isdir("/proc"):
+        return False
     try:
         with open(f"/proc/{pid}/stat", encoding="ascii", errors="replace") as f:
             fields = f.read().rpartition(")")[2].split()
@@ -64,8 +78,8 @@ def test_timed_out_command_job_kills_descendants(tmp_path: Path) -> None:
     # The background child would prove it survived by touching the
     # marker after the timeout window.
     command = (
-        f"(sleep 2; touch {pid_file.with_name('late-write')}) & "
-        f"echo $! > {pid_file}; sleep 300"
+        f"(sleep 2; touch {pid_file.with_name('late-write').as_posix()}) & "
+        f"echo {_BG_PID} > {pid_file.as_posix()}; sleep 300"
     )
     job = {"id": "t1", "command": command}
     start = time.monotonic()
@@ -93,11 +107,13 @@ def test_timed_out_command_job_kills_descendants(tmp_path: Path) -> None:
         )
         assert not marker.exists()
     finally:
-        # Never leak a sleeping tree out of the test run.
-        for pid in (child_pid,):
+        # Never leak a sleeping tree out of the test run -- but only
+        # signal a pid that is still alive: a dead pid may already have
+        # been reused by an unrelated process.
+        if pid_alive(child_pid):
             try:
-                os.kill(pid, 9)
-            except (ProcessLookupError, PermissionError):
+                os.kill(child_pid, 9)
+            except OSError:  # gone between the probe and the kill
                 pass
 
 
@@ -187,7 +203,7 @@ def test_timed_out_command_reports_error_via_execute_job(
     job = {
         "id": "t-exec",
         "name": "timeout-job",
-        "command": f"(sleep 300) & echo $! > {pid_file}; sleep 300",
+        "command": f"(sleep 300) & echo {_BG_PID} > {pid_file.as_posix()}; sleep 300",
         "deliver": "local",
         "enabled": True,
         "schedule": "every 1h",
@@ -209,10 +225,11 @@ def test_timed_out_command_reports_error_via_execute_job(
     try:
         assert _wait_pid_dead(child_pid)
     finally:
-        try:
-            os.kill(child_pid, 9)
-        except (ProcessLookupError, PermissionError):
-            pass
+        if pid_alive(child_pid):
+            try:
+                os.kill(child_pid, 9)
+            except OSError:  # gone between the probe and the kill
+                pass
 
 
 def test_proc_descendants_sees_multi_level_tree() -> None:

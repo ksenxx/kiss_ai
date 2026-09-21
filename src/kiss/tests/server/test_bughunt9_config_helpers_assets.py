@@ -40,12 +40,30 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from kiss.agents.sorcar.commit_message import clean_llm_output
 from kiss.server.user_assets import ensure_user_asset_from_default
+
+
+def _unlink_when_free(path: Path) -> None:
+    """Unlink *path*, waiting out a reader that momentarily holds it open.
+
+    Windows refuses to delete a file another handle has open (the racing
+    reader's ``read_text``); POSIX never raises here.
+    """
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.002)
 
 
 class TestCleanLlmOutputPairedQuotesOnly:
@@ -117,7 +135,9 @@ class TestUserAssetSeedIsAtomic:
             while not stop.is_set():
                 try:
                     text = target.read_text()
-                except FileNotFoundError:
+                except (FileNotFoundError, PermissionError):
+                    # Missing, or (Windows) opened while the seed's
+                    # os.replace / the unlink holds the name.
                     continue
                 if text != content:
                     bad.append(len(text))
@@ -130,7 +150,7 @@ class TestUserAssetSeedIsAtomic:
             for _ in range(400):
                 if stop.is_set():
                     break
-                target.unlink(missing_ok=True)
+                _unlink_when_free(target)
                 result = ensure_user_asset_from_default(name, content)
                 assert result == target
         finally:

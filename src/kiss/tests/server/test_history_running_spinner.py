@@ -4,7 +4,7 @@
 # add your name here
 
 
-"""Server-only tests extracted from ``kiss.tests.agents.vscode.test_history_running_green_circle``.
+"""Server-only tests extracted from ``kiss.tests.agents.vscode.test_history_running_spinner``.
 
 Moved here because their full dependency closure touches only
 kiss.core, kiss.agents.sorcar and kiss.server (task: relocate
@@ -166,7 +166,7 @@ def test_backend_overrides_failed_sentinel_for_running_task() -> None:
     This is the "crash-then-resume" path: the previous run left a
     failure sentinel in ``task_history.result``, but the agent has
     been reattached and is now actively running.  The History row
-    must show the green pulsing dot, NOT the red failed dot.
+    must show the spinner, NOT the red cross.
     """
     event = _history_event_from_real_backend(
         result="Agent Failed Abruptly",

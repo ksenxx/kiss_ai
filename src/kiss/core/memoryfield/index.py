@@ -6,9 +6,12 @@
 
 The index is a single SQLite file inside the memory directory, named after
 the embedding model (``text-embedding-3-small.sqlite3``). It stores one row
-per page: the page's frontmatter, its sha256 and its unit-length embedding
-as a float32 BLOB. Rows are refreshed incrementally: a page is re-embedded
-only when its sha256 changes, and rows for deleted pages are dropped.
+per page: the page's frontmatter, its sha256, its unit-length embedding
+as a float32 BLOB and a ``revision`` number that is unique to each write
+of the index. Rows are refreshed incrementally: a page is re-embedded only when
+its sha256 changes, and rows for deleted pages are dropped. Every agent
+process syncs the same index file, so writes are compare-and-swaps on the
+``revision`` token (see :meth:`VectorIndex.sync`).
 
 Search is an exhaustive cosine scan using :func:`math.sumprod`. At
 memoryfield scale (hundreds to a few thousand pages) this runs in
@@ -52,6 +55,14 @@ HASHED_EMBEDDING_DIMS = 1024
 # code as unchanged and the two versions never rebuild the index back and
 # forth.  Bump this whenever the mapping changes.
 EMBEDDING_INPUT_FORMAT = "2"
+
+# Columns added to the ``pages`` table after its first release, with the
+# definition used both in CREATE TABLE and in the ALTER TABLE migration
+# that :meth:`VectorIndex._connect` runs on older index files.
+_ADDED_COLUMNS = (
+    ("input_format", "TEXT NOT NULL DEFAULT '1'"),
+    ("revision", "INTEGER NOT NULL DEFAULT 0"),
+)
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
@@ -269,17 +280,19 @@ class VectorIndex:
                 " last_modified REAL NOT NULL,"
                 " sha256 BLOB NOT NULL,"
                 " embedding BLOB NOT NULL,"
-                " input_format TEXT NOT NULL DEFAULT '1')"
+                " input_format TEXT NOT NULL DEFAULT '1',"
+                " revision INTEGER NOT NULL DEFAULT 0)"
             )
             columns = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
-            if "input_format" not in columns:
-                # Index created before the input_format column existed; the
-                # default '1' marks its rows for re-embedding (they were
-                # embedded from the whole raw file, frontmatter included).
+            for column, definition in _ADDED_COLUMNS:
+                if column in columns:
+                    continue
+                # Index created before this column existed.  input_format's
+                # default '1' marks old rows for re-embedding (they were
+                # embedded from the whole raw file, frontmatter included);
+                # revision's default 0 is just a valid CAS token.
                 try:
-                    conn.execute(
-                        "ALTER TABLE pages ADD COLUMN input_format TEXT NOT NULL DEFAULT '1'"
-                    )
+                    conn.execute(f"ALTER TABLE pages ADD COLUMN {column} {definition}")
                 except sqlite3.OperationalError:
                     # Another process added the column between the PRAGMA
                     # read and the ALTER; the schema is as desired either
@@ -292,6 +305,7 @@ class VectorIndex:
                 "INSERT OR IGNORE INTO meta (key, value) VALUES ('model_code', ?)",
                 (self.model_code,),
             )
+            conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('revision', '0')")
             conn.commit()
             stored_code = conn.execute(
                 "SELECT value FROM meta WHERE key = 'model_code'"
@@ -334,31 +348,62 @@ class VectorIndex:
         page that changes while it is being embedded is left for the next
         sync rather than stored with a stale vector.
 
+        Every write is an optimistic compare-and-swap against the snapshot
+        of the index this sync started from.  Each row carries a
+        ``revision`` drawn from a counter in the ``meta`` table that only
+        ever increases, so no two writes to the index ever share one; a row
+        is inserted only if still absent, and updated or deleted only while
+        its ``revision`` still equals the snapshot's.  A row that another
+        sync inserted, updated, deleted or deleted-and-re-inserted after the
+        snapshot — even with byte-identical content — therefore never
+        matches, so a sync never overwrites or removes a row written by a
+        concurrent sync.  Writes skipped this way are counted in no
+        category.  Two things the CAS cannot see: the disk — a page deleted
+        after its post-embed check keeps (or gains) a row until the next
+        sync drops it, exactly as with a single sync — and a still-running
+        process on the pre-``revision`` code, whose rows land with the
+        column default ``0`` and are matched (or blindly replaced by that
+        process) until every writer runs this version.  Both are healed by
+        the next sync because the ``sha256`` check is unaffected.
+
         Returns:
-            A :class:`SyncReport` with per-category counts.
+            A :class:`SyncReport` with per-category counts of the writes
+            that were actually applied.
         """
         added = updated = removed = unchanged = 0
         with closing(self._connect()) as conn:
             stored = {
-                row[0]: (bytes(row[1]), row[2])
-                for row in conn.execute("SELECT filename, sha256, input_format FROM pages")
+                row[0]: (bytes(row[1]), row[2], row[3])
+                for row in conn.execute(
+                    "SELECT filename, sha256, input_format, revision FROM pages"
+                )
             }
 
         rows: list[tuple[str, str, float, bytes, bytes, str]] = []
         on_disk: set[str] = set()
         for name in self.memory.page_names():
             filename = f"{name}.md"
-            on_disk.add(filename)
             path = self.memory.page_path(name)
-            data = path.read_bytes()
+            try:
+                data = path.read_bytes()
+            except FileNotFoundError:
+                # Deleted by another process since page_names(): its row
+                # (if any) is stale and is removed below.
+                continue
+            on_disk.add(filename)
             digest = hashlib.sha256(data).digest()
-            if stored.get(filename) == (digest, EMBEDDING_INPUT_FORMAT):
+            if stored.get(filename, (None, None, None))[:2] == (digest, EMBEDDING_INPUT_FORMAT):
                 unchanged += 1
                 continue
             raw = data.decode("utf-8", errors="replace")
             frontmatter, _ = split_frontmatter(raw)
             vector = normalize(self.embed(self.embedding_input(raw)))
-            if hashlib.sha256(path.read_bytes()).digest() != digest:
+            try:
+                changed = hashlib.sha256(path.read_bytes()).digest() != digest
+                mtime = path.stat().st_mtime
+            except FileNotFoundError:
+                changed, mtime = True, 0.0  # deleted mid-embed; skipped below
+            if changed:
                 logger.info(
                     "%s changed while being embedded; it will be indexed on the next sync", filename
                 )
@@ -367,27 +412,56 @@ class VectorIndex:
                 (
                     filename,
                     json.dumps(frontmatter, default=str),
-                    path.stat().st_mtime,
+                    mtime,
                     digest,
                     serialize_float32(vector),
                     EMBEDDING_INPUT_FORMAT,
                 )
             )
-            if filename in stored:
-                updated += 1
-            else:
-                added += 1
 
         stale = stored.keys() - on_disk
+        if not rows and not stale:
+            return SyncReport(added=0, updated=0, removed=0, unchanged=unchanged)
+
+        skipped_message = "%s row changed or was removed after this sync started; skipping it"
         with closing(self._connect()) as conn, conn:
-            conn.executemany(
-                "INSERT OR REPLACE INTO pages"
-                " (filename, frontmatter, last_modified, sha256, embedding, input_format)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                rows,
+            # Take the write lock up front so reading and advancing the
+            # revision counter is atomic with the row writes it numbers.
+            conn.execute("BEGIN IMMEDIATE")
+            revision = int(
+                conn.execute("SELECT value FROM meta WHERE key = 'revision'").fetchone()[0]
             )
-            conn.executemany("DELETE FROM pages WHERE filename = ?", [(f,) for f in stale])
-        removed = len(stale)
+            for row in rows:
+                filename = row[0]
+                snapshot = stored.get(filename)
+                revision += 1
+                if snapshot is None:
+                    applied = conn.execute(
+                        "INSERT OR IGNORE INTO pages"
+                        " (filename, frontmatter, last_modified, sha256, embedding, input_format,"
+                        " revision) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (*row, revision),
+                    ).rowcount
+                    added += applied
+                else:
+                    applied = conn.execute(
+                        "UPDATE pages SET frontmatter = ?, last_modified = ?, sha256 = ?,"
+                        " embedding = ?, input_format = ?, revision = ?"
+                        " WHERE filename = ? AND revision = ?",
+                        (*row[1:], revision, filename, snapshot[2]),
+                    ).rowcount
+                    updated += applied
+                if not applied:
+                    logger.info(skipped_message, filename)
+            for filename in stale:
+                applied = conn.execute(
+                    "DELETE FROM pages WHERE filename = ? AND revision = ?",
+                    (filename, stored[filename][2]),
+                ).rowcount
+                removed += applied
+                if not applied:
+                    logger.info(skipped_message, filename)
+            conn.execute("UPDATE meta SET value = ? WHERE key = 'revision'", (str(revision),))
         return SyncReport(added=added, updated=updated, removed=removed, unchanged=unchanged)
 
     def search(self, query: str, k: int = 5, min_score: float = 0.0) -> list[SearchHit]:

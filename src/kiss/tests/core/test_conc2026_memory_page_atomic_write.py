@@ -23,11 +23,21 @@ import json
 import os
 import stat
 import threading
+import time
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from kiss.core.memoryfield.pages import MemoryDir
-from kiss.core.utils import atomic_write_text
+from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
+from kiss.tests.conftest import IS_WINDOWS, posix_only
+
+# Windows has no umask-derived mode bits and its chmod only toggles the
+# read-only flag (S_IMODE is always 0o666 or 0o444), so the permission
+# contract below is a POSIX one.  The atomic publication itself is
+# exercised on every platform by the other tests in this module.
+_mode_bits_only = posix_only("umask-derived and chmod-preserved mode bits")
 
 _REWRITES = 400
 
@@ -76,6 +86,28 @@ def test_concurrent_reader_never_sees_torn_page(tmp_path: Path) -> None:
     assert not anomalies, anomalies[0]
 
 
+def test_page_reader_gives_up_on_a_real_permission_error(tmp_path: Path) -> None:
+    """The reader's wait for an in-flight replace is bounded.
+
+    ``read_bytes_waiting_for_writer`` retries ``PermissionError`` only on
+    Windows and only for a second, so a path that is genuinely denied
+    still raises instead of hanging.  On POSIX a ``0o000`` file is denied
+    on the first attempt; on Windows opening a directory is denied on
+    every attempt, so it is the one-second deadline that gives up.
+    """
+    if IS_WINDOWS:
+        unreadable = tmp_path
+    else:
+        unreadable = tmp_path / "locked.md"
+        unreadable.write_text("x", encoding="utf-8")
+        unreadable.chmod(0o000)
+    started = time.monotonic()
+    with pytest.raises(PermissionError):
+        read_bytes_waiting_for_writer(unreadable)
+    if IS_WINDOWS:
+        assert time.monotonic() - started >= 1.0, "gave up before the deadline"
+
+
 def test_atomic_write_keeps_create_and_update_semantics(tmp_path: Path) -> None:
     """The atomic write must not change ``write``'s observable behaviour.
 
@@ -108,6 +140,7 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
+@_mode_bits_only
 def test_atomic_write_keeps_page_permissions(tmp_path: Path) -> None:
     """Atomic publication must not silently change page permissions.
 
@@ -139,6 +172,7 @@ def test_atomic_write_keeps_page_permissions(tmp_path: Path) -> None:
         os.umask(old_umask)
 
 
+@_mode_bits_only
 def test_atomic_write_text_helper_permission_contract(tmp_path: Path) -> None:
     """The shared helper's create/update/explicit-mode permission rules.
 
@@ -192,6 +226,7 @@ def test_atomic_write_text_helper_permission_contract(tmp_path: Path) -> None:
         os.umask(old_umask)
 
 
+@_mode_bits_only
 def test_fresh_config_with_secrets_is_private(tmp_path: Path) -> None:
     """A fresh password-bearing ``config.json`` must never be group/world-readable.
 

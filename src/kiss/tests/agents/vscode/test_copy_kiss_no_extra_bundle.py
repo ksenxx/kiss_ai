@@ -19,6 +19,12 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from kiss.tests.conftest import posix_only
+
+# copy-kiss.sh is the release-packaging step of scripts/release.sh, which
+# only runs on Darwin/Linux (install.sh rejects every other OS).
+pytestmark = posix_only("copy-kiss.sh is a bash release-packaging script")
+
 REPO_ROOT = Path(__file__).resolve().parents[5]
 COPY_KISS_SH = REPO_ROOT / "src" / "kiss" / "agents" / "vscode" / "copy-kiss.sh"
 SKILLS_DIR_REL = "src/kiss/agents/claude_skills"

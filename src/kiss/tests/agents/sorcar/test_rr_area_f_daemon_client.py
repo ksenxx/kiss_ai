@@ -73,7 +73,7 @@ class TestResolveAgentPath:
         with pytest.raises(
             ValueError,
             match=r"agent_path must be a string path to a Python file, "
-                  r"got PosixPath",
+                  rf"got {type(script).__name__}",
         ):
             resolve_agent_path(script)  # type: ignore[arg-type]
 

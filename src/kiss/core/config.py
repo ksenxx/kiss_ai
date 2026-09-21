@@ -5,6 +5,7 @@
 
 """Configuration Pydantic models for KISS agent settings."""
 
+import math
 import os
 import random
 import threading
@@ -15,6 +16,42 @@ from pydantic import BaseModel, Field
 
 _PROJECT_DIR = Path(__file__).resolve().parents[3]
 _ARTIFACTS_DIR_NAME = ".kiss.artifacts"
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Read a boolean toggle from the environment.
+
+    Args:
+        name: Environment variable name.
+        default: Value when the variable is unset or empty.
+
+    Returns:
+        ``False`` for ``0``, ``false``, ``no``, ``off`` (case-insensitive),
+        ``True`` for any other non-empty value, *default* otherwise.
+    """
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw not in ("0", "false", "no", "off")
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a finite float from the environment, falling back to *default* on junk."""
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = float(raw) if raw else default
+    except ValueError:
+        return default
+    return value if math.isfinite(value) else default
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an int from the environment, falling back to *default* on junk."""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
 
 DEFAULT_MAX_BUDGET = 100.0
 """The product default spend cap, in USD, for one agent run.
@@ -153,6 +190,73 @@ class Config(BaseModel):
     MOONSHOT_API_KEY: str = Field(
         default_factory=lambda: os.getenv("MOONSHOT_API_KEY", ""),
         description="Moonshot AI (Kimi) API key (can also be set via MOONSHOT_API_KEY env var)",
+    )
+    # Token-cost levers (projects/cost-levers-implementation-plan.md).
+    # Each is a plain toggle read from a ``KISS_*`` environment
+    # variable so a regression is a flag flip, not a revert.
+    read_dedupe: bool = Field(
+        default_factory=lambda: _env_flag("KISS_READ_DEDUPE", True),
+        description=(
+            "Read tool returns a one-line 'unchanged since your earlier Read' "
+            "stub instead of re-sending a file range that is still in the "
+            "model's context (KISS_READ_DEDUPE=0 disables)."
+        ),
+    )
+    read_outline_lines: int = Field(
+        default_factory=lambda: _env_int("KISS_READ_OUTLINE_LINES", 2000),
+        description=(
+            "A Read without start_line of a file longer than this many lines "
+            "returns a symbol outline instead of the first 2,000 lines "
+            "(0 disables; KISS_READ_OUTLINE_LINES)."
+        ),
+    )
+    tool_output_compaction: bool = Field(
+        default_factory=lambda: _env_flag("KISS_TOOL_OUTPUT_COMPACTION", True),
+        description=(
+            "Replace old, large tool outputs in the model conversation with "
+            "short stubs once the context grows past 100k tokens "
+            "(KISS_TOOL_OUTPUT_COMPACTION=0 disables)."
+        ),
+    )
+    context_limit_fraction: float = Field(
+        default_factory=lambda: _env_float("KISS_CONTEXT_LIMIT_FRACTION", 0.7),
+        description=(
+            "Fraction of the model's context window at which an agent session "
+            "hands off with a trajectory summary (KISS_CONTEXT_LIMIT_FRACTION)."
+        ),
+    )
+    tool_profiles: bool = Field(
+        default_factory=lambda: _env_flag("KISS_TOOL_PROFILES", True),
+        description=(
+            "Reviewer sub-agents get the read-only 'review' tool profile "
+            "instead of the full toolset (KISS_TOOL_PROFILES=0 disables)."
+        ),
+    )
+    review_budget_fraction: float = Field(
+        default_factory=lambda: _env_float("KISS_REVIEW_BUDGET_FRACTION", 0.0),
+        description=(
+            "Fallback share of a top-level task's budget that reviewer "
+            "sub-agents may spend in total when the task prompt names none "
+            "(the prompt's own 'at most N% of the budget for reviewing' wins); "
+            "review fan-outs beyond it are refused or clipped "
+            "(KISS_REVIEW_BUDGET_FRACTION; 0 or >= 1 = no fallback cap)."
+        ),
+    )
+    chat_history_digest: bool = Field(
+        default_factory=lambda: _env_flag("KISS_CHAT_HISTORY_DIGEST", True),
+        description=(
+            "Chat prompts carry the full result of only the last two prior "
+            "tasks and a short digest of older ones "
+            "(KISS_CHAT_HISTORY_DIGEST=0 disables)."
+        ),
+    )
+    dispatch_path_rewrite: bool = Field(
+        default_factory=lambda: _env_flag("KISS_DISPATCH_PATH_REWRITE", True),
+        description=(
+            "Sub-agent task text that names the parent repository path is "
+            "rewritten to the active worktree path at dispatch "
+            "(KISS_DISPATCH_PATH_REWRITE=0 disables)."
+        ),
     )
     max_budget: float = Field(
         default=DEFAULT_MAX_BUDGET,

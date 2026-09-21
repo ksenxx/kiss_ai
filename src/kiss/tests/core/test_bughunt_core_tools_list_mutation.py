@@ -16,12 +16,14 @@ a fake ``claude`` CLI on PATH whose run-to-completion output is the final
 text ``done`` — and asserts the caller's list is unchanged afterwards.
 """
 
-import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
 
 from kiss.core.kiss_agent import KISSAgent
+from kiss.tests.conftest import install_cli_script
 
 _EVENTS = [
     {
@@ -38,9 +40,12 @@ _EVENTS = [
     },
 ]
 
-_FAKE_CLAUDE = "#!/bin/bash\n/bin/cat > /dev/null\n" + "".join(
-    f"echo '{json.dumps(event)}'\n" for event in _EVENTS
-)
+_FAKE_CLAUDE = f"""#!{sys.executable}
+import json, sys
+sys.stdin.read()
+for event in {_EVENTS!r}:
+    print(json.dumps(event), flush=True)
+"""
 
 
 def echo_tool(text: str) -> str:
@@ -56,10 +61,8 @@ def test_run_does_not_mutate_caller_tools_list(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """After run(), the caller's tools list must be exactly as passed in."""
-    cli = tmp_path / "claude"
-    cli.write_text(_FAKE_CLAUDE)
-    cli.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tmp_path))
+    install_cli_script(tmp_path / "claude", _FAKE_CLAUDE)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
 
     shared_tools = [echo_tool]
     agent = KISSAgent("bughunt-tools-mutation")

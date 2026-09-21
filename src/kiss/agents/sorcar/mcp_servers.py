@@ -1259,7 +1259,7 @@ def make_mcp_tool_wrapper(
 # so such names are pre-reserved and the MCP tool gets a numeric suffix
 # instead.
 _RESERVED_TOOL_NAMES = frozenset({
-    "Bash", "Read", "Edit", "Write", "finish",
+    "Bash", "bash_job", "run_commands_parallel", "Read", "Edit", "Write", "finish",
     "go_to_url", "click", "type_text", "press_key", "scroll",
     "screenshot", "get_page_content", "show_browser", "close_browser",
     "skill", "ask_user_question", "talk", "set_model", "decide",

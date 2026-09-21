@@ -38,8 +38,11 @@ import unittest
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.conftest import posix_only
 
 _SCRIPT = Path(__file__).resolve().parents[4] / "scripts" / "sync-task-db.sh"
+
+pytestmark = posix_only("runs the bash sync-task-db.sh with a bash ssh stand-in")
 
 _FAKE_SSH = """#!/bin/bash
 # Stand-in for ssh: run the command locally with HOME inside the sandbox.

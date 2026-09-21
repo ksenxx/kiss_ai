@@ -11,6 +11,7 @@ Provides :class:`GitWorktree` (frozen dataclass for worktree state),
 
 from __future__ import annotations
 
+import contextlib
 import enum
 import logging
 import os
@@ -25,7 +26,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
-from kiss.agents.sorcar._concurrency import _fcntl, _race_delay, pid_alive
+from kiss.agents.sorcar._concurrency import _race_delay
+from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.core.processes import (
+    SIGKILL,
+    kill_process_group,
+    pid_alive,
+    popen_process_group,
+    process_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,20 +50,14 @@ def _file_lock(handle: IO[Any]) -> Iterator[None]:
     open file description, so it serialises across processes and is
     released automatically if the holder dies.
 
-    On platforms without ``fcntl`` (Windows) this degrades to a no-op,
-    matching the previous in-process-only behaviour.
-
     Args:
         handle: An open file object to lock.
     """
-    if _fcntl is None:  # pragma: no cover — Windows has no fcntl
-        yield
-        return
-    _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+    lock_exclusive(handle)
     try:
         yield
     finally:
-        _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+        unlock(handle)
 
 
 _reclaim_lock_reentry = threading.local()
@@ -134,9 +137,8 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     dirty-state copy) while still calling the reclaim / sweep / create
     helpers that take the flock internally.
 
-    Degrades to the previous in-process-only behaviour when ``fcntl``
-    is unavailable (Windows), the common dir cannot be resolved, or
-    the lock file cannot be opened.
+    Degrades to the previous in-process-only behaviour when the common
+    dir cannot be resolved or the lock file cannot be opened.
 
     Args:
         repo: Git repo root path.
@@ -144,9 +146,6 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     Yields:
         Nothing; the lock is held for the duration of the block.
     """
-    if _fcntl is None:  # pragma: no cover — Windows has no fcntl
-        yield
-        return
     result = _git("rev-parse", "--git-common-dir", cwd=repo)
     if result.returncode != 0:  # pragma: no cover — not a git repo
         yield
@@ -167,12 +166,6 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     except OSError:  # pragma: no cover — unwritable git dir
         yield
         return
-    if _fcntl is None:  # pragma: no cover — Windows has no fcntl
-        try:
-            yield
-        finally:
-            handle.close()
-        return
     # Marker registration and flock lifetime are fused into ONE frame:
     # the re-entry marker is valid exactly while `token` (the handle's
     # only owner besides this frame) is alive.  Whatever bytecode
@@ -182,13 +175,13 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     # both together; running the finally withdraws both in order.
     token = _ReclaimLockToken(handle)
     try:
-        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+        lock_exclusive(handle)
         held[lock_path] = weakref.ref(token)
         yield
     finally:
         held.pop(lock_path, None)
         try:
-            _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+            unlock(handle)
         finally:
             token.handle = None
             handle.close()
@@ -345,7 +338,7 @@ def _git(
         *args,
     ]
     env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
-    proc = subprocess.Popen(
+    proc = popen_process_group(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -353,27 +346,16 @@ def _git(
         encoding="utf-8",
         errors="surrogateescape",
         env=env,
-        start_new_session=os.name != "nt",
     )
     try:
         stdout, stderr = proc.communicate(timeout=_GIT_TIMEOUT_SECONDS)
         return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
         logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
-        if os.name != "nt":
-            try:
-                os.killpg(proc.pid, 9)
-            except ProcessLookupError:
-                pass
-        else:  # pragma: no cover - Windows CI is not available here
-            subprocess.run(  # noqa: S603, S607
-                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                capture_output=True,
-                timeout=5,
-                check=False,
-            )
-            if proc.poll() is None:
-                proc.kill()
+        with contextlib.suppress(OSError):  # group already gone
+            kill_process_group(proc.pid, SIGKILL)
+        if proc.poll() is None:
+            proc.kill()
         try:
             stdout, stderr = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:  # pragma: no cover - defensive
@@ -739,7 +721,14 @@ class GitWorktreeOps:
             True if the worktree was created AND stamped with this
             process's pid, False otherwise (nothing is left on disk).
         """
-        with _reclaim_process_lock(repo):
+        # ``repo_lock`` first, flock second — the file-wide order (see
+        # ``_reclaim_process_lock``).  The failed-stamp path below calls
+        # ``cleanup_partial`` -> ``remove``, which takes ``repo_lock``;
+        # taking only the flock here would invert the order against
+        # ``sweep_orphaned_state`` (repo_lock -> flock) and deadlock.
+        # ``repo_lock`` is an RLock, so callers already holding it are
+        # unaffected.
+        with repo_lock(repo), _reclaim_process_lock(repo):
             result = _git("worktree", "add", "-b", branch, str(wt_dir), cwd=repo)
             if result.returncode != 0:
                 logger.warning(
@@ -1545,6 +1534,12 @@ class GitWorktreeOps:
         owner pid lets :meth:`reclaim_orphaned_worktrees` in any
         process skip worktrees whose owner is still alive.
 
+        The pid alone is ambiguous once the owner has exited and the OS
+        has handed its pid to a stranger (routine on Windows, where pids
+        are recycled within seconds), so the owner's
+        :func:`process_identity` (start time + executable) is stored
+        beside it when available and :meth:`_owner_alive` compares both.
+
         Args:
             repo: Git repo root path.
             branch: The worktree branch name.
@@ -1552,6 +1547,12 @@ class GitWorktreeOps:
         Returns:
             True if the config was saved successfully.
         """
+        identity = process_identity(os.getpid())
+        if identity is not None and not GitWorktreeOps._save_branch_config(
+            repo, branch, "kiss-owner-identity", f"{os.getpid()}:{identity}",
+            "owner identity",
+        ):
+            return False
         return GitWorktreeOps._save_branch_config(
             repo, branch, "kiss-owner-pid", str(os.getpid()), "owner pid",
         )
@@ -1587,6 +1588,33 @@ class GitWorktreeOps:
             True when the process exists, False when it is gone.
         """
         return pid_alive(pid)
+
+    @staticmethod
+    def _owner_alive(repo: Path, branch: str, owner_pid: int) -> bool:
+        """Whether the process that stamped *branch* (:meth:`save_owner_pid`) still runs.
+
+        A live pid is not enough: the owner may have exited and the OS
+        may have recycled its pid.  When the stamp also recorded the
+        owner's :func:`process_identity` (prefixed with the pid it
+        describes), the current holder of the pid must match it; a stamp
+        without a matching identity (legacy, ``ps`` unavailable, or the
+        pid re-stamped by hand) falls back to the pid probe alone.
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch name.
+            owner_pid: The stamped owner pid.
+
+        Returns:
+            True when the stamping process is still alive.
+        """
+        if not GitWorktreeOps._pid_alive(owner_pid):
+            return False
+        stamped = GitWorktreeOps._load_branch_config(repo, branch, "kiss-owner-identity")
+        prefix = f"{owner_pid}:"
+        if stamped is None or not stamped.startswith(prefix):
+            return True
+        return process_identity(owner_pid) == stamped[len(prefix):]
 
     @staticmethod
     def save_spare_marker(repo: Path, branch: str) -> bool:
@@ -2329,6 +2357,191 @@ class GitWorktreeOps:
         _git("reset", "--hard", "HEAD", cwd=repo)
 
     @staticmethod
+    def begin_conflicted_merge(
+        repo: Path, branch: str, baseline: str | None,
+    ) -> list[str] | None:
+        """Apply *branch* onto HEAD, leaving conflicts in the tree to resolve.
+
+        The conflict-resolution counterpart of
+        :meth:`squash_merge_from_baseline` / :meth:`squash_merge_branch`,
+        run after one of those returned :attr:`MergeResult.CONFLICT` and
+        restored a clean tree.  Nothing is committed: with a *baseline*
+        the agent's net change (``baseline..branch``) is applied as ONE
+        three-way merge — a synthetic squashed commit with the branch's
+        tree and *baseline* as parent, cherry-picked with ``--no-commit``
+        (and the same ``-X theirs`` rule as the clean path) — so the
+        resolver sees a single set of conflicts instead of a stopped
+        multi-commit sequencer; without a baseline ``git merge --squash``
+        is used.
+
+        Args:
+            repo: Git repo root path, checked out on the target branch.
+            branch: The task branch to merge in.
+            baseline: The worktree's baseline commit SHA, or ``None`` for
+                a legacy worktree.
+
+        Returns:
+            The repository-relative paths left unmerged (the resolver's
+            work list); an empty list when the merge applied cleanly
+            and is staged; ``None`` when git failed for a reason other
+            than conflicts, in which case the tree has been restored.
+        """
+        before = GitWorktreeOps.status_porcelain(repo)
+        if baseline:
+            squashed = _git(
+                "commit-tree", f"{branch}^{{tree}}", "-p", baseline,
+                "-m", f"kiss: squashed {branch}", cwd=repo,
+            )
+            if squashed.returncode != 0:
+                logger.warning(
+                    "commit-tree for %s failed: %s", branch, squashed.stderr.strip(),
+                )
+                return None
+            args = ["cherry-pick", "--no-commit"]
+            if GitWorktreeOps._head_matches_baseline_parent(repo, baseline):
+                args.extend(["-X", "theirs"])
+            args.append(squashed.stdout.strip())
+        else:
+            args = ["merge", "--squash", branch]
+        result = _git(*args, cwd=repo)
+        if result.returncode == 0:
+            return []
+        conflicted = GitWorktreeOps.unresolved_paths(repo)
+        if not conflicted:
+            logger.warning(
+                "applying %s for conflict resolution failed without "
+                "conflicts: %s", branch, result.stderr.strip(),
+            )
+            GitWorktreeOps.abort_conflicted_merge(repo, before, "")
+            return None
+        return conflicted
+
+    @staticmethod
+    def unresolved_paths(repo: Path) -> list[str]:
+        """Return the repository-relative paths that are still unmerged."""
+        return GitWorktreeOps._diff_name_only(repo, "--diff-filter=U")
+
+    @staticmethod
+    def paths_with_conflict_markers(repo: Path, paths: list[str]) -> list[str]:
+        """Return those of *paths* whose staged content still has conflict markers.
+
+        Only the ``<<<<<<<`` and ``>>>>>>>`` marker lines are checked
+        (seven or more characters, so a ``conflict-marker-size``
+        attribute above the default is covered too): a bare ``=======``
+        line is also a Markdown setext underline, so matching it would
+        flag legitimately resolved files.  The paths are literal
+        pathspecs, so a name containing pathspec magic cannot break the
+        query, and a ``git grep`` failure (any exit code other than the
+        0 = matches / 1 = no matches pair) reports every path as
+        unresolved: this check guards a branch deletion, so it fails
+        closed.
+
+        Args:
+            repo: Git repo root path.
+            paths: Repository-relative paths to inspect (the files that
+                were conflicted).
+
+        Returns:
+            The subset of *paths* with markers left; empty when *paths*
+            is empty.
+        """
+        if not paths:
+            return []
+        result = _git(
+            "grep", "-l", "-z", "--cached", "-E", "-e", "^(<{7,}|>{7,})( |$)",
+            "--", *(f":(literal){p}" for p in paths), cwd=repo,
+        )
+        if result.returncode == 1:
+            return []
+        if result.returncode != 0:
+            logger.warning(
+                "git grep for conflict markers failed (%s); treating %s as "
+                "unresolved", result.stderr.strip(), paths,
+            )
+            return list(paths)
+        return [f for f in result.stdout.split("\0") if f]
+
+    @staticmethod
+    def finish_conflicted_merge(
+        repo: Path,
+        branch: str,
+        conflicted: list[str],
+        head_before: str,
+        user_prompt: str | None = None,
+        task_result: str | None = None,
+    ) -> MergeResult:
+        """Verify a resolved conflicted merge and commit it.
+
+        Accepts the resolution only when HEAD is still *head_before*,
+        every path is merged, none of the originally *conflicted* files
+        still carries a marker, and the index is non-empty.  Anything
+        else is refused: an empty index means the resolver discarded the
+        merge, and a moved HEAD means it committed on its own — the
+        commit may hold anything (a ``git reset --hard`` followed by an
+        unrelated commit reproduces the case), and there is no way to
+        prove it holds the merge.  Reporting SUCCESS in either case would
+        let the caller delete the only branch that holds the work, so
+        this check fails closed and the caller restores *head_before*.
+
+        Args:
+            repo: Git repo root path.
+            branch: The task branch being merged (for the commit message).
+            conflicted: The paths :meth:`begin_conflicted_merge` reported.
+            head_before: ``HEAD`` SHA before the conflicted merge began.
+            user_prompt: The task prompt for the commit message, or ``None``.
+            task_result: The task result summary for the message, or ``None``.
+
+        Returns:
+            :attr:`MergeResult.SUCCESS` when committed,
+            :attr:`MergeResult.MERGE_FAILED` when the commit itself
+            failed (tree reset), and :attr:`MergeResult.CONFLICT` when
+            the resolution is refused — the caller restores the tree.
+        """
+        if GitWorktreeOps.head_sha(repo) != head_before:
+            logger.warning(
+                "conflict resolver moved HEAD of %s away from %s; refusing "
+                "the merge", repo, head_before,
+            )
+            return MergeResult.CONFLICT
+        if GitWorktreeOps.unresolved_paths(repo):
+            return MergeResult.CONFLICT
+        if GitWorktreeOps.paths_with_conflict_markers(repo, conflicted):
+            return MergeResult.CONFLICT
+        if _git("diff", "--cached", "--quiet", cwd=repo).returncode == 0:
+            return MergeResult.CONFLICT
+        # ``--no-commit`` leaves no sequencer state, but a resolver that
+        # ran ``git cherry-pick --continue`` half-way may have; either
+        # way ``--quit`` is harmless and keeps the index.
+        _git("cherry-pick", "--quit", cwd=repo)
+        return GitWorktreeOps._commit_staged_merge(
+            repo, branch, user_prompt=user_prompt, task_result=task_result,
+        )
+
+    @staticmethod
+    def abort_conflicted_merge(repo: Path, before: str, head_before: str) -> None:
+        """Restore the tree after a conflicted merge that was not completed.
+
+        Drops any sequencer state, resets the branch, index and tracked
+        files to *head_before* (undoing any commit the resolver made on
+        its own — see :meth:`finish_conflicted_merge`), and — when the
+        tree was clean before the attempt (the merge path stashes the
+        user's changes first) — removes the untracked files the merge
+        or the resolver left behind.  A tree that was already dirty
+        keeps its untracked files: they may be the user's.
+
+        Args:
+            repo: Git repo root path.
+            before: ``status_porcelain`` output captured before
+                :meth:`begin_conflicted_merge`.
+            head_before: ``HEAD`` SHA captured before it; ``""`` (HEAD
+                unreadable) resets to the current HEAD.
+        """
+        _git("cherry-pick", "--quit", cwd=repo)
+        _git("reset", "--hard", head_before or "HEAD", cwd=repo)
+        if not before:
+            _git("clean", "-fd", cwd=repo)
+
+    @staticmethod
     def cleanup_partial(repo: Path, branch: str, wt_dir: Path) -> None:
         """Remove a partially-created worktree and branch (best-effort).
 
@@ -2637,7 +2850,7 @@ class GitWorktreeOps:
                 if (
                     owner_pid is not None
                     and owner_pid != os.getpid()
-                    and GitWorktreeOps._pid_alive(owner_pid)
+                    and GitWorktreeOps._owner_alive(repo, branch, owner_pid)
                 ):
                     # Another Sorcar process (daemon vs. CLI) owns this
                     # worktree and is still alive: its task may be

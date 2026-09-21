@@ -6,16 +6,18 @@
 // End-to-end (JSDOM) tests for the chat tab's status dot after a task
 // whose Result panel says "Status: FAILED".
 //
-// The daemon's terminal `task_done` event carries no `success` field
-// (server/task_runner.py broadcasts `{type, tabId, startTs, endTs}`);
-// the verdict lives on the `result` event that precedes it.  main.js
-// recorded that verdict (`tab.lastTaskFailed = true` in streamEnd) and
-// then, one event later, `markTabDone(tabId, ev.success === false)`
-// overwrote it with `false` -- so a live failed task ended with a
-// green dot while the same task reopened from history (a `task_events`
-// replay, which no `task_done` follows) showed a red one.  These tests
-// pin the live sequence, the replay, and the reset of the flag when a
-// tab replays a DIFFERENT task than the one it last flagged.
+// The daemon's terminal `task_done` event used to carry no `success`
+// field (server/task_runner.py broadcast `{type, tabId, startTs,
+// endTs}`); the verdict lived only on the `result` event that precedes
+// it.  main.js recorded that verdict (`tab.lastTaskFailed = true` in
+// streamEnd) and then, one event later, `markTabDone(tabId,
+// ev.success === false)` overwrote it with `false` -- so a live failed
+// task ended with a green dot while the same task reopened from history
+// (a `task_events` replay, which no `task_done` follows) showed a red
+// one.  These tests pin the live sequence, the replay, and the reset of
+// the flag when a tab replays a DIFFERENT task than the one it last
+// flagged.  Since 2026-09-19 task_done also carries the agent's own
+// `success` verdict; both spellings of the sequence must agree.
 
 'use strict';
 
@@ -87,7 +89,7 @@ function dotOf(win, tabId) {
 
 // The daemon's live sequence for one task in *tabId*, exactly as
 // commands.py / task_runner.py / json_printer.py broadcast it.
-function runTask(win, tabId, taskId, success) {
+function runTask(win, tabId, taskId, success, doneVerdict = false) {
   send(win, {type: 'setTaskText', text: 'do the thing', tabId});
   send(win, {type: 'clear', chat_id: 'chat-' + tabId, tabId});
   send(win, {
@@ -112,13 +114,16 @@ function runTask(win, tabId, taskId, success) {
     tabId,
     taskId,
   });
-  // task_done carries NO success field.
-  send(win, {
+  // Older daemons send task_done with NO success field; current ones
+  // stamp the agent's verdict on it.
+  const done = {
     type: 'task_done',
     tabId,
     startTs: Date.now() - 1000,
     endTs: Date.now(),
-  });
+  };
+  if (doneVerdict) done.success = success;
+  send(win, done);
   send(win, {type: 'status', running: false, tabId, taskId});
 }
 
@@ -137,6 +142,25 @@ function testLiveFailedTaskShowsRedDot() {
   );
   win.close();
   console.log('  ok - live failed task shows the red dot');
+}
+
+function testTaskDoneVerdictAgreesWithResult() {
+  const {win} = makeWebview();
+  const tabId = win._testApi.getActiveTabId();
+  runTask(win, tabId, 'task-1v', false, true);
+  assert.strictEqual(
+    dotOf(win, tabId),
+    'fail',
+    'task_done{success:false} after a failed result keeps the red dot',
+  );
+  runTask(win, tabId, 'task-2v', true, true);
+  assert.strictEqual(
+    dotOf(win, tabId),
+    'ok',
+    'task_done{success:true} after a successful result shows the green dot',
+  );
+  win.close();
+  console.log('  ok - task_done verdict agrees with the result');
 }
 
 function testLiveSuccessfulTaskShowsGreenDot() {
@@ -258,6 +282,7 @@ function testReplayMirrorsTheReplayedTask() {
 
 function main() {
   testLiveFailedTaskShowsRedDot();
+  testTaskDoneVerdictAgreesWithResult();
   testLiveSuccessfulTaskShowsGreenDot();
   testBackgroundFailedTaskShowsRedDot();
   testTerminalErrorStillWins();

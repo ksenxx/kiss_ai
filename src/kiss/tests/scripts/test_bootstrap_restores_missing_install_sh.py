@@ -29,8 +29,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from kiss.tests.conftest import posix_only
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "install.sh"
+
+pytestmark = posix_only("runs the real bash bootstrap scripts/install.sh")
 
 # Stand-in for the clone's ./install.sh: records that it ran.
 STUB_INSTALL_SH = """#!/bin/bash

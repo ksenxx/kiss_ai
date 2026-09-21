@@ -518,23 +518,58 @@ body {
   min-width: 0;
 }
 
-.chat-tab-spinner {
-  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-  background: #2e7d32;
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
-  animation: running-pulse 1.5s ease-in-out infinite;
+/* Task status icons, shared by the composer's wait spinner, the chat
+   tab strip, the history rows and the history filter chips: a spinning
+   ring while a task runs, a tick once it succeeded, a cross once it
+   failed.  Every icon takes its colour from `currentcolor`, so the
+   element that carries the state class only has to set `color`. */
+.status-spinner, .status-tick, .status-cross, #wait-spinner {
+  display: inline-block; flex-shrink: 0; box-sizing: border-box;
+  width: 12px; height: 12px;
 }
+
+/* The one ring every surface shows: a faint track with a single bright
+   leading arc, turning once every 0.8s. */
+.status-spinner, #wait-spinner {
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, currentcolor 25%, transparent);
+  border-top-color: currentcolor;
+}
+
+.status-spinner, #wait-spinner.active {
+  animation: status-spin 0.8s linear infinite;
+}
+
+/* Rotates through the `rotate` property (not `transform`).  Anything
+   that offsets a spinner must use the `translate` property as well:
+   the browser applies `transform` BEFORE `rotate`, so an offset given
+   as `transform: translateY()` would be rotated too and the ring
+   would orbit the point instead of turning in place. */
+@keyframes status-spin {
+  to { rotate: 360deg; }
+}
+
+.status-tick, .status-cross {
+  background: currentcolor;
+  mask: var(--status-icon) center / contain no-repeat;
+}
+
+.status-tick {
+  --status-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2.5 8.5l3.5 3.5 7.5-8' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.status-cross {
+  --status-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 3.5l9 9M12.5 3.5l-9 9' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+
+.chat-tab-spinner { color: var(--green); }
+.chat-tab-ok { color: var(--green); }
+.chat-tab-fail { color: var(--red); }
 
 @keyframes running-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 1px rgb(0 0 0 / 15%); }
   50% { opacity: 0.4; box-shadow: 0 0 6px 2px rgb(46 125 50 / 50%); }
 }
-
-.chat-tab-status {
-  font-size: 12px; font-weight: 700; flex-shrink: 0; line-height: 1;
-}
-.chat-tab-ok { color: var(--green); }
-.chat-tab-fail { color: var(--red); }
 
 .chat-tab-attention {
   font-size: 12px; font-weight: 700; flex-shrink: 0; line-height: 1;
@@ -562,40 +597,49 @@ body {
   outline-offset: -1px;
 }
 
+/* A sub-agent's tab is purple all over - tint, text, underline and its
+   status icon - so it is told apart from the chat's own tabs at a
+   glance. */
 .chat-tab.subagent-tab {
   border-bottom-color: color-mix(in srgb, var(--purple) 55%, transparent);
-  background: color-mix(in srgb, var(--purple) 8%, transparent);
+  background: color-mix(in srgb, var(--purple) 24%, transparent);
   color: color-mix(in srgb, var(--purple) 75%, var(--fg));
   max-width: 160px;
 }
 
 .chat-tab.subagent-tab:hover {
-  background: color-mix(in srgb, var(--purple) 14%, transparent);
+  background: color-mix(in srgb, var(--purple) 32%, transparent);
 }
 
 .chat-tab.subagent-tab.active {
   border-bottom-color: var(--purple);
-  background: color-mix(in srgb, var(--purple) 16%, transparent);
+  background: color-mix(in srgb, var(--purple) 40%, transparent);
   color: var(--purple);
 }
 
-.subagent-indicator {
-  font-size: 10px;
-  flex-shrink: 0;
-  line-height: 1;
+/* The remote webapp's pill tabs (remote-codex.css, which carries no
+   colour of its own) would flatten a sub-agent tab into an ordinary
+   one; these forms outrank them so it stays purple there too. */
+body.remote-chat #tab-bar .chat-tab.subagent-tab {
+  background: color-mix(in srgb, var(--purple) 24%, transparent);
+  border-color: color-mix(in srgb, var(--purple) 55%, transparent);
+  color: color-mix(in srgb, var(--purple) 75%, var(--fg));
+}
+
+body.remote-chat #tab-bar .chat-tab.subagent-tab:hover {
+  background: color-mix(in srgb, var(--purple) 32%, transparent);
+}
+
+body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
+  background: color-mix(in srgb, var(--purple) 40%, transparent);
+  border-color: var(--purple);
   color: var(--purple);
-  animation: subagent-pulse 1.5s ease-in-out infinite;
 }
 
-.chat-tab.subagent-tab .subagent-indicator.done {
-  animation: none;
-  opacity: 1;
-}
-
-@keyframes subagent-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
-}
+/* Sub-agent tab status: the shared spinner while the sub-agent runs
+   (.status-spinner), the shared tick once it is done (.status-tick),
+   both in the tab's purple. */
+.subagent-indicator { color: var(--purple); }
 
 #tab-context-menu {
   position: fixed;
@@ -875,6 +919,49 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .tc-h:hover { color: var(--fg); }
 
+/* ask_user_question renders as the "Question" panel: translucent red
+   header, the question as prose, the answer typed into the composer. */
+.tc-h.tc-h-question {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--red) 22%, transparent);
+  border-radius: 4px 4px 0 0;
+}
+
+.tc-question-pending > .tc-h.tc-h-question {
+  background: color-mix(in srgb, var(--red) 34%, transparent);
+}
+
+.tc-question-hint {
+  font-weight: 400; text-transform: none; letter-spacing: 0;
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+}
+
+.tc-question-body {
+  font-size: var(--fs-lg); line-height: 1.5; padding: 6px 4px;
+  color: color-mix(in srgb, var(--fg) 88%, transparent);
+  overflow-wrap: anywhere; word-break: break-word;
+}
+
+.tc-question-answer {
+  margin-top: 6px; padding: 6px 8px; border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border-left: 3px solid color-mix(in srgb, var(--red) 55%, transparent);
+  overflow-wrap: anywhere; word-break: break-word;
+}
+
+.tc-question-answer-label {
+  display: block; font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.4px;
+  text-transform: uppercase; color: color-mix(in srgb, var(--fg) 60%, transparent);
+  margin-bottom: 2px;
+}
+
+.tc-question-answer-text { font-size: var(--fs-lg); line-height: 1.5; white-space: pre-wrap; }
+
+body.ask-answering #input-container {
+  border-color: color-mix(in srgb, var(--red) 60%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 30%, transparent);
+}
+
 .tc-h.tc-h-bash {
   background: color-mix(in srgb, var(--cyan) 8%, transparent); color: var(--cyan);
 }
@@ -1022,6 +1109,39 @@ body.remote-chat #welcome-config { display: none !important; }
   line-height: 1.6; max-height: 400px; overflow-y: auto;
 }
 
+/* The finished `/ask` answer, shown inside the running task's transcript
+   (the answering sub-agent's nested tab closes when it ends). */
+.ask-answer {
+  border: 1px solid var(--cyan); border-radius: 8px; margin: 8px 0;
+  overflow: hidden; background: var(--surface);
+}
+.ask-answer.failed { border-color: var(--red); }
+
+.ask-answer-h {
+  padding: 6px 12px; font-size: var(--fs-sm); color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 8%, transparent);
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+
+.ask-answer.failed .ask-answer-h {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+}
+
+.ask-answer-label {
+  font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+}
+
+.ask-answer-q {
+  color: var(--fg); font-style: italic; font-size: var(--fs-md);
+  text-transform: none; letter-spacing: 0; word-break: break-word;
+}
+
+.ask-answer-body {
+  padding: 8px 12px; font-size: var(--fs-md); word-break: break-word;
+  line-height: 1.7;
+}
+
 .sys {
   font-size: var(--fs-base); color: var(--dim);
   font-family: var(--vscode-editor-font-family, monospace);
@@ -1094,21 +1214,14 @@ body.remote-chat #welcome-config { display: none !important; }
 .llm-panel .txt { font-size: var(--fs-md); line-height: 1.5; color: color-mix(in srgb, var(--fg) 79%, transparent); }
 .llm-panel .think .cnt { font-size: var(--fs-md); }
 
-@keyframes spin { to { transform: rotate(360deg); } }
-
+/* The composer's wait spinner: the shared ring (see .status-spinner)
+   in the accent colour, faded in while a task runs. */
 #wait-spinner {
-  width: 12px; height: 12px;
-  border: 2px solid rgb(255 255 255 / 8%);
-  border-top-color: rgb(255 255 255 / 15%);
-  border-radius: 50%; flex-shrink: 0;
+  color: rgb(88 166 255 / 70%);
   transition: opacity 0.2s; opacity: 0;
 }
 
-#wait-spinner.active {
-  border-color: rgb(255 255 255 / 15%);
-  border-top-color: rgb(88 166 255 / 70%);
-  animation: spin .8s linear infinite; opacity: 1;
-}
+#wait-spinner.active { opacity: 1; }
 
 .followup-bar {
   display: flex; flex-direction: column; gap: 4px;
@@ -1377,15 +1490,15 @@ body.content-tab-open #send-btn { display: none !important; }
 
 #share-btn.share-ok { color: var(--green); }
 #share-btn.share-err { color: var(--red); }
-#voice-btn.voice-loading, .ask-user-mic.voice-loading { opacity: 0.5; }
-#voice-btn.voice-listening, .ask-user-mic.voice-listening { animation: voice-pulse 1.6s ease-in-out infinite; }
-#voice-btn.voice-error, .ask-user-mic.voice-error { color: var(--error, #f48771); }
+#voice-btn.voice-loading { opacity: 0.5; }
+#voice-btn.voice-listening { animation: voice-pulse 1.6s ease-in-out infinite; }
+#voice-btn.voice-error { color: var(--error, #f48771); }
 
 /* Calm non-error state: neither this window nor the machine running KISS
    can capture audio (see voice.js 'unavailable'); dimmed, not red. */
-#voice-btn.voice-unavailable, .ask-user-mic.voice-unavailable { opacity: 0.4; }
-#voice-btn.voice-triggered, .ask-user-mic.voice-triggered { color: var(--red, #f48771); animation: voice-flash 0.8s ease-in-out infinite; }
-#voice-btn.voice-transcribing, .ask-user-mic.voice-transcribing { color: var(--warning, #e5c07b); animation: voice-flash 0.8s ease-in-out infinite; }
+#voice-btn.voice-unavailable { opacity: 0.4; }
+#voice-btn.voice-triggered { color: var(--red, #f48771); animation: voice-flash 0.8s ease-in-out infinite; }
+#voice-btn.voice-transcribing { color: var(--warning, #e5c07b); animation: voice-flash 0.8s ease-in-out infinite; }
 
 @keyframes voice-pulse {
   0%, 100% { opacity: 1; }
@@ -1689,6 +1802,13 @@ body.meta-panel-mode #meta-list {
   min-height: 0;
   overflow-y: auto;
 }
+
+/* Every surface's task-info list: a hidden row (the Parent task row
+   of a non-subagent task) stays hidden despite the per-mode
+   `display: list-item`, and a label ("Chat id:") never wraps — the
+   long id value after it breaks instead (overflow-wrap: anywhere). */
+.meta-item[hidden] { display: none !important; }
+.meta-item .meta-label { white-space: nowrap; }
 
 body.meta-panel-mode .meta-item {
   display: list-item;
@@ -2765,13 +2885,41 @@ body.sidebar-chat-mode #meta-info-content {
   letter-spacing: 0.05em; color: color-mix(in srgb, var(--fg) 50%, transparent); margin-bottom: 10px;
 }
 
-#history-search {
+#history-search,
+#tricks-search,
+#tricks-add-input {
   width: 100%; background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border);
   border-radius: 6px; color: var(--fg); font-size: var(--fs-base); padding: 6px 28px 6px 10px;
   outline: none; box-sizing: border-box;
 }
 .sidebar-section .search-wrap { margin-bottom: 10px; }
-#history-search:focus { border-color: var(--accent); }
+
+#history-search:focus,
+#tricks-search:focus,
+#tricks-add-input:focus { border-color: var(--accent); }
+
+/* The Inject promptlet panel's "new promptlet" box with its Add button. */
+#tricks-add-row { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+#tricks-add-row #tricks-add-input { flex: 1; min-width: 0; padding-right: 10px; }
+
+/* The search box with the flat-list / chat-panels switch on its right. */
+.history-search-row { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+.history-search-row .search-wrap { flex: 1; min-width: 0; margin-bottom: 0; }
+
+#history-view-toggle {
+  flex: none; display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0;
+  background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border);
+  border-radius: 6px; color: color-mix(in srgb, var(--fg) 70%, transparent);
+  font-size: 14px; cursor: pointer; transition: color 0.15s, background 0.15s;
+}
+#history-view-toggle:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 10%, transparent); }
+
+#history-view-toggle.active {
+  color: var(--accent); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+#history-view-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
 .history-filters-panel { margin-bottom: 4px; }
 
@@ -2842,25 +2990,24 @@ body.sidebar-chat-mode #meta-info-content {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
+/* Chip legends reuse the row status icons (.status-spinner /
+   .status-cross / .status-tick), greyed out while the chip is off.  The
+   Running chip's spinner only turns while that filter is on. */
 .hf-chip-dot {
-  flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%;
-  background: color-mix(in srgb, var(--fg) 35%, transparent);
+  flex: 0 0 auto; width: 9px; height: 9px;
+  color: color-mix(in srgb, var(--fg) 35%, transparent);
 }
+
+.hf-chip-dot.status-spinner { animation-play-state: paused; }
 
 .hf-chip-running:has(> input:checked) .hf-chip-dot {
-  background: #3fb950;
-  box-shadow: 0 0 4px color-mix(in srgb, #3fb950 60%, transparent);
+  color: #3fb950;
+  animation-play-state: running;
 }
 
-.hf-chip-errored:has(> input:checked) .hf-chip-dot {
-  background: #f85149;
-  box-shadow: 0 0 4px color-mix(in srgb, #f85149 60%, transparent);
-}
+.hf-chip-errored:has(> input:checked) .hf-chip-dot { color: #f85149; }
 
-.hf-chip-succeeded:has(> input:checked) .hf-chip-dot {
-  background: #58a6ff;
-  box-shadow: 0 0 4px color-mix(in srgb, #58a6ff 60%, transparent);
-}
+.hf-chip-succeeded:has(> input:checked) .hf-chip-dot { color: #58a6ff; }
 
 .hf-chip-icon {
   flex: 0 0 auto; width: 10px; height: 10px; opacity: 0.85;
@@ -3057,13 +3204,17 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 /* The chat panel's clickable header: a chevron and the chat's first
-   task, clamped to three lines. */
+   task on ONE line (ellipsized), in the cyan of a Bash tool call's
+   header in the transcript (.tc-h-bash).  The tint is much stronger
+   than that header's 8%: this header carries plain --fg text over the
+   sidebar background, so at 8% it vanished.  No tooltip: the line is
+   all there is. */
 .history-chat-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 6px;
   width: 100%;
-  background: none;
+  background: color-mix(in srgb, var(--cyan) 30%, transparent);
   border: none;
   border-radius: 7px;
   padding: 4px 6px;
@@ -3077,12 +3228,11 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 .history-chat-header:hover {
-  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  background: color-mix(in srgb, var(--cyan) 42%, transparent);
 }
 
 .history-chat-chevron {
   flex-shrink: 0;
-  margin-top: 0.175lh;
   transition: transform 0.15s ease;
 }
 
@@ -3092,14 +3242,16 @@ body.sidebar-chat-mode #meta-info-content {
 
 .history-chat-title {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: normal;
-  word-break: break-word;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
+}
+
+/* The legacy flat list: a narrow bar on each row's right edge in its
+   chat's color (--task-color, stamped per row by renderHistory). */
+#history-list.legacy-view > .running-item {
+  border-right: 4px solid var(--task-color, transparent);
 }
 
 .history-chat-body {
@@ -3125,37 +3277,28 @@ body.sidebar-chat-mode #meta-info-content {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-.sidebar-item-failed {
-  flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%;
-  background: #d32f2f; margin-right: 8px;
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
-}
-
-.sidebar-item-running {
-  flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%;
-  background: #2e7d32; margin-right: 8px;
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
-  animation: running-pulse 1.5s ease-in-out infinite;
-}
-
-.sidebar-item-completed {
-  flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%;
-  background: #2e7d32; margin-right: 8px;
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
-}
+/* Row status icons (.status-cross / .status-spinner / .status-tick
+   shapes): red cross for a failed task, green spinner while it runs,
+   green tick once it just completed. */
+.sidebar-item-failed { color: #d32f2f; margin-right: 8px; }
+.sidebar-item-running { color: #2e7d32; margin-right: 8px; }
+.sidebar-item-completed { color: #2e7d32; margin-right: 8px; }
 
 /* The panel is at least two lines tall - the task text and, below it,
-   the action strip - so the status dot is centred on the first line of
+   the action strip - so the status icon is centred on the first line of
    the task text rather than on the whole panel.  The offset is the
    panel's own padding-top plus half a line box, and the translation
-   then centres the dot on that point. */
+   then centres the icon on that point.  `translate`, not `transform`:
+   the spinner's `rotate` is applied after `translate` (so the ring
+   turns in place) but before `transform` (which would make it orbit;
+   see @keyframes status-spin). */
 .running-item > .sidebar-item-failed,
 .running-item > .sidebar-item-running,
 .running-item > .sidebar-item-completed {
   position: absolute;
   left: 5px;
   top: calc(7px + 0.5lh);
-  transform: translateY(-50%);
+  translate: 0 -50%;
   margin-right: 0;
 }
 
@@ -3168,6 +3311,22 @@ body.sidebar-chat-mode #meta-info-content {
   padding-left: 19px;
   background-color: color-mix(in srgb, var(--fg) 3%, transparent);
   color: var(--fg);
+}
+
+/* The task panel of the task the user is looking at (the chat webview
+   on screen), in the green of the Result panel's header (.rc-h) so the
+   eye finds it in the list; well above that header's 8% tint, which
+   was indistinguishable from the other panels.  The body.remote-chat
+   form outranks the remote webapp's plain .running-item background in
+   remote-codex.css; the :hover forms outrank both surfaces' generic
+   .sidebar-item:hover rules, so the cue survives the pointer (hover
+   feedback there is the brightness filter). */
+.running-item.history-active-task,
+.running-item.history-active-task:hover,
+body.remote-chat .running-item.history-active-task,
+body.remote-chat .running-item.history-active-task:hover {
+  background-color: color-mix(in srgb, var(--green) 28%, transparent);
+  border-color: color-mix(in srgb, var(--green) 75%, transparent);
 }
 
 .running-item > .sidebar-item-text {
@@ -3280,6 +3439,21 @@ body.sidebar-chat-mode #meta-info-content {
 .running-item:not(.collapsed) .sidebar-item-collapse svg { transform: rotate(180deg); }
 .running-item.collapsed > .running-item-info { display: none; }
 
+/* "launched 3 hours ago" — the task's age, next to the show-details
+   chevron of a history task panel. Muted and small so it reads as
+   metadata; it may shrink (with an ellipsis) but never wraps. */
+.sidebar-item-launched {
+  flex-shrink: 1;
+  min-width: 0;
+  margin-left: 2px;
+  font-size: 10px;
+  color: var(--fg);
+  opacity: 0.55;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .sidebar-item-copy.copied { opacity: 0.9; color: #2e7d32; }
 
 /* The frequent-tasks list keeps its pastel per-task backgrounds with
@@ -3330,59 +3504,6 @@ body.sidebar-chat-mode #meta-info-content {
   filter: brightness(0.9); border-color: color-mix(in srgb, var(--fg) 15%, transparent);
 }
 .sidebar-empty { font-size: var(--fs-base); color: color-mix(in srgb, var(--fg) 50%, transparent); padding: 8px 0; }
-
-#ask-user-modal {
-  position: fixed; inset: 0; background: rgb(0 0 0 / 70%);
-  display: flex; align-items: center; justify-content: center; z-index: 300;
-  padding: 16px; box-sizing: border-box;
-}
-
-.modal-content {
-  background: var(--bg2); border: 1px solid var(--border);
-  border-radius: 12px; padding: 20px; width: 90%; max-width: 400px;
-  max-height: 85vh; box-sizing: border-box;
-  display: flex; flex-direction: column; min-height: 0;
-}
-.modal-title { font-size: var(--fs-xl); font-weight: 600; color: var(--fg); margin-bottom: 12px; flex: 0 0 auto; }
-
-#ask-user-slot {
-  display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto;
-}
-
-.ask-user-question {
-  font-size: var(--fs-lg); color: color-mix(in srgb, var(--fg) 83%, transparent);
-  margin-bottom: 12px; line-height: 1.5;
-  flex: 0 1 auto; min-height: 0; overflow-y: auto;
-  padding-right: 4px;
-  overflow-wrap: anywhere; word-break: break-word;
-}
-
-.ask-user-input {
-  width: 100%; background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border);
-  border-radius: 6px; color: var(--fg); font-size: var(--fs-lg); padding: 10px;
-  resize: none; outline: none; min-height: 80px; margin-bottom: 12px;
-  box-sizing: border-box; flex: 0 0 auto;
-}
-.ask-user-input:focus { border-color: var(--accent); }
-
-.ask-user-submit {
-  background: var(--accent); border: none; border-radius: 6px; color: var(--vscode-button-foreground);
-  font-size: var(--fs-lg); font-weight: 500; padding: 8px 16px; cursor: pointer; transition: opacity 0.15s;
-  flex: 0 0 auto; align-self: flex-start;
-}
-.ask-user-submit:hover { opacity: 0.9; }
-
-.ask-user-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
-
-.ask-user-mic {
-  background: none; border: none;
-  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 4px; transition: color 0.15s, opacity 0.15s;
-  display: flex; align-items: center; position: relative;
-}
-.ask-user-mic:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
-.ask-user-mic.active { color: var(--accent); }
-.ask-user-mic svg { width: 16px; height: 16px; }
 
 #auth-modal {
   position: fixed; inset: 0; background: rgb(0 0 0 / 70%);
@@ -3728,7 +3849,8 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 }
 
 .system-prompt.collapsed .system-prompt-body,
-.prompt.collapsed .prompt-body { display: none; }
+.prompt.collapsed .prompt-body,
+.ask-answer.collapsed .ask-answer-body { display: none; }
 
 .tr.collapsed .tr-content { display: none; }
 
@@ -3773,6 +3895,38 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .kiss-server-loading-msg {
   font-size: var(--fs-lg);
   color: var(--fg);
+}
+
+/* Reconnect banner (remote webapp, socket lost after the app was on
+   screen): the overlay shrinks to a pill pinned to the top centre and #app
+   stays visible and usable underneath — see setServerLoading() in main.js.
+   Clicks pass through to the app. */
+#kiss-server-loading.kiss-server-loading--banner {
+  inset: 8px auto auto 50%;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 16px);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+  pointer-events: none;
+}
+
+#kiss-server-loading.kiss-server-loading--banner .kiss-server-loading-inner {
+  flex-direction: row;
+  gap: 8px;
+  padding: 6px 12px;
+}
+
+#kiss-server-loading.kiss-server-loading--banner .kiss-server-loading-spinner {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+
+#kiss-server-loading.kiss-server-loading--banner .kiss-server-loading-msg {
+  font-size: var(--fs-sm);
+  white-space: nowrap;
 }
 
 @keyframes kiss-server-loading-spin {

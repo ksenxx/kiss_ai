@@ -38,18 +38,9 @@ import time
 import unittest
 from pathlib import Path
 
+from kiss.core.processes import pid_alive
 from kiss.server.web_server import RemoteAccessServer
-
-
-def _child_is_alive(pid: int) -> bool:
-    """Return True iff *pid* is a live process."""
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return False
-    except OSError:
-        return False
-    return True
+from kiss.tests.conftest import posix_only
 
 
 class TestDetachTunnelLeavesProcessAlive(unittest.TestCase):
@@ -59,7 +50,7 @@ class TestDetachTunnelLeavesProcessAlive(unittest.TestCase):
         """A child wired into ``_tunnel_proc`` survives ``_detach_tunnel``."""
         server = RemoteAccessServer(use_tunnel=False)
         proc = subprocess.Popen(
-            ["sleep", "30"],
+            [sys.executable, "-c", "import time; time.sleep(30)"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -81,7 +72,7 @@ class TestDetachTunnelLeavesProcessAlive(unittest.TestCase):
 
             time.sleep(0.2)
             self.assertIsNone(proc.poll())
-            self.assertTrue(_child_is_alive(proc.pid))
+            self.assertTrue(pid_alive(proc.pid))
         finally:
             try:
                 proc.terminate()
@@ -94,7 +85,7 @@ class TestDetachTunnelLeavesProcessAlive(unittest.TestCase):
         """An adopted cloudflared survives ``_detach_tunnel``."""
         server = RemoteAccessServer(use_tunnel=False)
         proc = subprocess.Popen(
-            ["sleep", "30"],
+            [sys.executable, "-c", "import time; time.sleep(30)"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -112,7 +103,7 @@ class TestDetachTunnelLeavesProcessAlive(unittest.TestCase):
             self.assertIsNone(server._active_url)
 
             time.sleep(0.2)
-            self.assertTrue(_child_is_alive(proc.pid))
+            self.assertTrue(pid_alive(proc.pid))
         finally:
             try:
                 proc.terminate()
@@ -176,6 +167,7 @@ sys.exit(0)
 """
 
 
+@posix_only("SIGTERM delivery and start_new_session detachment")
 class TestCloudflaredSurvivesKissWebShutdown(unittest.TestCase):
     """A SIGTERM to ``kiss-web`` leaves the spawned ``cloudflared`` alive."""
 
@@ -203,7 +195,7 @@ class TestCloudflaredSurvivesKissWebShutdown(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertTrue(pid_file.exists())
                 child_pid = int(pid_file.read_text().strip())
-                self.assertTrue(_child_is_alive(child_pid))
+                self.assertTrue(pid_alive(child_pid))
 
                 proc.send_signal(signal.SIGTERM)
                 stdout, stderr = proc.communicate(timeout=30.0)
@@ -216,14 +208,14 @@ class TestCloudflaredSurvivesKissWebShutdown(unittest.TestCase):
                 self.assertIn("CLEAN_EXIT", stdout)
 
                 self.assertTrue(
-                    _child_is_alive(child_pid),
+                    pid_alive(child_pid),
                     "cloudflared stand-in was killed by kiss-web shutdown",
                 )
             finally:
                 if proc.poll() is None:
                     proc.kill()
                     proc.wait()
-                if child_pid is not None and _child_is_alive(child_pid):
+                if child_pid is not None and pid_alive(child_pid):
                     try:
                         os.kill(child_pid, signal.SIGKILL)
                     except (ProcessLookupError, PermissionError, OSError):
@@ -256,6 +248,7 @@ class TestStderrDrainShim(unittest.TestCase):
     real long-running child whose stderr is a real pipe.
     """
 
+    @posix_only("the SIGPIPE drain shim is a detached cat; Windows has no SIGPIPE")
     def test_drain_shim_keeps_proc_alive_under_stderr_load(self) -> None:
         """A noisy child stays alive after its parent reader is closed.
 
@@ -311,7 +304,7 @@ class TestStderrDrainShim(unittest.TestCase):
     def test_drain_shim_none_when_no_stderr(self) -> None:
         """Returns ``None`` (no-op) when the proc has no stderr pipe."""
         proc: subprocess.Popen[str] = subprocess.Popen(
-            ["sleep", "5"],
+            [sys.executable, "-c", "import time; time.sleep(5)"],
             stdout=subprocess.DEVNULL,
             text=True,
             start_new_session=True,

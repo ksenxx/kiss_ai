@@ -49,6 +49,17 @@
   const POST_META_UPDATES =
     EDITOR_TAB_MODE && !HISTORY_PANEL_MODE && !META_PANEL_MODE;
 
+  // Every VS Code chat surface (editor-tab panel or the sidebar chat
+  // view) tells the host which chat / task it shows (activeTask), and
+  // the host relays the one on screen into the primary-sidebar history
+  // panel, which highlights that task's row.  The remote webapp keeps
+  // its history list in-page and paints it directly (its postMessage
+  // goes to the daemon, which has no use for the message).
+  const POST_ACTIVE_TASK =
+    !HISTORY_PANEL_MODE &&
+    !META_PANEL_MODE &&
+    !document.body.classList.contains('remote-chat');
+
   // Host-only messages (never daemon commands, so not in api.js's
   // whitelist): everything the webview asks of its hosting editor tab.
   function postToHost(msg) {
@@ -665,6 +676,9 @@
   // Enter of another.
   let _deferHighlight = false;
   let acIdx = -1;
+  // Slash-command list (SEA agents), pushed by the daemon on connect
+  // and on any registry rescan.  Empty until the daemon replies.
+  let seaCommands = [];
 
   let histCache = [];
   let histIdx = -1;
@@ -689,6 +703,18 @@
   // Row elements in allHistSessions order, for the fast path's in-place
   // refresh of time-derived metrics text.
   let historyRenderedRows = [];
+  // The history panel's view: collapsible per-chat panels (the
+  // default), or the legacy flat list — every task newest first, each
+  // row with a color bar naming its chat.  Persisted across reloads.
+  const HISTORY_LEGACY_VIEW_KEY = 'kissSorcar.historyLegacyView';
+  let historyLegacyView = false;
+  try {
+    historyLegacyView =
+      window.localStorage.getItem(HISTORY_LEGACY_VIEW_KEY) === '1';
+  } catch {}
+  // The view the rows on screen were built for: a view switch is a
+  // rebuild even when the data did not change.
+  let historyRenderedLegacy = false;
   // A destructive history rebuild is deferred while a press (mouse
   // button or touch contact) is held inside the list: replacing ANY row
   // between press and release would swallow the resulting click (its
@@ -721,6 +747,15 @@
 
   let currentTaskName = '';
   let currentTaskId = null;
+  // The chat and task the user is looking at — the ones the Task Info
+  // rows describe — as the history list knows them: its row carries
+  // the highlight and its chat panel opens by default.  Set from this
+  // surface's own visible tab (reportVisibleTask), or by the host's
+  // `activeTask` relay when this webview is the history panel.  The
+  // pending flag asks the next repaint to scroll the row into view.
+  let historyActiveChatId = '';
+  let historyActiveTaskId = '';
+  let historyActiveScrollPending = false;
   // Settings of the active tab's OWN current task (model, worktree /
   // parallel modes, budget, start time, chat / task / parent ids) —
   // what the static task panel's info block shows while the panel
@@ -775,6 +810,16 @@
       // Set by sendMessage() the moment a submit leaves this tab, so the tab
       // owns the task before the daemon has told anyone its real id.
       pendingTaskId: null,
+      // The last prompt sent from this tab until the daemon echoes it
+      // (setTaskText for a run, prompt for a follow-up), and the
+      // ask-user answer (with its question) until askUserDone confirms
+      // it.  A connection that died silently swallows both without any
+      // error; persistTabState carries them over to the reloaded page
+      // as drafts so the user can send them again instead of losing
+      // them.
+      unackedPrompt: '',
+      unackedAnswer: '',
+      unackedQuestion: null,
       isRunning: false,
       // Raised by the Stop button until the task actually ends, so a
       // stop the agent has not reached yet looks different from a stop
@@ -850,8 +895,9 @@
       lastTaskFailed: false,
       hasRunTask: false,
       askPendingQuestion: null,
-      askQuestionEl: null,
-      askInputEl: null,
+      // The prompt the user was composing when the question arrived:
+      // parked while the composer is the answer box, back afterwards.
+      promptDraft: '',
     };
   }
 
@@ -1193,9 +1239,12 @@
       else taskPanel.classList.remove('visible');
     }
     currentTaskSettings = tab.taskSettings || null;
-    renderTaskPanelInfo(currentTaskSettings);
     currentTaskName = (tab.taskPanelHTML || '').trim();
+    // The task id lands before the Task Info repaint: without settings
+    // to read the ids from, the repaint reports the tab's own task id
+    // to the history list, not the previous tab's.
     currentTaskId = tab.currentTaskId !== undefined ? tab.currentTaskId : null;
+    updateMetaTaskDetails(currentTaskSettings);
     if (statusText) {
       statusText.textContent = tab.statusTextContent || 'Ready';
       statusText.style.color = tab.statusTextColor || 'var(--green)';
@@ -1227,6 +1276,13 @@
     attachErrors = tab.attachErrors || [];
     renderFileChips();
     inp.value = tab.inputValue || '';
+    // The picker and ghost text were computed for the draft that just
+    // left the screen. A user switch blurs the textbox and drops them,
+    // but a programmatic switch (a background task finishing pulls its
+    // tab forward) does not, and Tab would then paste the old tab's
+    // suggestion into this one.
+    clearGhost();
+    hideAC();
     syncClearBtn();
     inp.style.height = 'auto';
     inp.style.height = inp.scrollHeight + 'px';
@@ -1254,11 +1310,8 @@
       if (inputContainer) inputContainer.style.display = '';
     }
     updateInputDisabled();
-    // A tab that ran while hidden comes back looking like one that ran
-    // on screen: everything but its latest panel collapsed.
-    collapseOlderPanels(O, tab.id);
     resetAdjacentState();
-    syncAskModalToActiveTab();
+    syncAskComposer();
     // visibletask-coverage:start
     // The transcript comes back where the reader left it, which may well
     // be inside a neighbouring task, so the panel is derived from the
@@ -1371,19 +1424,18 @@
     if (!tabList || !tabBar) return;
 
     // Checked on <body> inline — not via EDITOR_TAB_MODE — so the
-    // function stays self-contained for the harness that replays it in
-    // isolation (see test_subagent_tab_done_solid_indicator.py).
+    // function stays self-contained.
     if (document.body.classList.contains('editor-tab-mode')) {
       // The EDITOR TAB is this chat's tab: mirror the root chat tab's
       // title onto it through the host.
       const root = editorRootTab();
       if (root) {
         const title = root.title || 'new chat';
-        // Mirror the internal tab strip's status dot onto the EDITOR
-        // tab: the host paints a pulsing green circle while the task
-        // runs and a solid green/red one after it ends (the same
-        // states .chat-tab-spinner / .chat-tab-ok / .chat-tab-fail
-        // render in sidebar mode).
+        // Mirror the internal tab strip's status icon onto the EDITOR
+        // tab: the host paints a spinner while the task runs and a
+        // green tick / red cross after it ends (the same states
+        // .chat-tab-spinner / .chat-tab-ok / .chat-tab-fail render in
+        // sidebar mode).
         const state = root.isRunning
           ? 'running'
           : root.hasRunTask
@@ -1464,23 +1516,25 @@
         fileIcon.title = tab.contentPath || '';
         el.appendChild(fileIcon);
       } else if (tab.isSubagentTab) {
+        // Spinner while the sub-agent runs, green tick once it is done.
         const subIndicator = document.createElement('span');
-        subIndicator.className =
-          'subagent-indicator' + (tab.isDone ? ' done' : '');
-        subIndicator.textContent = '\u25C9';
+        subIndicator.className = tab.isDone
+          ? 'subagent-indicator done status-tick'
+          : 'subagent-indicator status-spinner';
         subIndicator.title = tab.isDone ? 'Done' : 'Running';
         el.appendChild(subIndicator);
       } else {
         if (tab.isRunning) {
           const spinner = document.createElement('span');
-          spinner.className = 'chat-tab-spinner';
+          spinner.className = 'chat-tab-spinner status-spinner';
           el.appendChild(spinner);
         } else if (tab.hasRunTask) {
+          // Green tick after a successful task, red cross after a
+          // failed one.
           const icon = document.createElement('span');
           icon.className = tab.lastTaskFailed
-            ? 'chat-tab-status chat-tab-fail'
-            : 'chat-tab-status chat-tab-ok';
-          icon.textContent = '\u25CF';
+            ? 'chat-tab-status chat-tab-fail status-cross'
+            : 'chat-tab-status chat-tab-ok status-tick';
           el.appendChild(icon);
         }
       }
@@ -1684,6 +1738,9 @@
       }
       activateAdjacentTab(successor);
     }
+    // A closed chat may have been the one whose question the composer
+    // was answering (its file tab, if that stays on screen, is not).
+    syncAskComposer();
     reportSurvivingChatTab();
     renderTabBar();
     persistTabState();
@@ -1757,10 +1814,19 @@
     if (newTab.isContentTab) {
       activeTabId = newTab.id;
       showContentTab(newTab);
+      // The chat tab just left may have been answering a question.
+      syncAskComposer();
       return;
     }
     restoreTab(newTab);
     setRunningState(newTab.isRunning);
+    // A tab that ran while hidden comes back looking like one that ran
+    // on screen: everything but its newest two panels collapsed. This
+    // runs after setRunningState so the pass sees THIS tab's running
+    // state; inside restoreTab the module flag still described the tab
+    // the user just left, and a running tab restored from behind an
+    // idle one came back with nothing folded.
+    collapseOlderPanels(O, newTab.id);
     if (!newTab.isRunning) {
       stopTimer();
       removeSpinner();
@@ -2195,6 +2261,16 @@
     const editor = tab.contentEditor;
     if (!editor || tab.contentSaving || !tab.contentPath) return;
     if (!tab.contentDirty && !force) return;
+    if (daemonWasDown) {
+      // The post would never arrive; the tab stays dirty so the user
+      // can save again once the connection is back.
+      setContentSaveStatus(
+        tab,
+        'Not connected: try again when reconnected',
+        true,
+      );
+      return;
+    }
     const model = editor.getModel();
     contentSaveSeq += 1;
     tab.contentSaving = true;
@@ -2315,6 +2391,9 @@
     e.preventDefault();
     e.returnValue = '';
   });
+  // Last chance to save the composer draft before a reload or
+  // navigation takes the page down (see persistTabState).
+  window.addEventListener('pagehide', persistTabState);
 
   // ctxmenu-coverage:start
   // An opened .html file renders inside an iframe sandboxed with
@@ -3156,8 +3235,37 @@
   // selected tab and the drawer preferences.
   function persistTabState() {
     const root = EDITOR_TAB_MODE ? editorRootTab() : null;
+    const composer = document.getElementById('task-input');
+    const active = getTab(activeTabId);
+    // Every tab's unsent prompt, keyed by tab id.  The remote webapp
+    // reloads itself when its connection comes back after an outage
+    // (web_server._WS_SHIM_JS) and a webview can be reloaded any time;
+    // the `pagehide` handler below persists the drafts on the way out
+    // and the first snapshot after the reload hands them back.  The
+    // active tab's draft is what the composer shows, or, when that is
+    // empty, a prompt the daemon never acknowledged (see unackedPrompt).
+    const inputDrafts = {};
+    const askDrafts = {};
+    tabs.forEach(t => {
+      const typed = t === active ? composer && composer.value : t.inputValue;
+      // While the composer is the answer box the prompt is the parked
+      // one (enterAnswerMode) and what is typed is the answer.
+      const asked = t.askPendingQuestion !== null;
+      const draft = (asked ? t.promptDraft : typed) || t.unackedPrompt;
+      if (draft) inputDrafts[t.id] = draft;
+      // Likewise the answer typed into (or sent from, but never
+      // confirmed) the composer, with its question: it comes back when
+      // the daemon asks that same question again after the reload.
+      const answer = asked ? typed : t.unackedAnswer;
+      const question = asked ? t.askPendingQuestion : t.unackedQuestion;
+      if (answer && typeof question === 'string') {
+        askDrafts[t.id] = {question, answer};
+      }
+    });
     vscode.setState({
       chatId: activeTabId,
+      inputDrafts,
+      askDrafts,
       // Editor-tabs mode: the panel serializer re-adopts THIS chat tab
       // after a window reload (SorcarPanelManager.registerSerializer).
       // The active tab id will not do — a sub-agent tab may be on
@@ -3364,7 +3472,7 @@
       // A chat binding proves a task ran in this chat (chat ids are
       // allocated by the first run) — the same inference the shared
       // reconcile makes for tabs it adopts — so a revived or migrated
-      // panel gets its status circle back without waiting for a
+      // panel gets its status icon back without waiting for a
       // replay.
       if (entry.chatId) root.hasRunTask = true;
       if (entry.workDir && !root.workDir) root.workDir = entry.workDir;
@@ -3527,17 +3635,36 @@
       // runs a task; until then it is a welcome screen only.
       tabs.push(makeTab('new chat'));
     }
+    // Drafts persisted by the previous page instance go back to their
+    // tabs (restoreTab shows a tab's inputValue when it is selected).
+    if (savedInputDrafts) {
+      tabs.forEach(t => {
+        if (savedInputDrafts[t.id] && !t.inputValue) {
+          t.inputValue = savedInputDrafts[t.id];
+        }
+      });
+    }
     const activeAfter = getTab(activeTabId);
     if (!activeAfter || isTabHidden(activeAfter)) {
       // A hidden survivor keeps its draft; a removed tab has nothing
       // left to save.
       if (activeAfter) saveCurrentTab();
       const saved = savedActiveTabId ? getTab(savedActiveTabId) : null;
-      activateAdjacentTab(
-        saved && !isTabHidden(saved) ? saved : firstVisibleTab(),
-      );
+      const target = saved && !isTabHidden(saved) ? saved : firstVisibleTab();
+      // The previously selected tab is gone: the draft the boot tab
+      // showed for it follows the screen to the tab taking it
+      // (restoreTab shows tab.inputValue).
+      const activeDraft =
+        savedInputDrafts && savedActiveTabId
+          ? savedInputDrafts[savedActiveTabId]
+          : '';
+      if (activeDraft && !saved && !target.inputValue) {
+        target.inputValue = activeDraft;
+      }
+      activateAdjacentTab(target);
     }
     savedActiveTabId = '';
+    savedInputDrafts = null;
     reportSurvivingChatTab();
     renderTabBar();
     persistTabState();
@@ -3608,9 +3735,43 @@
   // persisted tab set into `ready` exactly once, so the first daemon
   // with an empty registry can adopt it (one-time migration).
   let savedActiveTabId = '';
+  // The composer drafts the previous page instance persisted on its way
+  // out (persistTabState), by tab id: the selected tab's is shown in the
+  // boot tab right away, and the first snapshot hands each to its tab.
+  let savedInputDrafts = null;
+  // The ask-user answers persisted the same way, by tab id
+  // ({question, answer}): shown again when the daemon re-asks that same
+  // question after the reload (it re-emits an unanswered question on
+  // every replay), dropped when it asks nothing or something else — the
+  // answer had arrived after all.
+  let savedAskDrafts = null;
   const legacyRestoredTabs = [];
   (function () {
     const saved = vscode.getState();
+    const drafts = saved && saved.inputDrafts;
+    if (drafts && typeof drafts === 'object') {
+      savedInputDrafts = {};
+      Object.keys(drafts).forEach(id => {
+        if (typeof drafts[id] === 'string' && drafts[id]) {
+          savedInputDrafts[id] = drafts[id];
+        }
+      });
+    }
+    const asks = saved && saved.askDrafts;
+    if (asks && typeof asks === 'object') {
+      savedAskDrafts = {};
+      Object.keys(asks).forEach(id => {
+        const d = asks[id];
+        if (
+          d &&
+          typeof d.question === 'string' &&
+          typeof d.answer === 'string' &&
+          d.answer
+        ) {
+          savedAskDrafts[id] = {question: d.question, answer: d.answer};
+        }
+      });
+    }
     if (saved && saved.tabs && saved.tabs.length > 0) {
       const seenChatIds = new Set();
       saved.tabs.forEach(st => {
@@ -3628,6 +3789,9 @@
     }
     if (saved && saved.chatId) savedActiveTabId = String(saved.chatId);
     const initial = makeTab('new chat');
+    if (savedInputDrafts && savedActiveTabId) {
+      initial.inputValue = savedInputDrafts[savedActiveTabId] || '';
+    }
     if (EDITOR_TAB_MODE) {
       // The hosting editor tab pins this webview to one root chat tab:
       // adopt the id (and title) the extension stamped on <body>, so
@@ -3653,6 +3817,9 @@
   const O = document.getElementById('output');
   const welcome = document.getElementById('welcome');
   const inp = document.getElementById('task-input');
+  // The placeholder the composer goes back to once a pending
+  // ask_user_question is answered (syncAskComposer).
+  inp.dataset.defaultPlaceholder = inp.placeholder;
   // Pending deferred composer focus retries (focusInputWithRetry).
   let inputFocusRetryTimers = [];
   const sendBtn = document.getElementById('send-btn');
@@ -3676,8 +3843,6 @@
   const historySearchClear = document.getElementById('history-search-clear');
   const historyList = document.getElementById('history-list');
   const autocomplete = document.getElementById('autocomplete');
-  const askUserModal = document.getElementById('ask-user-modal');
-  const askUserSlot = document.getElementById('ask-user-slot');
 
   const settingsPanel = document.getElementById('settings-panel');
   const settingsOverlay = document.getElementById('settings-overlay');
@@ -3692,6 +3857,10 @@
   const tricksPanelClose = document.getElementById('tricks-panel-close');
   const tricksBtn = document.getElementById('tricks-btn');
   const tricksList = document.getElementById('tricks-list');
+  const tricksSearch = document.getElementById('tricks-search');
+  const tricksSearchClear = document.getElementById('tricks-search-clear');
+  const tricksAddInput = document.getElementById('tricks-add-input');
+  const tricksAddBtn = document.getElementById('tricks-add-btn');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
@@ -3736,7 +3905,6 @@
   const shareBtn = document.getElementById('share-btn');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
-  const taskPanelInfo = document.getElementById('task-panel-info');
   const taskPanelCopy = document.getElementById('task-panel-copy');
   const taskPanelDrawerBtn = document.getElementById('task-panel-drawer-btn');
   const inputDrawerBtn = document.getElementById('input-drawer-btn');
@@ -4096,6 +4264,21 @@
     return el ? (el.textContent || '').trim() : '';
   }
 
+  /**
+   * Write one #meta-* value's display text ('—' for an empty *text*)
+   * and, optionally, its inline color.
+   *
+   * @param {string} id The value span's element id.
+   * @param {string} text The display text.
+   * @param {string} [color] Inline CSS color ('' clears it).
+   */
+  function setMetaValue(id, text, color) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text || '\u2014';
+    if (color !== undefined) el.style.color = color || '';
+  }
+
   /** Post this panel's task-info values to the host right now. */
   function postMetaUpdateNow() {
     const timeEl = document.getElementById('meta-time');
@@ -4110,6 +4293,13 @@
         machine: metaValueText('meta-machine'),
         workdir: metaValueText('meta-workdir'),
         maxBudget: metaValueText('meta-max-budget'),
+        date: metaValueText('meta-date'),
+        model: metaValueText('meta-model'),
+        worktree: metaValueText('meta-worktree'),
+        parallel: metaValueText('meta-parallel'),
+        chatId: metaValueText('meta-chat-id'),
+        taskId: metaValueText('meta-task-id'),
+        parentTask: metaValueText('meta-parent-id'),
       },
       progressMd: metaInfoMd,
     });
@@ -4159,23 +4349,21 @@
   function renderMetaState(ev) {
     const values =
       ev && ev.values && typeof ev.values === 'object' ? ev.values : null;
-    const put = (id, text, color) => {
-      const el = document.getElementById(id);
-      if (!el) return;
-      el.textContent = text || '\u2014';
-      el.style.color = color || '';
-    };
-    put('meta-tokens', values && values.tokens);
-    put('meta-cost', values && values.cost);
-    put('meta-steps', values && values.steps);
-    put(
-      'meta-time',
-      (values && values.time) || 'Ready',
-      values && values.timeColor,
-    );
-    put('meta-machine', values && values.machine);
-    put('meta-workdir', values && values.workdir);
-    put('meta-max-budget', values && values.maxBudget);
+    const v = key => (values && values[key]) || '';
+    setMetaValue('meta-tokens', v('tokens'), '');
+    setMetaValue('meta-cost', v('cost'), '');
+    setMetaValue('meta-steps', v('steps'), '');
+    setMetaValue('meta-time', v('time') || 'Ready', v('timeColor'));
+    setMetaValue('meta-machine', v('machine'), '');
+    setMetaValue('meta-workdir', v('workdir'), '');
+    setMetaValue('meta-max-budget', v('maxBudget'), '');
+    setMetaValue('meta-date', v('date'));
+    setMetaValue('meta-model', v('model'));
+    setMetaValue('meta-worktree', v('worktree'));
+    setMetaValue('meta-parallel', v('parallel'));
+    setMetaValue('meta-chat-id', v('chatId'));
+    setMetaValue('meta-task-id', v('taskId'));
+    setMetaParentTask(v('parentTask') || '\u2014');
     const md = ev && typeof ev.progressMd === 'string' ? ev.progressMd : '';
     if (!md.trim()) {
       setMetaInfoHTML('');
@@ -5081,12 +5269,17 @@
     if (ev.truncated) explorerNote(kids, depth, '(more entries not shown)');
   }
 
-  /** `parent/name`, without doubling the separator after a `/` root. */
+  /**
+   * `parent/name` in the parent's separator convention, without doubling
+   * the separator after a `/` root.  Under a Windows parent a git-style
+   * `dir/file` name becomes `dir\file`.
+   */
   function joinPath(parent, name) {
     const p = String(parent || '');
     if (!p) return name;
     const sepChar = p.indexOf('\\') >= 0 && p.indexOf('/') < 0 ? '\\' : '/';
-    return p.endsWith(sepChar) ? p + name : p + sepChar + name;
+    const child = sepChar === '\\' ? String(name).replace(/\//g, '\\') : name;
+    return (p.endsWith(sepChar) ? p : p + sepChar) + child;
   }
 
   /** Forget a folder (under top-level folder *root*) and every listed folder beneath it. */
@@ -5241,8 +5434,7 @@
     row.setAttribute('role', 'treeitem');
     row.tabIndex = -1;
     const abs =
-      change.absPath ||
-      (repo ? repo.replace(/[\\/]+$/, '') + '/' + change.path : change.path);
+      change.absPath || (repo ? joinPath(repo, change.path) : change.path);
     row.dataset.scmPath = abs;
     row.dataset.scmRelPath = change.path;
     row.dataset.scmStatus = status;
@@ -7248,10 +7440,32 @@
 
   // taskinfo-coverage:start
   /**
-   * The static task panel's settings info as HTML — the same shape the
-   * history sidebar's info rows use: a `workDir • model • wt •
-   * parallel • budget • started` line and a `chat • task • parent •
-   * subagent` ids line.
+   * A task's start time as the localized `Sep 19, 2026, 05:40 PM`
+   * style text the Task Info panel and the shared page show.
+   *
+   * @param {*} startTs The settings' start_ts (epoch milliseconds).
+   * @returns {string} The formatted time, '' when unknown or invalid.
+   */
+  function taskStartText(startTs) {
+    const ts = Number(startTs || 0);
+    if (!(ts > 0)) return '';
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+
+  /**
+   * A task's settings info as HTML for the STATIC task panels of the
+   * shared page (the live panel shows none: the Task Info panel carries
+   * them) — the same shape the history sidebar's info rows use: a
+   * `workDir • model • wt • parallel • budget • started` line and a
+   * `chat • task • parent • subagent` ids line.
    *
    * @param {object|null} s A task_settings event's settings payload.
    * @returns {string} The info HTML, '' when there is nothing to show.
@@ -7267,22 +7481,8 @@
     }
     const budget = Number(s.max_budget || 0);
     if (budget > 0) parts.push('budget $' + budget.toFixed(2));
-    const startTs = Number(s.start_ts || 0);
-    if (startTs > 0) {
-      const d = new Date(startTs);
-      if (!isNaN(d.getTime())) {
-        parts.push(
-          'started ' +
-            d.toLocaleString(undefined, {
-              year: 'numeric',
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-            }),
-        );
-      }
-    }
+    const started = taskStartText(s.start_ts);
+    if (started) parts.push('started ' + started);
     const ids = [];
     if (s.chat_id) ids.push('chat ' + s.chat_id);
     if (s.task_id !== undefined && s.task_id !== null && s.task_id !== '') {
@@ -7307,7 +7507,7 @@
   // may not double as the unknown sentinel.
   let configMaxBudget = null;
   // The settings payload the meta rows currently describe — whatever
-  // renderTaskPanelInfo painted LAST, which during a scroll onto a
+  // updateMetaTaskDetails painted LAST, which during a scroll onto a
   // spliced-in neighbouring task is the neighbour's settings, not the
   // tab's own currentTaskSettings.  A configData repaint must reuse
   // this, or it would silently jump the rows (and the info-subpanel
@@ -7323,14 +7523,40 @@
   }
 
   /**
-   * Paint the Workdir and Max budget items of the docked task-info
-   * panel (#meta-panel, remote desktop mode only).  Driven from
-   * renderTaskPanelInfo — the choke point every task-settings repaint
-   * (tab switch, task_settings event, scroll into a neighbouring
-   * task) already goes through — so the two items always describe the
-   * same task as the static task panel.  A task without settings
-   * falls back to the tab's pinned workdir and the configured default
-   * budget.  The workdir shown here is also adopted as the info
+   * *value* as Task Info row text: '—' for an unknown (empty) value.
+   *
+   * @param {*} value The raw settings value.
+   * @returns {string} The display text.
+   */
+  function metaText(value) {
+    return value === undefined || value === null || value === ''
+      ? '\u2014'
+      : String(value);
+  }
+
+  /**
+   * Show or hide the Parent task row: shown whenever the task names a
+   * parent (a subagent's task does; a top-level task does not).
+   *
+   * @param {string} text The row's value text ('—' when none).
+   */
+  function setMetaParentTask(text) {
+    const item = document.getElementById('meta-parent-item');
+    if (item) item.hidden = text === '\u2014';
+    setMetaValue('meta-parent-id', text);
+  }
+
+  /**
+   * Paint the task-settings items of the task-info panel (#meta-panel:
+   * the remote desktop dock, the sidebar-chat drawer, the mobile
+   * drawer): Workdir, Max budget, Date, Base model, Worktree mode,
+   * Parallel mode, Chat id, Task id and — when the task has one —
+   * Parent task.  This is the choke point every task-settings repaint (tab
+   * switch, task_settings event, scroll into a neighbouring task) goes
+   * through, so the items always describe the task the static task
+   * panel names.  A task without settings falls back to the tab's
+   * pinned workdir and the configured default budget, and shows '—'
+   * for the rest.  The workdir shown here is also adopted as the info
    * subpanel's poll target (setMetaInfoTarget), keeping the row and
    * the mirrored tmp/PROGRESS.md in the same directory.
    *
@@ -7343,6 +7569,7 @@
     // values; its own (idle, taskless) settings must not overwrite
     // them — e.g. a configData repaint landing between two relays.
     if (META_PANEL_MODE) return;
+    reportVisibleTask(s);
     if (!metaWorkdirEl && !metaMaxBudgetEl) return;
     // A filesystem root is never a real workspace (replayed historical
     // tasks are a known source of poisoned root paths — see
@@ -7359,25 +7586,45 @@
       metaMaxBudgetEl.textContent =
         budget === null ? '\u2014' : '$' + budget.toFixed(2);
     }
+    setMetaValue('meta-date', metaText(s ? taskStartText(s.start_ts) : ''));
+    setMetaValue('meta-model', metaText(s ? s.model : ''));
+    setMetaValue(
+      'meta-worktree',
+      s && 'is_worktree' in s
+        ? s.is_worktree
+          ? 'worktree'
+          : 'no worktree'
+        : '\u2014',
+    );
+    setMetaValue(
+      'meta-parallel',
+      s && 'is_parallel' in s
+        ? s.is_parallel
+          ? 'parallel'
+          : 'sequential'
+        : '\u2014',
+    );
+    setMetaValue('meta-chat-id', metaText(s ? s.chat_id : ''));
+    const taskId = metaText(s ? s.task_id : '');
+    setMetaValue(
+      'meta-task-id',
+      s && s.is_subagent && taskId !== '\u2014'
+        ? taskId + ' (subagent)'
+        : taskId,
+    );
+    setMetaParentTask(metaText(s ? s.parent_task_id : ''));
     setMetaInfoTarget(wd);
   }
   updateMetaTaskDetails(null);
 
-  /** Paint *s* into the panel's info block (clears it for null). */
-  function renderTaskPanelInfo(s) {
-    updateMetaTaskDetails(s);
-    if (!taskPanelInfo) return;
-    taskPanelInfo.innerHTML = taskPanelInfoHTML(s);
-  }
-
   /**
    * Adopt *s* as the active tab's own task's settings and show them.
    * Mirrors setTaskText: callers that only LEND the panel to a
-   * neighbouring task use renderTaskPanelInfo directly instead.
+   * neighbouring task use updateMetaTaskDetails directly instead.
    */
   function setTaskSettings(s) {
     currentTaskSettings = s && typeof s === 'object' ? s : null;
-    renderTaskPanelInfo(currentTaskSettings);
+    updateMetaTaskDetails(currentTaskSettings);
   }
   // taskinfo-coverage:end
 
@@ -7924,6 +8171,9 @@
   }
 
   function cycleHistoryUp() {
+    // The history holds prompts; while the composer is the answer box
+    // none of them is an answer.
+    if (document.body.classList.contains('ask-answering')) return false;
     if (histCache.length > 0 && (histIdx >= 0 || !inp.value)) {
       histIdx = Math.min(histIdx + 1, histCache.length - 1);
       inp.value = histCache[histIdx];
@@ -7978,10 +8228,14 @@
     }
   }
 
+  // Ghost text and the completions picker stay live while a task is
+  // running: the composer then drafts the message queued for the running
+  // agent, and that draft deserves the same history / suggestion help as a
+  // fresh task (the daemon's ``complete`` never depended on the run state).
   function requestGhost() {
     clearGhost();
-    if (isRunning || !inp.value) return;
-    if (getAtCtx()) return;
+    if (!inp.value) return;
+    if (getAtCtx() || getSlashCtx()) return;
     if (inp.selectionStart < inp.value.length) return;
     if (inp.value.replace(/\s/g, '').length < 2) return;
     ghostTimer = setTimeout(() => {
@@ -8041,8 +8295,15 @@
   // The lookbehind also rejects "$": "$HOME/kiss" is a shell expansion,
   // not a path named HOME/kiss, and matching it would make
   // mergeSplitPathText() pull "HOME" out of its hljs-variable span.
+  // The first alternative is a Windows drive path ("C:\Users\me\a.py"
+  // or "C:/Users/me/a.py"): a daemon on Windows reports its files that
+  // way, and they must be as clickable as POSIX paths.
   const _LINK_FILEPATH_RE =
-    /(?<![\w@:%/.~$-])((?:(?:~|\.{1,2})?\/|[A-Za-z0-9_+-]+\/)[A-Za-z0-9_./+-]*[A-Za-z0-9_+/-](?::\d+)?)/g;
+    /(?<![\w@:%/.~$-])((?:[A-Za-z]:[\\/][A-Za-z0-9_.\\/+-]*[A-Za-z0-9_+\\/-]|(?:(?:~|\.{1,2})?\/|[A-Za-z0-9_+-]+\/)[A-Za-z0-9_./+-]*[A-Za-z0-9_+/-])(?::\d+)?)/g;
+  // Cheap pre-check before running _LINK_FILEPATH_RE over a text node.
+  function _mayHoldPath(text) {
+    return !!text && (text.indexOf('/') >= 0 || text.indexOf(':\\') >= 0);
+  }
   const _LINK_SKIP_TAGS = new Set([
     'A',
     'SCRIPT',
@@ -8095,7 +8356,7 @@
     let n;
     while ((n = walker.nextNode())) {
       const text = n.nodeValue;
-      if (!text || text.indexOf('/') < 0) continue;
+      if (!_mayHoldPath(text)) continue;
       _LINK_FILEPATH_RE.lastIndex = 0;
       if (_LINK_FILEPATH_RE.test(text)) {
         matches.push(n);
@@ -8450,7 +8711,7 @@
    */
   function mergeSplitPathText(bl) {
     const text = bl.textContent;
-    if (!text || text.indexOf('/') < 0) return;
+    if (!_mayHoldPath(text)) return;
     const doc = bl.ownerDocument;
     const nodes = [];
     const walker = doc.createTreeWalker(bl, NodeFilter.SHOW_TEXT);
@@ -9224,6 +9485,12 @@
    * one -- it used to consult the visible tab's flag and so never
    * collapsed anything.
    *
+   * The module flag, not the tab's own, is deliberately what the
+   * visible tab answers with: the `status running:false` handler flips
+   * the tab's flag first and only then calls setRunningState, whose
+   * flush of a pending stream-tail sweep must still see the task as
+   * running to settle its collapse debt.
+   *
    * @param {string} tabId The tab that owns a transcript.
    * @returns {boolean} Whether that tab's task is running.
    */
@@ -9233,8 +9500,13 @@
     return !!(tab && tab.isRunning);
   }
 
+  /** How many of the newest panels a streaming transcript keeps open. */
+  const STREAM_OPEN_PANELS = 2;
+
   /**
-   * Collapse every top-level panel of a running transcript but the last.
+   * Collapse every top-level panel of a running transcript but the
+   * newest STREAM_OPEN_PANELS, so the panel just finished stays readable
+   * next to the one being streamed.
    *
    * @param {Element|DocumentFragment} container The transcript.
    * @param {string} tabId The tab that owns it.
@@ -9242,19 +9514,25 @@
   function collapseOlderPanels(container, tabId) {
     // Only an attached transcript is collapsed as it streams.  A
     // background tab's fragment is collapsed once, when it is restored
-    // (see restoreTab): collapsing a run_parallel panel adopts its open
-    // sub-agent tabs into the newest fan-out call, and mid-stream that
-    // call does not exist yet, so a live sub-agent tab would be closed
-    // by the very panel it is about to move out of.
+    // (see activateAdjacentTab): collapsing a run_parallel panel adopts
+    // its open sub-agent tabs into the newest fan-out call, and
+    // mid-stream that call does not exist yet, so a live sub-agent tab
+    // would be closed by the very panel it is about to move out of.
     if (!container || container.nodeType !== 1) return;
     if (!streamTabIsRunning(tabId)) return;
     const panels = Array.from(container.children).filter(
       el => el.classList && el.classList.contains('collapsible'),
     );
-    for (let i = 0; i < panels.length - 1; i++) {
+    for (let i = 0; i < panels.length - STREAM_OPEN_PANELS; i++) {
       const p = panels[i];
       if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
         continue;
+      // A `/ask` answer is something the user asked for and is reading
+      // while the task keeps streaming: the next event must not fold it
+      // away.  The user collapses it by hand (its header) when done.
+      if (p.classList.contains('ask-answer')) continue;
+      // A question the user has not answered yet must stay readable.
+      if (p.classList.contains('tc-question-pending')) continue;
       if (panelShowsImage(p)) continue;
       if (p.classList.contains('tc-run-parallel'))
         rpAdoptOpenSubagents(p, tabId);
@@ -9382,6 +9660,53 @@
     const rcBody = rc.querySelector('.rc-body');
     if (rcBody) linkifyFilePaths(rcBody, workDir, ownerTabId);
     return rc;
+  }
+
+  /**
+   * Build the panel for a finished `/ask` answer (an `ask_answer` event).
+   *
+   * Header: "Answer" (or "Answer (failed)" when the answering agent did
+   * not succeed) followed by the quoted question.  Body: the answering
+   * agent's summary, which is HTML from `finish(summary_in_html=...)`
+   * or Markdown from an older agent, rendered by the same
+   * resultSummaryHtml + sanitize path as a result panel.  Collapsible
+   * on its header like a prompt panel; copy button copies the body as
+   * the reader sees it.
+   *
+   * @param {object} ev The `ask_answer` event
+   *   ({question, text, success, ts}).
+   * @param {string} workDir The owning tab's work dir, for file links.
+   * @param {string} ownerTabId The tab that owns the transcript.
+   * @returns {Element} The `.ev.ask-answer` panel.
+   */
+  function createAskAnswerPanel(ev, workDir, ownerTabId) {
+    const el = mkEl(
+      'div',
+      'ev ask-answer' + (ev.success === false ? ' failed' : ''),
+    );
+    const question = String(ev.question || '').trim();
+    const answer = String(ev.text || '(no answer)')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    el.innerHTML =
+      '<div class="ask-answer-h">' +
+      '<span class="ask-answer-label">' +
+      (ev.success === false ? 'Answer (failed)' : 'Answer') +
+      '</span>' +
+      (question
+        ? '<span class="ask-answer-q">' + esc(question) + '</span>'
+        : '') +
+      '</div>' +
+      '<div class="ask-answer-body md-body">' +
+      kissSanitize(resultSummaryHtml(answer)) +
+      '</div>';
+    const body = el.querySelector('.ask-answer-body');
+    el.dataset.rawText = formattedTextFromNode(body).replace(/^\n+|\n+$/g, '');
+    // addCollapse also adds the copy button and the timestamp.
+    addCollapse(el, el.querySelector('.ask-answer-h'), ev.ts);
+    hlBlock(el);
+    linkifyFilePaths(body, workDir, ownerTabId);
+    return el;
   }
 
   window.toggleThink = toggleThink;
@@ -9811,6 +10136,17 @@
           hdr.classList.add('tc-h-bash');
           c.classList.add('tc-bash');
         }
+        // An ask_user_question call is the "Question" panel: the
+        // question reads as prose, the answer typed into the composer
+        // lands inside it with the tool_result (see the tool_result
+        // case), and the daemon's live askUser event marks it pending
+        // while the composer is in answer mode.
+        const isQuestion = ev.name === 'ask_user_question';
+        if (isQuestion) {
+          hdr.textContent = 'Question';
+          hdr.classList.add('tc-h-question');
+          c.classList.add('tc-question');
+        }
         // A run_agent dispatch is a fan-out too: the daemon runs its
         // child under the run_parallel sub-agent contract (nested tab,
         // subagentDone, a history row under this task), so its panel
@@ -9906,7 +10242,20 @@
         tcBody.innerHTML =
           b || '<em style="color:var(--dim)">No arguments</em>';
         c.appendChild(hdr);
-        if (isSummary) {
+        if (isQuestion) {
+          const qd = mkEl('div', 'tc-question-body');
+          const rawQ = (ev.extras && ev.extras.question) || '';
+          if (typeof marked !== 'undefined' && rawQ) {
+            qd.classList.add('md-body');
+            qd.innerHTML = kissSanitize(marked.parse(rawQ));
+            hlBlock(qd);
+            linkifyFilePaths(qd, evWorkDir, evOwnerTab);
+          } else {
+            qd.textContent = rawQ;
+          }
+          qd.dataset.rawText = rawQ;
+          c.appendChild(qd);
+        } else if (isSummary) {
           const sd = mkEl('div', 'tc-summary-desc');
           const rawDesc = ev.description || '';
           if (typeof marked !== 'undefined' && rawDesc) {
@@ -10065,6 +10414,22 @@
           resultTarget.appendChild(r);
           const trBody = r.querySelector('.tr-content');
           if (trBody) linkifyFilePaths(trBody, evWorkDir, evOwnerTab);
+        } else if (
+          tState.lastToolCallEl &&
+          tState.lastToolCallEl.classList.contains('tc-question')
+        ) {
+          // The user's answer, read back from the tool's return value
+          // so a replay shows it under its question too.
+          const ans = mkEl('div', 'tc-question-answer');
+          const lbl = mkEl('span', 'tc-question-answer-label');
+          lbl.textContent = 'Answer';
+          const txt = mkEl('div', 'tc-question-answer-text');
+          txt.textContent = ev.content || '';
+          ans.appendChild(lbl);
+          ans.appendChild(txt);
+          ans.dataset.rawText = 'Answer: ' + (ev.content || '');
+          resultTarget.appendChild(ans);
+          setQuestionPanelPending(resultTarget, false);
         } else {
           const op = mkEl('div', 'bash-panel');
           const opContent = mkEl('div', 'bash-panel-content');
@@ -10189,6 +10554,16 @@
         if (bodyEl) {
           linkifyFilePaths(bodyEl, evWorkDir, evOwnerTab);
         }
+        break;
+      }
+      case 'ask_answer': {
+        // The finished `/ask` side-channel reply.  The answering
+        // sub-agent's nested tab is closed the moment it ends
+        // (subagentDone), so this panel in the OWNER task's transcript
+        // is the one place the user reads the answer.  It quotes the
+        // question so the panel stands on its own on a replay, where
+        // the `/ask` prompt echo may sit many panels above.
+        target.appendChild(createAskAnswerPanel(ev, evWorkDir, evOwnerTab));
         break;
       }
       case 'usage_info': {
@@ -10443,7 +10818,7 @@
       if (rTab) {
         // A result proves this tab ran a task — set on replays too
         // (task_events / resumed panels), where no `clear` ever ran,
-        // so the status dot (and the editor tab's title circle) can
+        // so the status icon (and the editor tab's title prefix) can
         // describe the replayed task.
         rTab.hasRunTask = true;
         if (ev.success === false && !ev.is_continue) {
@@ -10925,9 +11300,9 @@
     const container = regionNeighbour(region);
     setTaskText(region.task || currentTaskName);
     // taskinfo-coverage:start
-    // The info block follows the panel: a neighbour's settings while
-    // the reader is parked on it, the tab's own otherwise.
-    renderTaskPanelInfo(
+    // The Task Info rows follow the panel: a neighbour's settings
+    // while the reader is parked on it, the tab's own otherwise.
+    updateMetaTaskDetails(
       container
         ? taskSettingsById[container.dataset.taskId || ''] || null
         : currentTaskSettings,
@@ -11023,7 +11398,7 @@
     if (O.querySelector('.adjacent-task[data-task]')) {
       taskWheelLastTarget = null;
       setTaskText(currentTaskName);
-      renderTaskPanelInfo(currentTaskSettings);
+      updateMetaTaskDetails(currentTaskSettings);
       showLiveMetrics();
     }
     return true;
@@ -11188,11 +11563,25 @@
     refreshSidebarDataViews(true);
   }
 
-  function setServerLoading(loading) {
+  /**
+   * Show or hide the "server is starting / reconnecting" overlay.
+   *
+   * `banner` (remote webapp, socket lost AFTER the app was on screen)
+   * shrinks the overlay to a slim bar along the top and leaves `#app`
+   * visible: the user keeps reading what was loaded while the shim
+   * reconnects, instead of losing the whole screen on every blip of a
+   * flaky connection.  Without `banner` the overlay covers a hidden
+   * `#app` (cold start, auth lockout, dismissed password prompt).
+   */
+  function setServerLoading(loading, banner) {
     const overlay = document.getElementById('kiss-server-loading');
     const app = document.getElementById('app');
-    if (overlay) overlay.style.display = loading ? '' : 'none';
-    if (app) app.style.display = loading ? 'none' : '';
+    const asBanner = loading && !!banner;
+    if (overlay) {
+      overlay.style.display = loading ? '' : 'none';
+      overlay.classList.toggle('kiss-server-loading--banner', asBanner);
+    }
+    if (app) app.style.display = loading && !asBanner ? 'none' : '';
   }
 
   const spokenTalkIds = new Set();
@@ -11279,6 +11668,9 @@
     'worktree_progress',
     'warning',
     'error',
+    // The finished `/ask` answer, emitted by the daemon's side-channel
+    // worker into the OWNER task's transcript (tabId + taskId stamped).
+    'ask_answer',
   ]);
 
   /**
@@ -11414,6 +11806,36 @@
   }
 
   /**
+   * True when a `/ask` answer names a task other than the one `tab` shows.
+   *
+   * The answer arrives minutes after the question, stamped with the tab it
+   * was typed into and the task it answers. If that tab has since started
+   * a newer task, the answer belongs to a transcript that is no longer on
+   * screen: rendering it would put a stale panel into the new task, and
+   * letting it adopt its taskId (mayAdoptTaskId trusts a tabId) would
+   * re-bind the tab to the finished task and reject every later event of
+   * the real one. The answer is not lost -- the daemon persisted it under
+   * its own task, so the history view of that task shows it.
+   *
+   * Two tests, because the tab's identity lags the new run: a task the
+   * tab already left behind (recorded by the `clear` that started its
+   * replacement, while the tab still carries the old id) is stale, and so
+   * is any task other than the one the tab owns now.
+   */
+  function isStaleAskAnswer(ev, tab) {
+    if (!ev || ev.type !== 'ask_answer') return false;
+    if (ev.taskId === undefined || ev.taskId === null || ev.taskId === '') {
+      return false;
+    }
+    const evTask = String(ev.taskId);
+    if (tab && tab.supersededTaskIds && tab.supersededTaskIds.has(evTask)) {
+      return true;
+    }
+    const owned = tabTaskId(tab);
+    return owned !== '' && owned !== evTask;
+  }
+
+  /**
    * True when a message names the conversation it belongs to.
    *
    * An addressed message must satisfy isForActiveTab() before it may touch a
@@ -11469,9 +11891,20 @@
 
   function handleEvent(ev) {
     const t = ev.type;
+    // The daemon echoes every prompt it takes — setTaskText for a run,
+    // prompt for a follow-up — to the tab it came from (an unaddressed
+    // echo is for the tab on screen, as in the handlers below):
+    // acknowledged.
+    if (t === 'setTaskText' || t === 'prompt') {
+      const echoed = getTab(ev.tabId || activeTabId);
+      if (echoed) echoed.unackedPrompt = '';
+    }
     switch (t) {
       case 'daemonStatus':
-        setServerLoading(!ev.connected);
+        // `reconnecting` is set by the remote webapp's shim when the
+        // socket dropped after this page was authenticated: the app
+        // stays on screen under a banner (see setServerLoading).
+        setServerLoading(!ev.connected, ev.reconnecting === true);
         if (!ev.connected) {
           forgetInFlightPathChecks();
           // An outage swallows in-flight replies. A getAdjacentTask reply
@@ -11790,6 +12223,13 @@
         }
         renderCustomModels();
         break;
+      case 'tricksData':
+        // The daemon's full promptlet list after an Add (from this or
+        // any other window): it replaces the list frozen into the page
+        // at load time so the panel shows the new entry right away.
+        window.__TRICKS__ = Array.isArray(ev.tricks) ? ev.tricks : [];
+        renderTricks(window.__TRICKS__);
+        break;
       case 'infoFile':
         renderInfoFileEvent(ev);
         break;
@@ -11797,6 +12237,17 @@
         // The host relays the ACTIVE chat editor panel's task-info
         // values; only the Task Info view renders them.
         if (META_PANEL_MODE) renderMetaState(ev);
+        break;
+      case 'activeTask':
+        // The host relays the chat / task ids of the chat surface on
+        // screen; only the history panel highlights them (a chat
+        // surface follows its own visible tab).
+        if (HISTORY_PANEL_MODE) {
+          setHistoryActiveTask(
+            String(ev.chatId || ''),
+            String(ev.taskId || ''),
+          );
+        }
         break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
@@ -11811,7 +12262,11 @@
         // tableak-coverage:end
         const filesCtx = getAtCtx();
         if (!filesCtx) {
-          hideAC();
+          // A stale ``files`` reply from a prior ``@`` query must not
+          // hide a slash-command popup that opened AFTER the reply
+          // left the daemon: only hide when the composer is neither
+          // in an ``@`` mention nor in a ``/`` command.
+          if (!getSlashCtx()) hideAC();
           break;
         }
         if (ev.prefix !== undefined && ev.prefix !== filesCtx.query) {
@@ -11820,6 +12275,13 @@
         renderAutocomplete(ev.files || []);
         break;
       }
+      case 'seaCommands':
+        seaCommands = Array.isArray(ev.commands) ? ev.commands.slice() : [];
+        // Refresh a slash-command popup currently on screen so a
+        // registry rescan (SEAS.md edit, new SEA file) reflows the
+        // list without needing another keystroke.
+        if (getSlashCtx()) checkAutocomplete();
+        break;
       case 'askUser': {
         const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
         const askTab = getTab(askTabId);
@@ -11832,8 +12294,17 @@
         // another client reloaded; a genuinely new question always
         // follows an askUserDone, which resets the state to null.
         if (askTab.askPendingQuestion === askQuestion) break;
-        askTab.askPendingQuestion = askQuestion;
-        showAskForTab(askTab);
+        enterAnswerMode(askTab, askQuestion);
+        const draft = savedAskDrafts && savedAskDrafts[askTab.id];
+        if (draft) {
+          // The same question is still open: the answer goes back into
+          // the (now empty) composer. A different one means the old
+          // answer was taken.
+          if (draft.question === askQuestion)
+            setComposerTextOf(askTab, draft.answer);
+          delete savedAskDrafts[askTab.id];
+        }
+        syncAskComposer();
         renderTabBar();
         break;
       }
@@ -11841,6 +12312,8 @@
         const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
         const askTab = getTab(askTabId);
         if (!askTab) break;
+        askTab.unackedAnswer = '';
+        askTab.unackedQuestion = null;
         clearAskForMatchingChatTabs(askTab);
         break;
       }
@@ -11912,6 +12385,17 @@
           // A new run replaces the tab's task: its settings arrive
           // with the run's own task_settings event.
           clearTab.taskSettings = null;
+          // The tab keeps the replaced task's id until the new run's
+          // first id-bearing event (sendMessage claims a pending id only
+          // for a tab that has none), so a `/ask` answer for the old task
+          // landing in that window would pass the same-task check in
+          // isStaleAskAnswer. Remember the id it is leaving behind.
+          if (clearTab.currentTaskId) {
+            if (!clearTab.supersededTaskIds) {
+              clearTab.supersededTaskIds = new Set();
+            }
+            clearTab.supersededTaskIds.add(String(clearTab.currentTaskId));
+          }
         }
         if (ev.chat_id && clearTab) {
           clearTab.backendChatId = ev.chat_id;
@@ -12056,7 +12540,13 @@
         renderWelcomeSuggestions(ev.suggestions);
         break;
       case 'remote_url':
-        renderRemoteUrl(ev.url, ev.ntfyUrl, ev.tunnelActive);
+        renderRemoteUrl(
+          ev.url,
+          ev.ntfyUrl,
+          ev.tunnelActive,
+          ev.loopbackUrl,
+          ev.lanUrls,
+        );
         break;
       case 'update_available':
         renderUpdateAvailable(
@@ -12087,7 +12577,7 @@
         const teTab = getTab(teTabId);
         dropStaleMainTreeBar(teTabId);
         // faildot-coverage:start
-        // The replay REPLACES the tab's transcript, so the status dot
+        // The replay REPLACES the tab's transcript, so the status icon
         // must describe the replayed task: its own failed `result`
         // re-raises the flag (streamEnd), a successful one leaves it
         // down. Mirrors the reset `clear` does when a task starts.
@@ -12289,7 +12779,7 @@
         setTaskSettings(null);
         replayTaskEvents(ev.events || []);
         // The replay recomputed the tab's verdict (hasRunTask /
-        // lastTaskFailed in streamEnd); repaint the status dot and, in
+        // lastTaskFailed in streamEnd); repaint the status icon and, in
         // editor-tabs mode, repost the panel title's state.
         renderTabBar();
         break;
@@ -12410,6 +12900,11 @@
         // tableak-coverage:start
         if (!isForActiveTab(ev)) break;
         // tableak-coverage:end
+        // A ghost suggestion that arrives while the composer is
+        // typing a slash-command (``/xxx``) must NOT paint under the
+        // popup: the daemon does not know about the slash context,
+        // so this guard sits on the response side.
+        if (getSlashCtx()) break;
         if (ev.suggestion && ev.query === inp.value) {
           updateGhost(ev.suggestion);
         }
@@ -12853,7 +13348,9 @@
         if (!TRANSCRIPT_EVENT_TYPES.has(t)) break;
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgTab = findTabByEvt(ev);
-          if (bgTab) processOutputEventForBgTab(ev, bgTab);
+          if (bgTab && !isStaleAskAnswer(ev, bgTab)) {
+            processOutputEventForBgTab(ev, bgTab);
+          }
           if (!isForActiveTab(ev)) break;
         }
         // tableak-coverage:start
@@ -12861,6 +13358,9 @@
         // names no tab cannot be attributed and must not be shown.
         if (TASK_SCOPED_STREAM_TYPES.has(t) && !isForActiveTab(ev)) break;
         // tableak-coverage:end
+        // A delayed answer for a task this tab has moved on from: neither
+        // rendered here nor allowed to drive the adoption below.
+        if (isStaleAskAnswer(ev, getTab(activeTabId))) break;
         if (
           ev.taskId !== undefined &&
           ev.taskId !== null &&
@@ -12920,8 +13420,11 @@
   function updateInputDisabled() {
     inp.disabled = false;
     // A photo still being converted must not be raced by a send: block the
-    // button until every attachment slot holds real bytes.
-    sendBtn.disabled = hasPendingAttachments();
+    // button until every attachment slot holds real bytes. An answer to a
+    // pending question is text only and never waits for one.
+    sendBtn.disabled =
+      hasPendingAttachments() &&
+      !document.body.classList.contains('ask-answering');
   }
 
   /**
@@ -13186,12 +13689,16 @@
       txt.removeAttribute('data-tooltip');
     }
     // taskinfo-coverage:start
-    // The clone carries the LIVE task's info block; every exported
-    // panel must show ITS OWN task's settings instead.
-    const info = panel.querySelector('#task-panel-info');
-    if (info) info.innerHTML = taskPanelInfoHTML(settings || null);
-    // taskinfo-coverage:end
+    // The live panel shows no settings (the Task Info panel carries
+    // them); the shared page has no such panel, so every exported
+    // panel gets an info block with ITS OWN task's settings, below the
+    // text and above the buttons (main.css hides an empty one).
+    const info = document.createElement('div');
+    info.id = 'task-panel-info';
+    info.innerHTML = taskPanelInfoHTML(settings || null);
     const btn = panel.querySelector('#task-panel-drawer-btn');
+    panel.insertBefore(info, btn);
+    // taskinfo-coverage:end
     if (btn) {
       btn.setAttribute('aria-expanded', 'true');
       btn.setAttribute('aria-label', 'Collapse task panel');
@@ -13635,14 +14142,16 @@
   // shareflash0903-coverage:end
   // share-coverage:end
 
-  function _buildRemoteUrlBar(displayUrl, isNtfy) {
+  function _buildRemoteUrlBar(displayUrl, isNtfy, labelText) {
     const wrapper = document.createElement('div');
     wrapper.className = 'remote-url-bar';
     const label = document.createElement('div');
     label.className = 'remote-url-label';
-    label.textContent = isNtfy
-      ? 'Webapp: click the link in the first post at URL:'
-      : 'Web/mobile app';
+    label.textContent =
+      labelText ||
+      (isNtfy
+        ? 'Webapp: click the link in the first post at URL:'
+        : 'Web/mobile app');
     const row = document.createElement('div');
     row.className = 'remote-url-row';
     const link = document.createElement('a');
@@ -13688,15 +14197,30 @@
     return wrapper;
   }
 
-  function renderRemoteUrl(url, ntfyUrl, tunnelActive) {
+  function renderRemoteUrl(url, ntfyUrl, tunnelActive, loopbackUrl, lanUrls) {
     const displayUrl = ntfyUrl || url;
+    // Alongside the Cloudflare (or ntfy) URL, always show how to
+    // reach the webapp from this machine (127.0.0.1) and from other
+    // devices on the LAN.  URLs equal to the primary one are skipped
+    // so nothing is listed twice.
+    const bars = [];
+    if (displayUrl) bars.push([displayUrl, !!ntfyUrl, undefined]);
+    if (loopbackUrl && loopbackUrl !== displayUrl) {
+      bars.push([loopbackUrl, false, 'Local (this machine)']);
+    }
+    for (const lanUrl of lanUrls || []) {
+      if (lanUrl && lanUrl !== displayUrl) {
+        bars.push([lanUrl, false, 'LAN (local network)']);
+      }
+    }
     const containerIds = ['remote-url', 'welcome-remote-url'];
     for (const id of containerIds) {
       const container = document.getElementById(id);
       if (!container) continue;
       container.innerHTML = '';
-      if (!displayUrl) continue;
-      container.appendChild(_buildRemoteUrlBar(displayUrl, !!ntfyUrl));
+      for (const [barUrl, isNtfy, labelText] of bars) {
+        container.appendChild(_buildRemoteUrlBar(barUrl, isNtfy, labelText));
+      }
     }
     const welcomeCfg = document.getElementById('welcome-config');
     if (welcomeCfg) {
@@ -14448,17 +14972,18 @@
       // be able to re-adopt this chat even if the window reloads
       // before any tab activity (e.g. while the daemon is down).
       persistTabState();
-      // Show the composer draft carried over from the opening panel
-      // (data-kiss-pending-text, adopted into the boot tab's
-      // inputValue): the boot tab is put on screen without restoreTab,
-      // so the textarea must be seeded here.
-      const bootTab = getTab(activeTabId);
-      if (bootTab && bootTab.inputValue && !inp.value) {
-        inp.value = bootTab.inputValue;
-        syncClearBtn();
-        inp.style.height = 'auto';
-        inp.style.height = inp.scrollHeight + 'px';
-      }
+    }
+    // Show the composer draft adopted into the boot tab's inputValue —
+    // carried over from the opening panel (data-kiss-pending-text) or
+    // persisted by the previous page instance (savedInputDrafts): the
+    // boot tab is put on screen without restoreTab, so the textarea
+    // must be seeded here.
+    const bootTab = getTab(activeTabId);
+    if (bootTab && bootTab.inputValue && !inp.value) {
+      inp.value = bootTab.inputValue;
+      syncClearBtn();
+      inp.style.height = 'auto';
+      inp.style.height = inp.scrollHeight + 'px';
     }
     sendReady();
     if (EDITOR_TAB_MODE) {
@@ -15305,6 +15830,33 @@
     if (tricksOverlay) {
       tricksOverlay.addEventListener('click', closeTricksPanel);
     }
+    if (tricksSearch) {
+      tricksSearch.addEventListener('input', () => {
+        if (tricksSearchClear)
+          tricksSearchClear.style.display = tricksSearch.value ? '' : 'none';
+        renderTricks(window.__TRICKS__ || []);
+      });
+    }
+    if (tricksSearchClear) {
+      tricksSearchClear.addEventListener('click', () => {
+        tricksSearch.value = '';
+        tricksSearchClear.style.display = 'none';
+        renderTricks(window.__TRICKS__ || []);
+        tricksSearch.focus();
+      });
+    }
+    if (tricksAddInput) {
+      tricksAddInput.addEventListener('input', syncTricksAddBtn);
+      tricksAddInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          submitNewTrick();
+        }
+      });
+    }
+    if (tricksAddBtn) {
+      tricksAddBtn.addEventListener('click', submitNewTrick);
+    }
     if (settingsPanelClose) {
       settingsPanelClose.addEventListener('click', closeSettingsPanel);
     }
@@ -15363,6 +15915,26 @@
         reapplyAllHistoryGroupCollapse(true);
         api.getHistory({query: '', generation: historyGeneration});
         historySearch.focus();
+      });
+    }
+    const historyViewToggle = document.getElementById('history-view-toggle');
+    if (historyViewToggle) {
+      applyHistoryViewToggle(historyViewToggle);
+      historyViewToggle.addEventListener('click', () => {
+        historyLegacyView = !historyLegacyView;
+        try {
+          window.localStorage.setItem(
+            HISTORY_LEGACY_VIEW_KEY,
+            historyLegacyView ? '1' : '0',
+          );
+        } catch {}
+        applyHistoryViewToggle(historyViewToggle);
+        // Rebuild what is on screen in the other view; no refetch — the
+        // loaded pages are the same rows either way (the fast path is
+        // bypassed because the rendered view no longer matches).
+        if (allHistSessions.length > 0) {
+          renderHistory(allHistSessions.slice(), 0, historyGeneration);
+        }
       });
     }
     const {
@@ -15576,12 +16148,6 @@
         if (spoken.trim()) inp.value = spoken;
       }
       sendMessage();
-    });
-
-    window.addEventListener('kiss-voice-answer', event => {
-      if (!isFromSpeechTab(event)) return;
-      const tab = getTab(chatTargetTabId());
-      if (tab && tab.askPendingQuestion !== null) submitAskForTab(tab);
     });
     // tableak-coverage:end
   }
@@ -15980,6 +16546,30 @@
   async function sendMessage() {
     let prompt = inp.value.trim();
     if (!prompt) return;
+    // Daemon unreachable (the remote webapp shows the app under its
+    // "Reconnecting ..." banner): a submit now would only sit in the
+    // shim's queue, and the page reload that follows the reconnect
+    // would drop it.  Keep the prompt in the composer instead of
+    // losing it silently; the user sends it once the banner is gone.
+    if (daemonWasDown) return;
+
+    // The agent is blocked in ask_user_question: the composer text is
+    // its answer, not a new prompt, and photos are not part of it (they
+    // stay attached for the next prompt). Decided here, before any
+    // wait, so a question arriving or being answered elsewhere mid-send
+    // cannot change what this text was.
+    // An answer is not prompt history either (ArrowUp must not offer it
+    // as a prompt later). Emptying the composer through the input event
+    // settles its height, ghost text, history index and clear button;
+    // the parked prompt then comes back the same way (retireAskForTab).
+    const askTab = getTab(activeTabId);
+    if (askTab && !askTab.isContentTab && askTab.askPendingQuestion !== null) {
+      setComposerTextOf(askTab, '');
+      clearGhost();
+      submitAskForTab(askTab, prompt);
+      updateInputDisabled();
+      return;
+    }
 
     // Enter and the voice trigger bypass the disabled send button, so a photo
     // that is still being converted has to be waited for rather than lost.
@@ -16001,7 +16591,17 @@
       // A conversion that failed leaves its error chip in place: sending the
       // prompt without the photo is exactly the silent loss to avoid.  A tab
       // switch means this submission no longer matches what the user sees.
-      if (!ready || activeTabId !== waitTab.id) return;
+      // The connection may have dropped during the wait: re-check.  A
+      // question that arrived meanwhile parked the prompt (enterAnswerMode)
+      // and made the composer the answer box: nothing here is a prompt any
+      // more, and the parked text comes back once the question is answered.
+      if (
+        !ready ||
+        activeTabId !== waitTab.id ||
+        daemonWasDown ||
+        waitTab.askPendingQuestion !== null
+      )
+        return;
       // attachlatch-coverage:end
       // The composer may have been edited during the wait.
       prompt = inp.value.trim();
@@ -16014,6 +16614,7 @@
     const curTab = getTab(activeTabId);
 
     if (isRunning) {
+      if (curTab) curTab.unackedPrompt = prompt;
       api.appendUserMessage({prompt: prompt, tabId: activeTabId});
       resetComposerAfterSend();
       return;
@@ -16052,94 +16653,100 @@
       // only it -- a legitimate owner of the output that is about to arrive.
       if (!curTab.currentTaskId) curTab.pendingTaskId = 'pending:' + curTab.id;
       // tableak-coverage:end
+      curTab.unackedPrompt = prompt;
     }
     resetComposerAfterSend();
   }
 
-  function ensureAskElementsForTab(tab) {
-    if (tab.askQuestionEl) return;
-    const q = document.createElement('div');
-    q.className = 'ask-user-question';
-    const i = document.createElement('textarea');
-    i.className = 'ask-user-input';
-    i.placeholder = 'Your answer...';
-    const s = document.createElement('button');
-    s.className = 'ask-user-submit';
-    s.setAttribute('data-tooltip', 'Submit answer');
-    s.textContent = 'Submit';
-    s.addEventListener('click', () => {
-      submitAskForTab(tab);
-    });
-    i.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        submitAskForTab(tab);
-      }
-    });
-    const m = document.createElement('button');
-    m.className = 'ask-user-mic';
-    m.setAttribute(
-      'data-tooltip',
-      "Voice trigger: listen for the word 'Sorcar'",
-    );
-    m.innerHTML =
-      '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" ' +
-      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
-      'stroke-linejoin="round">' +
-      '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>' +
-      '<path d="M19 10v2a7 7 0 0 1-14 0v-2"/>' +
-      '<line x1="12" y1="19" x2="12" y2="23"/>' +
-      '<line x1="8" y1="23" x2="16" y2="23"/></svg>';
-    const row = document.createElement('div');
-    row.className = 'ask-user-actions';
-    row.appendChild(s);
-    row.appendChild(m);
-    tab.askQuestionEl = q;
-    tab.askInputEl = i;
-    tab.askActionsEl = row;
+  // The "Question" panel of an ask_user_question call (see the tool_call
+  // case) is the tab's newest one: the daemon broadcasts the tool_call
+  // before the live askUser event, and one call blocks the agent until
+  // it is answered.
+  function lastQuestionPanel(tab) {
+    const root = tab.id === activeTabId ? O : tab.outputFragment;
+    if (!root || !root.querySelectorAll) return null;
+    const panels = root.querySelectorAll('.tc-question');
+    return panels.length ? panels[panels.length - 1] : null;
   }
 
-  function setAskQuestionTextForTab(tab, text) {
-    const t = text || '';
-    if (typeof marked !== 'undefined') {
-      tab.askQuestionEl.innerHTML = kissSanitize(marked.parse(t));
-      tab.askQuestionEl.classList.add('md-body');
-      hlBlock(tab.askQuestionEl);
+  function setQuestionPanelPending(panel, pending) {
+    panel.classList.toggle('tc-question-pending', pending);
+    const hdr = panel.querySelector(':scope > .tc-h');
+    if (!hdr) return;
+    let hint = hdr.querySelector('.tc-question-hint');
+    if (pending && !hint) {
+      hint = mkEl('span', 'tc-question-hint');
+      hint.textContent = ' (answer in the chat box below)';
+      hint.dataset.rawText = '';
+      hdr.appendChild(hint);
+    } else if (!pending && hint) {
+      hdr.removeChild(hint);
+    }
+  }
+
+  // The composer doubles as the answer box while the chat tab on screen
+  // has a question outstanding: sendMessage() then posts its text as the
+  // userAnswer instead of a prompt. A file/webview tab hides the text
+  // box (body.content-tab-open), so it is never in answer mode even
+  // when the chat it belongs to is asking.
+  function syncAskComposer() {
+    const tab = getTab(activeTabId);
+    const answering =
+      !!tab && !tab.isContentTab && tab.askPendingQuestion !== null;
+    document.body.classList.toggle('ask-answering', answering);
+    inp.placeholder = answering
+      ? 'Type your answer and press Enter'
+      : inp.dataset.defaultPlaceholder;
+    updateInputDisabled();
+    if (answering) inp.focus();
+  }
+
+  // The text in a tab's composer: the live textarea for the tab on
+  // screen, the parked copy (tab.inputValue) for every other tab.
+  function composerTextOf(tab) {
+    return tab.id === activeTabId ? inp.value : tab.inputValue || '';
+  }
+
+  function setComposerTextOf(tab, text) {
+    if (tab.id === activeTabId) {
+      inp.value = text;
+      inp.dispatchEvent(new Event('input', {bubbles: true}));
     } else {
-      tab.askQuestionEl.textContent = t;
+      tab.inputValue = text;
     }
   }
 
-  function clearAskSlot() {
-    if (!askUserSlot) return;
-    while (askUserSlot.firstChild)
-      askUserSlot.removeChild(askUserSlot.firstChild);
-    if (askUserModal) askUserModal.style.display = 'none';
-  }
-
-  function mountAskForTab(tab) {
-    if (!askUserSlot) return;
-    while (askUserSlot.firstChild)
-      askUserSlot.removeChild(askUserSlot.firstChild);
-    askUserSlot.appendChild(tab.askQuestionEl);
-    askUserSlot.appendChild(tab.askInputEl);
-    askUserSlot.appendChild(tab.askActionsEl);
-    askUserModal.style.display = 'flex';
-    window.dispatchEvent(new CustomEvent('kiss-ask-mic-mounted'));
-    setTimeout(() => {
-      if (tab.id === activeTabId && tab.askInputEl) tab.askInputEl.focus();
-    }, 0);
-  }
-
-  function showAskForTab(tab) {
-    if (tab.askPendingQuestion === null) {
-      if (tab.id === activeTabId) clearAskSlot();
-      return;
+  // Entering answer mode: whatever the user had typed was a prompt, so it
+  // is parked in tab.promptDraft and the composer starts empty for the
+  // answer. Text typed before a question is never sent as its answer.
+  function enterAnswerMode(tab, question) {
+    tab.askPendingQuestion = question;
+    const typed = composerTextOf(tab);
+    if (typed) {
+      tab.promptDraft = typed;
+      setComposerTextOf(tab, '');
     }
-    ensureAskElementsForTab(tab);
-    setAskQuestionTextForTab(tab, tab.askPendingQuestion);
-    tab.askInputEl.value = '';
-    if (tab.id === activeTabId) mountAskForTab(tab);
+    // A history entry being cycled through was a prompt too.
+    if (tab.id === activeTabId) histIdx = -1;
+    const panel = lastQuestionPanel(tab);
+    if (panel) setQuestionPanelPending(panel, true);
+  }
+
+  // Leaving answer mode (answer sent, answered elsewhere, task ended):
+  // the parked prompt comes back. An answer still being typed is kept
+  // too, above it, so nothing the user wrote is lost.
+  function retireAskForTab(tab) {
+    tab.askPendingQuestion = null;
+    const panel = lastQuestionPanel(tab);
+    if (panel) setQuestionPanelPending(panel, false);
+    if (tab.promptDraft) {
+      const typed = composerTextOf(tab);
+      setComposerTextOf(
+        tab,
+        typed ? typed + '\n' + tab.promptDraft : tab.promptDraft,
+      );
+      tab.promptDraft = '';
+    }
   }
 
   function isAskSameChatTab(sourceTab, candidate) {
@@ -16149,44 +16756,29 @@
     return !!chatId && String(candidate.backendChatId || '') === chatId;
   }
 
-  // Retire the question of exactly one tab. Returns true when the retired
-  // question was the one on screen, so callers can drop the modal once.
-  function retireAskForTab(tab) {
-    tab.askPendingQuestion = null;
-    if (tab.askInputEl) tab.askInputEl.value = '';
-    return tab.id === activeTabId;
-  }
-
   // A tab's own task ended, so only its question dies. Sibling tabs sharing
   // the backend chat run their own tasks and may still be waiting on answers.
   function clearAskForTab(tab) {
-    if (retireAskForTab(tab)) clearAskSlot();
+    retireAskForTab(tab);
+    syncAskComposer();
     renderTabBar();
   }
 
   function clearAskForMatchingChatTabs(sourceTab) {
-    let shouldClearSlot = false;
     for (let i = 0; i < tabs.length; i++) {
       const tab = tabs[i];
-      if (!isAskSameChatTab(sourceTab, tab)) continue;
-      if (retireAskForTab(tab)) shouldClearSlot = true;
+      if (isAskSameChatTab(sourceTab, tab)) retireAskForTab(tab);
     }
-    if (shouldClearSlot) clearAskSlot();
+    syncAskComposer();
     renderTabBar();
   }
 
-  function submitAskForTab(tab) {
-    const answer = tab.askInputEl ? tab.askInputEl.value : '';
+  function submitAskForTab(tab, answer) {
+    const question = tab.askPendingQuestion;
     api.userAnswer({answer: answer, tabId: tab.id});
     clearAskForMatchingChatTabs(tab);
-  }
-
-  function syncAskModalToActiveTab() {
-    clearAskSlot();
-    const tab = getTab(activeTabId);
-    if (!tab || tab.askPendingQuestion === null) return;
-    ensureAskElementsForTab(tab);
-    mountAskForTab(tab);
+    tab.unackedAnswer = answer;
+    tab.unackedQuestion = question;
   }
 
   function handleFileSelect(e) {
@@ -16435,6 +17027,90 @@
     return btn;
   }
 
+  // "launched 3 hours ago" label shown next to the show-details
+  // chevron of every task panel in the task-history panel. The unit
+  // ladder is minutes -> hours -> days -> weeks -> months -> years;
+  // anything under a minute reads "launched just now".
+
+  function launchedAgoUnit(count, unit) {
+    return count + ' ' + unit + (count === 1 ? '' : 's') + ' ago';
+  }
+
+  function taskLaunchedAgoText(launchMs, nowMs) {
+    const now = typeof nowMs === 'number' ? nowMs : Date.now();
+    const minutes = Math.floor(Math.max(0, now - launchMs) / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return launchedAgoUnit(minutes, 'minute');
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return launchedAgoUnit(hours, 'hour');
+    const days = Math.floor(hours / 24);
+    if (days < 7) return launchedAgoUnit(days, 'day');
+    if (days < 30) return launchedAgoUnit(Math.floor(days / 7), 'week');
+    if (days < 365) return launchedAgoUnit(Math.floor(days / 30), 'month');
+    return launchedAgoUnit(Math.floor(days / 365), 'year');
+  }
+
+  // Largest epoch offset a JavaScript Date can represent (ECMA-262:
+  // ±8.64e15 ms). A "timestamp" beyond it is corrupt data — the date
+  // renderer classifies such rows as Undated — so it gets no label.
+  const MAX_LAUNCH_EPOCH_MS = 8.64e15;
+
+  // The launch instant of a history session in epoch milliseconds:
+  // ``startTs`` (already ms) when the daemon recorded a valid one,
+  // otherwise the row's insertion ``timestamp`` (epoch seconds).
+  // Epoch zero is a real launch instant (imported databases carry it),
+  // so only an absent, non-numeric, negative, or out-of-Date-range
+  // timestamp yields NaN — meaning "render no label".
+  function taskLaunchMs(session) {
+    const start = Number(session.startTs || 0);
+    if (start > 0 && start <= MAX_LAUNCH_EPOCH_MS) return start;
+    if (session.timestamp === undefined || session.timestamp === null) {
+      return NaN;
+    }
+    const ms = Number(session.timestamp) * 1000;
+    if (!(ms >= 0) || ms > MAX_LAUNCH_EPOCH_MS) return NaN;
+    return ms;
+  }
+
+  function makeLaunchedAgoLabel(session) {
+    const ms = taskLaunchMs(session);
+    if (!isFinite(ms)) return null;
+    const span = document.createElement('span');
+    span.className = 'sidebar-item-launched';
+    span.dataset.launchTs = String(ms);
+    span.textContent = 'launched ' + taskLaunchedAgoText(ms);
+    span.title = 'Launched ' + new Date(ms).toLocaleString();
+    scheduleLaunchedAgoRefresh();
+    return span;
+  }
+
+  // Keep every on-screen "launched ... ago" label current: history
+  // re-renders only happen on daemon broadcasts, so without this sweep
+  // a quiet panel would keep saying "just now" forever. The sweep is a
+  // 30 s timeout CHAIN, not a permanent interval: it is armed when a
+  // label is built and re-arms itself only while at least one label is
+  // still in the document, so a window that never renders history (or
+  // whose history was cleared) holds no live timer keeping the host
+  // process alive.
+  let launchedAgoRefreshTimer = null;
+
+  function scheduleLaunchedAgoRefresh() {
+    if (launchedAgoRefreshTimer) return;
+    launchedAgoRefreshTimer = setTimeout(runLaunchedAgoRefresh, 30000);
+  }
+
+  function runLaunchedAgoRefresh() {
+    launchedAgoRefreshTimer = null;
+    const labels = document.querySelectorAll('.sidebar-item-launched');
+    labels.forEach(el => {
+      const ms = Number(el.dataset.launchTs);
+      if (!isFinite(ms) || ms < 0) return;
+      const text = 'launched ' + taskLaunchedAgoText(ms);
+      if (el.textContent !== text) el.textContent = text;
+    });
+    if (labels.length > 0) scheduleLaunchedAgoRefresh();
+  }
+
   function makeSidebarCopyButton(text) {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -16574,7 +17250,126 @@
     // the element only, dropped when the search text changes).
     if (historySearchActive()) return group._kissSearchCollapsed === true;
     if (group._kissCollapsed !== undefined) return group._kissCollapsed;
-    return group.dataset.hasRunning !== '1';
+    if (group.dataset.hasRunning === '1') return false;
+    // The chat the user is looking at stays open like a running one:
+    // its highlighted task row must be in view, not behind a header.
+    return !(
+      historyActiveChatId && group.dataset.chatId === historyActiveChatId
+    );
+  }
+
+  /**
+   * Tell the history list which chat and task THIS surface shows now,
+   * and — from a VS Code chat surface — the host, which relays the
+   * on-screen chat's ids into the primary-sidebar history panel.
+   *
+   * @param {object|null} s The task settings the Task Info rows are
+   *   painted from (the tab's own task, or the spliced-in neighbour
+   *   the reader scrolled to); without them the active tab's own chat
+   *   binding and task id stand in.
+   */
+  function reportVisibleTask(s) {
+    if (HISTORY_PANEL_MODE) return;
+    const tab = getTab(activeTabId);
+    const chatId = String((s && s.chat_id) || (tab && tab.backendChatId) || '');
+    const rawTask =
+      s && s.task_id !== undefined && s.task_id !== null
+        ? s.task_id
+        : currentTaskId;
+    const taskId =
+      rawTask === undefined || rawTask === null ? '' : String(rawTask);
+    if (!setHistoryActiveTask(chatId, taskId)) return;
+    if (POST_ACTIVE_TASK) postToHost({type: 'activeTask', chatId, taskId});
+  }
+
+  /**
+   * Adopt *chatId* / *taskId* as the task the user is looking at and
+   * repaint the history list: the chat's panel opens (unless the user
+   * folded it), the task's row takes the highlight and scrolls into
+   * view.  Returns false when nothing changed.
+   */
+  function setHistoryActiveTask(chatId, taskId) {
+    if (chatId === historyActiveChatId && taskId === historyActiveTaskId) {
+      return false;
+    }
+    historyActiveChatId = chatId;
+    historyActiveTaskId = taskId;
+    historyActiveScrollPending = true;
+    // Moving to a chat the user once folded unfolds it: the fold
+    // predates the move, and the row to show sits inside.  A fold
+    // made WHILE looking at the chat stands until the next move.
+    if (chatId) {
+      historyChatCollapseOverrides.delete(chatId);
+      historySearchCollapseOverrides.delete(chatId);
+      const group = historyChatGroups.get(chatId);
+      if (group) {
+        delete group._kissCollapsed;
+        delete group._kissSearchCollapsed;
+      }
+    }
+    reapplyAllHistoryGroupCollapse(false);
+    applyHistoryActiveTask();
+    return true;
+  }
+
+  /**
+   * After a history render: re-read which task this surface shows (a
+   * chat surface's visible tab may have been bound to its chat — a
+   * registry snapshot — without a Task Info repaint) and paint the
+   * highlight.  The history panel only knows what the host relayed.
+   */
+  function syncHistoryActiveTask() {
+    if (!HISTORY_PANEL_MODE) reportVisibleTask(metaShownSettings);
+    applyHistoryActiveTask();
+  }
+
+  /**
+   * The history row of the task the user is looking at: the row of
+   * that very task — or, for a chat that names no task yet (a tab
+   * bound to its chat before any task ran), the chat's newest row
+   * (rows come newest first).  Null without a chat, and null for a
+   * named task whose row is not loaded: another task of the chat must
+   * not pass for it.
+   */
+  function historyActiveRow() {
+    if (!historyActiveChatId) return null;
+    for (let i = 0; i < historyRenderedRows.length; i++) {
+      const s = allHistSessions[i];
+      if (!s || String(s.id || '') !== historyActiveChatId) continue;
+      if (!historyActiveTaskId) return historyRenderedRows[i];
+      const taskId =
+        s.task_id === undefined || s.task_id === null ? '' : String(s.task_id);
+      if (taskId === historyActiveTaskId) return historyRenderedRows[i];
+    }
+    return null;
+  }
+
+  /**
+   * Paint the highlight on the row of the task the user is looking at
+   * and, when a scroll is pending (the task changed, or the list was
+   * rebuilt — a rebuild lands at the top), bring the row into view: the
+   * row itself, or its chat's header when the user folded that panel.
+   * Called after every history render and on every change of the task.
+   */
+  function applyHistoryActiveTask() {
+    const target = historyActiveRow();
+    historyRenderedRows.forEach(row => {
+      row.classList.toggle('history-active-task', row === target);
+    });
+    if (!target || !historyActiveScrollPending) return;
+    // A row the filters hide (display:none, see
+    // applyHistoryFilterVisibility) has no place to scroll to; the
+    // scroll waits for the filter change that shows it again.
+    if (target.style.display === 'none') return;
+    historyActiveScrollPending = false;
+    const folded = target.closest('.history-chat-group.collapsed');
+    const el = folded
+      ? folded.querySelector(':scope > .history-chat-header') || folded
+      : target;
+    // jsdom has no scrollIntoView.
+    if (typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({block: 'center'});
+    }
   }
 
   /** Whether a history search is being shown right now. */
@@ -16603,11 +17398,10 @@
   function applyHistoryGroupCollapsed(group) {
     const collapsed = historyGroupCollapsed(group);
     group.classList.toggle('collapsed', collapsed);
+    // The header carries no tooltip (neither data-tooltip nor title):
+    // its one line of text is the whole of what it shows.
     const btn = group.querySelector(':scope > .history-chat-header');
-    if (btn) {
-      btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-      btn.dataset.tooltip = collapsed ? 'Expand chat' : 'Collapse chat';
-    }
+    if (btn) btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
   }
 
   /**
@@ -16631,10 +17425,15 @@
     } else if (group.dataset.firstFromServer === '1') {
       return;
     }
-    const text = first || session.preview || session.title || 'Untitled';
+    // One line of text: a newline in the task would render as a space
+    // anyway (white-space: nowrap), but the first line alone reads as
+    // the title rather than a run-on of the whole prompt.
+    const text =
+      (first || session.preview || session.title || 'Untitled')
+        .split('\n')
+        .map(l => l.trim())
+        .filter(Boolean)[0] || 'Untitled';
     if (titleEl.textContent !== text) titleEl.textContent = text;
-    const btn = group.querySelector(':scope > .history-chat-header');
-    if (btn && btn.title !== text) btn.title = text;
   }
 
   /** Build the collapsible chat panel's clickable header. */
@@ -17131,6 +17930,7 @@
         allHistSessions.length === sessions.length &&
         sessions.length > 0 &&
         historyRenderedTz === tzNow &&
+        historyRenderedLegacy === historyLegacyView &&
         historySessionsEqual(allHistSessions, sessions)
       ) {
         allHistSessions.forEach((s, i) => {
@@ -17152,6 +17952,7 @@
         // clearing of that search) lands here, and its matches must
         // still expand — or fold back — accordingly.
         reapplyAllHistoryGroupCollapse(false);
+        syncHistoryActiveTask();
         return;
       }
       if (historyPressHeld()) {
@@ -17211,11 +18012,17 @@
       // must not advance the cursor past what is on screen.
       historyOffset = 0;
       historyRenderedTz = tzNow;
+      historyRenderedLegacy = historyLegacyView;
+      historyList.classList.toggle('legacy-view', historyLegacyView);
       historyRenderedRows = [];
       allHistSessions = [];
       historyChatGroups.clear();
       historyLastDay = '';
       scheduleHistoryMidnightRelabel(false);
+      // Emptying the list drops its scroll offset: the rebuilt list
+      // lands at the top, so the highlighted row is brought back into
+      // view once the rows exist.
+      historyActiveScrollPending = true;
       if (sessions.length === 0) {
         historyList.innerHTML =
           '<div class="sidebar-empty">No conversations yet</div>';
@@ -17261,19 +18068,19 @@
 
       if (s.is_running) {
         const runningDot = document.createElement('span');
-        runningDot.className = 'sidebar-item-running';
+        runningDot.className = 'sidebar-item-running status-spinner';
         runningDot.dataset.tooltip = 'Task running';
         runningDot.setAttribute('aria-label', 'Task running');
         div.appendChild(runningDot);
       } else if (s.failed) {
         const failedDot = document.createElement('span');
-        failedDot.className = 'sidebar-item-failed';
+        failedDot.className = 'sidebar-item-failed status-cross';
         failedDot.dataset.tooltip = 'Task failed';
         failedDot.setAttribute('aria-label', 'Task failed');
         div.appendChild(failedDot);
       } else if (s.task_id && historyJustCompletedTaskIds.has(s.task_id)) {
         const completedDot = document.createElement('span');
-        completedDot.className = 'sidebar-item-completed';
+        completedDot.className = 'sidebar-item-completed status-tick';
         completedDot.dataset.tooltip = 'Task completed';
         completedDot.setAttribute('aria-label', 'Task completed');
         div.appendChild(completedDot);
@@ -17340,6 +18147,8 @@
       }
 
       actions.appendChild(makeSidebarCollapseToggle(div, s));
+      const launchedAgo = makeLaunchedAgoLabel(s);
+      if (launchedAgo) actions.appendChild(launchedAgo);
       div.appendChild(actions);
 
       const info = document.createElement('div');
@@ -17471,12 +18280,20 @@
         }
         closeSidebar();
       });
-      const group = historyGroupFor(s);
-      historyGroupBody(group).appendChild(div);
-      if (s.is_running && group.dataset.hasRunning !== '1') {
-        // A running task keeps its chat's panel open by default.
-        group.dataset.hasRunning = '1';
-        applyHistoryGroupCollapsed(group);
+      if (historyLegacyView) {
+        // The flat list: rows in the daemon's newest-first order, each
+        // with its chat's color (a hue hashed from the chat id) as a
+        // narrow bar on its right edge.
+        div.style.setProperty('--task-color', chatIdBgColor(chatId));
+        historyList.appendChild(div);
+      } else {
+        const group = historyGroupFor(s);
+        historyGroupBody(group).appendChild(div);
+        if (s.is_running && group.dataset.hasRunning !== '1') {
+          // A running task keeps its chat's panel open by default.
+          group.dataset.hasRunning = '1';
+          applyHistoryGroupCollapsed(group);
+        }
       }
       historyRenderedRows.push(div);
     });
@@ -17486,6 +18303,7 @@
       historyHasMore = false;
     }
     applyHistoryFilterVisibility();
+    syncHistoryActiveTask();
     if (focusKey) {
       // The rebuild detached the focused row; give the keyboard the
       // fresh row of the same task — or the same inline control on it —
@@ -17508,6 +18326,23 @@
         headerGroup.querySelector(':scope > .history-chat-header');
       if (headerBtn) headerBtn.focus({preventScroll: true});
     }
+  }
+
+  /**
+   * Paint the flat-list / chat-panels switch beside the search box and
+   * the list's view class after historyLegacyView changed.
+   *
+   * @param {Element} btn The #history-view-toggle button.
+   */
+  function applyHistoryViewToggle(btn) {
+    btn.setAttribute('aria-pressed', historyLegacyView ? 'true' : 'false');
+    btn.classList.toggle('active', historyLegacyView);
+    const label = historyLegacyView
+      ? 'Group tasks by chat'
+      : 'Show tasks as a flat list';
+    btn.setAttribute('aria-label', label);
+    btn.dataset.tooltip = historyLegacyView ? 'Group by chat' : 'Flat list';
+    historyList.classList.toggle('legacy-view', historyLegacyView);
   }
 
   function autofillHistoryDateRange(range) {
@@ -17844,6 +18679,9 @@
       const hasDate = !!((hfFrom && hfFrom.value) || (hfTo && hfTo.value));
       hfDateClear.style.display = hasDate ? '' : 'none';
     }
+    // A filter change may have just shown the highlighted row a
+    // pending scroll was waiting for.
+    applyHistoryActiveTask();
   }
 
   /**
@@ -17944,6 +18782,34 @@
     setPanelOpen(tricksPanel, tricksOverlay, false);
   }
 
+  /** Enable the panel's Add button only while its box holds text. */
+  function syncTricksAddBtn() {
+    if (!tricksAddBtn || !tricksAddInput) return;
+    tricksAddBtn.disabled = !tricksAddInput.value.trim();
+  }
+
+  /**
+   * Post the Add box's promptlet as `addTrick`: the daemon appends it
+   * to ~/.kiss/MY_INJECTION.md and answers every window with a
+   * `tricksData` list (or the sender alone with an `error`).  The box
+   * is cleared right away; a rejected promptlet is reported through
+   * the error banner, not by keeping the text.
+   */
+  function submitNewTrick() {
+    if (!tricksAddInput) return;
+    const text = tricksAddInput.value.trim();
+    if (!text) return;
+    api.addTrick({text});
+    tricksAddInput.value = '';
+    syncTricksAddBtn();
+    tricksAddInput.focus();
+  }
+
+  /**
+   * Repaint #tricks-list with the promptlets matching the search box
+   * (case-insensitive substring; every promptlet when the box is
+   * empty).  Clicking a row injects it at the composer's caret.
+   */
   function renderTricks(tricks) {
     if (!tricksList) return;
     if (!tricks || tricks.length === 0) {
@@ -17951,8 +18817,17 @@
         '<div class="sidebar-empty">No tricks available</div>';
       return;
     }
+    const query = tricksSearch ? tricksSearch.value.trim().toLowerCase() : '';
+    const shown = query
+      ? tricks.filter(text => text.toLowerCase().includes(query))
+      : tricks;
+    if (shown.length === 0) {
+      tricksList.innerHTML =
+        '<div class="sidebar-empty">No matching promptlets</div>';
+      return;
+    }
     tricksList.innerHTML = '';
-    tricks.forEach(text => {
+    shown.forEach(text => {
       const div = document.createElement('div');
       div.className = 'sidebar-item tricks-item';
       div.dataset.tooltip = text;
@@ -18626,7 +19501,64 @@
     return m ? {start: before.length - m[0].length, query: m[1]} : null;
   }
 
+  function getSlashCtx() {
+    // Only match a leading slash on the very first line (a stray "/"
+    // typed inside multi-line text is not a command). The cursor must
+    // be inside the command word — once whitespace follows, the user
+    // is typing the sub-task text and the popup should hide.
+    const val = inp.value;
+    const pos = inp.selectionStart || 0;
+    const before = val.substring(0, pos);
+    const m = before.match(/^\/([A-Za-z0-9_-]*)$/);
+    return m ? {start: 0, query: m[1]} : null;
+  }
+
+  function acceptSlashCommand(name) {
+    const slashCtx = getSlashCtx();
+    if (!slashCtx) return;
+    const cursor = inp.selectionStart || inp.value.length;
+    const after = inp.value.substring(cursor);
+    const sep = /^\s/.test(after) ? '' : ' ';
+    const inserted = '/' + name + sep;
+    inp.value = inserted + after;
+    syncClearBtn();
+    const np = inserted.length;
+    inp.setSelectionRange(np, np);
+    inp.style.height = 'auto';
+    inp.style.height = inp.scrollHeight + 'px';
+    hideAC();
+    inp.focus();
+  }
+
+  function renderSlashCommands(query) {
+    if (!seaCommands || !seaCommands.length) {
+      hideAC();
+      return;
+    }
+    const q = (query || '').toLowerCase();
+    const matches = q
+      ? seaCommands.filter(n => n.toLowerCase().indexOf(q) >= 0)
+      : seaCommands.slice();
+    if (!matches.length) {
+      hideAC();
+      return;
+    }
+    const data = matches.map(name => ({type: 'command', text: name}));
+    renderAcDropdown(
+      data,
+      ['command'],
+      {command: 'Commands'},
+      item => (q ? '/' + hlMatch(item.text, q) : '/' + esc(item.text)),
+      acceptSlashCommand,
+    );
+  }
+
   function checkAutocomplete() {
+    const slashCtx = getSlashCtx();
+    if (slashCtx) {
+      renderSlashCommands(slashCtx.query);
+      return;
+    }
     const atCtx = getAtCtx();
     if (atCtx) {
       api.getFiles({
@@ -18654,6 +19586,7 @@
     if (type === 'task') return _acSvg.bolt;
     if (type === 'trick') return _acSvg.spark;
     if (type === 'identifier') return _acSvg.code;
+    if (type === 'command') return _acSvg.bolt;
     return _acSvg.file;
   }
   function hlMatch(text, query) {
@@ -18790,14 +19723,10 @@
   }
 
   function renderCompletions(data) {
-    if (getAtCtx()) {
+    if (getAtCtx() || getSlashCtx()) {
       return;
     }
     if (!data || !data.length) {
-      hideAC();
-      return;
-    }
-    if (isRunning) {
       hideAC();
       return;
     }

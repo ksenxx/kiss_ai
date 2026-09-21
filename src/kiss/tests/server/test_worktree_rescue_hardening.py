@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, cast
@@ -187,7 +188,7 @@ class TestReclaimOwnerPidGuard:
 
     def test_live_foreign_owner_is_skipped(self) -> None:
         """A worktree owned by a living other process is untouchable."""
-        proc = subprocess.Popen(["sleep", "60"])
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
             self._set_owner(proc.pid)
             reclaimed = GitWorktreeOps.reclaim_orphaned_worktrees(self.repo)
@@ -202,7 +203,7 @@ class TestReclaimOwnerPidGuard:
 
     def test_dead_owner_is_reclaimed(self) -> None:
         """A worktree whose owner process died is reclaimed normally."""
-        proc = subprocess.Popen(["true"])
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
         proc.wait()
         self._set_owner(proc.pid)
         reclaimed = GitWorktreeOps.reclaim_orphaned_worktrees(self.repo)

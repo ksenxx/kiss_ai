@@ -16,6 +16,7 @@ const {
   daemonHasActiveTasks,
   decideRestart,
 } = require('../src/daemonHealth');
+const {fakeSockPath} = require('./fakeSock');
 
 let passed = 0;
 const failures = [];
@@ -133,14 +134,14 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
   });
 
   await test('daemonHasActiveTasks: returns {ok:false, reason:"sock-missing"} when the socket file does not exist', async () => {
-    const sockPath = path.join(tmpRoot, 'missing.sock');
+    const sockPath = fakeSockPath(tmpRoot, 'missing.sock');
     const res = await daemonHasActiveTasks(sockPath, 500);
     assert.strictEqual(res.ok, false);
     assert.strictEqual(res.reason, 'sock-missing');
   });
 
   await test('daemonHasActiveTasks: parses count=2 and the tabs list from a real UDS server', async () => {
-    const sockPath = path.join(tmpRoot, 'busy.sock');
+    const sockPath = fakeSockPath(tmpRoot, 'busy.sock');
     const tabs = [
       'ad4ecb65-2878-4c2c-9736-3bb9be18814a(task=74)',
       'beadbabe-1111-2222-3333-444455556666(task=99)',
@@ -159,7 +160,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
   });
 
   await test('daemonHasActiveTasks: parses count=0 correctly (idle daemon)', async () => {
-    const sockPath = path.join(tmpRoot, 'idle.sock');
+    const sockPath = fakeSockPath(tmpRoot, 'idle.sock');
     const server = await listenUds(sockPath, {
       type: 'activeTasksResponse', count: 0, tabs: [],
     });
@@ -174,7 +175,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
   });
 
   await test('daemonHasActiveTasks: returns {ok:false, reason:"timeout"} when the server never replies', async () => {
-    const sockPath = path.join(tmpRoot, 'silent.sock');
+    const sockPath = fakeSockPath(tmpRoot, 'silent.sock');
     const server = await listenUds(sockPath, null);
     try {
       const res = await daemonHasActiveTasks(sockPath, 200);
@@ -186,7 +187,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
   });
 
   await test('daemonHasActiveTasks: skips non-JSON broadcast noise and times out instead of mis-reporting', async () => {
-    const sockPath = path.join(tmpRoot, 'gibberish.sock');
+    const sockPath = fakeSockPath(tmpRoot, 'gibberish.sock');
     const server = await listenUds(sockPath, 'gibberish');
     try {
       const res = await daemonHasActiveTasks(sockPath, 200);
@@ -198,7 +199,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
   });
 
   await test('daemonHasActiveTasks: skips broadcast lines that are not the awaited response (times out instead of mis-reporting)', async () => {
-    const sockPath = path.join(tmpRoot, 'wrong.sock');
+    const sockPath = fakeSockPath(tmpRoot, 'wrong.sock');
     const server = await listenUds(sockPath, {type: 'something-else'});
     try {
       const res = await daemonHasActiveTasks(sockPath, 200);
@@ -210,7 +211,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
   });
 
   await test('daemonHasActiveTasks: tolerates a stray broadcast line that precedes the real activeTasksResponse', async () => {
-    const sockPath = path.join(tmpRoot, 'prefixed.sock');
+    const sockPath = fakeSockPath(tmpRoot, 'prefixed.sock');
     const server = await new Promise((resolve, reject) => {
       try {
         if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
@@ -257,7 +258,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
   });
 
   await test('daemonHasActiveTasks: an OLD-daemon "Unknown command: activeTasksQuery" error is INCONCLUSIVE (must not authorize a restart)', async () => {
-    const sockPath = path.join(tmpRoot, 'old-daemon.sock');
+    const sockPath = fakeSockPath(tmpRoot, 'old-daemon.sock');
     const server = await listenUds(sockPath, {
       type: 'error',
       text: 'Unknown command: activeTasksQuery',
@@ -406,7 +407,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
 
   await test('end-to-end: alive TCP + UDS reporting 1 active task → skip("active-tasks")', async () => {
     const {port, close: closeTcp} = await listenTcp();
-    const sockPath = path.join(tmpRoot, 'e2e.sock');
+    const sockPath = fakeSockPath(tmpRoot, 'e2e.sock');
     const tabs = ['ad4ecb65-2878-4c2c-9736-3bb9be18814a(task=74)'];
     const uds = await listenUds(sockPath, {
       type: 'activeTasksResponse', count: 1, tabs,

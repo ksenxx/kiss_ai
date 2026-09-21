@@ -46,6 +46,7 @@ from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+from kiss.tests.conftest import posix_only
 
 
 def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -274,6 +275,7 @@ class TestWorktreeDoNothing(_Base):
             "future orphan reclaim never auto-merges the parked work"
         )
 
+    @posix_only("chmod permission bits")
     def test_nothing_fails_closed_when_marker_cannot_be_saved(self) -> None:
         """No detach without the durable preserve marker.
 

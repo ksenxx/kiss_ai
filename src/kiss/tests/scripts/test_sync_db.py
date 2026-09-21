@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.conftest import posix_only
+
 REMOTE_HOST = os.environ.get("KISS_SYNC_TEST_HOST", "ksen@34.42.88.157")
 
 TASK_DDL = """
@@ -531,6 +533,7 @@ def test_dry_run_reports_what_a_real_run_would_do(tmp_path: Path) -> None:
     assert event_keys(target) == []
 
 
+@posix_only("a colon cannot appear in a Windows file name (it denotes a stream)")
 def test_relative_path_with_a_colon_stays_local(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

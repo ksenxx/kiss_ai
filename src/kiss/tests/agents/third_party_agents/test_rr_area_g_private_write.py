@@ -31,6 +31,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     save_json_config,
     write_private_file,
 )
+from kiss.tests.conftest import TRANSIENT_REPLACE_READ_ERRORS
 
 _IS_POSIX = sys.platform != "win32"
 
@@ -85,14 +86,23 @@ class TestWritePrivateFile:
 
         def writer(idx: int) -> None:
             for i in range(150):
-                write_private_file(
-                    target, json.dumps({"writer": idx, "i": i, "payload": "x" * 4096})
-                )
+                try:
+                    write_private_file(
+                        target, json.dumps({"writer": idx, "i": i, "payload": "x" * 4096})
+                    )
+                except OSError as e:  # pragma: no cover
+                    # Recorded so a refused replace (a Windows reader
+                    # holding the target) fails the test instead of
+                    # merely warning about a dead thread.
+                    errors.append(f"writer {idx} failed: {e}")
+                    return
 
         def reader() -> None:
             while not stop.is_set():
                 try:
                     data = json.loads(target.read_text(encoding="utf-8"))
+                except TRANSIENT_REPLACE_READ_ERRORS:
+                    continue
                 except (json.JSONDecodeError, OSError) as e:  # pragma: no cover
                     errors.append(f"torn read: {e}")
                     return
@@ -158,7 +168,7 @@ class TestGmailSaveCredentials:
         monkeypatch.setenv("KISS_HOME", str(tmp_path / "kiss_home"))
         from google.oauth2.credentials import Credentials
 
-        from kiss.agents.third_party_agents.gmail_agent import (
+        from kiss.agents.third_party_agents.gmail_sea import (
             _save_credentials,
             _token_path,
         )

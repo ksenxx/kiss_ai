@@ -7,15 +7,17 @@
 from __future__ import annotations
 
 import getpass
+import html
 import logging
 import os
 import platform
+import re
 import socket
 import threading
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NamedTuple, cast
+from typing import Any, NamedTuple, NoReturn, cast
 from uuid import uuid4
 
 import yaml
@@ -328,11 +330,22 @@ summary_in_html="precise chronologically-ordered list of things the agent did \
 with the reason for doing that along with relevant code snippets, formatted \
 as HTML (e.g. <ol>, <p>, <pre><code>), never Markdown")**
 - The summary_in_html argument of finish MUST always be formatted as HTML.
-- Work dir: {work_dir}
-- Current process PID: {current_pid} — NEVER kill this process.
+{work_dir_line}- Current process PID: {current_pid} — NEVER kill this process.
 """
 
+#: The ``IMPORTANT_INSTRUCTIONS`` work-dir line.  Omitted for container
+#: runs (``docker_image`` set): the tools then execute inside the
+#: container, whose working directory is not the host ``work_dir``, so
+#: naming the host path would point the model at files it cannot reach.
+WORK_DIR_LINE = "- Work dir: {work_dir}\n"
+
 TASK_SETTINGS_HEADER = "\n# Task Settings\n"
+
+#: Consecutive continuation sessions that made no progress — no tool
+#: call other than ``finish``, or a summary identical to the previous
+#: session's — after which :meth:`RelentlessAgent.perform_task` stops
+#: instead of spending the remaining sub-sessions on the same stall.
+MAX_ZERO_PROGRESS_SESSIONS = 2
 
 #: Budget cap (USD) a run falls back to when the caller states none.
 DEFAULT_MAX_BUDGET = 200.0
@@ -497,6 +510,78 @@ def _build_exhaustion_summary(summaries: list[str], banner: str) -> str:
     if not summaries:
         return banner
     return f"{_prior_sessions_section(summaries)}\n\n---\n\n{banner}"
+
+
+# The usage-info block ``KISSAgent._execute_step`` appends to every
+# model-role trajectory message; noise in a partial result.  Only the
+# LAST fenced block is the framework's: the model's own narration may
+# contain ```text fences too.
+_USAGE_BLOCK_RE = re.compile(r"\n```text\n(?:(?!```text\n).)*```\n?$", re.DOTALL)
+
+# How much of the executor's trajectory a partial result quotes.
+PARTIAL_RESULT_MAX_STEPS = 8
+PARTIAL_RESULT_MAX_CHARS_PER_STEP = 600
+
+
+def _partial_result_html(
+    executor: KISSAgent | None,
+    exc: BaseException,
+    budget_used: float,
+    max_budget: float,
+    total_steps: int,
+) -> str:
+    """Describe the work *executor* did before *exc* ended its run, as HTML.
+
+    Used when a sub-agent runs out of budget: instead of the bare
+    ``Task failed`` the parent used to get — losing every step the
+    child took — the parent receives the child's own account of its
+    progress: the model's most recent trajectory messages (its
+    narration plus the tool calls it made), oldest first.
+
+    Args:
+        executor: The session that was running when the budget ran out,
+            or ``None`` when it ran out between sessions.
+        exc: The budget error that ended the run.
+        budget_used: The sub-agent's cumulative spend in USD (all
+            sessions, nested sub-agents included).
+        max_budget: The sub-agent's budget cap in USD.
+        total_steps: The sub-agent's cumulative step count.
+
+    Returns:
+        An HTML fragment: a heading, a one-paragraph explanation, and
+        the quoted trajectory tail (when there is one).
+    """
+    heading = f"<h3>Partial result: {html.escape(str(exc))}</h3>"
+    if executor is None:
+        return heading + (
+            "<p>The sub-agent's budget ran out between sessions, before "
+            "the next session could start.  Only the previous sessions' "
+            "summaries above exist; the task is incomplete.</p>"
+        )
+    steps = [
+        _USAGE_BLOCK_RE.sub("", str(m["content"])).strip()
+        for m in executor.messages
+        if m.get("role") == "model"
+    ]
+    tail = steps[-PARTIAL_RESULT_MAX_STEPS:]
+    items = []
+    for text in tail:
+        if len(text) > PARTIAL_RESULT_MAX_CHARS_PER_STEP:
+            text = text[:PARTIAL_RESULT_MAX_CHARS_PER_STEP] + " …"
+        items.append(f"<li><pre>{html.escape(text)}</pre></li>")
+    omitted = len(steps) - len(tail)
+    parts = [
+        heading,
+        f"<p>The sub-agent spent ${budget_used:.4f} of its "
+        f"${max_budget:.4f} budget in {total_steps} steps "
+        "and was stopped before it called finish.  Below is its own account "
+        "of the work so far, oldest first; it is incomplete and unverified.</p>",
+    ]
+    if items:
+        if omitted > 0:
+            parts.append(f"<p>({omitted} earlier steps omitted.)</p>")
+        parts.append("<ol>" + "".join(items) + "</ol>")
+    return "".join(parts)
 
 
 class RelentlessAgent(Base):
@@ -1035,6 +1120,11 @@ class RelentlessAgent(Base):
     ) -> str:
         """Execute the task with auto-continuation across multiple sub-sessions.
 
+        Each sub-session is a fresh :class:`KISSAgent`; one that returns
+        ``finish(is_continue=True, ...)`` hands its summary to the next.
+        The ``IMPORTANT_INSTRUCTIONS`` suffix names the host work dir
+        only when the tools run on the host (no ``docker_image``).
+
         Args:
             tools: List of callable tools available to the agent during execution.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
@@ -1043,7 +1133,11 @@ class RelentlessAgent(Base):
             YAML string with 'success' and 'summary' keys on successful completion.
 
         Raises:
-            KISSError: If the task fails after exhausting all sub-sessions.
+            KISSError: If the task fails after exhausting all sub-sessions,
+                or after :data:`MAX_ZERO_PROGRESS_SESSIONS` consecutive
+                continuations that made no progress (no tool call other
+                than ``finish``, or a summary identical to the previous
+                session's).
         """
         logger.info(
             "Executing task: agent=%s model=%s max_steps=%d "
@@ -1059,9 +1153,13 @@ class RelentlessAgent(Base):
 
         progress_section = ""
         summaries: list[str] = []
+        previous_summary: str | None = None  # the last continuation's, even if empty
+        zero_progress_streak = 0
         current_pid = str(os.getpid())
         important_instructions = IMPORTANT_INSTRUCTIONS.format(
-            work_dir=self.work_dir,
+            work_dir_line=(
+                "" if self.docker_image else WORK_DIR_LINE.format(work_dir=self.work_dir)
+            ),
             current_pid=current_pid,
         )
         important_instructions += self._task_settings_section()
@@ -1081,10 +1179,14 @@ class RelentlessAgent(Base):
             budget_banked, tokens_banked, steps_banked = self.usage_snapshot()
             remaining_budget = self.max_budget - budget_banked
             if remaining_budget <= 0:
-                raise BudgetExceededError(
+                exhausted = BudgetExceededError(
                     f"Agent {self.name} budget exhausted "
                     f"(${budget_banked:.4f} / ${self.max_budget:.2f})."
                 )
+                partial = self._budget_exhausted_result(None, summaries, exhausted)
+                if partial is None:
+                    raise exhausted
+                return partial
             if self.printer:
                 self.printer.tokens_offset = tokens_banked  # type: ignore[attr-defined]
                 self.printer.budget_offset = budget_banked  # type: ignore[attr-defined]
@@ -1101,6 +1203,12 @@ class RelentlessAgent(Base):
             executor = KISSAgent(f"{self.name} Session-{session}")
             executor.pre_step_hook = getattr(self, "pre_step_hook", None)
             executor.tool_call_guard = getattr(self, "tool_call_guard", None)
+            context_reset_hook = getattr(self, "context_reset_hook", None)
+            executor.context_reset_hook = context_reset_hook
+            if session > 0 and context_reset_hook is not None:
+                # A new session starts from an empty context: nothing
+                # shown to the previous session's model is visible now.
+                context_reset_hook()
             llm_call_hook = getattr(self, "llm_call_hook", None)
             tool_call_hook = getattr(self, "tool_call_hook", None)
             executor.budget_check_hook = self._check_total_budget
@@ -1126,10 +1234,13 @@ class RelentlessAgent(Base):
                 )
                 self._current_executor = None
                 self._accumulate_usage(executor)
-            except BudgetExceededError:
+            except BudgetExceededError as exc:
                 self._current_executor = None
                 self._accumulate_usage(executor)
-                raise
+                partial = self._budget_exhausted_result(executor, summaries, exc)
+                if partial is None:
+                    raise
+                return partial
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
                 # Bank the failed session's spend BEFORE any recovery
@@ -1217,14 +1328,51 @@ class RelentlessAgent(Base):
                 return result
 
             summary = payload.get("summary", "")
-            if summary:  # pragma: no branch
+            # Zero-progress guard: a continuation that called no tool but
+            # ``finish``, or that repeated the previous session's summary
+            # verbatim (an empty one included — ``summaries`` below keeps
+            # only non-empty ones), did nothing the next session could
+            # build on.
+            stalled = executor.tool_calls_made == 0 or summary == previous_summary
+            previous_summary = summary
+            zero_progress_streak = zero_progress_streak + 1 if stalled else 0
+            if summary:
                 summaries.append(summary)
 
                 progress_section = CONTINUATION_PROMPT.format(
                     progress_text=_capped_progress_text(summaries),
                     continuation_number=session + 1,
                 )
-        banner = f"Task failed after {self.max_sub_sessions} sub-sessions"
+            if zero_progress_streak >= MAX_ZERO_PROGRESS_SESSIONS:
+                self._fail_after_sessions(
+                    summaries,
+                    f"Task stopped after {zero_progress_streak} consecutive "
+                    "sub-sessions with no progress (no tool calls or an "
+                    "unchanged summary)",
+                )
+        self._fail_after_sessions(
+            summaries, f"Task failed after {self.max_sub_sessions} sub-sessions",
+        )
+
+    def _fail_after_sessions(self, summaries: list[str], banner: str) -> NoReturn:
+        """End the run with *banner* after its sub-sessions stopped paying off.
+
+        Shared by the two ways :meth:`perform_task` gives up without a
+        terminal ``finish``: every sub-session was used, or
+        :data:`MAX_ZERO_PROGRESS_SESSIONS` continuations in a row made
+        no progress.  Emits the merged ``result`` event (the prior
+        sessions' summaries followed by *banner*, see
+        :func:`_build_exhaustion_summary`) and raises a :class:`KISSError`
+        flagged ``terminal_result_broadcast`` so the runner does not
+        emit a second terminal event.
+
+        Args:
+            summaries: Prior sessions' summaries, oldest first.
+            banner: The short reason shown as the terminal result.
+
+        Raises:
+            KISSError: Always, carrying *banner*.
+        """
         self._emit_merged_result_event(
             {
                 "success": False,
@@ -1235,6 +1383,55 @@ class RelentlessAgent(Base):
         err = KISSError(banner)
         err.terminal_result_broadcast = True  # type: ignore[attr-defined]
         raise err
+
+    def _budget_exhausted_result(
+        self,
+        executor: KISSAgent | None,
+        summaries: list[str],
+        exc: BudgetExceededError,
+    ) -> str | None:
+        """Turn a sub-agent's budget exhaustion into a partial result.
+
+        A top-level task keeps raising *exc*: the server, the CLI and
+        the result panel all report "budget exceeded" from it.  A
+        sub-agent (a ``run_parallel`` child or a ``run_agent``
+        dispatch, marked by ``_subagent_info``) instead returns a
+        ``finish(success=False, is_continue=False, ...)`` result whose
+        summary quotes what it did (:func:`_partial_result_html`),
+        preceded by any prior sessions' summaries — so the parent can
+        use the work instead of receiving a bare "Task failed".  The
+        merged result event is emitted here because the executor
+        raised before it could emit its own.
+
+        Args:
+            executor: The session that ran out of budget, or ``None``
+                when the budget ran out between sessions.
+            summaries: Prior sessions' summaries, oldest first.
+            exc: The budget error.
+
+        Returns:
+            The partial result string for a sub-agent, ``None`` for a
+            top-level task (the caller re-raises *exc*).
+        """
+        if getattr(self, "_subagent_info", None) is None:
+            return None
+        # Cumulative figures (the executor's spend is already banked,
+        # and nested sub-agents' spend is attributed here, not to the
+        # executor).
+        budget_used, _tokens, total_steps = self.usage_snapshot()
+        payload = {
+            "success": False,
+            "is_continue": False,
+            "summary": _build_exhaustion_summary(
+                summaries,
+                _partial_result_html(
+                    executor, exc, budget_used, self.max_budget, total_steps,
+                ),
+            ),
+        }
+        self._emit_merged_result_event(payload)
+        result: str = yaml.dump(payload, sort_keys=False)
+        return result
 
     def _summarize_failed_session(
         self,
@@ -1289,7 +1486,7 @@ class RelentlessAgent(Base):
                 summarizer_result = summarizer_agent.run(
                     model_name=self.model_name,
                     prompt_template=SUMMARIZER_PROMPT,
-                    tools=[shell_tools.Read, shell_tools.Bash],
+                    tools=[shell_tools.Read, shell_tools.Bash, shell_tools.bash_job],
                     arguments={
                         "trajectory_path": str(trajectory_path),
                     },

@@ -161,39 +161,53 @@ function testDotRendersForRunningRow() {
   );
 
   const dot = dotOf(running);
-  assert.ok(dot, 'running row must carry .sidebar-item-running dot');
+  assert.ok(dot, 'running row must carry .sidebar-item-running spinner');
 
   assert.strictEqual(
     running.firstElementChild,
     dot,
-    'running dot must be the first child of the row (left of text)',
+    'running spinner must be the first child of the row (left of text)',
+  );
+  assert.ok(
+    dot.classList.contains('status-spinner'),
+    'the running indicator must be the shared .status-spinner icon',
+  );
+  assert.strictEqual(
+    dot.textContent,
+    '',
+    'the spinner is drawn by CSS, not by a text glyph',
   );
 
   const cs = win.getComputedStyle(dot);
   assert.strictEqual(
-    cs.backgroundColor,
+    cs.color,
     'rgb(46, 125, 50)',
-    `dot background must be #2e7d32 (rgb(46, 125, 50)); got: ${cs.backgroundColor}`,
+    `spinner colour must be #2e7d32 (rgb(46, 125, 50)); got: ${cs.color}`,
   );
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';
   assert.ok(
-    animName.indexOf('running-pulse') >= 0 ||
-      animShort.indexOf('running-pulse') >= 0,
-    `dot must animate via 'running-pulse'; got animation-name=` +
+    animName.indexOf('status-spin') >= 0 ||
+      animShort.indexOf('status-spin') >= 0,
+    `spinner must animate via 'status-spin'; got animation-name=` +
       `"${animName}" animation="${animShort}"`,
+  );
+  assert.ok(
+    animName.indexOf('running-pulse') < 0 &&
+      animShort.indexOf('running-pulse') < 0,
+    'the running indicator must spin, not pulse',
   );
 
   const cssText = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   assert.ok(
-    /@keyframes\s+running-pulse\b/.test(cssText),
-    'main.css must define @keyframes running-pulse',
+    /@keyframes\s+status-spin\b/.test(cssText),
+    'main.css must define @keyframes status-spin',
   );
 
   assert.strictEqual(running.dataset.category, 'running');
 
   win.close();
-  console.log('  ok - pulsing green dot renders on is_running rows');
+  console.log('  ok - green spinner renders on is_running rows');
 }
 
 function testDotAppearsLiveOnStatusRunningTrue() {
@@ -246,12 +260,12 @@ function testDotAppearsLiveOnStatusRunningTrue() {
   const dot = dotOf(row);
   assert.ok(
     dot,
-    'pulsing green dot must appear on the row after status running:true',
+    'spinner must appear on the row after status running:true',
   );
   assert.strictEqual(
     row.firstElementChild,
     dot,
-    'live-added dot must still be the first child of the row',
+    'live-added spinner must still be the first child of the row',
   );
 
   win.close();
@@ -277,7 +291,7 @@ function testDotDisappearsLiveOnStatusRunningFalse() {
   assert.ok(
     sent,
     'status running:false must trigger a getHistory refetch ' +
-      'so the History panel can drop the pulsing dot',
+      'so the History panel can drop the spinner',
   );
 
   const generation = sent.generation;
@@ -300,7 +314,7 @@ function testDotDisappearsLiveOnStatusRunningFalse() {
   assert.strictEqual(
     dotOf(rows['ending task']),
     null,
-    'pulsing dot must be removed after status running:false reply',
+    'spinner must be removed after status running:false reply',
   );
 
   win.close();

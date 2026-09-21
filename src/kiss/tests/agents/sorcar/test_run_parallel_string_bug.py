@@ -73,18 +73,15 @@ class TestCoerceTasks:
             _coerce_tasks([1, 2, 3])  # type: ignore[list-item]
 
 
-class TestRunParallelClosureUsesCoercion:
-    """The ``run_parallel`` tool exposed to the LLM also runs through coercion.
+class TestRunParallelClosureRejectsBareString:
+    """The ``run_parallel`` tool exposed to the LLM never iterates a string.
 
-    With a bare-string ``tasks`` argument and ``max_workers="0"`` the closure
-    must raise :class:`ValueError` from ``ThreadPoolExecutor(max_workers=0)``
-    **after** coercion — proving the closure does not iterate the string
-    character-by-character before reaching the executor.
+    A bare-string ``tasks`` argument is refused outright with an
+    ``Error:`` result (see :mod:`kiss.agents.sorcar.fanout_guard`), so
+    no sub-agent — let alone one per character — is ever spawned.
     """
 
-    def test_run_parallel_tool_does_not_iterate_string(self) -> None:
-        """The closure surfaces ``ValueError`` from the executor, not a
-        character-iteration loop."""
+    def test_run_parallel_tool_rejects_bare_string(self) -> None:
         agent = SorcarAgent("test-string-bug")
         agent._use_web_tools = False
         agent._is_parallel = True
@@ -93,5 +90,5 @@ class TestRunParallelClosureUsesCoercion:
             t for t in tools if getattr(t, "__name__", "") == "run_parallel"
         )
 
-        with pytest.raises(ValueError):
-            run_parallel("hello world", max_workers="0")
+        result = run_parallel("hello world", max_workers="0")
+        assert result.startswith("Error: tasks must be a JSON array")

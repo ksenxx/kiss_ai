@@ -265,7 +265,7 @@ class TestF03InterruptUsageAccounting(_TempDbTestBase):
         stop = threading.Event()
         stop.set()
         printer._thread_local.stop_event = stop
-        totals: dict[str, float] = {}
+        totals: dict[str, Any] = {}
 
         time.sleep(random.random() * 0.05)
         with pytest.raises(KeyboardInterrupt):
@@ -279,9 +279,13 @@ class TestF03InterruptUsageAccounting(_TempDbTestBase):
 
         # Before the fix, the interrupt skipped the aggregation entirely
         # and totals_out stayed empty — the parent lost all accounting.
+        # ``budget_used_per_task`` (one entry per task) lets the parent
+        # release each child's unspent review budget.
         assert set(totals) == {
             "budget_used", "total_tokens_used", "total_steps",
+            "budget_used_per_task",
         }
+        assert len(totals["budget_used_per_task"]) == 1
         # No sub-agent registry entry may leak either.
         assert all(
             not state.is_subagent for state in agent_state.snapshot()
@@ -558,15 +562,17 @@ class TestF13ShellQuoting(_TempDbTestBase):
     """Recovery command blocks must be executable for paths with spaces."""
 
     def test_recovery_block_quotes_paths_and_branches(self) -> None:
+        repo_root = Path("/tmp/my repo")
         wt = GitWorktree(
-            repo_root=Path("/tmp/my repo"),
+            repo_root=repo_root,
             branch="kiss/wt-1",
             original_branch="feat branch",
-            wt_dir=Path("/tmp/my repo/.kiss-worktrees/x"),
+            wt_dir=repo_root / ".kiss-worktrees" / "x",
             baseline_commit=None,
         )
         block = _merge_fix_steps(wt, "    git commit\n")
-        assert "cd '/tmp/my repo'" in block
+        # str(Path) uses native separators; the quoting is what matters.
+        assert f"cd '{repo_root}'" in block
         assert "git checkout 'feat branch'" in block
         assert "git branch -D kiss/wt-1" in block
 

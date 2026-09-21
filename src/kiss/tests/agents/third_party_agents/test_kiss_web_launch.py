@@ -57,6 +57,7 @@ from kiss.agents.third_party_agents._kiss_web_launcher import (
 from kiss.core import vscode_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 
 STUB_SUMMARY = "stub summary done"
 
@@ -77,8 +78,13 @@ def _init_repo(repo: str) -> None:
     git("commit", "-q", "-m", "seed")
 
 
+@requires_unix_sockets
 class _ApiLaunchBase(unittest.TestCase):
-    """Real daemon over a temp UDS; only the LLM boundary is stubbed."""
+    """Real daemon over a temp UDS; only the LLM boundary is stubbed.
+
+    The daemon's local API is a Unix-domain socket, so every subclass
+    (which inherits this mark) skips on Windows.
+    """
 
     def setUp(self) -> None:
         # Every global mutation registers its restoration with
@@ -267,7 +273,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
     """The launcher must run tasks through ``kiss.server.sorcar.run``."""
 
     def test_task_runs_on_daemon_agent_not_passed_instance(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         self._install_stub()
         agent = SlackAgent()
@@ -295,7 +301,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert agent.last_run_result == result
 
     def test_channel_prompt_appended_to_task_prompt(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         self._install_stub()
         run_agent_via_kiss_web(
@@ -309,11 +315,11 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert "start_slack_browser_auth" in prompt
 
     def test_agent_module_is_the_tools_file(self) -> None:
-        from kiss.agents.third_party_agents import slack_agent
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents import slack_sea
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         agent = SlackAgent()
-        assert agent.tools_file == str(slack_agent.__file__), (
+        assert agent.tools_file == str(slack_sea.__file__), (
             "the agent's own module must be its tools file"
         )
 
@@ -354,7 +360,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert yaml.safe_load(result)["summary"] == "module tools loaded ok"
 
     def test_explicit_tools_file_overrides_agent_module(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         tools_py = Path(self.tmpdir) / "extra_tools.py"
         tools_py.write_text(
@@ -472,7 +478,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
     def test_workspace_env_var_set_while_task_runs(self) -> None:
         import os
 
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         seen: list[str | None] = []
 
@@ -498,7 +504,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
     def test_workspace_env_var_blocks_conflicting_overlap(self) -> None:
         import os
 
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         release = {"A": threading.Event(), "B": threading.Event()}
         started = {"A": threading.Event(), "B": threading.Event()}
@@ -553,7 +559,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         )
 
     def test_unauthenticated_backend_tools_excluded(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
             names = {t.__name__ for t in (kwargs.get("tools") or [])}
@@ -572,7 +578,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert self.stub_calls
 
     def test_overrides_forwarded_through_run_command(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         self._install_stub()
         agent = SlackAgent()
@@ -605,7 +611,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         from kiss.agents.third_party_agents._channel_agent_utils import (
             filter_launch_kwargs,
         )
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         assert filter_launch_kwargs(
             {"append_basic_tools": False, "system_prompt": "dropped"}
@@ -636,7 +642,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         from kiss.agents.third_party_agents._channel_agent_utils import (
             filter_launch_kwargs,
         )
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         assert filter_launch_kwargs(
             {
@@ -663,7 +669,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         )
 
     def test_zero_budget_override_is_honored(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         self._install_stub()
         run_agent_via_kiss_web(
@@ -676,7 +682,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert self.stub_calls[0]["kwargs"].get("max_budget") == 0.0
 
     def test_defaults_use_daemon_config(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         self._install_stub()
         run_agent_via_kiss_web(
@@ -695,7 +701,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         )
 
     def test_model_name_forwarded(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         self._install_stub()
         run_agent_via_kiss_web(
@@ -708,7 +714,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert self.stub_calls[0]["kwargs"].get("model_name") == "gpt-5.5"
 
     def test_stats_recorded_on_agent_for_cli_stats(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         self._install_stub(tokens=1234, cost=0.4567, steps=7)
         agent = SlackAgent()
@@ -723,7 +729,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert agent.total_steps == 7
 
     def test_agent_failure_returns_failure_yaml(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         self._install_stub(summary="boom-fail happened", success=False)
         agent = SlackAgent()
@@ -739,7 +745,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert agent.last_run_result == result
 
     def test_abrupt_agent_crash_maps_to_failure_yaml(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         self._install_stub(raise_exc=RuntimeError("boom-crash"))
         agent = SlackAgent()
@@ -769,7 +775,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert "empty" in str(parsed["summary"]).lower()
 
     def test_timeout_returns_empty_result(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         release = threading.Event()
         self._install_stub(block=release)
@@ -790,7 +796,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
                     state.task_thread.join(timeout=deadline)
 
     def test_invalid_tools_file_raises_before_connecting(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         self._install_stub()
         with self.assertRaises(ValueError):
@@ -808,7 +814,7 @@ class TestInProcessDaemonBootstrap(_ApiLaunchBase):
     """Launches without a socket start the process-global daemon."""
 
     def test_global_daemon_started_once_and_reused(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         self._install_stub(summary="global daemon ok")
         saved_override = launcher._SOCK_PATH_OVERRIDE
@@ -964,7 +970,7 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         return _Plain("Plain Direct Agent")
 
     def test_direct_run_appends_channel_prompt_to_prompt(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         self._install_stub()
         agent = SlackAgent()
@@ -1011,7 +1017,7 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         assert agent.last_run_result == result
 
     def test_direct_run_bridges_channel_auth_tools(self) -> None:
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         def on_run(self_agent, kwargs):
             names = {t.__name__ for t in (kwargs.get("tools") or [])}
@@ -1254,7 +1260,7 @@ class TestChannelMainInteractiveViaApi(_ApiLaunchBase):
         from kiss.agents.third_party_agents._channel_agent_utils import (
             channel_main,
         )
-        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+        from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
         self._install_stub()
         orig_argv = sys.argv
@@ -1306,7 +1312,7 @@ class TestNoDirectRunCallSites(unittest.TestCase):
         for py in sorted(tp_dir.glob("*.py")):
             if py.name == "_kiss_web_launcher.py":
                 continue
-            source = py.read_text()
+            source = py.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(py))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):

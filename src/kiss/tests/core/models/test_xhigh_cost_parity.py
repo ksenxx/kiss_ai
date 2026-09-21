@@ -165,15 +165,16 @@ def test_rolling_latest_gets_long_context_uplift(base: str) -> None:
 
 
 def test_gpt_mini_latest_keeps_free_writes_and_no_uplift() -> None:
-    """``gpt-mini-latest`` tracks gpt-5.4-mini: 0.10x reads, free writes,
-    and NO long-context tier."""
+    """``gpt-mini-latest`` tracks gpt-5.4-mini: 0.10x reads, no published
+    write price (OpenRouter never reports cache writes for it), and NO
+    long-context tier."""
     name = "openrouter/~openai/gpt-mini-latest"
     assert name in MODEL_INFO, f"{name} missing from MODEL_INFO"
     info = MODEL_INFO[name]
     assert info.cache_read_price_per_1M == pytest.approx(
         info.input_price_per_1M * 0.10
     )
-    assert info.cache_write_price_per_1M == 0.0
+    assert info.cache_write_price_per_1M is None
     in_tokens, out_tokens = 272_001, 10_000
     linear = (
         in_tokens / 1e6 * info.input_price_per_1M

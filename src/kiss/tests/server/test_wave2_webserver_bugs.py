@@ -66,6 +66,7 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import posix_only
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Any, Any, Any]:
@@ -197,11 +198,13 @@ class TestF3VoiceModelCrossProcessRace(unittest.TestCase):
             )
             for _ in range(2)
         ]
-        outs = [p.communicate(timeout=120)[0].strip() for p in procs]
+        results = [p.communicate(timeout=120) for p in procs]
+        outs = [out.strip() for out, _err in results]
         self.assertEqual(
             outs,
             [expected, expected],
-            f"each process must return an intact archive, got {outs}",
+            f"each process must return an intact archive, got {outs}; "
+            f"stderr: {[err for _out, err in results]}",
         )
         self.assertEqual(
             hashlib.sha256(cache.read_bytes()).hexdigest(), expected
@@ -313,6 +316,7 @@ class TestF14SnapshotActiveTabsConcurrent(unittest.TestCase):
                 t.join(timeout=5)
 
 
+@posix_only("fake cloudflared on PATH is a /bin/sh script")
 class TestF8SpawnCloudflaredRetries(unittest.TestCase):
     """F8: exhausted retries keep last proc's stderr open, reap the rest."""
 

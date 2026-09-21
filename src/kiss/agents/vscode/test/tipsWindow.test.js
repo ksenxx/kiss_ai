@@ -199,7 +199,9 @@ function renderChatHtml() {
   const webview = {
     cspSource: 'vscode-webview://stub',
     asWebviewUri(uri) {
-      return {toString: () => 'vscode-webview://' + uri.fsPath};
+      // Like the real API, answer a URI (forward slashes even on Windows).
+      const urlPath = uri.fsPath.split(path.sep).join('/');
+      return {toString: () => 'vscode-webview://' + urlPath};
     },
   };
   return buildChatHtml(webview, extensionUri, 'test-model');

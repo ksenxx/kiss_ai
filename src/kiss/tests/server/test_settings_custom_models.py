@@ -14,7 +14,6 @@ Covers the ``~/.kiss/MY_MODELS.json`` CRUD helpers in
 from __future__ import annotations
 
 import json
-import os
 import threading
 import unittest
 from pathlib import Path
@@ -24,6 +23,7 @@ from typing import Any
 import kiss.core.models.model_info as mi
 from kiss.server.commands import _CommandsMixin
 from kiss.server.sorcar import API
+from kiss.tests.conftest import is_root, posix_only
 
 
 class _MyModelsFileCase(unittest.TestCase):
@@ -396,11 +396,12 @@ class TestMyModelsCommandHandlers(_MyModelsFileCase):
         self.assertEqual(err["connId"], "c2")
         self.assertIn("_documentation", self.read_raw())
 
+    @posix_only("chmod-based directory permission denial")
     def test_save_my_model_write_failure_answers_error(self) -> None:
         # A read-only registry directory makes the atomic write's temp
         # staging raise OSError; the handler must answer with an error
         # event instead of killing the connection's dispatch loop.
-        if os.geteuid() == 0:
+        if is_root():
             self.skipTest("root ignores directory permissions")
         mi.save_custom_model("m1", endpoint="http://a/v1")
         mi.USER_MY_MODELS_PATH.parent.chmod(0o555)

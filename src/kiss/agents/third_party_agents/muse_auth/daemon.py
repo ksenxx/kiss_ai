@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import base64
 import contextlib
-import fcntl
 import functools
 import math
 import os
@@ -69,6 +68,7 @@ from kiss.agents.third_party_agents.muse_auth._common import (
 )
 from kiss.agents.third_party_agents.muse_auth.sentinel import Sentinel
 from kiss.agents.third_party_agents.muse_auth.vault import CredentialVault
+from kiss.core.file_lock import lock_exclusive, unlock
 
 _HOP_HEADERS = ("connection", "keep-alive", "transfer-encoding", "content-length", "host")
 _UNDECODED_HEADERS = ("content-encoding", "transfer-encoding", "content-length")
@@ -1129,7 +1129,7 @@ class MuseAuthDaemon:
         # daemons cannot observe each other bound-but-not-listening and
         # unlink each other's live socket.
         lock_file = open(state_dir / "daemon.lock", "a+b")
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        lock_exclusive(lock_file)
         try:
             probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
@@ -1145,7 +1145,7 @@ class MuseAuthDaemon:
             os.chmod(path, 0o600)
             server.listen(16)
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            unlock(lock_file)
             lock_file.close()
         server.settimeout(0.5)
         self._server = server

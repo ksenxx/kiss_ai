@@ -208,29 +208,32 @@ function testRunningTaskAppearsWhenBurgerOpened() {
   const dot = findDot(row);
   assert.ok(
     dot,
-    'running task row MUST carry a .sidebar-item-running pulsing ' +
-      'green dot',
+    'running task row MUST carry a .sidebar-item-running spinner',
   );
   assert.strictEqual(
     row.firstElementChild,
     dot,
-    'pulsing dot MUST be the first child of the row so it sits to ' +
+    'spinner MUST be the first child of the row so it sits to ' +
       'the LEFT of the task title (middle-left layout)',
   );
   assert.strictEqual(row.dataset.category, 'running');
+  assert.ok(
+    dot.classList.contains('status-spinner'),
+    'the running indicator must be the shared .status-spinner icon',
+  );
 
   const cs = win.getComputedStyle(dot);
   assert.strictEqual(
-    cs.backgroundColor,
+    cs.color,
     'rgb(46, 125, 50)',
-    `dot background must be #2e7d32 (rgb(46, 125, 50)); got: ${cs.backgroundColor}`,
+    `spinner colour must be #2e7d32 (rgb(46, 125, 50)); got: ${cs.color}`,
   );
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';
   assert.ok(
-    animName.indexOf('running-pulse') >= 0 ||
-      animShort.indexOf('running-pulse') >= 0,
-    `dot must animate via 'running-pulse'; got animation-name=` +
+    animName.indexOf('status-spin') >= 0 ||
+      animShort.indexOf('status-spin') >= 0,
+    `spinner must animate via 'status-spin'; got animation-name=` +
       `"${animName}" animation="${animShort}"`,
   );
 
@@ -268,33 +271,37 @@ function testRunningTaskAppearsWhenBurgerOpened() {
   const completed = findCompletedDot(row2);
   assert.ok(
     completed,
-    'finished task row MUST show a solid .sidebar-item-completed dot ' +
-      '(no pulse animation)',
+    'finished task row MUST show a .sidebar-item-completed green tick ' +
+      '(no animation)',
   );
   assert.strictEqual(
     row2.firstElementChild,
     completed,
-    'solid completed dot MUST be the first child of the row',
+    'green tick MUST be the first child of the row',
+  );
+  assert.ok(
+    completed.classList.contains('status-tick'),
+    'the completed indicator must be the shared .status-tick icon',
   );
 
   const cs2 = win.getComputedStyle(completed);
   assert.strictEqual(
-    cs2.backgroundColor,
+    cs2.color,
     'rgb(46, 125, 50)',
-    `completed dot background must be #2e7d32; got: ${cs2.backgroundColor}`,
+    `tick colour must be #2e7d32; got: ${cs2.color}`,
   );
   const anim2Name = cs2.getPropertyValue('animation-name') || '';
   const anim2Short = cs2.getPropertyValue('animation') || '';
   assert.ok(
-    anim2Name.indexOf('running-pulse') < 0 &&
-      anim2Short.indexOf('running-pulse') < 0,
-    `completed dot must NOT pulse; got animation-name="${anim2Name}" ` +
+    anim2Name.indexOf('status-spin') < 0 &&
+      anim2Short.indexOf('status-spin') < 0,
+    `tick must NOT animate; got animation-name="${anim2Name}" ` +
       `animation="${anim2Short}"`,
   );
 
   win.close();
   console.log(
-    '  ok - running task appears via burger menu and swaps to solid dot on finish',
+    '  ok - running task appears via burger menu and swaps to a tick on finish',
   );
 }
 
@@ -328,7 +335,7 @@ function testRunningTaskVisibleUnderDefaultWorkspaceFilter() {
     );
     assert.ok(
       findDot(row),
-      'matching-work_dir running row MUST carry pulsing green dot',
+      'matching-work_dir running row MUST carry the spinner',
     );
     win.close();
   }

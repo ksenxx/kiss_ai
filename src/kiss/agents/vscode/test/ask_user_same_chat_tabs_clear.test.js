@@ -48,8 +48,7 @@ function makeWebview() {
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -59,17 +58,39 @@ function send(win, data) {
 }
 
 function clickTab(win, tabId) {
-  const tabEl = win.document.querySelector(
-    `.chat-tab[data-tab-id="${tabId}"]`,
-  );
+  const tabEl = win.document.querySelector(`.chat-tab[data-tab-id="${tabId}"]`);
   assert.ok(tabEl, `tab ${tabId} must exist in the tab bar`);
   tabEl.click();
 }
 
+// The composer is in answer mode while the tab on screen has a question.
+function answering(win) {
+  return win.document.body.classList.contains('ask-answering');
+}
+
+// The Question panel of the tab on screen while it is awaiting an answer.
 function visibleAskText(win) {
-  const modal = win.document.getElementById('ask-user-modal');
-  if (!modal || modal.style.display !== 'flex') return '';
-  return modal.textContent || '';
+  if (!answering(win)) return '';
+  const panel = win.document.querySelector(
+    '#output .tc-question.tc-question-pending',
+  );
+  return panel ? panel.textContent || '' : '';
+}
+
+function askQuestionCall(win, question, tabId) {
+  send(win, {
+    type: 'tool_call',
+    name: 'ask_user_question',
+    extras: {question},
+    callId: 7,
+    tabId,
+    ts: Date.now(),
+  });
+}
+
+function submitAnswer(win, answer) {
+  win.document.getElementById('task-input').value = answer;
+  win.document.getElementById('send-btn').click();
 }
 
 function testAnswerClearsSiblingTabsWithSameBackendChatId() {
@@ -99,7 +120,7 @@ function testAnswerClearsSiblingTabsWithSameBackendChatId() {
   assert.strictEqual(
     visibleAskText(win),
     '',
-    'a background ask must not pop a modal over the active tab',
+    'a background ask must not put the active tab composer in answer mode',
   );
 
   send(win, {
@@ -113,11 +134,8 @@ function testAnswerClearsSiblingTabsWithSameBackendChatId() {
     'an ask for the active tab keeps it active',
   );
 
-  const modal = win.document.getElementById('ask-user-modal');
-  const input = modal.querySelector('.ask-user-input');
-  assert.ok(input, 'ask-user input must be mounted for the active tab');
-  input.value = 'yes, proceed';
-  modal.querySelector('.ask-user-submit').click();
+  assert.ok(answering(win), 'the active tab composer must be in answer mode');
+  submitAnswer(win, 'yes, proceed');
 
   assert.ok(
     posted.some(
@@ -128,18 +146,20 @@ function testAnswerClearsSiblingTabsWithSameBackendChatId() {
     ),
     'submitting in the sibling tab must post the answer for that tab',
   );
-  assert.notStrictEqual(
-    modal.style.display,
-    'flex',
-    'the answering tab ask-user modal must close immediately',
+  assert.ok(
+    !answering(win),
+    'the answering tab composer must leave answer mode immediately',
   );
 
   clickTab(win, firstTab);
-  assert.strictEqual(api.getActiveTabId(), firstTab, 'clicking first tab must switch back');
-  assert.notStrictEqual(
-    modal.style.display,
-    'flex',
-    'BUG: answering in one tab must close stale ask windows in all tabs with the same chai/chat id',
+  assert.strictEqual(
+    api.getActiveTabId(),
+    firstTab,
+    'clicking first tab must switch back',
+  );
+  assert.ok(
+    !answering(win),
+    'BUG: answering in one tab must retire stale questions in all tabs with the same chat id',
   );
   assert.strictEqual(
     visibleAskText(win),
@@ -161,6 +181,7 @@ function testAnswerKeepsDifferentBackendChatIdPromptOpen() {
   const secondTab = api.getActiveTabId();
   send(win, {type: 'clear', chat_id: 'chat-b', tabId: secondTab});
 
+  askQuestionCall(win, 'Question for chat A', firstTab);
   send(win, {
     type: 'askUser',
     question: 'Question for chat A',
@@ -172,16 +193,12 @@ function testAnswerKeepsDifferentBackendChatIdPromptOpen() {
     tabId: secondTab,
   });
 
-  const modal = win.document.getElementById('ask-user-modal');
-  const input = modal.querySelector('.ask-user-input');
-  input.value = 'answer B';
-  modal.querySelector('.ask-user-submit').click();
+  submitAnswer(win, 'answer B');
 
   clickTab(win, firstTab);
-  assert.strictEqual(
-    modal.style.display,
-    'flex',
-    'answering a different backend chat id must not close this tab prompt',
+  assert.ok(
+    answering(win),
+    'answering a different backend chat id must not retire this tab question',
   );
   assert.ok(
     visibleAskText(win).includes('Question for chat A'),
@@ -189,7 +206,9 @@ function testAnswerKeepsDifferentBackendChatIdPromptOpen() {
   );
 
   win.close();
-  console.log('  ok - answer does not clear ask windows for different chat ids');
+  console.log(
+    '  ok - answer does not clear ask windows for different chat ids',
+  );
 }
 
 function runTests() {

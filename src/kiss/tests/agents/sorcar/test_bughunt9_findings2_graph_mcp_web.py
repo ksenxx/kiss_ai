@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import pty
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -76,8 +75,9 @@ def real_stdin(
     transport requires to spawn the real server subprocess.  This is
     I/O plumbing for running the *real* servers, not a test double.
     """
-    master_fd, slave_fd = pty.openpty()
-    stdin_stream = os.fdopen(slave_fd, "r", closefd=True)
+    # ``os.devnull`` has a real descriptor on every platform (Windows has
+    # no pty) and nothing reads stdin while the client talks to the child.
+    stdin_stream = open(os.devnull, encoding="utf-8")
     errlog = (tmp_path / "mcp_errlog.txt").open("w", encoding="utf-8")
     monkeypatch.setattr(sys, "stdin", stdin_stream)
     monkeypatch.setattr(sys, "stderr", errlog)
@@ -91,7 +91,6 @@ def real_stdin(
     finally:
         errlog.close()
         stdin_stream.close()
-        os.close(master_fd)
 
 
 class TestMcpIsolationAndNaming:

@@ -32,6 +32,7 @@ from pathlib import Path
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.tests.conftest import posix_only
 
 _INVALID_NAME = b"caf\xe9.txt"
 
@@ -89,6 +90,7 @@ def _stage_invalid_utf8_path(repo: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+@posix_only("raw non-UTF-8 bytes in file names need a byte-oriented filesystem")
 class TestInvalidUtf8Path:
     """git output containing invalid UTF-8 must not crash worktree ops."""
 

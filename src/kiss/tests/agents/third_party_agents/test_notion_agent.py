@@ -32,12 +32,12 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-import kiss.agents.third_party_agents.notion_agent as notion_mod
+import kiss.agents.third_party_agents.notion_sea as notion_mod
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents.notion_agent import (
+from kiss.agents.third_party_agents.notion_sea import (
     NotionAgent,
     NotionChannelBackend,
     _config,

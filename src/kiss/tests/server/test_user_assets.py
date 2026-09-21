@@ -28,7 +28,6 @@ The contract:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -37,6 +36,7 @@ from kiss.server.user_assets import (
     ensure_user_asset_from_default,
     kiss_home_dir,
 )
+from kiss.tests.conftest import is_root, posix_only
 
 
 @pytest.fixture
@@ -100,11 +100,12 @@ def test_ensure_user_asset_from_default_creates_kiss_home_directory(
     assert result.read_text() == "## Task\n\nHi!\n"
 
 
+@posix_only("chmod-based permission denial")
 def test_ensure_user_asset_from_default_falls_back_to_none_when_unwritable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Read-only KISS_HOME yields ``None`` so callers can skip cleanly."""
-    if os.geteuid() == 0:  # pragma: no cover - CI runs as non-root
+    if is_root():  # pragma: no cover - CI runs as non-root
         pytest.skip("root cannot lose write permission via chmod")
     readonly_parent = tmp_path / "ro"
     readonly_parent.mkdir()

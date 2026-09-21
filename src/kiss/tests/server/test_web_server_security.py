@@ -54,6 +54,7 @@ from kiss.server.web_server import (
     _parse_quick_tunnel_url,
     _read_url_from_stderr,
 )
+from kiss.tests.conftest import posix_only
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
 
 
@@ -134,6 +135,7 @@ class TestH1NoTunnelWithoutPassword(IsolatedAsyncioTestCase):
         self.assertIsNone(self.server._tunnel_proc)
 
 
+@posix_only("fake cloudflared on PATH is a bash script")
 class TestH1TunnelStartsWhenPasswordSet(IsolatedAsyncioTestCase):
     """Symmetric check: with a password set, the tunnel-start path runs."""
 
@@ -185,6 +187,7 @@ class TestH1TunnelStartsWhenPasswordSet(IsolatedAsyncioTestCase):
 
 
 
+@posix_only("fake cloudflared on PATH is a bash script")
 class TestH2StdoutDevnull(IsolatedAsyncioTestCase):
     """``_spawn_cloudflared`` must not connect cloudflared's stdout to a pipe."""
 

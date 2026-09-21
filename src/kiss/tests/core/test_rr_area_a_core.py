@@ -33,6 +33,7 @@ import pytest
 import kiss.core.vscode_config as vscode_config
 from kiss.core.kiss_agent import _is_retryable_error
 from kiss.core.vscode_config import DEFAULTS, apply_config_to_env
+from kiss.tests.conftest import posix_only
 
 
 class PermissionDeniedError(Exception):
@@ -167,6 +168,7 @@ class TestSaveApiKeyToShellCrossProcessRace:
         env = {
             **os.environ,
             "HOME": str(fake_home),
+            "USERPROFILE": str(fake_home),  # Path.home() on Windows
             "KISS_HOME": str(fake_home / ".kiss"),
             "SHELL": "/bin/bash",
         }
@@ -218,6 +220,7 @@ class TestSaveApiKeyToShellCrossProcessRace:
                     env={
                         **os.environ,
                         "HOME": str(fake_home),
+                        "USERPROFILE": str(fake_home),  # Path.home() on Windows
                         # Every saver gets its own KISS_HOME, like two
                         # daemons deployed side by side for one user.
                         "KISS_HOME": str(fake_home / f".kiss-{index}"),
@@ -241,6 +244,7 @@ class TestSaveApiKeyToShellCrossProcessRace:
                 )
                 assert store_text.count(f"export {key}=") == 1
 
+    @posix_only("Windows chmod carries no group/other mode bits")
     def test_store_and_rc_stay_private(self, tmp_path: Path) -> None:
         """The key store and the hooked RC are written with mode 0600."""
         fake_home = tmp_path / "home"
@@ -248,6 +252,7 @@ class TestSaveApiKeyToShellCrossProcessRace:
         env = {
             **os.environ,
             "HOME": str(fake_home),
+            "USERPROFILE": str(fake_home),  # Path.home() on Windows
             "KISS_HOME": str(fake_home / ".kiss"),
             "SHELL": "/bin/bash",
         }
@@ -272,6 +277,7 @@ class TestSaveApiKeyToShellCrossProcessRace:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("USERPROFILE", str(fake_home))  # Path.home() on Windows
         monkeypatch.setenv("SHELL", "/bin/bash")
         monkeypatch.setitem(vars(vscode_config), "CONFIG_DIR", fake_home / ".kiss")
         monkeypatch.setitem(

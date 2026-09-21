@@ -26,9 +26,12 @@ from typing import Any, cast
 
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.server import sorcar
+from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_append_basic_tools import (
     DaemonRunApiHarness,
 )
+
+pytestmark = requires_unix_sockets
 
 _SYS_MARKER = "\n\nUNIQUE-APPENDED-SYSTEM-SUFFIX-9317"
 _PROMPT_MARKER = "\n\nUNIQUE-APPENDED-PROMPT-SUFFIX-4620"

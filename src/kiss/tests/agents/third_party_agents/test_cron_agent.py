@@ -23,7 +23,13 @@ source/configuration wiring checks.
 
 from __future__ import annotations
 
+import os
+import shlex
+import shutil
+import sys
 from pathlib import Path
+
+import pytest
 
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.cron_agent import (
@@ -56,11 +62,11 @@ def test_delivery_error_notes() -> None:
 
 
 def test_get_tools_and_sorcar_wiring() -> None:
-    assert cron_agent.tools() == [cron_job]
+    assert cron_agent.tools() == [cron_job, cron_agent.gateway_command]
     # The module lives in the sorcar package and never imports from
     # kiss.agents.third_party_agents at module scope.
     source_text = Path(cron_agent.__file__).read_text(encoding="utf-8")
-    assert "/agents/sorcar/" in cron_agent.__file__
+    assert Path(cron_agent.__file__).parent.parts[-2:] == ("agents", "sorcar")
     assert "from kiss.agents.third_party_agents" not in source_text
     assert "import kiss.agents.third_party_agents" not in source_text
     # cron_job is NOT a built-in tool of the default Sorcar toolset:
@@ -84,3 +90,57 @@ def test_get_tools_and_sorcar_wiring() -> None:
         'kiss-cron = "kiss.agents.sorcar.cron_agent:main"'
         in pyproject.read_text(encoding="utf-8")
     )
+
+
+_IDLE_SIGNAL_CLI = """#!/usr/bin/env python3
+import sys
+sys.exit(0)
+"""
+
+
+def test_gateway_command_tick_is_silent_when_idle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    """The command ``gateway_command`` builds is a real, silent channel tick.
+
+    Runs the Signal CLI against a stand-in ``signal-cli`` that receives
+    nothing: with ``--quiet`` the tick prints nothing, so scheduled as a
+    cron command job it is recorded as ``silent`` and delivers nothing;
+    without the flag the CLI keeps its progress output.
+
+    Not covered here: ``--quiet`` also suppresses the ``Resolved user``
+    line printed for ``--allow-users`` names.  Slack is the only channel
+    whose ``find_user`` resolves names, and ``channel_main`` resolves
+    them on the ``_make_backend()`` client, which talks to slack.com
+    before ``connect()`` installs the test-injectable base URL — so that
+    branch is reachable only with network access or a test double.
+    """
+    from kiss.agents.third_party_agents import signal_sea
+    from kiss.tests.conftest import install_cli_script
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    install_cli_script(bin_dir / "signal-cli", _IDLE_SIGNAL_CLI)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+    signal_sea._config.save({"phone_number": "+1BOT"})
+
+    command = cron_agent.gateway_command("signal", "+1AAA", pairing=False)
+    assert command == "kiss-signal --channel=+1AAA --quiet"
+    monkeypatch.setattr(sys, "argv", shlex.split(command))
+    signal_sea.main()
+    assert capsys.readouterr().out == ""
+    monkeypatch.setattr(sys, "argv", ["kiss-signal", "--channel=+1AAA"])
+    signal_sea.main()
+    out = capsys.readouterr().out
+    assert "Checking Signal channel for pending messages..." in out
+    assert "Processed 0 message(s)." in out
+
+    # Scheduled as a command job, the same tick runs through the console
+    # script in its own process and is silent.
+    assert shutil.which("kiss-signal") is not None
+    job = _create(cron_job("create", name="signal gw", command=command, schedule="every 2m"))
+    _set_job_fields(job["id"], next_run_at=1.0)
+    assert tick(2.0) == 1
+    stored = load_jobs()[0]
+    assert (stored["last_status"], stored["last_summary"]) == ("silent", "")
+    assert not (tmp_path / "cron" / "output" / f"{job['id']}.md").exists()

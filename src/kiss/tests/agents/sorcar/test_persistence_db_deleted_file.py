@@ -33,8 +33,10 @@ from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import _add_task
+from kiss.tests.conftest import posix_only
 
 
+@posix_only("unlinking a SQLite file another connection holds open")
 class TestDbFileDeletedUnderCachedConnection:
     """Writes after an external DB-file deletion must be durable."""
 

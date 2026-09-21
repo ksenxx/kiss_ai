@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for slack_agent's shared retry and cursor helpers (G-R2).
+"""End-to-end tests for slack_sea's shared retry and cursor helpers (G-R2).
 
 ``poll_messages`` and ``poll_thread_messages`` used to carry verbatim
 copies of the 3-attempt OSError backoff loop and the trailing
@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from kiss.agents.third_party_agents.slack_agent import _advance_cursor, _call_with_retry
+from kiss.agents.third_party_agents.slack_sea import _advance_cursor, _call_with_retry
 
 
 class FlakyCall:

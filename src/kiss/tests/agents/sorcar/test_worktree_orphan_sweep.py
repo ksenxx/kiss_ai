@@ -35,6 +35,7 @@ tests rather than hiding behind a stub.
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -216,7 +217,7 @@ class TestSweepRemovesDeadState:
         worktree = repo / ".kiss-worktrees" / branch.replace("/", "_")
         _git("worktree", "add", "-b", branch, str(worktree), cwd=repo)
         # Simulate a crash: the directory is gone, the registration is not.
-        subprocess.run(["rm", "-rf", str(worktree)], check=True)
+        shutil.rmtree(worktree)
         assert branch in GitWorktreeOps.checked_out_branches(repo)
 
         deleted = GitWorktreeOps.sweep_orphaned_state(repo)

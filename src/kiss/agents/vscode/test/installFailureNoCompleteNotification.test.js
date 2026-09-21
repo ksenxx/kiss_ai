@@ -125,8 +125,16 @@ async function runTest() {
   await ensureDependencies();
 
   const errors = notifications.filter(n => n.kind === 'error');
+  // With an empty PATH the install fails at the curl/tar preflight on
+  // POSIX; Windows has no such preflight (uv comes via PowerShell), so
+  // there the download itself fails and the manual-install hint is the
+  // PowerShell one-liner.
+  const failure =
+    process.platform === 'win32'
+      ? /Failed to install uv\. Install manually: powershell /
+      : /['"]?curl['"]? is required/;
   assert.ok(
-    errors.some(n => /['"]?curl['"]? is required/.test(n.message)),
+    errors.some(n => failure.test(n.message)),
     'sanity: the specific install-failure error notification must be ' +
       `shown; got: ${JSON.stringify(notifications)}`,
   );

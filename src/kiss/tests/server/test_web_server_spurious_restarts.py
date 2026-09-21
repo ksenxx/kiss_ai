@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import subprocess
+import sys
 import time
 import unittest
 from unittest import IsolatedAsyncioTestCase
@@ -94,7 +95,7 @@ class TestUnreachableMetricsDoesNotCountAsUnhealthy(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._loop = asyncio.get_event_loop()
         self._proc = subprocess.Popen(
-            ["sleep", "30"],
+            [sys.executable, "-c", "import time; time.sleep(30)"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -151,7 +152,7 @@ class TestConfirmedZeroStillRestarts(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._loop = asyncio.get_event_loop()
         self._proc = subprocess.Popen(
-            ["sleep", "30"],
+            [sys.executable, "-c", "import time; time.sleep(30)"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -310,7 +311,7 @@ class TestChronicMetricsFlakeCoolsDown(IsolatedAsyncioTestCase):
         self._loop = asyncio.get_event_loop()
         self._procs: list[subprocess.Popen[str]] = []
         first_proc = subprocess.Popen(
-            ["sleep", "30"],
+            [sys.executable, "-c", "import time; time.sleep(30)"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -337,7 +338,7 @@ class TestChronicMetricsFlakeCoolsDown(IsolatedAsyncioTestCase):
             """Simulate a successful respawn that is *also* immediately unhealthy."""
             self.restart_calls.append(time.monotonic())
             new_proc = subprocess.Popen(
-                ["sleep", "30"],
+                [sys.executable, "-c", "import time; time.sleep(30)"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 text=True,
@@ -443,7 +444,7 @@ class TestChronicMetricsFlakeCoolsDown(IsolatedAsyncioTestCase):
                     or self.server._tunnel_proc.poll() is not None
                 ):
                     new_proc = subprocess.Popen(
-                        ["sleep", "30"],
+                        [sys.executable, "-c", "import time; time.sleep(30)"],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         text=True,

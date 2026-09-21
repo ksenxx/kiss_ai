@@ -27,6 +27,7 @@ import time
 import pytest
 
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.tests.conftest import posix_only
 
 _posix_only = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX process/signal semantics required"
@@ -245,6 +246,8 @@ class TestStaleEscalationDirCleanup:
         finally:
             tool.close()
         assert _wait_dead(pid)
+
+    @posix_only("Chromium's SingletonLock symlink is the POSIX profile lock")
 
     def test_live_escalation_dir_is_preserved(self, tmp_path):
         base = tmp_path / "profile"

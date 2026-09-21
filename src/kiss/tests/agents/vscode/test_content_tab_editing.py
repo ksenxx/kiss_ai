@@ -24,6 +24,7 @@ unreachable the editor cannot exist, so those tests skip.
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
@@ -48,7 +49,10 @@ _DIRTY_TAB = ".chat-tab.content-tab.content-dirty"
 
 def _fresh_file(harness, name: str, text: str = _SOURCE) -> Path:
     path = Path(harness.work_dir) / name
-    path.write_text(text)
+    # Byte-exact fixture: the daemon saves the editor text without
+    # newline translation, and the assertions count LF bytes, so the
+    # file must not pick up CRLF from Windows text-mode writes.
+    path.write_text(text, encoding="utf-8", newline="\n")
     return path
 
 
@@ -75,7 +79,10 @@ def _open_editor(page, path: str, link_id: str) -> None:
 
 def _type_at_end(page, text: str) -> None:
     page.click(_MONACO + " .view-lines")
-    page.keyboard.press("Control+End")
+    # Monaco binds "go to end of document" per platform: Ctrl+End on
+    # Linux/Windows, Cmd+Down on macOS (Ctrl+End is unbound there, so
+    # the text would land wherever the click put the cursor).
+    page.keyboard.press("Meta+ArrowDown" if sys.platform == "darwin" else "Control+End")
     page.keyboard.type(text)
 
 
@@ -106,8 +113,13 @@ def _click_save(page) -> None:
 def _wait_for_disk(path: Path, needle: str, timeout: float = 20) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if needle in path.read_text():
-            return
+        try:
+            if needle in path.read_text():
+                return
+        except PermissionError:
+            # Windows refuses to open a file for the instant the daemon's
+            # atomic ``Path.replace`` swaps it in; poll again.
+            pass
         time.sleep(0.05)
     raise AssertionError(f"{needle!r} never reached {path}")
 
@@ -206,7 +218,9 @@ class TestContentTabEditing:
             _open_editor(page, str(path), "lnk-e3")
             _type_at_end(page, "zzz")
             page.wait_for_selector(_DIRTY_TAB, timeout=10000)
-            page.keyboard.press("Control+z")
+            # Undo is Monaco's own keybinding, and Monaco follows the
+            # platform: Ctrl+Z on Linux/Windows, Cmd+Z on macOS.
+            page.keyboard.press("ControlOrMeta+z")
             page.wait_for_function(
                 "sel => document.querySelector(sel) === null",
                 arg=_DIRTY_TAB, timeout=10000,

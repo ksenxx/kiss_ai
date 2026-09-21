@@ -34,28 +34,23 @@ import tempfile
 import unittest
 from typing import Any
 
+from kiss.core.processes import pid_alive
 from kiss.server.voice_wake_control import VoiceWakeController
 
 _PID_READY_SCRIPT = r"""
 import os, sys, time
 piddir = sys.argv[1]
-with open(os.path.join(piddir, str(os.getpid())), "w"):
+with open(os.path.join(piddir, f"{os.getpid()}-{os.getppid()}"), "w"):
     pass
 print("READY", flush=True)
 time.sleep(120)
 """
-"""Records its pid in ``piddir``, reports READY, then idles."""
+"""Records ``<pid>-<ppid>`` in ``piddir``, reports READY, then idles.
 
-
-def _alive(pid: int) -> bool:
-    """Return whether *pid* names a live (or zombie) process."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+The parent pid is recorded too because a Windows venv ``python.exe``
+is a launcher that runs the real interpreter as its child: there the
+spawned ``Process.pid`` is the launcher, i.e. the script's parent.
+"""
 
 
 class _Collector:
@@ -91,9 +86,17 @@ class VoiceStartSerializationTest(unittest.TestCase):
             fh.write(_PID_READY_SCRIPT)
         return VoiceWakeController([sys.executable, "-u", path, self.piddir])
 
-    def _spawned_pids(self) -> list[int]:
-        """Return the pid of every child that ever ran the script."""
-        return [int(name) for name in os.listdir(self.piddir)]
+    def _spawned(self) -> list[tuple[int, int]]:
+        """Return ``(pid, ppid)`` of every child that ever ran the script."""
+        return [
+            (int(pid), int(ppid))
+            for pid, ppid in (name.split("-") for name in os.listdir(self.piddir))
+        ]
+
+    @staticmethod
+    def _owns(proc_pid: int, entry: tuple[int, int]) -> bool:
+        """Whether the spawned ``Process.pid`` is *entry*'s pid or launcher."""
+        return proc_pid in entry
 
     def test_two_concurrent_starts_spawn_exactly_one_child(self) -> None:
         """The leak schedule: both starts pass the empty-slot check.
@@ -119,7 +122,9 @@ class VoiceStartSerializationTest(unittest.TestCase):
             listener = controller._listeners["c1"]
             # Wait for the registered child to record its pid.
             deadline = asyncio.get_running_loop().time() + 15
-            while str(listener.proc.pid) not in os.listdir(self.piddir):
+            while not any(
+                self._owns(listener.proc.pid, e) for e in self._spawned()
+            ):
                 if asyncio.get_running_loop().time() > deadline:
                     raise AssertionError(
                         "registered listener never recorded its pid"
@@ -128,12 +133,17 @@ class VoiceStartSerializationTest(unittest.TestCase):
             # Settle so a hypothetically leaked second child (which is
             # spawned before either start() returns) surfaces too.
             await asyncio.sleep(1.0)
-            spawned = self._spawned_pids()
-            live = [pid for pid in spawned if _alive(pid)]
+            spawned = self._spawned()
+            live = [entry for entry in spawned if pid_alive(entry[0])]
             self.assertEqual(
-                live, [listener.proc.pid],
+                len(live), 1,
                 f"expected exactly the registered child alive, got "
-                f"pids {spawned!r} (live: {live!r})",
+                f"(pid, ppid) entries {spawned!r} (live: {live!r})",
+            )
+            self.assertTrue(
+                self._owns(listener.proc.pid, live[0]),
+                f"the live child {live[0]!r} is not the registered "
+                f"listener {listener.proc.pid}",
             )
             self.assertEqual(
                 len(spawned), 1,
@@ -144,7 +154,15 @@ class VoiceStartSerializationTest(unittest.TestCase):
             self.assertGreaterEqual(sender.listening_true_count(), 1)
             await asyncio.wait_for(controller.stop_all(), 30)
             self.assertFalse(controller.running("c1"))
-            self.assertFalse(_alive(listener.proc.pid))
+            self.assertFalse(pid_alive(listener.proc.pid))
+            # The interpreter behind a launcher must be gone as well.
+            deadline = asyncio.get_running_loop().time() + 15
+            while pid_alive(live[0][0]):
+                if asyncio.get_running_loop().time() > deadline:
+                    raise AssertionError(
+                        f"listener interpreter {live[0][0]} outlived stop_all()"
+                    )
+                await asyncio.sleep(0.02)
             # The refcounted lock bookkeeping freed its entries.
             self.assertEqual(controller._lifecycle_locks, {})
             self.assertEqual(controller._lifecycle_holds, {})

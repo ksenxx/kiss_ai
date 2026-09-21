@@ -23,7 +23,11 @@ pages and openrouter.ai):
 
 * gpt-audio / gpt-audio-1.5 / gpt-audio-2025-08-28: text $2.50/$10.00,
   audio $32.00/$64.00 per 1M tokens.
-* gpt-audio-mini family: text $0.60/$2.40, audio $0.60/$2.40 (equal).
+* gpt-audio-mini family (direct OpenAI, re-verified 2026-09 on
+  developers.openai.com/api/docs/pricing): text $0.60/$2.40, audio
+  $10.00/$20.00.  OpenRouter's own listing for openai/gpt-audio-mini
+  still bills audio at the text rate, so the gateway entry keeps
+  $0.60/$2.40.
 """
 
 from types import SimpleNamespace
@@ -80,15 +84,17 @@ class TestAudioPricesRegistered:
 
     @pytest.mark.parametrize(
         "model_name",
-        [
-            "gpt-audio-mini",
-            "gpt-audio-mini-2025-10-06",
-            "gpt-audio-mini-2025-12-15",
-            "openrouter/openai/gpt-audio-mini",
-        ],
+        ["gpt-audio-mini", "gpt-audio-mini-2025-10-06", "gpt-audio-mini-2025-12-15"],
     )
     def test_gpt_audio_mini_family_audio_prices(self, model_name: str) -> None:
         info = MODEL_INFO[model_name]
+        assert info.input_price_per_1M == 0.6
+        assert info.output_price_per_1M == 2.4
+        assert info.audio_input_price_per_1M == 10.0
+        assert info.audio_output_price_per_1M == 20.0
+
+    def test_openrouter_gpt_audio_mini_keeps_gateway_listing(self) -> None:
+        info = MODEL_INFO["openrouter/openai/gpt-audio-mini"]
         assert info.audio_input_price_per_1M == 0.6
         assert info.audio_output_price_per_1M == 2.4
 
@@ -113,7 +119,7 @@ class TestCalculateCostAudioTokens:
         assert correct == pytest.approx((60 * 2.5 + 20 * 10.0 + 600 * 64.0) / 1e6)
         assert correct > 5 * old_wrong
 
-    def test_gpt_audio_mini_audio_rates_equal_text_rates(self) -> None:
+    def test_gpt_audio_mini_audio_tokens_billed_at_audio_rates(self) -> None:
         cost = calculate_cost(
             "gpt-audio-mini",
             num_input_tokens=100,
@@ -121,7 +127,7 @@ class TestCalculateCostAudioTokens:
             num_audio_input_tokens=300,
             num_audio_output_tokens=500,
         )
-        expected = (100 * 0.6 + 50 * 2.4 + 300 * 0.6 + 500 * 2.4) / 1e6
+        expected = (100 * 0.6 + 50 * 2.4 + 300 * 10.0 + 500 * 20.0) / 1e6
         assert cost == pytest.approx(expected)
 
     def test_model_without_audio_prices_falls_back_to_text_rates(self) -> None:

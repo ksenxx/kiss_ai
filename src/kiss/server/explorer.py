@@ -149,7 +149,9 @@ def repo_root(work_dir: str) -> str:
     result = _run_git(work_dir, "rev-parse", "--show-toplevel")
     if result.returncode != 0:
         return ""
-    return _chomp(result.stdout)
+    # git answers "C:/Users/..." on Windows; keep every path the
+    # explorer hands out in the native form.
+    return os.path.normpath(_chomp(result.stdout))
 
 
 def _same_dir(a: str, b: str) -> bool:
@@ -243,7 +245,10 @@ def _parse_worktree_record(record: str) -> dict[str, Any] | None:
             continue
         label, _, value = line.partition(" ")
         if label == "worktree":
-            path = value
+            # git prints "C:/Users/..." on Windows; the change rows
+            # (``Path(repo) / rel``) are native, so make the worktree
+            # path native too or the two never compare equal.
+            path = os.path.normpath(value)
         elif label == "HEAD":
             head = "" if _is_unborn_head(value) else value
         elif label == "branch":

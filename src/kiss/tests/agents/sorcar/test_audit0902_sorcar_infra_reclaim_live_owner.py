@@ -44,6 +44,7 @@ from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SUBDIR,
     GitWorktreeOps,
 )
+from kiss.core.processes import process_identity
 
 
 def _make_repo(path: Path) -> Path:
@@ -240,6 +241,66 @@ class TestSpareOwnerLiveness:
         assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
         assert not spare_dir.exists()
         assert not GitWorktreeOps.branch_exists(self.repo, spare_branch)
+
+    def test_recycled_owner_pid_is_not_mistaken_for_the_owner(self) -> None:
+        """A live pid whose process is NOT the stamping process is a
+        recycled pid: the spare's owner is dead and it is discarded.
+
+        The OS recycling of a dead owner's pid cannot be forced, so the
+        stamp is built the way a recycled pid presents itself: the pid of
+        a live stranger, with the identity of the real (other) owner.
+        """
+        assert worktree_pool.prewarm(self.repo)
+        spare_branch, spare_dir = worktree_pool._spares.pop(
+            worktree_pool._repo_key(self.repo)
+        )
+        stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            real_owner_identity = process_identity(os.getpid())
+            assert real_owner_identity is not None
+            assert real_owner_identity != process_identity(stranger.pid)
+            for key, value in (
+                ("kiss-owner-pid", str(stranger.pid)),
+                ("kiss-owner-identity", f"{stranger.pid}:{real_owner_identity}"),
+            ):
+                subprocess.run(
+                    ["git", "-C", str(self.repo), "config",
+                     f"branch.{spare_branch}.{key}", value],
+                    capture_output=True, check=True,
+                )
+            assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
+            assert not spare_dir.exists()
+            assert not GitWorktreeOps.branch_exists(self.repo, spare_branch)
+        finally:
+            stranger.kill()
+            stranger.wait(timeout=30)
+
+    def test_matching_owner_identity_keeps_the_spare(self) -> None:
+        """The stamp written by ``save_owner_pid`` (pid + identity of the
+        live stamping process) protects the spare while that process runs."""
+        assert worktree_pool.prewarm(self.repo)
+        spare_branch, spare_dir = worktree_pool._spares.pop(
+            worktree_pool._repo_key(self.repo)
+        )
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            identity = process_identity(owner.pid)
+            assert identity is not None
+            for key, value in (
+                ("kiss-owner-pid", str(owner.pid)),
+                ("kiss-owner-identity", f"{owner.pid}:{identity}"),
+            ):
+                subprocess.run(
+                    ["git", "-C", str(self.repo), "config",
+                     f"branch.{spare_branch}.{key}", value],
+                    capture_output=True, check=True,
+                )
+            assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+            assert spare_dir.is_dir()
+        finally:
+            owner.kill()
+            owner.wait(timeout=30)
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
 
     def test_own_spare_without_exclusion_is_still_discarded(self) -> None:
         """Within one process the exclusion set is authoritative: a spare

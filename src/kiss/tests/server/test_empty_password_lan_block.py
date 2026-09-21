@@ -57,6 +57,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import urllib.error
@@ -71,6 +72,7 @@ from websockets.asyncio.client import connect
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws_mod
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import posix_only
 
 _PASSWORD = "correct-horse-battery-staple"
 _PASSWORD2 = "a-different-password"
@@ -364,7 +366,7 @@ class TestEmptyPasswordLanBlock(IsolatedAsyncioTestCase):
         """
         server = self._server
         proc = subprocess.Popen(
-            ["sleep", "300"],
+            [sys.executable, "-c", "import time; time.sleep(300)"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -400,6 +402,7 @@ class TestEmptyPasswordLanBlock(IsolatedAsyncioTestCase):
                 proc.kill()
                 proc.wait(timeout=10)
 
+    @posix_only("copies the sleep binary as a process named cloudflared")
     async def test_startup_orphan_tunnel_terminated(self) -> None:
         """An orphaned cloudflared is killed when the password is empty.
 

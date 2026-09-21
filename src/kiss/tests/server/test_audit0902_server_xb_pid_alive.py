@@ -64,7 +64,7 @@ def test_is_pid_alive_matches_shared_helper_on_real_processes() -> None:
 
 def test_adoption_declines_pidfile_of_reaped_process(kiss_home: Path) -> None:
     """A stale pidfile naming a dead pid is not adopted."""
-    proc = subprocess.Popen(["true"])
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
     proc.wait()
     _write_pidfile(kiss_home, proc.pid)
     assert ws._cloudflared_pidfile() == kiss_home / "cloudflared.pid"

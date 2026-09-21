@@ -19,7 +19,6 @@ These integration tests use real on-disk git repos (no mocks).
 
 from __future__ import annotations
 
-import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -28,6 +27,7 @@ import pytest
 
 from kiss.agents.sorcar.git_worktree import _git
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.tests.conftest import is_root, posix_only
 
 
 def _make_repo(path: Path) -> Path:
@@ -71,9 +71,8 @@ def _kiss_branches(repo: Path) -> list[str]:
     return [b for b in result.stdout.strip().splitlines() if b]
 
 
-@pytest.mark.skipif(
-    os.geteuid() == 0, reason="root can read mode-000 files"
-)
+@posix_only("chmod 000 permission denial")
+@pytest.mark.skipif(is_root(), reason="root can read mode-000 files")
 class TestUnreadableDirtyFile:
     """Worktree setup must degrade gracefully on unreadable dirty files."""
 

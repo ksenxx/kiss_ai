@@ -77,7 +77,7 @@ class _WindowAgent(WorktreeSorcarAgent):
             self.window_release.wait(timeout=30)
         return value
 
-    def merge(self) -> str:
+    def merge(self, conflict_resolver: Any = None) -> str:
         with self._counts:
             self.merge_calls += 1
         self._wt = None

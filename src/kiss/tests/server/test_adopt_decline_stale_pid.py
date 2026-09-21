@@ -44,6 +44,7 @@ import unittest
 from pathlib import Path
 
 from kiss.server import web_server as ws
+from kiss.tests.conftest import posix_only
 
 
 class _MetricsHandler(http.server.BaseHTTPRequestHandler):
@@ -151,6 +152,7 @@ class TestAdoptDeclineStalePid(unittest.TestCase):
             )
             time.sleep(0.05)
 
+    @posix_only("a symlink named cloudflared cannot rename a Windows process image")
     def test_real_cloudflared_mid_reconnect_is_adopted_tentatively(
         self,
     ) -> None:
@@ -193,6 +195,7 @@ class TestAdoptDeclineStalePid(unittest.TestCase):
             "pidfile of a tentatively adopted cloudflared must remain",
         )
 
+    @posix_only("a symlink named cloudflared cannot rename a Windows process image")
     def test_real_cloudflared_without_known_url_is_terminated(self) -> None:
         """A 0-ready cloudflared whose URL is unknown IS terminated.
 

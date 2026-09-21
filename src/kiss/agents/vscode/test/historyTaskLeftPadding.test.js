@@ -78,7 +78,13 @@ function testStatusIndicatorLeftHalved() {
 function testDotFitsInsidePadding() {
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   const paddingLeft = pickDeclaration(css, '.running-item', 'padding-left');
-  const dotWidth = pickDeclaration(css, '.sidebar-item-completed', 'width');
+  // The row icons take their box from the shared status-icon rule
+  // (.status-spinner, .status-tick, .status-cross share one block).
+  const dotWidth = pickDeclaration(
+    css,
+    '.status-spinner, .status-tick, .status-cross',
+    'width',
+  );
   const dotLeftRe =
     /\.running-item\s*>\s*\.sidebar-item-failed\s*,\s*\.running-item\s*>\s*\.sidebar-item-running\s*,\s*\.running-item\s*>\s*\.sidebar-item-completed\s*\{([^}]*)\}/;
   const dotLeftMatch = dotLeftRe.exec(css);

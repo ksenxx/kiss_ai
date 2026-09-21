@@ -633,7 +633,10 @@ class VoiceWakeController:
             # still complete), verifies the listener is still the
             # registered one, and is registered in ``pumps`` so
             # ``stop``/restart joins and cancels it like any other
-            # endpoint-touching task.
+            # endpoint-touching task.  Finished re-report tasks are
+            # pruned first so repeated duplicate starts over a long
+            # session do not accumulate one done ``Task`` per call.
+            current.pumps = [t for t in current.pumps if not t.done()]
             current.pumps.append(asyncio.ensure_future(
                 self._report_listening_after_retirement(
                     conn_id, current, send,

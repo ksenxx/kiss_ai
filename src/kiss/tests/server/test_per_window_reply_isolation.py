@@ -55,6 +55,7 @@ from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 
 
 def _find_free_port() -> int:
@@ -101,6 +102,7 @@ def _has_type(reply_type: str) -> Callable[[dict[str, Any]], bool]:
     return _pred
 
 
+@requires_unix_sockets
 class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
     """Two UDS connections (= two VS Code windows) sharing one daemon."""
 

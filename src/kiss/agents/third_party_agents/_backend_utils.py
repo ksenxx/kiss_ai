@@ -18,10 +18,19 @@ from typing import Any
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-    """HTTP server with per-request threads and address reuse enabled."""
+    """HTTP server with per-request threads and (POSIX) address reuse.
+
+    ``SO_REUSEADDR`` lets a restarted backend rebind while the old
+    connections sit in ``TIME_WAIT`` on POSIX.  Winsock gives the same
+    option a different meaning: a second socket that also sets it may
+    bind a port another socket is already *listening* on (Microsoft,
+    "Using SO_REUSEADDR and SO_EXCLUSIVEADDRUSE"), so "bind failed" is
+    never reported and two backends silently share one port.  The option
+    is therefore left off on Windows.
+    """
 
     daemon_threads = True
-    allow_reuse_address = True
+    allow_reuse_address = sys.platform != "win32"
 
 
 MAX_DRAIN_BYTES = 8 * 1024 * 1024

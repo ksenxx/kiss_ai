@@ -42,6 +42,7 @@ from kiss.server.tricks import (
     read_tricks,
 )
 from kiss.server.user_assets import kiss_home_dir
+from kiss.tests.conftest import is_root, posix_only
 
 
 @pytest.fixture
@@ -198,11 +199,12 @@ def test_web_server_read_tricks_uses_my_injection_first(
     ]
 
 
+@posix_only("chmod permission bits")
 def test_kiss_home_unwritable_still_returns_bundled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bundled_injections: Path,
 ) -> None:
     """A read-only ``~/.kiss/`` must not stop the bundled tricks from rendering."""
-    if os.geteuid() == 0:  # pragma: no cover - CI runs as non-root
+    if is_root():  # pragma: no cover - CI runs as non-root
         pytest.skip("root cannot lose write permission via chmod")
     readonly_parent = tmp_path / "ro"
     readonly_parent.mkdir()

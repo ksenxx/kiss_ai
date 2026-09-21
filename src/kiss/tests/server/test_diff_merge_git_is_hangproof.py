@@ -46,6 +46,7 @@ import pytest
 
 from kiss.agents.sorcar import git_worktree
 from kiss.server.diff_merge import _git
+from kiss.tests.conftest import posix_only
 
 #: How long the stub git sleeps.  Long enough that a run which ignores
 #: the dialled-down budget is unambiguous, short enough that a failing
@@ -89,6 +90,7 @@ def _install_forking_git(tmp_path: Path, marker: Path) -> Path:
 class TestDiffMergeGitIsHardened:
     """The server-side git helper must not keep a private runner."""
 
+    @posix_only("the forking git stub is a #!/bin/sh script")
     def test_timeout_kills_the_whole_process_group(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -121,6 +123,7 @@ class TestDiffMergeGitIsHardened:
             "hold on the inherited pipes blocks the caller forever"
         )
 
+    @posix_only("the forking git stub is a #!/bin/sh script")
     def test_timeout_budget_is_shared_with_git_worktree(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

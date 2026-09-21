@@ -28,6 +28,7 @@ test blocks the CDN on purpose to pin the fallback behavior).
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -65,7 +66,10 @@ _DIRTY_TAB = ".chat-tab.content-tab.content-dirty"
 
 def _fresh_file(harness, name: str, text: str) -> Path:
     path = Path(harness.work_dir) / name
-    path.write_text(text)
+    # Byte-exact fixture: the daemon saves the editor text without
+    # newline translation, and the assertions count LF bytes, so the
+    # file must not pick up CRLF from Windows text-mode writes.
+    path.write_text(text, encoding="utf-8", newline="\n")
     return path
 
 
@@ -89,7 +93,10 @@ def _enter_source_mode(page) -> None:
 
 def _type_at_end(page, text: str) -> None:
     page.click(_MONACO + " .view-lines")
-    page.keyboard.press("Control+End")
+    # Monaco binds "go to end of document" per platform: Ctrl+End on
+    # Linux/Windows, Cmd+Down on macOS (Ctrl+End is unbound there, so
+    # the text would land wherever the click put the cursor).
+    page.keyboard.press("Meta+ArrowDown" if sys.platform == "darwin" else "Control+End")
     page.keyboard.type(text)
 
 

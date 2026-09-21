@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.third_party_agents.tlon_agent import TlonAgent, _config
+from kiss.agents.third_party_agents.tlon_sea import TlonAgent, _config
 from kiss.tests.agents.third_party_agents.test_new_channel_agents import (
     _CHANNEL_AGENTS,
 )

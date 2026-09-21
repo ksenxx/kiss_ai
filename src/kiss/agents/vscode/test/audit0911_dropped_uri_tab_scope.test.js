@@ -243,9 +243,11 @@ function hostSide() {
   });
   const reply = postedByHost.filter(m => m.type === 'droppedPaths').pop();
   assert.ok(reply, 'the host replied with droppedPaths');
+  // path.relative() answers in the host's native separator (src\a.py on
+  // Windows), which is what the prompt should carry there.
   assert.strictEqual(
     JSON.stringify(reply.paths),
-    JSON.stringify(['src/a.py']),
+    JSON.stringify([path.join('src', 'a.py')]),
     'the host relativized the dropped URI',
   );
   assert.strictEqual(
