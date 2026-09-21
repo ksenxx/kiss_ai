@@ -36,6 +36,17 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   for running the scheduler outside the daemon; in that mode command
   jobs work standalone while prompt jobs still need a reachable
   kiss-web daemon (they are submitted through its socket).
+- A prompt job runs as its own Sorcar Extension Agent: every run
+  writes a small SEA file into its scratch directory
+  (:func:`_write_prompt_sea` — the job's prompt, model and budget as
+  ``prompt()`` / ``model()`` / ``max_budget()`` getters, plus the
+  run's ``work_dir()`` and the pinned-off ``use_worktree()`` /
+  ``auto_commit()`` / ``classify_tasks()``) and launches it with the
+  same ``run_agent`` tool a chat task uses for any ``.py`` agent
+  script (:func:`kiss.agents.sorcar.agent_dispatch.make_run_agent_tool`),
+  so the whole run configuration lives in one place — the SEA — and
+  the daemon applies it through the standard ``extension_agent_path``
+  contract instead of cron pinning each value on the wire.
 - An always-on channel gateway (README §19) is a scheduled COMMAND
   job — the channel CLI's poll tick, e.g. ``kiss-telegram
   --channel=-100123 --pairing`` — never a prompt job: a tick that
@@ -105,13 +116,15 @@ still overlap them, as may ``run_now``.
 _daemon_sock_path: str | None = None
 """UDS path of the kiss-web daemon hosting this process's scheduler.
 
-Set by :func:`start_scheduler_thread` so tool calls executed inside the
-daemon (e.g. ``cron_job("run_now", ...)``) submit prompt jobs back to
-the same daemon even when it serves a non-default socket.  Always read
-through :func:`_recorded_daemon_sock_path`, which resolves the
-CANONICAL module's value: dispatched cron sessions get their
-``cron_job`` tool from a fresh synthetic copy of this module whose own
-global is never set.
+Set by :func:`start_scheduler_thread` so prompt jobs — scheduled ticks
+and ``cron_job("run_now", ...)`` tool calls executed inside the daemon
+alike — are submitted back to the same daemon even when it serves a
+non-default socket.  Read by
+:func:`kiss.agents.sorcar.agent_dispatch._daemon_sock_path`, which
+imports the CANONICAL ``kiss.agents.sorcar.cron_agent`` module: a
+dispatched cron session gets its ``cron_job`` tool from a fresh
+synthetic copy of this module whose own global is never set, and its
+``run_now`` still has to find the recorded socket.
 """
 CRON_SCAN_DAYS = 4 * 366 + 1  # covers the largest gap between leap days
 DEFAULT_TICK_INTERVAL_SECONDS = 60.0
@@ -412,27 +425,6 @@ def compute_next_run(schedule: str, now: float) -> float | None:
     return ts if ts > now else None
 
 
-def _recorded_daemon_sock_path() -> str | None:
-    """Return the daemon UDS recorded for this process, if any.
-
-    :func:`start_scheduler_thread` records the hosting daemon's socket
-    in the canonical ``kiss.agents.sorcar.cron_agent`` module.  The
-    kiss-web daemon, however, re-executes this file as a fresh
-    synthetic tools-file module for every dispatched cron session
-    (``run_agent("cron", ...)``), whose own :data:`_daemon_sock_path`
-    global is never set — so the lookup goes through
-    :data:`sys.modules` to the canonical module, falling back to this
-    module's own global for canonical and standalone callers.
-
-    Returns:
-        The recorded daemon socket path, or ``None`` when this process
-        hosts no scheduler.
-    """
-    canonical = sys.modules.get("kiss.agents.sorcar.cron_agent")
-    recorded = getattr(canonical, "_daemon_sock_path", None)
-    return recorded or _daemon_sock_path
-
-
 def _deliver_to_channel(channel: str, chat: str, text: str) -> str:
     """Send *text* to one channel agent's backend.
 
@@ -511,97 +503,160 @@ def _deliver(job: dict[str, Any], text: str) -> list[str]:
     return notes
 
 
-def _run_prompt_job(
-    job: dict[str, Any],
-    sock_path: str | None = None,
-    work_dir: Path | None = None,
-) -> tuple[str, str | None]:
-    """Run an LLM cron job in a fresh kiss-web daemon session.
+PROMPT_PREAMBLE = (
+    "You are running as an unattended scheduled automation (cron job). "
+    "Nobody can answer questions; never ask the user anything. Do not "
+    "create, modify, or remove scheduled jobs during this run. Your "
+    "final summary is delivered verbatim to the job's delivery targets; "
+    "reply with exactly [SILENT] if there is nothing worth reporting.\n\n"
+)
+"""Hermes-style preamble prepended to every prompt job's prompt."""
 
-    Submits the prompt to the running kiss-web daemon through the
-    public client API :func:`kiss.server.sorcar.run`.  Mirrors Hermes:
-    every run gets a brand-new session (no history), with a preamble
-    marking the run as unattended and forbidding further scheduling; a
-    ``[SILENT]`` (or empty) summary suppresses delivery.
+PROMPT_SEA_NAME = "cron_prompt_sea.py"
+"""File name of the generated per-run SEA inside a prompt job's scratch dir."""
+
+
+def _write_prompt_sea(job: dict[str, Any], work_dir: Path) -> Path:
+    """Write the Sorcar Extension Agent that configures one run of *job*.
+
+    The generated file follows the SEA contract of
+    ``src/kiss/server/README.md``: top-level getters the daemon calls
+    after importing the file (``apply_agent_overrides``), each
+    overriding the like-named ``run`` parameter.  ``prompt()`` returns
+    the Hermes-style preamble followed by the job's prompt; ``model()``
+    and ``max_budget()`` carry the job's LLM settings (``""`` / ``None``
+    mean "daemon default"); ``work_dir()`` pins the run to its private
+    scratch directory; ``use_worktree()``, ``auto_commit()`` and
+    ``classify_tasks()`` are pinned off because a scratch directory is
+    not a git repository and an unattended run must not stall on
+    classification.  Values are embedded as Python literals via
+    :func:`repr`, so any prompt text round-trips exactly.
 
     Args:
-        job: The job dict (uses ``prompt``, ``model_name``,
-            ``max_budget``).
-        sock_path: Daemon UDS path override; ``None`` uses the
-            standard resolution (``KISS_SORCAR_SOCK`` environment
-            variable, then ``$KISS_HOME/sorcar.sock``).
-        work_dir: The run's private scratch directory (see
-            :func:`_execute_job`, which every scheduled and ``run_now``
-            run goes through); ``None`` (direct callers) uses the
-            shared ``~/.kiss/cron/work``.
+        job: The job dict (uses ``id``, ``name``, ``prompt``,
+            ``model_name``, ``max_budget``).
+        work_dir: The run's scratch directory (must exist); the SEA is
+            written there as :data:`PROMPT_SEA_NAME`.
 
     Returns:
-        ``(status, text)`` where status is ``"ok"``, ``"error"``, or
-        ``"silent"``; text is the deliverable summary (``None`` when
-        silent).
+        The path of the written SEA file.
     """
-    from kiss.agents.sorcar import daemon_client
-
-    preamble = (
-        "You are running as an unattended scheduled automation (cron job). "
-        "Nobody can answer questions; never ask the user anything. Do not "
-        "create, modify, or remove scheduled jobs during this run. Your "
-        "final summary is delivered verbatim to the job's delivery targets; "
-        "reply with exactly [SILENT] if there is nothing worth reporting.\n\n"
+    raw_budget = job.get("max_budget")
+    budget = float(raw_budget) if raw_budget else None
+    # The docstring is static: job values go only into repr() literals
+    # (a name containing a triple quote would end a docstring early).
+    source = (
+        '"""Sorcar Extension Agent generated by kiss.agents.sorcar.cron_agent.\n'
+        "\n"
+        "Configures one run of the cron job named below; rewritten on every run.\n"
+        '"""\n'
+        "\n"
+        f"JOB_ID = {str(job.get('id', ''))!r}\n"
+        f"JOB_NAME = {str(job.get('name', ''))!r}\n"
+        f"PREAMBLE = {PROMPT_PREAMBLE!r}\n"
+        f"JOB_PROMPT = {str(job.get('prompt', ''))!r}\n"
+        "\n"
+        "\n"
+        "def prompt() -> str:\n"
+        "    return PREAMBLE + JOB_PROMPT\n"
+        "\n"
+        "\n"
+        "def work_dir() -> str:\n"
+        f"    return {str(work_dir)!r}\n"
+        "\n"
+        "\n"
+        "def model() -> str:\n"
+        f"    return {str(job.get('model_name') or '')!r}\n"
+        "\n"
+        "\n"
+        "def max_budget() -> float | None:\n"
+        f"    return {budget!r}\n"
+        "\n"
+        "\n"
+        "def use_worktree() -> bool:\n"
+        "    return False\n"
+        "\n"
+        "\n"
+        "def auto_commit() -> bool:\n"
+        "    return False\n"
+        "\n"
+        "\n"
+        "def classify_tasks() -> bool:\n"
+        "    return False\n"
     )
-    if work_dir is None:
-        work_dir = _cron_dir() / "work"
-        work_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        # Scheduled runs execute in the cron scratch directory, outside
-        # any project git lifecycle: no ``extension_agent_path`` is
-        # passed here, so this module's ``use_worktree()`` /
-        # ``auto_commit()`` getters do NOT apply and the values must be
-        # pinned on the wire.  ``classify_tasks=False`` is pinned too:
-        # cron is the one dispatch mode that never classifies — an
-        # unattended scheduled automation runs repeatedly, and a
-        # classifier round trip on every run buys nothing a one-off
-        # dispatch would not already get.  (The worktree pin alone is
-        # safe regardless: a classification verdict can only demote a
-        # requested worktree run, never promote a pinned-off one.)
-        # ``stop_on_timeout=True``: the run's scratch directory is
-        # removed as soon as this function returns, so a task that
-        # outlives the timeout must be stopped, not left running in a
-        # directory that is about to disappear.  A stop the daemon
-        # never confirmed (``StopUnconfirmedTimeoutError``) propagates
-        # to :func:`_execute_job`, which then keeps the directory.
-        result = daemon_client.run(
-            preamble + str(job.get("prompt", "")),
-            work_dir=str(work_dir),
-            model=str(job.get("model_name", "")),
-            use_worktree=False,
-            auto_commit=False,
-            classify_tasks=False,
-            max_budget=float(job["max_budget"]) if job.get("max_budget") else None,
-            timeout=PROMPT_TIMEOUT_SECONDS,
-            stop_on_timeout=True,
-            sock_path=sock_path,
-        )
-    except daemon_client.StopUnconfirmedTimeoutError:
-        raise
-    except TimeoutError:
-        return "error", (
-            f"prompt job timed out after {PROMPT_TIMEOUT_SECONDS:.0f}s "
-            "and was stopped"
-        )
-    except OSError as e:
-        # Name the exact socket the client resolved (same precedence
-        # rules, same helper) instead of re-deriving it here.
-        sock = daemon_client._resolve_sock_path(sock_path)
-        return "error", (
-            f"cannot reach the kiss-web daemon at {sock}: {e} "
-            "(prompt jobs need a running kiss-web daemon; "
-            "command jobs work without one)"
-        )
-    summary = result.text or ("" if result.success else "Task failed")
+    sea_path = work_dir / PROMPT_SEA_NAME
+    sea_path.write_text(source, encoding="utf-8")
+    return sea_path
+
+
+def _run_prompt_job(
+    job: dict[str, Any], work_dir: Path,
+) -> tuple[str, str | None]:
+    """Run an LLM cron job as a generated SEA in a fresh daemon session.
+
+    Writes the run's Sorcar Extension Agent into *work_dir*
+    (:func:`_write_prompt_sea`) and launches it with the ``run_agent``
+    tool (:func:`kiss.agents.sorcar.agent_dispatch.make_run_agent_tool`)
+    exactly as a chat task launches any ``.py`` agent script — the
+    daemon imports the SEA and applies its getters to the run.  Mirrors
+    Hermes: every run gets a brand-new session (no history), with a
+    preamble marking the run as unattended and forbidding further
+    scheduling; a ``[SILENT]`` (or empty) summary suppresses delivery.
+
+    The run has no parent task (the tool is built without a parent
+    agent), so the daemon treats it as a top-level task: no reviewer
+    sub-tree marking, no shared budget or task-tree quota.
+
+    Args:
+        job: The job dict (uses ``id``, ``name``, ``prompt``,
+            ``model_name``, ``max_budget``).
+        work_dir: The run's private scratch directory (created by
+            :func:`_execute_job`); receives the SEA file and is the
+            task's working directory.
+
+    Returns:
+        ``(status, summary)`` where status is ``"ok"``, ``"error"`` or
+        ``"silent"`` (summary ``None`` — nothing to deliver).  Failures
+        to reach the daemon, agent-script errors and a confirmed
+        timeout (the task was stopped after
+        :data:`PROMPT_TIMEOUT_SECONDS`) come back as ``"error"`` with
+        the ``run_agent`` error text.
+
+    Raises:
+        TimeoutError: When the run timed out but the daemon never
+            confirmed the stop — the task may still be running, so the
+            caller must keep *work_dir*.
+    """
+    # Lazy import: agent_dispatch imports this module lazily as well
+    # (``_daemon_sock_path``), and importing it at module load would
+    # pull the whole dispatch layer into ``kiss-cron --list``.
+    from kiss.agents.sorcar.agent_dispatch import (
+        make_run_agent_tool,
+        stop_unconfirmed_error,
+    )
+
+    sea_path = _write_prompt_sea(job, work_dir)
+    run_agent = make_run_agent_tool(str(work_dir))
+    # The task text is a placeholder: the SEA's ``prompt()`` replaces
+    # it on the daemon.  Every other run setting comes from the SEA
+    # too, so the tool is given only the agent path and the timeout.
+    reply = run_agent(
+        agent=str(sea_path),
+        task=f"Run cron job {job.get('id', '')} ({job.get('name', '')}).",
+        timeout=str(PROMPT_TIMEOUT_SECONDS),
+    )
+    if reply == stop_unconfirmed_error(sea_path.stem, PROMPT_TIMEOUT_SECONDS):
+        raise TimeoutError(reply)
+    if reply.startswith("Error:"):
+        return "error", reply
+    result = yaml.safe_load(reply)
+    if not isinstance(result, dict):
+        return "error", f"unexpected run_agent reply: {reply}"
+    success = bool(result.get("success"))
+    summary = str(result.get("summary") or "") or ("" if success else "Task failed")
     if not summary or _is_silent(summary):
         return "silent", None
-    return ("ok" if result.success else "error"), summary
+    return ("ok" if success else "error"), summary
 
 
 def _proc_descendants(root_pid: int) -> set[int]:
@@ -767,7 +822,7 @@ def _run_command_job(
     return "ok", output
 
 
-def _execute_job(job: dict[str, Any], sock_path: str | None = None) -> None:
+def _execute_job(job: dict[str, Any]) -> None:
     """Execute one job, deliver its result, and record the outcome.
 
     The run gets a fresh private scratch directory under
@@ -783,9 +838,13 @@ def _execute_job(job: dict[str, Any], sock_path: str | None = None) -> None:
     ``last_summary`` fields.  Errors are still delivered (so the user
     learns the automation broke), silent results are not.
 
+    Prompt jobs are submitted to the kiss-web daemon whose socket
+    :func:`start_scheduler_thread` recorded (standard resolution —
+    ``KISS_SORCAR_SOCK``, then ``$KISS_HOME/sorcar.sock`` — when none
+    was recorded, e.g. under ``kiss-cron --tick``).
+
     Args:
         job: The job dict to execute.
-        sock_path: Daemon UDS path override for prompt jobs.
     """
     _runs_dir().mkdir(parents=True, exist_ok=True)
     work_dir = Path(tempfile.mkdtemp(prefix=f"{job['id']}-", dir=_runs_dir()))
@@ -794,12 +853,10 @@ def _execute_job(job: dict[str, Any], sock_path: str | None = None) -> None:
         if str(job.get("command", "")).strip():
             status, text = _run_command_job(job, work_dir=work_dir)
         else:
-            status, text = _run_prompt_job(
-                job, sock_path or _recorded_daemon_sock_path(), work_dir,
-            )
+            status, text = _run_prompt_job(job, work_dir)
     except TimeoutError as e:
-        # Only daemon_client.StopUnconfirmedTimeoutError reaches here
-        # (_run_prompt_job handles the confirmed-stop timeout itself).
+        # Only the unconfirmed-stop timeout reaches here
+        # (_run_prompt_job reports the confirmed-stop timeout itself).
         keep_work_dir = True
         status, text = "error", (
             f"prompt job timed out after {PROMPT_TIMEOUT_SECONDS:.0f}s; the stop "
@@ -854,9 +911,7 @@ def running_job_ids() -> set[str]:
         return set(_running)
 
 
-def tick(
-    now: float | None = None, sock_path: str | None = None, wait: bool = True,
-) -> int:
+def tick(now: float | None = None, wait: bool = True) -> int:
     """Run one scheduler pass: launch every due job.
 
     Takes a non-blocking ``flock`` on the job store (a tick that finds
@@ -881,7 +936,6 @@ def tick(
 
     Args:
         now: Current time in epoch seconds; ``None`` uses the clock.
-        sock_path: Daemon UDS path override for prompt jobs.
         wait: Whether to block until every launched job has finished
             (the ``kiss-cron --tick`` CLI).  The scheduler loop passes
             ``False`` so a long job never delays the next tick.
@@ -932,7 +986,7 @@ def tick(
         threads = []
         for job in due:
             thread = threading.Thread(
-                target=_execute_job, args=(job, sock_path),
+                target=_execute_job, args=(job,),
                 name=f"kiss-cron-job-{job['id']}", daemon=True,
             )
             with _running_lock:
@@ -948,7 +1002,6 @@ def tick(
 def run_scheduler(
     stop_event: threading.Event,
     interval: float = DEFAULT_TICK_INTERVAL_SECONDS,
-    sock_path: str | None = None,
 ) -> None:
     """Run the scheduler loop until *stop_event* is set.
 
@@ -963,11 +1016,10 @@ def run_scheduler(
             between ticks returns early; jobs already launched run to
             completion in their own daemon threads).
         interval: Seconds between scheduler passes.
-        sock_path: Daemon UDS path override for prompt jobs.
     """
     while not stop_event.is_set():
         try:
-            ran = tick(sock_path=sock_path, wait=False)
+            ran = tick(wait=False)
             if ran:
                 logger.info("kiss-cron: launched %d job(s)", ran)
         except Exception as e:
@@ -983,14 +1035,15 @@ def start_scheduler_thread(
 
     Called by the kiss-web daemon on startup so scheduled automations
     fire without any external cron process.  Prompt jobs are submitted
-    back to the daemon through *sock_path*.
+    back to the daemon through *sock_path*, recorded in
+    :data:`_daemon_sock_path`.
 
     Args:
         interval: Seconds between scheduler passes.
-        sock_path: Daemon UDS path override for prompt jobs (the
-            daemon passes its own socket); also becomes the module
-            default so ``run_now`` tool calls in this process target
-            the same daemon.
+        sock_path: The hosting daemon's UDS path; recorded as the
+            module's :data:`_daemon_sock_path` so scheduled prompt jobs
+            and ``run_now`` tool calls in this process target the same
+            daemon.  ``None`` keeps the standard socket resolution.
 
     Returns:
         The stop event: set it to stop the loop.
@@ -1001,7 +1054,7 @@ def start_scheduler_thread(
     stop_event = threading.Event()
     threading.Thread(
         target=run_scheduler,
-        args=(stop_event, interval, sock_path),
+        args=(stop_event, interval),
         name="kiss-cron-scheduler",
         daemon=True,
     ).start()

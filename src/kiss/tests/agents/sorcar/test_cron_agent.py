@@ -8,13 +8,14 @@ Everything runs against the real JSON job store under an isolated
 ``KISS_HOME`` — no mocks or test doubles (``monkeypatch`` is used
 only to isolate environment variables, ``sys.argv``, and the
 module-level daemon-socket default between tests, and to capture the
-daemon submission a prompt job would perform).  The only branches
-not exercised here are ``_run_prompt_job``'s silent / timed-out LLM
-paths: they submit a task to the kiss-web daemon and require a live
-LLM endpoint, which is unavailable (and non-deterministic) in unit
-tests; the failure path is covered via ``_execute_job``'s exception
-handling, and the successful path's daemon-bound arguments via
-``test_prompt_job_skips_git_lifecycle``.
+daemon submission a prompt job would perform).  A real LLM run of a
+prompt job needs a live kiss-web daemon and LLM endpoint, which are
+unavailable (and non-deterministic) in unit tests: the failure path
+is covered via ``_execute_job``'s exception handling, and the
+successful / silent paths — including the generated SEA the daemon
+would apply — via ``test_prompt_job_runs_as_generated_sea`` and
+``test_prompt_sea_defaults_and_silent_result`` (timeouts are covered
+in ``test_cron_concurrent_runs``).
 """
 
 from __future__ import annotations
@@ -444,48 +445,134 @@ def test_tick_skips_when_lock_held() -> None:
     assert tick(2.0) == 1
 
 
-def test_prompt_job_skips_git_lifecycle(
+def test_prompt_job_runs_as_generated_sea(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A scheduled prompt job runs outside any project git lifecycle.
+    """A prompt job is launched as a generated SEA through ``run_agent``.
 
-    ``_run_prompt_job`` submits without an ``extension_agent_path``,
-    so the module's ``use_worktree()``/``auto_commit()`` getters never
-    apply on the daemon — the values must be pinned on the wire.
-    ``classify_tasks`` is pinned off too: cron is the one dispatch
-    mode that never classifies (an unattended automation runs
-    repeatedly, and a classifier round trip per run buys nothing).
-    Before the worktree pin, a scheduled job whose prompt looked like
-    development work created a git worktree of whatever repository
-    enclosed ``~/.kiss/cron/work`` on every run.  The real path is
-    exercised up to the daemon-client boundary; only that boundary
-    call is captured, to read the arguments the job runner computed.
+    ``_run_prompt_job`` writes ``cron_prompt_sea.py`` into the run's
+    scratch directory and dispatches it with the ``run_agent`` tool,
+    so the daemon receives an ``extension_agent_path`` and the SEA's
+    getters — not values pinned on the wire — configure the run: the
+    preamble-prefixed prompt, the job's model and budget, the scratch
+    ``work_dir``, and ``use_worktree`` / ``auto_commit`` /
+    ``classify_tasks`` pinned off (the scratch directory is no git
+    repository and an unattended automation never classifies).  The
+    real path is exercised up to the daemon-client boundary; only that
+    boundary call is captured, and the SEA it names is then applied
+    with the daemon's own loader to read the effective run settings.
     """
     from kiss.agents.sorcar import daemon_client
+    from kiss.server.agent_file import apply_agent_overrides
 
     captured: list[dict[str, object]] = []
 
     def capture_run(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
-        captured.append(kwargs)
+        captured.append({"prompt": prompt, **kwargs})
         return daemon_client.TaskResult(
             text="hello", success=True, cost=0.0, tokens=0, steps=0,
         )
 
     monkeypatch.setattr(daemon_client, "run", capture_run)
-    status, text = cron_agent._run_prompt_job(
-        {"id": "abcd1234", "prompt": "say hi", "max_budget": 0},
-    )
+    work_dir = tmp_path / "run"
+    work_dir.mkdir()
+    job = {
+        "id": "abcd1234", "name": "greeter", "prompt": "say 'hi'\n",
+        "model_name": "some-model", "max_budget": 1.5,
+    }
+    status, text = cron_agent._run_prompt_job(job, work_dir)
     assert (status, text) == ("ok", "hello")
-    assert captured[0]["use_worktree"] is False
-    assert captured[0]["auto_commit"] is False
-    assert captured[0]["classify_tasks"] is False
-    assert captured[0]["work_dir"] == str(tmp_path / "cron" / "work")
+    sea_path = work_dir / cron_agent.PROMPT_SEA_NAME
+    assert captured[0]["extension_agent_path"] == str(sea_path)
+    assert captured[0]["timeout"] == cron_agent.PROMPT_TIMEOUT_SECONDS
+    assert captured[0]["stop_on_timeout"] is True
+    # Top-level task: no parent, so no reviewer sub-tree marking.
+    assert captured[0]["parent_task_id"] == ""
+    cmd: dict[str, object] = {
+        "agentPath": str(sea_path), "prompt": str(captured[0]["prompt"]),
+        "useWorktree": True, "autoCommit": True, "classifyTasks": None,
+    }
+    assert apply_agent_overrides(cmd) == {
+        "prompt", "workDir", "model", "maxBudget", "useWorktree",
+        "autoCommit", "classifyTasks",
+    }
+    assert cmd["prompt"] == cron_agent.PROMPT_PREAMBLE + "say 'hi'\n"
+    assert cmd["workDir"] == str(work_dir)
+    assert cmd["model"] == "some-model"
+    assert cmd["maxBudget"] == 1.5
+    assert cmd["useWorktree"] is False
+    assert cmd["autoCommit"] is False
+    assert cmd["classifyTasks"] is False
+
+
+def test_prompt_sea_defaults_and_silent_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset model/budget become daemon defaults; [SILENT] is silent."""
+    from kiss.agents.sorcar import daemon_client
+    from kiss.server.agent_file import apply_agent_overrides
+
+    def silent_run(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
+        return daemon_client.TaskResult(
+            text="[SILENT]", success=True, cost=0.0, tokens=0, steps=0,
+        )
+
+    monkeypatch.setattr(daemon_client, "run", silent_run)
+    work_dir = tmp_path / "run"
+    work_dir.mkdir()
+    job = {"id": "abcd1234", "prompt": "say hi", "max_budget": 0}
+    assert cron_agent._run_prompt_job(job, work_dir) == ("silent", None)
+    cmd: dict[str, object] = {
+        "agentPath": str(work_dir / cron_agent.PROMPT_SEA_NAME),
+        "prompt": "x", "model": "wire-model", "maxBudget": 3.0,
+    }
+    apply_agent_overrides(cmd)
+    assert cmd["model"] == ""
+    assert cmd["maxBudget"] is None
+
+
+def test_prompt_sea_source_survives_adversarial_text(tmp_path: Path) -> None:
+    """Quotes, triple quotes, backslashes and unicode in job fields round-trip.
+
+    Job values are embedded only as ``repr()`` literals — never inside
+    the static module docstring — so a name or prompt containing a
+    triple quote cannot end a string early and break the generated SEA.
+    """
+    from kiss.server.agent_file import apply_agent_overrides
+
+    name = 'bad """ name ' + "''' with \\ backslash"
+    prompt = 'line1\n"""\n' + "'''\n\\n ünïcode \x00 {braces} #comment"
+    job = {"id": "abcd1234", "name": name, "prompt": prompt, "model_name": name}
+    sea_path = cron_agent._write_prompt_sea(job, tmp_path)
+    cmd: dict[str, object] = {"agentPath": str(sea_path), "prompt": "x"}
+    apply_agent_overrides(cmd)
+    assert cmd["prompt"] == cron_agent.PROMPT_PREAMBLE + prompt
+    assert cmd["model"] == name
+
+
+def test_prompt_job_marker_in_socket_path_is_not_a_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the exact unconfirmed-stop reply is treated as a timeout.
+
+    A connection error naming a socket path that happens to contain the
+    unconfirmed-stop wording must stay an ordinary error (scratch
+    directory removed), not be mistaken for a possibly live task.
+    """
+    sock = tmp_path / "MAY STILL BE RUNNING" / "no.sock"
+    monkeypatch.setenv("KISS_SORCAR_SOCK", str(sock))
+    work_dir = tmp_path / "run"
+    work_dir.mkdir()
+    job = {"id": "abcd1234", "name": "hi", "prompt": "say hi", "max_budget": 0}
+    status, text = cron_agent._run_prompt_job(job, work_dir)
+    assert status == "error"
+    assert text is not None and str(sock) in text
 
 
 def test_prompt_job_failure_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
     # With no reachable kiss-web daemon socket (the isolated KISS_HOME
-    # contains no sorcar.sock), a prompt job's sorcar.run raises and
-    # _execute_job records the error end-to-end.
+    # contains no sorcar.sock), the run_agent dispatch of the job's SEA
+    # fails and _execute_job records the error end-to-end.
     monkeypatch.delenv("KISS_SORCAR_SOCK", raising=False)
     job = _create(cron_job(
         "create", name="llm", prompt="say hi", schedule="every 1m",
@@ -496,7 +583,8 @@ def test_prompt_job_failure_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None
     stored = load_jobs()[0]
     assert stored["last_status"] == "error"
     # The error explains what is missing instead of a bare traceback.
-    assert "kiss-web daemon" in stored["last_summary"]
+    assert "Cannot connect to the sorcar daemon" in stored["last_summary"]
+    assert "kiss-web" in stored["last_summary"]
 
 
 def test_cli_usage_exits_without_args(

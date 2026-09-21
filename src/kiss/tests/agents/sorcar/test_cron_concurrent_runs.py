@@ -19,7 +19,7 @@ Covers the scheduler behaviour added on top of the base cron agent:
 Everything runs against the real JSON store under an isolated
 ``KISS_HOME`` (fixture reused from ``test_cron_agent``); only the
 daemon-client boundary of prompt jobs is captured, as in
-``test_cron_agent.test_prompt_job_skips_git_lifecycle``.
+``test_cron_agent.test_prompt_job_runs_as_generated_sea``.
 """
 
 from __future__ import annotations
@@ -150,7 +150,7 @@ def test_prompt_job_runs_in_private_work_dir_and_stops_on_timeout(
     assert tick(3.0) == 1
     stored = _stored(job["id"])
     assert stored["last_status"] == "error"
-    assert "timed out" in stored["last_summary"]
+    assert "did not finish within" in stored["last_summary"]
     assert "was stopped" in stored["last_summary"]
     assert list(_runs_dir(tmp_path).iterdir()) == []
 
@@ -163,10 +163,12 @@ def test_prompt_job_runs_in_private_work_dir_and_stops_on_timeout(
     kept = Path(str(captured[2]["work_dir"]))
     assert stored["last_status"] == "error"
     assert "was not confirmed" in stored["last_summary"]
-    assert "no terminal status" in stored["last_summary"]
+    assert "MAY STILL BE RUNNING" in stored["last_summary"]
     assert str(kept) in stored["last_summary"]
     assert "was stopped" not in stored["last_summary"]
     assert kept.is_dir()
+    # The run's generated SEA is kept with it.
+    assert (kept / cron_agent.PROMPT_SEA_NAME).is_file()
     assert [path.name for path in _runs_dir(tmp_path).iterdir()] == [kept.name]
 
 
