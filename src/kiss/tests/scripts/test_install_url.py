@@ -23,7 +23,7 @@ class TestInstallUrl(unittest.TestCase):
     """Verify install URLs use raw.githubusercontent.com, not github.com/blob."""
 
     def test_readme_uses_raw_url(self) -> None:
-        readme = (REPO_ROOT / "README.md").read_text()
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertTrue(
             RAW_URL_PATTERN.search(readme),
             "README.md should contain raw.githubusercontent.com install URL",
@@ -34,7 +34,7 @@ class TestInstallUrl(unittest.TestCase):
         )
 
     def test_install_script_has_shebang(self) -> None:
-        script = (REPO_ROOT / "scripts" / "install.sh").read_text()
+        script = (REPO_ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
         self.assertTrue(
             script.startswith("#!/bin/bash"),
             "scripts/install.sh must start with #!/bin/bash shebang",
@@ -51,7 +51,8 @@ class TestInstallUrl(unittest.TestCase):
                 "https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh",
             ],
             capture_output=True,
-            text=True,
+            encoding="utf-8",  # web pages are UTF-8, not the Windows code page
+            errors="replace",
             timeout=15,
         )
         self.assertEqual(result.returncode, 0, f"curl failed: {result.stderr}")
@@ -69,7 +70,8 @@ class TestInstallUrl(unittest.TestCase):
                 "https://kisssorcar.github.io/",
             ],
             capture_output=True,
-            text=True,
+            encoding="utf-8",  # web pages are UTF-8, not the Windows code page
+            errors="replace",
             timeout=15,
         )
         self.assertEqual(result.returncode, 0, f"curl failed: {result.stderr}")
@@ -93,7 +95,8 @@ class TestInstallUrl(unittest.TestCase):
                 "https://github.com/ksenxx/kiss_ai/blob/main/scripts/install.sh",
             ],
             capture_output=True,
-            text=True,
+            encoding="utf-8",  # web pages are UTF-8, not the Windows code page
+            errors="replace",
             timeout=15,
         )
         self.assertIn("<!DOCTYPE html>", result.stdout)

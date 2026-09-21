@@ -53,6 +53,7 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.task_runner import _state_owns_thread
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 
 # Watchdog schedule: first injection after 1 s, retry after 5 more.
 _RETRY_MOMENT = 6.0
@@ -180,6 +181,7 @@ class _UdsClient:
         self.sock.close()
 
 
+@requires_unix_sockets
 class TestSetupStopIsAcknowledgedAndLabelled(TestCase):
     """One injection, correct label, for a stop landing in setup."""
 

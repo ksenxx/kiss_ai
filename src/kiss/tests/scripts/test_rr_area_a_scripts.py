@@ -26,7 +26,9 @@ import unittest
 from pathlib import Path
 from tempfile import mkdtemp
 
+from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.scripts.check import PROJECT_ROOT, _should_skip_path
+from kiss.tests.conftest import IS_WINDOWS
 
 _REMOTE_CONFIG = (
     Path(__file__).resolve().parents[4] / "src" / "kiss" / "scripts" / "remote_config.py"
@@ -109,7 +111,8 @@ class RemoteConfigConcurrentWritersTest(unittest.TestCase):
         saved = json.loads(self.config.read_text())
         self.assertEqual(saved["last_model"], "claude-opus-5")
         self.assertEqual(saved["remote_password"], "chosen-pass")
-        self.assertEqual(self.config.stat().st_mode & 0o077, 0)
+        if not IS_WINDOWS:  # Windows chmod carries no group/other bits
+            self.assertEqual(self.config.stat().st_mode & 0o077, 0)
 
 
 class RemoteConfigSymlinkLockTest(unittest.TestCase):
@@ -147,12 +150,11 @@ class RemoteConfigSymlinkLockTest(unittest.TestCase):
         unfixed code the script locked the dotfiles side and sailed
         straight past the held lock.
         """
-        import fcntl
         import time
 
         before = self.target.read_text()
         with open(self.kiss_dir / ".config.lock", "w", encoding="utf-8") as held:
-            fcntl.flock(held, fcntl.LOCK_EX)
+            lock_exclusive(held)
             proc = subprocess.Popen(
                 [sys.executable, str(_REMOTE_CONFIG), str(self.link),
                  "/home/ubuntu/kiss", "locked-out-pass"],
@@ -169,7 +171,7 @@ class RemoteConfigSymlinkLockTest(unittest.TestCase):
                 # Blocked before reading: the target is untouched.
                 self.assertEqual(self.target.read_text(), before)
             finally:
-                fcntl.flock(held, fcntl.LOCK_UN)
+                unlock(held)
                 stdout, stderr = proc.communicate(timeout=120)
 
         self.assertEqual(proc.returncode, 0, stderr.decode())

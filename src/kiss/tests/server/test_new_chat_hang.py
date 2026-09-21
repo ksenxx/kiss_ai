@@ -243,13 +243,20 @@ class TestPeriodicEventFlush(unittest.TestCase):
                 "tabId": "0",
             })
             import time
-            time.sleep(3)
 
-            entries = th._load_history()
-            flush_entry = next(
-                (e for e in entries if e["task"] == "test periodic flush"),
-                None,
-            )
+            # The periodic flush runs on a timer; poll for its first save
+            # instead of sleeping a fixed 3 s, which a loaded machine
+            # (the whole suite in parallel on Windows) can overrun.  The
+            # task itself stays blocked on ``resume``, so any entry seen
+            # here was flushed BEFORE completion.
+            flush_entry = None
+            deadline = time.monotonic() + 15
+            while flush_entry is None and time.monotonic() < deadline:
+                time.sleep(0.25)
+                flush_entry = next(
+                    (e for e in th._load_history() if e["task"] == "test periodic flush"),
+                    None,
+                )
             assert flush_entry is not None
             flush_chat_id = flush_entry["chat_id"]
             assert isinstance(flush_chat_id, str) and flush_chat_id

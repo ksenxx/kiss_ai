@@ -3,23 +3,24 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 //
-// End-to-end tests for the static task panel's settings info block
-// (#task-panel-info in media/chat.html, rendered by media/main.js):
+// End-to-end tests for the task-settings rows of the Task Info panel
+// (#meta-list in media/chat.html, painted by updateMetaTaskDetails in
+// media/main.js) — Date, Base model, Worktree mode, Parallel mode,
+// Chat id, Task id and (when the task has one) Parent task — and for the
+// static task panel, which no longer carries a settings block:
 //
-// * a live task's `task_settings` event paints the info block with the
-//   same fields the history sidebar shows (model, wt/no-wt,
-//   parallel/sequential, budget, start time, chat/task/parent ids),
-// * a new submit clears the previous task's info until the new task's
-//   settings arrive,
-// * session replays (`task_events`) repopulate the block from the
+// * a live task's `task_settings` event paints the rows,
+// * a new submit clears the previous task's rows ('—') until the new
+//   task's settings arrive,
+// * session replays (`task_events`) repopulate the rows from the
 //   replayed stream's own task_settings event,
-// * a spliced-in adjacent task's replay must NOT repaint the panel of
+// * a spliced-in adjacent task's replay must NOT repaint the rows of
 //   the task on screen, but scrolling onto the neighbour shows ITS
 //   settings,
 // * a background tab's task_settings land on that tab and show after a
 //   switch, and
-// * the share export gives every synthesized task panel its OWN task's
-//   settings info.
+// * the share export (whose static page has no Task Info panel) gives
+//   every synthesized task panel its OWN task's settings info block.
 
 'use strict';
 
@@ -111,8 +112,30 @@ function clickTab(win, tabId) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
+const DASH = '\u2014';
+
+/** The Task Info panel's task-settings rows as {id: text}. */
+function infoRows(win) {
+  const doc = win.document;
+  const val = id => doc.getElementById(id).textContent;
+  return {
+    date: val('meta-date'),
+    model: val('meta-model'),
+    worktree: val('meta-worktree'),
+    parallel: val('meta-parallel'),
+    chatId: val('meta-chat-id'),
+    taskId: val('meta-task-id'),
+    parent: val('meta-parent-id'),
+    parentHidden: doc.getElementById('meta-parent-item').hidden,
+  };
+}
+
+/** The rows' text joined, for "shows X" / "shows nothing" checks. */
 function infoText(win) {
-  return win.document.getElementById('task-panel-info').textContent;
+  const r = infoRows(win);
+  return [r.date, r.model, r.worktree, r.parallel, r.chatId, r.taskId, r.parent]
+    .filter(t => t !== DASH)
+    .join(' | ');
 }
 
 const SETTINGS = {
@@ -139,17 +162,41 @@ test('live task_settings paints the info block; new submit clears it', () => {
     tabId: TAB,
     taskId: 'task-1',
   });
+  const rows = infoRows(win);
   const txt = infoText(win);
-  assert.ok(txt.includes('/repo'), 'work dir shown: ' + txt);
-  assert.ok(txt.includes('model-x'), 'model shown');
-  assert.ok(txt.includes('wt'), 'worktree mode shown');
-  assert.ok(txt.includes('parallel'), 'parallel mode shown');
-  assert.ok(txt.includes('budget $5.00'), 'budget shown: ' + txt);
-  assert.ok(txt.includes('started '), 'start time shown');
-  assert.ok(txt.includes('chat chat-abc'), 'chat id shown');
-  assert.ok(txt.includes('task task-1'), 'task id shown');
-  assert.ok(!txt.includes('parent'), 'no parent for a top-level task');
+  assert.strictEqual(
+    win.document.getElementById('meta-workdir').textContent,
+    '/repo',
+    'work dir shown',
+  );
+  assert.strictEqual(rows.model, 'model-x', 'model shown');
+  assert.strictEqual(rows.worktree, 'worktree', 'worktree mode shown');
+  assert.strictEqual(rows.parallel, 'parallel', 'parallel mode shown');
+  assert.strictEqual(
+    win.document.getElementById('meta-max-budget').textContent,
+    '$5.00',
+    'budget shown',
+  );
+  assert.strictEqual(
+    rows.date,
+    new Date(SETTINGS.start_ts).toLocaleString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }),
+    'start time shown localized',
+  );
+  assert.strictEqual(rows.chatId, 'chat-abc', 'chat id shown');
+  assert.strictEqual(rows.taskId, 'task-1', 'task id shown');
+  assert.strictEqual(rows.parent, DASH, 'no parent for a top-level task');
+  assert.ok(rows.parentHidden, 'the Parent task row hides without one');
   assert.ok(!txt.includes('subagent'), 'not a subagent');
+  assert.ok(
+    !win.document.getElementById('task-panel-info'),
+    'the live static task panel carries no settings block',
+  );
 
   // A malformed event (no settings) must change nothing.
   send(win, {type: 'task_settings', tabId: TAB, taskId: 'task-1'});
@@ -175,7 +222,8 @@ test('live task_settings paints the info block; new submit clears it', () => {
 
   // A real replacement run announces itself with 'clear'.
   send(win, {type: 'clear', chat_id: 'chat-abc', tabId: TAB});
-  assert.strictEqual(infoText(win), '', 'a new run clears the info block');
+  assert.strictEqual(infoText(win), '', 'a new run clears the rows');
+  assert.strictEqual(infoRows(win).model, DASH, 'an unknown row shows a dash');
 });
 
 test('subagent settings show no-wt, sequential and parentage', () => {
@@ -197,13 +245,37 @@ test('subagent settings show no-wt, sequential and parentage', () => {
     tabId: TAB,
     taskId: 'task-2',
   });
-  const txt = infoText(win);
-  assert.ok(txt.includes('no-wt'), 'no-wt shown: ' + txt);
-  assert.ok(txt.includes('sequential'), 'sequential shown');
-  assert.ok(!txt.includes('budget'), 'unknown budget omitted');
-  assert.ok(!txt.includes('started'), 'unknown start time omitted');
-  assert.ok(txt.includes('parent task-1'), 'parent shown');
-  assert.ok(txt.includes('subagent'), 'subagent marker shown');
+  const rows = infoRows(win);
+  assert.strictEqual(rows.worktree, 'no worktree', 'no worktree shown');
+  assert.strictEqual(rows.parallel, 'sequential', 'sequential shown');
+  assert.strictEqual(rows.date, DASH, 'unknown start time is a dash');
+  assert.strictEqual(rows.parent, 'task-1', 'parent shown');
+  assert.ok(!rows.parentHidden, 'the Parent task row shows for a subagent');
+  assert.strictEqual(rows.taskId, 'task-2 (subagent)', 'subagent marker');
+  // Settings that name neither mode show dashes, not a guessed mode.
+  send(win, {
+    type: 'task_settings',
+    settings: {model: 'bare', is_subagent: true},
+    tabId: TAB,
+    taskId: 'task-2',
+  });
+  const bare = infoRows(win);
+  assert.strictEqual(bare.worktree, DASH);
+  assert.strictEqual(bare.parallel, DASH);
+  assert.strictEqual(bare.taskId, DASH, 'no task id, no subagent suffix');
+  assert.ok(bare.parentHidden, 'no parent id: the Parent task row hides');
+  // A parent id shows whatever the subagent flag says: the row names
+  // the task's parentage, not its kind.
+  send(win, {
+    type: 'task_settings',
+    settings: {task_id: 'task-3', parent_task_id: 'task-1', is_subagent: false},
+    tabId: TAB,
+    taskId: 'task-3',
+  });
+  const child = infoRows(win);
+  assert.strictEqual(child.parent, 'task-1');
+  assert.ok(!child.parentHidden);
+  assert.strictEqual(child.taskId, 'task-3', 'no subagent suffix');
 });
 
 test('task_events replay repopulates the info from its own stream', () => {
@@ -221,9 +293,10 @@ test('task_events replay repopulates the info from its own stream', () => {
       {type: 'system_output', text: 'hello\n'},
     ],
   });
-  assert.ok(
-    infoText(win).includes('task task-1'),
-    'replayed settings must fill the info block: ' + infoText(win),
+  assert.strictEqual(
+    infoRows(win).taskId,
+    'task-1',
+    'replayed settings must fill the rows: ' + infoText(win),
   );
   // A replay carrying no settings must not keep the previous task's.
   send(win, {
@@ -237,7 +310,7 @@ test('task_events replay repopulates the info from its own stream', () => {
   assert.strictEqual(
     infoText(win),
     '',
-    'a replay without settings clears the block',
+    'a replay without settings clears the rows',
   );
 });
 
@@ -278,7 +351,7 @@ test('adjacent replay never repaints the live panel; scrolling does', () => {
   });
   assert.ok(
     infoText(win).includes('live-model'),
-    'a spliced-in neighbour must not steal the live panel info',
+    'a spliced-in neighbour must not steal the live task rows',
   );
 
   // A PREV neighbour becomes the first region, so the panel is lent to
@@ -303,7 +376,7 @@ test('adjacent replay never repaints the live panel; scrolling does', () => {
   );
 });
 
-test('a neighbour without settings shows an empty info block', () => {
+test('a neighbour without settings shows dashes', () => {
   const wv = makeWebview();
   const win = wv.win;
   const TAB = tabIdOf(wv);
@@ -330,7 +403,7 @@ test('a neighbour without settings shows an empty info block', () => {
   assert.strictEqual(
     infoText(win),
     '',
-    'a legacy neighbour with no known settings shows no info',
+    'a legacy neighbour with no known settings shows dashes only',
   );
 });
 
@@ -362,7 +435,7 @@ test('a background tab keeps its settings and shows them on switch', () => {
   assert.strictEqual(
     infoText(win),
     '',
-    'a background tab event must not repaint the visible panel',
+    'a background tab event must not repaint the visible rows',
   );
   clickTab(win, TAB);
   assert.ok(
@@ -441,15 +514,38 @@ test('share export gives every task panel its own settings info', () => {
   );
 });
 
-test('drawer markup: the info block lives inside the task panel', () => {
+test('share markup: the info block sits between the text and the buttons', () => {
   const wv = makeWebview();
-  const doc = wv.win.document;
-  const info = doc.getElementById('task-panel-info');
-  assert.ok(info, '#task-panel-info must exist');
+  const win = wv.win;
+  const TAB = tabIdOf(wv);
+  send(win, {type: 'clear', chat_id: 'chat-1', tabId: TAB});
+  send(win, {type: 'setTaskText', text: 'a task', tabId: TAB});
+  click(win.document.getElementById('share-btn'));
+  const req = wv.posted.filter(m => m.type === 'shareChatTasks').pop();
+  send(win, {
+    type: 'share_tasks',
+    tabId: req.tabId,
+    chatId: req.chatId,
+    truncated: false,
+    // A task with no settings anywhere: the block is present but empty
+    // (main.css hides an empty one), so every page has the same shape.
+    tasks: [{task: 'a task', task_id: 'task-z', events: []}],
+  });
+  const msg = wv.posted.filter(m => m.type === 'shareChat').pop();
+  const dom = new JSDOM('<div id="app">' + msg.html + '</div>');
+  const doc = dom.window.document;
+  const info = doc.querySelector('#task-panel #task-panel-info');
+  assert.ok(info, 'the exported panel carries an info block');
+  assert.strictEqual(info.textContent, '', 'no settings, empty block');
   assert.strictEqual(
-    info.parentElement,
-    doc.getElementById('task-panel'),
-    'the info block is a direct child of the panel',
+    info.previousElementSibling.id,
+    'task-panel-text-1',
+    'the block follows the task text',
+  );
+  assert.strictEqual(
+    info.nextElementSibling.id,
+    'task-panel-drawer-btn',
+    'the block precedes the drawer button',
   );
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   assert.ok(

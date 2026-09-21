@@ -19,11 +19,12 @@ output with latin-1 bytes).  Pre-fix behaviour:
 
 import subprocess
 
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools, _popen_kwargs
 
 
 def _has_bash() -> bool:
-    return subprocess.run(["bash", "-c", "true"], capture_output=True).returncode == 0
+    """True when the shell the Bash tool uses on this platform can run."""
+    return subprocess.run(**_popen_kwargs("true"), capture_output=True).returncode == 0
 
 
 def test_nonstreaming_bash_survives_invalid_utf8_output() -> None:

@@ -462,6 +462,7 @@ class RemoteOAuthSession:
     """
 
     _active: dict[str, RemoteOAuthSession] = {}
+    _registry_lock = threading.Lock()
 
     def __init__(self, service: str, scopes: list[str]) -> None:
         import wsgiref.simple_server
@@ -533,11 +534,12 @@ class RemoteOAuthSession:
         """
         if not credentials_path(service).exists():
             return None
-        previous = cls._active.pop(service, None)
-        if previous is not None:
-            previous.cancel()
-        session = cls(service, scopes)
-        cls._active[service] = session
+        with cls._registry_lock:
+            previous = cls._active.pop(service, None)
+            if previous is not None:
+                previous.cancel()
+            session = cls(service, scopes)
+            cls._active[service] = session
         return session
 
     @classmethod
@@ -558,13 +560,19 @@ class RemoteOAuthSession:
             still incomplete, or ``(None, error_message)`` when the
             flow failed or no session was started.
         """
-        session = cls._active.get(service)
+        with cls._registry_lock:
+            session = cls._active.get(service)
         if session is None:
             return None, f"no OAuth session in progress; call authenticate_{service}() first"
         session._thread.join(timeout=2.0)
         if session._thread.is_alive():
             return None, "pending"
-        del cls._active[service]
+        with cls._registry_lock:
+            # Compare-and-pop: a newer session registered meanwhile
+            # must stay active, and this stale one must not be handed out.
+            if cls._active.get(service) is not session:
+                return None, "pending"
+            del cls._active[service]
         if session.credentials is None:
             return None, session.error or "OAuth flow failed"
         save_google_credentials(service, session.credentials)

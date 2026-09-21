@@ -2,6 +2,8 @@
 
 A module for evolving and improving AI agents through multi-objective optimization. It provides tools to automatically optimize existing agent code for **token efficiency** and **execution speed** using evolutionary algorithms with Pareto frontier maintenance.
 
+This module lives under `kiss.agents.obsolete.create_and_optimize_agent` and is no longer part of the main Sorcar workflow; importing the package emits a `DeprecationWarning`.
+
 ## Overview
 
 The Create and Optimize Agent module consists of two main components:
@@ -68,7 +70,7 @@ print(f"Metrics: {best_variant.metrics}")
 
 ### ImproverAgent
 
-The `ImproverAgent` optimizes existing agent code by analyzing and improving it for token efficiency and execution speed. Default values for model, max_steps, and max_budget are specified directly in the constructor parameter defaults.
+The `ImproverAgent` optimizes existing agent code by analyzing and improving it for token efficiency and execution speed. `ImproverAgent()` takes no constructor arguments; each improvement run creates a `SorcarAgent` (`kiss.agents.sorcar.sorcar_agent`) and uses that agent's default model, step and budget settings.
 
 **Methods:**
 
@@ -153,7 +155,7 @@ best = evolver.evolve(
                                                       │
                                                       ▼
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│         Initial Agent Creation (Relentless Coding Agent) + Web Search for Best Practices                 │
+│         Initial Agent Creation (SorcarAgent coding agent) + Web Search for Best Practices                │
 └─────────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
                                                       │
                                                       ▼
@@ -216,7 +218,7 @@ Algorithm EVOLVE():
     2. CREATE INITIAL AGENTS
        - WHILE len(pareto_frontier) < initial_frontier_size:
            - Use coding agent to generate agent files from task_description
-           - Agent must implement agent_run(task) -> {metrics: {...}, feedback: "..."}
+           - Agent must implement agent_run(task) -> {metrics: {...}}
            - Evaluate agent by calling agent_run(task_description)
            - Update pareto_frontier (may reject if dominated)
            - Copy current best variant (min score) to optimal_dir
@@ -256,15 +258,15 @@ The module uses **Pareto dominance** to compare solutions. A solution A dominate
 
 The Pareto frontier contains all non-dominated solutions, representing the best trade-offs between objectives.
 
-By default, `tokens_used` and `execution_time` are minimized.
+All metrics are minimized; by default a variant reports `success` (0 for success, 1 for failure), `tokens_used` and `execution_time`.
 
 ### Scoring
 
 Variants are ranked using a combined score (lower is better). The score is calculated as:
 
-- `tokens_used` + (`execution_time` * 1000)
+- (`success` * 1,000,000) + `tokens_used` + (`execution_time` * 1000)
 
-This gives higher weight to execution time improvements.
+The 1,000,000-point failure penalty puts successful agents first in practice and each second of execution time weighs as much as 1,000 tokens; because it is a weighted sum rather than a lexicographic comparison, a successful variant with more than 1,000,000 weighted token/time points can still score worse than a failed one.
 
 ### Evolutionary Operations
 
@@ -281,13 +283,13 @@ This gives higher weight to execution time improvements.
 
 ### Agent Creation
 
-The `AgentEvolver` creates agents with these patterns:
+The `AgentEvolver` asks the coding agent to create agents that satisfy these requirements (see `AGENT_EVOLVER_PROMPT_PART1..3` in `improver_agent.py`):
 
-- **Orchestrator Pattern**: Central coordinator managing workflow
-- **Dynamic To-Do List**: Task tracking with dependencies and priorities
-- **Dynamic Tool Creation**: On-the-fly tool generation for subtasks
-- **Checkpointing**: State persistence for recovery
-- **Sub-Agent Delegation**: Specialized agents for complex subtasks
+- **Built on the KISS API**: Implemented with `SorcarAgent`, `KISSAgent`, or a mixture of them
+- **General purpose**: Not specialized to the given task unless `evolve_to_solve_task=True`
+- **Single-threaded**: No multithreading, multiprocessing, docker manager, `anyio`, `async` or `await`
+- **Fixed file layout**: `agent.py` (with `agent_run(task: str) -> dict[str, Any]`), `config.py`, `__init__.py`, `test_agent.py`, `requirements.txt`
+- **Self-reported metrics**: `agent_run` returns `{"metrics": {"cost", "tokens_used", "execution_time", "success"}}`
 
 ## Output
 

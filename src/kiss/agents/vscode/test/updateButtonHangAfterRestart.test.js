@@ -16,6 +16,7 @@ const {
   daemonHasActiveTasks,
   decideRestart,
 } = require('../src/daemonHealth');
+const {fakeSockPath, SOCK_FILE_OPS, SOCK_FILE_SKIP} = require('./fakeSock');
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-update-hang-'));
 
@@ -77,7 +78,10 @@ function listenUds(sockPath) {
 
 (async () => {
 
-  await test('Update-button hang — TCP alive + UDS file deleted ⇒ restart forced', async () => {
+  // install.sh rm-ing the socket file from under a listening daemon has
+  // no pipe equivalent: a pipe path exists exactly while it is served.
+  if (!SOCK_FILE_OPS) console.log(`  Update-button hang — ${SOCK_FILE_SKIP}`);
+  else await test('Update-button hang — TCP alive + UDS file deleted ⇒ restart forced', async () => {
     const {port, close: closeTcp} = await listenTcp();
     const sockPath = path.join(tmpRoot, 'update-hang.sock');
     const uds = await listenUds(sockPath);
@@ -117,7 +121,7 @@ function listenUds(sockPath) {
 
   await test('Task-3192 protection — TCP alive + UDS timeout ⇒ restart STILL deferred', async () => {
     const {port, close: closeTcp} = await listenTcp();
-    const sockPath = path.join(tmpRoot, 'task3192.sock');
+    const sockPath = fakeSockPath(tmpRoot, 'task3192.sock');
 
     const server = await new Promise((resolve, reject) => {
       try { if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath); }

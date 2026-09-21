@@ -38,6 +38,7 @@ import sys
 import pytest
 
 from kiss.agents.sorcar.web_use_tool import WebUseTool, _is_profile_in_use
+from kiss.tests.conftest import is_root, posix_only
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="SingletonLock symlinks are Unix-only"
@@ -50,6 +51,7 @@ def _make_lock(profile_dir, pid: int) -> None:
     os.symlink(f"testhost-{pid}", str(profile_dir / "SingletonLock"))
 
 
+@posix_only("pid 1 PermissionError probe")
 def test_profile_locked_by_unsignalable_live_process_is_in_use(tmp_path) -> None:
     """A lock held by a live process we cannot signal must read as in-use.
 
@@ -60,9 +62,12 @@ def test_profile_locked_by_unsignalable_live_process_is_in_use(tmp_path) -> None
     """
     profile = tmp_path / "profile_eperm"
     _make_lock(profile, 1)
-    if os.geteuid() == 0:  # pragma: no cover — root CI can signal PID 1
+    if is_root():  # pragma: no cover — root CI can signal PID 1
         pytest.skip("running as root: cannot provoke EPERM from os.kill")
     assert _is_profile_in_use(str(profile)) is True
+
+
+@posix_only("Chromium's SingletonLock symlink is the POSIX profile lock")
 
 
 def test_profile_locked_by_own_live_process_is_in_use(tmp_path) -> None:
@@ -97,10 +102,11 @@ def test_profile_without_lock_is_free(tmp_path) -> None:
     assert _is_profile_in_use(str(profile)) is False
 
 
+@posix_only("pid 1 PermissionError probe")
 def test_resolve_user_data_dir_skips_unsignalable_locked_profile(tmp_path) -> None:
     """End-to-end: ``_resolve_user_data_dir`` must NOT hand out a profile
     directory whose lock is held by a live-but-unsignalable process."""
-    if os.geteuid() == 0:  # pragma: no cover — root CI can signal PID 1
+    if is_root():  # pragma: no cover — root CI can signal PID 1
         pytest.skip("running as root: cannot provoke EPERM from os.kill")
     profile = tmp_path / "profile_busy"
     _make_lock(profile, 1)

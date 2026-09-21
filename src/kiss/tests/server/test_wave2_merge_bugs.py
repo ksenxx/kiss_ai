@@ -11,8 +11,8 @@ F1  ``_MergeFlowMixin._present_pending_worktree`` must claim the tab
     race the checkout.  The discard itself is never skipped: an empty
     worktree changes no files and the checkout is a no-op onto the
     branch the tree is already on.
-F13 ``diff_merge._scan_files`` must enforce its 5000-entry cap for
-    directory entries too, not only in the files loop.
+F13 ``diff_merge._scan_files`` must enforce its ``_SCAN_FILES_CAP`` entry
+    cap for directory entries too, not only in the files loop.
 F20 the ``vscode_config`` key migration must not import a forged API
     key from a multi-line environment-variable value (line-based
     ``env`` parsing); it must use NUL-separated ``env -0`` records.
@@ -33,7 +33,7 @@ from typing import Any
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.diff_merge import _scan_files
+from kiss.server.diff_merge import _SCAN_FILES_CAP, _scan_files
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.merge_flow import _MergeFlowMixin
 
@@ -143,7 +143,7 @@ class _MergingFlagRecordingAgent(WorktreeSorcarAgent):
 
 class TestScanFilesCapCoversDirectories:
     def test_directory_heavy_tree_respects_cap(self, tmp_path: Path) -> None:
-        """A tree dominated by directories must not exceed 5000 entries."""
+        """A tree dominated by directories is listed in full under the cap."""
         wd = tmp_path / "ws"
         wd.mkdir()
         (wd / "only.txt").write_text("x")
@@ -152,7 +152,10 @@ class TestScanFilesCapCoversDirectories:
 
         paths = _scan_files(str(wd))
 
-        assert len(paths) <= 5000
+        # 5500 directories + 1 file exceed the old 5000 cap; with the cap at
+        # _SCAN_FILES_CAP (1,000,000) every entry is returned.
+        assert len(paths) == 5501
+        assert len(paths) <= _SCAN_FILES_CAP
 
     def test_small_tree_lists_files_and_dirs(self, tmp_path: Path) -> None:
         wd = tmp_path / "ws"

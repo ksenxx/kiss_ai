@@ -6,12 +6,16 @@
 
 from __future__ import annotations
 
+import posixpath
+from collections import Counter
+
 # ``generate_commit_message_from_diff`` is re-exported: production
 # callers (``server.py``, ``merge_flow.py``) import it from here.
 from kiss.agents.sorcar.commit_message import (
     generate_commit_message_from_diff,  # noqa: F401 — re-exported
 )
 from kiss.core.models.model_info import _OPENAI_PREFIXES
+from kiss.server.diff_merge import _is_under
 
 
 def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
@@ -98,6 +102,42 @@ def model_vendor(name: str) -> tuple[str, int]:
 
 SUGGESTION_LIMIT = 20
 
+# A directory with at least this many immediate subdirectories is a container
+# of generated runs (``artifacts/<run_id>/``, ``jobs/<date>/``): source trees
+# rarely have more than a couple of dozen sibling packages, while such
+# containers hold hundreds of near-identical copies of the same files.
+WIDE_DIR_MIN_CHILDREN = 50
+
+
+def _wide_dirs(file_cache: list[str]) -> set[str]:
+    """Find directories holding at least ``WIDE_DIR_MIN_CHILDREN`` subdirectories.
+
+    Args:
+        file_cache: Scanned relative paths; directory entries end with ``/``.
+
+    Returns:
+        Relative directory paths (no trailing ``/``) whose immediate
+        subdirectory count reaches the threshold.  The repository root is
+        never returned.
+    """
+    children = Counter(
+        posixpath.dirname(p.rstrip("/")) for p in file_cache if p.endswith("/")
+    )
+    return {d for d, n in children.items() if d and n >= WIDE_DIR_MIN_CHILDREN}
+
+
+def _path_depth(path: str) -> int:
+    """Return how many directories deep *path* sits.
+
+    Args:
+        path: Slash-separated relative path; directories end with ``/``.
+
+    Returns:
+        Number of parent directories: ``README.md`` and ``src/`` are 0,
+        ``src/kiss/`` and ``src/main.py`` are 1.
+    """
+    return path.rstrip("/").count("/")
+
 
 def rank_file_suggestions(
     file_cache: list[str],
@@ -106,6 +146,14 @@ def rank_file_suggestions(
     limit: int = SUGGESTION_LIMIT,
 ) -> list[dict[str, str]]:
     """Rank and filter file paths by query match, recency, and usage.
+
+    Files inside a wide container of generated runs (see ``_wide_dirs``)
+    rank after every other match, so ``@test`` lists the project's own
+    tests before the hundreds of ``tests/test_*.py`` copies under
+    ``artifacts/<run_id>/``; they still appear when nothing else matches.
+    Otherwise matches are ordered by how close to the end of the path
+    the query occurs, and equally good matches shallowest first, so
+    ``README.md`` precedes ``docs/guides/README.md``.
 
     Args:
         file_cache: List of file paths to search.
@@ -146,7 +194,14 @@ def rank_file_suggestions(
             -usage.get(m["text"], 0),
         )
     )
-    rest.sort(key=lambda m: _end_dist(m["text"]))
+    wide = _wide_dirs(file_cache)
+    rest.sort(
+        key=lambda m: (
+            _is_under(m["text"], wide),
+            _end_dist(m["text"]),
+            _path_depth(m["text"]),
+        )
+    )
     for f in frequent:
         f["type"] = "frequent"
     return (frequent + rest)[:limit]

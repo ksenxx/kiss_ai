@@ -46,6 +46,7 @@ from kiss.server.web_server import (
     _SHARE_TASKS_MAX_REPLY_BYTES,
     RemoteAccessServer,
 )
+from kiss.tests.conftest import requires_unix_sockets
 
 _PASSWORD = "share-chat-test-password"
 
@@ -74,6 +75,7 @@ def _restore_db(saved: tuple[Any, Any, Any]) -> None:
     (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
+@requires_unix_sockets
 class _UdsServerTestCase(unittest.TestCase):
     """Harness: a live UDS dispatcher exactly like the extension's."""
 

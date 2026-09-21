@@ -44,6 +44,7 @@ from kiss.core.vscode_config import (
     load_api_keys,
     save_api_key,
 )
+from kiss.tests.conftest import posix_only
 
 _JOIN_TIMEOUT_S = 30.0
 _ROUNDS = 25
@@ -55,6 +56,7 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))  # what Path.home() reads on Windows
     monkeypatch.setenv("SHELL", "/bin/bash")
     monkeypatch.setitem(vars(vscode_config), "CONFIG_DIR", fake_home / ".kiss")
     monkeypatch.setitem(
@@ -83,6 +85,7 @@ def _run_recording_errors(fn, errors: list[BaseException]) -> None:  # type: ign
         errors.append(exc)
 
 
+@posix_only("the legacy-key migration sources ~/.bashrc with bash; asserts a 0600 store")
 def test_concurrent_save_load_and_migrate_never_deadlock() -> None:
     """Savers, a loader and a legacy-RC migration run together and all finish.
 
@@ -150,6 +153,7 @@ def test_concurrent_save_load_and_migrate_never_deadlock() -> None:
     assert stat.S_IMODE(api_keys_env_path().stat().st_mode) == 0o600
 
 
+@posix_only("Windows chmod carries no group/other mode bits")
 def test_atomic_write_mode_survives_replacing_a_more_permissive_file(tmp_path: Path) -> None:
     """Overwriting a 0644 file with ``mode=0o640`` publishes a 0640 file.
 

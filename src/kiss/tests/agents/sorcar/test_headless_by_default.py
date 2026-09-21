@@ -5,9 +5,10 @@
 """End-to-end tests: ``WebUseTool`` browses headless by default.
 
 A visible Chromium window steals the user's focus and cannot run on a
-machine without a display, so every page visit now happens in a headless
-browser.  These tests drive a REAL Chromium (no mocks) and check the three
-properties that make headless browsing usable:
+machine without a display, so by default no window is shown: Chromium
+runs headed on a private Xvfb display where one is available, and in real
+headless mode otherwise.  These tests drive a REAL Chromium (no mocks) and
+check the three properties that make windowless browsing usable:
 
 1. ``headless`` is the default, for the tool and for the agent that owns it.
 2. Screenshots still capture the rendered page, at full viewport
@@ -144,9 +145,14 @@ def test_screenshot_in_headless_browser_captures_the_page(tool, tmp_path):
     assert tool.screenshot(str(red)) == f"Screenshot saved to {red}"
     assert red.is_file()
 
+    # The PNG covers the live viewport at the machine's real device scale
+    # (no scale override is emulated: a Retina factor on a Linux server is
+    # a fingerprinting inconsistency).
     width, height = _png_size(red)
-    scale = tool._context_args()["device_scale_factor"]
-    assert (width, height) == (tool.viewport[0] * scale, tool.viewport[1] * scale)
+    scale = tool._page.evaluate("devicePixelRatio")
+    vw, vh = tool._viewport_size()
+    assert (width, height) == (vw * scale, vh * scale)
+    assert width >= 1000 and height >= 600
 
     # A blank/stub capture would be byte-identical for both pages; real
     # rendering makes a red page differ from a blue one.

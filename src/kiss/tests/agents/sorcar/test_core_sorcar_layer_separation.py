@@ -147,7 +147,15 @@ def test_get_tools_serves_file_tools_from_sorcar() -> None:
 
     # Any truthy docker_manager flips _get_tools onto the docker branch;
     # DockerTools only stores the bash callable, so no daemon is needed.
-    agent.docker_manager = object()
+    class _DockerManagerStandIn:
+        """Truthy docker_manager with the two attributes _get_tools touches."""
+
+        stop_event = None
+
+        def run_commands_parallel(self, commands: str) -> str:
+            return ""
+
+    agent.docker_manager = _DockerManagerStandIn()
     docker_tools = {t.__name__: t for t in agent._get_tools()}
     for name in file_tools:
         owner = getattr(docker_tools[name], "__self__", None)

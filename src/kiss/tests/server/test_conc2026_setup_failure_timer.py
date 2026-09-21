@@ -26,7 +26,6 @@ No mocks or patches.
 
 from __future__ import annotations
 
-import resource
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,10 +35,11 @@ import pytest
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
-from kiss.tests.server._memory_printer import MemoryPrinter
-from kiss.tests.server.test_concaudit_w6_commit_msg_claim import (
-    _thread_start_can_be_starved,
+from kiss.tests.conftest import (
+    nproc_limit_lowered_to_one,
+    thread_start_can_be_starved,
 )
+from kiss.tests.server._memory_printer import MemoryPrinter
 
 
 class TestSetupFailureTimerSpawnFailure(unittest.TestCase):
@@ -50,7 +50,7 @@ class TestSetupFailureTimerSpawnFailure(unittest.TestCase):
         self.addCleanup(agent_state.agent_states.clear)
 
     def test_setup_failure_result_survives_timer_spawn_failure(self) -> None:
-        if not _thread_start_can_be_starved():
+        if not thread_start_can_be_starved():
             pytest.skip("RLIMIT_NPROC cannot starve Thread.start on this host")
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -77,16 +77,12 @@ class TestSetupFailureTimerSpawnFailure(unittest.TestCase):
         # ``_run_task`` normally runs on a worker thread; calling it
         # inline is equivalent here and lets the NPROC limit apply to
         # exactly the failure-path ``Timer.start()``.
-        soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-        resource.setrlimit(resource.RLIMIT_NPROC, (1, hard))
         raised: BaseException | None = None
-        try:
+        with nproc_limit_lowered_to_one():
             try:
                 server._run_task(cmd)
             except BaseException as exc:  # noqa: BLE001 — the bug re-raised here
                 raised = exc
-        finally:
-            resource.setrlimit(resource.RLIMIT_NPROC, (soft, hard))
 
         self.assertIsNone(
             raised,

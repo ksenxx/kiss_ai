@@ -393,6 +393,9 @@ class TestAcquireTaskWorktree:
         # A spare whose git link is destroyed fails take_spare's
         # checkout validation; it is left on disk (its content is not
         # ours to judge) and the setup creates a worktree inline.
+        # git marks ``.git`` hidden on Windows, and opening a hidden file
+        # for truncating write is denied there; recreate it instead.
+        (wt_dir / ".git").unlink()
         (wt_dir / ".git").write_text("gitdir: /nonexistent\n")
         with worktree_pool._pool_lock:
             worktree_pool._spares[worktree_pool._repo_key(self.repo)] = spare

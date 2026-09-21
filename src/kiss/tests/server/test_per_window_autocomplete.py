@@ -39,6 +39,7 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import requires_unix_sockets
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -55,6 +56,7 @@ def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
 
 
+@requires_unix_sockets
 class TestPerWindowAutocomplete(IsolatedAsyncioTestCase):
     """Two UDS connections (= two VS Code windows) sharing one daemon."""
 

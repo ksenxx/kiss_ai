@@ -17,7 +17,6 @@ Driven end to end through a real FastMCP stdio server and the real
 from __future__ import annotations
 
 import os
-import pty
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -59,8 +58,9 @@ def real_stdin(
     # the file closed below.
     from mcp.client.stdio import stdio_client
 
-    master_fd, slave_fd = pty.openpty()
-    stdin_stream = os.fdopen(slave_fd, "r", closefd=True)
+    # ``os.devnull`` has a real descriptor on every platform (Windows has
+    # no pty) and nothing reads stdin while the client talks to the child.
+    stdin_stream = open(os.devnull, encoding="utf-8")
     errlog = (tmp_path / "mcp_errlog.txt").open("w", encoding="utf-8")
     monkeypatch.setattr(sys, "stdin", stdin_stream)
     monkeypatch.setattr(sys, "stderr", errlog)
@@ -72,7 +72,6 @@ def real_stdin(
     finally:
         errlog.close()
         stdin_stream.close()
-        os.close(master_fd)
 
 
 @pytest.fixture

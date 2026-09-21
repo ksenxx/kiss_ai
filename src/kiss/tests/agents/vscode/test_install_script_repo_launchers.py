@@ -34,6 +34,13 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.conftest import posix_only
+
+# install.sh refuses every OS but Darwin/Linux, and the launchers it installs
+# are executable shebang wrappers (the Windows CLI is a sorcar.cmd shim
+# written by the extension instead).
+pytestmark = posix_only("install.sh bash launcher wrappers (shebang + chmod +x)")
+
 REPO = Path(__file__).resolve().parents[5]
 INSTALL_SCRIPT = REPO / "install.sh"
 

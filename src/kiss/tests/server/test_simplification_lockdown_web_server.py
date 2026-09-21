@@ -55,6 +55,7 @@ from kiss.server.web_server import (
     _translate_webview_command,
     _version_tuple,
 )
+from kiss.tests.conftest import requires_unix_sockets
 
 _IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 
@@ -204,6 +205,7 @@ class TestHttpEndpointMatrix(_ServerTestBase):
 class TestVscodeOnlyCommandsDropped(_ServerTestBase):
     """VS Code-only webview commands must be silently dropped."""
 
+    @requires_unix_sockets
     async def test_vscode_only_commands_dropped_unknown_command_errors(
         self,
     ) -> None:

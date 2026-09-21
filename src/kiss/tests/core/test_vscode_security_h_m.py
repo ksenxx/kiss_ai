@@ -105,6 +105,7 @@ class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
         self.assertEqual(proc.stdout, evil)
 
 
+@unittest.skipIf(sys.platform == "win32", "POSIX-only: sources the RC with bash")
 class TestH3PropertyFuzz(unittest.TestCase):
     """Fuzz arbitrary key values through ``save_api_key`` and
     require round-trip equality after sourcing the RC."""

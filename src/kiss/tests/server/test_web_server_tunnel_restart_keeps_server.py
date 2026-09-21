@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -104,7 +105,7 @@ class TestTunnelRestartKeepsServer(IsolatedAsyncioTestCase):
     def _spawn_dummy(self) -> subprocess.Popen[str]:
         """Spawn a long-lived dummy process standing in for cloudflared."""
         proc = subprocess.Popen(
-            ["sleep", "30"],
+            [sys.executable, "-c", "import time; time.sleep(30)"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,

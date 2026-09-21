@@ -34,6 +34,7 @@ plays, proving the silent degradation released the talk queue.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -240,6 +241,12 @@ def run_fallback_driver(mode: str) -> dict:
     node = shutil.which("node")
     if node is None:
         raise unittest.SkipTest("node binary not found on PATH")
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+           "NODE_PATH": str(VSCODE_DIR / "node_modules")}
+    # Node's per-process CSPRNG init reads SYSTEMROOT on Windows; without
+    # it node aborts (exit 134) before running any script.
+    if "SYSTEMROOT" in os.environ:
+        env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
         fh.write(NODE_DRIVER)
         driver = fh.name
@@ -249,10 +256,10 @@ def run_fallback_driver(mode: str) -> dict:
              str(VIRTUAL_CAP_MS), TALK_TEXT],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=120,
             cwd=VSCODE_DIR,
-            env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
-                 "NODE_PATH": str(VSCODE_DIR / "node_modules")},
+            env=env,
         )
     finally:
         Path(driver).unlink(missing_ok=True)

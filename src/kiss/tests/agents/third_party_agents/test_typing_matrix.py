@@ -26,7 +26,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from kiss.agents.third_party_agents.matrix_agent import MatrixChannelBackend
+from kiss.agents.third_party_agents.matrix_sea import MatrixChannelBackend
 
 
 class _MatrixClientCredentials:

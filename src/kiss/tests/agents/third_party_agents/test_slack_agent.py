@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for slack_agent — no mocks or test doubles.
+"""Integration tests for slack_sea — no mocks or test doubles.
 
 Tests token persistence, tool creation, SlackAgent construction,
 authentication workflows, and tool function signatures.
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.third_party_agents.slack_agent import (
+from kiss.agents.third_party_agents.slack_sea import (
     _SLACK_DIR,
     SlackAgent,
     SlackChannelBackend,
@@ -158,7 +158,7 @@ class TestListWorkspaces:
 
     def test_no_slack_dir(self, capsys: pytest.CaptureFixture[str]) -> None:
         """_list_workspaces() prints 'No workspaces found.' when _SLACK_DIR missing."""
-        import kiss.agents.third_party_agents.slack_agent as mod
+        import kiss.agents.third_party_agents.slack_sea as mod
 
         original = mod._SLACK_DIR
         mod._SLACK_DIR = Path(tempfile.mkdtemp()) / "nonexistent"
@@ -171,7 +171,7 @@ class TestListWorkspaces:
 
     def test_empty_slack_dir(self, capsys: pytest.CaptureFixture[str]) -> None:
         """_list_workspaces() prints 'No workspaces found.' when no workspace dirs."""
-        import kiss.agents.third_party_agents.slack_agent as mod
+        import kiss.agents.third_party_agents.slack_sea as mod
 
         original = mod._SLACK_DIR
         empty_dir = Path(tempfile.mkdtemp())

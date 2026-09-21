@@ -55,6 +55,13 @@ import time
 from pathlib import Path
 from unittest import TestCase
 
+from kiss.tests.conftest import posix_only
+
+# The race window is a bash ``~/.bashrc`` sourced through ``/bin/bash``
+# with ``touch``/``sleep`` inside it: a POSIX-shell mechanism.  Windows
+# has no shell RC to migrate from (and ``Path.home()`` ignores ``HOME``).
+pytestmark = posix_only("legacy shell-RC key migration sources ~/.bashrc via bash")
+
 _MIGRATOR = r"""
 from kiss.core.vscode_config import load_api_keys
 load_api_keys()

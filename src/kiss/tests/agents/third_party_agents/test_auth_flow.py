@@ -25,7 +25,7 @@ import pytest
 
 _AUTH_AGENTS: list[dict[str, Any]] = [
     {
-        "module": "kiss.agents.third_party_agents.slack_agent",
+        "module": "kiss.agents.third_party_agents.slack_sea",
         "class": "SlackAgent",
         "check": "check_slack_auth",
         "auth": "authenticate_slack",
@@ -36,7 +36,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["xoxb-", "Slack"],
     },
     {
-        "module": "kiss.agents.third_party_agents.telegram_agent",
+        "module": "kiss.agents.third_party_agents.telegram_sea",
         "class": "TelegramAgent",
         "check": "check_telegram_auth",
         "auth": "authenticate_telegram",
@@ -46,7 +46,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["@BotFather", "/newbot"],
     },
     {
-        "module": "kiss.agents.third_party_agents.discord_agent",
+        "module": "kiss.agents.third_party_agents.discord_sea",
         "class": "DiscordAgent",
         "check": "check_discord_auth",
         "auth": "authenticate_discord",
@@ -57,7 +57,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Discord"],
     },
     {
-        "module": "kiss.agents.third_party_agents.googlechat_agent",
+        "module": "kiss.agents.third_party_agents.googlechat_sea",
         "class": "GoogleChatAgent",
         "check": "check_googlechat_auth",
         "auth": "authenticate_googlechat",
@@ -70,7 +70,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Google Chat"],
     },
     {
-        "module": "kiss.agents.third_party_agents.signal_agent",
+        "module": "kiss.agents.third_party_agents.signal_sea",
         "class": "SignalAgent",
         "check": "check_signal_auth",
         "auth": "authenticate_signal",
@@ -82,7 +82,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["signal-cli", "finish_signal_auth"],
     },
     {
-        "module": "kiss.agents.third_party_agents.msteams_agent",
+        "module": "kiss.agents.third_party_agents.msteams_sea",
         "class": "MSTeamsAgent",
         "check": "check_msteams_auth",
         "auth": "authenticate_msteams",
@@ -94,7 +94,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["App registrations", "finish_msteams_auth"],
     },
     {
-        "module": "kiss.agents.third_party_agents.matrix_agent",
+        "module": "kiss.agents.third_party_agents.matrix_sea",
         "class": "MatrixAgent",
         "check": "check_matrix_auth",
         "auth": "authenticate_matrix",
@@ -106,7 +106,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Element", "Access Token", "finish_matrix_auth"],
     },
     {
-        "module": "kiss.agents.third_party_agents.feishu_agent",
+        "module": "kiss.agents.third_party_agents.feishu_sea",
         "class": "FeishuAgent",
         "check": "check_feishu_auth",
         "auth": "authenticate_feishu",
@@ -119,7 +119,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Feishu", "Lark"],
     },
     {
-        "module": "kiss.agents.third_party_agents.line_agent",
+        "module": "kiss.agents.third_party_agents.line_sea",
         "class": "LineAgent",
         "check": "check_line_auth",
         "auth": "authenticate_line",
@@ -129,7 +129,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["LINE", "Messaging API"],
     },
     {
-        "module": "kiss.agents.third_party_agents.mattermost_agent",
+        "module": "kiss.agents.third_party_agents.mattermost_sea",
         "class": "MattermostAgent",
         "check": "check_mattermost_auth",
         "auth": "authenticate_mattermost",
@@ -139,7 +139,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Personal Access Tokens"],
     },
     {
-        "module": "kiss.agents.third_party_agents.irc_agent",
+        "module": "kiss.agents.third_party_agents.irc_sea",
         "class": "IRCAgent",
         "check": "check_irc_auth",
         "auth": "authenticate_irc",
@@ -149,7 +149,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["irc.libera.chat"],
     },
     {
-        "module": "kiss.agents.third_party_agents.bluebubbles_agent",
+        "module": "kiss.agents.third_party_agents.bluebubbles_sea",
         "class": "BlueBubblesAgent",
         "check": "check_bluebubbles_auth",
         "auth": "authenticate_bluebubbles",
@@ -160,7 +160,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "macos_only": True,
     },
     {
-        "module": "kiss.agents.third_party_agents.imessage_agent",
+        "module": "kiss.agents.third_party_agents.imessage_sea",
         "class": "IMessageAgent",
         "check": "check_imessage_auth",
         "auth": "authenticate_imessage",
@@ -171,7 +171,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "macos_only": True,
     },
     {
-        "module": "kiss.agents.third_party_agents.nextcloud_talk_agent",
+        "module": "kiss.agents.third_party_agents.nextcloud_sea",
         "class": "NextcloudTalkAgent",
         "check": "check_nextcloud_auth",
         "auth": "authenticate_nextcloud",
@@ -183,7 +183,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Nextcloud", "Devices & sessions", "finish_nextcloud_auth"],
     },
     {
-        "module": "kiss.agents.third_party_agents.nostr_agent",
+        "module": "kiss.agents.third_party_agents.nostr_sea",
         "class": "NostrAgent",
         "check": "check_nostr_auth",
         "auth": "authenticate_nostr",
@@ -193,7 +193,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["nsec", "Nostr"],
     },
     {
-        "module": "kiss.agents.third_party_agents.synology_chat_agent",
+        "module": "kiss.agents.third_party_agents.synology_sea",
         "class": "SynologyChatAgent",
         "check": "check_synology_auth",
         "auth": "authenticate_synology",
@@ -203,7 +203,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Synology Chat", "Incoming Webhooks"],
     },
     {
-        "module": "kiss.agents.third_party_agents.tlon_agent",
+        "module": "kiss.agents.third_party_agents.tlon_sea",
         "class": "TlonAgent",
         "check": "check_tlon_auth",
         "auth": "authenticate_tlon",
@@ -213,7 +213,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Tlon", "Urbit", "dojo"],
     },
     {
-        "module": "kiss.agents.third_party_agents.twitch_agent",
+        "module": "kiss.agents.third_party_agents.twitch_sea",
         "class": "TwitchAgent",
         "check": "check_twitch_auth",
         "auth": "authenticate_twitch",
@@ -227,7 +227,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
     {
         # QR-paired personal WhatsApp (whatsapp-mcp bridge): authenticate
         # takes no credentials — it clones and builds the bridge.
-        "module": "kiss.agents.third_party_agents.whatsapp_agent",
+        "module": "kiss.agents.third_party_agents.whatsapp_sea",
         "class": "WhatsAppAgent",
         "check": "check_whatsapp_auth",
         "auth": "authenticate_whatsapp",
@@ -237,7 +237,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["WhatsApp", "QR"],
     },
     {
-        "module": "kiss.agents.third_party_agents.zalo_agent",
+        "module": "kiss.agents.third_party_agents.zalo_sea",
         "class": "ZaloAgent",
         "check": "check_zalo_auth",
         "auth": "authenticate_zalo",
@@ -247,7 +247,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Zalo"],
     },
     {
-        "module": "kiss.agents.third_party_agents.phone_control_agent",
+        "module": "kiss.agents.third_party_agents.phone_sea",
         "class": "PhoneControlAgent",
         "check": "check_phone_auth",
         "auth": "authenticate_phone",
@@ -257,7 +257,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["companion", "REST"],
     },
     {
-        "module": "kiss.agents.third_party_agents.sms_agent",
+        "module": "kiss.agents.third_party_agents.sms_sea",
         "class": "SMSAgent",
         "check": "check_sms_auth",
         "auth": "authenticate_sms",
@@ -267,7 +267,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Twilio"],
     },
     {
-        "module": "kiss.agents.third_party_agents.gmail_agent",
+        "module": "kiss.agents.third_party_agents.gmail_sea",
         "class": "GmailAgent",
         "check": "check_gmail_auth",
         "auth": "authenticate_gmail",
@@ -401,7 +401,7 @@ class TestPlatformSpecificAuth:
         if sys.platform == "darwin":
             pytest.skip("Running on macOS — platform check passes")
         agent = _get_agent(
-            {"module": "kiss.agents.third_party_agents.imessage_agent", "class": "IMessageAgent"}
+            {"module": "kiss.agents.third_party_agents.imessage_sea", "class": "IMessageAgent"}
         )
         tools = _get_tools(agent)
         result = tools["check_imessage_auth"]()
@@ -414,7 +414,7 @@ class TestPlatformSpecificAuth:
         if sys.platform == "darwin":
             pytest.skip("Running on macOS — platform check passes")
         agent = _get_agent(
-            {"module": "kiss.agents.third_party_agents.imessage_agent", "class": "IMessageAgent"}
+            {"module": "kiss.agents.third_party_agents.imessage_sea", "class": "IMessageAgent"}
         )
         tools = _get_tools(agent)
         result = tools["authenticate_imessage"]()
@@ -427,7 +427,7 @@ class TestPlatformSpecificAuth:
             pytest.skip("Running on macOS — platform check passes")
         agent = _get_agent(
             {
-                "module": "kiss.agents.third_party_agents.bluebubbles_agent",
+                "module": "kiss.agents.third_party_agents.bluebubbles_sea",
                 "class": "BlueBubblesAgent",
             }
         )

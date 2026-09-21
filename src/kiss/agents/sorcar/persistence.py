@@ -36,8 +36,9 @@ from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import IO, Any
 
-from kiss.agents.sorcar._concurrency import _fcntl, _race_delay
+from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.core.config import kiss_home
+from kiss.core.file_lock import lock_exclusive, unlock
 
 logger = logging.getLogger(__name__)
 
@@ -480,19 +481,12 @@ def _process_owner_token() -> str:
     some *other* process happens to test a sentinel row of the dead
     owner.
 
-    Without ``fcntl`` there is no way to test whether the owning
-    process is still alive — file existence would make every crashed
-    process's rows look live forever — so no token is minted at all
-    and liveness degrades to the timestamp-only heuristic.
-
     Returns:
         The token to store in ``task_history.owner``, or ``""`` when
         the marker could not be created (liveness then degrades to the
         previous timestamp-only heuristic).
     """
     global _owner_state
-    if _fcntl is None:  # pragma: no cover — Windows has no flock
-        return ""
     current_dir = str(_owner_dir())
     with _owner_state_lock:
         if _owner_state is not None and _owner_state[0] == current_dir:
@@ -505,7 +499,8 @@ def _process_owner_token() -> str:
             handle = open(
                 Path(current_dir) / f"{token}.lock", "w", encoding="utf-8",
             )
-            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            if not lock_exclusive(handle, blocking=False):  # pragma: no cover
+                raise BlockingIOError(f"{token}.lock is already held")
             handle.write(f"{os.getpid()}\n")
             handle.flush()
         except OSError:
@@ -565,25 +560,14 @@ def _owner_is_alive(token: str) -> bool:
     """
     if not token:
         return False
-    if _fcntl is None:  # pragma: no cover — Windows has no flock
-        # No token is stamped without a usable cross-process lock, so
-        # any token seen here was written by a process on another
-        # platform.  Its marker's mere existence proves nothing (a
-        # crashed owner leaves it behind forever), so treat the owner
-        # as gone and let the timestamp heuristic decide.
-        return False
     if _owner_state is not None and _owner_state[1] == token:
         return True
     marker = _owner_dir() / f"{token}.lock"
     try:
         with open(marker, "r+", encoding="utf-8") as handle:
-            try:
-                _fcntl.flock(
-                    handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB,
-                )
-            except OSError:
+            if not lock_exclusive(handle, blocking=False):
                 return True
-            _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+            unlock(handle)
     except OSError:
         return False
     try:
@@ -2531,6 +2515,45 @@ def _set_task_favorite(task_id: str, is_favorite: bool) -> bool:
         return (cursor.rowcount or 0) > 0
 
 
+def _add_task_usage(
+    task_id: str, tokens: int, cost: float, steps: int,
+) -> tuple[int, float, int] | None:
+    """Add post-run spend to a task row's ``tokens`` / ``cost`` / ``steps``.
+
+    Used when work done on the task's behalf AFTER its row was persisted
+    (the merge agent that resolves its auto-merge conflicts) must count
+    towards the task.  The add is one atomic ``UPDATE`` on the stored
+    values, so it is correct whether or not the live agent counters
+    still hold the task's own totals.
+
+    Args:
+        task_id: Primary key of the ``task_history`` row to update.
+        tokens: Tokens to add.
+        cost: USD to add.
+        steps: Steps to add.
+
+    Returns:
+        The row's new ``(tokens, cost, steps)``, or ``None`` when no
+        such row exists.
+    """
+    _flush_chat_events(task_id)
+    db = _get_db()
+    with _rw_lock.write_lock(), _immediate_txn(db):
+        cursor = db.execute(
+            "UPDATE task_history SET tokens = COALESCE(tokens, 0) + ?, "
+            "cost = COALESCE(cost, 0.0) + ?, steps = COALESCE(steps, 0) + ? "
+            "WHERE id = ?",
+            (int(tokens), float(cost), int(steps), task_id),
+        )
+        if (cursor.rowcount or 0) == 0:
+            return None
+        row = db.execute(
+            "SELECT tokens, cost, steps FROM task_history WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+    return (_safe_int(row[0]), _safe_float(row[1]), _safe_int(row[2]))
+
+
 _EXTRA_COL_MAP: dict[str, tuple[str, object, object]] = {
     "model": ("model", str, ""),
     "work_dir": ("work_dir", str, ""),
@@ -2849,18 +2872,11 @@ def _prune_final_results_journal(sidecar: str) -> None:
     forever.  The rewrite happens under :func:`_journal_file_lock` and
     lands via an atomic rename, so a concurrent append in another
     process is either retained or ordered after the prune — never
-    torn.  That guarantee needs the inter-process flock, so on
-    platforms without ``fcntl`` (Windows) the prune is skipped
-    entirely: a rename replacing the journal with a pre-append
-    snapshot would silently drop the record a peer just appended,
-    and an unbounded-but-intact journal is the lesser harm.  All
-    failures are logged and swallowed.
+    torn.  All failures are logged and swallowed.
 
     Args:
         sidecar: Path returned by :func:`_final_results_path`.
     """
-    if _fcntl is None:  # pragma: no cover — Windows has no flock
-        return
     cutoff = time.time() - _FINAL_RESULTS_MAX_AGE_S
     with _journal_lock:
         try:
@@ -2928,21 +2944,18 @@ def _journal_file_lock(sidecar: str) -> Iterator[None]:
         sidecar: Path of the journal file being appended or replayed.
 
     Yields:
-        Nothing; the lock is held for the duration of the block.  On
-        platforms without ``fcntl`` the block runs unserialised (the
+        Nothing; the lock is held for the duration of the block.  When
+        the lock file cannot be opened the block runs unserialised (the
         in-process lock still applies), which is why replay also
         consumes by rename.
     """
-    if _fcntl is None:  # pragma: no cover — Windows has no flock
-        yield
-        return
     try:
         handle = open(sidecar + ".lock", "a+", encoding="utf-8")
     except OSError:  # pragma: no cover — unwritable journal directory
         yield
         return
     try:
-        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+        lock_exclusive(handle)
         yield
     finally:
         handle.close()
@@ -3428,13 +3441,25 @@ def _queue_chat_event(
             unrelated task in the new database (see
             :func:`_current_db_path`).
     """
-    _reserve_pending(task_id)
-    _event_queue.put((
+    # Build the complete queue item BEFORE reserving: ``json.dumps``
+    # raises TypeError on a non-serialisable value, and a reservation
+    # with no matching queue item is never released by the writer, so
+    # ``_flush_chat_events(task_id)`` would then spin forever.
+    item = (
         task_id,
         json.dumps(event),
         time.time(),
         origin_db_path or _current_db_path(),
-    ))
+    )
+    _reserve_pending(task_id)
+    try:
+        # The queue is unbounded, so this never blocks; the guard only
+        # rolls the reservation back if an injected stop (or any other
+        # BaseException) lands between the reserve and the publication.
+        _event_queue.put_nowait(item)
+    except BaseException:
+        _unreserve_pending(task_id)
+        raise
     t = _event_writer_thread
     if t is None or not t.is_alive():
         _start_event_writer()
@@ -3444,6 +3469,21 @@ def _reserve_pending(task_id: str) -> None:
     """Record one queued-but-unwritten event for *task_id*."""
     with _pending_cond:
         _pending_by_task[task_id] = _pending_by_task.get(task_id, 0) + 1
+
+
+def _unreserve_pending(task_id: str) -> None:
+    """Roll back one :func:`_reserve_pending` whose item never reached the queue.
+
+    Unlike :func:`_release_pending` this must NOT call
+    ``_event_queue.task_done()`` — nothing was enqueued.
+    """
+    with _pending_cond:
+        remaining = _pending_by_task.get(task_id, 0) - 1
+        if remaining > 0:
+            _pending_by_task[task_id] = remaining
+        else:
+            _pending_by_task.pop(task_id, None)
+        _pending_cond.notify_all()
 
 
 def _release_pending(batch: list[tuple[str, str, float, str]]) -> None:

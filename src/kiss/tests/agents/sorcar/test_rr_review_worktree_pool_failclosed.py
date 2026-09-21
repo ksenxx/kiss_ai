@@ -43,6 +43,7 @@ from kiss.tests.agents.sorcar.test_worktree_pool import (
     _make_repo,
     _restore_pool_env,
 )
+from kiss.tests.conftest import posix_only
 
 
 def _install_ls_files_failing_git(shim_dir: Path) -> str:
@@ -75,6 +76,7 @@ def _install_ls_files_failing_git(shim_dir: Path) -> str:
     return prev_path
 
 
+@posix_only("shebang git shim on PATH cannot shadow git.exe on Windows")
 class TestPoolFailsClosedOnEnumerationFailure:
     """``ignored is None`` must preserve, in BOTH pool callers."""
 

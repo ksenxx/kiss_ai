@@ -30,6 +30,12 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.conftest import posix_only
+
+# The preflight is a bash -c string that ends in ``bash install.sh``, and
+# install.sh refuses every OS but Darwin/Linux.
+pytestmark = posix_only("runUpdate preflight runs under bash and hands over to install.sh")
+
 REPO = Path(__file__).resolve().parents[5]
 SIDEBAR_TS = REPO / "src" / "kiss" / "agents" / "vscode" / "src" / "SorcarSidebarView.ts"
 

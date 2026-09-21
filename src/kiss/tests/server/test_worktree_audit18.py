@@ -389,7 +389,7 @@ class TestRaceSetupRespectsRepoLock:
         src = (
             Path(__file__).resolve().parents[2]
             / "agents" / "sorcar" / "worktree_sorcar_agent.py"
-        ).read_text()
+        ).read_text(encoding="utf-8")
 
         start = src.index("def _try_setup_worktree")
         end = src.index("\n    def ", start + 1)

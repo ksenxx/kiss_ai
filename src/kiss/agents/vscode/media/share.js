@@ -255,8 +255,7 @@
       if (taskId !== null) {
         el.setAttribute('data-sub-tab-id', taskId);
         const dot = document.createElement('span');
-        dot.className = 'subagent-indicator done';
-        dot.textContent = '\u25C9';
+        dot.className = 'subagent-indicator done status-tick';
         dot.title = 'Done';
         el.appendChild(dot);
       }

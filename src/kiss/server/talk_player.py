@@ -218,7 +218,10 @@ def _kill_playback(proc: subprocess.Popen[bytes]) -> None:
         proc.wait(timeout=_KILL_GRACE)
     except subprocess.TimeoutExpired:
         pass
-    _signal_group(proc.pid, signal.SIGKILL)
+    if not _signal_group(proc.pid, signal.SIGKILL):
+        # Honour ``_signal_group``'s contract: the caller's unbounded
+        # ``proc.wait()`` would otherwise hang the sole talk worker.
+        proc.kill()
 
 
 def _run_playback(argv: list[str]) -> bool:

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- Editor-tab icon of a chat whose task is running: the same 12px
+       ring the composer's wait spinner and the history rows draw
+       (.status-spinner in main.css) - a faint track with one bright
+       leading arc, turning once every 0.8s - in the history rows'
+       green. The rotation is SMIL so it keeps turning while the SVG is
+       painted as a CSS background image by the workbench. -->
+  <circle cx="8" cy="8" r="5" fill="none" stroke="#3fb950" stroke-opacity="0.25" stroke-width="2"/>
+  <path d="M4.464 4.464A5 5 0 0 1 11.536 4.464" fill="none" stroke="#3fb950" stroke-width="2">
+    <animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.8s" repeatCount="indefinite"/>
+  </path>
+</svg>

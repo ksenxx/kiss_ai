@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from kiss.agents.sorcar import worktree_pool
+from kiss.agents.sorcar.fanout_guard import is_review_task as _is_review_task
 from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SUBDIR,
     GitWorktreeOps,
@@ -38,6 +39,9 @@ from kiss.agents.sorcar.persistence import (
     _load_last_model,
     _save_task_extra,
     _save_task_result,
+)
+from kiss.agents.sorcar.sea_commands import (
+    rewrite_prompt_if_command as _rewrite_sea_command_prompt,
 )
 from kiss.agents.sorcar.sorcar_agent import _broadcast_subagent_done
 from kiss.agents.sorcar.task_classifier import classification_will_call_model
@@ -704,6 +708,7 @@ class _TaskRunnerMixin:
             *,
             internal: bool = False,
             already_claimed: bool = False,
+            resolve_conflicts: bool = False,
         ) -> dict[str, Any]: ...
         def _present_pending_worktree(
             self,
@@ -714,6 +719,7 @@ class _TaskRunnerMixin:
         def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]: ...
         def _extract_result_summary(self) -> str: ...
         def _refresh_files_after_task(self, work_dir: str = "") -> None: ...
+        def _merge_deferred_worktrees(self, repo: Path | None) -> None: ...
 
     def _run_task(self, cmd: dict[str, Any]) -> None:
         """Run the agent with the given task.
@@ -942,6 +948,11 @@ class _TaskRunnerMixin:
                 # this run never reached.
                 with suppress(BaseException):
                     state = self._resolve_run_state(cmd)
+            # Main-tree occupancy ``_run_task_inner`` did not release
+            # itself (it crashed before its own cleanup); worktree
+            # merges it kept waiting are retried below.  ``None`` on
+            # every normal path, where the inner cleanup already ran.
+            stranded_repo: Path | None = None
             with self._state_lock:
                 task_id_for_end: str | None = None
                 if state is not None:
@@ -956,6 +967,7 @@ class _TaskRunnerMixin:
                     # not leak into a later run on the same tab.
                     state.queued_followup_tasks.clear()
                     state.is_task_active = False
+                    stranded_repo = state.non_wt_repo_root
                     state.is_running_non_wt = False
                     state.non_wt_repo_root = None
                     state.interrupted_by_shutdown = False
@@ -992,6 +1004,11 @@ class _TaskRunnerMixin:
             # learns about a stop — so it has to end with the run, or
             # anything this thread does next would inherit it.
             self.printer._thread_local.stop_event = None
+            if stranded_repo is not None:
+                try:
+                    self._merge_deferred_worktrees(stranded_repo)
+                except BaseException:  # pragma: no cover — merge error handler
+                    logger.debug("Deferred worktree merge error", exc_info=True)
 
     def _restore_user_model_pick(self, tab_id: str) -> None:
         """Put the user's own model back in *tab_id*'s picker.
@@ -1282,6 +1299,20 @@ class _TaskRunnerMixin:
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
         """Inner implementation of _run_task (without the status guarantee)."""
         prompt = cmd.get("prompt", "")
+        # Detect a slash-command dispatch (``/xxx text``) HERE, but do
+        # not rewrite the outer ``prompt`` yet — the tab's task-panel
+        # text, the task classifier, ``state.last_user_prompt`` and
+        # every persistence path all read the raw prompt, and they
+        # must keep showing what the user actually typed.  The
+        # rewritten ``run_agent`` directive is substituted lower down
+        # (after ``parse_task_tags``) as a SINGLE atomic subtask so a
+        # slash command whose task text embeds ``<task>`` blocks is
+        # not split into multiple subagents.
+        _sea_dispatch: tuple[str, Path] | None = None
+        if isinstance(prompt, str) and prompt:
+            _hit = _rewrite_sea_command_prompt(prompt)
+            if _hit is not None:
+                _sea_dispatch = _hit
         work_dir = cmd.get("workDir") or self.work_dir
         active_file = cmd.get("activeFile")
         # Caller-supplied custom base system prompt (wire field
@@ -1341,6 +1372,16 @@ class _TaskRunnerMixin:
             {
                 "parent_task_id": parent_task_id,
                 "parent_tab_id": parent_tab_id,
+                # Reviewer sub-tree marker (see fanout_guard): a
+                # daemon-dispatched child of a reviewer must not be
+                # able to spawn reviewers via run_parallel either.
+                # The EFFECTIVE prompt is re-checked here because an
+                # agent script's ``prompt()`` override (applied above
+                # by ``apply_agent_overrides``) can turn an innocuous
+                # dispatch into a review task after the caller-side
+                # check in ``agent_dispatch._dispatch`` already passed.
+                "reviewer": bool(cmd.get("parentReviewer"))
+                or _is_review_task(str(cmd.get("prompt", "") or "")),
             }
             if parent_task_id
             else None
@@ -1584,6 +1625,15 @@ class _TaskRunnerMixin:
         run_task_ids: list[str] = []
         try:
             subtasks = parse_task_tags(prompt)
+            if _sea_dispatch is not None:
+                # A ``/xxx text`` command runs as ONE atomic subtask
+                # against the resolved SEA — any ``<task>`` blocks in
+                # the trailing text are meaningful to the SEA, not to
+                # the kiss task splitter.  Overwriting ``subtasks``
+                # here (rather than at parse time) keeps the raw
+                # user-visible ``prompt`` intact for classification,
+                # persistence and the tab's task-panel echo.
+                subtasks = [_sea_dispatch[0]]
             if append_to_prompt:
                 # The suffix is part of the EXECUTED prompt: appending
                 # here (once per subtask, before the loop) keeps the
@@ -1677,7 +1727,19 @@ class _TaskRunnerMixin:
             subtask_index = 0
             while subtask_index < len(subtasks):
                 task_prompt = subtasks[subtask_index]
-                state.last_user_prompt = task_prompt
+                # A slash-command dispatch is a single atomic subtask
+                # (see the ``_sea_dispatch`` branch above): keep the
+                # tab's ``last_user_prompt`` on the raw ``/xxx text``
+                # the user typed, not on the (long) ``run_agent``
+                # directive the LLM will actually see, so the tab
+                # title / history rebind / merge flow all still show
+                # what was submitted.
+                if _sea_dispatch is not None and subtask_index == 0:
+                    state.last_user_prompt = prompt if isinstance(
+                        prompt, str,
+                    ) else task_prompt
+                else:
+                    state.last_user_prompt = task_prompt
                 state.last_result_summary = ""
                 # Reset per subtask: a later subtask that fails must not
                 # publish an earlier subtask's suggestion.
@@ -1736,6 +1798,19 @@ class _TaskRunnerMixin:
                         tool_call_hook=_tool_call_hook,
                         _skip_persistence=True,
                         _on_task_id_allocated=on_task_id_allocated,
+                        # Persist the raw ``/xxx text`` (not the
+                        # internal ``run_agent`` directive) in the
+                        # task-history row, frequent-tasks table and
+                        # the chat's last-user-prompt cache.  Only the
+                        # slash-command dispatch sets ``_sea_dispatch``,
+                        # so every other run persists as before.
+                        _history_prompt=(
+                            prompt
+                            if _sea_dispatch is not None
+                            and subtask_index == 0
+                            and isinstance(prompt, str)
+                            else None
+                        ),
                     )
                     _run_parsed = parse_result_yaml(agent_returned) if agent_returned else None
                     if _run_parsed and _run_parsed.get("summary"):
@@ -1746,6 +1821,14 @@ class _TaskRunnerMixin:
                         (_run_parsed or {}).get("suggested_next_task") or "",
                     ).strip()
                     task_end_event = {"type": "task_done"}
+                    if _run_parsed and isinstance(_run_parsed.get("success"), bool):
+                        # The agent's own verdict rides on the terminal
+                        # event too (the frontend's markTabDone reads
+                        # ``success === false``), so a run that ended
+                        # with finish(success=False) — a sub-agent's
+                        # partial result on budget exhaustion, say — is
+                        # not shown as a plain success.
+                        task_end_event["success"] = _run_parsed["success"]
                     logger.info(
                         "Agent returned: tab_id=%s task_id=%s summary=%r",
                         tab_id,
@@ -1855,7 +1938,22 @@ class _TaskRunnerMixin:
                     self._persist_subtask_row(
                         state,
                         task_id=task_history_id,
-                        task_prompt=task_prompt,
+                        # A slash-command dispatch stored the raw
+                        # ``/xxx text`` in the DB (see the
+                        # ``_history_prompt`` branch of
+                        # ``ChatSorcarAgent.run``); the fallback
+                        # id-resolver for legacy callers must resolve
+                        # by that same string, not by the internal
+                        # ``run_agent`` directive.
+                        task_prompt=(
+                            prompt
+                            if (
+                                _sea_dispatch is not None
+                                and subtask_index == 0
+                                and isinstance(prompt, str)
+                            )
+                            else task_prompt
+                        ),
                         result_summary=result_summary,
                         model=model,
                         work_dir=work_dir,
@@ -1921,6 +2019,10 @@ class _TaskRunnerMixin:
             # backstops it on exception paths so a watching sub-agent
             # tab can never keep spinning forever.
             subagent_done_sent = False
+            # Main-repo root this non-worktree task occupied.  Worktree
+            # merges the occupancy kept waiting run once the task is
+            # over and its changes are committed (mandatory finally).
+            freed_repo: Path | None = None
             try:
                 _agent_parsed = parse_result_yaml(agent_returned) if agent_returned else None
                 _agent_reported_failure = bool(
@@ -1980,6 +2082,7 @@ class _TaskRunnerMixin:
                         logger.debug("Post-task autocommit error", exc_info=True)
                     finally:
                         with self._state_lock:
+                            freed_repo = state.non_wt_repo_root
                             state.is_running_non_wt = False
                             state.non_wt_repo_root = None
                 assert task_end_event is not None
@@ -2017,6 +2120,7 @@ class _TaskRunnerMixin:
                                 action,
                                 tab_id,
                                 internal=True,
+                                resolve_conflicts=True,
                             )
                             self.printer.broadcast(
                                 {
@@ -2148,6 +2252,10 @@ class _TaskRunnerMixin:
                 with self._state_lock:
                     state.is_task_active = False
                     if not use_worktree:
+                        if state.non_wt_repo_root is not None:
+                            # The normal path did not get as far as
+                            # releasing the occupancy: release it here.
+                            freed_repo = state.non_wt_repo_root
                         state.is_running_non_wt = False
                         state.non_wt_repo_root = None
                 if task_history_id is not None:
@@ -2170,6 +2278,20 @@ class _TaskRunnerMixin:
                 tl = getattr(self.printer, "_thread_local", None)
                 if tl is not None:
                     tl.task_id = ""
+                # The main tree this task occupied is free again and,
+                # with auto-commit on, committed: merge the worktrees
+                # whose post-task merge the guard refused meanwhile
+                # (they used to wait for the user to open a new chat).
+                # Lives in the mandatory finally so an exception in the
+                # persistence/broadcast block above (after the commit)
+                # cannot strand the promised merge; runs after this
+                # task's own end event so the other tabs' merge results
+                # never interleave with it, and is a no-op while the
+                # tree is still dirty.
+                try:
+                    self._merge_deferred_worktrees(freed_repo)
+                except BaseException:  # pragma: no cover — merge error handler
+                    logger.debug("Deferred worktree merge error", exc_info=True)
 
     def _persist_subtask_row(
         self,
@@ -2540,7 +2662,7 @@ class _TaskRunnerMixin:
                 # Cleared here, under the lock, rather than by the task
                 # thread's finally a moment later: a session replay in
                 # between would re-emit the question after the
-                # askUserDone broadcast below and leave a stale modal.
+                # askUserDone broadcast below and leave a stale prompt.
                 owner_state.pending_ask_question = ""
         logger.info(
             "Tool interrupt for tab %s (task %s, tool %r, call %s): %s",
@@ -2555,7 +2677,7 @@ class _TaskRunnerMixin:
         )
         if accepted and pending_ask:
             # The interrupted tool is a pending ask_user_question: the
-            # answer wait is aborted, so the question modal must close
+            # answer wait is aborted, so the question prompt must close
             # on every tab showing it (an answer would do this through
             # _cmd_user_answer's askUserDone).
             for clear_tab in self._user_answer_clear_tabs(tab_id, owner_task_id):
@@ -2874,7 +2996,7 @@ class _TaskRunnerMixin:
         The question is remembered on the task's agent state as
         ``pending_ask_question`` for as long as the agent thread is
         blocked on it, so session replays (``resumeSession``) can
-        re-broadcast the modal to clients that connect or reload while
+        re-broadcast the question to clients that connect or reload while
         the question is pending.  ``_cmd_user_answer`` clears the field
         the moment an answer is consumed (under ``_state_lock``, so a
         concurrent replay can never re-show an answered question); the
@@ -2889,7 +3011,7 @@ class _TaskRunnerMixin:
             # pending question and then broadcasting outside the lock
             # would let a session replay re-emit the question AND a
             # client answer it (``askUserDone``) before the initial
-            # broadcast hits the wire — reopening the modal on every
+            # broadcast hits the wire — reopening the question on every
             # client after its answer already closed it.
             with self._state_lock:
                 if q is not None:

@@ -29,7 +29,10 @@ variable.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextlib
 import logging
+import shutil
 import tempfile
 import threading
 from pathlib import Path
@@ -85,32 +88,94 @@ def _ensure_api_server() -> str:
             sock_dir = tempfile.mkdtemp(prefix="kiss-tp-api-")
             sock_path = str(Path(sock_dir) / "sorcar.sock")
             loop = asyncio.new_event_loop()
-            threading.Thread(
+            thread = threading.Thread(
                 target=loop.run_forever,
                 name="kiss-tp-api-server",
                 daemon=True,
-            ).start()
-            server = RemoteAccessServer(uds_path=sock_path)
-            # This daemon shares the KISS home (database, chats) with
-            # the canonical kiss-web daemon but must not share its tab
-            # registry: ``tabs.json`` tolerates exactly one owner, and
-            # a second one erased the canonical daemon's tabs with its
-            # stale snapshot on every channel run.  The channel tabs
-            # are transient, so they live next to the private socket.
-            server._vscode_server.use_private_tab_registry(
-                Path(sock_dir) / "tabs.json",
             )
-            server._printer._loop = loop
-            server._loop = loop
-            asyncio.run_coroutine_threadsafe(
-                asyncio.start_unix_server(
-                    server._uds_handler, path=sock_path,
-                ),
-                loop,
-            ).result(timeout=30)
+            thread.start()
+            startup: concurrent.futures.Future[asyncio.AbstractServer] | None = None
+            try:
+                server = RemoteAccessServer(uds_path=sock_path)
+                # This daemon shares the KISS home (database, chats) with
+                # the canonical kiss-web daemon but must not share its tab
+                # registry: ``tabs.json`` tolerates exactly one owner, and
+                # a second one erased the canonical daemon's tabs with its
+                # stale snapshot on every channel run.  The channel tabs
+                # are transient, so they live next to the private socket.
+                server._vscode_server.use_private_tab_registry(
+                    Path(sock_dir) / "tabs.json",
+                )
+                server._printer._loop = loop
+                server._loop = loop
+                startup = asyncio.run_coroutine_threadsafe(
+                    asyncio.start_unix_server(
+                        server._uds_handler, path=sock_path,
+                    ),
+                    loop,
+                )
+                startup.result(timeout=30)
+            except BaseException:
+                # Without this the ``run_forever`` daemon thread (and any
+                # listener the timed-out coroutine went on to create)
+                # would outlive the failed attempt, one per retry.
+                _abort_api_server_startup(loop, thread, startup, sock_dir)
+                raise
             _API_SERVER = server
             _API_SERVER_SOCK = sock_path
         return _API_SERVER_SOCK
+
+
+async def _close_listener(listener: asyncio.AbstractServer) -> None:
+    listener.close()
+    await listener.wait_closed()
+
+
+async def _stop_loop_after_pending_cancels() -> None:
+    # A task cancelled from another thread receives its CancelledError
+    # one iteration later and reports completion the iteration after
+    # that; yielding twice lets it finish instead of being destroyed
+    # while pending when the loop stops.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    asyncio.get_running_loop().stop()
+
+
+def _abort_api_server_startup(
+    loop: asyncio.AbstractEventLoop,
+    thread: threading.Thread,
+    startup: concurrent.futures.Future[asyncio.AbstractServer] | None,
+    sock_dir: str,
+) -> None:
+    """Tear down a half-started private daemon after a startup failure.
+
+    Cancels the pending listener coroutine (or closes the listener it
+    already produced), stops the loop thread and joins it with a finite
+    timeout, closes the loop once it has stopped, and removes the
+    private socket directory.  Every step is best-effort: this runs on
+    an error path and must never mask the original exception.
+
+    Args:
+        loop: The dedicated event loop the thread is running.
+        thread: The ``run_forever`` thread.
+        startup: The ``start_unix_server`` future, or ``None`` when the
+            failure happened before it was submitted.
+        sock_dir: The private temp directory holding the socket.
+    """
+    if startup is not None and not startup.cancel():
+        # Already finished: on timeout the listener may well exist.
+        if startup.exception() is None:
+            with contextlib.suppress(Exception):
+                asyncio.run_coroutine_threadsafe(
+                    _close_listener(startup.result()), loop,
+                ).result(timeout=2)
+    # Not awaited: the loop stops before this future's completion
+    # callback could run, so ``thread.join`` is the wait.
+    asyncio.run_coroutine_threadsafe(_stop_loop_after_pending_cancels(), loop)
+    thread.join(timeout=2)
+    if not thread.is_alive():
+        loop.close()
+    shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 class KissWebChatAgent(BaseChannelAgent):

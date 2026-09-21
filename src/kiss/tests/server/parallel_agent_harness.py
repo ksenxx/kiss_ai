@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from collections.abc import Callable
@@ -389,7 +390,28 @@ _PROVIDER_KEYS = (
 # Enough for git (and every other POSIX tool the agent shells out to)
 # while excluding the per-user and Homebrew directories the vendor
 # CLIs are installed into.
-_MINIMAL_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+_MINIMAL_POSIX_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def _path_without_vendor_clis() -> str:
+    """Return a ``PATH`` that still resolves git but hides ``claude``/``codex``.
+
+    POSIX uses the fixed system directories.  Windows has no such
+    convention (git lives under ``Program Files``, the CLIs are
+    ``.cmd`` shims under ``%APPDATA%\\npm``), so the current ``PATH`` is
+    kept minus every directory a vendor CLI resolves from.
+    """
+    if sys.platform != "win32":
+        return _MINIMAL_POSIX_PATH
+    entries = [e for e in os.environ.get("PATH", "").split(os.pathsep) if e]
+    for cli in ("claude", "codex"):
+        while (found := shutil.which(cli, path=os.pathsep.join(entries))) is not None:
+            hidden = Path(found).parent.resolve()
+            kept = [e for e in entries if Path(e).resolve() != hidden]
+            if len(kept) == len(entries):
+                break  # resolved from the working directory, not from PATH
+            entries = kept
+    return os.pathsep.join(entries)
 
 
 class OfflineFastModel:
@@ -427,7 +449,7 @@ class OfflineFastModel:
             setattr(keys, name, "")
             self._saved_env[name] = os.environ.pop(name, None)
         self._saved_path = os.environ.get("PATH")
-        os.environ["PATH"] = _MINIMAL_PATH
+        os.environ["PATH"] = _path_without_vendor_clis()
         return self
 
     def __exit__(self, *_exc: object) -> None:

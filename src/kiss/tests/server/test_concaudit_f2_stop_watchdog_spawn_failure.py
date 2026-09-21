@@ -24,8 +24,6 @@ enforced inline: the worker receives the interrupt and exits.
 
 from __future__ import annotations
 
-import os
-import resource
 import threading
 import time
 from collections.abc import Iterator
@@ -35,28 +33,11 @@ import pytest
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
+from kiss.tests.conftest import (
+    nproc_limit_lowered_to_one,
+    thread_start_can_be_starved,
+)
 from kiss.tests.server._memory_printer import MemoryPrinter
-
-
-def _thread_start_can_be_starved() -> bool:
-    """True when lowering RLIMIT_NPROC actually makes Thread.start fail here."""
-    if os.getuid() == 0:
-        return False
-    soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-    try:
-        resource.setrlimit(resource.RLIMIT_NPROC, (1, hard))
-    except (ValueError, OSError):
-        return False
-    try:
-        probe = threading.Thread(target=lambda: None)
-        try:
-            probe.start()
-        except RuntimeError:
-            return True
-        probe.join()
-        return False
-    finally:
-        resource.setrlimit(resource.RLIMIT_NPROC, (soft, hard))
 
 
 @pytest.fixture
@@ -96,7 +77,7 @@ def test_stop_is_enforced_inline_when_watchdog_thread_cannot_start(
     clean_registry: None,
 ) -> None:
     """A watchdog spawn failure still interrupts the non-cooperative worker."""
-    if not _thread_start_can_be_starved():
+    if not thread_start_can_be_starved():
         pytest.skip("RLIMIT_NPROC cannot starve Thread.start on this host")
     printer = MemoryPrinter()
     server = VSCodeServer(printer=printer)
@@ -112,14 +93,10 @@ def test_stop_is_enforced_inline_when_watchdog_thread_cannot_start(
     agent_state.register(state)
     worker.thread.start()
 
-    soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-    resource.setrlimit(resource.RLIMIT_NPROC, (1, hard))
-    try:
+    with nproc_limit_lowered_to_one():
         t0 = time.monotonic()
         server._stop_task(tab_id)
         elapsed = time.monotonic() - t0
-    finally:
-        resource.setrlimit(resource.RLIMIT_NPROC, (soft, hard))
 
     assert state.stop_event is not None and state.stop_event.is_set()
     assert worker.finished.wait(15), "the worker was never interrupted"

@@ -334,10 +334,6 @@
   let lastUiTip = "Voice trigger: listen for the word 'Sorcar'";
   let lastFlashCls = null;
 
-  function askMicButtons() {
-    return document.querySelectorAll('.ask-user-mic');
-  }
-
   function applyUiClasses(el) {
     el.classList.remove(
       'voice-off',
@@ -359,16 +355,6 @@
 
   function applyFlashToAll() {
     applyFlashClasses(btn);
-    const mics = askMicButtons();
-    for (let i = 0; i < mics.length; i++) applyFlashClasses(mics[i]);
-  }
-
-  function syncAskMics() {
-    const mics = askMicButtons();
-    for (let i = 0; i < mics.length; i++) {
-      applyUiClasses(mics[i]);
-      applyFlashClasses(mics[i]);
-    }
   }
 
   function setUi(state, message) {
@@ -396,7 +382,6 @@
     lastUiState = state;
     lastUiTip = tip;
     applyUiClasses(btn);
-    syncAskMics();
   }
 
   function normalize(text) {
@@ -487,18 +472,16 @@
     if (now - lastWakeAt < COOLDOWN_MS) return false;
     lastWakeAt = now;
     try {
-      (askAnswerInput() || inp).focus();
+      inp.focus();
     } catch (_e) {}
     flash('voice-triggered', 45000);
     return true;
   }
 
-  function askAnswerInput() {
-    const modal = document.getElementById('ask-user-modal');
-    if (!modal || !modal.style.display || modal.style.display === 'none') {
-      return null;
-    }
-    return modal.querySelector('.ask-user-input');
+  // True while the conversation on screen is blocked in ask_user_question:
+  // main.js flags the body and routes the composer text to the answer.
+  function answeringQuestion() {
+    return document.body.classList.contains('ask-answering');
   }
 
   // owner is this round's conversation, already retired by the caller. It is
@@ -541,27 +524,12 @@
       return;
     }
     // tableak-coverage:end
-    const askInp = askAnswerInput();
-    if (askInp) {
-      askInp.value = askInp.value
-        ? askInp.value + ' ' + translated
-        : translated;
-      askInp.dispatchEvent(new Event('input', {bubbles: true}));
-      try {
-        askInp.focus();
-      } catch (_e) {}
-      window.dispatchEvent(
-        new CustomEvent('kiss-voice-answer', {
-          detail: {tabId: ownerTabId(owner)},
-        }),
-      );
-      speakWorkingOnIt();
-      return;
-    }
     // Non-auto mode drafts into the input for the user to edit, so insert
     // the exact spoken words: the speaker/language prefix is only useful to
     // the agent, and would just be noise the user has to delete by hand.
-    if (!autoSubmit) {
+    // An answer to a pending question is always submitted: the agent is
+    // waiting on it.
+    if (!autoSubmit && !answeringQuestion()) {
       insertAtCursor(spoken);
       return;
     }
@@ -1260,16 +1228,6 @@
 
   btn.addEventListener('click', () => {
     setEnabled(!enabled);
-  });
-
-  document.addEventListener('click', event => {
-    const t = event.target;
-    const mic = t && t.closest ? t.closest('.ask-user-mic') : null;
-    if (mic) setEnabled(!enabled);
-  });
-
-  window.addEventListener('kiss-ask-mic-mounted', () => {
-    syncAskMics();
   });
 
   window.addEventListener('message', event => {

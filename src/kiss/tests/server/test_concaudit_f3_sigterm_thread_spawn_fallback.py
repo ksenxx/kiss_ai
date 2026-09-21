@@ -24,7 +24,6 @@ around the handler call.  The handler is invoked directly, exactly as
 from __future__ import annotations
 
 import asyncio
-import resource
 import signal
 import tempfile
 import threading
@@ -35,8 +34,9 @@ from pathlib import Path
 import pytest
 
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.server.test_concaudit_w6_commit_msg_claim import (
-    _thread_start_can_be_starved,
+from kiss.tests.conftest import (
+    nproc_limit_lowered_to_one,
+    thread_start_can_be_starved,
 )
 
 
@@ -44,7 +44,7 @@ class TestSigtermFallbackWithoutThreads(unittest.TestCase):
     """A failed shutdown-thread spawn still resolves the shutdown future."""
 
     def test_loop_unwinds_when_shutdown_thread_cannot_start(self) -> None:
-        if not _thread_start_can_be_starved():
+        if not thread_start_can_be_starved():
             pytest.skip("RLIMIT_NPROC cannot starve Thread.start on this host")
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -64,13 +64,9 @@ class TestSigtermFallbackWithoutThreads(unittest.TestCase):
             self._make_future(), loop,
         ).result(timeout=5)
 
-        soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-        resource.setrlimit(resource.RLIMIT_NPROC, (1, hard))
-        try:
+        with nproc_limit_lowered_to_one():
             # Must not raise out of the signal handler.
             server._handle_shutdown_signal(signal.SIGTERM)
-        finally:
-            resource.setrlimit(resource.RLIMIT_NPROC, (soft, hard))
 
         self.assertTrue(server._shutdown_initiated)
         deadline = time.monotonic() + 5
