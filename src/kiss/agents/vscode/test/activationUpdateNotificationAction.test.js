@@ -42,6 +42,7 @@ const snoozes = [];
 let nextInfoAction = 'Update now';
 const calls = {
   runUpdate: 0,
+  updateWhenIdle: 0,
   updateChecks: 0,
 };
 
@@ -69,7 +70,8 @@ const vscodeStub = {
   },
   Uri: {
     file: p => ({fsPath: p, scheme: 'file', toString: () => `file://${p}`}),
-    joinPath: (base, ...parts) => vscodeStub.Uri.file(path.join(base.fsPath, ...parts)),
+    joinPath: (base, ...parts) =>
+      vscodeStub.Uri.file(path.join(base.fsPath, ...parts)),
   },
   EventEmitter: class {
     constructor() {
@@ -129,6 +131,9 @@ class FakeSidebarView {
   }
   runUpdate() {
     calls.runUpdate += 1;
+  }
+  updateWhenIdle() {
+    calls.updateWhenIdle += 1;
   }
   dispose() {}
 }
@@ -208,8 +213,7 @@ function disposeContext(ctx) {
   for (const d of ctx.subscriptions) {
     try {
       if (d && typeof d.dispose === 'function') d.dispose();
-    } catch {
-    }
+    } catch {}
   }
   fs.rmSync(ctx._tmpExtPath, {recursive: true, force: true});
 }
@@ -240,6 +244,7 @@ async function runTest() {
     assert.strictEqual(notifications[0].kind, 'info');
     assert.deepStrictEqual(notifications[0].actions, [
       'Update now',
+      'Update when idle',
       'Remind me later',
     ]);
     assert.ok(
@@ -282,6 +287,28 @@ async function runTest() {
   } finally {
     extension.deactivate();
     disposeContext(ctx2);
+  }
+
+  // Third activation: "Update when idle" hands the update to the daemon's
+  // idle poller — no local installer run, no snooze.
+  nextInfoAction = 'Update when idle';
+  const ctx3 = makeContext();
+  try {
+    extension.activate(ctx3);
+    await waitFor(
+      () => calls.updateWhenIdle === 1,
+      'clicking Update when idle must arm the daemon-side idle update',
+    );
+    assert.strictEqual(
+      calls.runUpdate,
+      1,
+      'Update when idle must not run the installer now',
+    );
+    assert.strictEqual(snoozes.length, 1, 'Update when idle must not snooze');
+    console.log('All Update-when-idle activation tests passed');
+  } finally {
+    extension.deactivate();
+    disposeContext(ctx3);
     Module._load = origLoad;
   }
 }

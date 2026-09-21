@@ -370,6 +370,10 @@
   - `cmd`: The ``snoozeUpdate`` command; its optional ``latest`` field names the release being snoozed.
   - `ctx`: The transport context of the current call (unused — the resulting rebroadcast must reach every window).
 
+- **update_when_idle** — Arm (or cancel) an update that runs once no task is running. Services the "Update when idle" action of the update toast: the daemon polls its agent registry and launches ``install.sh`` the first time no task is in flight.  The ``update_available`` state is rebroadcast with ``pendingIdle`` so every chat window's toast reflects the armed state.<br/>`async update_when_idle(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``updateWhenIdle`` command; ``cancel: true`` disarms a pending idle update instead of arming one.
+  - `ctx`: The transport context of the current call (unused — the resulting rebroadcast must reach every window).
+
 - **ping** — Answer a client's ordering probe with a direct ``pong``. A connection's commands are dispatched one after another, so the ``pong`` reaches the sender only once every command it sent before the ``ping`` has been taken.  The remote webapp's WebSocket shim (``kiss.server.web_server._WS_SHIM_JS``) relies on that: after a lost session it flushes the commands the user issued during the outage, sends ``ping`` and reloads the page only when ``pong`` arrives, so nothing the reload discards was still owed to the server.<br/>`async ping(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``ping`` command (no fields are used).
   - `ctx`: The transport context of the current call; the reply goes to this sender only.

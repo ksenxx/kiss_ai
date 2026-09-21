@@ -34,6 +34,7 @@ from kiss.agents.third_party_agents._backend_utils import (
     start_http_server,
     stop_http_server,
 )
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -540,6 +541,8 @@ class ZaloAgent(BaseChannelAgent):
                     "Not authenticated with Zalo. Use authenticate_zalo(access_token=...) "
                     "to configure. Get a token from https://developers.zalo.me/ — "
                     "create an Official Account app and find the access token in its settings."
+                    + "\n"
+                    + portal_handoff("https://developers.zalo.me/")
                 )
             try:
                 result = json.loads(agent._backend.get_oa_info())

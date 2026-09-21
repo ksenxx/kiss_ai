@@ -36,6 +36,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
 from kiss.agents.third_party_agents._google_workspace_utils import (
     fresh_access_token,
     google_api_session,
+    google_consent_steps,
     load_google_credentials,
     make_google_auth_tools,
 )
@@ -455,28 +456,11 @@ class GoogleCalendarAgent(BaseChannelAgent):
         "Always call check_google_calendar_auth() first; if it returns ok, report "
         "that Google Calendar credentials are configured and stop — never start "
         "an OAuth flow over valid credentials. If credentials.json is missing, call "
-        "start_google_calendar_browser_setup() to create an OAuth Desktop-app "
-        "client in Google Cloud Console; if credentials.json exists, call "
+        "start_google_calendar_browser_setup(), which opens Google Cloud Console for "
+        "the user to create an OAuth Desktop-app client; if credentials.json exists, call "
         "authenticate_google_calendar() directly.\n"
-        "When authenticate_google_calendar() returns status 'consent_required' "
-        "with an auth_url, do NOT open the auth_url or any accounts.google.com "
-        "page in your own browser, and never ask for or type the user's Google "
-        "password or 2FA code: Google sign-in pages are often blocked in the "
-        "built-in browser (net::ERR_FAILED), and the sign-in belongs to the "
-        "user. Hand off consent instead:\n"
-        "1. Call ask_user_question() with the full auth_url, asking the user "
-        "to open it in their OWN browser, approve access, and paste back the "
-        "complete redirect URL from the address bar (it looks like "
-        "http://localhost:PORT/?state=...&code=... and shows a connection "
-        "error page — that is expected).\n"
-        "2. The loopback consent server runs on THIS machine: deliver the "
-        "pasted URL to it with Bash: curl -s '<pasted redirect URL>' (quote "
-        "the URL; it contains & characters).\n"
-        "3. Call finish_google_calendar_auth(); if it returns 'pending', wait 2 "
-        "seconds and call it once more.\n"
-        "If any browser navigation to a Google page fails, do not retry it or "
-        "relaunch the browser — switch to this hand-off immediately. Finish "
-        "by verifying with check_google_calendar_auth()."
+        + google_consent_steps("google_calendar")
+        + " Finish by verifying with check_google_calendar_auth()."
     )
 
     def __init__(self) -> None:

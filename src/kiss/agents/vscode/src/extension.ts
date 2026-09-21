@@ -884,10 +884,13 @@ export function activate(context: vscode.ExtensionContext): void {
         `KISS Sorcar: a new release (${latest}) is available. ` +
           `You are on ${current}.`,
         'Update now',
+        'Update when idle',
         'Remind me later',
       ).then(action => {
         if (action === 'Update now') {
           sidebarView?.runUpdate();
+        } else if (action === 'Update when idle') {
+          sidebarView?.updateWhenIdle();
         } else if (action === 'Remind me later') {
           snoozeUpdateNotification({latest});
         }

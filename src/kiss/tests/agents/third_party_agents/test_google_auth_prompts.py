@@ -8,9 +8,11 @@ Each ``channel_system_prompt`` is appended verbatim to every task
 dispatched to its channel agent, so its wording directly steers the
 subagent's OAuth behaviour.  These tests pin the paste-back consent
 hand-off contract shared by the Gmail, Google Drive, Google Chat,
-Google Calendar, Google Docs, and Google Sheets prompts: consent is
-approved by the user in their OWN browser and the pasted redirect URL
-is replayed locally — the agent must never drive
+Google Calendar, Google Docs, and Google Sheets prompts: the tool opens
+the consent page in the user's default browser when it can, consent is
+approved by the user in their OWN browser (the URL is always shown so
+they can open it by hand) and a redirect URL pasted back from another
+device is replayed locally — the agent must never drive
 accounts.google.com itself or ask for the user's password.
 """
 
@@ -48,9 +50,13 @@ def test_prompt_describes_paste_back_hand_off(
     # Check-first rule: never re-run OAuth over valid credentials.
     assert f"check_{service}_auth()" in prompt
     assert "never start an OAuth flow over valid credentials" in prompt
-    # The consent hand-off: user approves in their own browser and the
-    # pasted redirect URL is replayed against the local consent server.
+    # The consent hand-off: the tool opens the page in the user's default
+    # browser when it can; the agent always shows the URL, and a redirect
+    # URL pasted back from another device is replayed locally.
     assert "'consent_required'" in prompt
+    assert "user's default browser" in prompt
+    assert "'browser_opened'" in prompt
+    assert "ALWAYS call ask_user_question() with the full auth_url" in prompt
     assert "do NOT open the auth_url or any accounts.google.com" in prompt
     assert "password or 2FA code" in prompt
     assert "ask_user_question()" in prompt

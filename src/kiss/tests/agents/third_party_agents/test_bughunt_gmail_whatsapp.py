@@ -21,11 +21,9 @@ Bugs covered (the WhatsApp ones re-targeted at the QR-paired bridge backend):
 from __future__ import annotations
 
 import json
-import logging
 import re
 import sqlite3
 import threading
-import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -184,80 +182,42 @@ class TestWhatsAppPollMessages:
         assert [m["text"] for m in messages] == ["from-111-b"]
 
 
-def _wait_for_redirect_port(
-    caplog: pytest.LogCaptureFixture, flow_thread: threading.Thread, timeout: float = 10.0
-) -> int:
-    """Return the local redirect port announced by ``run_local_server``.
-
-    The flow logs its authorization URL (INFO on ``google_auth_oauthlib.flow``)
-    once the redirect server is listening; the ``redirect_uri`` query
-    parameter carries the ephemeral port.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        for record in caplog.records:
-            match = re.search(
-                r"redirect_uri=http%3A%2F%2Flocalhost%3A(\d+)", record.getMessage()
-            )
-            if match:
-                return int(match.group(1))
-        if not flow_thread.is_alive():
-            break
-        time.sleep(0.02)
-    raise AssertionError("OAuth flow never announced its local redirect server")
-
-
 class TestGmailOAuthFlow:
-    """Bug (A): headless OAuth flow must not call the removed run_console()."""
+    """Bug (A): the OAuth consent must never block the tool or use run_console()."""
 
     def test_run_console_removed_from_installed_dependency(self) -> None:
         assert not hasattr(InstalledAppFlow, "run_console")
 
-    def test_headless_oauth_flow_does_not_raise_attribute_error(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    def test_headless_consent_hands_off_and_rejects_forged_redirect(
+        self, isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The headless flow starts a real local redirect server, not run_console().
+        """authenticate_gmail() returns at once with the consent URL.
 
-        ``run_local_server`` blocks in ``handle_request()`` until the
-        browser redirect arrives, so the test plays the browser: it reads
-        the redirect port from the flow's INFO log line and sends a bogus
-        ``?state=...&code=...`` redirect. ``fetch_token`` then fails on the
-        CSRF state check before any network I/O, which lets the flow
-        thread and its listening socket exit instead of leaking.
+        The loopback redirect server runs in the background; the test
+        plays the browser and sends a bogus ``?state=...&code=...``
+        redirect.  ``fetch_token`` then fails on the CSRF state check
+        before any network I/O, so finish_gmail_auth() reports the error
+        (never a leaked thread or a stored token).
         """
         creds_path = gmail_sea._credentials_path()
-        backup = creds_path.read_text() if creds_path.exists() else None
         creds_path.parent.mkdir(parents=True, exist_ok=True)
         creds_path.write_text(json.dumps(_DUMMY_CLIENT_SECRETS))
         monkeypatch.setenv("KISS_HEADLESS", "1")
-        result: dict[str, BaseException] = {}
-
-        def run_flow() -> None:
-            try:
-                gmail_sea._run_oauth_flow()
-            except BaseException as exc:
-                result["exc"] = exc
-
-        thread = threading.Thread(target=run_flow, daemon=True)
-        try:
-            with caplog.at_level(logging.INFO, logger="google_auth_oauthlib.flow"):
-                thread.start()
-                port = _wait_for_redirect_port(caplog, thread)
-            with urllib.request.urlopen(
-                f"http://localhost:{port}/?state=bogus&code=bogus", timeout=10
-            ) as resp:
-                assert resp.status == 200
-            thread.join(timeout=10.0)
-            assert not thread.is_alive(), "OAuth flow thread did not exit"
-            exc = result.get("exc")
-            assert not isinstance(exc, AttributeError), f"run_console still used: {exc}"
-            # oauthlib ships no type stubs, so match the CSRF-check error by name.
-            assert type(exc).__name__ == "MismatchingStateError", f"unexpected outcome: {exc!r}"
-        finally:
-            if backup is not None:
-                creds_path.write_text(backup)
-            elif creds_path.exists():
-                creds_path.unlink()
+        tools = {tool.__name__: tool for tool in gmail_sea.GmailAgent()._get_auth_tools()}
+        started = json.loads(tools["authenticate_gmail"]())
+        assert started["status"] == "consent_required"
+        assert started["browser_opened"] is False
+        match = re.search(r"redirect_uri=http%3A%2F%2Flocalhost%3A(\d+)", started["auth_url"])
+        assert match is not None
+        port = int(match.group(1))
+        with urllib.request.urlopen(
+            f"http://localhost:{port}/?state=bogus&code=bogus", timeout=10
+        ) as resp:
+            assert resp.status == 200
+        finished = json.loads(tools["finish_gmail_auth"]())
+        assert finished["ok"] is False
+        assert "state" in finished["error"].lower()
+        assert not gmail_sea._token_path().exists()
 
 
 class TestGmailSendMessage:

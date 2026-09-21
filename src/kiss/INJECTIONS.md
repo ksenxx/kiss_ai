@@ -24,7 +24,7 @@ Can you check the following message for a merge conflict and help me fix it?
 
 ## Trick
 
-Authenticate on my behalf using claude-fable-5-1 as the model. Check the channel's existing credentials first and stop if they are valid. Drive setup pages with browser tools only while they load without a login screen or captcha. Never ask for or type my password or 2FA code. On any login wall, captcha, or failed page load, do not retry or relaunch the browser — ask me (ask_user_question) to complete that step in my OWN browser and paste back the resulting token or redirect URL, then finish the authentication with the channel's tools and verify with its check tool.
+Authenticate on my behalf using claude-fable-5-1 as the model. Check the channel's existing credentials first and stop if they are valid. The channel's authentication tools open the sign-in page or developer portal in my default browser when they can and return its URL (and code): always show me that URL and code with ask_user_question so I can finish in my OWN browser if no window appeared. Never drive sign-in pages or developer portals with your own browser tools, do not retry or relaunch the browser, and never ask for or type my password or 2FA code. When I paste back a token or redirect URL, finish the authentication with the channel's tools and verify with its check tool.
 
 ## Trick
 
