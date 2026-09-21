@@ -7641,7 +7641,12 @@
         ? adjacentContainer.dataset.task || ''
         : currentTaskName;
       if (taskName && panelTask !== taskName) continue;
-      if (inRunning || p.classList.contains('rc') || panelShowsImage(p)) {
+      if (
+        inRunning ||
+        p.classList.contains('rc') ||
+        panelShowsImage(p) ||
+        answerPanelStaysOpen(p)
+      ) {
         p.classList.remove('chv-hidden');
         continue;
       }
@@ -9444,6 +9449,23 @@
   }
   // imagepanel-coverage:end
 
+  /**
+   * True for the panel of a `/ask` answer (an `ask_answer` event).
+   *
+   * The answer is something the user asked for while the task ran, so
+   * no automatic pass ever folds or hides it: not the streaming sweep
+   * (collapseOlderPanels), not a replay or share export
+   * (collapseAllExceptResult), not the finished-task digest
+   * (applyChevronState), and a `summary` tool call leaves it out of
+   * the panels it adopts. Only the user folds it, by its header.
+   *
+   * @param {Element} panel A `.collapsible` panel.
+   * @returns {boolean} Whether *panel* is an answer panel.
+   */
+  function answerPanelStaysOpen(panel) {
+    return panel.classList.contains('ask-answer');
+  }
+
   function collapseAllExceptResult(container, ownerTabId) {
     const ownerId = rpOwnerTabIdForContainer(container, ownerTabId);
     const panels = container.querySelectorAll('.collapsible');
@@ -9451,6 +9473,10 @@
       const p = panels[i];
       if (p.classList.contains('rc')) continue;
       if (panelShowsImage(p)) continue;
+      // A `/ask` answer is never folded by the software (see
+      // answerPanelStaysOpen): a reloaded, shared or neighbouring
+      // transcript shows it exactly as the live one did.
+      if (answerPanelStaysOpen(p)) continue;
       if (p.classList.contains('tc-run-parallel')) {
         rpAdoptOpenSubagents(p, ownerId);
         // A fan-out still running when its task's own transcript is
@@ -9527,10 +9553,9 @@
       const p = panels[i];
       if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
         continue;
-      // A `/ask` answer is something the user asked for and is reading
-      // while the task keeps streaming: the next event must not fold it
-      // away.  The user collapses it by hand (its header) when done.
-      if (p.classList.contains('ask-answer')) continue;
+      // A `/ask` answer the user is reading while the task keeps
+      // streaming: the next event must not fold it away.
+      if (answerPanelStaysOpen(p)) continue;
       // A question the user has not answered yet must stay readable.
       if (p.classList.contains('tc-question-pending')) continue;
       if (panelShowsImage(p)) continue;
@@ -10310,7 +10335,9 @@
               !sib.classList.contains('llm-panel')
             )
               break;
-            adopt.push(sib);
+            // A `/ask` answer stays on the transcript, in front of the
+            // summary that folds its neighbours (answerPanelStaysOpen).
+            if (!answerPanelStaysOpen(sib)) adopt.push(sib);
             sib = sib.previousElementSibling;
           }
           for (let ai = adopt.length - 1; ai >= 0; ai--)
