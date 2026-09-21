@@ -258,6 +258,7 @@ export type FromWebviewMessage =
   | {type: 'runUpdate'}
   | {type: 'updateModels'}
   | {type: 'snoozeUpdate'; latest?: string}
+  | {type: 'updateWhenIdle'; cancel?: boolean}
   | {type: 'serverReset'}
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
@@ -842,13 +843,16 @@ type ToWebviewMessageBody =
   | {type: 'openTabRejected'; text: string}
   // Daemon: cached PyPI check result for the Update button/badge.
   // `snoozed` marks an active "Remind me later" snooze: the webview
-  // keeps the badge but suppresses the sticky toast.
+  // keeps the badge but suppresses the sticky toast.  `pendingIdle`
+  // marks an armed "Update when idle": the daemon installs the release
+  // once no task is running, and the toast offers "Cancel" instead.
   | {
       type: 'update_available';
       available: boolean;
       latest: string;
       current: string;
       snoozed?: boolean;
+      pendingIdle?: boolean;
     }
   // The window's workspace folder changed; the webview re-scopes its
   // workspace-filtered surfaces (tab bar, history) to this directory.
@@ -976,6 +980,7 @@ export interface AgentCommand {
     | 'shareChat'
     | 'shareChatTasks'
     | 'snoozeUpdate'
+    | 'updateWhenIdle'
     | 'getInfoFile';
   prompt?: string;
   model?: string;
@@ -1006,6 +1011,8 @@ export interface AgentCommand {
   isFavorite?: boolean;
   title?: string;
   latest?: string;
+  /** updateWhenIdle: disarm the pending idle update instead of arming. */
+  cancel?: boolean;
   /** saveMyModel / deleteMyModel: the custom model's name. */
   name?: string;
   /** saveMyModel: OpenAI-compatible base URL for the model. */

@@ -24,6 +24,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -1136,6 +1137,8 @@ class TelegramAgent(BaseChannelAgent):
                     "Not authenticated with Telegram. Use authenticate_telegram(bot_token=...) "
                     "to configure. Get a token by messaging @BotFather on Telegram: "
                     "send /newbot, follow the prompts, and copy the HTTP API token."
+                    + "\n"
+                    + portal_handoff("https://t.me/BotFather")
                 )
             try:
                 me = agent._backend._bot.get_me()
