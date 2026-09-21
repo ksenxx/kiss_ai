@@ -91,14 +91,19 @@ TOOL_PROFILES: dict[str, frozenset[str] | None] = {
     }),
     # Shell runner: just enough to run commands and read their output.
     "shell": frozenset({"Bash", "bash_job", "Read", "run_commands_parallel"}),
+    # Single command runner (the bundled ``/sh`` agent): Bash and nothing else.
+    "bash": frozenset({"Bash"}),
 }
-"""Tool profiles a sub-agent can run with (``finish`` is always added).
+"""Tool profiles an agent can run with (``finish`` is always added).
 
 Every tool schema is re-sent on every model step, so a reviewer that
 carries the browser, channel, cron and fan-out tools pays for ~30
 schemas it never calls.  The fan-out engine gives reviewer-marked
 children the ``review`` profile; a parent may name a profile explicitly
-through ``run_parallel(..., tool_profile=...)``.
+through ``run_parallel(..., tool_profile=...)``, and a top-level run
+through ``run(tool_profile=...)`` (the ``tool_profile`` parameter of
+:func:`kiss.server.sorcar.run` / the ``run_agent`` tool, or an agent
+script's ``tool_profile()`` getter).
 """
 
 
@@ -2564,6 +2569,7 @@ class SorcarAgent(RelentlessAgent):
         ) = None,
         tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
         use_memory: bool | None = None,
+        tool_profile: str = "",
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -2641,10 +2647,27 @@ class SorcarAgent(RelentlessAgent):
                 ``model_config["system_instruction"]``).  Forwarded to
                 every ``run_parallel`` sub-agent, so one override
                 governs the whole task tree.
+            tool_profile: Name of the tool profile this run's built-in
+                toolset is cut down to — a key of :data:`TOOL_PROFILES`
+                (``"full"``, ``"review"``, ``"shell"``, ``"bash"``) —
+                or ``""`` (the default) to let :meth:`_tool_profile`
+                decide (``full`` for a top-level task, ``review`` for a
+                reviewer sub-agent).  Applies to this agent only:
+                ``run_parallel`` children pick their own profile.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
+
+        Raises:
+            ValueError: If *tool_profile* is neither ``""`` nor a key of
+                :data:`TOOL_PROFILES`.
         """
+        if tool_profile and tool_profile not in TOOL_PROFILES:
+            raise ValueError(
+                f"tool_profile must be one of {', '.join(TOOL_PROFILES)}, "
+                f"got {tool_profile!r}."
+            )
+        self._tool_profile_name = tool_profile
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
         self._use_memory_override = use_memory
@@ -2697,7 +2720,10 @@ class SorcarAgent(RelentlessAgent):
                 + (system_prompt if system_prompt else "")
             )
             profile = self._tool_profile(prompt_template)
-            if profile != "full":
+            # No note without a built-in toolset to cut down: a run with
+            # ``append_basic_tools=False`` has only ``finish`` and the
+            # caller's tools, whatever profile it names.
+            if profile != "full" and self._append_basic_tools:
                 allowed = TOOL_PROFILES[profile]
                 assert allowed is not None
                 # The docker toolset has no job registry (see the docker
@@ -3092,7 +3118,7 @@ def run_tasks_parallel(
         # will carry the whole chat history, whose earlier tasks would
         # make every implementation-word heuristic fire.
         reviewer = parent_is_reviewer or is_review_task(task)
-        agent._tool_profile_name = tool_profile or (
+        child_profile = tool_profile or (
             "review"
             if DEFAULT_CONFIG.tool_profiles and reviewer and not is_implementation_task(task)
             else "full"
@@ -3131,6 +3157,7 @@ def run_tasks_parallel(
                 system_prompt=system_prompt_suffix or None,
                 web_tools=web_tools,
                 use_memory=use_memory,
+                tool_profile=child_profile,
             )
             return result
         except KeyboardInterrupt:

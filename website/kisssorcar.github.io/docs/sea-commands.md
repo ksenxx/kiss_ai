@@ -19,7 +19,7 @@ Any file that is a valid SEA works: a bundled channel agent, or a file of your o
 The daemon builds the command list from three sources:
 
 1. **Bundled channel agents** in `src/kiss/agents/third_party_agents/` of the installed package. These always win a name clash.
-2. **Bundled Sorcar-extending agents** in `src/kiss/agents/seas/` of the installed package, such as `/merge` (the merge-conflict resolver the auto-commit worktree merge also runs on its own). These beat every `SEAS.md` folder.
+2. **Bundled Sorcar-extending agents** in `src/kiss/agents/seas/` of the installed package, such as `/merge` (the merge-conflict resolver the auto-commit worktree merge also runs on its own) and `/sh` (runs the command you type — `/sh git status --short` — with the `Bash` tool alone, directly in the tab's working directory, and returns its output). Any `SEAS.md` folder may shadow these.
 3. **Your folders** listed in `~/.kiss/SEAS.md` (or `$KISS_HOME/SEAS.md` when `KISS_HOME` is set).
 
 The command name is the file name with `_sea.py` removed: `deploy_sea.py` is `/deploy`, `pr-review_sea.py` is `/pr-review`. A file is registered only when it is a regular file, ends in `_sea.py`, and the remaining stem uses ASCII letters, digits, `_`, or `-` only. `release.notes_sea.py` (a dot) or `my agent_sea.py` (a space) is skipped silently because the command could not be typed. A leading underscore is allowed: `_scratch_sea.py` is `/_scratch`.
@@ -52,7 +52,7 @@ $WORK/agents           # agents shared by the team
 
 ### Precedence when two folders define the same name
 
-Later lines override earlier ones: the folder at the bottom of `SEAS.md` beats the folder at the top. The bundled `third_party_agents/` folder beats every `SEAS.md` folder, and every `SEAS.md` folder beats the bundled `seas/` folder (the Sorcar-extending agents such as `/merge`). In the example above, if `~/my-seas` and `/opt/agents/experimental` both contain `deploy_sea.py`, `/deploy` runs the experimental one; if either contains `slack_sea.py`, `/slack` still runs the bundled Slack agent; if either contains `merge_sea.py`, `/merge` runs your copy instead of the bundled one.
+Later lines override earlier ones: the folder at the bottom of `SEAS.md` beats the folder at the top. The bundled `third_party_agents/` folder beats every `SEAS.md` folder, and every `SEAS.md` folder beats the bundled `seas/` folder (the Sorcar-extending agents such as `/merge` and `/sh`). In the example above, if `~/my-seas` and `/opt/agents/experimental` both contain `deploy_sea.py`, `/deploy` runs the experimental one; if either contains `slack_sea.py`, `/slack` still runs the bundled Slack agent; if either contains `merge_sea.py`, `/merge` runs your copy instead of the bundled one.
 
 ### Changes take effect while the daemon runs
 

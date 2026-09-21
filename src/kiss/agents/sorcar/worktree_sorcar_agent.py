@@ -1411,6 +1411,10 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             )
 
             wt_work_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                GitWorktreeOps.link_node_modules(repo, wt_dir)
+            except OSError:
+                logger.warning("Failed to link node_modules into worktree", exc_info=True)
             return wt_work_dir
 
 
