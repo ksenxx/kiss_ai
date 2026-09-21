@@ -77,13 +77,15 @@ def _redirect_db(tmpdir: str) -> tuple:
 
 
 def _restore_db(saved: tuple) -> None:
-    """Restore the persistence layer redirected by :func:`_redirect_db`."""
-    if th._db_conn is not None:
-        try:
-            th._db_conn.close()
-        except Exception:
-            pass
-        th._db_conn = None
+    """Restore the persistence layer redirected by :func:`_redirect_db`.
+
+    ``_close_db`` drains and stops the event-writer thread before the
+    connection goes away.  Closing ``th._db_conn`` directly while that
+    thread is still flushing a finished task's events is a
+    use-after-close inside the sqlite3 C module (seen as a SIGSEGV of
+    the whole pytest process), not a Python exception.
+    """
+    th._close_db()
     (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
@@ -455,12 +457,12 @@ class TestCleanupExceptionSafety(unittest.TestCase):
         self.assertTrue(rows, "the task row must exist while running")
         history_task_id = str(rows[0]["id"])
 
-        # Sabotage the DB while the agent is still "running": close the
-        # connection and turn the DB path into a directory, so every
-        # subsequent persistence call raises for real.
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        # Sabotage the DB while the agent is still "running": stop the
+        # event writer and close the connection (see ``_restore_db`` for
+        # why the writer must be stopped first), then turn the DB path
+        # into a directory so every subsequent persistence call raises
+        # for real.
+        th._close_db()
         bad = Path(self.tmpdir) / "db-as-directory"
         bad.mkdir()
         th._DB_PATH = bad
