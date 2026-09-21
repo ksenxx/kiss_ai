@@ -172,48 +172,6 @@ def _split_ask_command(prompt: str) -> str | None:
     return question or None
 
 
-def _route_prompt_to_owner(owner: AgentState, prompt: str) -> None:
-    """Queue a mid-run user *prompt* on the right list of *owner*.
-
-    A plain message is appended to ``pending_user_messages`` — the
-    live agent's pre-step hook drains it into the model conversation
-    as a steering instruction.  A message wrapped in
-    ``<task>...</task>`` tags is instead split into its task blocks
-    and appended to ``queued_followup_tasks``: the task runner's
-    per-subtask loop drains that list once the CURRENT task finishes
-    and runs each block one-by-one as further sequential subtasks, so
-    a task list typed mid-run never steers the running task.
-
-    Only server-owned states take the queued-tasks path: the drain
-    lives in ``TaskRunner._run_task_inner``, which executes only
-    UI-launched runs.  A sub-agent or standalone state has no such
-    loop, so a ``<task>`` message sent to one would sit undrained
-    forever — it falls back to live steering injection instead.  The
-    same fallback applies once the run's ``followup_queue_closed``
-    flag is up (the loop passed its final drain, a subtask failed, or
-    the run is finalizing): a task queued then would be echoed to the
-    user and silently discarded by the end-of-run cleanup.  The flag
-    is raised under the same :data:`agent_state.STATE_LOCK` this
-    helper runs under, so a message either lands in the queue before
-    the final drain (and runs) or takes the steering path — never the
-    accepted-then-dropped middle ground.
-
-    MUST be called while holding :data:`agent_state.STATE_LOCK`.
-
-    Args:
-        owner: The running-task state that accepted the prompt.
-        prompt: The user's message (non-empty).
-    """
-    if (
-        owner.server_owned
-        and not owner.followup_queue_closed
-        and contains_task_tags(prompt)
-    ):
-        owner.queued_followup_tasks.extend(parse_task_tags(prompt))
-    else:
-        owner.pending_user_messages.append(prompt)
-
-
 def _restart_kiss_web_daemon() -> bool:
     """Restart the ``kiss-web`` daemon so it picks up config changes.
 
@@ -516,8 +474,23 @@ class _CommandsMixin:
         thread: threading.Thread | None = None
         state: AgentState | None = None
         chat_id = ""
+        prompt = cmd.get("prompt", "")
+        typed = isinstance(prompt, str) and bool(prompt.strip())
         with self._state_lock:
             prev = agent_state.find_by_tab(tab_id)
+            # A plain message typed into a tab that only VIEWS a task
+            # whose agent is blocked in ``ask_user_question`` (a
+            # client-local sub-agent tab, or a stale viewer that sent
+            # ``run`` instead of ``appendUserMessage``) is that
+            # question's answer — not a new task.  A ``<task>`` message
+            # still starts a new task in the tab, as before.
+            asked: AgentState | None = None
+            if (
+                typed
+                and (prev is None or prev.task_thread is None)
+                and not contains_task_tags(prompt)
+            ):
+                asked = self._viewer_awaiting_answer(tab_id)
             if prev is not None and prev.is_merging:
                 # An in-flight merge/discard owns the tab's state (and
                 # its worktree agent); replacing it would orphan the
@@ -540,19 +513,22 @@ class _CommandsMixin:
                 )
                 return
             if prev is not None and prev.task_thread is not None:
-                prompt = cmd.get("prompt", "")
                 # S3-05: queue the prompt whenever a task thread is
                 # installed.  The worker sets ``is_task_active`` only
                 # AFTER the thread starts, so gating on the flag (or on
                 # thread death) silently dropped a second ``run``
                 # submitted during the startup window in which the
                 # thread was alive but the flag not yet raised.
-                if isinstance(prompt, str) and prompt.strip():
-                    _route_prompt_to_owner(prev, prompt)
+                if typed:
+                    self._route_prompt_to_owner(prev, prompt, tab_id)
                     inject_prompt = prompt
                     inject_task = _owner_task_id(prev)
                     if not inject_task:
                         prev.unattributed_prompt_echoes.append(prompt)
+            elif asked is not None:
+                self._route_prompt_to_owner(asked, prompt, tab_id)
+                inject_prompt = prompt
+                inject_task = _owner_task_id(asked)
             else:
                 requested_chat_id = cmd.get("chatId", "")
                 resumed_chat_id = self._tab_chat_views.get(tab_id, "")
@@ -919,14 +895,9 @@ class _CommandsMixin:
     def _cmd_user_answer(self, cmd: dict[str, Any]) -> None:
         """Route a user answer to the correct tab's queue.
 
-        The drain-then-put sequence is held under ``_state_lock`` so
-        two concurrent ``userAnswer`` commands cannot both observe
-        the queue as empty, both call ``q.put`` on the ``maxsize=1``
-        queue, and wedge the second handler thread forever.  Using
-        ``put_nowait`` after the drain — combined with the lock —
-        guarantees the call never blocks: the queue is guaranteed
-        empty by the just-completed drain, and any concurrent
-        ``userAnswer`` is serialised behind us.
+        Resolving the waiting state and delivering the answer (see
+        :meth:`_deliver_user_answer`) form one critical section under
+        ``_state_lock``.
         """
         ans_tab = cmd.get("tabId", "")
         with self._state_lock:
@@ -935,27 +906,150 @@ class _CommandsMixin:
             if owner is None or q is None:
                 logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
                 return
-            answered_task_id = owner.task_id
-            # The question is no longer pending the moment its answer
-            # is consumed: clearing under ``_state_lock`` guarantees a
-            # concurrent session replay (``_emit_pending_ask``) can
-            # never re-show an already-answered modal.
-            owner.pending_ask_question = ""
-            while not q.empty():
-                try:
-                    q.get_nowait()
-                except queue.Empty:  # pragma: no cover — race guard
-                    break
             answer = cmd.get("answer", "")
             if not isinstance(answer, str):
                 answer = "" if answer is None else str(answer)
+            self._deliver_user_answer(owner, q, answer, ans_tab)
+
+    def _deliver_user_answer(
+        self,
+        owner: AgentState,
+        q: queue.Queue[str],
+        answer: str,
+        ans_tab: str,
+    ) -> None:
+        """Hand *answer* to the ``ask_user_question`` blocked on *q* and close it.
+
+        The question is no longer pending the moment its answer is
+        consumed: clearing ``pending_ask_question`` under the lock
+        guarantees a concurrent session replay (``_emit_pending_ask``)
+        can never re-show an already-answered modal.  The drain-then-put
+        sequence under the same lock means two concurrent deliveries
+        cannot both observe the ``maxsize=1`` queue as empty, both
+        ``put`` and wedge the second handler thread forever; with the
+        queue guaranteed empty by the drain, ``put_nowait`` never blocks.
+
+        The ``askUserDone`` broadcast belongs to the SAME critical
+        section: the ``put`` wakes the agent thread, which may return
+        from the tool and publish its NEXT question at once —
+        ``_ask_user_question`` takes this lock to do so — and a close
+        sent after the lock is released could reach the clients after
+        that second ``askUser`` and dismiss it (clients clear whatever
+        question is showing; a close carries no question identity).
+        Broadcasting before the lock is released orders every
+        ``askUserDone`` ahead of the next ``askUser``.  ``STATE_LOCK`` →
+        printer-lock is the established nesting order (the
+        ``askUser`` broadcast itself is made under this lock).
+
+        MUST be called while holding :data:`agent_state.STATE_LOCK`.
+
+        Args:
+            owner: The state whose agent thread is waiting on *q*.
+            q: The owner's live ``user_answer_queue``.
+            answer: The user's answer text.
+            ans_tab: Frontend tab id the answer was typed into (see
+                :meth:`_user_answer_clear_tabs`).
+        """
+        owner.pending_ask_question = ""
+        while not q.empty():
             try:
-                q.put_nowait(answer)
-            except queue.Full:  # pragma: no cover — drained immediately above
-                pass
-        clear_tabs = self._user_answer_clear_tabs(ans_tab, answered_task_id)
-        for tab_id in clear_tabs:
+                q.get_nowait()
+            except queue.Empty:  # pragma: no cover — race guard
+                break
+        try:
+            q.put_nowait(answer)
+        except queue.Full:  # pragma: no cover — drained immediately above
+            pass
+        for tab_id in self._user_answer_clear_tabs(ans_tab, owner.task_id):
             self.printer.broadcast({"type": "askUserDone", "tabId": tab_id})
+
+    def _route_prompt_to_owner(
+        self, owner: AgentState, prompt: str, tab_id: str,
+    ) -> None:
+        """Queue a mid-run user *prompt* on the right list of *owner*.
+
+        A plain message is appended to ``pending_user_messages`` — the
+        live agent's pre-step hook drains it into the model conversation
+        as a steering instruction.  A message wrapped in
+        ``<task>...</task>`` tags is instead split into its task blocks
+        and appended to ``queued_followup_tasks``: the task runner's
+        per-subtask loop drains that list once the CURRENT task finishes
+        and runs each block one-by-one as further sequential subtasks, so
+        a task list typed mid-run never steers the running task.
+
+        Exception — a pending ``ask_user_question``: while the agent
+        thread is blocked inside that tool (``owner.pending_ask_question``
+        is set and the state holds a live ``user_answer_queue``) it never
+        reaches the pre-step hook, so a steering message would sit
+        undrained and the agent would hang until the task is stopped
+        (sorcar.db task ``e8a8407967d645c28c87750eda7a6cc0``: the user
+        typed the reply into the chat box instead of the answer box).  A
+        plain message typed then IS the answer and is delivered through
+        :meth:`_deliver_user_answer`, exactly like a ``userAnswer``
+        command.  A ``<task>`` message keeps its follow-up semantics even
+        then — it is an explicit "run this afterwards", not a reply.
+
+        Only server-owned states take the queued-tasks path: the drain
+        lives in ``TaskRunner._run_task_inner``, which executes only
+        UI-launched runs.  A sub-agent or standalone state has no such
+        loop, so a ``<task>`` message sent to one would sit undrained
+        forever — it falls back to live steering injection instead.  The
+        same fallback applies once the run's ``followup_queue_closed``
+        flag is up (the loop passed its final drain, a subtask failed, or
+        the run is finalizing): a task queued then would be echoed to the
+        user and silently discarded by the end-of-run cleanup.  The flag
+        is raised under the same :data:`agent_state.STATE_LOCK` this
+        helper runs under, so a message either lands in the queue before
+        the final drain (and runs) or takes the steering path — never the
+        accepted-then-dropped middle ground.
+
+        MUST be called while holding :data:`agent_state.STATE_LOCK`.
+
+        Args:
+            owner: The running-task state that accepted the prompt.
+            prompt: The user's message (non-empty).
+            tab_id: Frontend tab id the message was typed into.
+        """
+        if (
+            owner.server_owned
+            and not owner.followup_queue_closed
+            and contains_task_tags(prompt)
+        ):
+            owner.queued_followup_tasks.extend(parse_task_tags(prompt))
+        elif owner.pending_ask_question and owner.user_answer_queue is not None:
+            self._deliver_user_answer(
+                owner, owner.user_answer_queue, prompt, tab_id,
+            )
+        else:
+            owner.pending_user_messages.append(prompt)
+
+    def _viewer_awaiting_answer(self, tab_id: str) -> AgentState | None:
+        """Return the task *tab_id* views whose agent is blocked in ``ask_user_question``.
+
+        A daemon-dispatched sub-agent (``run_agent``) keeps its
+        server-side ``api-…`` source tab on its state, while every
+        client renders it in a client-local ``<parent>__sub_<task>``
+        tab that is merely SUBSCRIBED to the task — so
+        ``agent_state.find_by_tab`` never resolves that tab to the
+        running task.  A ``run`` typed there while the sub-agent waits
+        for an answer must reach that waiter (see
+        :meth:`_route_prompt_to_owner`) rather than start an unrelated
+        new task in the tab while the sub-agent hangs; the same holds
+        for a stale history viewer of a running task.
+
+        MUST be called while holding :data:`agent_state.STATE_LOCK`.
+
+        Args:
+            tab_id: The frontend tab id the message was typed into.
+
+        Returns:
+            The first viewed state with a pending question and a live
+            answer queue, or ``None``.
+        """
+        for state in self._find_viewer_task_states(tab_id):
+            if state.pending_ask_question and state.user_answer_queue is not None:
+                return state
+        return None
 
     def _user_answer_clear_tabs(
         self, ans_tab: str, answered_task_id: str,
@@ -1246,12 +1340,16 @@ class _CommandsMixin:
         pre-step hook can drain and inject the messages into the model
         conversation before the next model call.
 
-        Exception (see :func:`_route_prompt_to_owner`): a message
+        Exception (see :meth:`_route_prompt_to_owner`): a message
         wrapped in ``<task>...</task>`` tags is NOT injected into the
         running task.  Its task blocks are queued on
         :attr:`AgentState.queued_followup_tasks` instead, and the task
         runner executes them one-by-one as further sequential subtasks
-        once the current task finishes.
+        once the current task finishes.  And while the running agent
+        is blocked inside ``ask_user_question``, a plain message is
+        delivered as that question's answer (the agent cannot drain
+        steering input until the tool returns) and every viewer tab
+        receives ``askUserDone``, exactly as for a ``userAnswer``.
 
         When the tab itself has no live task (the common case for a
         VIEWER tab opened from the history sidebar while a task runs
@@ -1324,7 +1422,7 @@ class _CommandsMixin:
             if question is not None and owner_task:
                 ask_question = question
             else:
-                _route_prompt_to_owner(owner, prompt)
+                self._route_prompt_to_owner(owner, prompt, tab_id)
                 if not owner_task:
                     owner.unattributed_prompt_echoes.append(prompt)
         if ask_question is not None:

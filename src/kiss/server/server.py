@@ -2134,11 +2134,12 @@ class VSCodeServer(
         routing (:meth:`_resolve_user_answer_state`): the state
         launched from *tab_id* itself, else the state of any task the
         tab is subscribed to.  The broadcast happens under
-        ``_state_lock`` — the same lock ``_cmd_user_answer`` holds
-        while clearing ``pending_ask_question`` — so the re-emitted
-        ``askUser`` can never be ordered after the answer's
-        ``askUserDone`` (which is broadcast after the lock is
-        released), guaranteeing no client is left with a stale modal.
+        ``_state_lock`` — the same lock ``_deliver_user_answer`` holds
+        while clearing ``pending_ask_question`` and broadcasting the
+        answer's ``askUserDone`` — so the re-emitted ``askUser`` is
+        ordered either strictly before that close (and closed by it)
+        or strictly after the question was cleared (and not emitted at
+        all), guaranteeing no client is left with a stale modal.
 
         Args:
             tab_id: Frontend tab id whose viewers should (re)show the
