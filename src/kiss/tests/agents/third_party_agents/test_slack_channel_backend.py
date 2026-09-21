@@ -117,6 +117,25 @@ class TestSlackChannelBackendMethods:
         with pytest.raises(SlackApiError):
             self.backend.find_user("nobody")
 
+    def test_find_channel_passes_conversation_id_through(self) -> None:
+        """find_channel returns a conversation ID as-is without any API call.
+
+        The server answers invalid_auth to every call, so getting the ID
+        back (instead of SlackApiError) proves no request was made.
+        """
+        assert self.backend.find_channel("C0AKYSNLB7W") == "C0AKYSNLB7W"
+        assert self.backend.find_channel("G012ABCDEFG") == "G012ABCDEFG"
+        assert self.backend.find_channel("D012ABCDEFG") == "D012ABCDEFG"
+
+    def test_find_user_passes_user_id_through(self) -> None:
+        """find_user returns a user ID as-is without any API call.
+
+        The server answers invalid_auth to every call, so getting the ID
+        back (instead of SlackApiError) proves no request was made.
+        """
+        assert self.backend.find_user("UD7PM70GG") == "UD7PM70GG"
+        assert self.backend.find_user("W012ABCDEFG") == "W012ABCDEFG"
+
     def test_join_channel_swallows_api_error(self) -> None:
         """join_channel silently ignores SlackApiError."""
         self.backend.join_channel("C_FAKE_CHANNEL")
