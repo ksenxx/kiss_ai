@@ -34,6 +34,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -705,17 +706,18 @@ class DiscordAgent(BaseChannelAgent):
         "created in the Discord Developer Portal "
         "(https://discord.com/developers/applications), which sits behind the "
         "user's Discord login: never ask for or type the user's Discord "
-        "password or 2FA code. You may call start_discord_browser_auth() and "
-        "drive the portal with browser tools only while no login screen, "
-        "captcha, or page failure appears. On any failed page load, missing "
-        "display, or login wall, do not retry it or relaunch the browser — "
-        "hand off the token instead:\n"
+        "password or 2FA code. Call start_discord_browser_auth(): it opens the "
+        "portal in the user's default browser on this machine when it can and "
+        "returns the steps for the user. Do not drive the portal or any Discord "
+        "login page with your own browser tools; on any failed page load, "
+        "missing display, or login wall, do not retry it or relaunch the "
+        "browser — hand off the token instead:\n"
         "1. Call ask_user_question() asking the user to open "
-        "https://discord.com/developers/applications in their OWN browser, "
-        "create an application (New Application), open its Bot section, click "
-        "Reset Token to reveal the bot token, enable the Message Content "
-        "intent under Privileged Gateway Intents, and paste the bot token "
-        "back.\n"
+        "https://discord.com/developers/applications in their OWN browser (if it "
+        "did not open by itself), create an application (New Application), open "
+        "its Bot section, click Reset Token to reveal the bot token, enable the "
+        "Message Content intent under Privileged Gateway Intents, and paste the "
+        "bot token back.\n"
         "2. Call authenticate_discord(bot_token=<pasted token>).\n"
         "3. Finish by verifying with check_discord_auth()."
     )
@@ -759,12 +761,12 @@ class DiscordAgent(BaseChannelAgent):
             """
             if not agent._backend._bot_token:  # pragma: no branch
                 return (
-                    "Not authenticated with Discord. If browser tools work, call "
-                    "start_discord_browser_auth() to create a bot in the Discord "
-                    "Developer Portal; otherwise ask the user (ask_user_question) "
-                    "to create the bot at https://discord.com/developers/applications "
-                    "in their OWN browser and paste back the bot token. Then call "
-                    "authenticate_discord(bot_token=...). Never ask for the user's "
+                    "Not authenticated with Discord. Call start_discord_browser_auth() "
+                    "to open the Discord Developer Portal "
+                    "(https://discord.com/developers/applications) in the user's "
+                    "default browser, then ask the user (ask_user_question) to create "
+                    "the bot there in their OWN browser and paste back the bot token. "
+                    "Then call authenticate_discord(bot_token=...). Never ask for the user's "
                     "Discord password or 2FA code."
                 )
             try:
@@ -849,30 +851,30 @@ class DiscordAgent(BaseChannelAgent):
             return "Discord authentication cleared."
 
         def start_discord_browser_auth() -> str:
-            """Begin automated Discord bot creation and token retrieval via browser.
+            """Open the Discord Developer Portal for the user to create a bot token.
 
-            Navigates to the Discord Developer Portal. Use your browser tools
-            (go_to_url, click, type_text) to complete the following steps:
+            Opens https://discord.com/developers/applications in the user's
+            default browser when this machine has one and returns the steps
+            to relay with ask_user_question():
             1. Click "New Application", give it a name, and create it.
             2. Go to the "Bot" section, click "Add Bot" (or "Reset Token").
-            3. Copy the bot token shown.
+            3. Copy the bot token shown and paste it back.
             4. Enable any required Privileged Gateway Intents (Message Content, etc.).
-            5. Call authenticate_discord(bot_token=<the token>).
-            If a login screen, captcha, or page failure appears, do not retry:
-            hand off via ask_user_question() — the user creates the bot in
-            their OWN browser and pastes back the token. Never ask for the
-            user's Discord password or 2FA code.
+            Then call authenticate_discord(bot_token=<the token>).
+            Do not drive the portal with your own browser tools; if a page
+            fails to load, do not retry. Never ask for the user's Discord
+            password or 2FA code.
 
             Returns:
-                Instructions for navigating the Discord Developer Portal.
+                The portal URL, whether it was opened, and the user's steps.
             """
             return (
-                "Open https://discord.com/developers/applications with your "
-                "go_to_url browser tool and complete the bot creation steps "
-                "described above. If browser tools are unavailable or the page "
-                "fails to load or requires login, ask the user "
-                "(ask_user_question) to create the bot there in their OWN "
-                "browser and paste back the token, then call "
+                "The user creates the Discord bot themselves. "
+                + portal_handoff("https://discord.com/developers/applications")
+                + " Ask them to, in their OWN browser: 1. New Application (name it). "
+                "2. Bot section > Reset Token to reveal the bot token. 3. Enable the "
+                "Message Content intent under Privileged Gateway Intents. 4. Copy the "
+                "bot token and paste back the token here. Then call "
                 "authenticate_discord(bot_token=...)."
             )
 

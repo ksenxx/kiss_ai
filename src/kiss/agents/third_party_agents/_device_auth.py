@@ -16,9 +16,10 @@ reach the agent's host:
   with a client ID only and no client secret;
 * Nextcloud's Login Flow v2 — needs no client registration at all.
 
-Both work the same way: ``authenticate_<service>()`` starts a session and
-hands back the URL (plus a short code where the provider does not
-pre-fill it) for the USER to open in their own browser; a background
+Both work the same way: ``authenticate_<service>()`` starts a session,
+opens the sign-in URL in the USER's default browser when this machine
+has one, and hands back that URL (plus a short code where the provider
+does not pre-fill it) so the user can also open it by hand; a background
 thread polls the provider until the approval lands; and
 ``finish_<service>_auth()`` collects the result and enrolls the
 credential.  The sign-in page itself is never driven by the agent, and
@@ -35,6 +36,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import requests
+
+from kiss.agents.third_party_agents._browser_handoff import open_in_default_browser
 
 DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 USER_AGENT = "KISS Sorcar"
@@ -415,39 +418,60 @@ def _origin(url: str) -> tuple[str, str, int | None]:
     return scheme, (parts.hostname or "").lower(), port
 
 
-def consent_instructions(service: str, label: str, session: ConsentSession) -> str:
+def consent_instructions(
+    service: str, label: str, session: ConsentSession, browser_opened: bool = False
+) -> str:
     """Build the agent-facing hand-off text for a started session.
 
     Args:
         service: Connector service name (used in the finish tool name).
         label: Human-readable service label.
         session: The session whose URL and code the user needs.
+        browser_opened: Whether the sign-in page was already opened in
+            the user's default browser on this machine.
 
     Returns:
         Step-by-step instructions: the user signs in and approves in
-        their OWN browser, the agent then calls the finish tool.
+        their OWN browser (already open when *browser_opened*), the agent
+        shows the URL and code regardless, then calls the finish tool.
     """
     code_step = ""
     if session.user_code and session.code_prefilled:
         code_step = f" and confirm the code shown is {session.user_code}"
     elif session.user_code:
         code_step = f" and enter the code {session.user_code} when the page asks for it"
+    if browser_opened:
+        opened = (
+            "The sign-in page has just been opened in the user's default browser "
+            "on this machine; "
+        )
+    else:
+        opened = (
+            "No browser could be opened from this machine (headless or remote); "
+        )
     return (
         f"Connect {label} the way the Muse app does: the USER signs in and "
-        "approves; you only relay the link. Do NOT open this URL or any "
-        f"{label} sign-in page in your built-in browser, and never ask for or "
-        "type the user's password or 2FA code. Steps: 1) Call "
+        f"approves; you only relay the link and code. {opened}do NOT open this "
+        f"URL or any {label} sign-in page in your built-in browser, and never "
+        "ask for or type the user's password or 2FA code. Steps: 1) Call "
         "ask_user_question() giving the user this exact URL to open in their "
-        f"OWN browser: {session.verification_uri} — tell them to sign in to "
-        f"{label}{code_step}, approve the access request, and reply here when "
-        f"done (the link is valid for about {max(session.expires_in // 60, 1)} "
-        f"minutes). 2) Call finish_{service}_auth(); if it returns 'pending', "
-        "wait a few seconds and call it again. Nothing has to be pasted back."
+        f"OWN browser if no window appeared: {session.verification_uri} — tell "
+        f"them to sign in to {label}{code_step}, approve the access request, and "
+        "reply here when done (the link is valid for about "
+        f"{max(session.expires_in // 60, 1)} minutes). 2) Call "
+        f"finish_{service}_auth(); if it returns 'pending', wait a few seconds "
+        "and call it again. Nothing has to be pasted back."
     )
 
 
 def consent_required(service: str, label: str, session: ConsentSession) -> dict[str, Any]:
     """Build the ``authenticate_<service>()`` answer for a started session.
+
+    The verification page is opened in the user's default browser when
+    this process can reach one (see
+    :func:`~kiss.agents.third_party_agents._browser_handoff.open_in_default_browser`);
+    the URL and code are returned in every case so the agent can show
+    them for a manual sign-in.
 
     Args:
         service: Connector service name.
@@ -456,15 +480,18 @@ def consent_required(service: str, label: str, session: ConsentSession) -> dict[
 
     Returns:
         A JSON-ready dict with ``status: consent_required``, the URL, the
-        code (empty when pre-filled), the expiry and the instructions.
+        code (empty when pre-filled), the expiry, whether the page was
+        opened in the user's browser, and the instructions.
     """
+    browser_opened = open_in_default_browser(session.verification_uri)
     return {
         "ok": True,
         "status": "consent_required",
         "verification_uri": session.verification_uri,
         "user_code": session.user_code,
         "expires_in": session.expires_in,
-        "instructions": consent_instructions(service, label, session),
+        "browser_opened": browser_opened,
+        "instructions": consent_instructions(service, label, session, browser_opened),
     }
 
 
@@ -581,13 +608,15 @@ def connect_prompt(service: str, label: str, start_call: str, prerequisite: str)
         "never re-run authentication over a valid credential.\n"
         f"2. To connect, call {start_call}. {prerequisite} It returns "
         "status 'consent_required' with a verification URL (and a short code when "
-        "the provider does not pre-fill it).\n"
+        "the provider does not pre-fill it) and tries by itself to open that URL in "
+        "the user's default browser on this machine ('browser_opened' tells you "
+        "whether it could).\n"
         "3. The USER completes the sign-in, exactly like clicking Connect in the "
-        "Muse app: call ask_user_question() with that URL (and code), telling them "
-        f"to open it in their OWN browser, sign in to {label}, approve, and reply "
-        "when done. Do NOT open the URL or any sign-in page in your built-in "
-        "browser, do not retry or relaunch the browser, and never ask for or type "
-        "the user's password or 2FA code. Nothing is pasted back.\n"
+        "Muse app: ALWAYS call ask_user_question() with that URL (and code) so they "
+        f"can open it in their OWN browser if no window appeared, sign in to {label}, "
+        "approve, and reply when done. Do NOT open the URL or any sign-in page in "
+        "your built-in browser, do not retry or relaunch the browser, and never ask "
+        "for or type the user's password or 2FA code. Nothing is pasted back.\n"
         f"4. Then call finish_{service}_auth(); if it returns 'pending', wait a few "
         "seconds and call it again. Confirm the result with "
         f"check_{service}_auth()."

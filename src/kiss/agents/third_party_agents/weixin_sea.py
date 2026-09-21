@@ -49,6 +49,7 @@ from kiss.agents.third_party_agents._backend_utils import (
     start_http_server,
     stop_http_server,
 )
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -410,6 +411,8 @@ class WeixinAgent(BaseChannelAgent):
                     "Not configured for Weixin. Use authenticate_weixin() to configure.\n"
                     "You need the AppID and AppSecret of a WeChat Official Account "
                     "from https://mp.weixin.qq.com (Settings > Basic Configuration)."
+                    + "\n"
+                    + portal_handoff("https://mp.weixin.qq.com")
                 )
             return json.dumps(
                 {

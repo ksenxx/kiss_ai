@@ -86,8 +86,10 @@ def _due_command_job(name: str, command: str) -> dict:
 
 
 def test_due_jobs_run_concurrently_in_private_work_dirs(tmp_path: Path) -> None:
+    # Distinct commands: an identical command on the same schedule would be
+    # rejected by cron_job("create") as a duplicate.
     first = _due_command_job("first", "sleep 1; pwd")
-    second = _due_command_job("second", "sleep 1; pwd")
+    second = _due_command_job("second", "sleep 1 && pwd")
     started = time.monotonic()
     assert tick(2.0) == 2
     # Two 1 s jobs finishing in under 2 s can only have overlapped.

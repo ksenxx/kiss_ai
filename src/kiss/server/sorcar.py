@@ -300,6 +300,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("runUpdate", handler="run_update"),
     ApiCommand("updateModels", handler="update_models"),
     ApiCommand("snoozeUpdate", handler="snooze_update"),
+    ApiCommand("updateWhenIdle", handler="update_when_idle"),
     ApiCommand("ping", handler="ping"),
     ApiCommand("serverReset", handler="server_reset"),
     ApiCommand(
@@ -556,6 +557,8 @@ class ServerBackend(Protocol):
     async def _handle_update_models(self, conn_id: str = "") -> None: ...
 
     async def _handle_snooze_update(self, latest: str = "") -> None: ...
+
+    async def _handle_update_when_idle(self, cancel: bool = False) -> None: ...
 
     async def _handle_server_reset(self, conn_id: str = "") -> None: ...
 
@@ -1451,6 +1454,23 @@ class ServerApi:
         await self._backend._handle_snooze_update(
             latest if isinstance(latest, str) else "",
         )
+
+    async def update_when_idle(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Arm (or cancel) an update that runs once no task is running.
+
+        Services the "Update when idle" action of the update toast:
+        the daemon polls its agent registry and launches ``install.sh``
+        the first time no task is in flight.  The ``update_available``
+        state is rebroadcast with ``pendingIdle`` so every chat window's
+        toast reflects the armed state.
+
+        Args:
+            cmd: The ``updateWhenIdle`` command; ``cancel: true`` disarms
+                a pending idle update instead of arming one.
+            ctx: The transport context of the current call (unused —
+                the resulting rebroadcast must reach every window).
+        """
+        await self._backend._handle_update_when_idle(cancel=cmd.get("cancel") is True)
 
     async def ping(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Answer a client's ordering probe with a direct ``pong``.

@@ -32,6 +32,7 @@ from kiss.agents.third_party_agents._backend_utils import (
     start_http_server,
     stop_http_server,
 )
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -574,6 +575,8 @@ class LineAgent(BaseChannelAgent):
                     "to configure. Get a token from https://developers.line.biz/console/\n"
                     "Create a Messaging API channel, then find the Channel access token "
                     "on the channel's 'Messaging API' tab."
+                    + "\n"
+                    + portal_handoff("https://developers.line.biz/console/")
                 )
             try:
                 quota = json.loads(agent._backend.get_quota())

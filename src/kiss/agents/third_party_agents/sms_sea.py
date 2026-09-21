@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -419,6 +420,8 @@ class SMSAgent(BaseChannelAgent):
                     "Not authenticated with Twilio. Use authenticate_sms() to configure.\n"
                     "You need account_sid, auth_token, and from_number from "
                     "https://console.twilio.com/ (Dashboard > Account Info)."
+                    + "\n"
+                    + portal_handoff("https://console.twilio.com/")
                 )
             try:
                 result = json.loads(agent._backend.get_account_info())

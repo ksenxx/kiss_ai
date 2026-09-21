@@ -42,6 +42,7 @@ from urllib.parse import quote
 
 import requests
 
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -1330,7 +1331,8 @@ class GitHubAgent(BaseChannelAgent):
                         "https://github.com/settings/applications/new (any homepage "
                         "and callback URL; tick 'Enable Device Flow') and pass its "
                         "Client ID as client_id=..., or set KISS_GITHUB_CLIENT_ID. "
-                        "Or pass a personal access token as token=...",
+                        "Or pass a personal access token as token=... "
+                        + portal_handoff("https://github.com/settings/applications/new"),
                     }
                 )
             try:

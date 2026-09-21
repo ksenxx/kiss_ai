@@ -27,15 +27,20 @@ from typing import Any, cast
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from kiss.agents.third_party_agents._backend_utils import is_headless_environment
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
     channel_main,
     write_private_file,
+)
+from kiss.agents.third_party_agents._google_workspace_utils import (
+    CLOUD_CONSOLE_URL,
+    RemoteOAuthSession,
+    google_consent_steps,
+    start_google_consent,
 )
 from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 from kiss.core.config import kiss_home
@@ -139,35 +144,6 @@ def _clear_credentials() -> None:
         from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
 
         clear_credentials("gmail")
-
-
-def _run_oauth_flow() -> Credentials | None:
-    """Run the OAuth2 installed-app flow to get new credentials.
-
-    Requires ``~/.kiss/third_party_agents/gmail/credentials.json`` to exist
-    (downloaded from Google Cloud Console).
-
-    In headless/Docker environments, runs ``run_local_server`` with
-    ``open_browser=False`` so the auth URL is printed for manual visiting
-    instead of a browser window being opened.
-
-    Returns:
-        New Credentials object, or None if credentials.json not found.
-    """
-    creds_path = _credentials_path()
-    if not creds_path.exists():  # pragma: no branch
-        return None
-    flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), _SCOPES)
-    if is_headless_environment():  # pragma: no branch
-        creds = cast(Credentials, flow.run_local_server(port=0, open_browser=False))
-    else:
-        creds = cast(Credentials, flow.run_local_server(port=0))
-    _save_credentials(creds)
-    if muse_auth_enabled():
-        # The real credential now lives in the daemon vault; hand back
-        # a surrogate so no real token stays in agent memory.
-        return _load_credentials()
-    return creds
 
 
 def _build_service(creds: Credentials) -> Any:
@@ -930,29 +906,12 @@ class GmailAgent(BaseChannelAgent):
         "Always call check_gmail_auth() first; if it returns ok, report the "
         "authenticated email and stop — never start an OAuth flow over valid "
         "credentials. If credentials.json is missing, call "
-        "start_gmail_browser_setup() to create an OAuth Desktop-app client in "
-        "Google Cloud Console; if credentials.json exists, call "
-        "authenticate_gmail() directly.\n"
-        "When authenticate_gmail() returns status 'consent_required' with an "
-        "auth_url, do NOT open the auth_url or any accounts.google.com page in "
-        "your own browser, and never ask for or type the user's Google "
-        "password or 2FA code: Google sign-in pages are often blocked in the "
-        "built-in browser (net::ERR_FAILED), and the sign-in belongs to the "
-        "user. Hand off consent instead:\n"
-        "1. Call ask_user_question() with the full auth_url, asking the user "
-        "to open it in their OWN browser, approve access, and paste back the "
-        "complete redirect URL from the address bar (it looks like "
-        "http://localhost:PORT/?state=...&code=... and shows a connection "
-        "error page — that is expected).\n"
-        "2. The loopback consent server runs on THIS machine: deliver the "
-        "pasted URL to it with Bash: curl -s '<pasted redirect URL>' (quote "
-        "the URL; it contains & characters).\n"
-        "3. Call finish_gmail_auth(); if it returns 'pending', wait 2 seconds "
-        "and call it once more.\n"
-        "If any browser navigation to a Google page fails, do not retry it or "
-        "relaunch the browser — switch to this hand-off immediately. Finish "
-        "by verifying with check_gmail_auth() and reporting the authenticated "
-        "email address."
+        "start_gmail_browser_setup(), which opens Google Cloud Console for the "
+        "user to create an OAuth Desktop-app client; if credentials.json exists, "
+        "call authenticate_gmail() directly.\n"
+        + google_consent_steps("gmail")
+        + " Finish by verifying with check_gmail_auth() and reporting the "
+        "authenticated email address."
     )
 
     def __init__(self) -> None:
@@ -989,9 +948,9 @@ class GmailAgent(BaseChannelAgent):
                     )
                 return (
                     "Not authenticated with Gmail. Call start_gmail_browser_setup() "
-                    "to open Google Cloud Console in the browser and create OAuth "
-                    "credentials autonomously, then call authenticate_gmail() to "
-                    "complete the OAuth2 flow."
+                    "to open Google Cloud Console in the user's default browser so "
+                    "they can create OAuth credentials, then call "
+                    "authenticate_gmail() to start the OAuth2 consent."
                 )
             try:
                 profile = agent._backend._service.users().getProfile(userId="me").execute()
@@ -1006,69 +965,29 @@ class GmailAgent(BaseChannelAgent):
                 return json.dumps({"ok": False, "error": str(e)})
 
         def authenticate_gmail() -> str:
-            """Start the Gmail OAuth2 authentication flow.
+            """Start the Gmail OAuth2 consent flow.
 
-            Opens a browser window for the user to authorize access.
-            Requires credentials.json to exist at
-            ~/.kiss/third_party_agents/gmail/credentials.json.
+            Starts the loopback consent server, opens the Google consent
+            page in the user's default browser when this machine has one,
+            and returns the auth_url for the user to open by hand
+            otherwise. Requires credentials.json to exist at
+            ~/.kiss/third_party_agents/gmail/credentials.json. Complete
+            the flow with finish_gmail_auth().
 
             Returns:
-                Authentication result with email address, an inline
-                remote-consent handoff (auth_url + instructions) on
-                headless machines, or an error message.
+                status 'consent_required' with auth_url, browser_opened and
+                instructions; instructions when credentials.json is missing;
+                or an error message.
             """
-            if is_headless_environment():
-                # Remote machine: the user cannot see a local browser, so
-                # hand back the consent URL for the user to open in their
-                # own browser and paste back the loopback redirect URL.
-                from kiss.agents.third_party_agents._google_workspace_utils import (
-                    RemoteOAuthSession,
-                    remote_oauth_instructions,
-                )
-
-                try:
-                    session = RemoteOAuthSession.start("gmail", _SCOPES)
-                except Exception as e:
-                    return json.dumps(
-                        {"ok": False, "error": f"OAuth flow failed for Gmail: {e}"}
-                    )
-                if session is not None:
-                    return json.dumps(
-                        {
-                            "ok": True,
-                            "status": "consent_required",
-                            "auth_url": session.auth_url,
-                            "instructions": remote_oauth_instructions(
-                                "gmail", "Gmail", session.auth_url
-                            ),
-                        }
-                    )
-            creds = _run_oauth_flow()
-            if creds is None:  # pragma: no branch
+            answer = start_google_consent("gmail", "Gmail", _SCOPES)
+            if answer is None:
                 return (
                     f"credentials.json not found at {_credentials_path()}. "
-                    "Download it from Google Cloud Console > APIs & Services > "
-                    "Credentials > OAuth 2.0 Client IDs > Download JSON, "
-                    f"then save it to {_credentials_path()}"
+                    f"Download it from Google Cloud Console ({CLOUD_CONSOLE_URL}) > "
+                    "OAuth 2.0 Client IDs > Download JSON, then save it to "
+                    f"{_credentials_path()}, or call start_gmail_browser_setup()."
                 )
-            agent._backend._service = _build_service(creds)
-            try:
-                profile = agent._backend._service.users().getProfile(userId="me").execute()
-                return json.dumps(
-                    {
-                        "ok": True,
-                        "message": "Gmail authentication successful.",
-                        "email": profile.get("emailAddress", ""),
-                    }
-                )
-            except Exception as e:
-                return json.dumps(
-                    {
-                        "ok": True,
-                        "message": "Gmail token saved. Could not verify profile.",
-                        "error": str(e),
-                    }
-                )
+            return answer
 
         def clear_gmail_auth() -> str:
             """Clear the stored Gmail authentication credentials.
@@ -1081,46 +1000,42 @@ class GmailAgent(BaseChannelAgent):
             return "Gmail authentication cleared."
 
         def start_gmail_browser_setup() -> str:
-            """Begin automated Gmail API credential setup via browser.
+            """Open Google Cloud Console for the user to create Gmail OAuth credentials.
 
-            Navigates to Google Cloud Console. Use your browser tools
-            (go_to_url, click, type_text) to complete the following steps autonomously:
-            1. Create or select a project.
-            2. Enable the Gmail API (APIs & Services > Enable APIs > search "Gmail API").
-            3. Go to Credentials > Create Credentials > OAuth client ID.
-            4. Choose "Desktop app" as the application type, give it a name.
-            5. Download the JSON file and save it to:
-               ~/.kiss/third_party_agents/gmail/credentials.json
-            6. Call authenticate_gmail() to complete the OAuth consent flow.
-            Use ask_user_question() if you need user help with Google account login screens.
+            Opens the Credentials page in the user's default browser when
+            this machine has one and returns the steps to relay to the
+            user with ask_user_question(). Do not drive Google Cloud
+            Console or any Google sign-in page with your built-in browser,
+            and never ask for the user's Google password or 2FA code.
 
             Returns:
-                Instructions for navigating Google Cloud Console.
+                The console URL and step-by-step instructions for the user.
             """
             return (
-                "Open https://console.cloud.google.com/apis/credentials with "
-                "your go_to_url browser tool and complete the credential "
-                "setup steps described above. If browser tools are "
-                "unavailable, manually download credentials.json from "
-                "https://console.cloud.google.com/apis/credentials, save it "
-                f"to {_credentials_path()}, then call authenticate_gmail()."
+                f"The user creates the OAuth client themselves. "
+                f"{portal_handoff(CLOUD_CONSOLE_URL)} Ask them to: 1. Create or "
+                "select a project. 2. Enable the Gmail API (APIs & Services > "
+                "Enable APIs). 3. Credentials > Create Credentials > OAuth client "
+                "ID > Desktop app. 4. Download the JSON and either paste its "
+                f"content back or save it to {_credentials_path()}. Write pasted "
+                "content to that path yourself, then call authenticate_gmail() to "
+                "start the OAuth consent. Do not drive Google Cloud Console or any "
+                "Google sign-in page with your built-in browser, and never ask for "
+                "the user's Google password or 2FA code."
             )
 
         def finish_gmail_auth() -> str:
-            """Complete a remote Gmail OAuth consent started by authenticate_gmail().
+            """Complete the Gmail OAuth consent started by authenticate_gmail().
 
             Call after the user has approved consent in their own browser
-            and the pasted redirect URL has been delivered to the local
-            consent server (``curl -s '<pasted redirect URL>'``).
+            (and, when they did so on another machine, after the pasted
+            redirect URL has been delivered to the local consent server
+            with ``curl -s '<pasted redirect URL>'``).
 
             Returns:
                 Authentication result, a pending status when consent is not
                 finished, or an error message.
             """
-            from kiss.agents.third_party_agents._google_workspace_utils import (
-                RemoteOAuthSession,
-            )
-
             creds, status = RemoteOAuthSession.finish("gmail", _SCOPES)
             if status == "pending":
                 return json.dumps(

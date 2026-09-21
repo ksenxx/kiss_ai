@@ -29,6 +29,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -386,6 +387,8 @@ class BraveSearchAgent(BaseChannelAgent):
                     "Get an API key at https://api-dashboard.search.brave.com/ "
                     "(create an account, pick a plan — a free tier exists — "
                     "and generate a subscription token)."
+                    + "\n"
+                    + portal_handoff("https://api-dashboard.search.brave.com/")
                 )
             return json.dumps({"ok": True, "message": "Brave Search API key is configured."})
 

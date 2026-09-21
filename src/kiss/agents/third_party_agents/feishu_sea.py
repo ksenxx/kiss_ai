@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -410,6 +411,8 @@ class FeishuAgent(BaseChannelAgent):
                     "Get credentials from: https://open.feishu.cn/app (Feishu) "
                     "or https://open.larksuite.com/app (Lark international).\n"
                     "Create an app and find app_id and app_secret on the app's Credentials page."
+                    + "\n"
+                    + portal_handoff("https://open.feishu.cn/app")
                 )
             try:
                 resp = agent._backend.list_chats(page_size=1)
