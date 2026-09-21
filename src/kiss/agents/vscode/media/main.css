@@ -1968,13 +1968,14 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 /* The dimming backdrop behind every side panel -- history sidebar,
-   task info drawer, settings, frequent tasks, tricks: one rule, five
-   ids. */
+   task info drawer, settings, frequent tasks, tricks, working
+   directory: one rule, six ids. */
 #sidebar-overlay,
 #meta-overlay,
 #settings-overlay,
 #frequent-overlay,
-#tricks-overlay {
+#tricks-overlay,
+#workdir-overlay {
   position: fixed; inset: 0; background: rgb(0 0 0 / 50%);
   z-index: 199; opacity: 0; pointer-events: none; transition: opacity 0.2s ease;
 }
@@ -1983,7 +1984,8 @@ body.sidebar-chat-mode #meta-info-content {
 #meta-overlay.open,
 #settings-overlay.open,
 #frequent-overlay.open,
-#tricks-overlay.open { opacity: 1; pointer-events: auto; }
+#tricks-overlay.open,
+#workdir-overlay.open { opacity: 1; pointer-events: auto; }
 
 /* The settings panel: a centered dialog. No entry animation — it is
    display-toggled, never slid in from an edge. */
@@ -2060,32 +2062,102 @@ body.sidebar-chat-mode #meta-info-content {
 
 #tricks-panel.open { transform: translateY(0); }
 
+/* The "Working directory" bottom sheet ("..." menu): same geometry as
+   the Inject sheet. */
+#workdir-panel {
+  position: fixed;
+  left: 5%;
+  right: 5%;
+  bottom: 0;
+  width: 90%;
+  height: 60vh;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
+  transform: translateY(100%);
+  transition: transform 0.2s ease;
+  z-index: 200;
+  padding: 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+#workdir-panel.open { transform: translateY(0); }
+
 /* The "x" of every side panel; the bottom sheets' buttons also stack
    above their own list pane. */
 #sidebar-close,
 #settings-panel-close,
 #frequent-panel-close,
-#tricks-panel-close {
+#tricks-panel-close,
+#workdir-panel-close {
   position: absolute; top: 12px; right: 12px; background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); font-size: var(--fs-2xl); cursor: pointer; padding: 4px 8px; border-radius: 4px;
 }
 
 #frequent-panel-close,
-#tricks-panel-close { z-index: 1; }
+#tricks-panel-close,
+#workdir-panel-close { z-index: 1; }
 
 #sidebar-close:hover,
 #settings-panel-close:hover,
 #frequent-panel-close:hover,
-#tricks-panel-close:hover { color: color-mix(in srgb, var(--fg) 83%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
+#tricks-panel-close:hover,
+#workdir-panel-close:hover { color: color-mix(in srgb, var(--fg) 83%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 
-/* The scrolling list pane of both bottom sheets. */
+/* The scrolling list pane of the bottom sheets. */
 #frequent-list,
-#tricks-list {
+#tricks-list,
+#workdir-list {
   flex: 1;
   overflow-y: auto;
   scrollbar-width: thin;
   margin-top: 2px;
 }
+
+/* One previously opened working directory: its path and when it was
+   last opened. */
+.workdir-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.workdir-item:hover,
+.workdir-item:focus-visible {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  outline: none;
+}
+
+.workdir-item-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.workdir-item-ago {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  white-space: nowrap;
+}
+
+#workdir-empty,
+#workdir-error {
+  padding: 8px 10px;
+  font-size: var(--fs-sm);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+
+#workdir-error { color: var(--red, #f14c4c); margin-bottom: 6px; }
 
 .tricks-item {
   padding: 8px 10px;
@@ -2887,7 +2959,8 @@ body.sidebar-chat-mode #meta-info-content {
 
 #history-search,
 #tricks-search,
-#tricks-add-input {
+#tricks-add-input,
+#workdir-input {
   width: 100%; background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border);
   border-radius: 6px; color: var(--fg); font-size: var(--fs-base); padding: 6px 28px 6px 10px;
   outline: none; box-sizing: border-box;
@@ -2896,11 +2969,19 @@ body.sidebar-chat-mode #meta-info-content {
 
 #history-search:focus,
 #tricks-search:focus,
-#tricks-add-input:focus { border-color: var(--accent); }
+#tricks-add-input:focus,
+#workdir-input:focus { border-color: var(--accent); }
 
-/* The Inject promptlet panel's "new promptlet" box with its Add button. */
-#tricks-add-row { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
-#tricks-add-row #tricks-add-input { flex: 1; min-width: 0; padding-right: 10px; }
+/* The Inject promptlet panel's "new promptlet" box with its Add button,
+   and the Working directory panel's path box with its Open and
+   folder buttons. */
+#tricks-add-row,
+#workdir-open-row { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+
+#tricks-add-row #tricks-add-input,
+#workdir-open-row #workdir-input { flex: 1; min-width: 0; padding-right: 10px; }
+
+#workdir-pick-btn { padding: 6px 8px; }
 
 /* The search box with the flat-list / chat-panels switch on its right. */
 .history-search-row { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }

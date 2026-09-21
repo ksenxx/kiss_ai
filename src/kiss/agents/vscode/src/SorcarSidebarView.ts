@@ -414,6 +414,18 @@ export function updateShellPath(): string | null {
   return candidates.find(c => fs.existsSync(c)) ?? null;
 }
 
+/**
+ * The real directory behind *p* (`..` segments and symlinks resolved),
+ * or '' when *p* is empty or not an existing directory.
+ */
+function realDirectory(p: string): string {
+  try {
+    return p && fs.statSync(p).isDirectory() ? fs.realpathSync(p) : '';
+  } catch {
+    return '';
+  }
+}
+
 export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _view?: ChatWebviewHost;
   private _panelHooks?: PanelHooks;
@@ -1890,7 +1902,63 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         await cfg.update('editorTabsMode', !!message.enabled, target);
         break;
       }
+
+      case 'openWorkDir':
+        await this._openWorkDir(message.path);
+        break;
+
+      case 'pickWorkDir': {
+        const wd = this._getWorkDir();
+        const picked = await vscode.window.showOpenDialog({
+          canSelectFolders: true,
+          canSelectFiles: false,
+          canSelectMany: false,
+          openLabel: 'Open as Working Directory',
+          defaultUri: wd ? vscode.Uri.file(wd) : undefined,
+        });
+        if (picked && picked[0]) await this._openWorkDir(picked[0].fsPath);
+        break;
+      }
     }
+  }
+
+  /**
+   * Open *dir* as this window's folder.
+   *
+   * A VS Code window's working directory is its workspace folder, so a
+   * directory chosen in the "Working directory" panel becomes a
+   * `vscode.openFolder` in this window.  A path that is not a
+   * directory, a file-system root, the folder this window already
+   * shows, or an open VS Code refuses is reported back to the panel as
+   * `workDirError` instead.
+   */
+  private async _openWorkDir(dir: string): Promise<void> {
+    const target = String(dir || '').trim();
+    const error = await this._openWorkDirError(target);
+    if (error) this._sendToWebview({type: 'workDirError', text: error});
+  }
+
+  /** Open *target* in this window; the failure text, or '' on success. */
+  private async _openWorkDirError(target: string): Promise<string> {
+    const real = realDirectory(target);
+    if (!real) return 'Not a directory: ' + (target || '(empty path)');
+    if (path.dirname(real) === real) {
+      // `/`, `C:\`, a UNC share root: the daemon never runs in one.
+      return 'A file-system root cannot be the working directory; pick a folder.';
+    }
+    const current = this._getWorkDir();
+    if (current && realDirectory(current) === real) {
+      return target + ' is already the working directory of this window.';
+    }
+    try {
+      await vscode.commands.executeCommand(
+        'vscode.openFolder',
+        vscode.Uri.file(target),
+      );
+    } catch (err) {
+      return 'Could not open ' + target + ': ' + String(err);
+    }
+    return '';
   }
 
   /**
