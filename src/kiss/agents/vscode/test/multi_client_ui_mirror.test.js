@@ -78,10 +78,12 @@ function actionBarLabel(client) {
   return bar ? bar.querySelector('.wt-label').textContent : '';
 }
 
+// The composer placeholder while the tab on screen has a question; '' when
+// there is none.
 function askText(client) {
-  const modal = client.win.document.getElementById('ask-user-modal');
-  if (!modal || modal.style.display !== 'flex') return '';
-  return modal.textContent || '';
+  const body = client.win.document.body;
+  if (!body.classList.contains('ask-answering')) return '';
+  return client.win.document.getElementById('task-input').placeholder;
 }
 
 function withTwoClients(body) {
@@ -127,8 +129,8 @@ function testAskUserOpensAndClosesOnBothClients() {
     mirror({type: 'askUser', question: 'Proceed?'}, clients);
     clients.forEach((client, i) => {
       assert.ok(
-        askText(client).includes('Proceed?'),
-        `client ${i} must show the ask-user question`,
+        askText(client).includes('answer'),
+        `client ${i} must put the composer into answer mode`,
       );
     });
 
@@ -137,11 +139,11 @@ function testAskUserOpensAndClosesOnBothClients() {
       assert.strictEqual(
         askText(client),
         '',
-        `client ${i} must close the ask-user window once answered`,
+        `client ${i} must leave answer mode once answered`,
       );
     });
   });
-  console.log('  ok - ask-user window opens and closes on every client');
+  console.log('  ok - answer mode opens and closes on every client');
 }
 
 function runTests() {

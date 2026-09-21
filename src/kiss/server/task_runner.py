@@ -2662,7 +2662,7 @@ class _TaskRunnerMixin:
                 # Cleared here, under the lock, rather than by the task
                 # thread's finally a moment later: a session replay in
                 # between would re-emit the question after the
-                # askUserDone broadcast below and leave a stale modal.
+                # askUserDone broadcast below and leave a stale prompt.
                 owner_state.pending_ask_question = ""
         logger.info(
             "Tool interrupt for tab %s (task %s, tool %r, call %s): %s",
@@ -2677,7 +2677,7 @@ class _TaskRunnerMixin:
         )
         if accepted and pending_ask:
             # The interrupted tool is a pending ask_user_question: the
-            # answer wait is aborted, so the question modal must close
+            # answer wait is aborted, so the question prompt must close
             # on every tab showing it (an answer would do this through
             # _cmd_user_answer's askUserDone).
             for clear_tab in self._user_answer_clear_tabs(tab_id, owner_task_id):
@@ -2996,7 +2996,7 @@ class _TaskRunnerMixin:
         The question is remembered on the task's agent state as
         ``pending_ask_question`` for as long as the agent thread is
         blocked on it, so session replays (``resumeSession``) can
-        re-broadcast the modal to clients that connect or reload while
+        re-broadcast the question to clients that connect or reload while
         the question is pending.  ``_cmd_user_answer`` clears the field
         the moment an answer is consumed (under ``_state_lock``, so a
         concurrent replay can never re-show an answered question); the
@@ -3011,7 +3011,7 @@ class _TaskRunnerMixin:
             # pending question and then broadcasting outside the lock
             # would let a session replay re-emit the question AND a
             # client answer it (``askUserDone``) before the initial
-            # broadcast hits the wire — reopening the modal on every
+            # broadcast hits the wire — reopening the question on every
             # client after its answer already closed it.
             with self._state_lock:
                 if q is not None:
