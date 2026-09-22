@@ -31,8 +31,11 @@ import pytest
 
 from kiss.agents.sorcar.docker_manager import DockerManager
 from kiss.core.kiss_error import KISSError
-
-IMAGE = "python:3.11-slim"
+from kiss.tests.agents.sorcar.docker_test_containers import (
+    IMAGE,
+    image_container_ids,
+    remove_new_image_containers,
+)
 
 
 def _docker_available() -> bool:
@@ -54,17 +57,12 @@ def manager() -> Iterator[DockerManager]:
     """A manager whose containers are all removed after the test."""
     mgr = DockerManager(IMAGE)
     client = docker.from_env()
-    before = {c.id for c in client.containers.list(all=True)}
+    before = image_container_ids(client)
     try:
         yield mgr
     finally:
         mgr.close()
-        for container in client.containers.list(all=True):
-            if container.id not in before:
-                try:
-                    container.remove(force=True)
-                except Exception:
-                    pass
+        remove_new_image_containers(client, before)
 
 
 def test_second_open_is_refused_and_keeps_first_container(
@@ -72,7 +70,7 @@ def test_second_open_is_refused_and_keeps_first_container(
 ) -> None:
     """``open()`` on an open manager must not start a second container."""
     client = docker.from_env()
-    before = {c.id for c in client.containers.list(all=True)}
+    before = image_container_ids(client)
     manager.open()
     first = manager.container
     first_dir = manager.host_shared_path
@@ -81,7 +79,7 @@ def test_second_open_is_refused_and_keeps_first_container(
         manager.open()
     assert manager.container is first, "the first container was orphaned"
     assert manager.host_shared_path == first_dir
-    started = {c.id for c in client.containers.list(all=True)} - before
+    started = image_container_ids(client) - before
     assert started == {first.id}, f"extra containers started: {started}"
     assert manager.Bash("echo still-open", "probe").strip() == "still-open"
     manager.close()
@@ -92,7 +90,7 @@ def test_second_open_is_refused_and_keeps_first_container(
 def test_close_without_shared_volume_and_unremovable_dir() -> None:
     """``close()`` copes with no shared volume and with an unremovable one."""
     client = docker.from_env()
-    before = {c.id for c in client.containers.list(all=True)}
+    before = image_container_ids(client)
     try:
         plain = DockerManager(IMAGE, mount_shared_volume=False)
         plain.open()
@@ -122,12 +120,7 @@ def test_close_without_shared_volume_and_unremovable_dir() -> None:
         assert mgr.host_shared_path is None
         assert not os.path.exists(shared)
     finally:
-        for container in client.containers.list(all=True):
-            if container.id not in before:
-                try:
-                    container.remove(force=True)
-                except Exception:
-                    pass
+        remove_new_image_containers(client, before)
 
 
 def test_failed_open_removes_shared_volume_dir(manager: DockerManager) -> None:
