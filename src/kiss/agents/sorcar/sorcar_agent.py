@@ -1781,6 +1781,17 @@ class SorcarAgent(RelentlessAgent):
             Returns:
                 The user's typed response text.
             """
+            from kiss.agents.sorcar import cron_agent
+
+            if cron_agent.is_unattended(self):
+                # A cron run (or its sub-task) has no one to answer; a
+                # blocked question would only stall until the timeout.
+                return (
+                    "Error: this task runs unattended (scheduled automation) and "
+                    "nobody can answer. Do not ask again: proceed on the most "
+                    "reasonable assumption, or report the blocker in your final "
+                    "summary and finish."
+                )
             ask_callback = getattr(self, "_ask_user_question_callback", None)
             if ask_callback:
                 return str(ask_callback(question))
@@ -1995,6 +2006,10 @@ class SorcarAgent(RelentlessAgent):
                 task_list = parse_tasks_json(tasks)
             except ValueError as e:
                 return f"Error: {e.args[0]}"
+            from kiss.agents.sorcar import cron_agent
+
+            if cron_agent.is_unattended(self):
+                task_list = [cron_agent.unattended_child_prompt(t) for t in task_list]
             try:
                 workers: int | None = int(max_workers) if max_workers else None
             except ValueError:

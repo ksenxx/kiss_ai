@@ -66,6 +66,8 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             IMAGE, command="sleep infinity", detach=True, working_dir="/srv",
             name=f"kiss-attach-test-{uuid.uuid4().hex[:8]}",
         )
+        assert self.container.id is not None
+        self.short_id: str = self.container.id[:12]
 
     def tearDown(self) -> None:
         try:
@@ -153,7 +155,7 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         assert result.success is True, result.text
         assert len(calls) == 1, calls
         call = calls[0]
-        assert self.container.id[:12] in call["bash"], call["bash"]
+        assert self.short_id in call["bash"], call["bash"]
         assert "/srv" in call["bash"].splitlines()[1], call["bash"]
         assert "written by the stub" in call["read"], call["read"]
         assert call["container_id"] == self.container.id
@@ -181,7 +183,7 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         assert "child task" in child["task"], child
         assert "agent ok" in parent["run_parallel"], parent["run_parallel"]
         assert child["container_id"] == self.container.id
-        assert self.container.id[:12] in child["bash"], child["bash"]
+        assert self.short_id in child["bash"], child["bash"]
 
     def test_sea_docker_image_getter_attaches(self) -> None:
         """An agent script's ``docker_image()`` getter selects the container."""
@@ -250,4 +252,4 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         assert len(calls) == 1, calls
         assert "bash_job" in calls[0]["tool_names"]
         assert calls[0]["container_id"] is None
-        assert self.container.id[:12] not in calls[0]["bash"]
+        assert self.short_id not in calls[0]["bash"]

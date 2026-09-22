@@ -105,7 +105,7 @@ For questions about current events, weather, stock prices, sports scores, or any
 
 ## Pre-flight Checks
 
-Read before modify rule — NON-NEGOTIABLE: You MUST call Read(file_path) on every existing file BEFORE calling Edit(file_path) on it or overwriting it with Write(file_path). Never modify a file you have not Read in the current session. Viewing a file through Bash (`cat`, `sed -n`, `grep`, `nl`) does NOT count: Edit and Write reject any existing file that was not shown by the Read tool, and every rejected call wastes a full step. Use Read (it deduplicates unchanged ranges, so it is cheaper than `sed -n`) for any file you may later modify — including an existing ./tmp/PROGRESS.md, which you either Read first or append to with `cat >>`.
+Read before modify rule — NON-NEGOTIABLE: You MUST call Read(file_path) on every existing file BEFORE calling Edit(file_path) on it or overwriting it with Write(file_path). Never modify a file you have not Read in the current session. Viewing a file through Bash (`cat`, `sed -n`, `grep`, `nl`) does NOT count: Edit and Write reject any existing file that was not shown by the Read tool, and every rejected call wastes a full step. Use Read (it deduplicates unchanged ranges, so it is cheaper than `sed -n`) for any file you may later modify. Exception: Write may overwrite a scratch file under a `tmp/` directory (e.g. ./tmp/PROGRESS.md, ./tmp/ideas.md) without a prior Read; Edit still requires one.
 
 Read relevant source files when the task depends on existing architecture. If referenced files, commands, or config don’t exist, stop and ask the user rather than guessing.
 

@@ -17,6 +17,8 @@ import uuid
 from collections.abc import Iterator
 
 import docker
+import docker.errors
+import docker.models.containers
 import pytest
 
 from kiss.agents.sorcar.docker_manager import ATTACH_PREFIX, DockerManager
@@ -39,7 +41,9 @@ pytestmark = [
 
 
 @pytest.fixture
-def containers() -> Iterator[docker.models.containers.Container]:
+def containers() -> Iterator[
+    tuple[docker.models.containers.Container, docker.models.containers.Container]
+]:
     """A running container (no declared working directory) and one with ``/opt``."""
     client = docker.from_env()
     name = f"kiss-attach-{uuid.uuid4().hex[:8]}"
@@ -96,7 +100,9 @@ def test_streaming_bash_timeout_returns_output_so_far(containers) -> None:
         mgr.stream_callback = streamed.append
         result = mgr.Bash("echo started; sleep 5; echo never", "slow", timeout_seconds=1)
         silent = mgr.Bash("sleep 5", "silent", timeout_seconds=1)
-    assert result.startswith("Error: command timed out after 1s and was killed. Output before the timeout:")
+    assert result.startswith(
+        "Error: command timed out after 1s and was killed. Output before the timeout:"
+    )
     assert "started" in result and "never" not in result
     assert silent == "Error: command timed out after 1s"
     assert "started\n" in "".join(streamed)

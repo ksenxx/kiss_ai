@@ -31,7 +31,7 @@ from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SUBDIR,
 )
 from kiss.core import tool_interrupt
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.config import DEFAULT_CONFIG, kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.models.model import (
     READ_TOOL_BINARY_MIME_TYPES,
@@ -220,6 +220,29 @@ def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
     if tail and tail[0] == _WORKTREE_SUBDIR:
         return None
     return Path(*wt_root_parts, *tail)
+
+
+def _is_scratch_path(resolved: Path, work_dir: str | None) -> bool:
+    """True when *resolved* is an agent scratch file: under a ``tmp`` directory
+    inside *work_dir*, or anywhere under the cron work directory.
+
+    The system prompt sends every scratch file to ``./tmp/`` and cron runs
+    keep their notes under ``$KISS_HOME/cron/work``.  Such files are
+    rewritten from scratch by each session, so requiring a ``Read`` before
+    overwriting one only costs a wasted step: all eleven read-before-write
+    refusals in a 24 h audit were on such files.  The ``tmp`` component
+    must lie *inside* the work directory: a checkout that itself sits under
+    ``/tmp`` or ``~/tmp`` is not scratch, and neither is any path outside
+    the work directory.
+    """
+    if resolved.is_relative_to((kiss_home() / "cron" / "work").resolve()):
+        return True
+    if not work_dir:
+        return False
+    root = Path(work_dir).resolve()
+    if not resolved.is_relative_to(root):
+        return False
+    return "tmp" in resolved.relative_to(root).parts[:-1]
 
 
 def _absolutize(file_path: str, work_dir: str | None) -> str:
@@ -1290,7 +1313,11 @@ class UsefulTools:
                     f"Error: {file_path} exists and is not a regular file "
                     f"(directory/FIFO/device/socket); refusing to write to it."
                 )
-            if resolved.is_file() and resolved not in self.read_files:
+            if (
+                resolved.is_file()
+                and resolved not in self.read_files
+                and not _is_scratch_path(resolved, self.work_dir)
+            ):
                 return self._unread_error(file_path, "overwriting")
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding="utf-8", newline="")

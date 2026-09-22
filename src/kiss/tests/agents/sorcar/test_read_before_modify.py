@@ -110,3 +110,76 @@ def test_oversized_binary_read_does_not_mark_file(repo: Path) -> None:
     big.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * (useful_tools._MAX_BINARY_READ_BYTES + 1))
     assert "too large" in tools.Read(str(big))
     assert tools.Write(str(big), "text\n").startswith("Error:")
+
+
+def test_write_overwrites_unread_scratch_file_under_tmp(repo: Path) -> None:
+    """Scratch files under a ``tmp`` directory inside the work dir may be
+    overwritten without a Read.
+
+    All eleven read-before-write refusals in the 2026-09-22 audit were on
+    ``tmp/`` notes (``tmp/ideas.md``, a cron run's own report file), each a
+    wasted step.  Source files keep the guard: ``Edit`` on a scratch file
+    still needs a Read, and a ``tmp``-named *file* is not a scratch dir.
+    """
+    tools = UsefulTools(work_dir=str(repo))
+    scratch = repo / "tmp" / "notes.md"
+    scratch.parent.mkdir()
+    scratch.write_text("old\n", encoding="utf-8")
+    assert tools.Write(str(scratch), "new\n").startswith("Successfully wrote")
+    assert scratch.read_text() == "new\n"
+    nested = repo / "work" / "tmp" / "deep" / "state.json"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("{}", encoding="utf-8")
+    assert tools.Write("work/tmp/deep/state.json", "[]").startswith("Successfully wrote")
+    assert nested.read_text() == "[]"
+    other = UsefulTools(work_dir=str(repo))
+    out = other.Edit(str(scratch), "new", "newer")
+    assert out.startswith("Error:") and "has not been read" in out
+    tmp_named_file = repo / "tmp"
+    assert other.Write(str(repo / "a.py"), "x = 9\n").startswith("Error:")
+    assert tmp_named_file.is_dir()
+
+
+def test_tmp_outside_the_work_dir_is_not_scratch(tmp_path: Path) -> None:
+    """A checkout living under a ``tmp`` directory, or a file outside the work
+    dir, keeps the read-before-overwrite guard; the cron work directory under
+    ``$KISS_HOME`` is scratch everywhere."""
+    checkout = tmp_path / "home" / "tmp" / "checkout"
+    checkout.mkdir(parents=True)
+    source = checkout / "core.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    tools = UsefulTools(work_dir=str(checkout))
+    out = tools.Write(str(source), "x = 2\n")
+    assert out.startswith("Error:") and "has not been read" in out
+    assert source.read_text() == "x = 1\n"
+    outside = tmp_path / "elsewhere" / "tmp" / "note.md"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("old", encoding="utf-8")
+    assert tools.Write(str(outside), "new").startswith("Error:")
+    from kiss.core.config import kiss_home
+
+    cron_note = kiss_home() / "cron" / "work" / "tmp" / "last-report.md"
+    cron_note.parent.mkdir(parents=True, exist_ok=True)
+    cron_note.write_text("old", encoding="utf-8")
+    try:
+        assert tools.Write(str(cron_note), "new").startswith("Successfully wrote")
+        assert cron_note.read_text() == "new"
+    finally:
+        cron_note.unlink()
+
+
+def test_cron_work_dir_is_scratch_through_a_symlinked_kiss_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``$KISS_HOME`` given as a symlink still marks its cron work files scratch:
+    the comparison root is resolved like the file path is."""
+    real_home = tmp_path / "realhome"
+    (real_home / "cron" / "work").mkdir(parents=True)
+    link = tmp_path / "home-link"
+    link.symlink_to(real_home, target_is_directory=True)
+    monkeypatch.setenv("KISS_HOME", str(link))
+    note = link / "cron" / "work" / "report.md"
+    note.write_text("old", encoding="utf-8")
+    tools = UsefulTools(work_dir=None)
+    assert tools.Write(str(note), "new").startswith("Successfully wrote")
+    assert (real_home / "cron" / "work" / "report.md").read_text() == "new"

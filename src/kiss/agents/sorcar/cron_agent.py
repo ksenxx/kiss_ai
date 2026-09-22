@@ -515,6 +515,84 @@ PROMPT_PREAMBLE = (
 )
 """Hermes-style preamble prepended to every prompt job's prompt."""
 
+UNATTENDED_MARKER = "Nobody can answer questions; never ask the user anything."
+"""Sentence shared by both unattended preambles."""
+
+UNATTENDED_CHILD_PREAMBLE = (
+    "You are a sub-task of an unattended scheduled automation (cron job). "
+    + UNATTENDED_MARKER
+    + " Never wait for user approval: when an action is blocked, report "
+    "the blocker in your final summary and finish."
+)
+"""Paragraph added to every sub-task (``run_agent`` / ``run_parallel``)
+spawned from an unattended run, so the child inherits the no-questions rule
+instead of blocking on ``ask_user_question`` until its timeout.  Prepended
+to ``run_parallel`` tasks (:func:`unattended_child_prompt`); appended to
+``run_agent`` tasks through ``append_to_prompt``
+(:func:`unattended_child_suffix`), which the daemon adds after an agent
+script's ``prompt()`` override has replaced the prompt body."""
+
+CHAT_TASK_HEADING = "# Task"
+"""Heading ``ChatSorcarAgent.build_chat_prompt`` puts in front of the current
+task, after the chat history (``# Task`` / ``# Task (work on it now)``)."""
+
+
+def _current_task_text(agent: Any) -> str:
+    """Return the text of the task *agent* is working on now.
+
+    ``task_description`` on a
+    :class:`~kiss.agents.sorcar.relentless_agent.RelentlessAgent` (its
+    ``prompt_template`` is the per-session template), ``prompt_template``
+    on a plain :class:`~kiss.core.kiss_agent.KISSAgent`.  A chat agent's
+    text starts with earlier tasks and results; only the part after the
+    last :data:`CHAT_TASK_HEADING` is the current task, so an old result
+    that quotes a preamble cannot mark a later task as unattended.
+    """
+    task = getattr(agent, "task_description", "") or getattr(agent, "prompt_template", "")
+    return str(task or "").rsplit(CHAT_TASK_HEADING, 1)[-1].strip()
+
+
+def is_unattended(agent: Any) -> bool:
+    """True when *agent* runs an unattended (cron) task or a sub-task of one.
+
+    The current task text must start with :data:`PROMPT_PREAMBLE` (a cron
+    prompt job) or start or end with :data:`UNATTENDED_CHILD_PREAMBLE` (a
+    sub-task); a prompt that merely quotes the sentence elsewhere is not
+    unattended.
+
+    Args:
+        agent: A running agent (see :func:`_current_task_text`).
+    """
+    text = _current_task_text(agent)
+    return (
+        text.startswith(PROMPT_PREAMBLE.strip())
+        or text.startswith(UNATTENDED_CHILD_PREAMBLE)
+        or text.endswith(UNATTENDED_CHILD_PREAMBLE)
+    )
+
+
+def unattended_child_prompt(prompt: str) -> str:
+    """Return *prompt* with :data:`UNATTENDED_CHILD_PREAMBLE` prepended (once).
+
+    Args:
+        prompt: A ``run_parallel`` task about to be spawned from an unattended run.
+    """
+    if prompt.lstrip().startswith(UNATTENDED_CHILD_PREAMBLE):
+        return prompt
+    return UNATTENDED_CHILD_PREAMBLE + "\n\n" + prompt
+
+
+def unattended_child_suffix(append_to_prompt: str) -> str:
+    """Return *append_to_prompt* ending with :data:`UNATTENDED_CHILD_PREAMBLE` (once).
+
+    Args:
+        append_to_prompt: The ``run_agent`` caller's prompt suffix (may be empty).
+    """
+    if append_to_prompt.rstrip().endswith(UNATTENDED_CHILD_PREAMBLE):
+        return append_to_prompt
+    return append_to_prompt + "\n\n" + UNATTENDED_CHILD_PREAMBLE
+
+
 PROMPT_SEA_NAME = "cron_prompt_sea.py"
 """File name of the generated per-run SEA inside a prompt job's scratch dir."""
 
