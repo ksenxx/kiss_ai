@@ -77,16 +77,19 @@ def test_install_sh_uses_exec_tee_not_pipeline_subshell() -> None:
     src = _read_install_sh()
     exec_pattern = (
         r"exec\s*>\s*>\(\s*trap\s+''\s+INT\s+TERM\s*;\s*"
-        r'exec\s+tee\s+-a\s+"?\$LOG_FILE"?(?:\s+9>&-)?\s*\)\s*2>&1'
+        r'exec\s+tee\s+-a\s+"?\$LOG_FILE"?\s+9>&-\s*\)\s*2>&1'
     )
     assert re.search(exec_pattern, src), (
         "install.sh must use `exec > >(trap '' INT TERM; exec tee -a "
-        "\"$LOG_FILE\") 2>&1` so the install body runs in the outer "
+        "\"$LOG_FILE\" 9>&-) 2>&1` so the install body runs in the outer "
         "trap-handled shell instead of a pipeline subshell, AND the tee "
         "child ignores the process-group SIGINT/SIGTERM that VS Code's "
         "terminal teardown delivers.  Without the inner trap guard tee "
         "dies with the group signal and the outer shell's next write "
-        "(the trap diagnostic itself) is killed by SIGPIPE."
+        "(the trap diagnostic itself) is killed by SIGPIPE.  `9>&-` keeps "
+        "the update-lock fd out of tee: tee outlives the shell by a few "
+        "milliseconds after closing its stdout, so without it a caller "
+        "that saw the output end could still find the lock held."
     )
     code_only = "\n".join(
         line

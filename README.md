@@ -62,7 +62,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 664 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 672 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -277,34 +277,32 @@ These agents live in `src/kiss/agents/third_party_agents/`; a prompt-oriented us
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **664 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
+KISS Sorcar ships a catalog of **672 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 102 |
-| Anthropic | 14 |
-| Gemini | 24 |
+| OpenAI | 106 |
+| Anthropic | 15 |
+| Gemini | 25 |
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 381 |
-| Claude Code CLI (`cc/*`) | 14 |
+| OpenRouter | 382 |
+| Claude Code CLI (`cc/*`) | 15 |
 | Codex CLI (`codex/*`) | 8 |
 
 Current catalog capability totals:
 
-- **642** generation-capable models
-- **485** function-calling-capable models
-- **11** embedding models
+- **649** generation-capable models
+- **484** function-calling-capable models
+- **12** embedding models
 - **2** decision models
 
 Full model list:
 
 <details>
-<summary><strong>OpenAI (102)</strong></summary>
+<summary><strong>OpenAI (106)</strong></summary>
 
-- `computer-use-preview`
-- `computer-use-preview-2025-03-11`
 - `gpt-3.5-turbo`
 - `gpt-3.5-turbo-0125`
 - `gpt-3.5-turbo-1106`
@@ -379,6 +377,16 @@ Full model list:
 - `gpt-6-astra-low`
 - `gpt-6-astra-medium`
 - `gpt-6-astra-xhigh`
+- `gpt-6-luna`
+- `gpt-6-luna-high`
+- `gpt-6-luna-low`
+- `gpt-6-luna-medium`
+- `gpt-6-luna-xhigh`
+- `gpt-6-sol`
+- `gpt-6-sol-high`
+- `gpt-6-sol-low`
+- `gpt-6-sol-medium`
+- `gpt-6-sol-xhigh`
 - `gpt-audio`
 - `gpt-audio-1.5`
 - `gpt-audio-2025-08-28`
@@ -394,14 +402,10 @@ Full model list:
 - `o1-2024-12-17`
 - `o3`
 - `o3-2025-04-16`
-- `o3-deep-research`
-- `o3-deep-research-2025-06-26`
 - `o3-mini`
 - `o3-mini-2025-01-31`
 - `o4-mini`
 - `o4-mini-2025-04-16`
-- `o4-mini-deep-research`
-- `o4-mini-deep-research-2025-06-26`
 - `text-embedding-3-large`
 - `text-embedding-3-small`
 - `text-embedding-ada-002`
@@ -409,7 +413,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Anthropic (14)</strong></summary>
+<summary><strong>Anthropic (15)</strong></summary>
 
 - `claude-fable-5`
 - `claude-fable-5-1`
@@ -421,6 +425,7 @@ Full model list:
 - `claude-opus-4-7`
 - `claude-opus-4-8`
 - `claude-opus-5`
+- `claude-opus-5-5`
 - `claude-sonnet-4-5`
 - `claude-sonnet-4-5-20250929`
 - `claude-sonnet-4-6`
@@ -429,7 +434,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Gemini (24)</strong></summary>
+<summary><strong>Gemini (25)</strong></summary>
 
 - `gemini-2.5-flash`
 - `gemini-2.5-flash-image`
@@ -446,10 +451,11 @@ Full model list:
 - `gemini-3.5-flash`
 - `gemini-3.5-flash-lite`
 - `gemini-3.5-transcribe`
-- `gemini-3.5-transcribe-live`
 - `gemini-3.6-flash`
 - `gemini-3.7-flash`
 - `gemini-3.8-flash`
+- `gemini-3.8-flash-lite-tts`
+- `gemini-3.8-flash-tts`
 - `gemini-embedding-001`
 - `gemini-embedding-2`
 - `gemini-embedding-2-preview`
@@ -598,7 +604,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (381)</strong></summary>
+<summary><strong>OpenRouter (382)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -621,6 +627,7 @@ Full model list:
 - `openrouter/anthropic/claude-opus-4.7`
 - `openrouter/anthropic/claude-opus-4.8`
 - `openrouter/anthropic/claude-opus-5`
+- `openrouter/anthropic/claude-opus-5.5`
 - `openrouter/anthropic/claude-sonnet-4`
 - `openrouter/anthropic/claude-sonnet-4.5`
 - `openrouter/anthropic/claude-sonnet-4.6`
@@ -692,7 +699,6 @@ Full model list:
 - `openrouter/inclusionai/ling-3.0-flash-vl`
 - `openrouter/inference-net/schematron-v2-small`
 - `openrouter/inference-net/schematron-v2-turbo`
-- `openrouter/kwaipilot/kat-coder-pro-v2`
 - `openrouter/kwaipilot/kat-coder-pro-v2.5`
 - `openrouter/mancer/weaver`
 - `openrouter/meituan/longcat-2.0`
@@ -926,6 +932,7 @@ Full model list:
 - `openrouter/x-ai/grok-4.5-low`
 - `openrouter/x-ai/grok-4.5-medium`
 - `openrouter/x-ai/grok-4.6`
+- `openrouter/x-ai/grok-4.7`
 - `openrouter/x-ai/grok-build-0.1`
 - `openrouter/xiaomi/mimo-v2.5`
 - `openrouter/xiaomi/mimo-v2.5-pro`
@@ -985,7 +992,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Claude Code CLI (cc/*) (14)</strong></summary>
+<summary><strong>Claude Code CLI (cc/*) (15)</strong></summary>
 
 - `cc/claude-fable-5`
 - `cc/claude-fable-5-1`
@@ -995,6 +1002,7 @@ Full model list:
 - `cc/claude-opus-4-7`
 - `cc/claude-opus-4-8`
 - `cc/claude-opus-5`
+- `cc/claude-opus-5-5`
 - `cc/claude-sonnet-4-5-20250929`
 - `cc/claude-sonnet-4-6`
 - `cc/claude-sonnet-5`
