@@ -72,6 +72,35 @@ def tool_call_body(
     }).encode()
 
 
+def text_body(text: str, prompt_tokens: int = 500, completion_tokens: int = 100) -> bytes:
+    """Build one chat-completion response that answers with plain text (no tool call).
+
+    Args:
+        text: The assistant's reply.
+        prompt_tokens: Reported prompt (context) size.
+        completion_tokens: Reported completion size.
+
+    Returns:
+        The JSON body.
+    """
+    return json.dumps({
+        "id": "chatcmpl-scripted",
+        "object": "chat.completion",
+        "created": 0,
+        "model": MODEL,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": text},
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }).encode()
+
+
 def finish_body(summary: str, prompt_tokens: int = 5000, success: bool = True) -> bytes:
     """Build a response calling ``finish`` with the structured contract."""
     return tool_call_body(
