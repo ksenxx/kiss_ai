@@ -499,7 +499,7 @@ class _CommandsMixin:
                 and not contains_task_tags(prompt)
             ):
                 asked = self._viewer_awaiting_answer(tab_id)
-            if prev is not None and prev.is_merging:
+            if prev is not None and prev.merge_in_progress():
                 # An in-flight merge/discard owns the tab's state (and
                 # its worktree agent); replacing it would orphan the
                 # operation.  Refuse the run instead.  Both frontends
