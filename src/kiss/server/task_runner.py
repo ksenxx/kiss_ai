@@ -538,7 +538,7 @@ def _wt_merge_on_repo(state: AgentState, repo: Path | None) -> bool:
         about to remove), or whose repository cannot be determined —
         the conservative pre-repo-aware behavior.
     """
-    if not (state.is_merging and state.use_worktree):
+    if not (state.use_worktree and state.merge_in_progress()):
         return False
     if repo is None:
         return False
@@ -1425,7 +1425,7 @@ class _TaskRunnerMixin:
             return
 
         with self._state_lock:
-            if state.is_merging:
+            if state.merge_in_progress():
                 self.printer.broadcast(
                     {
                         "type": "error",
@@ -1545,11 +1545,17 @@ class _TaskRunnerMixin:
 
         if not use_worktree:
             with self._state_lock:
-                if any(
-                    _wt_merge_on_repo(t, repo)
-                    for t in agent_state.agent_states.values()
-                ):
+                merging = [
+                    t for t in agent_state.agent_states.values()
+                    if _wt_merge_on_repo(t, repo)
+                ]
+                if merging:
                     state.is_task_active = False
+                    logger.warning(
+                        "Refusing main-tree run on tab %s: worktree merge "
+                        "in progress on %s (tab %s, task %s)",
+                        tab_id, repo, merging[0].tab_id, merging[0].task_id,
+                    )
                     self.printer.broadcast(
                         {
                             "type": "error",
@@ -1569,6 +1575,10 @@ class _TaskRunnerMixin:
                 claim = self._main_tree_claim_reason(repo)
                 if claim is not None:
                     state.is_task_active = False
+                    logger.warning(
+                        "Refusing main-tree run on tab %s: %s in progress on %s",
+                        tab_id, claim, repo,
+                    )
                     self.printer.broadcast(
                         {
                             "type": "error",
