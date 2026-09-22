@@ -32,6 +32,14 @@
 # sync, that it removes a stale ~/.kiss/sorcar.db.incoming on the remote, and
 # that a remote without room stops the deploy there (SORCAR_DISK_HEADROOM_GB
 # set to more than any disk holds), while SORCAR_SKIP_DISK_CHECK=1 skips it.
+# Step 4 runs for real as far as the stubs allow: the ssh stub runs the key
+# probe rsorcar feeds to ``bash -s`` against the fake remote HOME and the scp
+# stub records what it is asked to copy, so the test sees this machine's keys
+# travel to a remote without any (tests 1 and 10) and stay home when the
+# remote already has keys of its own — in ~/.kiss/api_keys.env (test 8), in
+# its ~/.bashrc or fish config (test 12) — even from a machine without any
+# key of its own (test 9); a key store the probe cannot read stops the
+# deploy (test 13).
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -142,7 +150,13 @@ case "\$cmd" in
     *) [ -t 0 ] || cat >/dev/null; exit 0 ;;
 esac
 EOF
-    printf '#!/bin/bash\nexit 0\n' > "$fix/bin/scp"
+    # scp stub: copies nothing, records what rsorcar asked it to copy.
+    cat > "$fix/bin/scp" <<SCP
+#!/bin/bash
+while [[ "\${1:-}" == -* ]]; do shift; done
+printf '%s\n' "\$*" >> "$fix/scp-args.txt"
+exit 0
+SCP
     printf '#!/bin/bash\nprintf 200\n' > "$fix/bin/curl"
     chmod +x "$fix/bin/"*
 }
@@ -180,6 +194,15 @@ echo "$OUT" | grep -q "SSH identity copied to $WORK/ok/rhome/.ssh (2 files)" \
     || fail "the ssh copy was not reported with its file count:
 $OUT"
 pass "the ssh identity travels as a tar stream: key arrives, authorized_keys and excluded files stay put"
+
+echo "$OUT" | grep -q "Copying API keys (1 exported variables) to user@fakehost" \
+    || fail "this machine's keys were not copied to a remote without any:
+$OUT"
+grep -qE '/api_keys\.env user@fakehost:\.kiss/$' "$WORK/ok/scp-args.txt" \
+    || fail "api_keys.env was never handed to scp: $(cat "$WORK/ok/scp-args.txt")"
+echo "$OUT" | grep -q "already has API keys (" && fail "a remote without keys was reported as having some:
+$OUT"
+pass "a remote without API keys gets this machine's"
 
 grep -q "install-remote-prereqs.sh" "$WORK/ok/bash-s-stdin.txt" \
     || fail "scripts/install-remote-prereqs.sh was never fed to the remote's bash -s"
@@ -309,6 +332,128 @@ echo "$OUT" | grep -q "SORCAR_DISK_HEADROOM_GB must be a whole number of gigabyt
     || fail "no clear error for a bad SORCAR_DISK_HEADROOM_GB:
 $OUT"
 pass "a SORCAR_DISK_HEADROOM_GB that is not a number is refused"
+
+# --- Test 8: a remote that already has API keys keeps them ----------------------
+# Its ~/.kiss/api_keys.env holds a key, so this machine's keys are not copied
+# (neither the distilled file nor the rc file), while the helpers still travel
+# and ~/.bashrc is still wired to the remote's own key store.
+make_env "$WORK/haskeys"
+populate_checkout "$WORK/haskeys/checkout" 0 "$WORK/haskeys"
+echo 'export REMOTE_API_KEY=r' > "$WORK/haskeys/rhome/.kiss/api_keys.env"
+echo 'export LOCAL_RC_TOKEN=t' > "$WORK/haskeys/home/.zshrc"
+OUT=$(run_rsorcar "$WORK/haskeys" "$WORK/haskeys/checkout/rsorcar") || fail "rsorcar failed against a remote with keys:
+$OUT"
+echo "$OUT" | grep -q "user@fakehost already has API keys (1 found)" \
+    || fail "the remote's existing keys were not reported:
+$OUT"
+echo "$OUT" | grep -q "Copying API keys" && fail "this machine's keys were copied although the remote has its own"
+grep -qE 'api_keys\.env|\.zshrc' "$WORK/haskeys/scp-args.txt" \
+    && fail "a key file was handed to scp although the remote has its own keys: $(cat "$WORK/haskeys/scp-args.txt")"
+grep -q 'remote_config.py' "$WORK/haskeys/scp-args.txt" \
+    || fail "the remote helpers were not shipped: $(cat "$WORK/haskeys/scp-args.txt")"
+echo "$OUT" | grep -q "API keys installed (~/.kiss/api_keys.env, sourced from ~/.bashrc)" \
+    || fail "install-api-keys.sh did not run for the remote's own keys:
+$OUT"
+[[ "$(cat "$WORK/haskeys/rhome/.kiss/api_keys.env")" == "export REMOTE_API_KEY=r" ]] \
+    || fail "the remote's key store was changed: $(cat "$WORK/haskeys/rhome/.kiss/api_keys.env")"
+[[ -f "$WORK/haskeys/install-marker.txt" ]] || fail "the deploy did not finish"
+pass "a remote that already has API keys keeps them; this machine's are not copied"
+
+# --- Test 9: ... even when this machine has no keys at all ---------------------
+# Local key discovery is skipped, so its "No API keys found" error cannot fire.
+make_env "$WORK/nolocal"
+populate_checkout "$WORK/nolocal/checkout" 0 "$WORK/nolocal"
+echo 'export REMOTE_API_KEY=r' > "$WORK/nolocal/rhome/.kiss/api_keys.env"
+rm "$WORK/nolocal/home/.kiss/api_keys.env"
+OUT=$(run_rsorcar "$WORK/nolocal" "$WORK/nolocal/checkout/rsorcar") || fail "rsorcar failed from a machine without keys against a remote with keys:
+$OUT"
+echo "$OUT" | grep -q "already has API keys (1 found)" || fail "the remote's keys were not found:
+$OUT"
+[[ -f "$WORK/nolocal/install-marker.txt" ]] || fail "the deploy did not finish"
+pass "a machine without keys can re-deploy to a remote that has them"
+
+# --- Test 10: a remote key store without any key does not count ------------------
+# The file exists but holds no FOO_API_KEY= / FOO_TOKEN= line, so this
+# machine's keys are copied as to a fresh remote.
+make_env "$WORK/emptykeys"
+populate_checkout "$WORK/emptykeys/checkout" 0 "$WORK/emptykeys"
+cat > "$WORK/emptykeys/rhome/.kiss/api_keys.env" <<'KEYS'
+# export REMOTE_API_KEY=deleted
+note=API_KEY=
+export REMOTE_API_KEY=
+export QUOTED_API_KEY=''
+export DQUOTED_API_KEY=""
+export COMMENTED_API_KEY= # deleted
+export NOT_A_KEY=1
+KEYS
+mkdir -p "$WORK/emptykeys/rhome/.config/fish"
+printf "set -gx FISH_API_KEY ''\nset -gx FISH_TOKEN # deleted\n" > "$WORK/emptykeys/rhome/.config/fish/config.fish"
+printf '[ -f "$HOME/.kiss/api_keys.env" ] && . "$HOME/.kiss/api_keys.env"\n' > "$WORK/emptykeys/rhome/.bashrc"
+OUT=$(run_rsorcar "$WORK/emptykeys" "$WORK/emptykeys/checkout/rsorcar") || fail "rsorcar failed against a remote with an empty key store:
+$OUT"
+echo "$OUT" | grep -q "already has API keys (" && fail "a key store without keys counted as having some"
+echo "$OUT" | grep -q "Copying API keys (1 exported variables) to user@fakehost" \
+    || fail "this machine's keys were not copied to a remote whose key store holds no key:
+$OUT"
+grep -qE '/api_keys\.env user@fakehost:\.kiss/$' "$WORK/emptykeys/scp-args.txt" \
+    || fail "api_keys.env was never handed to scp: $(cat "$WORK/emptykeys/scp-args.txt")"
+pass "a remote key store that holds no key gets this machine's keys"
+
+# --- Test 11: no keys anywhere is still an error ------------------------------------
+make_env "$WORK/nokeys"
+populate_checkout "$WORK/nokeys/checkout" 0 "$WORK/nokeys"
+rm "$WORK/nokeys/home/.kiss/api_keys.env"
+if OUT=$(run_rsorcar "$WORK/nokeys" "$WORK/nokeys/checkout/rsorcar"); then
+    fail "rsorcar went on with no API keys on either machine"
+fi
+echo "$OUT" | grep -q "No API keys found — neither a ~/\*rc file with keys nor" \
+    || fail "no clear error when neither machine has keys:
+$OUT"
+[[ ! -f "$WORK/nokeys/install-marker.txt" ]] || fail "install.sh ran although the deploy had stopped"
+pass "no API keys on either machine stops the deploy"
+
+# --- Test 12: keys living only in the remote's shell rc count too -------------------
+# An install older than ~/.kiss/api_keys.env kept its keys as export lines
+# in ~/.bashrc (or ``set -gx`` lines in fish's config), which the kiss-web
+# daemon migrates into the store at startup; they must not be overwritten.
+make_env "$WORK/rckeys"
+populate_checkout "$WORK/rckeys/checkout" 0 "$WORK/rckeys"
+printf 'export PATH=$PATH:/x\nexport REMOTE_API_KEY="r"\n' > "$WORK/rckeys/rhome/.bashrc"
+mkdir -p "$WORK/rckeys/rhome/.config/fish"
+printf 'set -gx REMOTE_TOKEN r\n' > "$WORK/rckeys/rhome/.config/fish/config.fish"
+OUT=$(run_rsorcar "$WORK/rckeys" "$WORK/rckeys/checkout/rsorcar") || fail "rsorcar failed against a remote with rc keys:
+$OUT"
+echo "$OUT" | grep -q "already has API keys (2 found)" \
+    || fail "keys in the remote's ~/.bashrc and fish config were not found:
+$OUT"
+echo "$OUT" | grep -q "Copying API keys" && fail "this machine's keys were copied over the remote's rc keys"
+grep -q 'api_keys\.env' "$WORK/rckeys/scp-args.txt" \
+    && fail "api_keys.env was handed to scp although the remote has rc keys: $(cat "$WORK/rckeys/scp-args.txt")"
+[[ -f "$WORK/rckeys/install-marker.txt" ]] || fail "the deploy did not finish"
+pass "keys that live only in the remote's shell rc are kept; this machine's are not copied"
+
+# --- Test 13: a key store the probe cannot read stops the deploy ------------------
+# Unreadable is not the same as empty: the copy would overwrite keys nobody
+# could see.  (root reads everything, so the case cannot be staged as root.)
+if [[ "$(id -u)" != "0" ]]; then
+    make_env "$WORK/unreadable"
+    populate_checkout "$WORK/unreadable/checkout" 0 "$WORK/unreadable"
+    echo 'export REMOTE_API_KEY=r' > "$WORK/unreadable/rhome/.kiss/api_keys.env"
+    chmod 000 "$WORK/unreadable/rhome/.kiss/api_keys.env"
+    if OUT=$(run_rsorcar "$WORK/unreadable" "$WORK/unreadable/checkout/rsorcar"); then
+        fail "rsorcar went on although the remote's key store cannot be read"
+    fi
+    chmod 600 "$WORK/unreadable/rhome/.kiss/api_keys.env"
+    echo "$OUT" | grep -q "Could not tell whether user@fakehost already has API keys" \
+        || fail "no clear error for an unreadable remote key store:
+$OUT"
+    echo "$OUT" | grep -q "Copying API keys" && fail "this machine's keys were copied over an unreadable key store"
+    if [[ -e "$WORK/unreadable/scp-args.txt" ]] && grep -q 'api_keys\.env' "$WORK/unreadable/scp-args.txt"; then
+        fail "api_keys.env was handed to scp although the remote's key store is unreadable"
+    fi
+    [[ ! -f "$WORK/unreadable/install-marker.txt" ]] || fail "install.sh ran although the deploy had stopped"
+    pass "a remote key store the probe cannot read stops the deploy"
+fi
 
 echo
 echo "ALL TESTS PASSED"
