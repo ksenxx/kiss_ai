@@ -34,6 +34,21 @@ const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '';
 const LOG_DIR = kissHomeDir();
 const LOG_FILE = path.join(LOG_DIR, 'install.log');
 
+// Written when a kiss-web restart is needed (the installed kiss_project no
+// longer matches the fingerprint the running daemon was started with) but
+// had to be deferred because tasks were in flight.  While it exists,
+// ensureDependencies() skips its "nothing to do" fast path so the next
+// activation re-evaluates the restart, and a timer retries in-process.
+// Without it a deferred restart was never retried: the .extension-updated
+// marker that forces the full check is consumed before the restart runs, so
+// the daemon kept old code until VS Code happened to find it dead.
+// The record is shared by every window; a window whose fingerprint already
+// matches the running daemon clears it (the writer's own retry timer still
+// re-evaluates), and a verified restart clears it.
+const RESTART_PENDING_FILE = path.join(LOG_DIR, '.kiss-web.restart-pending');
+const RESTART_RETRY_MS = Number(process.env.KISS_RESTART_RETRY_MS) || 60_000;
+let restartRetryTimer: ReturnType<typeof setTimeout> | undefined;
+
 // Synchronous probes run on the extension-host event loop, so they must
 // never wait on a hung child (e.g. a PATH entry on a stalled mount).
 const SYNC_PROBE_TIMEOUT_MS = 5_000;
@@ -493,7 +508,8 @@ async function ensureDependenciesImpl(): Promise<void> {
     venvExists &&
     isChromiumInstalled() &&
     (await isDaemonRunning()) &&
-    !fs.existsSync(updateMarker)
+    !fs.existsSync(updateMarker) &&
+    !fs.existsSync(RESTART_PENDING_FILE)
   ) {
     log('All dependencies satisfied and daemon running — nothing to do');
     log('=== Dependency check finished ===');
@@ -989,12 +1005,14 @@ async function restartKissWebDaemonLocked(
     {ok: true; count: number; tabs: string[]} | {ok: false; reason: string} =
     await daemonHasActiveTasks(sockPath, 1500);
 
-  const decision = decideRestart({
-    fingerprintMatches: !!currentFp && currentFp === savedFp,
-    health,
-    activeTasks,
-  });
+  const fingerprintMatches = !!currentFp && currentFp === savedFp;
+  const decision = decideRestart({fingerprintMatches, health, activeTasks});
   if (decision.skip) {
+    if (fingerprintMatches) {
+      clearRestartPending();
+    } else {
+      markRestartPending(decision.reason, kissProjectPath, workDir);
+    }
     if (decision.reason === 'active-tasks') {
       log(
         `kiss-web has ${(activeTasks as {ok: true; count: number}).count} ` +
@@ -1224,6 +1242,86 @@ WantedBy=default.target
     log(
       `Failed to write kiss-web fingerprint: ${err instanceof Error ? err.message : err}`,
     );
+  }
+  clearRestartPending();
+}
+
+/**
+ * Record that a needed kiss-web restart was deferred and retry it later.
+ *
+ * Writes RESTART_PENDING_FILE (so the next activation skips the "nothing
+ * to do" fast path) and arms a single RESTART_RETRY_MS timer that calls
+ * restartKissWebDaemon again, so the daemon picks up the new code as soon
+ * as the in-flight tasks finish, without waiting for a window reload.
+ *
+ * @param reason The decideRestart() reason the restart was skipped for.
+ * @param kissProjectPath The bundled kiss_project directory.
+ * @param workDir The working directory kiss-web is started in.
+ */
+function markRestartPending(
+  reason: string,
+  kissProjectPath: string,
+  workDir: string,
+): void {
+  try {
+    fs.writeFileSync(RESTART_PENDING_FILE, reason + '\n');
+  } catch (err) {
+    log(
+      `Failed to write ${RESTART_PENDING_FILE}: ` +
+        `${err instanceof Error ? err.message : err}`,
+    );
+  }
+  log(
+    `kiss-web restart pending (${reason}) — retrying in ` +
+      `${RESTART_RETRY_MS / 1000}s`,
+  );
+  armRestartRetry(kissProjectPath, workDir);
+}
+
+function armRestartRetry(kissProjectPath: string, workDir: string): void {
+  if (restartRetryTimer) return;
+  restartRetryTimer = setTimeout(
+    retryPendingRestart,
+    RESTART_RETRY_MS,
+    kissProjectPath,
+    workDir,
+  );
+  restartRetryTimer.unref();
+}
+
+/**
+ * Timer callback: run the full restart path again and keep retrying while
+ * the pending record survives it (tasks still active, or another window
+ * held the restart lock so this attempt was skipped without a decision).
+ */
+async function retryPendingRestart(
+  kissProjectPath: string,
+  workDir: string,
+): Promise<void> {
+  restartRetryTimer = undefined;
+  try {
+    await restartKissWebDaemon(kissProjectPath, workDir);
+  } catch (err) {
+    log(
+      `kiss-web restart retry failed: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+  if (fs.existsSync(RESTART_PENDING_FILE)) {
+    armRestartRetry(kissProjectPath, workDir);
+  }
+}
+
+/**
+ * Forget a pending restart: remove the record and cancel the retry timer,
+ * so a later deferral arms a fresh timer with its own project/work dir.
+ */
+function clearRestartPending(): void {
+  try {
+    fs.unlinkSync(RESTART_PENDING_FILE);
+  } catch {}
+  if (restartRetryTimer) {
+    clearTimeout(restartRetryTimer);
+    restartRetryTimer = undefined;
   }
 }
 
