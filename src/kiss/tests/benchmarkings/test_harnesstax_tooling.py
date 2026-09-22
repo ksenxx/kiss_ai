@@ -699,3 +699,144 @@ def test_time_limit_note_in_prompt_and_tool_results(tmp_path: Path) -> None:
         if live is not None:
             live.remove(force=True)
     assert message["output"] == "out"
+
+
+def test_changed_definitions_and_test_paths() -> None:
+    """The edit locator names the enclosing definitions; the test-path heuristic covers common layouts."""
+    from benchmarkings.harnesstax import test_context
+
+    old = "class Field:\n    def check(self):\n        return 1\n\n    def other(self):\n        pass\n"
+    new = "class Field:\n    def check(self):\n        if True:\n            return 2\n\n    def other(self):\n        pass\n"
+    assert test_context.changed_definitions(old, new) == ["check", "Field"]
+    # a deleted line points at the definition that lost it; a new top-level function names itself
+    assert test_context.changed_definitions(new, old) == ["check", "Field"]
+    assert test_context.changed_definitions("x = 1\n", "x = 1\ndef helper():\n    return 3\n") == ["helper"]
+    # generic names are dropped, a change outside any definition yields nothing
+    assert test_context.changed_definitions("def main():\n    a\n", "def main():\n    b\n") == []
+    assert test_context.changed_definitions("a = 1\n", "a = 2\n") == []
+    # Go receiver methods and exported JS functions are recognised too
+    go_old = "func (s *Server) Start() {\n\treturn\n}\n"
+    assert test_context.changed_definitions(go_old, go_old.replace("return", "run()")) == ["Start"]
+    js_old = "export async function load() {\n  a\n}\n"
+    assert test_context.changed_definitions(js_old, js_old.replace("  a\n", "  b\n")) == ["load"]
+    for path in ("tests/test_x.py", "pkg/x_test.go", "src/a.spec.ts", "spec/a_spec.rb", "src/__tests__/a.js",
+                 "FooTests.cs", "testing/util.py"):
+        assert test_context.is_test_path(path), path
+    for path in ("django/db/models/fields.py", "src/contest.py", "latest/run.py"):
+        assert not test_context.is_test_path(path), path
+    assert test_context.find_referencing_tests("c", "/w", [], "/w/a.py") == []
+
+
+def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
+    """Editing an existing source file appends the tests that mention the changed definitions."""
+    import docker
+
+    from benchmarkings.harnesstax import sea_core
+
+    try:
+        client = docker.from_env()
+        client.ping()
+    except Exception:
+        pytest.skip("Docker is not available")
+    live = client.containers.run("python:3.11-slim", "sleep infinity", detach=True)
+    try:
+        setup = (
+            "mkdir -p /repo/pkg /repo/tests && cd /repo && "
+            "printf 'class Field:\\n    def check(self):\\n        return 1\\n' > pkg/fields.py && "
+            "printf 'from pkg.fields import Field\\n\\ndef test_check():\\n    assert Field().check() == 1\\n' "
+            "> tests/test_fields.py && "
+            "printf 'def test_other():\\n    Field\\n    Field\\n    Field\\n' > tests/test_other.py && "
+            "printf 'x = 1\\n' > tests/test_unrelated.py && printf 'Field\\n' > pkg/notes.txt"
+        )
+        assert live.exec_run(["sh", "-c", setup]).exit_code == 0
+        config = tmp_path / "config.json"
+        config.write_text(json.dumps({
+            "container": live.id, "workdir": "/repo", "prompt": "p", "model": MODEL,
+            "trajectory": str(tmp_path / "trajectory.jsonl"), "time_limit_seconds": 600, "test_context": True,
+        }))
+        harness = sea_core.ContainerHarness(str(config))
+        assert "tests that reference the changed definitions" in harness.system_prompt()
+        # an Edit of a source file: snapshot, then the change lands in the container
+        assert harness.on_tool_call("Edit", {"file_path": "pkg/fields.py", "old_string": "1", "new_string": "2"}) == "OK"
+        live.exec_run(["sh", "-c", "sed -i 's/return 1/return 2/' /repo/pkg/fields.py"])
+        # edits of test files, missing files and non-string paths are ignored
+        harness.on_tool_call("Write", {"file_path": "/repo/tests/test_new.py", "content": "x"})
+        harness.on_tool_call("Write", {"file_path": "/repo/pkg/new_module.py", "content": "x"})
+        harness.on_tool_call("Edit", {"file_path": 3})
+        message = {"type": "function_call_output", "call_id": "c", "output": "Edited"}
+        harness.on_llm_call([message])
+        note = message["output"]
+        assert "code you changed in pkg/fields.py (check, Field" in note
+        assert "tests/test_other.py (3)" in note and "tests/test_fields.py (3)" in note
+        assert "test_unrelated" not in note and "notes.txt" not in note
+        assert note.index("test_fields.py") < note.index("test_other.py")  # mentions both names: ranks first
+        assert "[wall clock:" in note  # the deadline note still follows
+        events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
+        assert [e["tests"] for e in events if e["event"] == "test_context"] == [
+            [["tests/test_fields.py", 3], ["tests/test_other.py", 3]]]
+        # the same tests are not listed twice; an edit that changed nothing adds nothing
+        harness.on_tool_call("Edit", {"file_path": "/repo/pkg/fields.py", "old_string": "2", "new_string": "3"})
+        live.exec_run(["sh", "-c", "sed -i 's/return 2/return 3/' /repo/pkg/fields.py"])
+        harness.on_tool_call("Edit", {"file_path": "/repo/pkg/fields.py", "old_string": "q", "new_string": "r"})
+        again = {"type": "function_call_output", "call_id": "c", "output": "Edited"}
+        harness.on_llm_call([again])
+        assert "Existing tests" not in again["output"]
+        # a file deleted between snapshot and model call is skipped
+        harness.on_tool_call("Edit", {"file_path": "/repo/pkg/fields.py", "old_string": "3", "new_string": "4"})
+        live.exec_run(["rm", "/repo/pkg/fields.py"])
+        gone = {"type": "function_call_output", "call_id": "c", "output": "Edited"}
+        harness.on_llm_call([gone])
+        assert "Existing tests" not in gone["output"]
+        # the feature is off unless the trial config enables it
+        config.write_text(json.dumps({
+            "container": live.id, "workdir": "/repo", "prompt": "p", "model": MODEL,
+            "trajectory": str(tmp_path / "t2.jsonl"),
+        }))
+        off = sea_core.ContainerHarness(str(config))
+        off.on_tool_call("Edit", {"file_path": "pkg/fields.py", "old_string": "1", "new_string": "2"})
+        assert off.pending_edits == []
+    finally:
+        live.remove(force=True)
+
+
+def test_verification_pass_runs_fresh_context_after_first_run(tmp_path: Path) -> None:
+    """A trial runs the task, then a fresh-context verification pass on the same container.
+
+    Needs a running benchmark daemon (``HARNESSTAX_TEST_SOCK``) and Docker;
+    skipped otherwise, since the pass is only observable end to end.
+    """
+    import docker
+
+    from benchmarkings.harnesstax import trials
+
+    sock = os.environ.get("HARNESSTAX_TEST_SOCK", "")
+    if not sock or not Path(sock).exists():
+        pytest.skip("set HARNESSTAX_TEST_SOCK to a benchmark daemon socket")
+    client = docker.from_env()
+    live = client.containers.run("python:3.11-slim", "sleep infinity", detach=True, working_dir="/app")
+    try:
+        live.exec_run(["mkdir", "-p", "/app"])
+        os.environ["HARNESSTAX_VERIFY_PASS"] = "1"
+        try:
+            metrics = trials.run_sea_trial(
+                tmp_path, live.id, "/app",
+                "Create the file /app/hello.txt containing exactly the line `hello` and nothing else.",
+                os.environ.get("HARNESSTAX_TEST_MODEL", "gpt-5.6-luna"), 900, Path(sock),
+            )
+        finally:
+            del os.environ["HARNESSTAX_VERIFY_PASS"]
+        assert live.exec_run(["cat", "/app/hello.txt"]).output.decode().strip() == "hello"
+        second = metrics["verify_pass"]
+        assert second is not None and second["error"] == "" and second["agent_success"]
+        assert metrics["agent_success"] and metrics["cost_usd"] >= second["cost_usd"] > 0
+        events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
+        prompts = [json.dumps(e["new_messages"]) for e in events if e.get("event") == "llm_call" and e["turn"] == 1]
+        assert len(prompts) == 2 and "Do not trust that report" in prompts[1] and "Do not trust" not in prompts[0]
+        assert metrics["turns"] == sum(1 for e in events if e.get("event") == "llm_call")
+        # the pass is off by default
+        again = trials.run_sea_trial(tmp_path, live.id, "/app", "Print the content of /app/hello.txt.",
+                                     os.environ.get("HARNESSTAX_TEST_MODEL", "gpt-5.6-luna"), 900, Path(sock))
+        assert again["verify_pass"] is None
+    finally:
+        live.remove(force=True)
+    assert trials.plain_text("<p>Did <b>x</b></p>\n<ul><li>y</li></ul>") == "Did x y"
