@@ -1368,7 +1368,7 @@ class UsefulTools:
         command: str,
         description: str,
         timeout_seconds: float = 300,
-        max_output_chars: int = 50000,
+        max_output_chars: int = DEFAULT_CONFIG.tool_output_max_chars,
         background: bool = False,
     ) -> str:
         """Runs a bash command and returns its output.

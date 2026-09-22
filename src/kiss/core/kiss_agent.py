@@ -17,8 +17,6 @@ from kiss.core.base import Base
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.context_compaction import (
     CHARS_PER_TOKEN,
-    COMPACTION_START_TOKENS,
-    COMPACTION_STEP_TOKENS,
     apply_compaction,
     dropped_chars,
     plan_compaction,
@@ -231,7 +229,7 @@ class KISSAgent(Base):
         conversation, so tools that assume the model still sees an
         earlier output (the Read tool's dedupe) can forget it."""
         self._llm_hook_conversation_index = 0
-        self._next_compaction_at = COMPACTION_START_TOKENS
+        self._next_compaction_at = DEFAULT_CONFIG.compaction_start_tokens
         self._prompt_cache_touched_at = 0.0
         """Wall-clock start of the last request that read or wrote the
         provider's prompt cache (a model call or a keep-alive ping)."""
@@ -268,7 +266,7 @@ class KISSAgent(Base):
         self.total_tokens_used = 0  # pyright: ignore[reportIncompatibleVariableOverride]
         self.context_tokens_used = 0
         self.last_cache_read_tokens = 0
-        self._next_compaction_at = COMPACTION_START_TOKENS
+        self._next_compaction_at = DEFAULT_CONFIG.compaction_start_tokens
         self._prompt_cache_touched_at = 0.0
         self._llm_hook_conversation_index = 0
         self.budget_used = 0.0  # pyright: ignore[reportIncompatibleVariableOverride]
@@ -972,7 +970,7 @@ class KISSAgent(Base):
                 self.step_count,
             )
             return
-        self._next_compaction_at = self.context_tokens_used + COMPACTION_STEP_TOKENS
+        self._next_compaction_at = self.context_tokens_used + DEFAULT_CONFIG.compaction_step_tokens
         compacted = apply_compaction(plan)
         logger.info(
             "Compacted %d old tool outputs (~%d of %d context tokens): agent=%s step=%d",

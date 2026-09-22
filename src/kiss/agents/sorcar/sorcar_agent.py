@@ -1629,6 +1629,13 @@ class SorcarAgent(RelentlessAgent):
             review_share = min(share, review_budget / max(1, sum(review_flags)))
             child_budgets = [review_share if flag else share for flag in review_flags]
         child_model = model_name or self.model_name
+        # Sub-agents act in the parent's live container, not on the host
+        # and not in a fresh container of their own.
+        child_docker_image: str | None = None
+        if self.docker_manager is not None and self.docker_manager.container is not None:
+            from kiss.agents.sorcar.docker_manager import ATTACH_PREFIX
+
+            child_docker_image = ATTACH_PREFIX + self.docker_manager.container.id
         try:
             # Started inside the try: a stop injected between the start
             # and the try would otherwise leak the polling thread —
@@ -1639,6 +1646,7 @@ class SorcarAgent(RelentlessAgent):
                 max_workers=max_workers,
                 model_name=child_model,
                 work_dir=self.work_dir,
+                docker_image=child_docker_image,
                 printer=self.printer,
                 totals_out=totals,
                 usage_monitor=monitor,
@@ -2927,6 +2935,7 @@ def run_tasks_parallel(
     use_memory: bool | None = None,
     tool_profile: str = "",
     child_budgets: list[float | None] | None = None,
+    docker_image: str | None = None,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -3034,6 +3043,10 @@ def run_tasks_parallel(
             as *tasks*); an entry of ``None`` falls back to *max_budget*.
             Used to clip reviewer children to the review allowance
             without touching their non-review siblings.
+        docker_image: ``docker_image`` for every child (normally the
+            parent's live container as ``container:<id>``, so the
+            children's tools act inside the same container); ``None``
+            runs the children's tools on the host.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -3158,6 +3171,7 @@ def run_tasks_parallel(
                 web_tools=web_tools,
                 use_memory=use_memory,
                 tool_profile=child_profile,
+                docker_image=docker_image,
             )
             return result
         except KeyboardInterrupt:

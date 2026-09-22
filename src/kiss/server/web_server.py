@@ -42,6 +42,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import collections
 import base64
 import binascii
 import contextlib
@@ -2329,6 +2330,60 @@ def _self_signed_cert_needs_renewal(
     )
 
 
+class FifoSendLock:
+    """Per-endpoint FIFO lock whose waiters cost O(1) each.
+
+    Every outbound payload is its own event-loop task queued on the
+    endpoint's send lock (:meth:`WebPrinter._locked_send`).  With many
+    concurrent streaming tasks that queue grows to thousands of
+    waiters, and :class:`asyncio.Lock` removes each woken waiter from
+    its deque with ``deque.remove`` (O(n)), so a backlog of *n* sends
+    costs O(n^2) loop time and starves the event loop (observed with
+    60 daemon tasks: clients dropped by the drain timeout, results
+    never delivered).  This lock hands ownership to the leftmost live
+    waiter on :meth:`release` and never scans the queue.
+    """
+
+    def __init__(self) -> None:
+        self._locked = False
+        self._waiters: collections.deque[asyncio.Future[None]] = collections.deque()
+
+    def locked(self) -> bool:
+        """Return True while some task holds the lock."""
+        return self._locked
+
+    async def acquire(self) -> bool:
+        """Wait in FIFO order until the lock is owned by the caller."""
+        if not self._locked:
+            self._locked = True
+            return True
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._waiters.append(fut)
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                # release() already handed the lock to us; pass it on.
+                self.release()
+            raise
+        return True
+
+    def release(self) -> None:
+        """Hand the lock to the next live waiter, or unlock."""
+        while self._waiters:
+            fut = self._waiters.popleft()
+            if not fut.done():
+                fut.set_result(None)  # ownership transfers; stays locked
+                return
+        self._locked = False
+
+    async def __aenter__(self) -> None:
+        await self.acquire()
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.release()
+
+
 class WebPrinter(JsonPrinter):
     """Printer that broadcasts JSON events to connected WebSocket clients.
 
@@ -2360,7 +2415,7 @@ class WebPrinter(JsonPrinter):
         self._loop: asyncio.AbstractEventLoop | None = None
         self.work_dir: str = ""
         self._pending_sends: dict[Any, set[ConcurrentFuture[None]]] = {}
-        self._send_locks: dict[Any, asyncio.Lock] = {}
+        self._send_locks: dict[Any, FifoSendLock] = {}
         self._uds_drain_timeout: float = _UDS_DRAIN_TIMEOUT
         # tabId -> pending worktree dir of that tab's finished (or
         # running) worktree task; see _track_worktree_event().
@@ -2623,8 +2678,38 @@ class WebPrinter(JsonPrinter):
         for tab_id in targets:
             self._track_worktree_event(event, tab_id, event.get("taskId"))
             self._send_to_ws_clients(
-                f'{base}, "tabId": {json.dumps(tab_id)}}}'
+                f'{base}, "tabId": {json.dumps(tab_id)}}}', tab_id,
             )
+
+    def _uds_writers_for_tab(self, tab_id: str) -> list[asyncio.StreamWriter]:
+        """UDS writers that receive a task event copy stamped *tab_id*.
+
+        Webview connections mirror the whole tab registry and peers
+        that never addressed a tab keep receiving every copy.  A
+        headless peer that addressed only OTHER tabs (a ``run_agent``
+        or benchmark client driving its own ``api-…`` tab) is skipped:
+        sending every streamed token of every task to dozens of such
+        clients multiplied the event loop's work by the number of
+        clients and starved it (drain timeouts dropped clients).
+
+        Args:
+            tab_id: The frontend tab id the copy is stamped with.
+
+        Returns:
+            The writers to schedule the copy on.
+        """
+        with self._ws_lock:
+            skip: set[Any] = set()
+            for conn_id, tabs in self._uds_local_tab_sets.items():
+                if (
+                    tabs
+                    and tab_id not in tabs
+                    and conn_id not in self._uds_webview_conns
+                ):
+                    endpoint = self._conn_endpoints.get(conn_id)
+                    if endpoint is not None:
+                        skip.add(endpoint)
+            return [w for w in self._uds_writers if w not in skip]
 
     @staticmethod
     def _increment_count(counts: dict[str, int], key: str) -> None:
@@ -2892,7 +2977,7 @@ class WebPrinter(JsonPrinter):
         for endpoint in endpoints:
             self._schedule_send(endpoint, data)
 
-    def _send_to_uds_writers(self, data: str) -> None:
+    def _send_to_uds_writers(self, data: str, tab_id: str = "") -> None:
         """Send a pre-serialised JSON payload to local UDS peers only.
 
         UDS peers (VS Code extension webviews, Python clients) are
@@ -2901,13 +2986,20 @@ class WebPrinter(JsonPrinter):
 
         Args:
             data: The JSON payload (already encoded with ``json.dumps``).
+            tab_id: The tab the payload is stamped with, when it is a
+                task-event copy; only the peers that can show that tab
+                receive it (see :meth:`_uds_writers_for_tab`).  Empty
+                for global events, which reach every peer.
         """
-        with self._ws_lock:
-            endpoints = list(self._uds_writers)
+        if tab_id:
+            endpoints = self._uds_writers_for_tab(tab_id)
+        else:
+            with self._ws_lock:
+                endpoints = list(self._uds_writers)
         for endpoint in endpoints:
             self._schedule_send(endpoint, data)
 
-    def _send_to_ws_clients(self, data: str) -> None:
+    def _send_to_ws_clients(self, data: str, tab_id: str = "") -> None:
         """Send a pre-serialised JSON payload to every connected client.
 
         Factored out of :meth:`broadcast` so fan-out copies for
@@ -2920,9 +3012,12 @@ class WebPrinter(JsonPrinter):
 
         Args:
             data: The JSON payload (already encoded with ``json.dumps``).
+            tab_id: The stamped tab of a task-event copy (empty for
+                global events); UDS delivery is narrowed to the peers
+                that can show it.
         """
         self._send_to_wss_clients(data)
-        self._send_to_uds_writers(data)
+        self._send_to_uds_writers(data, tab_id)
 
     def _send_to_conn(self, conn_id: str, data: str) -> None:
         """Send a pre-serialised JSON payload to ONE connection.
@@ -2942,7 +3037,7 @@ class WebPrinter(JsonPrinter):
             return
         self._schedule_send(endpoint, data)
 
-    def send_lock(self, endpoint: Any) -> asyncio.Lock:
+    def send_lock(self, endpoint: Any) -> FifoSendLock:
         """Return the per-endpoint lock serialising outbound sends.
 
         Every code path that writes to *endpoint* — the broadcast
@@ -2955,12 +3050,12 @@ class WebPrinter(JsonPrinter):
             endpoint: The client connection the payload targets.
 
         Returns:
-            The (lazily created) ``asyncio.Lock`` for *endpoint*.
+            The (lazily created) :class:`FifoSendLock` for *endpoint*.
         """
         with self._ws_lock:
             lock = self._send_locks.get(endpoint)
             if lock is None:
-                lock = asyncio.Lock()
+                lock = FifoSendLock()
                 if endpoint in self._pending_sends:
                     self._send_locks[endpoint] = lock
             return lock

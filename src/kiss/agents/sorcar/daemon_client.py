@@ -374,6 +374,7 @@ def run(
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
     tool_profile: str = "",
+    docker_image: str = "",
     timeout: float | None = 3600.0,
     stop_on_timeout: bool = False,
     sock_path: str | Path | None = None,
@@ -648,6 +649,16 @@ def run(
             An unknown name stops the task with a diagnostic error.
             Ignored when *append_basic_tools* is False, which builds
             no built-in toolset at all.
+        docker_image: Run the task's file and shell tools (``Bash``,
+            ``run_commands_parallel``, ``Read``, ``Edit``, ``Write``)
+            inside a Docker container instead of on the daemon's host.
+            An image name (``"python:3.12"``) starts a fresh container
+            that is removed when the task ends; ``container:<name-or-id>``
+            attaches to a container the caller already runs and leaves
+            it running.  ``run_parallel`` sub-agents share the task's
+            container.  ``bash_job`` and persistent memory are
+            unavailable in a Docker run.  Empty (default) runs the
+            tools on the host.
         timeout: Maximum seconds to wait for the task to finish;
             ``None`` waits indefinitely.
         stop_on_timeout: Whether a *timeout* expiry also STOPS the
@@ -788,6 +799,7 @@ def run(
             "appendToSystemPrompt": append_to_system_prompt,
             "appendToPrompt": append_to_prompt,
             "toolProfile": tool_profile,
+            "dockerImage": docker_image,
         }
         sock.sendall(json.dumps(cmd).encode("utf-8") + b"\n")
         # Newline-framed events are assembled by hand from ``recv``

@@ -1731,6 +1731,10 @@ class _TaskRunnerMixin:
                     f"tool_profile must be one of {', '.join(TOOL_PROFILES)}, "
                     f"got {_tool_profile!r}."
                 )
+            # Docker image (or ``container:<id>``) the run's shell and
+            # file tools execute in; absent or malformed means the host.
+            _raw_docker = cmd.get("dockerImage")
+            _docker_image = _raw_docker if isinstance(_raw_docker, str) else ""
             _raw_model_config = cmd.get("modelConfig")
             _agent_model_config = (
                 _raw_model_config
@@ -1848,6 +1852,7 @@ class _TaskRunnerMixin:
                         llm_call_hook=_llm_call_hook,
                         tool_call_hook=_tool_call_hook,
                         tool_profile=_tool_profile,
+                        docker_image=_docker_image or None,
                         _skip_persistence=True,
                         _on_task_id_allocated=on_task_id_allocated,
                         # Persist the raw ``/xxx text`` (not the

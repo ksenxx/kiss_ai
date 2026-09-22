@@ -51,7 +51,7 @@ class _WireCapturingWebPrinter(WebPrinter):
         self.wire: list[str] = []
         self._wire_lock = threading.Lock()
 
-    def _send_to_ws_clients(self, data: str) -> None:
+    def _send_to_ws_clients(self, data: str, tab_id: str = "") -> None:
         with self._wire_lock:
             self.wire.append(data)
 

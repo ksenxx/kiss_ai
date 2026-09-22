@@ -13,6 +13,8 @@ scripted local model server and read the children's state back.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -85,6 +87,12 @@ class TestConfigToggles:
         assert cfg.dispatch_path_rewrite is True
         monkeypatch.setenv("KISS_READ_OUTLINE_LINES", "x")
         assert Config().read_outline_lines == 2000
+        monkeypatch.setenv("KISS_TOOL_OUTPUT_MAX_CHARS", "1234")
+        monkeypatch.setenv("KISS_COMPACTION_START_TOKENS", "40000")
+        monkeypatch.setenv("KISS_COMPACTION_STEP_TOKENS", "20000")
+        cfg = Config()
+        assert (cfg.tool_output_max_chars, cfg.compaction_start_tokens, cfg.compaction_step_tokens) == (
+            1234, 40000, 20000)
 
     def test_defaults_are_on(self) -> None:
         for name in ("read_dedupe", "tool_output_compaction", "tool_profiles",
@@ -92,6 +100,24 @@ class TestConfigToggles:
             assert getattr(DEFAULT_CONFIG, name) is True, name
         assert DEFAULT_CONFIG.context_limit_fraction == 0.7
         assert DEFAULT_CONFIG.review_budget_fraction == 0.0  # prompt-derived by default
+        assert DEFAULT_CONFIG.tool_output_max_chars == 50000
+        assert DEFAULT_CONFIG.compaction_start_tokens == DEFAULT_CONFIG.compaction_step_tokens == 100_000
+
+    def test_tool_output_cap_env_reaches_bash_and_docker_defaults(self, tmp_path: Path) -> None:
+        """KISS_TOOL_OUTPUT_MAX_CHARS sets the Bash default cap in a fresh process (host and Docker mode)."""
+        code = (
+            "import inspect\n"
+            "from kiss.agents.sorcar import docker_manager, useful_tools\n"
+            "print(docker_manager.MAX_OUTPUT_CHARS, "
+            "inspect.signature(useful_tools.UsefulTools.Bash).parameters['max_output_chars'].default)\n"
+            "print(useful_tools.UsefulTools(work_dir=str(work)).Bash('yes | head -c 5000', 'long output'))\n"
+            .replace("str(work)", repr(str(tmp_path)))
+        )
+        env = {**os.environ, "KISS_TOOL_OUTPUT_MAX_CHARS": "1200"}
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, check=True).stdout
+        first, rest = out.split("\n", 1)
+        assert first == "1200 1200"
+        assert "[truncated" in rest and len(rest) < 1500
 
 
 class TestToolProfiles:
