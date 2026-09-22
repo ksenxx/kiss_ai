@@ -903,7 +903,8 @@ _HISTORY_SELECT = (
     "SELECT id, timestamp, task, has_events, result, chat_id, "
     "model, work_dir, version, tokens, cost, steps, "
     "is_parallel, is_worktree, auto_commit_mode, "
-    "start_ts, end_ts, is_favorite, parent_task_id, max_budget "
+    "start_ts, end_ts, is_favorite, parent_task_id, max_budget, "
+    "is_side_channel "
     "FROM task_history "
 )
 
@@ -1010,9 +1011,12 @@ def _row_to_extra_json(row: sqlite3.Row) -> str:
         payload["max_budget"] = _safe_float(row["max_budget"], 0.0)
         payload["is_favorite"] = bool(row["is_favorite"])
         if row["parent_task_id"]:
-            payload["subagent"] = {
+            sub: dict[str, object] = {
                 "parent_task_id": _safe_str(row["parent_task_id"]),
             }
+            if row["is_side_channel"]:
+                sub["side_channel"] = True
+            payload["subagent"] = sub
     except (KeyError, IndexError):
         return ""
     return _dumps_extra(payload) if payload else ""
@@ -1217,7 +1221,11 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             max_budget REAL DEFAULT 0.0,
             -- Token of the process that created the row; see
             -- _process_owner_token / _recover_orphaned_tasks.
-            owner TEXT DEFAULT ''
+            owner TEXT DEFAULT '',
+            -- 1 for a side-channel sub-agent (the /ask answerer): its
+            -- result lands in the parent's transcript, so replays close
+            -- its nested tab instead of re-opening it.
+            is_side_channel INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1291,6 +1299,7 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
     added_columns = (
         ("owner", "TEXT DEFAULT ''"),
         ("max_budget", "REAL DEFAULT 0.0"),
+        ("is_side_channel", "INTEGER DEFAULT 0"),
     )
     for name, column_ddl in added_columns:
         if name in cols:
@@ -1792,6 +1801,11 @@ def _add_task(
     db = _get_db()
     payload = dict(extra) if extra else {}
     parent_task_id = _extract_parent_task_id(payload)
+    sub = payload.get("subagent")
+    is_side_channel = (
+        1 if parent_task_id and isinstance(sub, dict)
+        and sub.get("side_channel") else 0
+    )
     with _rw_lock.write_lock():
         if chat_id == "":
             chat_id = _allocate_chat_id()
@@ -1800,8 +1814,8 @@ def _add_task(
             "INSERT INTO task_history (id, timestamp, task, chat_id, result, "
             "model, work_dir, version, tokens, cost, steps, is_parallel, "
             "is_worktree, auto_commit_mode, start_ts, end_ts, is_favorite, "
-            "parent_task_id, max_budget, owner) VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "parent_task_id, max_budget, owner, is_side_channel) VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id, time.time(), task, chat_id,
                 "Agent Failed Abruptly",
@@ -1820,6 +1834,7 @@ def _add_task(
                 parent_task_id,
                 _safe_float(payload.get("max_budget"), 0.0),
                 _process_owner_token(),
+                is_side_channel,
             ),
         )
     _invalidate_chat_context_cache(chat_id)
