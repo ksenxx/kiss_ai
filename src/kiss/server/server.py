@@ -1785,14 +1785,51 @@ class VSCodeServer(
                 id).
         """
         wt_agent = state.agent if state is not None else None
-        claim_retained = False
-        if wt_agent is not None and getattr(wt_agent, "_wt_pending", False):
-            try:
-                claim_retained = not wt_agent.retire_for_disposal()
-                wt_agent._flush_warnings(self.printer)
-            except Exception:  # pragma: no cover — git/printer failure
-                logger.debug("Worktree release on tab close failed", exc_info=True)
-                claim_retained = bool(getattr(wt_agent, "_wt_pending", False))
+        try:
+            if wt_agent is not None and getattr(wt_agent, "_wt_pending", False):
+                try:
+                    wt_agent.retire_for_disposal()
+                    wt_agent._flush_warnings(self.printer)
+                except Exception:  # pragma: no cover — git/printer failure
+                    logger.debug("Worktree release on tab close failed", exc_info=True)
+        finally:
+            # The claim is released whatever the retire did — a
+            # ``BaseException`` escaping it (the stop interrupt the
+            # model layer raises for a failed auto-commit message when
+            # the thread's stop signal is set) once left ``is_merging``
+            # stuck, and every later main-tree run on the repo was
+            # refused as "a worktree merge in progress".  The agent
+            # keeps ``_wt`` exactly while its claim is retained
+            # (``retire_for_disposal`` returns ``_wt is None``), so the
+            # keep/unregister decision reads that instead of a result
+            # the interrupted retire never returned.
+            self._finish_tab_teardown(tab_id, state, removal_token)
+
+    def _finish_tab_teardown(
+        self,
+        tab_id: str,
+        state: AgentState | None,
+        removal_token: int | None,
+    ) -> None:
+        """Release the disposal claim and drop the tab's server-side state.
+
+        The locked tail of :meth:`_teardown_tab_resources`; see there
+        for the ownership rules.  The state stays registered when its
+        agent still holds a worktree claim (the retire kept the
+        worktree but could not make that decision durable, or never
+        finished), so a later disposal attempt can retry.
+
+        Args:
+            tab_id: The frontend tab identifier being disposed.
+            state: The claimed agent state, or ``None`` when the tab
+                never ran a task.
+            removal_token: The registry observation taken at claim
+                time, or ``None`` for callers with no registry ordering.
+        """
+        wt_agent = state.agent if state is not None else None
+        claim_retained = bool(
+            wt_agent is not None and getattr(wt_agent, "_wt_pending", False)
+        )
         # ONE ``_state_lock`` section for every destructive step, with
         # ONE atomic ownership decision (``finalize_removal``: re-check
         # + rowless stamp retirement under a single registry lock

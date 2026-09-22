@@ -1002,11 +1002,19 @@ class _TaskRunnerMixin:
                 tab_id,
                 client_task_id=client_task_id,
             )
-            self._dispose_if_closed(tab_id)
             # The binding is per THREAD — that is how a model stream
             # learns about a stop — so it has to end with the run, or
-            # anything this thread does next would inherit it.
+            # anything this thread does next would inherit it.  It ends
+            # BEFORE the deferred disposal: retiring a closed tab's
+            # worktree auto-commits with an LLM-generated message, and
+            # the model layer turns any request failure into the stop
+            # interrupt while the thread's stop signal is set.  That
+            # interrupt used to escape ``_teardown_tab_resources`` with
+            # the disposal claim (``is_merging``) still set, and every
+            # later main-tree run on the repo was refused with "A
+            # worktree merge is in progress".
             self.printer._thread_local.stop_event = None
+            self._dispose_if_closed(tab_id)
             if stranded_repo is not None:
                 try:
                     self._merge_deferred_worktrees(stranded_repo)
@@ -2321,7 +2329,14 @@ class _TaskRunnerMixin:
                 # cannot strand the promised merge; runs after this
                 # task's own end event so the other tabs' merge results
                 # never interleave with it, and is a no-op while the
-                # tree is still dirty.
+                # tree is still dirty.  The run is over, so this
+                # thread's stop binding ends first: the merge's commit
+                # message is an LLM call, and with a stopped task's
+                # signal still bound the model layer would turn any
+                # request failure into the stop interrupt — silently
+                # losing the merge (``_run_task`` clears the binding
+                # again before the deferred tab disposal).
+                self.printer._thread_local.stop_event = None
                 try:
                     self._merge_deferred_worktrees(freed_repo)
                 except BaseException:  # pragma: no cover — merge error handler
