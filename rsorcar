@@ -65,8 +65,9 @@
 #      fish's config.fish) already holds a key — an earlier deploy, or keys
 #      saved in the settings panel of the web app running there — keeps its
 #      keys untouched: this machine's are not copied, so a re-deploy never
-#      rolls a rotated or added key back; a key file the probe cannot read
-#      stops the deploy instead of passing for empty.  Otherwise the ~/*rc file that
+#      rolls a rotated or added key back; a key file the probe
+#      (scripts/count-api-keys.sh, run on the remote) cannot read stops the
+#      deploy instead of passing for empty.  Otherwise the ~/*rc file that
 #      holds the API keys (the one with the most ``FOO_API_KEY=`` style
 #      lines) is copied into ~/.kiss/ — not into the remote's home
 #      directory, which has shell files of its own that a copy of this
@@ -200,7 +201,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$SCRIPT_DIR/scripts/sync-repo.sh" ]] || die "No scripts/sync-repo.sh next to $0 — step 3 needs it."
 for helper in scripts/install-ssh-identity.sh scripts/install-remote-prereqs.sh \
               scripts/check-remote-disk-space.sh scripts/move-home-to-disk.sh \
-              scripts/wait-for-public-url.sh \
+              scripts/wait-for-public-url.sh scripts/count-api-keys.sh \
               scripts/install-api-keys.sh scripts/sync-task-db.sh \
               scripts/collect-github-auth.sh scripts/install-github-auth.sh \
               src/kiss/scripts/sync_db.py src/kiss/scripts/relocate_work_dir.py \
@@ -512,26 +513,15 @@ ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && chmod 700 "$HOME/.kiss" \
 # deploy rather than passing for empty: the one case a copy must never
 # happen in is the one where the remote's keys cannot be seen.
 step "Checking whether $TARGET already has API keys ..."
-# The two patterns go to the remote as the first lines of the probe, quoted
-# by printf %q (they hold both kinds of quote, so no shell quoting done by
-# hand would survive the trip).
-REMOTE_KEY_COUNT="$({ printf 'KEY_RE=%q\nFISH_RE=%q\n' "$KEY_LINE_RE" "$FISH_KEY_LINE_RE"; cat <<'EOF'
-count=0
-count_keys() {  # $1: file, $2: what a key line looks like in it
-    [ -e "$1" ] || return 0
-    n="$(grep -cE "$2" "$1" 2>/dev/null)"
-    case $? in
-        0|1) count=$((count + n)) ;;
-        *) echo "cannot read $1" >&2; exit 2 ;;
-    esac
-}
-count_keys "$HOME/.kiss/api_keys.env" "$KEY_RE"
-count_keys "$HOME/.bashrc" "$KEY_RE"
-count_keys "$HOME/.zshrc" "$KEY_RE"
-count_keys "$HOME/.config/fish/config.fish" "$FISH_RE"
-echo "$count"
-EOF
-} | ssh "$TARGET" 'bash -s')" || REMOTE_KEY_COUNT=""
+# scripts/count-api-keys.sh does the counting on the remote.  The two
+# patterns go ahead of it as the first lines of the probe, quoted by printf %q
+# (they hold both kinds of quote, so no shell quoting done by hand would
+# survive the trip).  The script is a file, not a here-document: bash 3.2,
+# the one macOS ships, expands a quoted here-document inside ``$( ... )`` on
+# this machine, which turned $FISH_RE into an unbound variable here.
+REMOTE_KEY_COUNT="$({ printf 'KEY_RE=%q\nFISH_RE=%q\n' "$KEY_LINE_RE" "$FISH_KEY_LINE_RE"
+                      cat "$SCRIPT_DIR/scripts/count-api-keys.sh"; } | ssh "$TARGET" 'bash -s')" \
+    || REMOTE_KEY_COUNT=""
 [[ "$REMOTE_KEY_COUNT" =~ ^[0-9]+$ ]] \
     || die "Could not tell whether $TARGET already has API keys (its ~/.kiss/api_keys.env or a shell rc file is unreadable, or the probe failed); nothing was copied."
 if ((REMOTE_KEY_COUNT > 0)); then

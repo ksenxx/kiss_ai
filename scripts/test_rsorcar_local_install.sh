@@ -78,11 +78,13 @@ EOF
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/sync-repo.sh"
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/sync-task-db.sh"
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/install-api-keys.sh"
-    # Steps 1a and 1c feed these two to the remote's ``bash -s``; the ssh stub
-    # runs what it is fed, so the real scripts run (against this machine,
-    # which has every tool the first looks for and room for the second).
+    # Steps 1a, 1c and 4 feed these three to the remote's ``bash -s``; the ssh
+    # stub runs what it is fed, so the real scripts run (against this machine,
+    # which has every tool the first looks for and room for the second, and
+    # against the fake remote HOME for the third's key count).
     cp "$REPO_ROOT/scripts/install-remote-prereqs.sh" \
-       "$REPO_ROOT/scripts/check-remote-disk-space.sh" "$dir/scripts/"
+       "$REPO_ROOT/scripts/check-remote-disk-space.sh" \
+       "$REPO_ROOT/scripts/count-api-keys.sh" "$dir/scripts/"
     local helper
     for helper in scripts/collect-github-auth.sh scripts/install-github-auth.sh \
                   scripts/install-ssh-identity.sh scripts/move-home-to-disk.sh \
