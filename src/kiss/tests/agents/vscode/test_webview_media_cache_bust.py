@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -124,6 +125,20 @@ class TestMediaVersionFollowsFileChanges(unittest.TestCase):
         st = path.stat()
         os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
 
+    def _wait_for_ctime_tick(self, after_ns: int) -> None:
+        # The kernel stamps ctime from a coarse clock (one jiffy, a few
+        # ms on Linux): a rewrite in the same tick as the stat that
+        # produced *after_ns* would keep the ctime.  Create a scratch
+        # file (creation always stamps ctime from the clock) until the
+        # clock has moved past it.
+        probe = self.media_dir / "ctime-probe"
+        while True:
+            probe.unlink(missing_ok=True)
+            probe.write_bytes(b"")
+            if probe.stat().st_ctime_ns > after_ns:
+                return
+            time.sleep(0.001)
+
     def _serve(self, url: str) -> bytes:
         server = RemoteAccessServer(host="127.0.0.1", port=0)
         conn = SimpleNamespace(remote_address=("127.0.0.1", 0))
@@ -167,6 +182,7 @@ class TestMediaVersionFollowsFileChanges(unittest.TestCase):
         css = self.media_dir / "main.css"
         url_before = web_server._media_url("main.css")
         st = css.stat()
+        self._wait_for_ctime_tick(st.st_ctime_ns)
         data = bytearray(css.read_bytes())
         data[-1:] = b"X" if data[-1:] != b"X" else b"Y"
         css.write_bytes(bytes(data))
