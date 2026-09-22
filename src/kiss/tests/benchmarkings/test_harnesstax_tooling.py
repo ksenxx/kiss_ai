@@ -11,9 +11,8 @@ ledger database with the real schema, then run the ``aggregate``, ``audit``,
 ``analyze`` and ``report`` command-line tools as subprocesses with
 ``HARNESSTAX_RESULTS_ROOT`` / ``HARNESSTAX_HOME`` pointing at the tree.
 
-Not covered here: the client timeout in ``harbor_agent`` and the container
-attach need a live daemon, a model and a container; they were exercised by
-hand on a real trial.
+Not covered here: ``harbor_agent`` and the container attach need a live
+daemon, a model and a container; they were exercised by hand on a real trial.
 """
 
 from __future__ import annotations
@@ -464,25 +463,18 @@ def test_trajectory_metrics_and_turn_count(tmp_path: Path) -> None:
     }
 
 
-def test_harbor_agent_timeout_from_task_toml(tmp_path: Path) -> None:
-    """The client timeout is the task's agent limit minus the margin, with a floor and a default."""
-    from benchmarkings.harnesstax import harbor_agent
+def test_tb2_runner_lifts_harbor_agent_deadline(tmp_path: Path) -> None:
+    """A new job lifts Harbor's agent deadline; an existing job directory is resumed as is."""
+    from benchmarkings.harnesstax import tb2_runner
 
-    task_dir = tmp_path / "task"
-    (task_dir / "environment").mkdir(parents=True)
-    (task_dir / "task.toml").write_text("[agent]\ntimeout_sec = 1200.0\n")
-    env = task_dir / "environment"
-    assert harbor_agent.agent_timeout_seconds(env) == 1200 - harbor_agent.DEADLINE_MARGIN_SECONDS
-    (task_dir / "task.toml").write_text("[agent]\ntimeout_sec = 50\n")
-    assert harbor_agent.agent_timeout_seconds(env) == 60
-    (task_dir / "task.toml").write_text("[verifier]\ntimeout_sec = 50\n")
-    assert harbor_agent.agent_timeout_seconds(env) == harbor_agent.DEFAULT_TIMEOUT_SECONDS
-    (task_dir / "task.toml").write_text("not = [toml\n")
-    assert harbor_agent.agent_timeout_seconds(env) == harbor_agent.DEFAULT_TIMEOUT_SECONDS
-    assert (
-        harbor_agent.agent_timeout_seconds(tmp_path / "nope" / "environment")
-        == harbor_agent.DEFAULT_TIMEOUT_SECONDS
-    )
+    command = tb2_runner.harbor_command(tmp_path, "job", MODEL, ["regex-log", "train-fasttext"], 3, 6)
+    multiplier = command[command.index("--agent-timeout-multiplier") + 1]
+    assert float(multiplier) == tb2_runner.AGENT_TIMEOUT_MULTIPLIER >= 1000
+    assert command[command.index("-m") + 1] == MODEL and command[command.index("-k") + 1] == "3"
+    assert [command[i + 1] for i, a in enumerate(command) if a == "-i"] == ["regex-log", "train-fasttext"]
+    (tmp_path / "job").mkdir()
+    resume = tb2_runner.harbor_command(tmp_path, "job", MODEL, ["regex-log"], 3, 6)
+    assert resume[-3:] == ["resume", "-p", str(tmp_path / "job")] and "-i" not in resume
 
 
 def test_tb2_runner_job_finished(tmp_path: Path) -> None:
@@ -567,6 +559,8 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
                 {"role": "user", "content": "x"}
             ]
             assert harness.turns == expected
+        # no wall-clock limit: tool results carry no time note
+        assert harness.on_llm_call([{"role": "tool", "content": "out"}]) == [{"role": "tool", "content": "out"}]
     finally:
         if live is not None:
             live.remove(force=True)
@@ -582,12 +576,12 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
     assert harness.on_tool_call("run_agent", {"agent": "slack", "task": "x"}) != "OK"
     assert harness.docker_image() == f"container:{container_name}"
     assert harness.if_append_basic_tools() and not harness.use_memory() and not harness.use_web_tools()
-    assert "/app" in harness.system_prompt()
+    assert "/app" in harness.system_prompt() and "wall-clock" not in harness.system_prompt()
     events = [
         json.loads(line)
         for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
     ]
-    assert [e["event"] for e in events].count("llm_call") == 201 + (live is not None)
+    assert [e["event"] for e in events].count("llm_call") == 202 + (live is not None)
     tool_events = [e for e in events if e["event"] == "tool_call"]
     assert [e["blocked"] for e in tool_events] == [False, True, True, True]
 
@@ -641,64 +635,27 @@ def test_audit_agent_error_and_deadline_aware_contamination(tree: dict[str, Path
     assert "4 flagged trial(s)" in proc.stdout
 
 
-def test_time_limit_note_in_prompt_and_tool_results(tmp_path: Path) -> None:
-    """With a time limit the prompt states it and every tool result gets the wall-clock note."""
-    import docker
-
+def test_append_to_last_tool_result_handles_every_message_shape() -> None:
+    """The note lands in tool results of every provider shape and never in prompts or assistant turns."""
     from benchmarkings.harnesstax import sea_core
 
-    # on_llm_call ends the trial when the container is gone, so a live one is
-    # needed wherever a Docker daemon is available
-    container_name = "c"
-    live = None
-    try:
-        client = docker.from_env()
-        client.ping()
-        live = client.containers.run("python:3.11-slim", "sleep infinity", detach=True)
-        container_name = live.id
-    except Exception:
-        pass
-    config = tmp_path / "config.json"
-    config.write_text(json.dumps({
-        "container": container_name, "workdir": "/app", "prompt": "p", "model": MODEL,
-        "trajectory": str(tmp_path / "trajectory.jsonl"), "time_limit_seconds": 1500,
-    }))
-    harness = sea_core.ContainerHarness(str(config))
-    assert "hard wall-clock limit of 25 minutes" in harness.system_prompt()
     anthropic = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "out"}]}
     anthropic_list = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t",
                                                    "content": [{"type": "text", "text": "out"}]}]}
     responses = {"type": "function_call_output", "call_id": "c", "output": "out"}
     chat = {"role": "tool", "tool_call_id": "c", "content": "out"}
     for message in (anthropic, anthropic_list, responses, chat):
-        harness.on_llm_call([message])
-    assert anthropic["content"][0]["content"].startswith("out\n\n[wall clock: 0 min used, 25 min left")
-    assert anthropic_list["content"][0]["content"][-1]["text"].startswith("[wall clock:")
-    assert responses["output"].startswith("out\n\n[wall clock:")
-    assert chat["content"].startswith("out\n\n[wall clock:")
-    # the task prompt and assistant turns are never annotated
+        assert sea_core.append_to_last_tool_result(message, "[note]")
+    assert anthropic["content"][0]["content"] == "out\n\n[note]"
+    assert anthropic_list["content"][0]["content"][-1]["text"] == "[note]"
+    assert responses["output"] == "out\n\n[note]"
+    assert chat["content"] == "out\n\n[note]"
     prompt = {"role": "user", "content": "task"}
     assistant = {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}
-    harness.on_llm_call([prompt, assistant])
+    for message in (prompt, assistant, "not a dict"):
+        assert not sea_core.append_to_last_tool_result(message, "[note]")
     assert prompt == {"role": "user", "content": "task"}
     assert assistant["content"] == [{"type": "text", "text": "hi"}]
-    assert not sea_core.append_to_last_tool_result("not a dict", "n")
-    events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
-    assert "[wall clock:" in json.dumps(events[0]["new_messages"])
-    # without a limit nothing is added and the prompt does not mention one
-    config.write_text(json.dumps({
-        "container": container_name, "workdir": "/app", "prompt": "p", "model": MODEL,
-        "trajectory": str(tmp_path / "t2.jsonl"),
-    }))
-    plain = sea_core.ContainerHarness(str(config))
-    assert "wall-clock limit" not in plain.system_prompt()
-    message = {"type": "function_call_output", "call_id": "c", "output": "out"}
-    try:
-        plain.on_llm_call([message])
-    finally:
-        if live is not None:
-            live.remove(force=True)
-    assert message["output"] == "out"
 
 
 def test_changed_definitions_and_test_paths() -> None:
@@ -752,7 +709,7 @@ def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
         config = tmp_path / "config.json"
         config.write_text(json.dumps({
             "container": live.id, "workdir": "/repo", "prompt": "p", "model": MODEL,
-            "trajectory": str(tmp_path / "trajectory.jsonl"), "time_limit_seconds": 600, "test_context": True,
+            "trajectory": str(tmp_path / "trajectory.jsonl"), "test_context": True,
         }))
         harness = sea_core.ContainerHarness(str(config))
         assert "tests that reference the changed definitions" in harness.system_prompt()
@@ -770,7 +727,7 @@ def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
         assert "tests/test_other.py (3)" in note and "tests/test_fields.py (3)" in note
         assert "test_unrelated" not in note and "notes.txt" not in note
         assert note.index("test_fields.py") < note.index("test_other.py")  # mentions both names: ranks first
-        assert "[wall clock:" in note  # the deadline note still follows
+        assert note.endswith("before you finish.]")  # nothing follows: no wall-clock note
         events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
         assert [e["tests"] for e in events if e["event"] == "test_context"] == [
             [["tests/test_fields.py", 3], ["tests/test_other.py", 3]]]
