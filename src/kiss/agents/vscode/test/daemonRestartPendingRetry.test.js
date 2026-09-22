@@ -151,7 +151,12 @@ Module._resolveFilename = function (request, parent, ...rest) {
   return origResolve.call(this, request, parent, ...rest);
 };
 global.__kissVscodeStub = {
-  window: {showInputBox: () => Promise.resolve(undefined)},
+  window: {
+    showInputBox: () => Promise.resolve(undefined),
+    // The active-tasks deferral offers "Restart now"; this test is about
+    // the unattended retry, so the user never answers.
+    showWarningMessage: () => Promise.resolve(undefined),
+  },
   workspace: {workspaceFolders: undefined},
   ProgressLocation: {Notification: 15},
 };
