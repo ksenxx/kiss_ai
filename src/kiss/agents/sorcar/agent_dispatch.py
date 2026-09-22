@@ -688,6 +688,18 @@ def _dispatch_reserved(
         resolve_tab = getattr(parent_agent, "_subagent_parent_tab_id", None)
         if callable(resolve_tab):
             parent_tab_id = str(resolve_tab() or "")
+    # A sub-task of an unattended (cron) run inherits the no-questions
+    # rule: without it a channel agent asked the user for an approval
+    # nobody could give and blocked until the run_agent timeout.  It
+    # travels in ``append_to_prompt``, which the daemon adds after an
+    # agent script's ``prompt()`` override has replaced the prompt body.
+    from kiss.agents.sorcar import cron_agent
+
+    if cron_agent.is_unattended(parent_agent):
+        options = dataclasses.replace(
+            options,
+            append_to_prompt=cron_agent.unattended_child_suffix(options.append_to_prompt),
+        )
     Path(work_dir).mkdir(parents=True, exist_ok=True)
     # The caller's explicit overrides win over the dispatch-mode
     # defaults (``_dispatch`` has already refused a worktree /

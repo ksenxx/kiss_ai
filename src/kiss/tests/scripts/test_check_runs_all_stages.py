@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.scripts.check import run_checks
+from kiss.scripts.check import MAX_DIGEST_LINES, error_lines, run_checks
 
 pytestmark = pytest.mark.skipif(
     shutil.which("sh") is None, reason="needs a POSIX shell"
@@ -43,7 +43,7 @@ def test_all_stages_run_after_a_failure(tmp_path: Path) -> None:
         _touch_stage(marker, "Type check (mypy)"),
         (["false"], "Type check (pyright)"),
     ])
-    assert failed == ["Lint code (ruff)", "Type check (pyright)"]
+    assert [name for name, _ in failed] == ["Lint code (ruff)", "Type check (pyright)"]
     assert marker.exists(), "the stage after the first failure must still run"
 
 
@@ -64,5 +64,43 @@ def test_failed_uv_sync_stops_the_run(tmp_path: Path) -> None:
         (["uv", "sync", "--project", str(empty_project)], "Install dependencies (uv sync)"),
         _touch_stage(marker, "Lint code (ruff)"),
     ])
-    assert failed == ["Install dependencies (uv sync)"]
+    assert [name for name, _ in failed] == ["Install dependencies (uv sync)"]
+    assert failed[0][1], "the uv error line must be in the digest"
     assert not marker.exists()
+
+
+def test_failed_stage_digest_repeats_its_error_lines() -> None:
+    """The digest of a failed stage keeps only the lines that locate an error.
+
+    An agent that pipes ``check --full`` through ``tail`` must still see
+    every error, so ``main`` reprints these lines after the stage list.
+    """
+    output = (
+        "Checking 12 files\n"
+        "E501 Line too long (108 > 100)\n"
+        "   --> src/kiss/x.py:99:101\n"
+        "    |\n"
+        "src/kiss/y.py:12: error: Incompatible return value  [return-value]\n"
+        "  /abs/z.py:5:7 - error: Object of type None is not subscriptable\n"
+        "Found 3 errors.\n"
+        "All done\n"
+    )
+    failed = run_checks([
+        (["sh", "-c", f"printf '%s' '{output}' >&2; exit 1"], "Lint code (ruff)"),
+    ])
+    assert [name for name, _ in failed] == ["Lint code (ruff)"]
+    assert failed[0][1] == [
+        "E501 Line too long (108 > 100)",
+        "   --> src/kiss/x.py:99:101",
+        "src/kiss/y.py:12: error: Incompatible return value  [return-value]",
+        "  /abs/z.py:5:7 - error: Object of type None is not subscriptable",
+        "Found 3 errors.",
+    ]
+
+
+def test_digest_is_capped() -> None:
+    """A stage with hundreds of errors is cut to MAX_DIGEST_LINES plus a count."""
+    lines = error_lines(f"a.py:{i}: error: boom\n" for i in range(MAX_DIGEST_LINES + 7))
+    assert len(lines) == MAX_DIGEST_LINES + 1
+    assert lines[-1] == "... 7 more"
+    assert error_lines(["all good\n", "nothing here\n"]) == []

@@ -220,7 +220,7 @@ class DockerManager:
         if self.attached_container is not None:
             self.container = self.client.containers.get(self.attached_container)
             self.workdir = self.container.attrs["Config"].get("WorkingDir") or "/"
-            print(f"Attached to running container {self.container.id[:12]}")
+            print(f"Attached to running container {(self.container.id or '')[:12]}")
             return
         image = self.image
         tag = self.tag

@@ -85,9 +85,10 @@ class TestTargetedUdsFanout(unittest.IsolatedAsyncioTestCase):
         raise AssertionError(f"server never registered {count} UDS writers")
 
     async def _wait_for_interest(self, tab_id: str) -> None:
+        printer = self.server._printer
         for _ in range(300):
-            with self.server._printer._ws_lock:
-                if any(tab_id in tabs for tabs in self.server._printer._uds_local_tab_sets.values()):
+            with printer._ws_lock:
+                if any(tab_id in tabs for tabs in printer._uds_local_tab_sets.values()):
                     return
             await asyncio.sleep(0.01)
         raise AssertionError(f"server never recorded interest in {tab_id}")
@@ -153,6 +154,7 @@ class TestTargetedUdsFanout(unittest.IsolatedAsyncioTestCase):
         await self._send(writer_w, {"type": "stop", "tabId": "tab-w"})
         await self._wait_for_interest("tab-w")
         printer = self.server._printer
+        conn_ids: list[str] = []
         for _ in range(300):
             with printer._ws_lock:
                 conn_ids = list(printer._uds_local_tab_sets)

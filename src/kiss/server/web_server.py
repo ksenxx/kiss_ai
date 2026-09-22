@@ -42,9 +42,9 @@ Usage::
 from __future__ import annotations
 
 import asyncio
-import collections
 import base64
 import binascii
+import collections
 import contextlib
 import datetime
 import errno

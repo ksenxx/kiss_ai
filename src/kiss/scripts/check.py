@@ -6,40 +6,94 @@
 """Script to run all code quality checks: syntax check, lint, and type check."""
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 """Repository root (``src/kiss/scripts/check.py`` is four levels deep)."""
 
 
-def run_command(cmd: list[str], description: str) -> bool:
-    """Run a command and return True if successful.
+_ERROR_LINE = re.compile(r"error|-->|^\S+:\d+(:\d+)?: |^\s*[A-Z]{1,3}\d{3,4}\b", re.IGNORECASE)
+"""Lines worth repeating in the final digest: mypy/pyright ``error:``
+lines, ruff's ``--> file:line:col`` locators and ``E501 …`` headers,
+eslint/stylelint ``file:line:col`` locations."""
+
+MAX_DIGEST_LINES = 60
+"""Cap per failed stage so the digest stays readable when a stage
+reports hundreds of errors."""
+
+
+def error_lines(lines: Iterable[str]) -> list[str]:
+    """Return the lines among *lines* that locate or describe an error.
+
+    Consumes *lines* lazily and keeps at most :data:`MAX_DIGEST_LINES`
+    of them, so a stage that prints megabytes of output costs no more
+    memory than the digest itself.
+
+    Args:
+        lines: The combined stdout/stderr lines of one check stage.
+
+    Returns:
+        The matching lines in order, capped at :data:`MAX_DIGEST_LINES`
+        with a trailing ``... N more`` line when truncated.
+    """
+    kept: list[str] = []
+    extra = 0
+    for line in lines:
+        if not _ERROR_LINE.search(line):
+            continue
+        if len(kept) < MAX_DIGEST_LINES:
+            kept.append(line.rstrip())
+        else:
+            extra += 1
+    if extra:
+        kept.append(f"... {extra} more")
+    return kept
+
+
+def _echo_lines(stream: Iterable[str]) -> Iterator[str]:
+    """Print every line of *stream* as it arrives and pass it on."""
+    for line in stream:
+        print(line, end="", flush=True)
+        yield line
+
+
+def run_command(cmd: list[str], description: str) -> list[str] | None:
+    """Run a command, streaming its output, and return its error lines when it fails.
 
     Args:
         cmd: List of command arguments to execute.
         description: Human-readable description of the command for logging.
 
     Returns:
-        True if the command exits with code 0, False otherwise.
+        ``None`` when the command exits with code 0, otherwise the
+        :func:`error_lines` of its combined stdout/stderr (already
+        printed) for the final digest.
     """
     print(f"\n{'=' * 60}")
     print(f"Running: {description}")
     print(f"Command: {' '.join(cmd)}")
-    print(f"{'=' * 60}\n")
+    print(f"{'=' * 60}\n", flush=True)
 
-    result = subprocess.run(cmd, check=False)
-    if result.returncode != 0:
-        print(f"\n❌ {description} failed with exit code {result.returncode}")
-        return False
+    with subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace"
+    ) as proc:
+        assert proc.stdout is not None
+        digest = error_lines(_echo_lines(proc.stdout))
+        returncode = proc.wait()
+    if returncode != 0:
+        print(f"\n❌ {description} failed with exit code {returncode}")
+        return digest
     print(f"\n✅ {description} passed")
-    return True
+    return None
 
 
-def run_checks(checks: list[tuple[list[str], str]]) -> list[str]:
-    """Run every check and return the descriptions of the ones that failed.
+def run_checks(checks: list[tuple[list[str], str]]) -> list[tuple[str, list[str]]]:
+    """Run every check and return the failed ones with their error lines.
 
     Every stage runs even after an earlier one fails, so a single
     invocation reports ruff, mypy, pyright and extension errors together
@@ -52,13 +106,18 @@ def run_checks(checks: list[tuple[list[str], str]]) -> list[str]:
         checks: ``(command, description)`` pairs, run in order.
 
     Returns:
-        The descriptions of the failed checks, in run order; empty when
-        everything passed.
+        ``(description, error_lines)`` for each failed check, in run
+        order; empty when everything passed.  The error lines (see
+        :func:`error_lines`) let ``main`` repeat every error at the very
+        end of the output, where a ``| tail`` still shows them: an agent
+        that piped a 700-line run through ``tail -25`` saw only the
+        failed stage names and re-ran the whole two-minute check twice.
     """
-    failed: list[str] = []
+    failed: list[tuple[str, list[str]]] = []
     for cmd, description in checks:
-        if not run_command(cmd, description):
-            failed.append(description)
+        digest = run_command(cmd, description)
+        if digest is not None:
+            failed.append((description, digest))
             if cmd[:2] == ["uv", "sync"]:
                 break
     return failed
@@ -249,8 +308,14 @@ def main() -> int:
         return 0
     print("\n" + "=" * 60)
     print("❌ Some checks failed. Please fix the errors above.")
-    for description in failed:
+    for description, _lines in failed:
         print(f"   ❌ {description}")
+    print("=" * 60)
+    print("Errors, repeated from each failed stage:")
+    for description, lines in failed:
+        print(f"\n--- {description} ---")
+        for line in lines:
+            print(line)
     print("=" * 60 + "\n")
     return 1
 
