@@ -952,35 +952,64 @@ function releaseDaemonRestartLock(lockFile: string, token: string): void {
   } catch {}
 }
 
+/**
+ * Restart the kiss-web daemon if its code changed and it is safe to.
+ *
+ * @param kissProjectPath The bundled kiss_project directory.
+ * @param workDir The working directory kiss-web is started in.
+ * @param force Restart even though the daemon reports active tasks:
+ *     the user chose "Restart now" on the deferred-update notification.
+ * @returns False when the restart lock could not be taken (another
+ *     window holds it, or the lock file could not be created), so this
+ *     call made no decision and the caller may try again; true
+ *     otherwise (a decision was made, or there is nothing to restart).
+ */
 export async function restartKissWebDaemon(
   kissProjectPath: string,
   workDir: string,
-): Promise<void> {
-  if (process.platform === 'win32') return;
+  force = false,
+): Promise<boolean> {
+  if (process.platform === 'win32') return true;
 
   const kissWebBin = path.join(kissProjectPath, '.venv', 'bin', 'kiss-web');
   if (!fs.existsSync(kissWebBin)) {
     log(`kiss-web binary not found at ${kissWebBin} — skipping daemon setup`);
-    return;
+    return true;
   }
 
   const releaseLock = acquireDaemonRestartLock();
   if (!releaseLock) {
     log('another window is restarting kiss-web — skipping this one');
-    return;
+    return false;
   }
   try {
-    await restartKissWebDaemonLocked(kissProjectPath, workDir, kissWebBin);
+    await restartKissWebDaemonLocked(
+      kissProjectPath,
+      workDir,
+      kissWebBin,
+      force,
+    );
   } finally {
     releaseLock();
   }
+  return true;
 }
 
 async function restartKissWebDaemonLocked(
   kissProjectPath: string,
   workDir: string,
   kissWebBin: string,
+  force: boolean,
 ): Promise<void> {
+  // Checked under the lock: a forced restart answers a notification
+  // that may have outlived its deferral.  If the pending record is
+  // gone, a retry or another window already restarted the daemon with
+  // the new code (and cleared the record under this same lock), and
+  // restarting again would only abort whatever started since.
+  if (force && !fs.existsSync(RESTART_PENDING_FILE)) {
+    log('kiss-web update already applied — ignoring the forced restart');
+    return;
+  }
   const binDir = path.join(HOME_DIR, '.local', 'bin');
 
   const fpFile = path.join(LOG_DIR, '.kiss-web.fingerprint');
@@ -1006,7 +1035,12 @@ async function restartKissWebDaemonLocked(
     await daemonHasActiveTasks(sockPath, 1500);
 
   const fingerprintMatches = !!currentFp && currentFp === savedFp;
-  const decision = decideRestart({fingerprintMatches, health, activeTasks});
+  const decision = decideRestart({
+    fingerprintMatches,
+    health,
+    activeTasks,
+    force,
+  });
   if (decision.skip) {
     if (fingerprintMatches) {
       clearRestartPending();
@@ -1014,10 +1048,14 @@ async function restartKissWebDaemonLocked(
       markRestartPending(decision.reason, kissProjectPath, workDir);
     }
     if (decision.reason === 'active-tasks') {
+      const count = (activeTasks as {ok: true; count: number}).count;
       log(
-        `kiss-web has ${(activeTasks as {ok: true; count: number}).count} ` +
-          'active task(s) — deferring restart to avoid aborting in-flight work',
+        `kiss-web has ${count} active task(s) — deferring restart to avoid ` +
+          'aborting in-flight work',
       );
+      if (!fingerprintMatches) {
+        offerForcedRestart(count, kissProjectPath, workDir);
+      }
     } else if (decision.reason.startsWith('alive-uncertain')) {
       log(
         'kiss-web alive but active-tasks probe inconclusive ' +
@@ -1033,7 +1071,8 @@ async function restartKissWebDaemonLocked(
     return;
   }
   log(
-    `kiss-web restart: fingerprint ${savedFp.slice(0, 8) || '<none>'} → ` +
+    `kiss-web restart (${decision.reason}): fingerprint ` +
+      `${savedFp.slice(0, 8) || '<none>'} → ` +
       `${currentFp.slice(0, 8) || '<none>'}, health=${health}, ` +
       `sock=${sockExists}, activeTasks=` +
       `${activeTasks.ok ? activeTasks.count : 'unknown(' + activeTasks.reason + ')'}`,
@@ -1311,9 +1350,104 @@ async function retryPendingRestart(
   }
 }
 
+// Whether the "Restart now" notification for the current deferred
+// update has been shown.  One offer per deferral: the retry timer
+// re-enters the restart path every RESTART_RETRY_MS and must not
+// re-raise the notification each time.
+let forcedRestartOffered = false;
+
+/**
+ * Let the user break a deferral that may never end on its own.
+ *
+ * A pending update waits for the daemon's active tasks to finish, but
+ * the daemon's report can be wrong: a tab wedged on a stale busy claim
+ * (2026-09-22, ~/.kiss/kiss-web-stderr.log) counted as active for hours
+ * and deferred the very restart that would have loaded the fix.  The
+ * notification says what the update is waiting for and lets the user
+ * decide to restart anyway, accepting that any task really running in
+ * the daemon is aborted.
+ *
+ * @param count Active tasks the daemon reported.
+ * @param kissProjectPath The bundled kiss_project directory.
+ * @param workDir The working directory kiss-web is started in.
+ */
+function offerForcedRestart(
+  count: number,
+  kissProjectPath: string,
+  workDir: string,
+): void {
+  if (forcedRestartOffered) return;
+  forcedRestartOffered = true;
+  void showWarningNotification(
+    `KISS Sorcar: the kiss-web update is waiting for ${count} running ` +
+      'task(s) to finish and retries every minute. If no task is ' +
+      'actually running, the daemon is stuck on a stale task and only a ' +
+      'restart will clear it. Restarting now aborts any task that IS ' +
+      'running.',
+    'Restart now',
+    'Keep waiting',
+  ).then(choice => {
+    if (choice !== 'Restart now') return;
+    log('user chose to restart kiss-web despite reported active tasks');
+    forceRestartKissWebDaemon(kissProjectPath, workDir).catch(err => {
+      // The unattended retry catches its own failures; a click that
+      // fails must not leave the offer latched, or the user is never
+      // asked again while the retry keeps deferring.
+      log(
+        `forced kiss-web restart failed: ${err instanceof Error ? err.message : err}`,
+      );
+      forcedRestartOffered = false;
+    });
+  });
+}
+
+// How long a "Restart now" click keeps trying to take the restart lock
+// before giving up: as long as a live lock holder is honoured
+// (RESTART_LOCK_MAX_HOLD_MS), because that is how long a legitimate
+// restart in another window can take.
+const FORCED_RESTART_RETRY_MS = 2_000;
+
+/**
+ * Carry out the user's "Restart now" choice.
+ *
+ * The click is not dropped while the restart lock is busy: this
+ * window's own retry timer holds it for the few seconds its probes
+ * take, and another window's restart may hold it for minutes, and in
+ * both cases restartKissWebDaemon() returns false without deciding
+ * anything.  Keep trying until a forced attempt gets to decide, or the
+ * lock's maximum hold time passes — then re-arm the offer so the user
+ * can click again instead of waiting on a click that went nowhere.
+ *
+ * A click on a notification that outlived its deferral is ignored by
+ * the locked restart path itself (see restartKissWebDaemonLocked), so
+ * the check cannot race another window's completion.
+ *
+ * @param kissProjectPath The bundled kiss_project directory.
+ * @param workDir The working directory kiss-web is started in.
+ */
+async function forceRestartKissWebDaemon(
+  kissProjectPath: string,
+  workDir: string,
+): Promise<void> {
+  const deadline = Date.now() + RESTART_LOCK_MAX_HOLD_MS;
+  while (true) {
+    if (await restartKissWebDaemon(kissProjectPath, workDir, true)) return;
+    if (Date.now() > deadline) {
+      log(
+        'forced kiss-web restart could not take the restart lock within ' +
+          `${RESTART_LOCK_MAX_HOLD_MS / 1000}s — offering it again`,
+      );
+      forcedRestartOffered = false;
+      return;
+    }
+    await sleep(FORCED_RESTART_RETRY_MS);
+  }
+}
+
 /**
  * Forget a pending restart: remove the record and cancel the retry timer,
- * so a later deferral arms a fresh timer with its own project/work dir.
+ * so a later deferral arms a fresh timer with its own project/work dir
+ * and may offer the forced restart again.
  */
 function clearRestartPending(): void {
   try {
@@ -1323,6 +1457,7 @@ function clearRestartPending(): void {
     clearTimeout(restartRetryTimer);
     restartRetryTimer = undefined;
   }
+  forcedRestartOffered = false;
 }
 
 function computeKissWebFingerprint(
